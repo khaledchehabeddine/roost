@@ -1,0 +1,6 @@
+[package]
+name = "hermes-uniffi"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]

@@ -1,0 +1,8 @@
+# Cargo/Rust
+target
+
+# macOS
+.DS_Store
+
+# RustRover
+.idea/
