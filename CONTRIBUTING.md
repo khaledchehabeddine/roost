@@ -1,5 +1,15 @@
 # Contributing to Hermes
 
+## Branches
+
+Format: `<type>/<short-description>`
+
+```
+enhancement/ble-peer-discovery
+bug/empty-payload-crash
+chore/update-dependencies
+```
+
 ## Commits
 
 Format: `<type>: <summary>\n\n- <what changed>\n- <what changed>`
@@ -12,16 +22,6 @@ feat: add Curve25519 key generation to hermes-crypto
 - Add `generate_keypair()` returning `(PublicKey, SecretKey)`
 - Add `KeyPair` struct to hermes-crypto public API
 - Add unit tests for key generation and round-trip encoding
-```
-
-## Branches
-
-Format: `<type>/<short-description>`
-
-```
-feat/ble-peer-discovery
-fix/empty-payload-crash
-chore/update-dependencies
 ```
 
 ## Pull Requests
@@ -37,4 +37,4 @@ chore/update-dependencies
 
 ## Crate-Specific Rules
 
-Each crate defines its own constraints in `crates/<name>/README.md`. Read it before contributing to that crate.
+Each crate defines its own constraints in `crates/*/README.md`. Read it before contributing to that crate.
