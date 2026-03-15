@@ -47,12 +47,12 @@ PR title: derive from branch name as `<Type>: <Short Description>`, capitalize k
 PR body: derive from `git diff main...HEAD` — reflects current state only, not commit history. Use the template in `PULL_REQUEST_TEMPLATE.md` for the body structure.
 
 If no open PR exists:
-- Run `gh pr create --title "<title>" --body "<body>" --draft`
+- Run `gh pr create --title "<title>" --body "<body>" --draft --assignee "@me" --label "<branch-type>"`
 
 If a PR already exists:
 - Run `gh pr edit --body "<body>"`
 
 ## Additional Resources
 
-- For commit message format, see [CONTRIBUTING.md](CONTRIBUTING.md)
+- For commit message format, see [CONTRIBUTING.md](../../../CONTRIBUTING.md)
 - For PR body structure, see [PULL_REQUEST_TEMPLATE.md](../../../.github/PULL_REQUEST_TEMPLATE.md)
