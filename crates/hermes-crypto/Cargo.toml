@@ -4,3 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+rand = { version = "0.8", features = ["getrandom"] }
+curve25519-dalek = { version = "4", features = ["rand_core", "zeroize"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize", "fast"] }
+x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
