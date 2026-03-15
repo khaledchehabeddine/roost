@@ -1,7 +1,7 @@
 ---
 description: Rust Engineer specialised in code review. Invoke after completing a task to get feedback on correctness, idiomatic Rust, and security. Explains reasoning so the developer can learn, not just fix.
 tools: Read, Glob, Grep
-model: opus
+model: sonnet
 memory: project
 ---
 
