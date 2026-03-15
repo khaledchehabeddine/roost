@@ -27,7 +27,7 @@ feat: add Curve25519 key generation to hermes-crypto
 ## Pull Requests
 
 - All CI workflows must pass
-- Reference a decision document (`docs/decisions/`) if the PR introduces or changes an architectural choice
+- See `.github/PULL_REQUEST_TEMPLATE.md` for the required PR structure
 
 ## Error Handling
 
