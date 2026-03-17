@@ -3,6 +3,7 @@ name: Test
 on:
   pull_request:
     branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
   push:
     branches: [main]
 
@@ -10,6 +11,7 @@ jobs:
   test:
     name: Cargo Test
     runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v6
 
