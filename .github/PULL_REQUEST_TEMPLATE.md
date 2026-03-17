@@ -8,4 +8,4 @@
 
 ## Decision Record
 
-<!-- Bullet points only. Format: - NNNN: Title (e.g. - 0001: Hermes Engine Architecture). Delete this section if not applicable. -->
+<!-- Bullet points only. Format: - [NNNN: Title](docs/decisions/NNNN-title-kebab-case.md). Delete this section if not applicable. -->
