@@ -8,4 +8,4 @@
 
 ## Decision Record
 
-<!-- If this PR introduces or changes an architectural choice, reference the relevant decision document. Otherwise delete this section. -->
+<!-- Bullet points only. Format: - NNNN: Title (e.g. - 0001: Hermes Engine Architecture). Delete this section if not applicable. -->
