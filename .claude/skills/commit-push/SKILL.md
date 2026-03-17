@@ -19,14 +19,14 @@ allowed-tools: Bash(gh *), Bash(git *)
 If the current branch is `main`:
 
 If `$ARGUMENTS` is provided:
-- Fetch the issue: !`gh issue view $ARGUMENTS --json number,title,labels`
+- Fetch the issue: `gh issue view $ARGUMENTS --json number,title,labels`
 - Use the issue's single label directly as the branch type
 - Create branch as `<label>/<issue-title-kebab-case>` and confirm with the user
 - Run `git checkout -b <branch-name>`
 - Run `gh issue develop $ARGUMENTS --checkout` to link the branch to the issue
 
 If `$ARGUMENTS` is not provided:
-- Fetch available repo labels: !`gh label list --json name`
+- Fetch available repo labels: `gh label list --json name`
 - Ask the user to select a label from the fetched list and provide a short description
 - Create branch as `<selected-label>/<short-description>` and confirm with the user
 - Run `git checkout -b <branch-name>`
