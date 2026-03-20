@@ -2,7 +2,7 @@
 <!-- A brief summary of the task or bug. -->
 
 ## Acceptance Criteria
-- [ ] <criterion>
+- [ ] <!-- criterion -->
 
 <!--
 ## Notes
