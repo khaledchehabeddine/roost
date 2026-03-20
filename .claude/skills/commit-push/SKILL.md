@@ -43,7 +43,7 @@ If `$ARGUMENTS` is not provided:
 
 ### 4. Pull request
 
-PR title: derive from branch name as `<Type>: <Short Description>`, capitalize key words.
+PR title: derive from branch name as `<Type>: <Short Description>`, capitalize keywords.
 PR body: derive from `git diff main...HEAD` — reflects current state only, not commit history. Use the template in `PULL_REQUEST_TEMPLATE.md` for the body structure.
 
 If no open PR exists:

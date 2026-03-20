@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum StorageError {
-    IO(String)
+    IO(String),
 }
 
 impl fmt::Display for StorageError {
@@ -44,7 +44,7 @@ pub trait SecureStorage {
 /// Not suitable for production — data is not persisted and has no platform security guarantees.
 #[derive(Default)]
 pub struct InMemorySecureStorage {
-    entries: HashMap<String, Zeroizing<Vec<u8>>>
+    entries: HashMap<String, Zeroizing<Vec<u8>>>,
 }
 
 impl InMemorySecureStorage {
