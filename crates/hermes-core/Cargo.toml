@@ -4,3 +4,5 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+hermes-crypto = { path = "../hermes-crypto" }
+hermes-storage = { path = "../hermes-storage" }

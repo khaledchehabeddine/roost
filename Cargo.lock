@@ -151,6 +151,10 @@ dependencies = [
 [[package]]
 name = "hermes-core"
 version = "0.1.0"
+dependencies = [
+ "hermes-crypto",
+ "hermes-storage",
+]
 
 [[package]]
 name = "hermes-crypto"
@@ -160,6 +164,7 @@ dependencies = [
  "ed25519-dalek",
  "rand",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
