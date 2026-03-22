@@ -66,7 +66,7 @@ impl SigningKeyPair {
     pub fn from_signing_bytes(bytes: [u8; 32]) -> Self {
         let signing = SigningKey::from_bytes(&bytes);
         let verifying = signing.verifying_key();
-        SigningKeyPair { signing, verifying }
+        SigningKeyPair { verifying, signing }
     }
 }
 

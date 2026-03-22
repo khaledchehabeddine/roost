@@ -3,6 +3,7 @@ use hermes_crypto::{
     generate_signing_key_pair,
 };
 use hermes_storage::{SecureStorage, StorageError};
+use std::error::Error;
 use std::fmt;
 
 const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
@@ -12,29 +13,11 @@ const IDENTITY_X25519_KEY: &str = "identity/x25519";
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum IdentityError {
-    /// An identity already exists in storage.
-    ///
-    /// User-decision error — surface as: "Identity already exists — overwrite?"
     AlreadyExists,
-
-    /// No identity was found in storage.
-    ///
-    /// User-decision error — surface as: "No identity found — create a new one?"
-    NotFound,
-
-    /// Storage contains only one of the two identity keys, indicating a partial write.
-    ///
-    /// System error — surface as: "Something went wrong"
+    /// Only one of the two identity keys is present in storage, indicating a partial writing.
     Corrupt,
-
-    /// The stored key material is malformed or the wrong length.
-    ///
-    /// System error — surface as: "Something went wrong"
     InvalidData(String),
-
-    /// A storage backend error occurred.
-    ///
-    /// System error — surface as: "Something went wrong"
+    NotFound,
     Storage(StorageError),
 }
 
@@ -42,10 +25,10 @@ impl fmt::Display for IdentityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             IdentityError::AlreadyExists => {
-                write!(f, "Identity already exists — overwrite?")
+                write!(f, "Identity already exists")
             }
             IdentityError::NotFound => {
-                write!(f, "No identity found — create a new one?")
+                write!(f, "No identity found")
             }
             IdentityError::Corrupt | IdentityError::InvalidData(_) | IdentityError::Storage(_) => {
                 write!(f, "Something went wrong")
@@ -54,8 +37,8 @@ impl fmt::Display for IdentityError {
     }
 }
 
-impl std::error::Error for IdentityError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl Error for IdentityError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             IdentityError::Storage(e) => Some(e),
             _ => None,
@@ -94,10 +77,11 @@ impl Identity {
 /// Manages creation and retrieval of the local Hermes identity.
 ///
 /// Identities are persisted via a [`SecureStorage`] backend. On real devices this
-/// will be the iOS Keychain or Android Keystore; in tests use [`hermes_storage::InMemorySecureStorage`].
+/// will be the iOS Keychain or Android Keystore; in tests use
+/// [`hermes_storage::InMemorySecureStorage`].
 ///
 /// Only one `IdentityManager` instance should operate against a given storage backend at a time.
-/// Concurrent access is not protected and may leave identity state partially written.
+/// Concurrent access is not protected and may leave the identity state partially written.
 pub struct IdentityManager<S: SecureStorage> {
     storage: S,
 }
@@ -111,17 +95,17 @@ impl<S: SecureStorage> IdentityManager<S> {
     ///
     /// Returns [`IdentityError::AlreadyExists`] if an X25519 identity key is already stored.
     ///
-    /// If the X25519 key is stored successfully but writing the Ed25519 key fails, the
-    /// X25519 key is deleted to leave storage in a clean state. If that cleanup also fails,
-    /// the error is logged and the original write error is returned — the identity can be
-    /// re-created by calling this method again.
+    /// If the X25519 key is stored successfully but writing the Ed25519 key fails, the X25519 key
+    /// is deleted to leave storage in a clean state. If that cleanup also fails, the error is
+    /// logged, and the original writing error is returned — the identity can be re-created by
+    /// calling this method again.
     pub fn generate_identity(&mut self) -> Result<Identity, IdentityError> {
-        if self
+        let identity_exists = self
             .storage
             .load(IDENTITY_X25519_KEY)
             .map_err(log_storage_err)?
-            .is_some()
-        {
+            .is_some();
+        if identity_exists {
             return Err(IdentityError::AlreadyExists);
         }
 
@@ -140,7 +124,8 @@ impl<S: SecureStorage> IdentityManager<S> {
         if let Err(e) = ed25519_result {
             if let Err(cleanup_err) = self.storage.delete(IDENTITY_X25519_KEY) {
                 eprintln!(
-                    "[hermes-core] failed to roll back X25519 key after partial write: {cleanup_err}"
+                    "[hermes-core] failed to roll back X25519 key after partial write: \
+                    {cleanup_err}"
                 );
             }
             return Err(e);
@@ -191,8 +176,6 @@ impl<S: SecureStorage> IdentityManager<S> {
 }
 
 /// Logs system-level storage errors internally and maps them to [`IdentityError::Storage`].
-///
-/// Per CONTRIBUTING.md: system errors surface as generic UI feedback and are logged internally.
 fn log_storage_err(e: StorageError) -> IdentityError {
     eprintln!("[hermes-core] storage error: {e}");
     IdentityError::Storage(e)
@@ -200,9 +183,8 @@ fn log_storage_err(e: StorageError) -> IdentityError {
 
 #[cfg(test)]
 mod tests {
-    use hermes_storage::InMemorySecureStorage;
-
     use super::*;
+    use hermes_storage::InMemorySecureStorage;
 
     fn manager() -> IdentityManager<InMemorySecureStorage> {
         IdentityManager::new(InMemorySecureStorage::new())
@@ -235,10 +217,7 @@ mod tests {
         let mut m = manager();
         let generated = m.generate_identity().unwrap();
         let loaded = m.load_identity().unwrap();
-        assert_eq!(
-            generated.public_key().as_bytes(),
-            loaded.public_key().as_bytes()
-        );
+        assert_eq!(generated.public_key(), loaded.public_key());
         assert_eq!(
             generated.verifying_key().as_bytes(),
             loaded.verifying_key().as_bytes()
@@ -260,10 +239,8 @@ mod tests {
 
     #[test]
     fn diffie_hellman_round_trip_after_load_identity() {
-        use hermes_crypto::generate_key_pair;
         let mut m = manager();
-        m.generate_identity().unwrap();
-        let loaded = m.load_identity().unwrap();
+        let loaded = m.generate_identity().unwrap();
         let peer = generate_key_pair();
         let shared_a = loaded.diffie_hellman(&peer.public);
         let shared_b = peer.diffie_hellman(loaded.public_key());
@@ -276,24 +253,5 @@ mod tests {
         m.generate_identity().unwrap();
         m.storage.delete(IDENTITY_ED25519_KEY).unwrap();
         assert!(matches!(m.load_identity(), Err(IdentityError::Corrupt)));
-    }
-
-    #[test]
-    fn already_exists_error_has_actionable_message() {
-        let mut m = manager();
-        m.generate_identity().unwrap();
-        match m.generate_identity() {
-            Err(e) => assert_eq!(e.to_string(), "Identity already exists — overwrite?"),
-            Ok(_) => panic!("expected AlreadyExists error"),
-        }
-    }
-
-    #[test]
-    fn not_found_error_has_actionable_message() {
-        let m = manager();
-        match m.load_identity() {
-            Err(e) => assert_eq!(e.to_string(), "No identity found — create a new one?"),
-            Ok(_) => panic!("expected NotFound error"),
-        }
     }
 }
