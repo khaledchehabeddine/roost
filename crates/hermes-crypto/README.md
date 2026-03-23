@@ -1,6 +1,6 @@
 # hermes-crypto
 
-Cryptographic primitives for Hermes. Provides key generation, signing, and encryption.
+Cryptographic primitives. Provides X25519 key exchange and Ed25519 signing.
 
 ## Constraints
 

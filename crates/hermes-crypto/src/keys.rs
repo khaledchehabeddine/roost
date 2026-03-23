@@ -3,6 +3,7 @@ pub use ed25519_dalek::{Signature, VerifyingKey};
 use rand::rngs::OsRng;
 use x25519_dalek::StaticSecret;
 pub use x25519_dalek::{PublicKey, SharedSecret};
+use zeroize::Zeroizing;
 
 /// An X25519 key pair for Diffie–Hellman key exchange.
 ///
@@ -22,6 +23,20 @@ impl KeyPair {
     pub fn diffie_hellman(&self, their_public: &PublicKey) -> SharedSecret {
         self.secret.diffie_hellman(their_public)
     }
+
+    /// Exports the secret key bytes for secure storage.
+    ///
+    /// Wrapped in [`Zeroizing`] so the bytes are scrubbed from memory when dropped.
+    pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.secret.to_bytes())
+    }
+
+    /// Restores a [`KeyPair`] from stored secret key bytes.
+    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(bytes);
+        let public = PublicKey::from(&secret);
+        KeyPair { public, secret }
+    }
 }
 
 /// An Ed25519 key pair for signing.
@@ -38,6 +53,20 @@ impl SigningKeyPair {
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)
+    }
+
+    /// Exports the signing key bytes for secure storage.
+    ///
+    /// Wrapped in [`Zeroizing`] so the bytes are scrubbed from memory when dropped.
+    pub fn to_signing_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing.to_bytes())
+    }
+
+    /// Restores a [`SigningKeyPair`] from stored signing key bytes.
+    pub fn from_signing_bytes(bytes: [u8; 32]) -> Self {
+        let signing = SigningKey::from_bytes(&bytes);
+        let verifying = signing.verifying_key();
+        SigningKeyPair { verifying, signing }
     }
 }
 
@@ -112,5 +141,19 @@ mod tests {
         let kp = generate_signing_key_pair();
         let signature = kp.sign(b"message one");
         assert!(kp.verifying.verify(b"message two", &signature).is_err());
+    }
+
+    #[test]
+    fn key_pair_round_trip_via_secret_bytes() {
+        let kp = generate_key_pair();
+        let restored = KeyPair::from_secret_bytes(*kp.to_secret_bytes());
+        assert_eq!(kp.public.as_bytes(), restored.public.as_bytes());
+    }
+
+    #[test]
+    fn signing_key_pair_round_trip_via_signing_bytes() {
+        let kp = generate_signing_key_pair();
+        let restored = SigningKeyPair::from_signing_bytes(*kp.to_signing_bytes());
+        assert_eq!(kp.verifying.as_bytes(), restored.verifying.as_bytes());
     }
 }

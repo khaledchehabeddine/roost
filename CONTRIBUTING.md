@@ -34,8 +34,7 @@ feat: add Curve25519 key generation to hermes-crypto
 - All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
 - Each crate defines its own domain error type
 - Errors never cross the UniFFI boundary — only domain errors defined in the UniFFI Definition Language (UDL) propagate to the platform layer
-- **User-decision errors** — surface with specific, actionable messaging (e.g. "Identity already exists — overwrite?")
-- **System errors** — surface as generic UI feedback (e.g. "Something went wrong") and log the full error internally — never swallowed silently
+- Error `Display` implementations should be detailed and developer-facing
 
 ## Crate-Specific Rules
 

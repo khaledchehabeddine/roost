@@ -9,3 +9,4 @@ ed25519-dalek = { version = "2", features = ["fast", "rand_core", "zeroize"] }
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
 # Pinned to 0.8: dalek latest stable releases require rand_core 0.6
 rand = { version = "0.8", features = ["getrandom"] }
+zeroize = "1"
