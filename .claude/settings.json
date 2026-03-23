@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo check --quiet 2>&1 | head -20"
+          }
+        ]
+      }
+    ]
+  }
+}
