@@ -30,8 +30,14 @@ impl fmt::Display for IdentityError {
             IdentityError::NotFound => {
                 write!(f, "No identity found")
             }
-            IdentityError::Corrupt | IdentityError::InvalidData(_) | IdentityError::Storage(_) => {
-                write!(f, "Something went wrong")
+            IdentityError::Corrupt => {
+                write!(f, "Identity data is corrupt")
+            }
+            IdentityError::InvalidData(reason) => {
+                write!(f, "Invalid identity data: {reason}")
+            }
+            IdentityError::Storage(err) => {
+                write!(f, "Storage error: {err}")
             }
         }
     }
