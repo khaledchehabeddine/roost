@@ -9,3 +9,6 @@ target
 
 # RustRover
 .idea/
+
+# SQLite databases
+*.db

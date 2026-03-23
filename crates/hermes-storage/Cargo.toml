@@ -4,4 +4,9 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate"] }
+tokio = { version = "1", features = ["rt"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+hermes-crypto = { path = "../hermes-crypto" }
