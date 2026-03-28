@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cargo check --quiet 2>&1 | head -20"
+            "command": "cargo check --quiet 2>&1 | head -20 && cargo clippy --quiet 2>&1 | head -20"
           }
         ]
       }

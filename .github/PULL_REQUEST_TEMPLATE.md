@@ -8,4 +8,4 @@
 
 ## Decision Record
 
-<!-- Bullet points only. Format: - NNNN: Title (e.g. - 0001: Hermes Engine Architecture). Delete this section if not applicable. -->
+<!-- Omit this section entirely if not applicable. Format: - NNNN: Title (e.g. - 0001: Hermes Engine Architecture) -->
