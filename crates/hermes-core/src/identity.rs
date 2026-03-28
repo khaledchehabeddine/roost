@@ -200,7 +200,7 @@ impl<S: SecureStorage> IdentityManager<S> {
     /// Exports the current identity as an encrypted backup blob.
     ///
     /// The backup format is:
-    /// `[Argon2id salt (16 bytes)] + [XChaCha20-Poly1305 nonce (24 bytes)] + [ciphertext]`
+    /// `[Argon2id salt (16B)] + [XChaCha20-Poly1305 nonce (24B)] + [ciphertext (nB)]`
     ///
     /// The plaintext is the concatenation of the X25519 secret key (32 bytes) and
     /// the Ed25519 signing key (32 bytes).
@@ -211,8 +211,7 @@ impl<S: SecureStorage> IdentityManager<S> {
         let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
 
         let mut salt = [0u8; SALT_LEN];
-        getrandom::getrandom(&mut salt)
-            .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        getrandom::getrandom(&mut salt).map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
         getrandom::getrandom(&mut nonce_bytes)
@@ -271,7 +270,9 @@ impl<S: SecureStorage> IdentityManager<S> {
             .map_err(|_| IdentityError::DecryptionFailed)?;
 
         if plaintext_vec.len() != 64 {
-            return Err(IdentityError::BackupFailed("unexpected plaintext length".into()));
+            return Err(IdentityError::BackupFailed(
+                "unexpected plaintext length".into(),
+            ));
         }
         let plaintext = Zeroizing::new(plaintext_vec);
 
@@ -305,10 +306,15 @@ impl<S: SecureStorage> IdentityManager<S> {
 /// Derives a 32-byte encryption key from `passphrase` and `salt` using Argon2id.
 fn derive_key(
     passphrase: &str,
-    salt: &[u8]
+    salt: &[u8],
 ) -> Result<Zeroizing<[u8; ARGON2_OUTPUT_LEN]>, IdentityError> {
-    let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(ARGON2_OUTPUT_LEN))
-        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+    let params = Params::new(
+        ARGON2_M_COST,
+        ARGON2_T_COST,
+        ARGON2_P_COST,
+        Some(ARGON2_OUTPUT_LEN),
+    )
+    .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; ARGON2_OUTPUT_LEN]);
     argon2
@@ -414,7 +420,8 @@ mod tests {
         let backup = m.export_encrypted_backup("correct-passphrase").unwrap();
 
         let mut m2 = manager();
-        m2.import_encrypted_backup(&backup, "correct-passphrase").unwrap();
+        m2.import_encrypted_backup(&backup, "correct-passphrase")
+            .unwrap();
         let restored = m2.load_identity().unwrap();
 
         assert_eq!(original.public_key(), restored.public_key());
