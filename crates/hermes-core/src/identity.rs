@@ -12,6 +12,8 @@ use std::error::Error;
 use std::fmt;
 use zeroize::Zeroizing;
 
+type KeyBytes = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>);
+
 const IDENTITY_X25519_KEY: &str = "identity/x25519";
 const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 
@@ -287,7 +289,7 @@ impl<S: SecureStorage> IdentityManager<S> {
     }
 
     /// Reads both raw key byte vectors from storage, propagating `NotFound` / `Corrupt`.
-    fn load_key_bytes(&self) -> Result<(Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>), IdentityError> {
+    fn load_key_bytes(&self) -> Result<KeyBytes, IdentityError> {
         match (
             self.storage
                 .load(IDENTITY_X25519_KEY)
