@@ -2,7 +2,6 @@
 members = [
     "crates/hermes-core",
     "crates/hermes-crypto",
-    "crates/hermes-storage",
     "crates/hermes-transport-ble",
     "crates/hermes-uniffi"
 ]

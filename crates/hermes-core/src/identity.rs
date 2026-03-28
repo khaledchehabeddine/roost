@@ -1,8 +1,8 @@
+use crate::storage::{SecureStorage, StorageError};
 use hermes_crypto::{
     KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,
     generate_signing_key_pair,
 };
-use hermes_storage::{SecureStorage, StorageError};
 use std::error::Error;
 use std::fmt;
 
@@ -84,7 +84,7 @@ impl Identity {
 ///
 /// Identities are persisted via a [`SecureStorage`] backend. On real devices this
 /// will be the iOS Keychain or Android Keystore; in tests use
-/// [`hermes_storage::InMemorySecureStorage`].
+/// [`crate::InMemorySecureStorage`].
 ///
 /// Only one `IdentityManager` instance should operate against a given storage backend at a time.
 /// Concurrent access is not protected and may leave the identity state partially written.
@@ -190,7 +190,7 @@ fn log_storage_err(e: StorageError) -> IdentityError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hermes_storage::InMemorySecureStorage;
+    use crate::storage::InMemorySecureStorage;
 
     fn manager() -> IdentityManager<InMemorySecureStorage> {
         IdentityManager::new(InMemorySecureStorage::new())

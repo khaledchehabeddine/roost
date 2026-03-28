@@ -1,7 +1,0 @@
-[package]
-name = "hermes-storage"
-edition.workspace = true
-version.workspace = true
-
-[dependencies]
-zeroize = { version = "1", features = ["zeroize_derive"] }

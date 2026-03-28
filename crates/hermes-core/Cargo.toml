@@ -5,4 +5,4 @@ version.workspace = true
 
 [dependencies]
 hermes-crypto = { path = "../hermes-crypto" }
-hermes-storage = { path = "../hermes-storage" }
+zeroize = { version = "1", features = ["zeroize_derive"] }

@@ -9,8 +9,6 @@ Hermes is a private Rust workspace implementing the cryptographic and networking
 ```
 hermes-crypto
       ↓
-hermes-storage
-      ↓
 hermes-core  ←  hermes-transport-ble
       ↓
 hermes-uniffi

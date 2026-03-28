@@ -2,9 +2,9 @@
 <!-- A brief summary of the task or bug. -->
 
 ## Acceptance Criteria
-- [ ] <!-- criterion -->
+<!-- Child issues only. Omit for parent issues. -->
+- [ ] 
 
-<!--
 ## Notes
-Additional context, links, or edge cases.
--->
+<!-- Optional. Additional context, links, or edge cases. -->
+-
