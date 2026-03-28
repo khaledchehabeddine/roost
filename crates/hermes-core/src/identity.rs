@@ -1,5 +1,5 @@
-use argon2::{Argon2, Params};
 use crate::storage::{SecureStorage, StorageError};
+use argon2::{Argon2, Params};
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
@@ -12,21 +12,22 @@ use std::error::Error;
 use std::fmt;
 use zeroize::Zeroizing;
 
-const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 const IDENTITY_X25519_KEY: &str = "identity/x25519";
+const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
-/// Argon2id parameters for backup key derivation.
-///
-/// - Memory cost: 65536 KiB (64 MiB) — high memory usage resists GPU/ASIC attacks
-/// - Time cost: 3 iterations — additional computational hardness
-/// - Parallelism: 1 — single-threaded to match mobile constraints
-/// - Output length: 32 bytes — one AES-256 / XChaCha20-Poly1305 key
+/// Argon2id memory cost in KiB. Primary defense: forces attackers to provision large amounts
+/// of RAM per guess, defeating GPU and ASIC brute-force. OWASP baseline: 65,536 KiB (64 MiB).
 const ARGON2_M_COST: u32 = 65536;
+/// Argon2id time cost (iterations). Secondary defense: increases CPU work per guess without
+/// raising memory requirements. OWASP baseline: 3.
 const ARGON2_T_COST: u32 = 3;
+/// Argon2id parallelism. OWASP baseline: 1. Security comes from [`ARGON2_M_COST`] and
+/// [`ARGON2_T_COST`], not parallelism.
 const ARGON2_P_COST: u32 = 1;
+/// Argon2id output length in bytes. 32 bytes is the length of a XChaCha20-Poly1305 key.
 const ARGON2_OUTPUT_LEN: usize = 32;
 
 /// Errors returned by [`IdentityManager`] operations.
@@ -197,106 +198,115 @@ impl<S: SecureStorage> IdentityManager<S> {
     }
 
     /// Exports the current identity as an encrypted backup blob.
-///
-/// The backup format is:
-/// `[Argon2id salt (16 bytes)] + [XChaCha20-Poly1305 nonce (24 bytes)] + [ciphertext]`
-///
-/// The plaintext is the concatenation of the X25519 secret key (32 bytes) and
-/// the Ed25519 signing key (32 bytes).
-///
-/// Returns [`IdentityError::NotFound`] if no identity is stored, or
-/// [`IdentityError::BackupFailed`] on encryption or RNG failure.
-pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, IdentityError> {
-    let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
+    ///
+    /// The backup format is:
+    /// `[Argon2id salt (16 bytes)] + [XChaCha20-Poly1305 nonce (24 bytes)] + [ciphertext]`
+    ///
+    /// The plaintext is the concatenation of the X25519 secret key (32 bytes) and
+    /// the Ed25519 signing key (32 bytes).
+    ///
+    /// Returns [`IdentityError::NotFound`] if no identity is stored, or
+    /// [`IdentityError::BackupFailed`] on encryption or RNG failure.
+    pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, IdentityError> {
+        let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
 
-    let mut salt = [0u8; SALT_LEN];
-    getrandom::getrandom(&mut salt)
-        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        let mut salt = [0u8; SALT_LEN];
+        getrandom::getrandom(&mut salt)
+            .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
 
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce_bytes)
-        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        getrandom::getrandom(&mut nonce_bytes)
+            .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
 
-    let key_bytes = derive_key(passphrase, &salt)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
-    let nonce = XNonce::from_slice(&nonce_bytes);
+        let key_bytes = derive_key(passphrase, &salt)?;
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
+        let nonce = XNonce::from_slice(&nonce_bytes);
 
-    let mut plaintext = Zeroizing::new([0u8; 64]);
-    plaintext[..32].copy_from_slice(&x25519_bytes);
-    plaintext[32..].copy_from_slice(&ed25519_bytes);
+        let x25519_array: [u8; 32] = x25519_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
+        let ed25519_array: [u8; 32] = ed25519_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
+        let mut plaintext = Zeroizing::new([0u8; 64]);
+        plaintext[..32].copy_from_slice(&x25519_array);
+        plaintext[32..].copy_from_slice(&ed25519_array);
 
-    let ciphertext = cipher
-        .encrypt(nonce, &plaintext[..])
-        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        let ciphertext = cipher
+            .encrypt(nonce, &plaintext[..])
+            .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
 
-    let mut backup = Vec::with_capacity(SALT_LEN + NONCE_LEN + ciphertext.len());
-    backup.extend_from_slice(&salt);
-    backup.extend_from_slice(&nonce_bytes);
-    backup.extend_from_slice(&ciphertext);
-    Ok(backup)
-}
-
-/// Imports an identity from an encrypted backup blob, overwriting any existing identity.
-///
-/// Returns [`IdentityError::DecryptionFailed`] if the passphrase is wrong or the backup
-/// is corrupt. Returns [`IdentityError::BackupFailed`] if the data is malformed.
-pub fn import_encrypted_backup(
-    &mut self,
-    data: &[u8],
-    passphrase: &str,
-) -> Result<(), IdentityError> {
-    // Minimum: salt + nonce + 64-byte plaintext + 16-byte Poly1305 tag
-    if data.len() < SALT_LEN + NONCE_LEN + 64 + 16 {
-        return Err(IdentityError::BackupFailed("backup data too short".into()));
+        let mut backup = Vec::with_capacity(SALT_LEN + NONCE_LEN + ciphertext.len());
+        backup.extend_from_slice(&salt);
+        backup.extend_from_slice(&nonce_bytes);
+        backup.extend_from_slice(&ciphertext);
+        Ok(backup)
     }
 
-    let (salt, rest) = data.split_at(SALT_LEN);
-    let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+    /// Imports an identity from an encrypted backup blob, overwriting any existing identity.
+    ///
+    /// Returns [`IdentityError::DecryptionFailed`] if the passphrase is wrong or the backup is
+    /// corrupt. Returns [`IdentityError::BackupFailed`] if the data is malformed.
+    pub fn import_encrypted_backup(
+        &mut self,
+        data: &[u8],
+        passphrase: &str,
+    ) -> Result<(), IdentityError> {
+        // salt (16) + nonce (24) + ciphertext (64) + Poly1305 tag (16) = 120 bytes
+        if data.len() != SALT_LEN + NONCE_LEN + 64 + 16 {
+            return Err(IdentityError::BackupFailed("invalid backup length".into()));
+        }
 
-    let key_bytes = derive_key(passphrase, salt)?;
-    let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
-    let nonce = XNonce::from_slice(nonce_bytes);
+        let (salt, remainder) = data.split_at(SALT_LEN);
+        let (nonce_bytes, ciphertext) = remainder.split_at(NONCE_LEN);
 
-    let plaintext_vec = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| IdentityError::DecryptionFailed)?;
+        let key_bytes = derive_key(passphrase, salt)?;
+        let nonce = XNonce::from_slice(nonce_bytes);
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
 
-    if plaintext_vec.len() != 64 {
-        return Err(IdentityError::BackupFailed("unexpected plaintext length".into()));
-    }
-    let plaintext = Zeroizing::new(plaintext_vec);
+        let plaintext_vec = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| IdentityError::DecryptionFailed)?;
 
-    self.storage
-        .store(IDENTITY_X25519_KEY, &plaintext[..32])
-        .map_err(log_storage_err)?;
-    self.storage
-        .store(IDENTITY_ED25519_KEY, &plaintext[32..])
-        .map_err(log_storage_err)?;
+        if plaintext_vec.len() != 64 {
+            return Err(IdentityError::BackupFailed("unexpected plaintext length".into()));
+        }
+        let plaintext = Zeroizing::new(plaintext_vec);
 
-    Ok(())
-}
-
-/// Reads both raw key byte vectors from storage, propagating `NotFound` / `Corrupt`.
-fn load_key_bytes(
-    &self,
-) -> Result<(Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>), IdentityError> {
-    match (
         self.storage
-            .load(IDENTITY_X25519_KEY)
-            .map_err(log_storage_err)?,
+            .store(IDENTITY_X25519_KEY, &plaintext[..32])
+            .map_err(log_storage_err)?;
         self.storage
-            .load(IDENTITY_ED25519_KEY)
-            .map_err(log_storage_err)?,
-    ) {
-        (None, None) => Err(IdentityError::NotFound),
-        (Some(_), None) | (None, Some(_)) => Err(IdentityError::Corrupt),
-        (Some(x), Some(e)) => Ok((x, e)),
+            .store(IDENTITY_ED25519_KEY, &plaintext[32..])
+            .map_err(log_storage_err)?;
+
+        Ok(())
     }
-}
+
+    /// Reads both raw key byte vectors from storage, propagating `NotFound` / `Corrupt`.
+    fn load_key_bytes(&self) -> Result<(Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>), IdentityError> {
+        match (
+            self.storage
+                .load(IDENTITY_X25519_KEY)
+                .map_err(log_storage_err)?,
+            self.storage
+                .load(IDENTITY_ED25519_KEY)
+                .map_err(log_storage_err)?,
+        ) {
+            (None, None) => Err(IdentityError::NotFound),
+            (Some(_), None) | (None, Some(_)) => Err(IdentityError::Corrupt),
+            (Some(x), Some(e)) => Ok((x, e)),
+        }
+    }
 }
 
 /// Derives a 32-byte encryption key from `passphrase` and `salt` using Argon2id.
-fn derive_key(passphrase: &str, salt: &[u8]) -> Result<Zeroizing<[u8; ARGON2_OUTPUT_LEN]>, IdentityError> {
+fn derive_key(
+    passphrase: &str,
+    salt: &[u8]
+) -> Result<Zeroizing<[u8; ARGON2_OUTPUT_LEN]>, IdentityError> {
     let params = Params::new(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST, Some(ARGON2_OUTPUT_LEN))
         .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
@@ -428,10 +438,14 @@ mod tests {
     }
 
     #[test]
-    fn import_truncated_data_returns_backup_failed() {
+    fn import_wrong_length_returns_backup_failed() {
         let mut m = manager();
         assert!(matches!(
             m.import_encrypted_backup(&[0u8; 10], "passphrase"),
+            Err(IdentityError::BackupFailed(_))
+        ));
+        assert!(matches!(
+            m.import_encrypted_backup(&[0u8; 121], "passphrase"),
             Err(IdentityError::BackupFailed(_))
         ));
     }
