@@ -4,7 +4,7 @@
 //
 //   kotlinc \
 //     examples/kotlin-poc/main.kt \
-//     target/android/kotlin/uniffi/hermes/hermes.kt \
+//     target/android/kotlin/com/relay/hermes/hermes.kt \
 //     -include-runtime \
 //     -classpath jna.jar \
 //     -d /tmp/hermes-kotlin-poc.jar
@@ -13,8 +13,8 @@
 //     -Djna.library.path=target/aarch64-linux-android/release \
 //     MainKt
 
-import uniffi.hermes.InMemorySecureStorage
-import uniffi.hermes.IdentityManager
+import com.relay.hermes.InMemorySecureStorage
+import com.relay.hermes.IdentityManager
 
 fun main() {
     val storage = InMemorySecureStorage()

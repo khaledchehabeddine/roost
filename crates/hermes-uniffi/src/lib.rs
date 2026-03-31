@@ -72,7 +72,7 @@ impl InMemorySecureStorage {
     }
 }
 
-/// Newtype bridging `Arc<InMemorySecureStorage>` into the `SecureStorage` trait.
+/// New type bridging `Arc<InMemorySecureStorage>` into the `SecureStorage` trait.
 ///
 /// Required because Rust's orphan rule forbids implementing a foreign trait
 /// (`SecureStorage`) directly on a foreign type (`Arc<T>`).

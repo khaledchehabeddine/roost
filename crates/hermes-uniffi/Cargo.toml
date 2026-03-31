@@ -12,5 +12,5 @@ path = "uniffi-bindgen.rs"
 
 [dependencies]
 hermes-core = { path = "../hermes-core" }
-uniffi = { version = "0.28", features = ["cli"] }
+uniffi = { version = "0.31.0", features = ["cli"] }
 zeroize = "1"
