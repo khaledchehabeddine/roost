@@ -34,13 +34,13 @@ cargo build -p hermes-uniffi
 
 # Swift
 cargo run --bin uniffi-bindgen -- generate \
-    --library target/debug/libhermes_uniffi.dylib \
+    --library target/debug/libhermes.dylib \
     --language swift \
     --out-dir target/bindings/swift
 
 # Kotlin
 cargo run --bin uniffi-bindgen -- generate \
-    --library target/debug/libhermes_uniffi.dylib \
+    --library target/debug/libhermes.dylib \
     --language kotlin \
     --out-dir target/bindings/kotlin
 ```

@@ -24,7 +24,7 @@ done
 mkdir -p "$OUT/kotlin"
 
 cargo run --bin uniffi-bindgen -- generate \
-    --library "target/aarch64-linux-android/release/libhermes_uniffi.so" \
+    --library "target/aarch64-linux-android/release/libhermes.so" \
     --language kotlin \
     --out-dir "$OUT/kotlin"
 

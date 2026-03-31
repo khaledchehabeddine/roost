@@ -1,5 +1,5 @@
-[bindings.swift]
-module_name = "Hermes"
-
 [bindings.kotlin]
 package_name = "com.relay.hermes"
+
+[bindings.swift]
+module_name = "Hermes"

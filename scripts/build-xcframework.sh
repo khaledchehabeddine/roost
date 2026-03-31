@@ -7,7 +7,7 @@
 set -euo pipefail
 
 CRATE="hermes-uniffi"
-LIB="libhermes_uniffi"
+LIB="libhermes"
 OUT="target/xcframework"
 
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
