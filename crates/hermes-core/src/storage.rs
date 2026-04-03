@@ -26,7 +26,7 @@ impl std::error::Error for StorageError {}
 ///
 /// Implementations are expected to back this with platform secure storage (iOS Keychain,
 /// Android Keystore).
-pub trait SecureStorage {
+pub trait SecureStorage: Send {
     /// Stores `value` under `key`, overwriting any existing entry.
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError>;
 

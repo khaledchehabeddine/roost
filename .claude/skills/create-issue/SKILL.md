@@ -24,6 +24,6 @@ allowed-tools: Bash(gh *)
    - If no milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --assignee "@me" --project "Hermes"`
 9. Show the user the created issue URL
 
-## Additional resources
+## Additional Resources
 
 - For the issue body template, see [template.md](template.md)
