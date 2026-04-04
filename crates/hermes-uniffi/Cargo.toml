@@ -3,4 +3,19 @@ name = "hermes-uniffi"
 edition.workspace = true
 version.workspace = true
 
+[lib]
+crate-type = ["cdylib", "staticlib"]
+name = "hermes"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "uniffi-bindgen-swift.rs"
+
 [dependencies]
+hermes-core = { path = "../hermes-core" }
+uniffi = { version = "0.31.0", features = ["cli"] }
+zeroize = "1.8.2"

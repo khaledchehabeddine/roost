@@ -10,6 +10,7 @@ use hermes_crypto::{
 };
 use std::error::Error;
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
 type KeyBytes = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>);
@@ -33,7 +34,6 @@ const ARGON2_P_COST: u32 = 1;
 const ARGON2_OUTPUT_LEN: usize = 32;
 
 /// Errors returned by [`IdentityManager`] operations.
-#[non_exhaustive]
 #[derive(Debug)]
 pub enum IdentityError {
     AlreadyExists,
@@ -42,6 +42,8 @@ pub enum IdentityError {
     Corrupt,
     DecryptionFailed,
     InvalidData(String),
+    /// The internal storage lock was poisoned by a panicked thread.
+    LockPoisoned,
     NotFound,
     Storage(StorageError),
 }
@@ -56,6 +58,7 @@ impl fmt::Display for IdentityError {
                 write!(f, "Decryption failed: wrong passphrase or corrupt backup")
             }
             IdentityError::InvalidData(reason) => write!(f, "Invalid identity data: {reason}"),
+            IdentityError::LockPoisoned => write!(f, "Internal lock poisoned"),
             IdentityError::NotFound => write!(f, "No identity found"),
             IdentityError::Storage(err) => write!(f, "Storage error: {err}"),
         }
@@ -105,15 +108,22 @@ impl Identity {
 /// will be the iOS Keychain or Android Keystore; in tests use
 /// [`crate::InMemorySecureStorage`].
 ///
-/// Only one `IdentityManager` instance should operate against a given storage backend at a time.
-/// Concurrent access is not protected and may leave the identity state partially written.
-pub struct IdentityManager<S: SecureStorage> {
-    storage: S,
+/// Thread-safe: all methods take `&self` and synchronize internally. The storage backend is
+/// exclusively owned — it cannot be shared across instances.
+pub struct IdentityManager {
+    storage: Mutex<Box<dyn SecureStorage>>,
 }
 
-impl<S: SecureStorage> IdentityManager<S> {
-    pub fn new(storage: S) -> Self {
-        IdentityManager { storage }
+impl IdentityManager {
+    pub fn new(storage: Box<dyn SecureStorage>) -> Self {
+        IdentityManager {
+            storage: Mutex::new(storage),
+        }
+    }
+
+    /// Acquires the storage lock, mapping a poisoned mutex to [`IdentityError::LockPoisoned`].
+    fn lock_storage(&self) -> Result<MutexGuard<'_, Box<dyn SecureStorage>>, IdentityError> {
+        self.storage.lock().map_err(|_| IdentityError::LockPoisoned)
     }
 
     /// Generates a new identity and persists it to storage.
@@ -124,9 +134,10 @@ impl<S: SecureStorage> IdentityManager<S> {
     /// is deleted to leave storage in a clean state. If that cleanup also fails, the error is
     /// logged, and the original writing error is returned — the identity can be re-created by
     /// calling this method again.
-    pub fn generate_identity(&mut self) -> Result<Identity, IdentityError> {
-        let identity_exists = self
-            .storage
+    pub fn generate_identity(&self) -> Result<Identity, IdentityError> {
+        let mut storage = self.lock_storage()?;
+
+        let identity_exists = storage
             .load(IDENTITY_X25519_KEY)
             .map_err(log_storage_err)?
             .is_some();
@@ -137,17 +148,16 @@ impl<S: SecureStorage> IdentityManager<S> {
         let key_pair = generate_key_pair();
         let signing_key_pair = generate_signing_key_pair();
 
-        self.storage
+        storage
             .store(IDENTITY_X25519_KEY, &*key_pair.to_secret_bytes())
             .map_err(log_storage_err)?;
 
-        let ed25519_result = self
-            .storage
+        let ed25519_result = storage
             .store(IDENTITY_ED25519_KEY, &*signing_key_pair.to_signing_bytes())
             .map_err(log_storage_err);
 
         if let Err(e) = ed25519_result {
-            if let Err(cleanup_err) = self.storage.delete(IDENTITY_X25519_KEY) {
+            if let Err(cleanup_err) = storage.delete(IDENTITY_X25519_KEY) {
                 eprintln!(
                     "[hermes-core] failed to roll back X25519 key after partial write: \
                     {cleanup_err}"
@@ -167,13 +177,11 @@ impl<S: SecureStorage> IdentityManager<S> {
     /// Returns [`IdentityError::NotFound`] if neither key is present.
     /// Returns [`IdentityError::Corrupt`] if only one of the two keys is present.
     pub fn load_identity(&self) -> Result<Identity, IdentityError> {
-        let x25519_bytes = self
-            .storage
-            .load(IDENTITY_X25519_KEY)
-            .map_err(log_storage_err)?;
+        let storage = self.lock_storage()?;
 
-        let ed25519_bytes = self
-            .storage
+        let x25519_bytes = storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?;
+
+        let ed25519_bytes = storage
             .load(IDENTITY_ED25519_KEY)
             .map_err(log_storage_err)?;
 
@@ -251,7 +259,7 @@ impl<S: SecureStorage> IdentityManager<S> {
     /// Returns [`IdentityError::DecryptionFailed`] if the passphrase is wrong or the backup is
     /// corrupt. Returns [`IdentityError::BackupFailed`] if the data is malformed.
     pub fn import_encrypted_backup(
-        &mut self,
+        &self,
         data: &[u8],
         passphrase: &str,
     ) -> Result<(), IdentityError> {
@@ -278,10 +286,11 @@ impl<S: SecureStorage> IdentityManager<S> {
         }
         let plaintext = Zeroizing::new(plaintext_vec);
 
-        self.storage
+        let mut storage = self.lock_storage()?;
+        storage
             .store(IDENTITY_X25519_KEY, &plaintext[..32])
             .map_err(log_storage_err)?;
-        self.storage
+        storage
             .store(IDENTITY_ED25519_KEY, &plaintext[32..])
             .map_err(log_storage_err)?;
 
@@ -290,11 +299,10 @@ impl<S: SecureStorage> IdentityManager<S> {
 
     /// Reads both raw key byte vectors from storage, propagating `NotFound` / `Corrupt`.
     fn load_key_bytes(&self) -> Result<KeyBytes, IdentityError> {
+        let storage = self.lock_storage()?;
         match (
-            self.storage
-                .load(IDENTITY_X25519_KEY)
-                .map_err(log_storage_err)?,
-            self.storage
+            storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?,
+            storage
                 .load(IDENTITY_ED25519_KEY)
                 .map_err(log_storage_err)?,
         ) {
@@ -336,19 +344,19 @@ mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
 
-    fn manager() -> IdentityManager<InMemorySecureStorage> {
-        IdentityManager::new(InMemorySecureStorage::new())
+    fn manager() -> IdentityManager {
+        IdentityManager::new(Box::new(InMemorySecureStorage::new()))
     }
 
     #[test]
     fn generate_identity_succeeds() {
-        let mut m = manager();
+        let m = manager();
         assert!(m.generate_identity().is_ok());
     }
 
     #[test]
     fn generate_identity_twice_returns_already_exists() {
-        let mut m = manager();
+        let m = manager();
         m.generate_identity().unwrap();
         assert!(matches!(
             m.generate_identity(),
@@ -364,7 +372,7 @@ mod tests {
 
     #[test]
     fn load_identity_returns_same_public_keys() {
-        let mut m = manager();
+        let m = manager();
         let generated = m.generate_identity().unwrap();
         let loaded = m.load_identity().unwrap();
         assert_eq!(generated.public_key(), loaded.public_key());
@@ -376,7 +384,7 @@ mod tests {
 
     #[test]
     fn sign_round_trip_after_load_identity() {
-        let mut m = manager();
+        let m = manager();
         let generated = m.generate_identity().unwrap();
         let loaded = m.load_identity().unwrap();
         let message = b"hermes test message";
@@ -389,7 +397,7 @@ mod tests {
 
     #[test]
     fn diffie_hellman_round_trip_after_load_identity() {
-        let mut m = manager();
+        let m = manager();
         let loaded = m.generate_identity().unwrap();
         let peer = generate_key_pair();
         let shared_a = loaded.diffie_hellman(&peer.public);
@@ -399,9 +407,13 @@ mod tests {
 
     #[test]
     fn load_identity_returns_corrupt_when_only_one_key_present() {
-        let mut m = manager();
+        let m = manager();
         m.generate_identity().unwrap();
-        m.storage.delete(IDENTITY_ED25519_KEY).unwrap();
+        m.storage
+            .lock()
+            .unwrap()
+            .delete(IDENTITY_ED25519_KEY)
+            .unwrap();
         assert!(matches!(m.load_identity(), Err(IdentityError::Corrupt)));
     }
 
@@ -416,12 +428,12 @@ mod tests {
 
     #[test]
     fn export_import_round_trip_restores_identity() {
-        let mut m = manager();
+        let m = manager();
         let original = m.generate_identity().unwrap();
 
         let backup = m.export_encrypted_backup("correct-passphrase").unwrap();
 
-        let mut m2 = manager();
+        let m2 = manager();
         m2.import_encrypted_backup(&backup, "correct-passphrase")
             .unwrap();
         let restored = m2.load_identity().unwrap();
@@ -435,11 +447,11 @@ mod tests {
 
     #[test]
     fn import_with_wrong_passphrase_returns_decryption_failed() {
-        let mut m = manager();
+        let m = manager();
         m.generate_identity().unwrap();
         let backup = m.export_encrypted_backup("correct-passphrase").unwrap();
 
-        let mut m2 = manager();
+        let m2 = manager();
         assert!(matches!(
             m2.import_encrypted_backup(&backup, "wrong-passphrase"),
             Err(IdentityError::DecryptionFailed)
@@ -448,7 +460,7 @@ mod tests {
 
     #[test]
     fn import_wrong_length_returns_backup_failed() {
-        let mut m = manager();
+        let m = manager();
         assert!(matches!(
             m.import_encrypted_backup(&[0u8; 10], "passphrase"),
             Err(IdentityError::BackupFailed(_))
@@ -461,7 +473,7 @@ mod tests {
 
     #[test]
     fn two_exports_produce_different_ciphertexts() {
-        let mut m = manager();
+        let m = manager();
         m.generate_identity().unwrap();
         let b1 = m.export_encrypted_backup("passphrase").unwrap();
         let b2 = m.export_encrypted_backup("passphrase").unwrap();
