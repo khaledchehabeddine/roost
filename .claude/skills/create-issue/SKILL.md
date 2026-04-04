@@ -20,7 +20,7 @@ allowed-tools: Bash(gh *)
 6. Ask the user to optionally pick a milestone from the fetched milestones above — skip if not provided
 7. Use `template.md` to write the issue body with the user's answers
 8. Create the issue:
-   - If milestone provided: `gh issue create --title "<title>" --body "<body>" --label "<label>" --milestone "<milestone>" --assignee "@me" --project "Hermes"`
+   - If a milestone provided: `gh issue create --title "<title>" --body "<body>" --label "<label>" --milestone "<milestone>" --assignee "@me" --project "Hermes"`
    - If no milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --assignee "@me" --project "Hermes"`
 9. Show the user the created issue URL
 
