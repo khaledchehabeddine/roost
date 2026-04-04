@@ -53,7 +53,9 @@ impl From<IdentityError> for HermesError {
                 reason: "internal lock poisoned".into(),
             },
             IdentityError::NotFound => HermesError::NotFound,
-            IdentityError::Storage(e) => HermesError::Storage { reason: e.to_string() },
+            IdentityError::Storage(e) => HermesError::Storage {
+                reason: e.to_string(),
+            },
         }
     }
 }
@@ -173,9 +175,7 @@ impl IdentityManager {
     #[uniffi::constructor]
     pub fn new(storage: Arc<dyn SecureStorage>) -> Self {
         Self {
-            inner: hermes_core::IdentityManager::new(Box::new(SecureStorageAdapter {
-                storage,
-            })),
+            inner: hermes_core::IdentityManager::new(Box::new(SecureStorageAdapter { storage })),
         }
     }
 

@@ -179,9 +179,7 @@ impl IdentityManager {
     pub fn load_identity(&self) -> Result<Identity, IdentityError> {
         let storage = self.lock_storage()?;
 
-        let x25519_bytes = storage
-            .load(IDENTITY_X25519_KEY)
-            .map_err(log_storage_err)?;
+        let x25519_bytes = storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?;
 
         let ed25519_bytes = storage
             .load(IDENTITY_ED25519_KEY)
@@ -303,9 +301,7 @@ impl IdentityManager {
     fn load_key_bytes(&self) -> Result<KeyBytes, IdentityError> {
         let storage = self.lock_storage()?;
         match (
-            storage
-                .load(IDENTITY_X25519_KEY)
-                .map_err(log_storage_err)?,
+            storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?,
             storage
                 .load(IDENTITY_ED25519_KEY)
                 .map_err(log_storage_err)?,
@@ -413,7 +409,11 @@ mod tests {
     fn load_identity_returns_corrupt_when_only_one_key_present() {
         let m = manager();
         m.generate_identity().unwrap();
-        m.storage.lock().unwrap().delete(IDENTITY_ED25519_KEY).unwrap();
+        m.storage
+            .lock()
+            .unwrap()
+            .delete(IDENTITY_ED25519_KEY)
+            .unwrap();
         assert!(matches!(m.load_identity(), Err(IdentityError::Corrupt)));
     }
 
