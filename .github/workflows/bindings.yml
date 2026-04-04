@@ -26,14 +26,14 @@ jobs:
 
       - name: Generate Swift bindings
         run: |
-          cargo run --bin uniffi-bindgen -- generate \
-            --library target/debug/libhermes.so \
-            --language swift \
-            --out-dir target/bindings/swift
+          cargo run --bin uniffi-bindgen-swift -- \
+            target/debug/libhermes.so \
+            target/bindings/swift \
+            --swift-sources --headers
 
       - name: Generate Kotlin bindings
         run: |
           cargo run --bin uniffi-bindgen -- generate \
-            --library target/debug/libhermes.so \
+            target/debug/libhermes.so \
             --language kotlin \
             --out-dir target/bindings/kotlin

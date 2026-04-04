@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 # Build .so libraries for Android ABIs and generate Kotlin bindings.
-# Requires cargo-ndk (cargo install cargo-ndk) and the Android NDK.
-#
-# Usage:
-#   NDK_HOME=/path/to/ndk ./scripts/build-android.sh
 set -euo pipefail
 
 CRATE="hermes-uniffi"
@@ -24,7 +20,7 @@ done
 mkdir -p "$OUT/kotlin"
 
 cargo run --bin uniffi-bindgen -- generate \
-    --library "target/aarch64-linux-android/release/libhermes.so" \
+    "target/aarch64-linux-android/release/libhermes.so" \
     --language kotlin \
     --out-dir "$OUT/kotlin"
 

@@ -1,11 +1,11 @@
 # hermes-uniffi
 
-UniFFI bindings crate. Exposes `IdentityManager` and `InMemorySecureStorage` to Swift (iOS) and Kotlin (Android) under the `hermes` namespace.
+UniFFI bindings crate. Exposes `IdentityManager`, `SecureStorage`, and `InMemorySecureStorage` to Swift (iOS) and Kotlin (Android) under the `hermes` namespace.
 
 ## Constraints
 
 - May only depend on `hermes-core`.
-- Generic `hermes-core` types are wrapped in concrete FFI types within this crate.
+- Core types are wrapped in FFI-compatible types within this crate.
 
 ## Building for iOS (xcframework)
 
@@ -15,7 +15,7 @@ Requires Xcode command-line tools and the iOS Rust targets:
 ./scripts/build-xcframework.sh
 ```
 
-The xcframework is written to `target/xcframework/Hermes.xcframework`. Swift bindings are generated alongside it in `target/xcframework/swift/`.
+The xcframework is written to `target/xcframework/Hermes.xcframework`. Swift sources are generated in `target/xcframework/Sources/`.
 
 ## Building for Android (.so)
 
@@ -32,15 +32,15 @@ NDK_HOME=/path/to/ndk ./scripts/build-android.sh
 ```sh
 cargo build -p hermes-uniffi
 
-# Swift
-cargo run --bin uniffi-bindgen -- generate \
-    --library target/debug/libhermes.dylib \
-    --language swift \
-    --out-dir target/bindings/swift
+# Swift (headers + sources)
+cargo run --bin uniffi-bindgen-swift -- \
+    target/debug/libhermes.dylib \
+    target/bindings/swift \
+    --swift-sources --headers
 
 # Kotlin
 cargo run --bin uniffi-bindgen -- generate \
-    --library target/debug/libhermes.dylib \
+    target/debug/libhermes.dylib \
     --language kotlin \
     --out-dir target/bindings/kotlin
 ```

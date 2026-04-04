@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Build a universal xcframework for iOS device and iOS Simulator.
-# Requires Xcode command-line tools and the iOS Rust targets.
 #
-# Usage:
-#   ./scripts/build-xcframework.sh
+# Build an xcframework for iOS devices and simulators.
+
 set -euo pipefail
 
 CRATE="hermes-uniffi"
@@ -12,22 +10,30 @@ OUT="target/xcframework"
 
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
 
-cargo build --release --target aarch64-apple-ios        -p "$CRATE"
-cargo build --release --target aarch64-apple-ios-sim    -p "$CRATE"
+cargo build --release --target aarch64-apple-ios -p "$CRATE"
+cargo build --release --target aarch64-apple-ios-sim -p "$CRATE"
 
-mkdir -p "$OUT/swift"
+mkdir -p "$OUT/Headers" "$OUT/Modules" "$OUT/Sources"
 
-cargo run --bin uniffi-bindgen -- generate \
-    --library "target/aarch64-apple-ios/release/${LIB}.a" \
-    --language swift \
-    --out-dir "$OUT/swift"
+# Generate Swift bindings using the dedicated uniffi-bindgen-swift binary.
+cargo run --bin uniffi-bindgen-swift -- \
+    "target/aarch64-apple-ios/release/${LIB}.a" \
+    "$OUT/Headers" --headers
+
+cargo run --bin uniffi-bindgen-swift -- \
+    "target/aarch64-apple-ios/release/${LIB}.a" \
+    "$OUT/Modules" --modulemap --xcframework --modulemap-filename module.modulemap
+
+cargo run --bin uniffi-bindgen-swift -- \
+    "target/aarch64-apple-ios/release/${LIB}.a" \
+    "$OUT/Sources" --swift-sources
 
 xcodebuild -create-xcframework \
     -library "target/aarch64-apple-ios/release/${LIB}.a" \
-    -headers "$OUT/swift" \
+    -headers "$OUT/Headers" \
     -library "target/aarch64-apple-ios-sim/release/${LIB}.a" \
-    -headers "$OUT/swift" \
+    -headers "$OUT/Headers" \
     -output "$OUT/Hermes.xcframework"
 
 echo "xcframework written to $OUT/Hermes.xcframework"
-echo "Swift bindings written to $OUT/swift/"
+echo "Swift sources written to $OUT/Sources/"
