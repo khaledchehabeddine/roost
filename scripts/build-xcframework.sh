@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build an xcframework for iOS devices and simulators.
+# Build an xcframework and Swift bindings for iOS.
 
 set -euo pipefail
 
@@ -15,7 +15,6 @@ cargo build --release --target aarch64-apple-ios-sim -p "$CRATE"
 
 mkdir -p "$OUT/Headers" "$OUT/Modules" "$OUT/Sources"
 
-# Generate Swift bindings using the dedicated uniffi-bindgen-swift binary.
 cargo run --bin uniffi-bindgen-swift -- \
     "target/aarch64-apple-ios/release/${LIB}.a" \
     "$OUT/Headers" --headers

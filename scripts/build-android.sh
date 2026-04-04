@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# Build .so libraries for Android ABIs and generate Kotlin bindings.
+#
+# Build .so libraries and Kotlin bindings for Android.
+
 set -euo pipefail
 
 CRATE="hermes-uniffi"
+LIB="libhermes"
 OUT="target/android"
 
 TARGETS=(
@@ -20,9 +23,11 @@ done
 mkdir -p "$OUT/kotlin"
 
 cargo run --bin uniffi-bindgen -- generate \
-    "target/aarch64-linux-android/release/libhermes.so" \
+    "target/aarch64-linux-android/release/${LIB}.so" \
     --language kotlin \
     --out-dir "$OUT/kotlin"
 
-echo ".so files written to target/<abi>/release/"
+for TARGET in "${TARGETS[@]}"; do
+    echo ".so written to target/$TARGET/release/${LIB}.so"
+done
 echo "Kotlin bindings written to $OUT/kotlin/"
