@@ -6,6 +6,9 @@ version.workspace = true
 [dependencies]
 ed25519-dalek = { version = "2.2.0", features = ["fast", "rand_core", "zeroize"] }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
-# Pinned to 0.8: dalek latest stable releases require rand_core 0.6
+# Pinned to 0.8.5 since dalek latest stable releases require rand_core 0.6
 rand = { version = "0.8.5", features = ["getrandom"] }
 zeroize = "1.8.2"
+
+[dev-dependencies]
+hex = "0.4.3"

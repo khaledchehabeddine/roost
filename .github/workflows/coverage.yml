@@ -1,0 +1,33 @@
+name: Coverage
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
+  push:
+    branches: [main]
+
+jobs:
+  coverage:
+    name: Line Coverage
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check hermes-core Coverage
+        run: cargo llvm-cov -p hermes-core --fail-under-lines 80
+
+      - name: Check hermes-crypto Coverage
+        run: cargo llvm-cov -p hermes-crypto --fail-under-lines 80

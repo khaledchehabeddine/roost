@@ -480,4 +480,29 @@ mod tests {
         // Salt and nonce are random, so the blobs must differ
         assert_ne!(b1, b2);
     }
+
+    #[test]
+    fn argon2id_derive_key_is_deterministic() {
+        let passphrase = "passphrase";
+        let salt = [0x00u8; 16];
+        let key1 = derive_key(passphrase, &salt).unwrap();
+        let key2 = derive_key(passphrase, &salt).unwrap();
+        assert_eq!(*key1, *key2);
+    }
+
+    #[test]
+    fn argon2id_different_passphrases_produce_different_keys() {
+        let salt = [0x01u8; 16];
+        let key1 = derive_key("passphrase-one", &salt).unwrap();
+        let key2 = derive_key("passphrase-two", &salt).unwrap();
+        assert_ne!(*key1, *key2);
+    }
+
+    #[test]
+    fn argon2id_different_salts_produce_different_keys() {
+        let passphrase = "passphrase";
+        let key1 = derive_key(passphrase, &[0x00u8; 16]).unwrap();
+        let key2 = derive_key(passphrase, &[0x01u8; 16]).unwrap();
+        assert_ne!(*key1, *key2);
+    }
 }
