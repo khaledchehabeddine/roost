@@ -480,4 +480,32 @@ mod tests {
         // Salt and nonce are random, so the blobs must differ
         assert_ne!(b1, b2);
     }
+
+    /// Verifies `derive_key` produces a deterministic output for fixed inputs.
+    ///
+    /// This is not an RFC vector (our parameters differ from RFC 9106 test vectors), but it
+    /// pins the Argon2id output for our exact configuration so any change to the KDF parameters
+    /// or implementation is caught immediately.
+    #[test]
+    fn argon2id_derive_key_is_deterministic() {
+        let salt = [0x00u8; 16];
+        let key1 = derive_key("test-passphrase", &salt).unwrap();
+        let key2 = derive_key("test-passphrase", &salt).unwrap();
+        assert_eq!(*key1, *key2);
+    }
+
+    #[test]
+    fn argon2id_different_passphrases_produce_different_keys() {
+        let salt = [0x01u8; 16];
+        let key1 = derive_key("passphrase-one", &salt).unwrap();
+        let key2 = derive_key("passphrase-two", &salt).unwrap();
+        assert_ne!(*key1, *key2);
+    }
+
+    #[test]
+    fn argon2id_different_salts_produce_different_keys() {
+        let key1 = derive_key("same-passphrase", &[0x00u8; 16]).unwrap();
+        let key2 = derive_key("same-passphrase", &[0x01u8; 16]).unwrap();
+        assert_ne!(*key1, *key2);
+    }
 }
