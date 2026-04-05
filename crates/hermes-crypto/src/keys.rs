@@ -141,12 +141,10 @@ mod tests {
                 .try_into()
                 .unwrap();
         let message: [u8; 0] = [];
-        let expected_signature: [u8; 64] = hex(
-            "e5564300c360ac729086e2cc806e828a\
+        let expected_signature: [u8; 64] = hex("e5564300c360ac729086e2cc806e828a\
              84877f1eb8e5d974d873e06522490155\
              5fb8821590a33bacc61e39701cf9b46b\
-             d25bf5f0595bbe24655141438e7a100b",
-        )
+             d25bf5f0595bbe24655141438e7a100b")
         .try_into()
         .unwrap();
 
@@ -169,12 +167,10 @@ mod tests {
                 .try_into()
                 .unwrap();
         let message: [u8; 1] = [0x72];
-        let expected_signature: [u8; 64] = hex(
-            "92a009a9f0d4cab8720e820b5f642540\
+        let expected_signature: [u8; 64] = hex("92a009a9f0d4cab8720e820b5f642540\
              a2b27b5416503f8fb3762223ebdb69da\
              085ac1e43e15996e458f3613d0f11d8c\
-             387b2eaeb4302aeeb00d291612bb0c00",
-        )
+             387b2eaeb4302aeeb00d291612bb0c00")
         .try_into()
         .unwrap();
 

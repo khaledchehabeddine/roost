@@ -26,14 +26,8 @@ jobs:
       - name: Cache Dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Check hermes-crypto coverage
-        run: |
-          COV=$(cargo llvm-cov -p hermes-crypto --summary-only 2>&1 | grep TOTAL | awk '{print $10}' | tr -d '%')
-          echo "hermes-crypto line coverage: ${COV}%"
-          awk "BEGIN { exit ($COV < 80) ? 1 : 0 }" || { echo "::error::hermes-crypto coverage ${COV}% is below 80%"; exit 1; }
+      - name: Check hermes-core Coverage
+        run: cargo llvm-cov -p hermes-core --fail-under-lines 80
 
-      - name: Check hermes-core coverage
-        run: |
-          COV=$(cargo llvm-cov -p hermes-core --summary-only 2>&1 | grep TOTAL | awk '{print $10}' | tr -d '%')
-          echo "hermes-core line coverage: ${COV}%"
-          awk "BEGIN { exit ($COV < 80) ? 1 : 0 }" || { echo "::error::hermes-core coverage ${COV}% is below 80%"; exit 1; }
+      - name: Check hermes-crypto Coverage
+        run: cargo llvm-cov -p hermes-crypto --fail-under-lines 80
