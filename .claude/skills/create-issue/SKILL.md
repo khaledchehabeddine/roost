@@ -1,4 +1,5 @@
 ---
+name: create-issue
 description: Create a GitHub issue following the project template and link it to the Hermes project board
 argument-hint: <title>
 disable-model-invocation: true

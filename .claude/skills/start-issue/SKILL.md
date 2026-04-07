@@ -1,4 +1,5 @@
 ---
+name: start-issue
 description: Fetch a GitHub issue, create a branch, and begin implementation
 argument-hint: <issue-id>
 disable-model-invocation: true

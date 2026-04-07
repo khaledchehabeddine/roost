@@ -1,4 +1,5 @@
 ---
+name: commit-push
 description: Stage, commit, push, and create or update a pull request following CONTRIBUTING.md conventions
 argument-hint: [issue-id]
 disable-model-invocation: true

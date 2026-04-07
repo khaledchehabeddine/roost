@@ -1,4 +1,5 @@
 ---
+name: create-decision-record
 description: Scaffold a new architectural decision record in docs/decisions/
 argument-hint: <short-title>
 disable-model-invocation: true
