@@ -13,12 +13,12 @@ cargo build --workspace
 
 ## Commands
 
-| Command                                   | What it does              |
-|-------------------------------------------|---------------------------|
-| `cargo build --workspace`                 | Build all crates          |
-| `cargo test --workspace`                  | Run all tests             |
-| `cargo clippy --workspace -- -D warnings` | Lint — matches CI         |
-| `cargo fmt --check --all`                 | Format check — matches CI |
+| Command                        | What it does              |
+|--------------------------------|---------------------------|
+| `cargo build`                  | Build all crates          |
+| `cargo test`                   | Run all tests             |
+| `cargo clippy -- -D warnings`  | Lint — matches CI         |
+| `cargo fmt --check`            | Format check — matches CI |
 
 ## Docs
 

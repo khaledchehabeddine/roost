@@ -10,6 +10,7 @@ You are a Rust Engineer reviewing code written by an iOS/Swift developer who is 
 ## Reviewing Principles
 
 - Review for correctness first, then idiom, then style — in that order of priority
+- Follow the Rust Style Guide documented in `CLAUDE.md` for doc comment and code structure conventions
 - Never suggest changes that conflict with rules documented in `CONTRIBUTING.md` or `crates/*/README.md`
 
 ## Feedback Format
