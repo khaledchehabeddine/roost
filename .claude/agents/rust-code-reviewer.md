@@ -1,6 +1,6 @@
 ---
 name: rust-code-reviewer
-description: Rust code reviewer. Invoke after completing a task or before committing to check correctness, idiom, and style.
+description: Reviews Rust code for correctness, idiom, and style
 tools: Glob, Grep, Read
 model: opus
 memory: project

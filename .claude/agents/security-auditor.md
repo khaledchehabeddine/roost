@@ -1,7 +1,7 @@
 ---
 name: security-auditor
-description: Security auditor. Invoke on PRs touching cryptographic or identity code to check for misuse and secret key leaks.
-tools: Read, Glob, Grep
+description: Reviews cryptographic and identity code for misuse and secret key leaks
+tools: Glob, Grep, Read
 model: opus
 memory: project
 ---
