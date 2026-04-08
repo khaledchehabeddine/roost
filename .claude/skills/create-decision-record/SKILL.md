@@ -1,9 +1,9 @@
 ---
 name: create-decision-record
-description: Scaffold a new architectural decision record in docs/decisions/
+description: Scaffold a new architectural decision record
 argument-hint: <short-title>
 disable-model-invocation: true
-allowed-tools: Bash(ls:*), Read, Write
+allowed-tools: Bash(ls *) Read Write
 ---
 
 ## Context
@@ -12,13 +12,10 @@ allowed-tools: Bash(ls:*), Read, Write
 
 ## Task
 
-1. Determine the next sequential four-digit number from the existing files
-2. Use `$ARGUMENTS` as the decision title to generate a kebab-case filename: `NNNN-<short-title>.md`
-3. Ask the user: "What was decided?" — wait for response
-4. Ask the user: "Why?" — wait for response
-5. Write the completed file to `docs/decisions/NNNN-<short-title>.md` with today's date, the user's answers, and the title derived from `$ARGUMENTS`
-6. Show the user the created file path and content for review
-
-## Additional Resources
-
-- For the decision record template, see [template.md](template.md)
+1. Read `template.md` for the decision record format
+2. Determine the next sequential four-digit number from the existing files
+3. Generate kebab-case filename from `$ARGUMENTS`: `NNNN-<short-title>.md`, confirm with user
+4. Ask the user: "What was decided?"
+5. Ask the user: "Why?"
+6. Write the file to `docs/decisions/NNNN-<short-title>.md` using the template with today's date and the user's answers
+7. Show the created file path and content for review

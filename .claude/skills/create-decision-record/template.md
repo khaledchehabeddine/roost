@@ -5,11 +5,8 @@
 
 ## Decision
 
-<!-- What was decided -->
+<!-- Short paragraph summarizing what was decided -->
 
 ## Why
 
-<!-- Self-contained technical justification
-     - Bullet points only
-     - No references to external projects
-     - Readable in under 30 seconds -->
+<!-- Bullet points justifying the decision -->
