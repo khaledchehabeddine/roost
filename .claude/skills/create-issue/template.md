@@ -1,10 +1,11 @@
 ## Description
-<!-- A brief summary of the task or bug. -->
+
+<!-- Short paragraph summarizing the task or bug -->
 
 ## Acceptance Criteria
-<!-- Child issues only. Omit for parent issues. -->
-- [ ] 
+
+<!-- Checklist items — omit this section for parent issues -->
 
 ## Notes
-<!-- Optional. Additional context, links, or edge cases. -->
--
+
+<!-- Optional — bullet points with additional context, links, or edge cases. -->
