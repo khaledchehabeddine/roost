@@ -7,4 +7,5 @@
 <!-- Bullet points only -->
 
 ## Decision Record
-<!-- Optional. Add this section only when adding or modifying a decision record. Format: - NNNN: Title (e.g. - 0001: Hermes Engine Architecture) -->
+
+<!-- Optional — list any decision records added or modified as: NNNN: Title -->
