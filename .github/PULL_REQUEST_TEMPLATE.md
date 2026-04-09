@@ -6,6 +6,4 @@
 
 <!-- Bullet points only -->
 
-## Decision Record
-
-<!-- Optional — list any decision records added or modified as: NNNN: Title -->
+<!-- If decision records were added or modified, append a "## Decision Record" section listing them as: NNNN: Title. Otherwise, omit the section entirely. -->
