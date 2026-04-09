@@ -1,13 +1,15 @@
-# Contributing to Hermes
+# Contributing
 
 ## Branches
 
 Format: `<type>/<short-description>`
 
+Types match the repo's GitHub labels — run `gh label list` to see the current set.
+
+### Example
+
 ```
-enhancement/ble-peer-discovery
-bug/empty-payload-crash
-chore/update-dependencies
+feature/ble-peer-discovery
 ```
 
 ## Commits
@@ -15,6 +17,8 @@ chore/update-dependencies
 Format: `<type>: <summary>\n\n- <what changed>\n- <what changed>`
 
 Types: `feat` `fix` `chore` `docs` `ci` `refactor` `test`
+
+### Example
 
 ```
 feat: add Curve25519 key generation to hermes-crypto
@@ -27,15 +31,4 @@ feat: add Curve25519 key generation to hermes-crypto
 ## Pull Requests
 
 - All CI workflows must pass
-- See `.github/PULL_REQUEST_TEMPLATE.md` for the required PR structure
-
-## Error Handling
-
-- All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
-- Each crate defines its own domain error type
-- Errors never cross the UniFFI boundary — only domain errors defined in the UniFFI Definition Language (UDL) propagate to the platform layer
-- Error `Display` implementations should be detailed and developer-facing
-
-## Crate-Specific Rules
-
-Each crate's purpose is documented in its `lib.rs` module docs (`//!`). Workspace-wide crate dependency rules live in `CLAUDE.md`.
+- See [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) for the required PR structure
