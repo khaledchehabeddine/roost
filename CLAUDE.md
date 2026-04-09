@@ -13,6 +13,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - `hermes-transport-ble` → `hermes-core`
 - `hermes-uniffi` → `hermes-core`, `hermes-transport-ble`
 
-## Git Workflow
+## Workflow
 
-See `CONTRIBUTING.md` for branches, commits, and PR conventions.
+- See `CONTRIBUTING.md` for branches, commits, and PR conventions
+- After responding to a non-obvious discovery, fix, or workaround, suggest `/create-decision-record` or a `CLAUDE.md` update

@@ -43,4 +43,4 @@ jobs:
 
       # Compilation verification requires Gradle + UniFFI runtime; verify generation only
       - name: Verify Kotlin Generated
-        run: test -s target/bindings/kotlin/hermes/hermes.kt
+        run: test -s target/bindings/kotlin/com/relay/hermes/hermes.kt
