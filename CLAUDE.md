@@ -13,14 +13,6 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - `hermes-transport-ble` → `hermes-core`
 - `hermes-uniffi` → `hermes-core`, `hermes-transport-ble`
 
-## Workflow
+## Git Workflow
 
-- Follow `CONTRIBUTING.md` for Git workflows.
-
-## Rules
-
-Loaded on-demand from `.claude/rules/` by file path:
-
-- `crypto.md` — crypto primitives and security constraints (hermes-crypto, hermes-core)
-- `rust-style.md` — doc comment and code structure conventions (all .rs files)
-- `uniffi.md` — UniFFI naming conventions (hermes-uniffi)
+See `CONTRIBUTING.md` for branches, commits, and PR conventions.

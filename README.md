@@ -1,6 +1,6 @@
 # Hermes
 
-A shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
+The shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
 
 ## Setup
 
