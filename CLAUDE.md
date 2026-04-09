@@ -1,21 +1,19 @@
 # Hermes
 
-## What is Hermes
+## Overview
 
-Hermes is a private Rust workspace implementing the cryptographic and networking core for an encrypted peer-to-peer messaging system over Bluetooth Low Energy (BLE). It exposes a single API surface to Swift (iOS) and Kotlin (Android) via UniFFI.
+Hermes is the shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
 
-## Crate Dependency Graph
+## Architecture
 
-```
-hermes-crypto
-      ↓
-hermes-core  ←  hermes-transport-ble
-      ↓
-hermes-uniffi
-```
+Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B"):
 
-Each crate may only depend on crates below it in this graph. `hermes-crypto` has no `hermes-*` dependencies.
+- `hermes-crypto`
+- `hermes-core` → `hermes-crypto`
+- `hermes-transport-ble` → `hermes-core`
+- `hermes-uniffi` → `hermes-core`, `hermes-transport-ble`
 
-## Before Modifying a Crate
+## Workflow
 
-Read `crates/*/README.md` first — each crate documents its own constraints.
+- See `CONTRIBUTING.md` for branches, commits, and PR conventions
+- After responding to a non-obvious discovery, fix, or workaround, suggest `/create-decision-record` or a `CLAUDE.md` update

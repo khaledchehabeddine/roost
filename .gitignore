@@ -7,8 +7,5 @@ target
 # macOS
 .DS_Store
 
-# Project
-examples/
-
 # RustRover
 .idea/

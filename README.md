@@ -1,6 +1,6 @@
 # Hermes
 
-Cross-platform networking engine for encrypted peer-to-peer messaging over Bluetooth Low Energy (BLE). All cryptographic and transport logic lives here, exposed to Swift and Kotlin via UniFFI.
+The shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
 
 ## Setup
 
@@ -11,17 +11,13 @@ rustup show
 cargo build --workspace
 ```
 
-## Commands
+Generate documentation:
 
-| Command                                   | What it does              |
-|-------------------------------------------|---------------------------|
-| `cargo build --workspace`                 | Build all crates          |
-| `cargo test --workspace`                  | Run all tests             |
-| `cargo clippy --workspace -- -D warnings` | Lint — matches CI         |
-| `cargo fmt --check --all`                 | Format check — matches CI |
+```bash
+cargo doc --workspace --open
+```
 
 ## Docs
 
-- `docs/decisions/` — architectural decisions and reasoning
-- `CONTRIBUTING.md` — commit format, branch naming, project-wide rules
-- `crates/<n>/README.md` — crate-specific constraints
+- [`docs/decisions/`](docs/decisions/) — architectural decisions and reasoning
+- [`docs/building-mobile.md`](docs/building-mobile.md) — Android, iOS, and manual UniFFI bindings
