@@ -38,4 +38,4 @@ feat: add Curve25519 key generation to hermes-crypto
 
 ## Crate-Specific Rules
 
-Each crate defines its own constraints in `crates/*/README.md`. Read it before contributing to that crate.
+Each crate's purpose is documented in its `lib.rs` module docs (`//!`). Workspace-wide crate dependency rules live in `CLAUDE.md`.

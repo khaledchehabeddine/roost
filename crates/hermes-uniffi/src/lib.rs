@@ -1,3 +1,12 @@
+//! UniFFI bindings exposing Hermes to Swift (iOS) and Kotlin (Android) under the
+//! `hermes` namespace.
+//!
+//! Wraps `hermes-core` types into FFI-compatible types using Mozilla's UniFFI.
+//! [`SecureStorage`] is foreign-implementable (`Send + Sync`) so platform callers can
+//! inject iOS Keychain / Android Keystore backends. `SecureStorageAdapter` bridges
+//! the FFI trait (`&self` methods, shared via `Arc`) to the core trait (`&mut self`
+//! methods, owned exclusively behind a `Mutex`).
+
 uniffi::setup_scaffolding!("hermes");
 
 use hermes_core::{IdentityError, SecureStorage as CoreSecureStorage, StorageError};
