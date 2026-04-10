@@ -1,5 +1,6 @@
 name = "security-auditor"
-description = "Reviews cryptographic and identity code for misuse and secret key leaks"
+description = "Spawn when auditing cryptographic and identity code for misuse, secret key leaks, and algorithm violations. Not for general code review or style feedback."
+model = "o3"
 sandbox_mode = "read-only"
 
 developer_instructions = """
