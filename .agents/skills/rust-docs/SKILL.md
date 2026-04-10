@@ -1,6 +1,6 @@
 ---
 name: rust-docs
-description: Trigger when the user wants to add or update /// doc comments on public Rust items. Accepts a crate name or file path. Not for inline code comments, README files, or non-Rust documentation.
+description: Trigger when the user wants to add or update /// doc comments on public Rust items. Not for inline code comments, README files, or non-Rust documentation.
 ---
 
 ## Steps

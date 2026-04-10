@@ -1,6 +1,6 @@
 ---
 name: create-decision-record
-description: Trigger when the user wants to record a new architectural decision. Accepts a short title. Not for updating, superseding, or deleting existing records.
+description: Trigger when the user wants to record a new architectural decision. Not for updating, superseding, or deleting existing records.
 ---
 
 ## Steps

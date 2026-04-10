@@ -1,6 +1,6 @@
 ---
 name: commit-push
-description: Trigger when the user wants to commit and push their current changes, or open a draft PR. Accepts an optional issue ID to create a linked branch. Not for cherry-picks, rebases, amends, or pushing without a commit.
+description: Trigger when the user wants to commit and push their current changes, or open a draft PR. Not for cherry-picks, rebases, amends, or pushing without a commit.
 ---
 
 ## Steps
