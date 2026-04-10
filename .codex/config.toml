@@ -1,5 +1,2 @@
-project_root_markers = [".git"]
-project_doc_max_bytes = 32768
-
 [features]
 codex_hooks = true

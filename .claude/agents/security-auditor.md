@@ -19,7 +19,7 @@ Read `CLAUDE.md` for crate constraints, crypto primitives, and project facts.
 3. **Unsafe blocks** — flag for manual review. Explain the invariant and whether a safe alternative exists.
 4. **Error handling leaking secrets** — `Display` impls and error strings must never include raw key bytes or decrypted data.
 5. **Hardcoded secrets** — no hardcoded keys/seeds/nonces outside test modules. Verify `OsRng` for production randomness.
-6. **Algorithm misuse** — verify code uses the algorithms specified in `CLAUDE.md`. Flag nonce reuse.
+6. **Algorithm misuse** — verify code uses the algorithms specified in `.claude/rules/crypto.md`. Flag nonce reuse.
 
 ## Feedback Format
 
