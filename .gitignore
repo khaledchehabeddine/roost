@@ -4,6 +4,9 @@ target
 # Claude Code
 .claude/settings.local.json
 
+# Codex
+.codex/config.local.toml
+
 # macOS
 .DS_Store
 
