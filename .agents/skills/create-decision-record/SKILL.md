@@ -1,6 +1,6 @@
 ---
 name: create-decision-record
-description: Scaffold a new architectural decision record. Accepts a short title as input. Do not use for updating or superseding existing records.
+description: Trigger when the user wants to record a new architectural decision. Accepts a short title. Not for updating, superseding, or deleting existing records.
 ---
 
 ## Steps

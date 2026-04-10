@@ -1,6 +1,6 @@
 ---
 name: start-issue
-description: Start work on a GitHub issue. Accepts an issue ID as input. Do not use for issues already in progress or without a valid issue ID.
+description: Trigger when the user wants to begin working on a GitHub issue by creating a branch and linking it. Requires a valid issue ID. Not for issues already in progress or general branching without an issue.
 ---
 
 ## Steps

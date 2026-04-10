@@ -1,6 +1,6 @@
 ---
 name: commit-push
-description: Stage, commit, push, and create or update a pull request. Optionally accepts an issue ID to link the branch. Do not use for cherry-picks, rebases, or amends.
+description: Trigger when the user wants to commit and push their current changes, or open a draft PR. Accepts an optional issue ID to create a linked branch. Not for cherry-picks, rebases, amends, or pushing without a commit.
 ---
 
 ## Steps

@@ -1,6 +1,6 @@
 ---
 name: create-issue
-description: Create a GitHub issue and link it to the project board. Accepts an issue title as input. Do not use for editing or closing existing issues.
+description: Trigger when the user wants to file a new GitHub issue on the Hermes project board. Accepts an issue title. Not for editing, closing, or triaging existing issues.
 ---
 
 ## Steps

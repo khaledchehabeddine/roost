@@ -1,6 +1,6 @@
 ---
 name: design-review
-description: Interview the user about a design or feature plan until every decision branch is resolved. Do not use for code review or implementation tasks.
+description: Trigger when the user wants to walk through a design or feature plan interactively, resolving decisions one at a time. Not for code review, implementation, or post-merge retrospectives.
 ---
 
 ## Steps
