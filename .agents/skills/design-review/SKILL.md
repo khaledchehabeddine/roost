@@ -1,6 +1,6 @@
 ---
 name: design-review
-description: Interview the user about a design or feature plan until every decision branch is resolved.
+description: Interview the user about a design or feature plan until every decision branch is resolved. Do not use for code review or implementation tasks.
 ---
 
 ## Steps

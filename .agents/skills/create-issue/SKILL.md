@@ -1,6 +1,6 @@
 ---
 name: create-issue
-description: Create a GitHub issue and link it to the project board. Accepts an issue title as input.
+description: Create a GitHub issue and link it to the project board. Accepts an issue title as input. Do not use for editing or closing existing issues.
 ---
 
 ## Steps
@@ -11,7 +11,7 @@ description: Create a GitHub issue and link it to the project board. Accepts an 
 4. Ask the user: "Any notes to add? (context, links, edge cases)" — skip if none
 5. User picks a label from the fetched labels
 6. User optionally picks a milestone — skip if none
-7. Read `references/template.md` and write the issue body with the user's answers
+7. Read `assets/template.md` and write the issue body with the user's answers
 8. Create the issue:
    - With milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --milestone "<milestone>" --assignee "@me" --project "Hermes"`
    - Without: `gh issue create --title "<title>" --body "<body>" --label "<label>" --assignee "@me" --project "Hermes"`

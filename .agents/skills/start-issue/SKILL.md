@@ -1,6 +1,6 @@
 ---
 name: start-issue
-description: Start work on a GitHub issue. Accepts an issue ID as input.
+description: Start work on a GitHub issue. Accepts an issue ID as input. Do not use for issues already in progress or without a valid issue ID.
 ---
 
 ## Steps

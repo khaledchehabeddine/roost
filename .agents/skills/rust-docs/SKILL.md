@@ -1,6 +1,6 @@
 ---
 name: rust-docs
-description: Add or update Rust doc comments on public items. Accepts a file or crate path as input.
+description: Add or update Rust doc comments on public items. Accepts a file or crate path as input. Do not use for inline code comments or README files.
 ---
 
 ## Steps

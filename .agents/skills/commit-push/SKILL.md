@@ -1,6 +1,6 @@
 ---
 name: commit-push
-description: Stage, commit, push, and create or update a pull request. Optionally accepts an issue ID to link the branch.
+description: Stage, commit, push, and create or update a pull request. Optionally accepts an issue ID to link the branch. Do not use for cherry-picks, rebases, or amends.
 ---
 
 ## Steps
