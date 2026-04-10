@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt --check"
+          },
+          {
+            "type": "command",
+            "command": "cargo clippy --quiet -- -D warnings"
+          },
+          {
+            "type": "command",
+            "command": "cargo test --quiet"
+          },
+          {
+            "type": "command",
+            "command": "cargo llvm-cov -p hermes-core --fail-under-lines 80 --quiet"
+          },
+          {
+            "type": "command",
+            "command": "cargo llvm-cov -p hermes-crypto --fail-under-lines 80 --quiet"
+          }
+        ]
+      }
+    ]
+  }
+}
