@@ -37,8 +37,7 @@ If on `main` without `$ARGUMENTS`:
 
 ### 3. Commit
 
-- Infer commit message from staged diff following `CONTRIBUTING.md` format
-- Confirm with user
+- Infer commit message from staged diff following `CONTRIBUTING.md` format, confirm with user
 - `git add -A && git commit -m "<message>"`
 
 ### 4. Push

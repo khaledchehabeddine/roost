@@ -35,7 +35,7 @@ Invoke the `rust-code-reviewer` agent on the staged diff.
 
 ### 4. Push
 
-Run `git push -u origin HEAD`.
+- Run `git push -u origin HEAD`.
 
 ### 5. Pull request
 
