@@ -1,7 +1,9 @@
+pub mod double_ratchet;
 pub mod error;
 pub mod keys;
 pub mod ratchet;
 
+pub use double_ratchet::{Header, RatchetState};
 pub use error::CryptoError;
 pub use keys::{
     KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,

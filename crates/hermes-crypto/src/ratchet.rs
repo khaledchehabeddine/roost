@@ -9,15 +9,15 @@ const CK_MESSAGE_KEY_INPUT: &[u8] = &[0x01];
 const CK_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
 /// Root key for the Double Ratchet root chain.
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct RootKey(pub(crate) [u8; 32]);
 
 /// Chain key for the Double Ratchet sending/receiving chain.
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ChainKey(pub(crate) [u8; 32]);
 
 /// Single-use message encryption key derived from a chain key.
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MessageKey(pub(crate) [u8; 32]);
 
 impl RootKey {
