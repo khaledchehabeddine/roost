@@ -137,7 +137,7 @@ impl RatchetState {
         };
         self.ns += 1;
 
-        let ciphertext = encrypt(&mk, plaintext, ad, &header)?;
+        let ciphertext = encrypt(plaintext, ad, &header, &mk)?;
         Ok((header, ciphertext))
     }
 
@@ -154,11 +154,11 @@ impl RatchetState {
     /// decryption.
     pub fn ratchet_decrypt(
         &mut self,
-        header: &Header,
         ciphertext: &[u8],
+        header: &Header,
         ad: &[u8],
     ) -> Result<Vec<u8>, CryptoError> {
-        if let Some(plaintext) = self.try_skipped_message_keys(header, ciphertext, ad)? {
+        if let Some(plaintext) = self.try_skipped_message_keys(ciphertext, header, ad)? {
             return Ok(plaintext);
         }
 
@@ -179,7 +179,7 @@ impl RatchetState {
         state.ckr = Some(new_ckr);
         state.nr += 1;
 
-        let plaintext = decrypt(&mk, ciphertext, ad, header)?;
+        let plaintext = decrypt(ciphertext, ad, header, &mk)?;
 
         *self = state;
         Ok(plaintext)
@@ -191,13 +191,13 @@ impl RatchetState {
     /// skipped keys by replaying headers with tampered ciphertext.
     fn try_skipped_message_keys(
         &mut self,
-        header: &Header,
         ciphertext: &[u8],
+        header: &Header,
         ad: &[u8],
     ) -> Result<Option<Vec<u8>>, CryptoError> {
         let key = (header.public_key, header.n);
         if let Some(mk) = self.mk_skipped.remove(&key) {
-            match decrypt(&mk, ciphertext, ad, header) {
+            match decrypt(ciphertext, ad, header, &mk) {
                 Ok(plaintext) => Ok(Some(plaintext)),
                 Err(e) => {
                     self.mk_skipped.insert(key, mk);
@@ -258,6 +258,44 @@ impl RatchetState {
     }
 }
 
+/// Encrypts plaintext with XChaCha20-Poly1305 using a derived encryption key and nonce.
+fn encrypt(
+    plaintext: &[u8],
+    ad: &[u8],
+    header: &Header,
+    mk: &MessageKey,
+) -> Result<Vec<u8>, CryptoError> {
+    let (enc_key, nonce) = expand_message_key(mk)?;
+    let cipher = XChaCha20Poly1305::new((&*enc_key).into());
+    let full_ad = build_full_ad(ad, header);
+    let payload = Payload {
+        msg: plaintext,
+        aad: &full_ad,
+    };
+    cipher
+        .encrypt(XNonce::from_slice(&nonce), payload)
+        .map_err(|_| CryptoError::Aead)
+}
+
+/// Decrypts ciphertext with XChaCha20-Poly1305 using a derived encryption key and nonce.
+fn decrypt(
+    ciphertext: &[u8],
+    ad: &[u8],
+    header: &Header,
+    mk: &MessageKey,
+) -> Result<Vec<u8>, CryptoError> {
+    let (enc_key, nonce) = expand_message_key(mk)?;
+    let cipher = XChaCha20Poly1305::new((&*enc_key).into());
+    let full_ad = build_full_ad(ad, header);
+    let payload = Payload {
+        msg: ciphertext,
+        aad: &full_ad,
+    };
+    cipher
+        .decrypt(XNonce::from_slice(&nonce), payload)
+        .map_err(|_| CryptoError::Aead)
+}
+
 /// Expands a message key into a 32-byte encryption key and 24-byte nonce via HKDF-SHA256.
 fn expand_message_key(mk: &MessageKey) -> Result<(Zeroizing<[u8; 32]>, [u8; 24]), CryptoError> {
     // MK is already pseudo-random from the chain KDF, so no salt is needed (RFC 5869 §3.1).
@@ -281,44 +319,6 @@ fn build_full_ad(ad: &[u8], header: &Header) -> Vec<u8> {
     full_ad.extend_from_slice(ad);
     full_ad.extend_from_slice(&serialized);
     full_ad
-}
-
-/// Encrypts plaintext with XChaCha20-Poly1305 using a derived encryption key and nonce.
-fn encrypt(
-    mk: &MessageKey,
-    plaintext: &[u8],
-    ad: &[u8],
-    header: &Header,
-) -> Result<Vec<u8>, CryptoError> {
-    let (enc_key, nonce) = expand_message_key(mk)?;
-    let cipher = XChaCha20Poly1305::new((&*enc_key).into());
-    let full_ad = build_full_ad(ad, header);
-    let payload = Payload {
-        msg: plaintext,
-        aad: &full_ad,
-    };
-    cipher
-        .encrypt(XNonce::from_slice(&nonce), payload)
-        .map_err(|_| CryptoError::Aead)
-}
-
-/// Decrypts ciphertext with XChaCha20-Poly1305 using a derived encryption key and nonce.
-fn decrypt(
-    mk: &MessageKey,
-    ciphertext: &[u8],
-    ad: &[u8],
-    header: &Header,
-) -> Result<Vec<u8>, CryptoError> {
-    let (enc_key, nonce) = expand_message_key(mk)?;
-    let cipher = XChaCha20Poly1305::new((&*enc_key).into());
-    let full_ad = build_full_ad(ad, header);
-    let payload = Payload {
-        msg: ciphertext,
-        aad: &full_ad,
-    };
-    cipher
-        .decrypt(XNonce::from_slice(&nonce), payload)
-        .map_err(|_| CryptoError::Aead)
 }
 
 #[cfg(test)]
@@ -379,7 +379,7 @@ mod tests {
         let (mut initiator, mut responder, ad) = setup_pair();
 
         let (header, ciphertext) = initiator.ratchet_encrypt(b"hello responder", &ad).unwrap();
-        let plaintext = responder.ratchet_decrypt(&header, &ciphertext, &ad).unwrap();
+        let plaintext = responder.ratchet_decrypt(&ciphertext, &header, &ad).unwrap();
         assert_eq!(plaintext, b"hello responder");
     }
 
@@ -389,22 +389,22 @@ mod tests {
 
         // Initiator → Responder
         let (h1, ct1) = initiator.ratchet_encrypt(b"message 1", &ad).unwrap();
-        let pt1 = responder.ratchet_decrypt(&h1, &ct1, &ad).unwrap();
+        let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
         assert_eq!(pt1, b"message 1");
 
         // Responder → Initiator
         let (h2, ct2) = responder.ratchet_encrypt(b"message 2", &ad).unwrap();
-        let pt2 = initiator.ratchet_decrypt(&h2, &ct2, &ad).unwrap();
+        let pt2 = initiator.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
         assert_eq!(pt2, b"message 2");
 
         // Initiator → Responder again
         let (h3, ct3) = initiator.ratchet_encrypt(b"message 3", &ad).unwrap();
-        let pt3 = responder.ratchet_decrypt(&h3, &ct3, &ad).unwrap();
+        let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
         assert_eq!(pt3, b"message 3");
 
         // Responder → Initiator again
         let (h4, ct4) = responder.ratchet_encrypt(b"message 4", &ad).unwrap();
-        let pt4 = initiator.ratchet_decrypt(&h4, &ct4, &ad).unwrap();
+        let pt4 = initiator.ratchet_decrypt(&ct4, &h4, &ad).unwrap();
         assert_eq!(pt4, b"message 4");
     }
 
@@ -416,9 +416,9 @@ mod tests {
         let (h2, ct2) = initiator.ratchet_encrypt(b"msg 2", &ad).unwrap();
         let (h3, ct3) = initiator.ratchet_encrypt(b"msg 3", &ad).unwrap();
 
-        let pt1 = responder.ratchet_decrypt(&h1, &ct1, &ad).unwrap();
-        let pt2 = responder.ratchet_decrypt(&h2, &ct2, &ad).unwrap();
-        let pt3 = responder.ratchet_decrypt(&h3, &ct3, &ad).unwrap();
+        let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
+        let pt2 = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
+        let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
 
         assert_eq!(pt1, b"msg 1");
         assert_eq!(pt2, b"msg 2");
@@ -434,9 +434,9 @@ mod tests {
         let (h3, ct3) = initiator.ratchet_encrypt(b"msg 3", &ad).unwrap();
 
         // Deliver in reverse order
-        let pt3 = responder.ratchet_decrypt(&h3, &ct3, &ad).unwrap();
-        let pt1 = responder.ratchet_decrypt(&h1, &ct1, &ad).unwrap();
-        let pt2 = responder.ratchet_decrypt(&h2, &ct2, &ad).unwrap();
+        let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
+        let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
+        let pt2 = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
 
         assert_eq!(pt1, b"msg 1");
         assert_eq!(pt2, b"msg 2");
@@ -458,7 +458,7 @@ mod tests {
 
         // Decrypting the last message requires skipping MAX_SKIP + 1 keys → error
         let (ref h, ref ct) = headers_and_cts[(MAX_SKIP + 1) as usize];
-        let result = responder.ratchet_decrypt(h, ct, &ad);
+        let result = responder.ratchet_decrypt(ct, h, &ad);
         assert!(matches!(result, Err(CryptoError::MaxSkipExceeded)));
     }
 
@@ -469,7 +469,7 @@ mod tests {
         let (header, mut ciphertext) = initiator.ratchet_encrypt(b"secret", &ad).unwrap();
         ciphertext[0] ^= 0xFF;
 
-        let result = responder.ratchet_decrypt(&header, &ciphertext, &ad);
+        let result = responder.ratchet_decrypt(&ciphertext, &header, &ad);
         assert!(matches!(result, Err(CryptoError::Aead)));
     }
 
@@ -480,7 +480,7 @@ mod tests {
         let (header, ciphertext) = initiator.ratchet_encrypt(b"secret", &ad).unwrap();
         let wrong_ad = b"wrong_identity_keys";
 
-        let result = responder.ratchet_decrypt(&header, &ciphertext, wrong_ad);
+        let result = responder.ratchet_decrypt(&ciphertext, &header, wrong_ad);
         assert!(matches!(result, Err(CryptoError::Aead)));
     }
 
@@ -490,7 +490,7 @@ mod tests {
 
         // Successful decrypt to establish receiving chain
         let (h1, ct1) = initiator.ratchet_encrypt(b"msg 1", &ad).unwrap();
-        responder.ratchet_decrypt(&h1, &ct1, &ad).unwrap();
+        responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
 
         // Snapshot responder's counters before failed attempt
         let nr_before = responder.nr;
@@ -500,7 +500,7 @@ mod tests {
         // Tampered ciphertext → should fail and rollback
         let (h2, mut ct2) = initiator.ratchet_encrypt(b"msg 2", &ad).unwrap();
         ct2[0] ^= 0xFF;
-        let result = responder.ratchet_decrypt(&h2, &ct2, &ad);
+        let result = responder.ratchet_decrypt(&ct2, &h2, &ad);
         assert!(matches!(result, Err(CryptoError::Aead)));
 
         // State must be unchanged
@@ -510,7 +510,7 @@ mod tests {
 
         // Responder can still decrypt the real message
         let (h2_real, ct2_real) = initiator.ratchet_encrypt(b"msg 2 retry", &ad).unwrap();
-        let pt = responder.ratchet_decrypt(&h2_real, &ct2_real, &ad).unwrap();
+        let pt = responder.ratchet_decrypt(&ct2_real, &h2_real, &ad).unwrap();
         assert_eq!(pt, b"msg 2 retry");
     }
 
