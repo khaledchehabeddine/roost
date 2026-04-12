@@ -327,23 +327,6 @@ mod tests {
     use crate::keys::generate_key_pair;
     use crate::ratchet::RootKey;
 
-    /// Sets up an initiator/responder pair with a shared secret and returns (initiator, responder, ad).
-    fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>) {
-        let shared_secret = [0x42u8; 32];
-        let responder_keypair = generate_key_pair();
-        let responder_public = responder_keypair.public;
-
-        let initiator =
-            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_public).unwrap();
-        let responder= RatchetState::init_responder(
-            RootKey::from_bytes(shared_secret),
-            responder_keypair,
-        );
-
-        let ad = b"initiator_identity||responder_identity".to_vec();
-        (initiator, responder, ad)
-    }
-
     #[test]
     fn init_initiator_sets_sending_chain() {
         let shared_secret = [0xAA; 32];
@@ -352,9 +335,9 @@ mod tests {
             RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_keypair.public)
                 .unwrap();
 
+        assert!(initiator.dhr.is_some());
         assert!(initiator.cks.is_some());
         assert!(initiator.ckr.is_none());
-        assert!(initiator.dhr.is_some());
         assert_eq!(initiator.ns, 0);
         assert_eq!(initiator.nr, 0);
         assert_eq!(initiator.pn, 0);
@@ -364,11 +347,11 @@ mod tests {
     fn init_responder_has_no_chains() {
         let shared_secret = [0xBB; 32];
         let responder_keypair = generate_key_pair();
-        let responder= RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_keypair);
+        let responder = RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_keypair);
 
+        assert!(responder.dhr.is_none());
         assert!(responder.cks.is_none());
         assert!(responder.ckr.is_none());
-        assert!(responder.dhr.is_none());
         assert_eq!(responder.ns, 0);
         assert_eq!(responder.nr, 0);
         assert_eq!(responder.pn, 0);
@@ -378,76 +361,81 @@ mod tests {
     fn basic_exchange() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
-        let (header, ciphertext) = initiator.ratchet_encrypt(b"hello responder", &ad).unwrap();
+        let message = b"hello responder";
+        let (header, ciphertext) = initiator.ratchet_encrypt(message, &ad).unwrap();
         let plaintext = responder.ratchet_decrypt(&ciphertext, &header, &ad).unwrap();
-        assert_eq!(plaintext, b"hello responder");
+        assert_eq!(plaintext, message);
     }
 
     #[test]
     fn ping_pong_exchange() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
-        // Initiator → Responder
-        let (h1, ct1) = initiator.ratchet_encrypt(b"message 1", &ad).unwrap();
+        let m1 = b"message 1";
+        let (h1, ct1) = initiator.ratchet_encrypt(m1, &ad).unwrap();
         let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
-        assert_eq!(pt1, b"message 1");
+        assert_eq!(pt1, m1);
 
-        // Responder → Initiator
-        let (h2, ct2) = responder.ratchet_encrypt(b"message 2", &ad).unwrap();
+        let m2 = b"message 2";
+        let (h2, ct2) = responder.ratchet_encrypt(m2, &ad).unwrap();
         let pt2 = initiator.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
-        assert_eq!(pt2, b"message 2");
+        assert_eq!(pt2, m2);
 
-        // Initiator → Responder again
-        let (h3, ct3) = initiator.ratchet_encrypt(b"message 3", &ad).unwrap();
+        let m3 = b"message 3";
+        let (h3, ct3) = initiator.ratchet_encrypt(m3, &ad).unwrap();
         let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
-        assert_eq!(pt3, b"message 3");
+        assert_eq!(pt3, m3);
 
-        // Responder → Initiator again
-        let (h4, ct4) = responder.ratchet_encrypt(b"message 4", &ad).unwrap();
+        let m4 = b"message 4";
+        let (h4, ct4) = responder.ratchet_encrypt(m4, &ad).unwrap();
         let pt4 = initiator.ratchet_decrypt(&ct4, &h4, &ad).unwrap();
-        assert_eq!(pt4, b"message 4");
+        assert_eq!(pt4, m4);
     }
 
     #[test]
     fn multiple_messages_same_direction() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
-        let (h1, ct1) = initiator.ratchet_encrypt(b"msg 1", &ad).unwrap();
-        let (h2, ct2) = initiator.ratchet_encrypt(b"msg 2", &ad).unwrap();
-        let (h3, ct3) = initiator.ratchet_encrypt(b"msg 3", &ad).unwrap();
+        let m1 = b"msg 1";
+        let m2 = b"msg 2";
+        let m3 = b"msg 3";
+        let (h1, ct1) = initiator.ratchet_encrypt(m1, &ad).unwrap();
+        let (h2, ct2) = initiator.ratchet_encrypt(m2, &ad).unwrap();
+        let (h3, ct3) = initiator.ratchet_encrypt(m3, &ad).unwrap();
 
         let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
         let pt2 = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
         let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
 
-        assert_eq!(pt1, b"msg 1");
-        assert_eq!(pt2, b"msg 2");
-        assert_eq!(pt3, b"msg 3");
+        assert_eq!(pt1, m1);
+        assert_eq!(pt2, m2);
+        assert_eq!(pt3, m3);
     }
 
     #[test]
     fn out_of_order_delivery() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
-        let (h1, ct1) = initiator.ratchet_encrypt(b"msg 1", &ad).unwrap();
-        let (h2, ct2) = initiator.ratchet_encrypt(b"msg 2", &ad).unwrap();
-        let (h3, ct3) = initiator.ratchet_encrypt(b"msg 3", &ad).unwrap();
+        let m1 = b"msg 1";
+        let m2 = b"msg 2";
+        let m3 = b"msg 3";
+        let (h1, ct1) = initiator.ratchet_encrypt(m1, &ad).unwrap();
+        let (h2, ct2) = initiator.ratchet_encrypt(m2, &ad).unwrap();
+        let (h3, ct3) = initiator.ratchet_encrypt(m3, &ad).unwrap();
 
-        // Deliver in reverse order
         let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
-        let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
         let pt2 = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
+        let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
 
-        assert_eq!(pt1, b"msg 1");
-        assert_eq!(pt2, b"msg 2");
-        assert_eq!(pt3, b"msg 3");
+        assert_eq!(pt1, m1);
+        assert_eq!(pt2, m2);
+        assert_eq!(pt3, m3);
     }
 
     #[test]
     fn max_skip_exceeded() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
-        // Send MAX_SKIP + 2 messages without responder receiving any
         let mut headers_and_cts = Vec::new();
         for i in 0..MAX_SKIP + 2 {
             let (h, ct) = initiator
@@ -456,7 +444,6 @@ mod tests {
             headers_and_cts.push((h, ct));
         }
 
-        // Decrypting the last message requires skipping MAX_SKIP + 1 keys → error
         let (ref h, ref ct) = headers_and_cts[(MAX_SKIP + 1) as usize];
         let result = responder.ratchet_decrypt(ct, h, &ad);
         assert!(matches!(result, Err(CryptoError::MaxSkipExceeded)));
@@ -488,30 +475,26 @@ mod tests {
     fn state_rollback_on_failed_decrypt() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
-        // Successful decrypt to establish receiving chain
         let (h1, ct1) = initiator.ratchet_encrypt(b"msg 1", &ad).unwrap();
         responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
 
-        // Snapshot responder's counters before failed attempt
         let nr_before = responder.nr;
         let ns_before = responder.ns;
         let skipped_count_before = responder.mk_skipped.len();
 
-        // Tampered ciphertext → should fail and rollback
         let (h2, mut ct2) = initiator.ratchet_encrypt(b"msg 2", &ad).unwrap();
         ct2[0] ^= 0xFF;
         let result = responder.ratchet_decrypt(&ct2, &h2, &ad);
         assert!(matches!(result, Err(CryptoError::Aead)));
 
-        // State must be unchanged
         assert_eq!(responder.nr, nr_before);
         assert_eq!(responder.ns, ns_before);
         assert_eq!(responder.mk_skipped.len(), skipped_count_before);
 
-        // Responder can still decrypt the real message
-        let (h2_real, ct2_real) = initiator.ratchet_encrypt(b"msg 2 retry", &ad).unwrap();
+        let m2 = b"msg 2 retry";
+        let (h2_real, ct2_real) = initiator.ratchet_encrypt(m2, &ad).unwrap();
         let pt = responder.ratchet_decrypt(&ct2_real, &h2_real, &ad).unwrap();
-        assert_eq!(pt, b"msg 2 retry");
+        assert_eq!(pt, m2);
     }
 
     #[test]
@@ -533,8 +516,33 @@ mod tests {
     fn each_message_has_unique_ciphertext() {
         let (mut initiator, _, ad) = setup_pair();
 
-        let (_, ct1) = initiator.ratchet_encrypt(b"same plaintext", &ad).unwrap();
-        let (_, ct2) = initiator.ratchet_encrypt(b"same plaintext", &ad).unwrap();
+        let plaintext = b"same plaintext";
+        let (_, ct1) = initiator.ratchet_encrypt(plaintext, &ad).unwrap();
+        let (_, ct2) = initiator.ratchet_encrypt(plaintext, &ad).unwrap();
         assert_ne!(ct1, ct2);
+    }
+
+    #[test]
+    fn responder_encrypt_before_receiving_fails() {
+        let (_, mut responder, ad) = setup_pair();
+
+        let result = responder.ratchet_encrypt(b"premature send", &ad);
+        assert!(matches!(result, Err(CryptoError::InvalidState(_))));
+    }
+
+    /// Returns a fresh initiator/responder pair with shared associated data.
+    fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>) {
+        let shared_secret = [0x42u8; 32];
+        let responder_keypair = generate_key_pair();
+        let responder_public = responder_keypair.public;
+
+        let initiator =
+            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_public).unwrap();
+        let responder = RatchetState::init_responder(
+            RootKey::from_bytes(shared_secret),
+            responder_keypair,
+        );
+        let ad = b"initiator_identity||responder_identity".to_vec();
+        (initiator, responder, ad)
     }
 }
