@@ -123,10 +123,9 @@ impl RatchetState {
         plaintext: &[u8],
         ad: &[u8],
     ) -> Result<(Header, Vec<u8>), CryptoError> {
-        let cks = self
-            .cks
-            .as_ref()
-            .ok_or(CryptoError::InvalidState("sending chain key not initialized"))?;
+        let cks = self.cks.as_ref().ok_or(CryptoError::InvalidState(
+            "sending chain key not initialized",
+        ))?;
         let (new_cks, mk) = kdf_ck(cks)?;
         self.cks = Some(new_cks);
 
@@ -171,10 +170,9 @@ impl RatchetState {
 
         state.skip_message_keys(header.n)?;
 
-        let ckr = state
-            .ckr
-            .as_ref()
-            .ok_or(CryptoError::InvalidState("receiving chain key not set after DH ratchet"))?;
+        let ckr = state.ckr.as_ref().ok_or(CryptoError::InvalidState(
+            "receiving chain key not set after DH ratchet",
+        ))?;
         let (new_ckr, mk) = kdf_ck(ckr)?;
         state.ckr = Some(new_ckr);
         state.nr += 1;
@@ -216,9 +214,9 @@ impl RatchetState {
         }
 
         if let Some(ref ckr) = self.ckr {
-            let dhr = self
-                .dhr
-                .ok_or(CryptoError::InvalidState("dhr not set when skipping message keys"))?;
+            let dhr = self.dhr.ok_or(CryptoError::InvalidState(
+                "dhr not set when skipping message keys",
+            ))?;
             let mut current_ck = ChainKey::from_bytes(*ckr.as_bytes());
             while self.nr < until_n {
                 let (next_ck, mk) = kdf_ck(&current_ck)?;
@@ -239,17 +237,13 @@ impl RatchetState {
         self.nr = 0;
         self.dhr = Some(header.public_key);
 
-        let dh_recv = self
-            .dhs
-            .diffie_hellman(&header.public_key);
+        let dh_recv = self.dhs.diffie_hellman(&header.public_key);
         let (rk, ckr) = kdf_rk(&self.rk, &dh_recv)?;
         self.rk = rk;
         self.ckr = Some(ckr);
 
         self.dhs = generate_key_pair();
-        let dh_send = self
-            .dhs
-            .diffie_hellman(&header.public_key);
+        let dh_send = self.dhs.diffie_hellman(&header.public_key);
         let (rk, cks) = kdf_rk(&self.rk, &dh_send)?;
         self.rk = rk;
         self.cks = Some(cks);
@@ -328,12 +322,29 @@ mod tests {
     use crate::ratchet::RootKey;
 
     #[test]
+    fn header_serialize_round_trip() {
+        let kp = generate_key_pair();
+        let header = Header {
+            public_key: kp.public,
+            pn: 42,
+            n: 7,
+        };
+
+        let buf = header.serialize();
+        assert_eq!(&buf[..32], kp.public.as_bytes());
+        assert_eq!(u32::from_be_bytes(buf[32..36].try_into().unwrap()), 42);
+        assert_eq!(u32::from_be_bytes(buf[36..40].try_into().unwrap()), 7);
+    }
+
+    #[test]
     fn init_initiator_sets_sending_chain() {
         let shared_secret = [0xAA; 32];
         let responder_keypair = generate_key_pair();
-        let initiator =
-            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_keypair.public)
-                .unwrap();
+        let initiator = RatchetState::init_initiator(
+            RootKey::from_bytes(shared_secret),
+            &responder_keypair.public,
+        )
+        .unwrap();
 
         assert!(initiator.dhr.is_some());
         assert!(initiator.cks.is_some());
@@ -347,7 +358,8 @@ mod tests {
     fn init_responder_has_no_chains() {
         let shared_secret = [0xBB; 32];
         let responder_keypair = generate_key_pair();
-        let responder = RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_keypair);
+        let responder =
+            RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_keypair);
 
         assert!(responder.dhr.is_none());
         assert!(responder.cks.is_none());
@@ -358,13 +370,33 @@ mod tests {
     }
 
     #[test]
+    fn responder_encrypt_before_receiving_fails() {
+        let (_, mut responder, ad) = setup_pair();
+
+        let result = responder.ratchet_encrypt(b"premature send", &ad);
+        assert!(matches!(result, Err(CryptoError::InvalidState(_))));
+    }
+
+    #[test]
     fn basic_exchange() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
         let message = b"hello responder";
         let (header, ciphertext) = initiator.ratchet_encrypt(message, &ad).unwrap();
-        let plaintext = responder.ratchet_decrypt(&ciphertext, &header, &ad).unwrap();
+        let plaintext = responder
+            .ratchet_decrypt(&ciphertext, &header, &ad)
+            .unwrap();
         assert_eq!(plaintext, message);
+    }
+
+    #[test]
+    fn each_message_has_unique_ciphertext() {
+        let (mut initiator, _, ad) = setup_pair();
+
+        let plaintext = b"same plaintext";
+        let (_, ct1) = initiator.ratchet_encrypt(plaintext, &ad).unwrap();
+        let (_, ct2) = initiator.ratchet_encrypt(plaintext, &ad).unwrap();
+        assert_ne!(ct1, ct2);
     }
 
     #[test]
@@ -497,39 +529,6 @@ mod tests {
         assert_eq!(pt, m2);
     }
 
-    #[test]
-    fn header_serialize_round_trip() {
-        let kp = generate_key_pair();
-        let header = Header {
-            public_key: kp.public,
-            pn: 42,
-            n: 7,
-        };
-
-        let buf = header.serialize();
-        assert_eq!(&buf[..32], kp.public.as_bytes());
-        assert_eq!(u32::from_be_bytes(buf[32..36].try_into().unwrap()), 42);
-        assert_eq!(u32::from_be_bytes(buf[36..40].try_into().unwrap()), 7);
-    }
-
-    #[test]
-    fn each_message_has_unique_ciphertext() {
-        let (mut initiator, _, ad) = setup_pair();
-
-        let plaintext = b"same plaintext";
-        let (_, ct1) = initiator.ratchet_encrypt(plaintext, &ad).unwrap();
-        let (_, ct2) = initiator.ratchet_encrypt(plaintext, &ad).unwrap();
-        assert_ne!(ct1, ct2);
-    }
-
-    #[test]
-    fn responder_encrypt_before_receiving_fails() {
-        let (_, mut responder, ad) = setup_pair();
-
-        let result = responder.ratchet_encrypt(b"premature send", &ad);
-        assert!(matches!(result, Err(CryptoError::InvalidState(_))));
-    }
-
     /// Returns a fresh initiator/responder pair with shared associated data.
     fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>) {
         let shared_secret = [0x42u8; 32];
@@ -537,11 +536,10 @@ mod tests {
         let responder_public = responder_keypair.public;
 
         let initiator =
-            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_public).unwrap();
-        let responder = RatchetState::init_responder(
-            RootKey::from_bytes(shared_secret),
-            responder_keypair,
-        );
+            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_public)
+                .unwrap();
+        let responder =
+            RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_keypair);
         let ad = b"initiator_identity||responder_identity".to_vec();
         (initiator, responder, ad)
     }
