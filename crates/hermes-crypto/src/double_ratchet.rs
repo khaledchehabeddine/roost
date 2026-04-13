@@ -9,6 +9,12 @@ use std::collections::HashMap;
 use zeroize::Zeroizing;
 
 const MAX_SKIP: u32 = 100;
+/// Global cap on cached skipped message keys across all ratchet chains.
+///
+/// `MAX_SKIP` only bounds keys per ratchet step, but each DH ratchet step resets the counter.
+/// Without a global cap, an attacker can trigger unlimited steps to exhaust memory. 500 allows
+/// 5 full steps of maximum skip — generous for BLE-based offline messaging.
+const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 const HKDF_MK_INFO: &[u8] = b"HermesRatchet_MK";
 
 /// Message header transmitted alongside each ciphertext.
@@ -56,6 +62,10 @@ pub struct RatchetState {
     mk_skipped: HashMap<(PublicKey, u32), MessageKey>,
 }
 
+/// Clone is required for the rollback pattern in `ratchet_decrypt`: state mutations happen on a
+/// clone, and the original is only replaced on successful decryption. Inner types (`RootKey`,
+/// `ChainKey`, `MessageKey`, `StaticSecret`) each implement `ZeroizeOnDrop`, so cloned secret
+/// material is zeroized when the clone is dropped.
 impl Clone for RatchetState {
     fn clone(&self) -> Self {
         Self {
@@ -122,7 +132,7 @@ impl RatchetState {
         &mut self,
         plaintext: &[u8],
         ad: &[u8],
-    ) -> Result<(Header, Vec<u8>), CryptoError> {
+    ) -> Result<(Header, Zeroizing<Vec<u8>>), CryptoError> {
         let cks = self.cks.as_ref().ok_or(CryptoError::InvalidState(
             "sending chain key not initialized",
         ))?;
@@ -136,7 +146,7 @@ impl RatchetState {
         };
         self.ns += 1;
 
-        let ciphertext = encrypt(plaintext, ad, &header, &mk)?;
+        let ciphertext = Zeroizing::new(encrypt(plaintext, ad, &header, &mk)?);
         Ok((header, ciphertext))
     }
 
@@ -156,7 +166,7 @@ impl RatchetState {
         ciphertext: &[u8],
         header: &Header,
         ad: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         if let Some(plaintext) = self.try_skipped_message_keys(ciphertext, header, ad)? {
             return Ok(plaintext);
         }
@@ -177,7 +187,7 @@ impl RatchetState {
         state.ckr = Some(new_ckr);
         state.nr += 1;
 
-        let plaintext = decrypt(ciphertext, ad, header, &mk)?;
+        let plaintext = Zeroizing::new(decrypt(ciphertext, ad, header, &mk)?);
 
         *self = state;
         Ok(plaintext)
@@ -192,11 +202,11 @@ impl RatchetState {
         ciphertext: &[u8],
         header: &Header,
         ad: &[u8],
-    ) -> Result<Option<Vec<u8>>, CryptoError> {
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, CryptoError> {
         let key = (header.public_key, header.n);
         if let Some(mk) = self.mk_skipped.remove(&key) {
             match decrypt(ciphertext, ad, header, &mk) {
-                Ok(plaintext) => Ok(Some(plaintext)),
+                Ok(plaintext) => Ok(Some(Zeroizing::new(plaintext))),
                 Err(e) => {
                     self.mk_skipped.insert(key, mk);
                     Err(e)
@@ -211,6 +221,11 @@ impl RatchetState {
     fn skip_message_keys(&mut self, until_n: u32) -> Result<(), CryptoError> {
         if until_n > self.nr + MAX_SKIP {
             return Err(CryptoError::MaxSkipExceeded);
+        }
+
+        let keys_to_skip = until_n.saturating_sub(self.nr) as usize;
+        if self.mk_skipped.len() + keys_to_skip > MAX_SKIPPED_KEYS_TOTAL {
+            return Err(CryptoError::MaxSkippedKeysExceeded);
         }
 
         if let Some(ref ckr) = self.ckr {
@@ -386,7 +401,7 @@ mod tests {
         let plaintext = responder
             .ratchet_decrypt(&ciphertext, &header, &ad)
             .unwrap();
-        assert_eq!(plaintext, message);
+        assert_eq!(plaintext.as_slice(), message);
     }
 
     #[test]
@@ -406,22 +421,22 @@ mod tests {
         let m1 = b"message 1";
         let (h1, ct1) = initiator.ratchet_encrypt(m1, &ad).unwrap();
         let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
-        assert_eq!(pt1, m1);
+        assert_eq!(pt1.as_slice(), m1);
 
         let m2 = b"message 2";
         let (h2, ct2) = responder.ratchet_encrypt(m2, &ad).unwrap();
         let pt2 = initiator.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
-        assert_eq!(pt2, m2);
+        assert_eq!(pt2.as_slice(), m2);
 
         let m3 = b"message 3";
         let (h3, ct3) = initiator.ratchet_encrypt(m3, &ad).unwrap();
         let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
-        assert_eq!(pt3, m3);
+        assert_eq!(pt3.as_slice(), m3);
 
         let m4 = b"message 4";
         let (h4, ct4) = responder.ratchet_encrypt(m4, &ad).unwrap();
         let pt4 = initiator.ratchet_decrypt(&ct4, &h4, &ad).unwrap();
-        assert_eq!(pt4, m4);
+        assert_eq!(pt4.as_slice(), m4);
     }
 
     #[test]
@@ -439,9 +454,9 @@ mod tests {
         let pt2 = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
         let pt3 = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
 
-        assert_eq!(pt1, m1);
-        assert_eq!(pt2, m2);
-        assert_eq!(pt3, m3);
+        assert_eq!(pt1.as_slice(), m1);
+        assert_eq!(pt2.as_slice(), m2);
+        assert_eq!(pt3.as_slice(), m3);
     }
 
     #[test]
@@ -459,9 +474,9 @@ mod tests {
         let pt2 = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
         let pt1 = responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
 
-        assert_eq!(pt1, m1);
-        assert_eq!(pt2, m2);
-        assert_eq!(pt3, m3);
+        assert_eq!(pt1.as_slice(), m1);
+        assert_eq!(pt2.as_slice(), m2);
+        assert_eq!(pt3.as_slice(), m3);
     }
 
     #[test]
@@ -526,7 +541,37 @@ mod tests {
         let m2 = b"msg 2 retry";
         let (h2_real, ct2_real) = initiator.ratchet_encrypt(m2, &ad).unwrap();
         let pt = responder.ratchet_decrypt(&ct2_real, &h2_real, &ad).unwrap();
-        assert_eq!(pt, m2);
+        assert_eq!(pt.as_slice(), m2);
+    }
+
+    #[test]
+    fn global_skipped_keys_cap_enforced() {
+        let (mut initiator, mut responder, ad) = setup_pair();
+
+        let steps_needed = (MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP) + 1;
+
+        for step in 0..steps_needed {
+            let mut headers_and_cts = Vec::new();
+            for i in 0..=MAX_SKIP {
+                let (h, ct) = initiator
+                    .ratchet_encrypt(format!("step {step} msg {i}").as_bytes(), &ad)
+                    .unwrap();
+                headers_and_cts.push((h, ct));
+            }
+
+            let (ref h, ref ct) = headers_and_cts[MAX_SKIP as usize];
+            let result = responder.ratchet_decrypt(ct, h, &ad);
+
+            if result.is_err() {
+                assert!(matches!(result, Err(CryptoError::MaxSkippedKeysExceeded)));
+                return;
+            }
+
+            let (rh, rct) = responder.ratchet_encrypt(b"reply", &ad).unwrap();
+            initiator.ratchet_decrypt(&rct, &rh, &ad).unwrap();
+        }
+
+        panic!("expected MaxSkippedKeysExceeded but all steps succeeded");
     }
 
     /// Returns a fresh initiator/responder pair with shared associated data.

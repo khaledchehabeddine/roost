@@ -7,6 +7,7 @@ pub enum CryptoError {
     InvalidHmacKey,
     InvalidState(&'static str),
     MaxSkipExceeded,
+    MaxSkippedKeysExceeded,
 }
 
 impl fmt::Display for CryptoError {
@@ -19,6 +20,10 @@ impl fmt::Display for CryptoError {
                 write!(f, "ratchet state invariant violated: {context}")
             }
             Self::MaxSkipExceeded => write!(f, "requested message skip exceeds MAX_SKIP limit"),
+            Self::MaxSkippedKeysExceeded => write!(
+                f,
+                "total cached skipped message keys exceeds MAX_SKIPPED_KEYS_TOTAL limit"
+            ),
         }
     }
 }
