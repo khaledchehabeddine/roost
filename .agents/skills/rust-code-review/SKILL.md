@@ -1,6 +1,6 @@
 ---
 name: rust-code-review
-description: Run the Rust code reviewer on all source files
+description: Run the Rust code reviewer on all changed code
 ---
 
 ## Steps
