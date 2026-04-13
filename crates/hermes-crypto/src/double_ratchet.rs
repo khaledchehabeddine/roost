@@ -74,7 +74,7 @@ pub struct RatchetState {
 impl Clone for RatchetState {
     fn clone(&self) -> Self {
         Self {
-            dhs: KeyPair::from_secret_bytes(self.dhs.to_secret_bytes()),
+            dhs: KeyPair::from_secret_bytes(*self.dhs.to_secret_bytes()),
             dhr: self.dhr,
             rk: self.rk.clone(),
             cks: self.cks.clone(),
@@ -149,9 +149,7 @@ impl RatchetState {
             pn: self.pn,
             n: self.ns,
         };
-        self.ns = self.ns.checked_add(1).ok_or(CryptoError::InvalidState(
-            "sending counter overflow",
-        ))?;
+        self.ns += 1;
 
         let ciphertext = encrypt(plaintext, ad, &header, &mk)?;
         Ok((header, ciphertext))
@@ -192,9 +190,7 @@ impl RatchetState {
         ))?;
         let (new_ckr, mk) = kdf_ck(ckr)?;
         state.ckr = Some(new_ckr);
-        state.nr = state.nr.checked_add(1).ok_or(CryptoError::InvalidState(
-            "receiving counter overflow",
-        ))?;
+        state.nr += 1;
 
         let plaintext = decrypt(ciphertext, ad, header, &mk)?;
 
@@ -228,12 +224,11 @@ impl RatchetState {
 
     /// Advances the receiving chain and caches skipped message keys up to `until_n`.
     fn skip_message_keys(&mut self, until_n: u32) -> Result<(), CryptoError> {
-        let keys_to_skip = until_n.saturating_sub(self.nr);
-        if keys_to_skip > MAX_SKIP {
+        if until_n > self.nr + MAX_SKIP {
             return Err(CryptoError::MaxSkipExceeded);
         }
 
-        let keys_to_skip = keys_to_skip as usize;
+        let keys_to_skip = until_n.saturating_sub(self.nr) as usize;
         if self.mk_skipped.len() + keys_to_skip > MAX_SKIPPED_KEYS_TOTAL {
             return Err(CryptoError::MaxSkippedKeysExceeded);
         }
@@ -247,9 +242,7 @@ impl RatchetState {
                 let (next_ck, mk) = kdf_ck(&current_ck)?;
                 self.mk_skipped.insert((dhr, self.nr), mk);
                 current_ck = next_ck;
-                self.nr = self.nr.checked_add(1).ok_or(CryptoError::InvalidState(
-                    "receiving counter overflow while skipping",
-                ))?;
+                self.nr += 1;
             }
             self.ckr = Some(current_ck);
         }

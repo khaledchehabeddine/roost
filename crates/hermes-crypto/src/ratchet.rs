@@ -110,8 +110,8 @@ mod tests {
 
     #[test]
     fn kdf_rk_known_answer_hex() {
-        let alice = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0x77u8; 32]));
-        let bob = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0x88u8; 32]));
+        let alice = crate::KeyPair::from_secret_bytes([0x77u8; 32]);
+        let bob = crate::KeyPair::from_secret_bytes([0x88u8; 32]);
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let expected_rk =
@@ -129,8 +129,8 @@ mod tests {
 
     #[test]
     fn kdf_rk_deterministic() {
-        let alice = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xAAu8; 32]));
-        let bob = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xBBu8; 32]));
+        let alice = crate::KeyPair::from_secret_bytes([0xAAu8; 32]);
+        let bob = crate::KeyPair::from_secret_bytes([0xBBu8; 32]);
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let root_key = RootKey([0x42u8; 32]);
@@ -143,8 +143,8 @@ mod tests {
 
     #[test]
     fn kdf_rk_different_root_keys_produce_different_output() {
-        let alice = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xAAu8; 32]));
-        let bob = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xBBu8; 32]));
+        let alice = crate::KeyPair::from_secret_bytes([0xAAu8; 32]);
+        let bob = crate::KeyPair::from_secret_bytes([0xBBu8; 32]);
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let (rk1, ck1) = kdf_rk(&RootKey([0x00u8; 32]), &dh_output).unwrap();

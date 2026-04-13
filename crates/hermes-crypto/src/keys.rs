@@ -35,10 +35,8 @@ impl KeyPair {
     }
 
     /// Restores a [`KeyPair`] from stored secret key bytes.
-    ///
-    /// Accepts `Zeroizing` to ensure the caller's copy is scrubbed on drop.
-    pub fn from_secret_bytes(bytes: Zeroizing<[u8; 32]>) -> Self {
-        let secret = StaticSecret::from(*bytes);
+    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(bytes);
         let public = PublicKey::from(&secret);
         KeyPair { public, secret }
     }
@@ -71,10 +69,8 @@ impl SigningKeyPair {
     }
 
     /// Restores a [`SigningKeyPair`] from stored signing key bytes.
-    ///
-    /// Accepts `Zeroizing` to ensure the caller's copy is scrubbed on drop.
-    pub fn from_signing_bytes(bytes: Zeroizing<[u8; 32]>) -> Self {
-        let signing = SigningKey::from_bytes(&*bytes);
+    pub fn from_signing_bytes(bytes: [u8; 32]) -> Self {
+        let signing = SigningKey::from_bytes(&bytes);
         let verifying = signing.verifying_key();
         SigningKeyPair { verifying, signing }
     }
@@ -127,8 +123,8 @@ mod tests {
                 .try_into()
                 .unwrap();
 
-        let alice = KeyPair::from_secret_bytes(Zeroizing::new(alice_secret));
-        let bob = KeyPair::from_secret_bytes(Zeroizing::new(bob_secret));
+        let alice = KeyPair::from_secret_bytes(alice_secret);
+        let bob = KeyPair::from_secret_bytes(bob_secret);
 
         assert_eq!(alice.public.as_bytes(), &alice_public_expected);
         assert_eq!(bob.public.as_bytes(), &bob_public_expected);
@@ -158,7 +154,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let kp = SigningKeyPair::from_signing_bytes(Zeroizing::new(secret));
+        let kp = SigningKeyPair::from_signing_bytes(secret);
         assert_eq!(kp.verifying.as_bytes(), &expected_public);
 
         let signature = kp.sign(&message);
@@ -184,7 +180,7 @@ mod tests {
         .try_into()
         .unwrap();
 
-        let kp = SigningKeyPair::from_signing_bytes(Zeroizing::new(secret));
+        let kp = SigningKeyPair::from_signing_bytes(secret);
         assert_eq!(kp.verifying.as_bytes(), &expected_public);
 
         let signature = kp.sign(&message);
@@ -247,14 +243,14 @@ mod tests {
     #[test]
     fn key_pair_round_trip_via_secret_bytes() {
         let kp = generate_key_pair();
-        let restored = KeyPair::from_secret_bytes(kp.to_secret_bytes());
+        let restored = KeyPair::from_secret_bytes(*kp.to_secret_bytes());
         assert_eq!(kp.public.as_bytes(), restored.public.as_bytes());
     }
 
     #[test]
     fn signing_key_pair_round_trip_via_signing_bytes() {
         let kp = generate_signing_key_pair();
-        let restored = SigningKeyPair::from_signing_bytes(kp.to_signing_bytes());
+        let restored = SigningKeyPair::from_signing_bytes(*kp.to_signing_bytes());
         assert_eq!(kp.verifying.as_bytes(), restored.verifying.as_bytes());
     }
 

@@ -179,11 +179,15 @@ impl IdentityManager {
     pub fn load_identity(&self) -> Result<Identity, IdentityError> {
         let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
 
-        let x25519_array = Zeroizing::new(<[u8; 32]>::try_from(x25519_bytes.as_slice())
-            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?);
+        let x25519_array: [u8; 32] = x25519_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
 
-        let ed25519_array = Zeroizing::new(<[u8; 32]>::try_from(ed25519_bytes.as_slice())
-            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?);
+        let ed25519_array: [u8; 32] = ed25519_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
 
         Ok(Identity {
             key_pair: KeyPair::from_secret_bytes(x25519_array),
@@ -215,13 +219,17 @@ impl IdentityManager {
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
         let nonce = XNonce::from_slice(&nonce_bytes);
 
-        let x25519_array = Zeroizing::new(<[u8; 32]>::try_from(x25519_bytes.as_slice())
-            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?);
-        let ed25519_array = Zeroizing::new(<[u8; 32]>::try_from(ed25519_bytes.as_slice())
-            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?);
+        let x25519_array: [u8; 32] = x25519_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
+        let ed25519_array: [u8; 32] = ed25519_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
         let mut plaintext = Zeroizing::new([0u8; 64]);
-        plaintext[..32].copy_from_slice(&*x25519_array);
-        plaintext[32..].copy_from_slice(&*ed25519_array);
+        plaintext[..32].copy_from_slice(&x25519_array);
+        plaintext[32..].copy_from_slice(&ed25519_array);
 
         let ciphertext = cipher
             .encrypt(nonce, &plaintext[..])
