@@ -9,6 +9,8 @@ use zeroize::Zeroizing;
 pub struct Identity {
     /// X25519 public key bytes (32 bytes).
     pub public_key: Vec<u8>,
+    /// Ed25519 verifying key bytes (32 bytes).
+    pub verifying_key: Vec<u8>,
 }
 
 /// Errors surfaced across the FFI boundary.
@@ -72,6 +74,13 @@ impl From<StorageError> for HermesError {
 ///
 /// Implement this trait to provide [`IdentityManager`] with platform-specific secure storage
 /// (e.g., iOS Keychain, Android Keystore).
+///
+/// # Secret material
+///
+/// `value` in `store` and the return of `load` carry secret key bytes as bare `Vec<u8>` because
+/// UniFFI does not support `Zeroizing<Vec<u8>>`. On the Rust side, the `SecureStorageAdapter`
+/// wraps loaded values in `Zeroizing` immediately. Platform implementations should treat these
+/// bytes as sensitive and avoid unnecessary copies.
 #[uniffi::export(with_foreign)]
 pub trait SecureStorage: Send + Sync {
     fn store(&self, key: String, value: Vec<u8>) -> Result<(), HermesError>;
@@ -184,6 +193,7 @@ impl IdentityManager {
         let id = self.inner.generate_identity()?;
         Ok(Identity {
             public_key: id.public_key().as_bytes().to_vec(),
+            verifying_key: id.verifying_key().as_bytes().to_vec(),
         })
     }
 
@@ -192,6 +202,21 @@ impl IdentityManager {
         let id = self.inner.load_identity()?;
         Ok(Identity {
             public_key: id.public_key().as_bytes().to_vec(),
+            verifying_key: id.verifying_key().as_bytes().to_vec(),
         })
+    }
+
+    /// Exports the current identity as an encrypted backup blob.
+    pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, HermesError> {
+        Ok(self.inner.export_encrypted_backup(&passphrase)?)
+    }
+
+    /// Imports an identity from an encrypted backup blob.
+    pub fn import_encrypted_backup(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+    ) -> Result<(), HermesError> {
+        Ok(self.inner.import_encrypted_backup(&data, &passphrase)?)
     }
 }

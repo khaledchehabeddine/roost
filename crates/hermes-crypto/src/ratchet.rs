@@ -9,14 +9,23 @@ const CK_MESSAGE_KEY_INPUT: &[u8] = &[0x01];
 const CK_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
 /// Root key for the Double Ratchet root chain.
+///
+/// `Clone` is required for the rollback-on-failed-decrypt pattern in `RatchetState`.
+/// `ZeroizeOnDrop` ensures cloned copies are scrubbed from memory.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct RootKey(pub(crate) [u8; 32]);
 
 /// Chain key for the Double Ratchet sending/receiving chain.
+///
+/// `Clone` is required for the rollback-on-failed-decrypt pattern in `RatchetState`.
+/// `ZeroizeOnDrop` ensures cloned copies are scrubbed from memory.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct ChainKey(pub(crate) [u8; 32]);
 
 /// Single-use message encryption key derived from a chain key.
+///
+/// `Clone` is required for the `mk_skipped` HashMap in `RatchetState` and its rollback pattern.
+/// `ZeroizeOnDrop` ensures cloned copies are scrubbed from memory.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct MessageKey(pub(crate) [u8; 32]);
 
@@ -101,8 +110,8 @@ mod tests {
 
     #[test]
     fn kdf_rk_known_answer_hex() {
-        let alice = crate::KeyPair::from_secret_bytes([0x77u8; 32]);
-        let bob = crate::KeyPair::from_secret_bytes([0x88u8; 32]);
+        let alice = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0x77u8; 32]));
+        let bob = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0x88u8; 32]));
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let expected_rk =
@@ -120,8 +129,8 @@ mod tests {
 
     #[test]
     fn kdf_rk_deterministic() {
-        let alice = crate::KeyPair::from_secret_bytes([0xAAu8; 32]);
-        let bob = crate::KeyPair::from_secret_bytes([0xBBu8; 32]);
+        let alice = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xAAu8; 32]));
+        let bob = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xBBu8; 32]));
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let root_key = RootKey([0x42u8; 32]);
@@ -134,8 +143,8 @@ mod tests {
 
     #[test]
     fn kdf_rk_different_root_keys_produce_different_output() {
-        let alice = crate::KeyPair::from_secret_bytes([0xAAu8; 32]);
-        let bob = crate::KeyPair::from_secret_bytes([0xBBu8; 32]);
+        let alice = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xAAu8; 32]));
+        let bob = crate::KeyPair::from_secret_bytes(zeroize::Zeroizing::new([0xBBu8; 32]));
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let (rk1, ck1) = kdf_rk(&RootKey([0x00u8; 32]), &dh_output).unwrap();

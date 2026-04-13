@@ -41,6 +41,10 @@ impl Header {
 ///
 /// Holds the DH ratchet key pairs, chain keys, message counters, and a cache of skipped message
 /// keys for handling out-of-order delivery.
+///
+/// All secret fields (`dhs`, `rk`, `cks`, `ckr`, and `mk_skipped` values) implement `ZeroizeOnDrop`
+/// and are scrubbed when this struct is dropped. `HashMap` drops each entry individually, triggering
+/// `ZeroizeOnDrop` on every cached `MessageKey`.
 pub struct RatchetState {
     /// Sending ratchet key pair.
     dhs: KeyPair,
@@ -69,7 +73,7 @@ pub struct RatchetState {
 impl Clone for RatchetState {
     fn clone(&self) -> Self {
         Self {
-            dhs: KeyPair::from_secret_bytes(*self.dhs.to_secret_bytes()),
+            dhs: KeyPair::from_secret_bytes(self.dhs.to_secret_bytes()),
             dhr: self.dhr,
             rk: self.rk.clone(),
             cks: self.cks.clone(),
@@ -132,7 +136,7 @@ impl RatchetState {
         &mut self,
         plaintext: &[u8],
         ad: &[u8],
-    ) -> Result<(Header, Zeroizing<Vec<u8>>), CryptoError> {
+    ) -> Result<(Header, Vec<u8>), CryptoError> {
         let cks = self.cks.as_ref().ok_or(CryptoError::InvalidState(
             "sending chain key not initialized",
         ))?;
@@ -146,7 +150,7 @@ impl RatchetState {
         };
         self.ns += 1;
 
-        let ciphertext = Zeroizing::new(encrypt(plaintext, ad, &header, &mk)?);
+        let ciphertext = encrypt(plaintext, ad, &header, &mk)?;
         Ok((header, ciphertext))
     }
 
@@ -187,7 +191,7 @@ impl RatchetState {
         state.ckr = Some(new_ckr);
         state.nr += 1;
 
-        let plaintext = Zeroizing::new(decrypt(ciphertext, ad, header, &mk)?);
+        let plaintext = decrypt(ciphertext, ad, header, &mk)?;
 
         *self = state;
         Ok(plaintext)
@@ -206,7 +210,7 @@ impl RatchetState {
         let key = (header.public_key, header.n);
         if let Some(mk) = self.mk_skipped.remove(&key) {
             match decrypt(ciphertext, ad, header, &mk) {
-                Ok(plaintext) => Ok(Some(Zeroizing::new(plaintext))),
+                Ok(plaintext) => Ok(Some(plaintext)),
                 Err(e) => {
                     self.mk_skipped.insert(key, mk);
                     Err(e)
@@ -241,6 +245,7 @@ impl RatchetState {
             }
             self.ckr = Some(current_ck);
         }
+        // When ckr is None (responder before first receive), there are no keys to skip.
 
         Ok(())
     }
@@ -287,12 +292,14 @@ fn encrypt(
 }
 
 /// Decrypts ciphertext with XChaCha20-Poly1305 using a derived encryption key and nonce.
+///
+/// Returns `Zeroizing<Vec<u8>>` so plaintext is scrubbed on drop at the earliest possible point.
 fn decrypt(
     ciphertext: &[u8],
     ad: &[u8],
     header: &Header,
     mk: &MessageKey,
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     let (enc_key, nonce) = expand_message_key(mk)?;
     let cipher = XChaCha20Poly1305::new((&*enc_key).into());
     let full_ad = build_full_ad(ad, header);
@@ -302,6 +309,7 @@ fn decrypt(
     };
     cipher
         .decrypt(XNonce::from_slice(&nonce), payload)
+        .map(Zeroizing::new)
         .map_err(|_| CryptoError::Aead)
 }
 
