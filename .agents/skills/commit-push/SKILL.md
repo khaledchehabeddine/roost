@@ -23,8 +23,8 @@ Skip if already on a feature branch.
 
 ### 2. Code review gate
 
-Invoke the `rust-code-reviewer` agent on the staged diff.
-- **critical** and **improvement** issues block — do not proceed until resolved
+Invoke the `rust-code-reviewer` and `security-auditor` agents on the staged diff.
+- **critical** and **improvement** issues from either agent block — do not proceed until resolved
 - **learning** issues are shown but do not block
 
 ### 3. Commit
