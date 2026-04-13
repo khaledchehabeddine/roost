@@ -8,9 +8,9 @@ allowed-tools: Bash(git *)
 ## Context
 
 - Current branch: !`git branch --show-current`
-- Changed files: !`git diff --name-only main...HEAD`
+- Source files: !`find crates -name '*.rs' | sort`
 
 ## Task
 
-- Invoke `security-auditor` agent on all changed files
+- Invoke `security-auditor` agent on all source files listed above
 - Present the agent's **Security Summary** rating to the user
