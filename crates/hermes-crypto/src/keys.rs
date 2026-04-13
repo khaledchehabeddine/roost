@@ -13,9 +13,6 @@ use zeroize::Zeroizing;
 ///
 /// The secret field is private to prevent callers from moving it out, which would fire
 /// zeroize-on-drop at the moved-from location rather than the final location.
-///
-/// `Debug` and `Clone` are intentionally omitted — `StaticSecret` implements `ZeroizeOnDrop`
-/// internally, but cloning or debug-printing would expose raw key bytes.
 pub struct KeyPair {
     pub public: PublicKey,
     secret: StaticSecret,
@@ -46,9 +43,6 @@ impl KeyPair {
 ///
 /// `signing` is private for the same reason as `KeyPair::secret` — moving it out would break
 /// zeroize-on-drop.
-///
-/// `Debug` and `Clone` are intentionally omitted — `SigningKey` implements `ZeroizeOnDrop`
-/// internally, but cloning or debug-printing would expose raw key bytes.
 pub struct SigningKeyPair {
     pub verifying: VerifyingKey,
     signing: SigningKey,

@@ -18,7 +18,6 @@ const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 const HKDF_MK_INFO: &[u8] = b"HermesRatchet_MK";
 
 /// Message header transmitted alongside each ciphertext.
-#[derive(Clone, Debug)]
 pub struct Header {
     pub public_key: PublicKey,
     pub pn: u32,
@@ -42,10 +41,6 @@ impl Header {
 ///
 /// Holds the DH ratchet key pairs, chain keys, message counters, and a cache of skipped message
 /// keys for handling out-of-order delivery.
-///
-/// All secret fields (`dhs`, `rk`, `cks`, `ckr`, and `mk_skipped` values) implement `ZeroizeOnDrop`
-/// and are scrubbed when this struct is dropped. `HashMap` drops each entry individually, triggering
-/// `ZeroizeOnDrop` on every cached `MessageKey`.
 pub struct RatchetState {
     /// Sending ratchet key pair.
     dhs: KeyPair,
@@ -293,8 +288,6 @@ fn encrypt(
 }
 
 /// Decrypts ciphertext with XChaCha20-Poly1305 using a derived encryption key and nonce.
-///
-/// Returns `Zeroizing<Vec<u8>>` so plaintext is scrubbed on drop at the earliest possible point.
 fn decrypt(
     ciphertext: &[u8],
     ad: &[u8],

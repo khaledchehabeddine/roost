@@ -16,6 +16,7 @@ Read `CLAUDE.md` for crate constraints, project rules, and style guides.
 
 - Correctness first, then idiom, then style
 - Never suggest changes that conflict with project rules
+- Every suggestion must solve a real problem or document a non-obvious decision — don't suggest derives, traits, doc comments, or wrappers that aren't actively used or needed
 - Hardening must earn its maintenance cost — don't suggest defensive wrappers or checked operations for values that are bounded, stack-local, or immediately consumed
 - Only flag edge cases as `critical` if there is a plausible path to the bad state given the product's physical constraints — unreachable scenarios are `learning` at most
 
