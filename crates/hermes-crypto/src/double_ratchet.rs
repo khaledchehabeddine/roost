@@ -18,6 +18,7 @@ const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 const HKDF_MK_INFO: &[u8] = b"HermesRatchet_MK";
 
 /// Message header transmitted alongside each ciphertext.
+#[derive(Clone, Debug)]
 pub struct Header {
     pub public_key: PublicKey,
     pub pn: u32,
@@ -227,11 +228,12 @@ impl RatchetState {
 
     /// Advances the receiving chain and caches skipped message keys up to `until_n`.
     fn skip_message_keys(&mut self, until_n: u32) -> Result<(), CryptoError> {
-        if until_n > self.nr.saturating_add(MAX_SKIP) {
+        let keys_to_skip = until_n.saturating_sub(self.nr);
+        if keys_to_skip > MAX_SKIP {
             return Err(CryptoError::MaxSkipExceeded);
         }
 
-        let keys_to_skip = until_n.saturating_sub(self.nr) as usize;
+        let keys_to_skip = keys_to_skip as usize;
         if self.mk_skipped.len() + keys_to_skip > MAX_SKIPPED_KEYS_TOTAL {
             return Err(CryptoError::MaxSkippedKeysExceeded);
         }
@@ -245,7 +247,9 @@ impl RatchetState {
                 let (next_ck, mk) = kdf_ck(&current_ck)?;
                 self.mk_skipped.insert((dhr, self.nr), mk);
                 current_ck = next_ck;
-                self.nr += 1;
+                self.nr = self.nr.checked_add(1).ok_or(CryptoError::InvalidState(
+                    "receiving counter overflow while skipping",
+                ))?;
             }
             self.ckr = Some(current_ck);
         }
