@@ -32,7 +32,8 @@ If on `main` without `$ARGUMENTS`:
 ### 2. Code review gate
 
 - Invoke `rust-code-reviewer` agent on the staged diff
-- **critical** and **improvement** issues block the commit — do not proceed until the user confirms resolution
+- If the staged diff touches files under `crates/hermes-crypto/` or `crates/hermes-core/`, also invoke `security-auditor` agent on the staged diff
+- **critical** and **improvement** issues from either agent block the commit — do not proceed until the user confirms resolution
 - **learning** issues are shown but do not block
 
 ### 3. Commit
