@@ -1,0 +1,18 @@
+---
+name: rust-code-review
+description: Run the Rust code reviewer on all source files
+---
+
+## Steps
+
+### 1. Gather context
+
+Run `git branch --show-current` and `find crates -name '*.rs' | sort`.
+
+### 2. Review
+
+Invoke the `rust-code-reviewer` agent on all source files listed above.
+
+### 3. Report
+
+Present the agent's **Summary** to the user.
