@@ -177,19 +177,7 @@ impl IdentityManager {
     /// Returns [`IdentityError::NotFound`] if neither key is present.
     /// Returns [`IdentityError::Corrupt`] if only one of the two keys is present.
     pub fn load_identity(&self) -> Result<Identity, IdentityError> {
-        let storage = self.lock_storage()?;
-
-        let x25519_bytes = storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?;
-
-        let ed25519_bytes = storage
-            .load(IDENTITY_ED25519_KEY)
-            .map_err(log_storage_err)?;
-
-        let (x25519_bytes, ed25519_bytes) = match (x25519_bytes, ed25519_bytes) {
-            (None, None) => return Err(IdentityError::NotFound),
-            (Some(_), None) | (None, Some(_)) => return Err(IdentityError::Corrupt),
-            (Some(x), Some(e)) => (x, e),
-        };
+        let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
 
         let x25519_array = Zeroizing::new(<[u8; 32]>::try_from(x25519_bytes.as_slice())
             .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?);
@@ -283,9 +271,20 @@ impl IdentityManager {
         storage
             .store(IDENTITY_X25519_KEY, &plaintext[..32])
             .map_err(log_storage_err)?;
-        storage
+
+        let ed25519_result = storage
             .store(IDENTITY_ED25519_KEY, &plaintext[32..])
-            .map_err(log_storage_err)?;
+            .map_err(log_storage_err);
+
+        if let Err(e) = ed25519_result {
+            if let Err(cleanup_err) = storage.delete(IDENTITY_X25519_KEY) {
+                eprintln!(
+                    "[hermes-core] failed to roll back X25519 key after partial import: \
+                    {cleanup_err}"
+                );
+            }
+            return Err(e);
+        }
 
         Ok(())
     }

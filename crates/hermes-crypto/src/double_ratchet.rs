@@ -148,7 +148,9 @@ impl RatchetState {
             pn: self.pn,
             n: self.ns,
         };
-        self.ns += 1;
+        self.ns = self.ns.checked_add(1).ok_or(CryptoError::InvalidState(
+            "sending counter overflow",
+        ))?;
 
         let ciphertext = encrypt(plaintext, ad, &header, &mk)?;
         Ok((header, ciphertext))
@@ -189,7 +191,9 @@ impl RatchetState {
         ))?;
         let (new_ckr, mk) = kdf_ck(ckr)?;
         state.ckr = Some(new_ckr);
-        state.nr += 1;
+        state.nr = state.nr.checked_add(1).ok_or(CryptoError::InvalidState(
+            "receiving counter overflow",
+        ))?;
 
         let plaintext = decrypt(ciphertext, ad, header, &mk)?;
 
@@ -223,7 +227,7 @@ impl RatchetState {
 
     /// Advances the receiving chain and caches skipped message keys up to `until_n`.
     fn skip_message_keys(&mut self, until_n: u32) -> Result<(), CryptoError> {
-        if until_n > self.nr + MAX_SKIP {
+        if until_n > self.nr.saturating_add(MAX_SKIP) {
             return Err(CryptoError::MaxSkipExceeded);
         }
 
