@@ -8,12 +8,9 @@ use sha2::Sha256;
 use std::collections::HashMap;
 use zeroize::Zeroizing;
 
+/// Maximum number of message keys to skip in a single ratchet step.
 const MAX_SKIP: u32 = 100;
-/// Global cap on cached skipped message keys across all ratchet chains.
-///
-/// `MAX_SKIP` only bounds keys per ratchet step, but each DH ratchet step resets the counter.
-/// Without a global cap, an attacker can trigger unlimited steps to exhaust memory. 500 allows
-/// 5 full steps of maximum skip — generous for BLE-based offline messaging.
+/// Global cap across all ratchet chains, preventing memory exhaustion from repeated DH steps.
 const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 const HKDF_MK_INFO: &[u8] = b"HermesRatchet_MK";
 
@@ -38,9 +35,6 @@ impl Header {
 }
 
 /// Session state for the Double Ratchet algorithm between two peers.
-///
-/// Holds the DH ratchet key pairs, chain keys, message counters, and a cache of skipped message
-/// keys for handling out-of-order delivery.
 pub struct RatchetState {
     /// Sending ratchet key pair.
     dhs: KeyPair,
@@ -62,12 +56,9 @@ pub struct RatchetState {
     mk_skipped: HashMap<(PublicKey, u32), MessageKey>,
 }
 
-/// Clone is required for the rollback pattern in `ratchet_decrypt`: state mutations happen on a
-/// clone, and the original is only replaced on successful decryption. Inner types (`RootKey`,
-/// `ChainKey`, `MessageKey`, `StaticSecret`) each implement `ZeroizeOnDrop`, so cloned secret
-/// material is zeroized when the clone is dropped.
-impl Clone for RatchetState {
-    fn clone(&self) -> Self {
+impl RatchetState {
+    /// Private to avoid exposing `Clone` on a type holding secret material.
+    fn snapshot(&self) -> Self {
         Self {
             dhs: KeyPair::from_secret_bytes(*self.dhs.to_secret_bytes()),
             dhr: self.dhr,
@@ -80,9 +71,7 @@ impl Clone for RatchetState {
             mk_skipped: self.mk_skipped.clone(),
         }
     }
-}
 
-impl RatchetState {
     /// Initializes the ratchet as the initiator.
     ///
     /// Generates a fresh key pair, performs the initial DH exchange with `dhr`, and derives the
@@ -171,10 +160,10 @@ impl RatchetState {
             return Ok(plaintext);
         }
 
-        let mut state = self.clone();
+        let mut state = self.snapshot();
 
         if Some(header.public_key) != state.dhr {
-            state.skip_message_keys(state.pn)?;
+            state.skip_message_keys(header.pn)?;
             state.dh_ratchet_step(header)?;
         }
 
@@ -223,7 +212,7 @@ impl RatchetState {
             return Err(CryptoError::MaxSkipExceeded);
         }
 
-        let keys_to_skip = until_n.saturating_sub(self.nr) as usize;
+        let keys_to_skip = (until_n - self.nr) as usize;
         if self.mk_skipped.len() + keys_to_skip > MAX_SKIPPED_KEYS_TOTAL {
             return Err(CryptoError::MaxSkippedKeysExceeded);
         }
@@ -241,7 +230,6 @@ impl RatchetState {
             }
             self.ckr = Some(current_ck);
         }
-        // When ckr is None (responder before first receive), there are no keys to skip.
 
         Ok(())
     }
@@ -482,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn max_skip_exceeded() {
+    fn max_skip_enforced() {
         let (mut initiator, mut responder, ad) = setup_pair();
 
         let mut headers_and_cts = Vec::new();
@@ -496,6 +484,39 @@ mod tests {
         let (ref h, ref ct) = headers_and_cts[(MAX_SKIP + 1) as usize];
         let result = responder.ratchet_decrypt(ct, h, &ad);
         assert!(matches!(result, Err(CryptoError::MaxSkipExceeded)));
+    }
+
+    #[test]
+    fn max_skipped_keys_enforced() {
+        let (mut initiator, mut responder, ad) = setup_pair();
+
+        let overflow_step = MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP;
+        assert_eq!(
+            overflow_step as usize * MAX_SKIP as usize,
+            MAX_SKIPPED_KEYS_TOTAL,
+            "test assumes MAX_SKIPPED_KEYS_TOTAL is an exact multiple of MAX_SKIP"
+        );
+        for step in 0..=overflow_step {
+            let mut headers_and_cts = Vec::new();
+            for i in 0..=MAX_SKIP {
+                let (h, ct) = initiator
+                    .ratchet_encrypt(format!("step {step} msg {i}").as_bytes(), &ad)
+                    .unwrap();
+                headers_and_cts.push((h, ct));
+            }
+
+            let (ref h, ref ct) = headers_and_cts[MAX_SKIP as usize];
+            if step == overflow_step {
+                assert!(matches!(
+                    responder.ratchet_decrypt(ct, h, &ad),
+                    Err(CryptoError::MaxSkippedKeysExceeded)
+                ));
+            } else {
+                responder.ratchet_decrypt(ct, h, &ad).unwrap();
+                let (rh, rct) = responder.ratchet_encrypt(b"reply", &ad).unwrap();
+                initiator.ratchet_decrypt(&rct, &rh, &ad).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -544,36 +565,6 @@ mod tests {
         let (h2_real, ct2_real) = initiator.ratchet_encrypt(m2, &ad).unwrap();
         let pt = responder.ratchet_decrypt(&ct2_real, &h2_real, &ad).unwrap();
         assert_eq!(pt.as_slice(), m2);
-    }
-
-    #[test]
-    fn global_skipped_keys_cap_enforced() {
-        let (mut initiator, mut responder, ad) = setup_pair();
-
-        let steps_needed = (MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP) + 1;
-
-        for step in 0..steps_needed {
-            let mut headers_and_cts = Vec::new();
-            for i in 0..=MAX_SKIP {
-                let (h, ct) = initiator
-                    .ratchet_encrypt(format!("step {step} msg {i}").as_bytes(), &ad)
-                    .unwrap();
-                headers_and_cts.push((h, ct));
-            }
-
-            let (ref h, ref ct) = headers_and_cts[MAX_SKIP as usize];
-            let result = responder.ratchet_decrypt(ct, h, &ad);
-
-            if result.is_err() {
-                assert!(matches!(result, Err(CryptoError::MaxSkippedKeysExceeded)));
-                return;
-            }
-
-            let (rh, rct) = responder.ratchet_encrypt(b"reply", &ad).unwrap();
-            initiator.ratchet_decrypt(&rct, &rh, &ad).unwrap();
-        }
-
-        panic!("expected MaxSkippedKeysExceeded but all steps succeeded");
     }
 
     /// Returns a fresh initiator/responder pair with shared associated data.

@@ -239,8 +239,10 @@ impl IdentityManager {
                 .decrypt(nonce, ciphertext)
                 .map_err(|_| IdentityError::DecryptionFailed)?,
         );
-        let plaintext = Zeroizing::new(<[u8; 64]>::try_from(plaintext_vec.as_slice())
-            .map_err(|_| IdentityError::BackupFailed("unexpected plaintext length".into()))?);
+        let plaintext = Zeroizing::new(
+            <[u8; 64]>::try_from(plaintext_vec.as_slice())
+                .map_err(|_| IdentityError::BackupFailed("unexpected plaintext length".into()))?,
+        );
 
         let mut storage = self.lock_storage()?;
         storage

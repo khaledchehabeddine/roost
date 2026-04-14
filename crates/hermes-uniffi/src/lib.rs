@@ -75,12 +75,8 @@ impl From<StorageError> for HermesError {
 /// Implement this trait to provide [`IdentityManager`] with platform-specific secure storage
 /// (e.g., iOS Keychain, Android Keystore).
 ///
-/// # Secret material
-///
-/// `value` in `store` and the return of `load` carry secret key bytes as bare `Vec<u8>` because
-/// UniFFI does not support `Zeroizing<Vec<u8>>`. On the Rust side, the `SecureStorageAdapter`
-/// wraps loaded values in `Zeroizing` immediately. Platform implementations should treat these
-/// bytes as sensitive and avoid unnecessary copies.
+/// `value` and `load` return bare `Vec<u8>` because UniFFI does not support `Zeroizing`.
+/// The `SecureStorageAdapter` wraps loaded values in `Zeroizing` on the Rust side.
 #[uniffi::export(with_foreign)]
 pub trait SecureStorage: Send + Sync {
     fn store(&self, key: String, value: Vec<u8>) -> Result<(), HermesError>;
@@ -180,7 +176,6 @@ pub struct IdentityManager {
 
 #[uniffi::export]
 impl IdentityManager {
-    /// Constructs a new `IdentityManager` backed by the given storage.
     #[uniffi::constructor]
     pub fn new(storage: Arc<dyn SecureStorage>) -> Self {
         Self {
@@ -188,7 +183,6 @@ impl IdentityManager {
         }
     }
 
-    /// Generates a new identity and persists it to storage.
     pub fn generate_identity(&self) -> Result<Identity, HermesError> {
         let id = self.inner.generate_identity()?;
         Ok(Identity {
@@ -197,7 +191,6 @@ impl IdentityManager {
         })
     }
 
-    /// Loads the existing identity from storage.
     pub fn load_identity(&self) -> Result<Identity, HermesError> {
         let id = self.inner.load_identity()?;
         Ok(Identity {
@@ -206,12 +199,10 @@ impl IdentityManager {
         })
     }
 
-    /// Exports the current identity as an encrypted backup blob.
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, HermesError> {
         Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
 
-    /// Imports an identity from an encrypted backup blob.
     pub fn import_encrypted_backup(
         &self,
         data: Vec<u8>,

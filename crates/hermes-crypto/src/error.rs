@@ -19,11 +19,10 @@ impl fmt::Display for CryptoError {
             Self::InvalidState(context) => {
                 write!(f, "ratchet state invariant violated: {context}")
             }
-            Self::MaxSkipExceeded => write!(f, "requested message skip exceeds MAX_SKIP limit"),
-            Self::MaxSkippedKeysExceeded => write!(
-                f,
-                "total cached skipped message keys exceeds MAX_SKIPPED_KEYS_TOTAL limit"
-            ),
+            Self::MaxSkipExceeded => write!(f, "requested message skip exceeds ratchet step limit"),
+            Self::MaxSkippedKeysExceeded => {
+                write!(f, "cached skipped message keys total exceeds global limit")
+            }
         }
     }
 }
