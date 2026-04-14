@@ -151,20 +151,9 @@ impl IdentityManager {
         storage
             .store(IDENTITY_X25519_KEY, &*key_pair.to_secret_bytes())
             .map_err(log_storage_err)?;
-
-        let ed25519_result = storage
+        storage
             .store(IDENTITY_ED25519_KEY, &*signing_key_pair.to_signing_bytes())
-            .map_err(log_storage_err);
-
-        if let Err(e) = ed25519_result {
-            if let Err(cleanup_err) = storage.delete(IDENTITY_X25519_KEY) {
-                eprintln!(
-                    "[hermes-core] failed to roll back X25519 key after partial write: \
-                    {cleanup_err}"
-                );
-            }
-            return Err(e);
-        }
+            .map_err(log_storage_err)?;
 
         Ok(Identity {
             key_pair,
@@ -245,36 +234,21 @@ impl IdentityManager {
         let nonce = XNonce::from_slice(nonce_bytes);
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
 
-        let plaintext = Zeroizing::new(
+        let plaintext_vec = Zeroizing::new(
             cipher
                 .decrypt(nonce, ciphertext)
                 .map_err(|_| IdentityError::DecryptionFailed)?,
         );
-
-        if plaintext.len() != 64 {
-            return Err(IdentityError::BackupFailed(
-                "unexpected plaintext length".into(),
-            ));
-        }
+        let plaintext = Zeroizing::new(<[u8; 64]>::try_from(plaintext_vec.as_slice())
+            .map_err(|_| IdentityError::BackupFailed("unexpected plaintext length".into()))?);
 
         let mut storage = self.lock_storage()?;
         storage
             .store(IDENTITY_X25519_KEY, &plaintext[..32])
             .map_err(log_storage_err)?;
-
-        let ed25519_result = storage
+        storage
             .store(IDENTITY_ED25519_KEY, &plaintext[32..])
-            .map_err(log_storage_err);
-
-        if let Err(e) = ed25519_result {
-            if let Err(cleanup_err) = storage.delete(IDENTITY_X25519_KEY) {
-                eprintln!(
-                    "[hermes-core] failed to roll back X25519 key after partial import: \
-                    {cleanup_err}"
-                );
-            }
-            return Err(e);
-        }
+            .map_err(log_storage_err)?;
 
         Ok(())
     }

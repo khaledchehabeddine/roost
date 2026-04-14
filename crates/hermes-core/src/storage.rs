@@ -36,7 +36,7 @@ pub trait SecureStorage: Send {
     /// caller drops them.
     fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError>;
 
-    /// Removes the value stored under `key`. No-op if the key is not present.
+    /// Removes the value stored under `key`. Does nothing if the key is not present.
     fn delete(&mut self, key: &str) -> Result<(), StorageError>;
 }
 

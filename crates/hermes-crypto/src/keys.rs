@@ -3,7 +3,7 @@ pub use ed25519_dalek::{Signature, VerifyingKey};
 use rand::rngs::OsRng;
 use x25519_dalek::StaticSecret;
 pub use x25519_dalek::{PublicKey, SharedSecret};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// An X25519 key pair for Diffie–Hellman key exchange.
 ///
@@ -36,6 +36,14 @@ impl KeyPair {
         let secret = StaticSecret::from(bytes);
         let public = PublicKey::from(&secret);
         KeyPair { public, secret }
+    }
+}
+
+/// `x25519-dalek`'s `StaticSecret` derives `Zeroize` but not `ZeroizeOnDrop`, so without this
+/// impl the secret key bytes would not be scrubbed on drop.
+impl Drop for KeyPair {
+    fn drop(&mut self) {
+        self.secret.zeroize();
     }
 }
 
