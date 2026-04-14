@@ -9,6 +9,8 @@ use zeroize::Zeroizing;
 pub struct Identity {
     /// X25519 public key bytes (32 bytes).
     pub public_key: Vec<u8>,
+    /// Ed25519 verifying key bytes (32 bytes).
+    pub verifying_key: Vec<u8>,
 }
 
 /// Errors surfaced across the FFI boundary.
@@ -72,6 +74,9 @@ impl From<StorageError> for HermesError {
 ///
 /// Implement this trait to provide [`IdentityManager`] with platform-specific secure storage
 /// (e.g., iOS Keychain, Android Keystore).
+///
+/// `value` and `load` return bare `Vec<u8>` because UniFFI does not support `Zeroizing`.
+/// The `SecureStorageAdapter` wraps loaded values in `Zeroizing` on the Rust side.
 #[uniffi::export(with_foreign)]
 pub trait SecureStorage: Send + Sync {
     fn store(&self, key: String, value: Vec<u8>) -> Result<(), HermesError>;
@@ -171,7 +176,6 @@ pub struct IdentityManager {
 
 #[uniffi::export]
 impl IdentityManager {
-    /// Constructs a new `IdentityManager` backed by the given storage.
     #[uniffi::constructor]
     pub fn new(storage: Arc<dyn SecureStorage>) -> Self {
         Self {
@@ -179,19 +183,31 @@ impl IdentityManager {
         }
     }
 
-    /// Generates a new identity and persists it to storage.
     pub fn generate_identity(&self) -> Result<Identity, HermesError> {
         let id = self.inner.generate_identity()?;
         Ok(Identity {
             public_key: id.public_key().as_bytes().to_vec(),
+            verifying_key: id.verifying_key().as_bytes().to_vec(),
         })
     }
 
-    /// Loads the existing identity from storage.
     pub fn load_identity(&self) -> Result<Identity, HermesError> {
         let id = self.inner.load_identity()?;
         Ok(Identity {
             public_key: id.public_key().as_bytes().to_vec(),
+            verifying_key: id.verifying_key().as_bytes().to_vec(),
         })
+    }
+
+    pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, HermesError> {
+        Ok(self.inner.export_encrypted_backup(&passphrase)?)
+    }
+
+    pub fn import_encrypted_backup(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+    ) -> Result<(), HermesError> {
+        Ok(self.inner.import_encrypted_backup(&data, &passphrase)?)
     }
 }

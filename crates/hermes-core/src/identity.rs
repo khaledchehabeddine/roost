@@ -13,7 +13,7 @@ use std::fmt;
 use std::sync::{Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
-type KeyBytes = (Zeroizing<Vec<u8>>, Zeroizing<Vec<u8>>);
+type KeyBytes = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 
 const IDENTITY_X25519_KEY: &str = "identity/x25519";
 const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
@@ -151,20 +151,9 @@ impl IdentityManager {
         storage
             .store(IDENTITY_X25519_KEY, &*key_pair.to_secret_bytes())
             .map_err(log_storage_err)?;
-
-        let ed25519_result = storage
+        storage
             .store(IDENTITY_ED25519_KEY, &*signing_key_pair.to_signing_bytes())
-            .map_err(log_storage_err);
-
-        if let Err(e) = ed25519_result {
-            if let Err(cleanup_err) = storage.delete(IDENTITY_X25519_KEY) {
-                eprintln!(
-                    "[hermes-core] failed to roll back X25519 key after partial write: \
-                    {cleanup_err}"
-                );
-            }
-            return Err(e);
-        }
+            .map_err(log_storage_err)?;
 
         Ok(Identity {
             key_pair,
@@ -177,33 +166,11 @@ impl IdentityManager {
     /// Returns [`IdentityError::NotFound`] if neither key is present.
     /// Returns [`IdentityError::Corrupt`] if only one of the two keys is present.
     pub fn load_identity(&self) -> Result<Identity, IdentityError> {
-        let storage = self.lock_storage()?;
-
-        let x25519_bytes = storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?;
-
-        let ed25519_bytes = storage
-            .load(IDENTITY_ED25519_KEY)
-            .map_err(log_storage_err)?;
-
-        let (x25519_bytes, ed25519_bytes) = match (x25519_bytes, ed25519_bytes) {
-            (None, None) => return Err(IdentityError::NotFound),
-            (Some(_), None) | (None, Some(_)) => return Err(IdentityError::Corrupt),
-            (Some(x), Some(e)) => (x, e),
-        };
-
-        let x25519_array: [u8; 32] = x25519_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
-
-        let ed25519_array: [u8; 32] = ed25519_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
+        let (x25519, ed25519) = self.load_key_bytes()?;
 
         Ok(Identity {
-            key_pair: KeyPair::from_secret_bytes(x25519_array),
-            signing_key_pair: SigningKeyPair::from_signing_bytes(ed25519_array),
+            key_pair: KeyPair::from_secret_bytes(*x25519),
+            signing_key_pair: SigningKeyPair::from_signing_bytes(*ed25519),
         })
     }
 
@@ -231,17 +198,9 @@ impl IdentityManager {
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
         let nonce = XNonce::from_slice(&nonce_bytes);
 
-        let x25519_array: [u8; 32] = x25519_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
-        let ed25519_array: [u8; 32] = ed25519_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
         let mut plaintext = Zeroizing::new([0u8; 64]);
-        plaintext[..32].copy_from_slice(&x25519_array);
-        plaintext[32..].copy_from_slice(&ed25519_array);
+        plaintext[..32].copy_from_slice(&*x25519_bytes);
+        plaintext[32..].copy_from_slice(&*ed25519_bytes);
 
         let ciphertext = cipher
             .encrypt(nonce, &plaintext[..])
@@ -275,16 +234,15 @@ impl IdentityManager {
         let nonce = XNonce::from_slice(nonce_bytes);
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
 
-        let plaintext_vec = cipher
-            .decrypt(nonce, ciphertext)
-            .map_err(|_| IdentityError::DecryptionFailed)?;
-
-        if plaintext_vec.len() != 64 {
-            return Err(IdentityError::BackupFailed(
-                "unexpected plaintext length".into(),
-            ));
-        }
-        let plaintext = Zeroizing::new(plaintext_vec);
+        let plaintext_vec = Zeroizing::new(
+            cipher
+                .decrypt(nonce, ciphertext)
+                .map_err(|_| IdentityError::DecryptionFailed)?,
+        );
+        let plaintext = Zeroizing::new(
+            <[u8; 64]>::try_from(plaintext_vec.as_slice())
+                .map_err(|_| IdentityError::BackupFailed("unexpected plaintext length".into()))?,
+        );
 
         let mut storage = self.lock_storage()?;
         storage
@@ -297,19 +255,30 @@ impl IdentityManager {
         Ok(())
     }
 
-    /// Reads both raw key byte vectors from storage, propagating `NotFound` / `Corrupt`.
+    /// Reads both identity keys from storage, validates their length, and returns fixed-size arrays.
     fn load_key_bytes(&self) -> Result<KeyBytes, IdentityError> {
         let storage = self.lock_storage()?;
-        match (
+        let (x_vec, e_vec) = match (
             storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?,
             storage
                 .load(IDENTITY_ED25519_KEY)
                 .map_err(log_storage_err)?,
         ) {
-            (None, None) => Err(IdentityError::NotFound),
-            (Some(_), None) | (None, Some(_)) => Err(IdentityError::Corrupt),
-            (Some(x), Some(e)) => Ok((x, e)),
-        }
+            (None, None) => return Err(IdentityError::NotFound),
+            (Some(_), None) | (None, Some(_)) => return Err(IdentityError::Corrupt),
+            (Some(x), Some(e)) => (x, e),
+        };
+
+        let x_bytes: [u8; 32] = x_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
+        let e_bytes: [u8; 32] = e_vec
+            .as_slice()
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
+
+        Ok((Zeroizing::new(x_bytes), Zeroizing::new(e_bytes)))
     }
 }
 
