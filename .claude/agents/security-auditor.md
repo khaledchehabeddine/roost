@@ -16,7 +16,7 @@ Read `CLAUDE.md` for crate constraints, crypto primitives, and project facts.
 
 - Every finding must identify a plausible attack path or a concrete violation of project rules — don't flag theoretical concerns that require impossible preconditions
 - Hardening suggestions must earn their maintenance cost — don't recommend defensive wrappers or checked operations for values that are bounded, stack-local, or immediately consumed
-- Only flag issues as `critical` if there is a realistic path to exploitation given the product's physical constraints (BLE, offline messaging)
+- Only flag issues as `critical` if there is a realistic path to exploitation given the product's physical constraints
 
 ## Audit Checklist
 

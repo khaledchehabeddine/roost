@@ -25,7 +25,7 @@ Skip if already on a feature branch.
 
 Invoke the `rust-code-reviewer` and `security-auditor` agents on the staged diff.
 - **critical** issues from either agent block — do not proceed until resolved
-- **learning** and **improvement** issues are shown but do not block
+- **improvement** and **learning** issues are shown but do not block
 
 ### 3. Commit
 
