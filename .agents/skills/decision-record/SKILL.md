@@ -1,5 +1,5 @@
 ---
-name: create-decision-record
+name: decision-record
 description: Trigger when the user wants to record a new architectural decision. Not for updating, superseding, or deleting existing records.
 ---
 

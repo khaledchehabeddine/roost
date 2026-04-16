@@ -1,0 +1,10 @@
+name: Parent
+description: Tracking issue for a group of related tasks
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: One paragraph summarizing the scope and goal
+    validations:
+      required: true
