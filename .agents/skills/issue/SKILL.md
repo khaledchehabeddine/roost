@@ -17,7 +17,7 @@ description: Trigger when the user wants to file a new GitHub issue on the Herme
    - **Parent**: description
    - **Bug**: description, reproduction steps, expected behavior
    - **Security**: summary, impact, location, severity (Critical/High/Medium/Low), optional suggested fix
-5. Ask: "Any notes to add?" — if yes, append a `### Notes` section. Otherwise, omit entirely
+5. Ask: "Any notes to add?" — skip if none
 6. Pick a label:
    - Bug → auto-apply `bug`
    - Security → auto-apply `security`

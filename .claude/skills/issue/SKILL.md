@@ -24,7 +24,7 @@ allowed-tools: Bash(gh *)
    - **Parent**: description
    - **Bug**: description, reproduction steps, expected behavior
    - **Security**: summary, impact, location, severity (Critical/High/Medium/Low), optional suggested fix
-4. Ask: "Any notes to add?" — if yes, append a `### Notes` section. Otherwise, omit entirely
+4. Ask: "Any notes to add?" — skip if none
 5. Pick a label:
    - Bug → auto-apply `bug`
    - Security → auto-apply `security`
