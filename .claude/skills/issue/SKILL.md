@@ -1,5 +1,5 @@
 ---
-name: create-issue
+name: issue
 description: Create a GitHub issue and link it to the project board
 argument-hint: <title>
 disable-model-invocation: true

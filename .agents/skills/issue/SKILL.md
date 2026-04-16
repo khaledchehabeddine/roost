@@ -1,5 +1,5 @@
 ---
-name: create-issue
+name: issue
 description: Trigger when the user wants to file a new GitHub issue on the Hermes project board. Not for editing, closing, or triaging existing issues.
 ---
 
