@@ -14,12 +14,19 @@ allowed-tools: Bash(gh *)
 ## Task
 
 1. Use `$ARGUMENTS` as the issue title
-2. Ask the user: "Describe the task or bug?"
-3. Ask the user: "What are the acceptance criteria?" — each criterion becomes a checklist item
-4. Ask the user: "Any notes to add? (context, links, edge cases)" — skip if none
-5. Ask the user to pick a label from the fetched labels
+2. Ask the user to pick an issue type: **Task**, **Parent**, **Bug**, **Security**
+3. Based on type, prompt for the relevant fields:
+   - **Task**: description, acceptance criteria
+   - **Parent**: description
+   - **Bug**: description, reproduction steps, expected behavior
+   - **Security**: summary, impact, location, severity (Critical/High/Medium/Low), optional suggested fix
+4. Ask: "Any notes to add?" — if yes, append a `### Notes` section. Otherwise, omit entirely
+5. Pick a label:
+   - Bug → auto-apply `bug`
+   - Security → auto-apply `security`
+   - Task / Parent → ask the user to pick from available labels
 6. Ask the user to optionally pick a milestone — skip if none
-7. Read `template.md` and write the issue body with the user's answers
+7. Read the corresponding template from `templates/<type>.md` and construct the issue body with the user's answers
 8. Create the issue:
    - With milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --milestone "<milestone>" --assignee "@me" --project "Hermes"`
    - Without milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --assignee "@me" --project "Hermes"`

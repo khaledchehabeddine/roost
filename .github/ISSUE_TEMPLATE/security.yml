@@ -1,0 +1,43 @@
+name: Security
+description: Security vulnerability or hardening task
+labels: ["security"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What the vulnerability or security concern is
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: What is at risk and how it could be exploited
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Location
+      description: "Crate, file, and/or function where the issue exists"
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Critical
+        - High
+        - Medium
+        - Low
+    validations:
+      required: true
+  - type: textarea
+    id: suggested-fix
+    attributes:
+      label: Suggested Fix
+      description: Proposed approach to address the issue
+    validations:
+      required: false
