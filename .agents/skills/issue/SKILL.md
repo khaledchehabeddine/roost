@@ -7,7 +7,11 @@ description: Trigger when the user wants to file a new GitHub issue on the Herme
 
 1. Run `gh label list --json name` and `gh milestone list --json number,title` to fetch options
 2. Use the provided title as the issue title
-3. Ask the user to pick an issue type: **Task**, **Parent**, **Bug**, **Security**
+3. Ask the user to pick an issue type:
+   - **Task** — Feature, docs, chore, or any other unit of work
+   - **Parent** — Tracking issue for a group of related tasks
+   - **Bug** — Report a defect or unexpected behavior
+   - **Security** — Security vulnerability or hardening task
 4. Based on type, prompt for the relevant fields:
    - **Task**: description, acceptance criteria
    - **Parent**: description

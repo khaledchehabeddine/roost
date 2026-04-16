@@ -1,5 +1,5 @@
 name: Task
-description: Feature, fix, chore, or any other unit of work
+description: Feature, docs, chore, or any other unit of work
 body:
   - type: textarea
     id: description

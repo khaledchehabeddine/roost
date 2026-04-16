@@ -14,7 +14,11 @@ allowed-tools: Bash(gh *)
 ## Task
 
 1. Use `$ARGUMENTS` as the issue title
-2. Ask the user to pick an issue type: **Task**, **Parent**, **Bug**, **Security**
+2. Ask the user to pick an issue type:
+   - **Task** — Feature, docs, chore, or any other unit of work
+   - **Parent** — Tracking issue for a group of related tasks
+   - **Bug** — Report a defect or unexpected behavior
+   - **Security** — Security vulnerability or hardening task
 3. Based on type, prompt for the relevant fields:
    - **Task**: description, acceptance criteria
    - **Parent**: description
