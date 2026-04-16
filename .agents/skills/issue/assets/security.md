@@ -13,3 +13,5 @@
 ### Severity
 
 <!-- Critical | High | Medium | Low -->
+
+<!-- If a suggested fix is worth capturing, append a "### Suggested Fix" section describing the proposed approach. Otherwise, omit the section entirely. -->
