@@ -16,4 +16,4 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 ## Workflow
 
 - See `CONTRIBUTING.md` for branches, commits, and PR conventions
-- After responding to a non-obvious discovery, fix, or workaround, suggest `/create-decision-record` or a `CLAUDE.md` update
+- After responding to a non-obvious discovery, fix, or workaround, suggest `/decision-record` or a `CLAUDE.md` update
