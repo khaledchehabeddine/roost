@@ -256,14 +256,6 @@ impl IdentityManager {
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, HermesError> {
         Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
-
-    pub fn import_encrypted_backup(
-        &self,
-        data: Vec<u8>,
-        passphrase: String,
-    ) -> Result<(), HermesError> {
-        Ok(self.inner.import_encrypted_backup(&data, &passphrase)?)
-    }
 }
 
 /// Single construction point for all key-managing types over the FFI boundary.
@@ -299,6 +291,26 @@ impl KeyStore {
     /// Returns the public-form bundle for the currently stored signed prekey.
     pub fn current_pre_key_bundle(&self) -> Result<PreKeyBundle, HermesError> {
         Ok(self.inner.signed_prekey().current_bundle()?.into())
+    }
+
+    /// Imports an encrypted identity backup, then resets the signed prekey.
+    ///
+    /// The safe import path: replacing the identity also clears any SPK that was signed
+    /// by the previous identity, so the next call to [`Self::rotate_spk_if_stale`] will
+    /// generate a fresh SPK signed by the imported identity.
+    pub fn import_encrypted_backup(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+    ) -> Result<(), HermesError> {
+        self.inner
+            .import_encrypted_backup(&data, &passphrase)
+            .map_err(Into::into)
+    }
+
+    /// Wipes all key material from storage. Used during logout.
+    pub fn wipe_all(&self) -> Result<(), HermesError> {
+        self.inner.wipe_all().map_err(Into::into)
     }
 }
 
@@ -360,5 +372,44 @@ mod tests {
         // Identity exists but no SPK has been rotated yet.
         let result = ks.current_pre_key_bundle();
         assert!(matches!(result, Err(HermesError::InvalidData { .. })));
+    }
+
+    #[test]
+    fn import_encrypted_backup_via_keystore_clears_stale_spk() {
+        let ks_b = key_store();
+        ks_b.identity().generate_identity().unwrap();
+        ks_b.rotate_spk_if_stale().unwrap();
+        assert!(ks_b.current_pre_key_bundle().is_ok());
+
+        let ks_a = key_store();
+        ks_a.identity().generate_identity().unwrap();
+        let backup = ks_a
+            .identity()
+            .export_encrypted_backup("pass".into())
+            .unwrap();
+
+        ks_b.import_encrypted_backup(backup, "pass".into()).unwrap();
+        assert!(matches!(
+            ks_b.current_pre_key_bundle(),
+            Err(HermesError::InvalidData { .. })
+        ));
+    }
+
+    #[test]
+    fn wipe_all_via_keystore_clears_state() {
+        let ks = key_store();
+        ks.identity().generate_identity().unwrap();
+        ks.rotate_spk_if_stale().unwrap();
+
+        ks.wipe_all().unwrap();
+
+        assert!(matches!(
+            ks.identity().load_identity(),
+            Err(HermesError::NotFound)
+        ));
+        assert!(matches!(
+            ks.current_pre_key_bundle(),
+            Err(HermesError::InvalidData { .. })
+        ));
     }
 }

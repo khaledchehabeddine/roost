@@ -2,8 +2,8 @@
 target
 
 # Claude Code
-.claude/settings.local.json
 .claude/agent-memory/
+.claude/settings.local.json
 
 # Codex
 .codex/config.local.toml

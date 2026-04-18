@@ -263,6 +263,22 @@ impl IdentityManager {
         Ok(())
     }
 
+    /// Deletes both identity keys from storage.
+    ///
+    /// `pub(crate)` — applications must use [`crate::KeyStore::wipe_all`] instead, which
+    /// also clears dependent SPK material. Direct identity-only deletion would orphan
+    /// the signed prekey.
+    pub(crate) fn reset(&self) -> Result<(), IdentityError> {
+        let mut storage = self.lock_storage()?;
+        storage
+            .delete(IDENTITY_X25519_KEY)
+            .map_err(log_storage_err)?;
+        storage
+            .delete(IDENTITY_ED25519_KEY)
+            .map_err(log_storage_err)?;
+        Ok(())
+    }
+
     /// Reads both identity keys from storage, validates their length, and returns fixed-size arrays.
     fn load_key_bytes(&self) -> Result<KeyBytes, IdentityError> {
         let storage = self.lock_storage()?;

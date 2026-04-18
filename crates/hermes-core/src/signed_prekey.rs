@@ -21,7 +21,7 @@ const SPK_KEY: &str = "prekey/signed";
 /// History:
 /// - `1`: initial layout, signature over bare 32-byte X25519 public key.
 /// - `2`: same byte layout, signature now over `b"hermes-spk-v1:" || public_key_bytes`
-///        (domain-separated to prevent signature confusion). Bumped in #57.
+///   (domain-separated to prevent signature confusion). Bumped in #57.
 const SPK_VERSION: u8 = 2;
 /// Layout: `[version(1) | secret(32) | sig(64) | created_at u64-be (8)]` = 105 bytes.
 const SPK_BLOB_LEN: usize = 1 + 32 + 64 + 8;
@@ -138,6 +138,17 @@ impl SignedPreKeyManager {
         if needs_rotation {
             self.rotate_now()?;
         }
+        Ok(())
+    }
+
+    /// Deletes the stored signed prekey.
+    ///
+    /// Used by [`crate::KeyStore::wipe_all`] and [`crate::KeyStore::import_encrypted_backup`]
+    /// to clear SPK material when the signing identity is about to be replaced or wiped.
+    /// Safe to call when no SPK is stored — [`SecureStorage::delete`] is idempotent.
+    pub fn reset(&self) -> Result<(), SignedPreKeyError> {
+        let mut storage = self.lock_storage()?;
+        storage.delete(SPK_KEY)?;
         Ok(())
     }
 

@@ -94,6 +94,37 @@ impl KeyStore {
         self.0.signed_prekey.rotate_if_stale()?;
         Ok(())
     }
+
+    /// Imports an encrypted identity backup, then resets the signed prekey.
+    ///
+    /// This is the safe import path: it ensures any stale SPK signed by the previous
+    /// identity is cleared, so the next call to [`Self::rotate_spk_if_stale`] generates a
+    /// fresh SPK signed by the newly-imported identity. Applications should not import
+    /// the identity directly; doing so leaves an orphan SPK.
+    pub fn import_encrypted_backup(
+        &self,
+        data: &[u8],
+        passphrase: &str,
+    ) -> Result<(), KeyStoreError> {
+        self.0.identity.import_encrypted_backup(data, passphrase)?;
+        self.0.signed_prekey.reset()?;
+        Ok(())
+    }
+
+    /// Wipes all key material from storage — signed prekey first, then identity.
+    ///
+    /// After this returns successfully, the device has no identity and no SPK; the next
+    /// launch behaves as a first launch. Used during logout flows.
+    ///
+    /// If the SPK delete succeeds but the identity delete fails, the partial state is
+    /// recoverable: callers can retry [`Self::wipe_all`], or the next
+    /// [`Self::rotate_spk_if_stale`] will regenerate the SPK against the still-present
+    /// identity.
+    pub fn wipe_all(&self) -> Result<(), KeyStoreError> {
+        self.0.signed_prekey.reset()?;
+        self.0.identity.reset()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -151,5 +182,78 @@ mod tests {
         // Both sub-managers wrote to the shared backend without overwriting each other.
         assert!(ks.identity().load_identity().is_ok());
         assert!(ks.signed_prekey().current_bundle().is_ok());
+    }
+
+    #[test]
+    fn import_encrypted_backup_clears_stale_spk() {
+        // Setup: ks_b has its own identity + SPK
+        let ks_b = store();
+        ks_b.identity().generate_identity().unwrap();
+        ks_b.rotate_spk_if_stale().unwrap();
+        assert!(ks_b.signed_prekey().current_bundle().is_ok());
+
+        // Setup: ks_a has a different identity, export its backup
+        let ks_a = store();
+        ks_a.identity().generate_identity().unwrap();
+        let backup = ks_a.identity().export_encrypted_backup("pass").unwrap();
+
+        // Importing ks_a's backup into ks_b must clear ks_b's stale SPK (signed by old id)
+        ks_b.import_encrypted_backup(&backup, "pass").unwrap();
+        assert!(matches!(
+            ks_b.signed_prekey().current_bundle(),
+            Err(SignedPreKeyError::InvalidData(_))
+        ));
+
+        // The imported identity is now active in ks_b
+        let imported = ks_b.identity().load_identity().unwrap();
+        let original = ks_a.identity().load_identity().unwrap();
+        assert_eq!(
+            imported.verifying_key().as_bytes(),
+            original.verifying_key().as_bytes()
+        );
+    }
+
+    #[test]
+    fn import_then_rotate_yields_spk_signed_by_imported_identity() {
+        let ks_b = store();
+        ks_b.identity().generate_identity().unwrap();
+        ks_b.rotate_spk_if_stale().unwrap();
+
+        let ks_a = store();
+        ks_a.identity().generate_identity().unwrap();
+        let backup = ks_a.identity().export_encrypted_backup("pass").unwrap();
+
+        ks_b.import_encrypted_backup(&backup, "pass").unwrap();
+        ks_b.rotate_spk_if_stale().unwrap();
+
+        let new_bundle = ks_b.signed_prekey().current_bundle().unwrap();
+        let imported = ks_b.identity().load_identity().unwrap();
+        assert!(verify_bundle(&new_bundle, imported.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn wipe_all_clears_identity_and_spk() {
+        let ks = store();
+        ks.identity().generate_identity().unwrap();
+        ks.rotate_spk_if_stale().unwrap();
+
+        ks.wipe_all().unwrap();
+
+        assert!(matches!(
+            ks.identity().load_identity(),
+            Err(IdentityError::NotFound)
+        ));
+        assert!(matches!(
+            ks.signed_prekey().current_bundle(),
+            Err(SignedPreKeyError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn wipe_all_is_idempotent_on_empty_store() {
+        // Calling wipe_all twice (or on empty storage) must not error.
+        let ks = store();
+        ks.wipe_all().unwrap();
+        ks.wipe_all().unwrap();
     }
 }
