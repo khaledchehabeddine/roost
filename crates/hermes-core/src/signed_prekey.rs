@@ -16,7 +16,10 @@ use crate::storage::{SecureStorage, StorageError};
 pub const SPK_ROTATION_WINDOW_DAYS: u64 = 7;
 
 const SPK_KEY: &str = "prekey/signed";
-const SPK_BLOB_LEN: usize = 32 + 64 + 8;
+/// Current on-disk format version. Bump when the blob layout or signed payload changes.
+const SPK_VERSION: u8 = 1;
+/// Layout: `[version(1) | secret(32) | sig(64) | created_at u64-be (8)]` = 105 bytes.
+const SPK_BLOB_LEN: usize = 1 + 32 + 64 + 8;
 const SECONDS_PER_DAY: u64 = 86_400;
 
 /// Errors returned by [`SignedPreKeyManager`] operations.
@@ -143,7 +146,8 @@ impl SignedPreKeyManager {
     }
 
     /// Reads only the issuance timestamp out of the stored blob. Returns `Ok(None)` if no
-    /// SPK is stored. Surfaces [`SignedPreKeyError::InvalidData`] on a length mismatch.
+    /// SPK is stored. Surfaces [`SignedPreKeyError::InvalidData`] on a length or version
+    /// mismatch.
     fn read_stored_timestamp(&self) -> Result<Option<u64>, SignedPreKeyError> {
         let storage = self.lock_storage()?;
         let blob = match storage.load(SPK_KEY)? {
@@ -157,7 +161,13 @@ impl SignedPreKeyManager {
                 blob.len()
             )));
         }
-        let ts_bytes: [u8; 8] = blob[96..SPK_BLOB_LEN]
+        if blob[0] != SPK_VERSION {
+            return Err(SignedPreKeyError::InvalidData(format!(
+                "unsupported SPK format version: {}",
+                blob[0]
+            )));
+        }
+        let ts_bytes: [u8; 8] = blob[97..SPK_BLOB_LEN]
             .try_into()
             .map_err(|_| SignedPreKeyError::InvalidData("timestamp slice".into()))?;
         Ok(Some(u64::from_be_bytes(ts_bytes)))
@@ -166,12 +176,14 @@ impl SignedPreKeyManager {
 
 /// Encodes a [`SignedPreKey`] into the on-disk format.
 ///
-/// Layout: `[secret(32) | signature(64) | created_at u64 big-endian (8)]` = 104 bytes.
+/// Layout: `[version(1) | secret(32) | signature(64) | created_at u64 big-endian (8)]`
+/// = 105 bytes.
 fn encode_spk(spk: &SignedPreKey) -> Zeroizing<[u8; SPK_BLOB_LEN]> {
     let mut buf = Zeroizing::new([0u8; SPK_BLOB_LEN]);
-    buf[..32].copy_from_slice(&*spk.to_secret_bytes());
-    buf[32..96].copy_from_slice(&spk.signature().to_bytes());
-    buf[96..SPK_BLOB_LEN].copy_from_slice(&spk.created_at().to_be_bytes());
+    buf[0] = SPK_VERSION;
+    buf[1..33].copy_from_slice(&*spk.to_secret_bytes());
+    buf[33..97].copy_from_slice(&spk.signature().to_bytes());
+    buf[97..SPK_BLOB_LEN].copy_from_slice(&spk.created_at().to_be_bytes());
     buf
 }
 
@@ -184,13 +196,19 @@ fn decode_spk(blob: &[u8]) -> Result<SignedPreKey, SignedPreKeyError> {
             blob.len()
         )));
     }
-    let secret: [u8; 32] = blob[..32]
+    if blob[0] != SPK_VERSION {
+        return Err(SignedPreKeyError::InvalidData(format!(
+            "unsupported SPK format version: {}",
+            blob[0]
+        )));
+    }
+    let secret: [u8; 32] = blob[1..33]
         .try_into()
         .map_err(|_| SignedPreKeyError::InvalidData("secret slice".into()))?;
-    let signature: [u8; 64] = blob[32..96]
+    let signature: [u8; 64] = blob[33..97]
         .try_into()
         .map_err(|_| SignedPreKeyError::InvalidData("signature slice".into()))?;
-    let ts_bytes: [u8; 8] = blob[96..SPK_BLOB_LEN]
+    let ts_bytes: [u8; 8] = blob[97..SPK_BLOB_LEN]
         .try_into()
         .map_err(|_| SignedPreKeyError::InvalidData("timestamp slice".into()))?;
     let created_at = u64::from_be_bytes(ts_bytes);
@@ -336,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_now_writes_exactly_104_bytes() {
+    fn rotate_now_writes_exactly_blob_len_bytes() {
         let mgr = manager_with_identity();
         // Pre-seed an arbitrary blob to confirm full overwrite (not append).
         mgr.storage
@@ -347,6 +365,30 @@ mod tests {
         mgr.rotate_now().unwrap();
         let stored = mgr.storage.lock().unwrap().load(SPK_KEY).unwrap().unwrap();
         assert_eq!(stored.len(), SPK_BLOB_LEN);
+        assert_eq!(stored[0], SPK_VERSION);
+    }
+
+    #[test]
+    fn decode_rejects_unsupported_version() {
+        // Well-formed length, but version byte = 99
+        let mut bad = [0u8; SPK_BLOB_LEN];
+        bad[0] = 99;
+        assert!(matches!(
+            decode_spk(&bad),
+            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
+        ));
+    }
+
+    #[test]
+    fn read_stored_timestamp_rejects_unsupported_version() {
+        let mgr = manager_with_identity();
+        let mut bad = [0u8; SPK_BLOB_LEN];
+        bad[0] = 99;
+        mgr.storage.lock().unwrap().store(SPK_KEY, &bad).unwrap();
+        assert!(matches!(
+            mgr.rotate_if_stale(),
+            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
+        ));
     }
 
     #[test]
