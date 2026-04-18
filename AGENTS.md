@@ -38,6 +38,13 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Module ordering: `use` declarations → types → traits → impls → functions
 - No `pub use` glob re-exports
 
+### Rustdoc
+
+- Document only what cannot be inferred from name, signature, variant types, or visibility
+- Document "why" decisions when not captured in a decision record; reference the DR when one exists
+- Match the brevity of sibling types in the same file as a baseline
+- Prefer deleting a doc over leaving a low-information one
+
 ### UniFFI
 
 - FFI-incompatible core types must be re-wrapped within the `hermes-uniffi` crate
