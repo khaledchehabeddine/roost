@@ -38,7 +38,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Module ordering: `use` declarations → types → traits → impls → functions
 - No `pub use` glob re-exports
 
-### Rustdoc
+### Rust Docs
 
 - Document only what cannot be inferred from name, signature, variant types, or visibility
 - Document "why" decisions when not captured in a decision record; reference the DR when one exists
