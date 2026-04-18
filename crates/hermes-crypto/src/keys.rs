@@ -53,11 +53,13 @@ impl SigningKeyPair {
     ///
     /// # Domain separation
     ///
-    /// The identity Ed25519 key signs the 32-byte X25519 public key of a
-    /// [`SignedPreKey`](crate::SignedPreKey) without a domain prefix. Callers MUST NOT
-    /// reuse this method to sign other 32-byte payloads with the identity key —
-    /// signatures would be confusable with SPK signatures. New 32-byte signing use cases
-    /// must prepend a unique domain string before calling this method.
+    /// All Hermes call sites that reuse an identity Ed25519 key for sub-key signing MUST
+    /// prepend a unique domain prefix before calling this method. Without prefixes,
+    /// signatures over identical-length payloads from different contexts are
+    /// indistinguishable — a classic signature-confusion break. The signed-prekey path
+    /// (see [`generate_signed_prekey`](crate::generate_signed_prekey)) uses
+    /// `b"hermes-spk-v1:"`. Future signing contexts must add their own prefix before
+    /// passing data to this method.
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)

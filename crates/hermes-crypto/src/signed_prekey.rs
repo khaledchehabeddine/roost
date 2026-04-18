@@ -6,6 +6,13 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::error::CryptoError;
 use crate::keys::SigningKeyPair;
 
+/// Domain separator prepended to the X25519 public key bytes before SPK signing/verifying.
+///
+/// Prevents signature confusion if the identity Ed25519 key is ever used to sign other
+/// 32-byte payloads. The version suffix (`v1`) lets a future format bump re-key the
+/// domain without ambiguity.
+const SPK_DOMAIN: &[u8] = b"hermes-spk-v1:";
+
 /// A signed prekey (SPK) — an X25519 keypair signed by an Ed25519 identity key.
 ///
 /// SPKs bridge forward secrecy between the long-lived identity key and the per-message
@@ -97,12 +104,15 @@ impl SignedPreKey {
 
 /// Generates a fresh signed prekey signed by the supplied identity key.
 ///
-/// Uses [`OsRng`] for the X25519 keypair and signs the public-key bytes with `identity`.
+/// Uses [`OsRng`] for the X25519 keypair. Signs `SPK_DOMAIN || public_key.as_bytes()` —
+/// the domain prefix prevents signature confusion with any other 32-byte payload that the
+/// identity key might sign in the future.
 #[must_use]
 pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> SignedPreKey {
     let secret_key = StaticSecret::random_from_rng(OsRng);
     let public_key = PublicKey::from(&secret_key);
-    let signature = identity.sign(public_key.as_bytes());
+    let payload = spk_signed_payload(&public_key);
+    let signature = identity.sign(&payload);
     SignedPreKey {
         secret_key,
         public_key,
@@ -113,15 +123,26 @@ pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> Sig
 
 /// Verifies that a [`PreKeyBundle`] was signed by the claimed identity key.
 ///
-/// Returns `Ok(())` if `bundle.signature` validates against `bundle.public_key.as_bytes()`
-/// using `peer_identity`. Returns [`CryptoError::SignatureInvalid`] otherwise.
+/// Returns `Ok(())` if `bundle.signature` validates against `SPK_DOMAIN ||
+/// bundle.public_key.as_bytes()` using `peer_identity`. Returns
+/// [`CryptoError::SignatureInvalid`] otherwise — including when a signature was produced
+/// over the bare public key bytes without the domain prefix.
 pub fn verify_bundle(
     bundle: &PreKeyBundle,
     peer_identity: &VerifyingKey,
 ) -> Result<(), CryptoError> {
+    let payload = spk_signed_payload(&bundle.public_key);
     peer_identity
-        .verify(bundle.public_key.as_bytes(), &bundle.signature)
+        .verify(&payload, &bundle.signature)
         .map_err(|_| CryptoError::SignatureInvalid)
+}
+
+/// Builds the domain-prefixed payload signed for an SPK: `SPK_DOMAIN || pubkey_bytes`.
+fn spk_signed_payload(public_key: &PublicKey) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(SPK_DOMAIN.len() + 32);
+    buf.extend_from_slice(SPK_DOMAIN);
+    buf.extend_from_slice(public_key.as_bytes());
+    buf
 }
 
 #[cfg(test)]
@@ -237,5 +258,25 @@ mod tests {
         );
         let bundle = restored.bundle();
         assert!(verify_bundle(&bundle, &identity.verifying).is_ok());
+    }
+
+    #[test]
+    fn signature_without_domain_prefix_fails_verification() {
+        // Regression guard for #57: a signature produced over the bare 32-byte X25519
+        // public key (i.e. without the SPK_DOMAIN prefix) must not validate. Otherwise an
+        // attacker who can convince the identity key to sign 32 raw bytes elsewhere could
+        // replay that signature as an SPK signature.
+        let identity = generate_signing_key_pair();
+        let kp = generate_key_pair();
+        let bare_signature = identity.sign(kp.public.as_bytes());
+        let bundle = PreKeyBundle {
+            public_key: kp.public,
+            signature: bare_signature,
+            created_at: FIXED_TS,
+        };
+        assert!(matches!(
+            verify_bundle(&bundle, &identity.verifying),
+            Err(CryptoError::SignatureInvalid)
+        ));
     }
 }

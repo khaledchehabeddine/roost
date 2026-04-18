@@ -103,10 +103,10 @@ impl Identity {
 
     /// Returns a reference to the Ed25519 signing key pair.
     ///
-    /// Used by sub-key derivations (e.g. signed prekeys) that need to sign with the
-    /// identity key. Holding the reference exposes [`SigningKeyPair::to_signing_bytes`] —
-    /// callers must treat the returned secret material as sensitive.
-    pub fn signing_key_pair(&self) -> &SigningKeyPair {
+    /// `pub(crate)` to limit secret-extraction surface — application code should sign
+    /// through [`Self::sign`] instead. Used internally by `SignedPreKeyManager` to derive
+    /// a domain-prefixed signature.
+    pub(crate) fn signing_key_pair(&self) -> &SigningKeyPair {
         &self.signing_key_pair
     }
 }

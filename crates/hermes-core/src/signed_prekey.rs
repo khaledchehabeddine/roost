@@ -17,7 +17,12 @@ pub const SPK_ROTATION_WINDOW_DAYS: u64 = 7;
 
 const SPK_KEY: &str = "prekey/signed";
 /// Current on-disk format version. Bump when the blob layout or signed payload changes.
-const SPK_VERSION: u8 = 1;
+///
+/// History:
+/// - `1`: initial layout, signature over bare 32-byte X25519 public key.
+/// - `2`: same byte layout, signature now over `b"hermes-spk-v1:" || public_key_bytes`
+///        (domain-separated to prevent signature confusion). Bumped in #57.
+const SPK_VERSION: u8 = 2;
 /// Layout: `[version(1) | secret(32) | sig(64) | created_at u64-be (8)]` = 105 bytes.
 const SPK_BLOB_LEN: usize = 1 + 32 + 64 + 8;
 const SECONDS_PER_DAY: u64 = 86_400;
