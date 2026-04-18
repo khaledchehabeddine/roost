@@ -1,16 +1,10 @@
+use crate::identity::{IdentityError, IdentityManager};
+use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
+use crate::storage::SecureStorage;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use crate::identity::{IdentityError, IdentityManager};
-use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
-use crate::storage::SecureStorage;
-
-/// Errors surfaced by [`KeyStore`] facade operations.
-///
-/// Wraps the per-sub-manager error types. Sub-manager methods called via their `Arc`
-/// handles return their own error types directly; this enum is only used by the
-/// cross-cutting methods on `KeyStore` itself.
 #[derive(Debug)]
 pub enum KeyStoreError {
     Identity(IdentityError),
@@ -47,13 +41,7 @@ impl From<SignedPreKeyError> for KeyStoreError {
     }
 }
 
-/// A single construction point for all key-managing types in `hermes-core`.
-///
-/// Owns one shared `Arc<Mutex<Box<dyn SecureStorage>>>` and vends Arc-wrapped sub-managers
-/// ([`IdentityManager`], [`SignedPreKeyManager`]). All sub-managers obtained from the same
-/// `KeyStore` see the same backing storage.
-///
-/// `KeyStore` itself is cheap to clone: it is a newtype around `Arc<KeyStoreInner>`.
+/// All sub-managers vended by the same `KeyStore` share one backing `SecureStorage`.
 #[derive(Clone)]
 pub struct KeyStore(Arc<KeyStoreInner>);
 
@@ -63,9 +51,6 @@ struct KeyStoreInner {
 }
 
 impl KeyStore {
-    /// Constructs a `KeyStore` over the given `SecureStorage` backend.
-    ///
-    /// The backend is wrapped in `Arc<Mutex<...>>` and shared across all sub-managers.
     pub fn new(storage: Box<dyn SecureStorage>) -> Self {
         let storage = Arc::new(Mutex::new(storage));
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
@@ -76,31 +61,22 @@ impl KeyStore {
         }))
     }
 
-    /// Returns a handle to the identity manager.
     pub fn identity(&self) -> Arc<IdentityManager> {
         Arc::clone(&self.0.identity)
     }
 
-    /// Returns a handle to the signed prekey manager.
     pub fn signed_prekey(&self) -> Arc<SignedPreKeyManager> {
         Arc::clone(&self.0.signed_prekey)
     }
 
-    /// Convenience: rotates the signed prekey if it is stale or missing.
-    ///
-    /// Equivalent to `self.signed_prekey().rotate_if_stale()` with the error type lifted
-    /// into [`KeyStoreError`]. Intended to be called once at app launch.
+    /// Call once at app launch.
     pub fn rotate_spk_if_stale(&self) -> Result<(), KeyStoreError> {
         self.0.signed_prekey.rotate_if_stale()?;
         Ok(())
     }
 
-    /// Imports an encrypted identity backup, then resets the signed prekey.
-    ///
-    /// This is the safe import path: it ensures any stale SPK signed by the previous
-    /// identity is cleared, so the next call to [`Self::rotate_spk_if_stale`] generates a
-    /// fresh SPK signed by the newly-imported identity. Applications should not import
-    /// the identity directly; doing so leaves an orphan SPK.
+    /// Use this rather than [`IdentityManager::import_encrypted_backup`] directly —
+    /// importing identity alone would orphan the SPK signed by the previous identity.
     pub fn import_encrypted_backup(
         &self,
         data: &[u8],
@@ -111,15 +87,8 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Wipes all key material from storage — signed prekey first, then identity.
-    ///
-    /// After this returns successfully, the device has no identity and no SPK; the next
-    /// launch behaves as a first launch. Used during logout flows.
-    ///
-    /// If the SPK delete succeeds but the identity delete fails, the partial state is
-    /// recoverable: callers can retry [`Self::wipe_all`], or the next
-    /// [`Self::rotate_spk_if_stale`] will regenerate the SPK against the still-present
-    /// identity.
+    /// Partial-failure safe: if SPK delete succeeds but identity delete fails, retrying
+    /// [`Self::wipe_all`] completes the wipe.
     pub fn wipe_all(&self) -> Result<(), KeyStoreError> {
         self.0.signed_prekey.reset()?;
         self.0.identity.reset()?;

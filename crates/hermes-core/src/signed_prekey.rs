@@ -9,38 +9,27 @@ use zeroize::Zeroizing;
 use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
 
-/// Default rotation window for signed prekeys, in days.
-///
-/// Aligned with the libsignal default. Rotation happens at app launch via
-/// [`SignedPreKeyManager::rotate_if_stale`] when the stored SPK is older than this.
+/// Aligned with the libsignal default.
 pub const SPK_ROTATION_WINDOW_DAYS: u64 = 7;
 
 const SPK_KEY: &str = "prekey/signed";
-/// Current on-disk format version. Bump when the blob layout or signed payload changes.
-///
 /// History:
-/// - `1`: initial layout, signature over bare 32-byte X25519 public key.
-/// - `2`: same byte layout, signature now over `b"hermes-spk-v1:" || public_key_bytes`
-///   (domain-separated to prevent signature confusion). Bumped in #57.
+/// - `1`: signature over bare X25519 public key.
+/// - `2`: signature over `b"hermes-spk-v1:" || public_key_bytes` (#57).
 const SPK_VERSION: u8 = 2;
-/// Layout: `[version(1) | secret(32) | sig(64) | created_at u64-be (8)]` = 105 bytes.
+/// `[version(1) | secret(32) | sig(64) | created_at u64-be (8)]`
 const SPK_BLOB_LEN: usize = 1 + 32 + 64 + 8;
 const SECONDS_PER_DAY: u64 = 86_400;
-/// Stored timestamps more than this far ahead of `now` are treated as corrupt and
-/// trigger immediate rotation. Defends against an attacker who briefly controls the
-/// system clock and writes a far-future SPK timestamp to freeze rotation.
+/// Defends against clock-manipulation that would otherwise freeze rotation forever.
 const MAX_FUTURE_SKEW_SECS: u64 = 30 * SECONDS_PER_DAY;
 
-/// Errors returned by [`SignedPreKeyManager`] operations.
 #[derive(Debug)]
 pub enum SignedPreKeyError {
     Storage(StorageError),
     Identity(IdentityError),
-    /// The stored SPK blob is malformed (wrong length, unparseable fields).
     InvalidData(String),
-    /// The system clock is set before the Unix epoch.
+    /// System clock is before the Unix epoch.
     Clock,
-    /// The internal storage lock was poisoned by a panicked thread.
     LockPoisoned,
 }
 
@@ -78,12 +67,8 @@ impl From<IdentityError> for SignedPreKeyError {
     }
 }
 
-/// Manages the per-device signed prekey: generation, persistence, and rotation.
-///
-/// Shares storage with the [`IdentityManager`] vended by the same [`crate::KeyStore`].
-/// Rotation is triggered explicitly via [`Self::rotate_if_stale`] (typically once at app
-/// launch); the read path ([`Self::current`], [`Self::current_bundle`]) does not touch
-/// the system clock.
+/// Read path does not touch the system clock — rotation is explicit via
+/// [`Self::rotate_if_stale`].
 pub struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
@@ -97,10 +82,7 @@ impl SignedPreKeyManager {
         SignedPreKeyManager { storage, identity }
     }
 
-    /// Returns the currently stored signed prekey.
-    ///
-    /// Returns [`SignedPreKeyError::InvalidData`] if no SPK is stored — call
-    /// [`Self::rotate_if_stale`] first at app launch to seed one.
+    /// Returns `InvalidData` if no SPK is stored — call [`Self::rotate_if_stale`] first.
     pub fn current(&self) -> Result<SignedPreKey, SignedPreKeyError> {
         let storage = self.lock_storage()?;
         let blob = storage
@@ -109,24 +91,17 @@ impl SignedPreKeyManager {
         decode_spk(&blob)
     }
 
-    /// Returns the public-form bundle for the currently stored signed prekey.
     pub fn current_bundle(&self) -> Result<PreKeyBundle, SignedPreKeyError> {
         Ok(self.current()?.bundle())
     }
 
-    /// Rotates the SPK if the stored issuance timestamp is older than
-    /// [`SPK_ROTATION_WINDOW_DAYS`] (or no SPK is stored at all).
-    ///
     /// Timestamp policy:
-    /// - Missing SPK → rotate (first launch).
-    /// - Timestamp more than [`MAX_FUTURE_SKEW_SECS`] ahead of now → rotate (treat as
-    ///   corrupt; defends against clock-manipulation attacks that would otherwise freeze
-    ///   rotation forever).
-    /// - Timestamp slightly ahead of now (small clock skew) → keep.
-    /// - Timestamp older than the rotation window → rotate.
+    /// - Missing → rotate.
+    /// - More than [`MAX_FUTURE_SKEW_SECS`] ahead of now → rotate.
+    /// - Slightly ahead of now → keep (small clock skew tolerance).
+    /// - Older than [`SPK_ROTATION_WINDOW_DAYS`] → rotate.
     ///
-    /// A blob with the wrong length surfaces [`SignedPreKeyError::InvalidData`] rather than
-    /// being silently replaced; the caller can decide whether to wipe and retry.
+    /// Wrong blob length or version surfaces `InvalidData` rather than silent overwrite.
     pub fn rotate_if_stale(&self) -> Result<(), SignedPreKeyError> {
         let now = now_secs()?;
         let needs_rotation = match self.read_stored_timestamp()? {
@@ -141,22 +116,14 @@ impl SignedPreKeyManager {
         Ok(())
     }
 
-    /// Deletes the stored signed prekey.
-    ///
-    /// Used by [`crate::KeyStore::wipe_all`] and [`crate::KeyStore::import_encrypted_backup`]
-    /// to clear SPK material when the signing identity is about to be replaced or wiped.
-    /// Safe to call when no SPK is stored — [`SecureStorage::delete`] is idempotent.
+    /// Idempotent.
     pub fn reset(&self) -> Result<(), SignedPreKeyError> {
         let mut storage = self.lock_storage()?;
         storage.delete(SPK_KEY)?;
         Ok(())
     }
 
-    /// Unconditionally rotates the SPK and writes the new blob to storage.
-    ///
-    /// Atomic relative to `SecureStorage::store`'s overwrite semantics: the new 104-byte
-    /// blob fully replaces the old entry in a single call — no `delete` precedes the
-    /// `store`, so there is no partial-write window.
+    /// Atomic via single [`SecureStorage::store`] call — no partial-write window.
     pub fn rotate_now(&self) -> Result<SignedPreKey, SignedPreKeyError> {
         let identity = self.identity.load_identity()?;
         let now = now_secs()?;
@@ -173,9 +140,7 @@ impl SignedPreKeyManager {
             .map_err(|_| SignedPreKeyError::LockPoisoned)
     }
 
-    /// Reads only the issuance timestamp out of the stored blob. Returns `Ok(None)` if no
-    /// SPK is stored. Surfaces [`SignedPreKeyError::InvalidData`] on a length or version
-    /// mismatch.
+    /// Fast-path: parses only the timestamp without reconstructing the X25519 secret.
     fn read_stored_timestamp(&self) -> Result<Option<u64>, SignedPreKeyError> {
         let storage = self.lock_storage()?;
         let blob = match storage.load(SPK_KEY)? {
@@ -202,10 +167,6 @@ impl SignedPreKeyManager {
     }
 }
 
-/// Encodes a [`SignedPreKey`] into the on-disk format.
-///
-/// Layout: `[version(1) | secret(32) | signature(64) | created_at u64 big-endian (8)]`
-/// = 105 bytes.
 fn encode_spk(spk: &SignedPreKey) -> Zeroizing<[u8; SPK_BLOB_LEN]> {
     let mut buf = Zeroizing::new([0u8; SPK_BLOB_LEN]);
     buf[0] = SPK_VERSION;
@@ -215,7 +176,6 @@ fn encode_spk(spk: &SignedPreKey) -> Zeroizing<[u8; SPK_BLOB_LEN]> {
     buf
 }
 
-/// Decodes the on-disk format back into a [`SignedPreKey`].
 fn decode_spk(blob: &[u8]) -> Result<SignedPreKey, SignedPreKeyError> {
     if blob.len() != SPK_BLOB_LEN {
         return Err(SignedPreKeyError::InvalidData(format!(

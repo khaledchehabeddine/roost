@@ -101,11 +101,8 @@ impl Identity {
         self.signing_key_pair.sign(message)
     }
 
-    /// Returns a reference to the Ed25519 signing key pair.
-    ///
-    /// `pub(crate)` to limit secret-extraction surface — application code should sign
-    /// through [`Self::sign`] instead. Used internally by `SignedPreKeyManager` to derive
-    /// a domain-prefixed signature.
+    /// Application code signs via [`Self::sign`]; this exposes the keypair to
+    /// crate-internal callers (SPK signing) only.
     pub(crate) fn signing_key_pair(&self) -> &SigningKeyPair {
         &self.signing_key_pair
     }
@@ -117,9 +114,8 @@ impl Identity {
 /// will be the iOS Keychain or Android Keystore; in tests use
 /// [`crate::InMemorySecureStorage`].
 ///
-/// Thread-safe: all methods take `&self` and synchronize internally. The storage handle is
-/// shared — sibling managers vended by the same [`crate::KeyStore`] hold clones of the
-/// same `Arc<Mutex<...>>` and share the same locked backend.
+/// Thread-safe; sibling managers vended by the same [`crate::KeyStore`] share this
+/// `Arc<Mutex<...>>` storage handle.
 pub struct IdentityManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
 }
@@ -263,11 +259,8 @@ impl IdentityManager {
         Ok(())
     }
 
-    /// Deletes both identity keys from storage.
-    ///
-    /// `pub(crate)` — applications must use [`crate::KeyStore::wipe_all`] instead, which
-    /// also clears dependent SPK material. Direct identity-only deletion would orphan
-    /// the signed prekey.
+    /// Applications must use [`crate::KeyStore::wipe_all`] — direct identity-only
+    /// deletion would orphan the SPK signed by this identity.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
         storage

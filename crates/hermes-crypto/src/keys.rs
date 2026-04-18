@@ -49,17 +49,11 @@ pub struct SigningKeyPair {
 }
 
 impl SigningKeyPair {
-    /// Signs `message` and returns the Ed25519 signature.
-    ///
     /// # Domain separation
     ///
-    /// All Hermes call sites that reuse an identity Ed25519 key for sub-key signing MUST
-    /// prepend a unique domain prefix before calling this method. Without prefixes,
-    /// signatures over identical-length payloads from different contexts are
-    /// indistinguishable — a classic signature-confusion break. The signed-prekey path
-    /// (see [`generate_signed_prekey`](crate::generate_signed_prekey)) uses
-    /// `b"hermes-spk-v1:"`. Future signing contexts must add their own prefix before
-    /// passing data to this method.
+    /// Sub-key signers MUST prepend a unique domain prefix before calling this method —
+    /// otherwise signatures from different contexts become confusable. SPK uses
+    /// `b"hermes-spk-v1:"` (see [`generate_signed_prekey`](crate::generate_signed_prekey)).
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)

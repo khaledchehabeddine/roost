@@ -17,11 +17,8 @@ pub struct Identity {
     pub verifying_key: Vec<u8>,
 }
 
-/// FFI-visible signed prekey bundle.
-///
-/// Contains the SPK public key (32 bytes), the Ed25519 signature over those bytes
-/// (64 bytes), and the issuance timestamp in Unix seconds. The owner's identity
-/// verifying key is NOT embedded — verifiers obtain it through other channels.
+/// `public_key` is 32 bytes, `signature` is 64 bytes. Identity verifying key is not
+/// embedded — verifiers obtain it through other channels.
 #[derive(uniffi::Record)]
 pub struct PreKeyBundle {
     pub public_key: Vec<u8>,
@@ -221,9 +218,7 @@ impl SecureStorage for InMemorySecureStorage {
     }
 }
 
-/// Manages the local Hermes identity over the FFI boundary.
-///
-/// Obtained via [`KeyStore::identity`] — this type has no standalone FFI constructor.
+/// Obtained via [`KeyStore::identity`] — no standalone FFI constructor.
 #[derive(uniffi::Object)]
 pub struct IdentityManager {
     inner: Arc<hermes_core::IdentityManager>,
@@ -258,11 +253,7 @@ impl IdentityManager {
     }
 }
 
-/// Single construction point for all key-managing types over the FFI boundary.
-///
-/// Owns one shared [`SecureStorage`] backend and vends sub-managers
-/// ([`IdentityManager`]) plus cross-cutting operations ([`Self::rotate_spk_if_stale`],
-/// [`Self::current_pre_key_bundle`]). Construct once at app launch and hold a reference.
+/// Construct once at app launch and hold a reference.
 #[derive(uniffi::Object)]
 pub struct KeyStore {
     inner: CoreKeyStore,
@@ -277,27 +268,22 @@ impl KeyStore {
         })
     }
 
-    /// Returns a handle to the identity manager.
     pub fn identity(&self) -> Arc<IdentityManager> {
         IdentityManager::from_inner(self.inner.identity())
     }
 
-    /// Rotates the signed prekey if it is stale or missing. Call once at app launch.
+    /// Call once at app launch.
     pub fn rotate_spk_if_stale(&self) -> Result<(), HermesError> {
         self.inner.rotate_spk_if_stale()?;
         Ok(())
     }
 
-    /// Returns the public-form bundle for the currently stored signed prekey.
     pub fn current_pre_key_bundle(&self) -> Result<PreKeyBundle, HermesError> {
         Ok(self.inner.signed_prekey().current_bundle()?.into())
     }
 
-    /// Imports an encrypted identity backup, then resets the signed prekey.
-    ///
-    /// The safe import path: replacing the identity also clears any SPK that was signed
-    /// by the previous identity, so the next call to [`Self::rotate_spk_if_stale`] will
-    /// generate a fresh SPK signed by the imported identity.
+    /// Use this rather than calling import on `IdentityManager` directly — that path
+    /// would orphan the SPK signed by the previous identity.
     pub fn import_encrypted_backup(
         &self,
         data: Vec<u8>,
@@ -308,7 +294,6 @@ impl KeyStore {
             .map_err(Into::into)
     }
 
-    /// Wipes all key material from storage. Used during logout.
     pub fn wipe_all(&self) -> Result<(), HermesError> {
         self.inner.wipe_all().map_err(Into::into)
     }
