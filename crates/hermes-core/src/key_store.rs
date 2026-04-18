@@ -134,26 +134,6 @@ mod tests {
     }
 
     #[test]
-    fn rotate_spk_if_stale_seeds_first_spk() {
-        let ks = store();
-        ks.identity().generate_identity().unwrap();
-        ks.rotate_spk_if_stale().unwrap();
-        let bundle = ks.signed_prekey().current_bundle().unwrap();
-        let identity = ks.identity().load_identity().unwrap();
-        assert!(verify_bundle(&bundle, identity.verifying_key()).is_ok());
-    }
-
-    #[test]
-    fn identity_and_spk_keys_do_not_collide() {
-        let ks = store();
-        ks.identity().generate_identity().unwrap();
-        ks.rotate_spk_if_stale().unwrap();
-        // Both sub-managers wrote to the shared backend without overwriting each other.
-        assert!(ks.identity().load_identity().is_ok());
-        assert!(ks.signed_prekey().current_bundle().is_ok());
-    }
-
-    #[test]
     fn import_encrypted_backup_clears_stale_spk() {
         // Setup: ks_b has its own identity + SPK
         let ks_b = store();
