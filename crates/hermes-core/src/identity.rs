@@ -10,7 +10,7 @@ use hermes_crypto::{
 };
 use std::error::Error;
 use std::fmt;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
 type KeyBytes = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
@@ -100,6 +100,15 @@ impl Identity {
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key_pair.sign(message)
     }
+
+    /// Returns a reference to the Ed25519 signing key pair.
+    ///
+    /// Used by sub-key derivations (e.g. signed prekeys) that need to sign with the
+    /// identity key. Holding the reference exposes [`SigningKeyPair::to_signing_bytes`] —
+    /// callers must treat the returned secret material as sensitive.
+    pub fn signing_key_pair(&self) -> &SigningKeyPair {
+        &self.signing_key_pair
+    }
 }
 
 /// Manages creation and retrieval of the local Hermes identity.
@@ -108,17 +117,16 @@ impl Identity {
 /// will be the iOS Keychain or Android Keystore; in tests use
 /// [`crate::InMemorySecureStorage`].
 ///
-/// Thread-safe: all methods take `&self` and synchronize internally. The storage backend is
-/// exclusively owned — it cannot be shared across instances.
+/// Thread-safe: all methods take `&self` and synchronize internally. The storage handle is
+/// shared — sibling managers vended by the same [`crate::KeyStore`] hold clones of the
+/// same `Arc<Mutex<...>>` and share the same locked backend.
 pub struct IdentityManager {
-    storage: Mutex<Box<dyn SecureStorage>>,
+    storage: Arc<Mutex<Box<dyn SecureStorage>>>,
 }
 
 impl IdentityManager {
-    pub fn new(storage: Box<dyn SecureStorage>) -> Self {
-        IdentityManager {
-            storage: Mutex::new(storage),
-        }
+    pub fn new(storage: Arc<Mutex<Box<dyn SecureStorage>>>) -> Self {
+        IdentityManager { storage }
     }
 
     /// Acquires the storage lock, mapping a poisoned mutex to [`IdentityError::LockPoisoned`].
@@ -314,7 +322,7 @@ mod tests {
     use crate::storage::InMemorySecureStorage;
 
     fn manager() -> IdentityManager {
-        IdentityManager::new(Box::new(InMemorySecureStorage::new()))
+        IdentityManager::new(Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new()))))
     }
 
     #[test]

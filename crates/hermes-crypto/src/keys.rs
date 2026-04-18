@@ -50,6 +50,14 @@ pub struct SigningKeyPair {
 
 impl SigningKeyPair {
     /// Signs `message` and returns the Ed25519 signature.
+    ///
+    /// # Domain separation
+    ///
+    /// The identity Ed25519 key signs the 32-byte X25519 public key of a
+    /// [`SignedPreKey`](crate::SignedPreKey) without a domain prefix. Callers MUST NOT
+    /// reuse this method to sign other 32-byte payloads with the identity key —
+    /// signatures would be confusable with SPK signatures. New 32-byte signing use cases
+    /// must prepend a unique domain string before calling this method.
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)

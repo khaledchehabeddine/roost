@@ -8,6 +8,7 @@ pub enum CryptoError {
     InvalidState(&'static str),
     MaxSkipExceeded,
     MaxSkippedKeysExceeded,
+    SignatureInvalid,
 }
 
 impl fmt::Display for CryptoError {
@@ -23,6 +24,7 @@ impl fmt::Display for CryptoError {
             Self::MaxSkippedKeysExceeded => {
                 write!(f, "cached skipped message keys total exceeds global limit")
             }
+            Self::SignatureInvalid => write!(f, "Ed25519 signature verification failed"),
         }
     }
 }

@@ -1,6 +1,10 @@
 uniffi::setup_scaffolding!("hermes");
 
-use hermes_core::{IdentityError, SecureStorage as CoreSecureStorage, StorageError};
+use hermes_core::{
+    IdentityError, KeyStore as CoreKeyStore, KeyStoreError, SecureStorage as CoreSecureStorage,
+    SignedPreKeyError, StorageError,
+};
+use hermes_crypto::PreKeyBundle as CorePreKeyBundle;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
@@ -11,6 +15,28 @@ pub struct Identity {
     pub public_key: Vec<u8>,
     /// Ed25519 verifying key bytes (32 bytes).
     pub verifying_key: Vec<u8>,
+}
+
+/// FFI-visible signed prekey bundle.
+///
+/// Contains the SPK public key (32 bytes), the Ed25519 signature over those bytes
+/// (64 bytes), and the issuance timestamp in Unix seconds. The owner's identity
+/// verifying key is NOT embedded — verifiers obtain it through other channels.
+#[derive(uniffi::Record)]
+pub struct PreKeyBundle {
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+    pub created_at: u64,
+}
+
+impl From<CorePreKeyBundle> for PreKeyBundle {
+    fn from(b: CorePreKeyBundle) -> Self {
+        PreKeyBundle {
+            public_key: b.public_key.as_bytes().to_vec(),
+            signature: b.signature.to_bytes().to_vec(),
+            created_at: b.created_at,
+        }
+    }
 }
 
 /// Errors surfaced across the FFI boundary.
@@ -70,9 +96,36 @@ impl From<StorageError> for HermesError {
     }
 }
 
+impl From<SignedPreKeyError> for HermesError {
+    fn from(e: SignedPreKeyError) -> Self {
+        match e {
+            SignedPreKeyError::Storage(e) => HermesError::Storage {
+                reason: e.to_string(),
+            },
+            SignedPreKeyError::Identity(e) => e.into(),
+            SignedPreKeyError::InvalidData(reason) => HermesError::InvalidData { reason },
+            SignedPreKeyError::Clock => HermesError::InternalError {
+                reason: "system clock is before Unix epoch".into(),
+            },
+            SignedPreKeyError::LockPoisoned => HermesError::InternalError {
+                reason: "internal lock poisoned".into(),
+            },
+        }
+    }
+}
+
+impl From<KeyStoreError> for HermesError {
+    fn from(e: KeyStoreError) -> Self {
+        match e {
+            KeyStoreError::Identity(e) => e.into(),
+            KeyStoreError::SignedPreKey(e) => e.into(),
+        }
+    }
+}
+
 /// Platform storage abstraction exposed to Swift and Kotlin.
 ///
-/// Implement this trait to provide [`IdentityManager`] with platform-specific secure storage
+/// Implement this trait to provide [`KeyStore`] with platform-specific secure storage
 /// (e.g., iOS Keychain, Android Keystore).
 ///
 /// `value` and `load` return bare `Vec<u8>` because UniFFI does not support `Zeroizing`.
@@ -168,21 +221,22 @@ impl SecureStorage for InMemorySecureStorage {
     }
 }
 
-/// Manages creation and retrieval of the local Hermes identity over the FFI boundary.
+/// Manages the local Hermes identity over the FFI boundary.
+///
+/// Obtained via [`KeyStore::identity`] — this type has no standalone FFI constructor.
 #[derive(uniffi::Object)]
 pub struct IdentityManager {
-    inner: hermes_core::IdentityManager,
+    inner: Arc<hermes_core::IdentityManager>,
+}
+
+impl IdentityManager {
+    fn from_inner(inner: Arc<hermes_core::IdentityManager>) -> Arc<Self> {
+        Arc::new(IdentityManager { inner })
+    }
 }
 
 #[uniffi::export]
 impl IdentityManager {
-    #[uniffi::constructor]
-    pub fn new(storage: Arc<dyn SecureStorage>) -> Self {
-        Self {
-            inner: hermes_core::IdentityManager::new(Box::new(SecureStorageAdapter { storage })),
-        }
-    }
-
     pub fn generate_identity(&self) -> Result<Identity, HermesError> {
         let id = self.inner.generate_identity()?;
         Ok(Identity {
@@ -209,5 +263,102 @@ impl IdentityManager {
         passphrase: String,
     ) -> Result<(), HermesError> {
         Ok(self.inner.import_encrypted_backup(&data, &passphrase)?)
+    }
+}
+
+/// Single construction point for all key-managing types over the FFI boundary.
+///
+/// Owns one shared [`SecureStorage`] backend and vends sub-managers
+/// ([`IdentityManager`]) plus cross-cutting operations ([`Self::rotate_spk_if_stale`],
+/// [`Self::current_pre_key_bundle`]). Construct once at app launch and hold a reference.
+#[derive(uniffi::Object)]
+pub struct KeyStore {
+    inner: CoreKeyStore,
+}
+
+#[uniffi::export]
+impl KeyStore {
+    #[uniffi::constructor]
+    pub fn new(storage: Arc<dyn SecureStorage>) -> Arc<Self> {
+        Arc::new(KeyStore {
+            inner: CoreKeyStore::new(Box::new(SecureStorageAdapter { storage })),
+        })
+    }
+
+    /// Returns a handle to the identity manager.
+    pub fn identity(&self) -> Arc<IdentityManager> {
+        IdentityManager::from_inner(self.inner.identity())
+    }
+
+    /// Rotates the signed prekey if it is stale or missing. Call once at app launch.
+    pub fn rotate_spk_if_stale(&self) -> Result<(), HermesError> {
+        self.inner.rotate_spk_if_stale()?;
+        Ok(())
+    }
+
+    /// Returns the public-form bundle for the currently stored signed prekey.
+    pub fn current_pre_key_bundle(&self) -> Result<PreKeyBundle, HermesError> {
+        Ok(self.inner.signed_prekey().current_bundle()?.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hermes_crypto::{PublicKey, Signature, VerifyingKey, verify_bundle};
+
+    fn key_store() -> Arc<KeyStore> {
+        let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+        KeyStore::new(storage)
+    }
+
+    #[test]
+    fn key_store_vends_identity_manager() {
+        let ks = key_store();
+        let id = ks.identity();
+        let generated = id.generate_identity().unwrap();
+        assert_eq!(generated.public_key.len(), 32);
+        assert_eq!(generated.verifying_key.len(), 32);
+    }
+
+    #[test]
+    fn key_store_full_roundtrip() {
+        let ks = key_store();
+        let id = ks.identity();
+        let identity = id.generate_identity().unwrap();
+        ks.rotate_spk_if_stale().unwrap();
+        let bundle = ks.current_pre_key_bundle().unwrap();
+        assert_eq!(bundle.public_key.len(), 32);
+        assert_eq!(bundle.signature.len(), 64);
+        assert!(bundle.created_at > 0);
+
+        // Verify the bundle round-trips through hermes_crypto::verify_bundle.
+        let verifying_bytes: [u8; 32] = identity.verifying_key.as_slice().try_into().unwrap();
+        let verifying = VerifyingKey::from_bytes(&verifying_bytes).unwrap();
+        let pk_bytes: [u8; 32] = bundle.public_key.as_slice().try_into().unwrap();
+        let sig_bytes: [u8; 64] = bundle.signature.as_slice().try_into().unwrap();
+        let core_bundle = hermes_crypto::PreKeyBundle {
+            public_key: PublicKey::from(pk_bytes),
+            signature: Signature::from_bytes(&sig_bytes),
+            created_at: bundle.created_at,
+        };
+        assert!(verify_bundle(&core_bundle, &verifying).is_ok());
+    }
+
+    #[test]
+    fn rotate_spk_without_identity_returns_error() {
+        let ks = key_store();
+        // No identity generated — rotation should fail with a NotFound-mapped error.
+        let result = ks.rotate_spk_if_stale();
+        assert!(matches!(result, Err(HermesError::NotFound)));
+    }
+
+    #[test]
+    fn current_pre_key_bundle_without_rotation_returns_invalid_data() {
+        let ks = key_store();
+        ks.identity().generate_identity().unwrap();
+        // Identity exists but no SPK has been rotated yet.
+        let result = ks.current_pre_key_bundle();
+        assert!(matches!(result, Err(HermesError::InvalidData { .. })));
     }
 }

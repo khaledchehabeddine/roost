@@ -3,6 +3,7 @@ target
 
 # Claude Code
 .claude/settings.local.json
+.claude/agent-memory/
 
 # Codex
 .codex/config.local.toml

@@ -17,5 +17,6 @@ path = "uniffi-bindgen-swift.rs"
 
 [dependencies]
 hermes-core = { path = "../hermes-core" }
+hermes-crypto = { path = "../hermes-crypto" }
 uniffi = { version = "0.31.0", features = ["cli"] }
 zeroize = "1.8.2"
