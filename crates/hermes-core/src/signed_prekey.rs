@@ -26,6 +26,10 @@ const SPK_VERSION: u8 = 2;
 /// Layout: `[version(1) | secret(32) | sig(64) | created_at u64-be (8)]` = 105 bytes.
 const SPK_BLOB_LEN: usize = 1 + 32 + 64 + 8;
 const SECONDS_PER_DAY: u64 = 86_400;
+/// Stored timestamps more than this far ahead of `now` are treated as corrupt and
+/// trigger immediate rotation. Defends against an attacker who briefly controls the
+/// system clock and writes a far-future SPK timestamp to freeze rotation.
+const MAX_FUTURE_SKEW_SECS: u64 = 30 * SECONDS_PER_DAY;
 
 /// Errors returned by [`SignedPreKeyManager`] operations.
 #[derive(Debug)]
@@ -113,13 +117,21 @@ impl SignedPreKeyManager {
     /// Rotates the SPK if the stored issuance timestamp is older than
     /// [`SPK_ROTATION_WINDOW_DAYS`] (or no SPK is stored at all).
     ///
-    /// A stored timestamp newer than `now` (clock skew) is treated as fresh — no rotation.
+    /// Timestamp policy:
+    /// - Missing SPK → rotate (first launch).
+    /// - Timestamp more than [`MAX_FUTURE_SKEW_SECS`] ahead of now → rotate (treat as
+    ///   corrupt; defends against clock-manipulation attacks that would otherwise freeze
+    ///   rotation forever).
+    /// - Timestamp slightly ahead of now (small clock skew) → keep.
+    /// - Timestamp older than the rotation window → rotate.
+    ///
     /// A blob with the wrong length surfaces [`SignedPreKeyError::InvalidData`] rather than
     /// being silently replaced; the caller can decide whether to wipe and retry.
     pub fn rotate_if_stale(&self) -> Result<(), SignedPreKeyError> {
         let now = now_secs()?;
         let needs_rotation = match self.read_stored_timestamp()? {
             None => true,
+            Some(ts) if ts > now.saturating_add(MAX_FUTURE_SKEW_SECS) => true,
             Some(ts) if ts > now => false,
             Some(ts) => now.saturating_sub(ts) > SPK_ROTATION_WINDOW_DAYS * SECONDS_PER_DAY,
         };
@@ -338,6 +350,23 @@ mod tests {
         mgr.rotate_if_stale().unwrap();
         let after = mgr.current_bundle().unwrap().public_key;
         assert_eq!(after.as_bytes(), future_spk.public().as_bytes());
+    }
+
+    #[test]
+    fn far_future_timestamp_triggers_rotation() {
+        // Regression guard for #58: a stored timestamp far in the future (e.g., from clock
+        // manipulation) must not freeze rotation. Backdoor a 100-day-ahead SPK and confirm
+        // rotate_if_stale replaces it.
+        let mgr = manager_with_identity();
+        let identity = mgr.identity.load_identity().unwrap();
+        let far_future_ts = now_secs().unwrap() + 100 * SECONDS_PER_DAY;
+        let bad_spk = generate_signed_prekey(identity.signing_key_pair(), far_future_ts);
+        let blob = encode_spk(&bad_spk);
+        mgr.storage.lock().unwrap().store(SPK_KEY, &*blob).unwrap();
+
+        mgr.rotate_if_stale().unwrap();
+        let after = mgr.current_bundle().unwrap().public_key;
+        assert_ne!(after.as_bytes(), bad_spk.public().as_bytes());
     }
 
     #[test]
