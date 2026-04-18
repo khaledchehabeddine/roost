@@ -294,8 +294,8 @@ impl KeyStore {
             .map_err(Into::into)
     }
 
-    pub fn wipe_all(&self) -> Result<(), HermesError> {
-        self.inner.wipe_all().map_err(Into::into)
+    pub fn reset(&self) -> Result<(), HermesError> {
+        self.inner.reset().map_err(Into::into)
     }
 }
 
@@ -381,12 +381,12 @@ mod tests {
     }
 
     #[test]
-    fn wipe_all_via_keystore_clears_state() {
+    fn reset_via_keystore_clears_state() {
         let ks = key_store();
         ks.identity().generate_identity().unwrap();
         ks.rotate_spk_if_stale().unwrap();
 
-        ks.wipe_all().unwrap();
+        ks.reset().unwrap();
 
         assert!(matches!(
             ks.identity().load_identity(),

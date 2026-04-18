@@ -41,7 +41,7 @@ impl From<SignedPreKeyError> for KeyStoreError {
     }
 }
 
-/// All sub-managers vended by the same `KeyStore` share one backing `SecureStorage`.
+/// All sub-managers vended by the same `KeyStore` share one `SecureStorage`.
 #[derive(Clone)]
 pub struct KeyStore(Arc<KeyStoreInner>);
 
@@ -75,21 +75,23 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Use this rather than [`IdentityManager::import_encrypted_backup`] directly —
-    /// importing identity alone would orphan the SPK signed by the previous identity.
+    /// Decrypt-then-commit: a bad passphrase fails before any storage mutation. A partial
+    /// failure of the commit (SPK reset succeeds, identity store fails) leaves
+    /// `{no SPK, old identity}` — self-consistent, repaired by the next `rotate_if_stale`.
     pub fn import_encrypted_backup(
         &self,
         data: &[u8],
         passphrase: &str,
     ) -> Result<(), KeyStoreError> {
-        self.0.identity.import_encrypted_backup(data, passphrase)?;
+        let plaintext = self.0.identity.decrypt_backup(data, passphrase)?;
         self.0.signed_prekey.reset()?;
+        self.0.identity.store_decrypted_identity(&plaintext)?;
         Ok(())
     }
 
-    /// Partial-failure safe: if SPK delete succeeds but identity delete fails, retrying
-    /// [`Self::wipe_all`] completes the wipe.
-    pub fn wipe_all(&self) -> Result<(), KeyStoreError> {
+    /// Partial-failure safe: if SPK reset succeeds but identity reset fails, retrying
+    /// [`Self::reset`] completes the reset.
+    pub fn reset(&self) -> Result<(), KeyStoreError> {
         self.0.signed_prekey.reset()?;
         self.0.identity.reset()?;
         Ok(())
@@ -107,12 +109,11 @@ mod tests {
     }
 
     #[test]
-    fn identity_round_trip_via_key_store() {
-        let ks = store();
-        let id = ks.identity();
-        let generated = id.generate_identity().unwrap();
-        let loaded = id.load_identity().unwrap();
-        assert_eq!(generated.public_key(), loaded.public_key());
+    fn key_store_clone_shares_storage() {
+        let ks_a = store();
+        let ks_b = ks_a.clone();
+        ks_a.identity().generate_identity().unwrap();
+        assert!(ks_b.identity().load_identity().is_ok());
     }
 
     #[test]
@@ -126,22 +127,20 @@ mod tests {
     }
 
     #[test]
-    fn key_store_clone_shares_storage() {
-        let ks_a = store();
-        let ks_b = ks_a.clone();
-        ks_a.identity().generate_identity().unwrap();
-        assert!(ks_b.identity().load_identity().is_ok());
+    fn sub_manager_writes_do_not_collide() {
+        let ks = store();
+        ks.identity().generate_identity().unwrap();
+        ks.rotate_spk_if_stale().unwrap();
+        assert!(ks.identity().load_identity().is_ok());
+        assert!(ks.signed_prekey().current_bundle().is_ok());
     }
 
     #[test]
     fn import_encrypted_backup_clears_stale_spk() {
-        // Setup: ks_b has its own identity + SPK
         let ks_b = store();
         ks_b.identity().generate_identity().unwrap();
         ks_b.rotate_spk_if_stale().unwrap();
-        assert!(ks_b.signed_prekey().current_bundle().is_ok());
 
-        // Setup: ks_a has a different identity, export its backup
         let ks_a = store();
         ks_a.identity().generate_identity().unwrap();
         let backup = ks_a.identity().export_encrypted_backup("pass").unwrap();
@@ -153,7 +152,6 @@ mod tests {
             Err(SignedPreKeyError::InvalidData(_))
         ));
 
-        // The imported identity is now active in ks_b
         let imported = ks_b.identity().load_identity().unwrap();
         let original = ks_a.identity().load_identity().unwrap();
         assert_eq!(
@@ -164,29 +162,49 @@ mod tests {
 
     #[test]
     fn import_then_rotate_yields_spk_signed_by_imported_identity() {
-        let ks_b = store();
-        ks_b.identity().generate_identity().unwrap();
-        ks_b.rotate_spk_if_stale().unwrap();
-
         let ks_a = store();
         ks_a.identity().generate_identity().unwrap();
-        let backup = ks_a.identity().export_encrypted_backup("pass").unwrap();
+        ks_a.rotate_spk_if_stale().unwrap();
 
-        ks_b.import_encrypted_backup(&backup, "pass").unwrap();
-        ks_b.rotate_spk_if_stale().unwrap();
+        let ks_b = store();
+        ks_b.identity().generate_identity().unwrap();
+        let backup = ks_b.identity().export_encrypted_backup("pass").unwrap();
 
-        let new_bundle = ks_b.signed_prekey().current_bundle().unwrap();
-        let imported = ks_b.identity().load_identity().unwrap();
+        ks_a.import_encrypted_backup(&backup, "pass").unwrap();
+        ks_a.rotate_spk_if_stale().unwrap();
+
+        let new_bundle = ks_a.signed_prekey().current_bundle().unwrap();
+        let imported = ks_a.identity().load_identity().unwrap();
         assert!(verify_bundle(&new_bundle, imported.verifying_key()).is_ok());
     }
 
     #[test]
-    fn wipe_all_clears_identity_and_spk() {
+    fn import_with_wrong_passphrase_does_not_disturb_existing_state() {
+        let ks_a = store();
+        ks_a.identity().generate_identity().unwrap();
+        ks_a.rotate_spk_if_stale().unwrap();
+        let original_id = ks_a.identity().load_identity().unwrap();
+        let original_spk = ks_a.signed_prekey().current_bundle().unwrap().public_key;
+
+        let ks_b = store();
+        ks_b.identity().generate_identity().unwrap();
+        let backup = ks_b.identity().export_encrypted_backup("right").unwrap();
+
+        assert!(ks_a.import_encrypted_backup(&backup, "wrong").is_err());
+
+        let id = ks_a.identity().load_identity().unwrap();
+        let spk = ks_a.signed_prekey().current_bundle().unwrap().public_key;
+        assert_eq!(original_id.public_key(), id.public_key());
+        assert_eq!(original_spk.as_bytes(), spk.as_bytes());
+    }
+
+    #[test]
+    fn reset_clears_identity_and_spk() {
         let ks = store();
         ks.identity().generate_identity().unwrap();
         ks.rotate_spk_if_stale().unwrap();
 
-        ks.wipe_all().unwrap();
+        ks.reset().unwrap();
 
         assert!(matches!(
             ks.identity().load_identity(),
@@ -199,10 +217,22 @@ mod tests {
     }
 
     #[test]
-    fn wipe_all_is_idempotent_on_empty_store() {
-        // Calling wipe_all twice (or on empty storage) must not error.
+    fn reset_returns_store_to_first_launch_state() {
         let ks = store();
-        ks.wipe_all().unwrap();
-        ks.wipe_all().unwrap();
+        ks.identity().generate_identity().unwrap();
+        ks.rotate_spk_if_stale().unwrap();
+
+        ks.reset().unwrap();
+
+        ks.identity().generate_identity().unwrap();
+        ks.rotate_spk_if_stale().unwrap();
+        assert!(ks.signed_prekey().current_bundle().is_ok());
+    }
+
+    #[test]
+    fn reset_on_empty_store_succeeds() {
+        let ks = store();
+        ks.reset().unwrap();
+        ks.reset().unwrap();
     }
 }

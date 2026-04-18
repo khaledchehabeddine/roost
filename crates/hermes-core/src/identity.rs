@@ -101,8 +101,8 @@ impl Identity {
         self.signing_key_pair.sign(message)
     }
 
-    /// Application code signs via [`Self::sign`]; this exposes the keypair to
-    /// crate-internal callers (SPK signing) only.
+    /// Application code signs via [`Self::sign`]; this exposes the keypair to crate-internal
+    /// callers (SPK signing) only.
     pub(crate) fn signing_key_pair(&self) -> &SigningKeyPair {
         &self.signing_key_pair
     }
@@ -113,9 +113,6 @@ impl Identity {
 /// Identities are persisted via a [`SecureStorage`] backend. On real devices this
 /// will be the iOS Keychain or Android Keystore; in tests use
 /// [`crate::InMemorySecureStorage`].
-///
-/// Thread-safe; sibling managers vended by the same [`crate::KeyStore`] share this
-/// `Arc<Mutex<...>>` storage handle.
 pub struct IdentityManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
 }
@@ -217,18 +214,16 @@ impl IdentityManager {
         Ok(backup)
     }
 
-    /// Imports an identity from an encrypted backup blob, overwriting any existing identity.
-    ///
-    /// Returns [`IdentityError::DecryptionFailed`] if the passphrase is wrong or the backup is
-    /// corrupt. Returns [`IdentityError::BackupFailed`] if the data is malformed.
-    pub fn import_encrypted_backup(
+    /// Decrypts a blob produced by [`Self::export_encrypted_backup`] into the raw
+    /// `[X25519 secret (32) | Ed25519 secret (32)]` plaintext.
+    pub(crate) fn decrypt_backup(
         &self,
         data: &[u8],
         passphrase: &str,
-    ) -> Result<(), IdentityError> {
+    ) -> Result<Zeroizing<[u8; 64]>, IdentityError> {
         // salt (16) + nonce (24) + ciphertext (64) + Poly1305 tag (16) = 120 bytes
         if data.len() != SALT_LEN + NONCE_LEN + 64 + 16 {
-            return Err(IdentityError::BackupFailed("invalid backup length".into()));
+            return Err(IdentityError::InvalidData("invalid backup length".into()));
         }
 
         let (salt, remainder) = data.split_at(SALT_LEN);
@@ -245,9 +240,16 @@ impl IdentityManager {
         );
         let plaintext = Zeroizing::new(
             <[u8; 64]>::try_from(plaintext_vec.as_slice())
-                .map_err(|_| IdentityError::BackupFailed("unexpected plaintext length".into()))?,
+                .map_err(|_| IdentityError::InvalidData("unexpected plaintext length".into()))?,
         );
+        Ok(plaintext)
+    }
 
+    /// Plaintext layout: `[X25519 secret (32) | Ed25519 secret (32)]`.
+    pub(crate) fn store_decrypted_identity(
+        &self,
+        plaintext: &[u8; 64],
+    ) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
         storage
             .store(IDENTITY_X25519_KEY, &plaintext[..32])
@@ -255,12 +257,11 @@ impl IdentityManager {
         storage
             .store(IDENTITY_ED25519_KEY, &plaintext[32..])
             .map_err(log_storage_err)?;
-
         Ok(())
     }
 
-    /// Applications must use [`crate::KeyStore::wipe_all`] — direct identity-only
-    /// deletion would orphan the SPK signed by this identity.
+    /// Applications must use [`crate::KeyStore::reset`] — direct identity-only deletion would
+    /// orphan the SPK signed by this identity.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
         storage
@@ -420,8 +421,8 @@ mod tests {
         let backup = m.export_encrypted_backup("correct-passphrase").unwrap();
 
         let m2 = manager();
-        m2.import_encrypted_backup(&backup, "correct-passphrase")
-            .unwrap();
+        let plaintext = m2.decrypt_backup(&backup, "correct-passphrase").unwrap();
+        m2.store_decrypted_identity(&plaintext).unwrap();
         let restored = m2.load_identity().unwrap();
 
         assert_eq!(original.public_key(), restored.public_key());
@@ -432,28 +433,28 @@ mod tests {
     }
 
     #[test]
-    fn import_with_wrong_passphrase_returns_decryption_failed() {
+    fn decrypt_backup_with_wrong_passphrase_returns_decryption_failed() {
         let m = manager();
         m.generate_identity().unwrap();
         let backup = m.export_encrypted_backup("correct-passphrase").unwrap();
 
         let m2 = manager();
         assert!(matches!(
-            m2.import_encrypted_backup(&backup, "wrong-passphrase"),
+            m2.decrypt_backup(&backup, "wrong-passphrase"),
             Err(IdentityError::DecryptionFailed)
         ));
     }
 
     #[test]
-    fn import_wrong_length_returns_backup_failed() {
+    fn decrypt_backup_rejects_invalid_length() {
         let m = manager();
         assert!(matches!(
-            m.import_encrypted_backup(&[0u8; 10], "passphrase"),
-            Err(IdentityError::BackupFailed(_))
+            m.decrypt_backup(&[0u8; 10], "passphrase"),
+            Err(IdentityError::InvalidData(_))
         ));
         assert!(matches!(
-            m.import_encrypted_backup(&[0u8; 121], "passphrase"),
-            Err(IdentityError::BackupFailed(_))
+            m.decrypt_backup(&[0u8; 121], "passphrase"),
+            Err(IdentityError::InvalidData(_))
         ));
     }
 

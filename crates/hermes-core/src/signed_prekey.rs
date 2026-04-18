@@ -116,8 +116,8 @@ impl SignedPreKeyManager {
         Ok(())
     }
 
-    /// Idempotent.
-    pub fn reset(&self) -> Result<(), SignedPreKeyError> {
+    /// Applications should use [`crate::KeyStore::reset`] — it clears identity and SPK together.
+    pub(crate) fn reset(&self) -> Result<(), SignedPreKeyError> {
         let mut storage = self.lock_storage()?;
         storage.delete(SPK_KEY)?;
         Ok(())
