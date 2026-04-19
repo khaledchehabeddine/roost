@@ -110,8 +110,7 @@ impl SignedPreKeyManager {
     /// Applications should use [`crate::KeyStore::reset`] — it clears identity and SPK together.
     pub(crate) fn reset(&self) -> Result<(), SignedPreKeyError> {
         let mut storage = self.lock_storage()?;
-        storage.delete(SPK_KEY)?;
-        Ok(())
+        Ok(storage.delete(SPK_KEY)?)
     }
 
     /// Atomic via a single [`SecureStorage::store`] call — no partial-write window.
@@ -165,10 +164,7 @@ fn decode_spk(blob: &[u8; SPK_BLOB_LEN]) -> SignedPreKey {
 
 fn checked_blob(raw: &[u8]) -> Result<&[u8; SPK_BLOB_LEN], SignedPreKeyError> {
     let blob: &[u8; SPK_BLOB_LEN] = raw.try_into().map_err(|_| {
-        SignedPreKeyError::InvalidData(format!(
-            "expected {SPK_BLOB_LEN} bytes, got {}",
-            raw.len()
-        ))
+        SignedPreKeyError::InvalidData(format!("expected {SPK_BLOB_LEN} bytes, got {}", raw.len()))
     })?;
     if blob[0] != SPK_VERSION {
         return Err(SignedPreKeyError::InvalidData(format!(

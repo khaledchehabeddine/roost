@@ -71,8 +71,7 @@ impl KeyStore {
 
     /// Call once at app launch.
     pub fn rotate_spk_if_stale(&self) -> Result<(), KeyStoreError> {
-        self.0.signed_prekey.rotate_if_stale()?;
-        Ok(())
+        Ok(self.0.signed_prekey.rotate_if_stale()?)
     }
 
     /// Decrypt-then-commit: a bad passphrase fails before any storage mutation. A partial
