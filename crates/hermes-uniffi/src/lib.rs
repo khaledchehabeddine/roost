@@ -18,7 +18,7 @@ pub struct Identity {
 }
 
 /// `public_key` is 32 bytes, `signature` is 64 bytes. Identity verifying key is not
-/// embedded — verifiers obtain it through other channels.
+/// embedded — verifiers get it through other channels.
 #[derive(uniffi::Record)]
 pub struct PreKeyBundle {
     pub public_key: Vec<u8>,
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn key_store_full_roundtrip() {
+    fn key_store_full_round_trip() {
         let ks = key_store();
         let id = ks.identity();
         let identity = id.generate_identity().unwrap();
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn rotate_spk_without_identity_returns_error() {
         let ks = key_store();
-        // No identity generated — rotation should fail with a NotFound-mapped error.
+        // No identity-generated — rotation should fail with a NotFound-mapped error.
         let result = ks.rotate_spk_if_stale();
         assert!(matches!(result, Err(HermesError::NotFound)));
     }
@@ -354,7 +354,7 @@ mod tests {
     fn current_pre_key_bundle_without_rotation_returns_invalid_data() {
         let ks = key_store();
         ks.identity().generate_identity().unwrap();
-        // Identity exists but no SPK has been rotated yet.
+        // Identity exists, but no SPK has been rotated yet.
         let result = ks.current_pre_key_bundle();
         assert!(matches!(result, Err(HermesError::InvalidData { .. })));
     }

@@ -49,11 +49,6 @@ pub struct SigningKeyPair {
 }
 
 impl SigningKeyPair {
-    /// # Domain separation
-    ///
-    /// Sub-key signers MUST prepend a unique domain prefix before calling this method —
-    /// otherwise signatures from different contexts become confusable. SPK uses
-    /// `b"hermes-spk-v1:"` (see [`generate_signed_prekey`](crate::generate_signed_prekey)).
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)
@@ -94,6 +89,10 @@ pub fn generate_signing_key_pair() -> SigningKeyPair {
 mod tests {
     use super::*;
     use ed25519_dalek::Verifier;
+
+    fn hex(s: &str) -> Vec<u8> {
+        hex::decode(s).unwrap()
+    }
 
     // --- RFC 7748 §6.1: X25519 test vector ---
     // https://www.rfc-editor.org/rfc/rfc7748#section-6.1
@@ -250,9 +249,5 @@ mod tests {
         let kp = generate_signing_key_pair();
         let restored = SigningKeyPair::from_signing_bytes(*kp.to_signing_bytes());
         assert_eq!(kp.verifying.as_bytes(), restored.verifying.as_bytes());
-    }
-
-    fn hex(s: &str) -> Vec<u8> {
-        hex::decode(s).unwrap()
     }
 }

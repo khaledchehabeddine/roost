@@ -1,46 +1,39 @@
+use crate::identity::{IdentityError, IdentityManager};
+use crate::storage::{SecureStorage, StorageError};
+use hermes_crypto::{PreKeyBundle, SignedPreKey, generate_signed_prekey};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-use hermes_crypto::{PreKeyBundle, SignedPreKey, generate_signed_prekey};
 use zeroize::Zeroizing;
 
-use crate::identity::{IdentityError, IdentityManager};
-use crate::storage::{SecureStorage, StorageError};
-
-/// Aligned with the libsignal default.
 pub const SPK_ROTATION_WINDOW_DAYS: u64 = 7;
 
 const SPK_KEY: &str = "prekey/signed";
-/// History:
-/// - `1`: signature over bare X25519 public key.
-/// - `2`: signature over `b"hermes-spk-v1:" || public_key_bytes` (#57).
-const SPK_VERSION: u8 = 2;
-/// `[version(1) | secret(32) | sig(64) | created_at u64-be (8)]`
+const SPK_VERSION: u8 = 1;
+/// `[version(1) | secret(32) | signature(64) | created_at(8)]`
 const SPK_BLOB_LEN: usize = 1 + 32 + 64 + 8;
 const SECONDS_PER_DAY: u64 = 86_400;
 /// Defends against clock-manipulation that would otherwise freeze rotation forever.
-const MAX_FUTURE_SKEW_SECS: u64 = 30 * SECONDS_PER_DAY;
+const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
 
 #[derive(Debug)]
 pub enum SignedPreKeyError {
-    Storage(StorageError),
+    Clock,
     Identity(IdentityError),
     InvalidData(String),
-    /// System clock is before the Unix epoch.
-    Clock,
     LockPoisoned,
+    Storage(StorageError),
 }
 
 impl fmt::Display for SignedPreKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SignedPreKeyError::Storage(e) => write!(f, "storage: {e}"),
+            SignedPreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
             SignedPreKeyError::Identity(e) => write!(f, "identity: {e}"),
             SignedPreKeyError::InvalidData(reason) => write!(f, "invalid SPK data: {reason}"),
-            SignedPreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
             SignedPreKeyError::LockPoisoned => write!(f, "internal lock poisoned"),
+            SignedPreKeyError::Storage(e) => write!(f, "storage: {e}"),
         }
     }
 }
@@ -48,16 +41,10 @@ impl fmt::Display for SignedPreKeyError {
 impl Error for SignedPreKeyError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            SignedPreKeyError::Storage(e) => Some(e),
             SignedPreKeyError::Identity(e) => Some(e),
+            SignedPreKeyError::Storage(e) => Some(e),
             _ => None,
         }
-    }
-}
-
-impl From<StorageError> for SignedPreKeyError {
-    fn from(e: StorageError) -> Self {
-        SignedPreKeyError::Storage(e)
     }
 }
 
@@ -67,8 +54,12 @@ impl From<IdentityError> for SignedPreKeyError {
     }
 }
 
-/// Read path does not touch the system clock — rotation is explicit via
-/// [`Self::rotate_if_stale`].
+impl From<StorageError> for SignedPreKeyError {
+    fn from(e: StorageError) -> Self {
+        SignedPreKeyError::Storage(e)
+    }
+}
+
 pub struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
@@ -85,10 +76,10 @@ impl SignedPreKeyManager {
     /// Returns `InvalidData` if no SPK is stored — call [`Self::rotate_if_stale`] first.
     pub fn current(&self) -> Result<SignedPreKey, SignedPreKeyError> {
         let storage = self.lock_storage()?;
-        let blob = storage
+        let raw = storage
             .load(SPK_KEY)?
             .ok_or_else(|| SignedPreKeyError::InvalidData("no signed prekey present".into()))?;
-        decode_spk(&blob)
+        Ok(decode_spk(checked_blob(&raw)?))
     }
 
     pub fn current_bundle(&self) -> Result<PreKeyBundle, SignedPreKeyError> {
@@ -97,18 +88,18 @@ impl SignedPreKeyManager {
 
     /// Timestamp policy:
     /// - Missing → rotate.
-    /// - More than [`MAX_FUTURE_SKEW_SECS`] ahead of now → rotate.
+    /// - More than [`FUTURE_TIMESTAMP_TOLERANCE_SECS`] ahead of now → rotate.
     /// - Slightly ahead of now → keep (small clock skew tolerance).
     /// - Older than [`SPK_ROTATION_WINDOW_DAYS`] → rotate.
     ///
-    /// Wrong blob length or version surfaces `InvalidData` rather than silent overwrite.
+    /// Wrong blob length or version surfaces `InvalidData` rather than silently overwrite.
     pub fn rotate_if_stale(&self) -> Result<(), SignedPreKeyError> {
         let now = now_secs()?;
-        let needs_rotation = match self.read_stored_timestamp()? {
+        let needs_rotation = match self.read_stored_created_at()? {
             None => true,
-            Some(ts) if ts > now.saturating_add(MAX_FUTURE_SKEW_SECS) => true,
+            Some(ts) if ts > now + FUTURE_TIMESTAMP_TOLERANCE_SECS => true,
             Some(ts) if ts > now => false,
-            Some(ts) => now.saturating_sub(ts) > SPK_ROTATION_WINDOW_DAYS * SECONDS_PER_DAY,
+            Some(ts) => now - ts > SPK_ROTATION_WINDOW_DAYS * SECONDS_PER_DAY,
         };
         if needs_rotation {
             self.rotate_now()?;
@@ -123,7 +114,7 @@ impl SignedPreKeyManager {
         Ok(())
     }
 
-    /// Atomic via single [`SecureStorage::store`] call — no partial-write window.
+    /// Atomic via a single [`SecureStorage::store`] call — no partial-write window.
     pub fn rotate_now(&self) -> Result<SignedPreKey, SignedPreKeyError> {
         let identity = self.identity.load_identity()?;
         let now = now_secs()?;
@@ -134,36 +125,21 @@ impl SignedPreKeyManager {
         Ok(spk)
     }
 
+    fn read_stored_created_at(&self) -> Result<Option<u64>, SignedPreKeyError> {
+        let storage = self.lock_storage()?;
+        let Some(raw) = storage.load(SPK_KEY)? else {
+            return Ok(None);
+        };
+        let blob = checked_blob(&raw)?;
+        let mut ts_bytes = [0u8; 8];
+        ts_bytes.copy_from_slice(&blob[97..SPK_BLOB_LEN]);
+        Ok(Some(u64::from_be_bytes(ts_bytes)))
+    }
+
     fn lock_storage(&self) -> Result<MutexGuard<'_, Box<dyn SecureStorage>>, SignedPreKeyError> {
         self.storage
             .lock()
             .map_err(|_| SignedPreKeyError::LockPoisoned)
-    }
-
-    /// Fast-path: parses only the timestamp without reconstructing the X25519 secret.
-    fn read_stored_timestamp(&self) -> Result<Option<u64>, SignedPreKeyError> {
-        let storage = self.lock_storage()?;
-        let blob = match storage.load(SPK_KEY)? {
-            Some(b) => b,
-            None => return Ok(None),
-        };
-        if blob.len() != SPK_BLOB_LEN {
-            return Err(SignedPreKeyError::InvalidData(format!(
-                "expected {} bytes, got {}",
-                SPK_BLOB_LEN,
-                blob.len()
-            )));
-        }
-        if blob[0] != SPK_VERSION {
-            return Err(SignedPreKeyError::InvalidData(format!(
-                "unsupported SPK format version: {}",
-                blob[0]
-            )));
-        }
-        let ts_bytes: [u8; 8] = blob[97..SPK_BLOB_LEN]
-            .try_into()
-            .map_err(|_| SignedPreKeyError::InvalidData("timestamp slice".into()))?;
-        Ok(Some(u64::from_be_bytes(ts_bytes)))
     }
 }
 
@@ -176,33 +152,31 @@ fn encode_spk(spk: &SignedPreKey) -> Zeroizing<[u8; SPK_BLOB_LEN]> {
     buf
 }
 
-fn decode_spk(blob: &[u8]) -> Result<SignedPreKey, SignedPreKeyError> {
-    if blob.len() != SPK_BLOB_LEN {
-        return Err(SignedPreKeyError::InvalidData(format!(
-            "expected {} bytes, got {}",
-            SPK_BLOB_LEN,
-            blob.len()
-        )));
-    }
+fn decode_spk(blob: &[u8; SPK_BLOB_LEN]) -> SignedPreKey {
+    let mut secret = [0u8; 32];
+    secret.copy_from_slice(&blob[1..33]);
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&blob[33..97]);
+    let mut ts_bytes = [0u8; 8];
+    ts_bytes.copy_from_slice(&blob[97..SPK_BLOB_LEN]);
+    let created_at = u64::from_be_bytes(ts_bytes);
+    SignedPreKey::from_secret_bytes(secret, signature, created_at)
+}
+
+fn checked_blob(raw: &[u8]) -> Result<&[u8; SPK_BLOB_LEN], SignedPreKeyError> {
+    let blob: &[u8; SPK_BLOB_LEN] = raw.try_into().map_err(|_| {
+        SignedPreKeyError::InvalidData(format!(
+            "expected {SPK_BLOB_LEN} bytes, got {}",
+            raw.len()
+        ))
+    })?;
     if blob[0] != SPK_VERSION {
         return Err(SignedPreKeyError::InvalidData(format!(
             "unsupported SPK format version: {}",
             blob[0]
         )));
     }
-    let secret: [u8; 32] = blob[1..33]
-        .try_into()
-        .map_err(|_| SignedPreKeyError::InvalidData("secret slice".into()))?;
-    let signature: [u8; 64] = blob[33..97]
-        .try_into()
-        .map_err(|_| SignedPreKeyError::InvalidData("signature slice".into()))?;
-    let ts_bytes: [u8; 8] = blob[97..SPK_BLOB_LEN]
-        .try_into()
-        .map_err(|_| SignedPreKeyError::InvalidData("timestamp slice".into()))?;
-    let created_at = u64::from_be_bytes(ts_bytes);
-    Ok(SignedPreKey::from_secret_bytes(
-        secret, signature, created_at,
-    ))
+    Ok(blob)
 }
 
 fn now_secs() -> Result<u64, SignedPreKeyError> {
@@ -236,12 +210,188 @@ mod tests {
     }
 
     #[test]
+    fn current_without_stored_spk_returns_invalid_data() {
+        let manager = manager_with_identity();
+        assert!(matches!(
+            manager.current(),
+            Err(SignedPreKeyError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn current_returns_invalid_data_for_corrupt_blob() {
+        let manager = manager_with_identity();
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SPK_KEY, &[0xAAu8; 50])
+            .unwrap();
+        assert!(matches!(
+            manager.current(),
+            Err(SignedPreKeyError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn current_bundle_does_not_require_identity() {
+        let manager = manager_no_identity();
+        let identity_signing = generate_signing_key_pair();
+        let spk = generate_signed_prekey(&identity_signing, 1_700_000_000);
+        let blob = encode_spk(&spk);
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SPK_KEY, &*blob)
+            .unwrap();
+
+        let bundle = manager.current_bundle().unwrap();
+        assert_eq!(bundle.public_key.as_bytes(), spk.public().as_bytes());
+    }
+
+    #[test]
+    fn rotate_if_stale_seeds_first_spk() {
+        let manager = manager_with_identity();
+        manager.rotate_if_stale().unwrap();
+        let bundle = manager.current_bundle().unwrap();
+        let identity = manager.identity.load_identity().unwrap();
+        assert!(verify_bundle(&bundle, identity.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn rotate_if_stale_keeps_fresh_spk() {
+        let manager = manager_with_identity();
+        manager.rotate_if_stale().unwrap();
+        let first = manager.current_bundle().unwrap().public_key;
+        manager.rotate_if_stale().unwrap();
+        let second = manager.current_bundle().unwrap().public_key;
+        assert_eq!(first.as_bytes(), second.as_bytes());
+    }
+
+    #[test]
+    fn rotate_if_stale_replaces_backdated_spk() {
+        let manager = manager_with_identity();
+        manager.rotate_if_stale().unwrap();
+        let original_pk = manager.current_bundle().unwrap().public_key;
+
+        let identity = manager.identity.load_identity().unwrap();
+        let backdated_ts = now_secs().unwrap() - (SPK_ROTATION_WINDOW_DAYS + 1) * SECONDS_PER_DAY;
+        let stale = generate_signed_prekey(identity.signing_key_pair(), backdated_ts);
+        let blob = encode_spk(&stale);
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SPK_KEY, &*blob)
+            .unwrap();
+
+        manager.rotate_if_stale().unwrap();
+        let rotated_pk = manager.current_bundle().unwrap().public_key;
+        assert_ne!(rotated_pk.as_bytes(), stale.public().as_bytes());
+        assert_ne!(rotated_pk.as_bytes(), original_pk.as_bytes());
+    }
+
+    #[test]
+    fn future_created_at_does_not_rotate() {
+        let manager = manager_with_identity();
+        let identity = manager.identity.load_identity().unwrap();
+        let timestamp = now_secs().unwrap() + 100_000;
+        let spk = generate_signed_prekey(identity.signing_key_pair(), timestamp);
+        let blob = encode_spk(&spk);
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SPK_KEY, &*blob)
+            .unwrap();
+
+        manager.rotate_if_stale().unwrap();
+        let public_key = manager.current_bundle().unwrap().public_key;
+        assert_eq!(public_key.as_bytes(), spk.public().as_bytes());
+    }
+
+    #[test]
+    fn far_future_created_at_triggers_rotation() {
+        let manager = manager_with_identity();
+        let identity = manager.identity.load_identity().unwrap();
+        let timestamp = now_secs().unwrap() + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10;
+        let spk = generate_signed_prekey(identity.signing_key_pair(), timestamp);
+        let blob = encode_spk(&spk);
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SPK_KEY, &*blob)
+            .unwrap();
+
+        manager.rotate_if_stale().unwrap();
+        let public_key = manager.current_bundle().unwrap().public_key;
+        assert_ne!(public_key.as_bytes(), spk.public().as_bytes());
+    }
+
+    #[test]
+    fn rotate_if_stale_rejects_unsupported_version() {
+        let manager = manager_with_identity();
+        let mut blob = [0u8; SPK_BLOB_LEN];
+        blob[0] = 99;
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SPK_KEY, &blob)
+            .unwrap();
+        assert!(matches!(
+            manager.rotate_if_stale(),
+            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
+        ));
+    }
+
+    #[test]
+    fn rotate_if_stale_without_identity_returns_identity_error() {
+        let manager = manager_no_identity();
+        assert!(matches!(
+            manager.rotate_if_stale(),
+            Err(SignedPreKeyError::Identity(IdentityError::NotFound))
+        ));
+    }
+
+    #[test]
+    fn rotate_now_writes_exactly_blob_len_bytes() {
+        let manager = manager_with_identity();
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SPK_KEY, &[0xFFu8; 50])
+            .unwrap();
+        manager.rotate_now().unwrap();
+        let stored = manager
+            .storage
+            .lock()
+            .unwrap()
+            .load(SPK_KEY)
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.len(), SPK_BLOB_LEN);
+    }
+
+    #[test]
+    fn rotate_now_without_identity_returns_identity_error() {
+        let manager = manager_no_identity();
+        assert!(matches!(
+            manager.rotate_now(),
+            Err(SignedPreKeyError::Identity(IdentityError::NotFound))
+        ));
+    }
+
+    #[test]
     fn encode_decode_round_trip() {
         let identity_signing = generate_signing_key_pair();
         let original = generate_signed_prekey(&identity_signing, 1_700_000_000);
         let blob = encode_spk(&original);
         assert_eq!(blob.len(), SPK_BLOB_LEN);
-        let restored = decode_spk(&*blob).unwrap();
+        let restored = decode_spk(&blob);
         assert_eq!(restored.public().as_bytes(), original.public().as_bytes());
         assert_eq!(
             restored.signature().to_bytes(),
@@ -251,147 +401,27 @@ mod tests {
     }
 
     #[test]
-    fn decode_rejects_short_blob() {
-        let result = decode_spk(&[0u8; 50]);
-        assert!(matches!(result, Err(SignedPreKeyError::InvalidData(_))));
-    }
-
-    #[test]
-    fn decode_rejects_long_blob() {
-        let result = decode_spk(&[0u8; 200]);
-        assert!(matches!(result, Err(SignedPreKeyError::InvalidData(_))));
-    }
-
-    #[test]
-    fn current_without_stored_spk_returns_invalid_data() {
-        let mgr = manager_with_identity();
+    fn checked_blob_rejects_short_blob() {
         assert!(matches!(
-            mgr.current(),
+            checked_blob(&[0u8; 50]),
             Err(SignedPreKeyError::InvalidData(_))
         ));
     }
 
     #[test]
-    fn rotate_if_stale_seeds_first_spk() {
-        let mgr = manager_with_identity();
-        mgr.rotate_if_stale().unwrap();
-        let bundle = mgr.current_bundle().unwrap();
-        let identity = mgr.identity.load_identity().unwrap();
-        assert!(verify_bundle(&bundle, identity.verifying_key()).is_ok());
-    }
-
-    #[test]
-    fn rotate_if_stale_is_idempotent_on_fresh_spk() {
-        let mgr = manager_with_identity();
-        mgr.rotate_if_stale().unwrap();
-        let first = mgr.current_bundle().unwrap().public_key;
-        mgr.rotate_if_stale().unwrap();
-        let second = mgr.current_bundle().unwrap().public_key;
-        assert_eq!(first.as_bytes(), second.as_bytes());
-    }
-
-    #[test]
-    fn rotate_if_stale_replaces_backdated_spk() {
-        let mgr = manager_with_identity();
-        mgr.rotate_if_stale().unwrap();
-        let original = mgr.current_bundle().unwrap().public_key;
-
-        // Backdoor a 30-day-old blob signed by the same identity
-        let identity = mgr.identity.load_identity().unwrap();
-        let backdated_ts = now_secs().unwrap() - 30 * SECONDS_PER_DAY;
-        let stale = generate_signed_prekey(identity.signing_key_pair(), backdated_ts);
-        let blob = encode_spk(&stale);
-        mgr.storage.lock().unwrap().store(SPK_KEY, &*blob).unwrap();
-
-        mgr.rotate_if_stale().unwrap();
-        let rotated = mgr.current_bundle().unwrap().public_key;
-        assert_ne!(rotated.as_bytes(), stale.public().as_bytes());
-        assert_ne!(rotated.as_bytes(), original.as_bytes());
-    }
-
-    #[test]
-    fn future_timestamp_does_not_rotate() {
-        let mgr = manager_with_identity();
-        let identity = mgr.identity.load_identity().unwrap();
-        let future_ts = now_secs().unwrap() + 100_000;
-        let future_spk = generate_signed_prekey(identity.signing_key_pair(), future_ts);
-        let blob = encode_spk(&future_spk);
-        mgr.storage.lock().unwrap().store(SPK_KEY, &*blob).unwrap();
-
-        mgr.rotate_if_stale().unwrap();
-        let after = mgr.current_bundle().unwrap().public_key;
-        assert_eq!(after.as_bytes(), future_spk.public().as_bytes());
-    }
-
-    #[test]
-    fn far_future_timestamp_triggers_rotation() {
-        // Regression guard for #58: a stored timestamp far in the future (e.g., from clock
-        // manipulation) must not freeze rotation. Backdoor a 100-day-ahead SPK and confirm
-        // rotate_if_stale replaces it.
-        let mgr = manager_with_identity();
-        let identity = mgr.identity.load_identity().unwrap();
-        let far_future_ts = now_secs().unwrap() + 100 * SECONDS_PER_DAY;
-        let bad_spk = generate_signed_prekey(identity.signing_key_pair(), far_future_ts);
-        let blob = encode_spk(&bad_spk);
-        mgr.storage.lock().unwrap().store(SPK_KEY, &*blob).unwrap();
-
-        mgr.rotate_if_stale().unwrap();
-        let after = mgr.current_bundle().unwrap().public_key;
-        assert_ne!(after.as_bytes(), bad_spk.public().as_bytes());
-    }
-
-    #[test]
-    fn rotate_if_stale_without_identity_returns_identity_error() {
-        let mgr = manager_no_identity();
+    fn checked_blob_rejects_long_blob() {
         assert!(matches!(
-            mgr.rotate_if_stale(),
-            Err(SignedPreKeyError::Identity(IdentityError::NotFound))
+            checked_blob(&[0u8; 200]),
+            Err(SignedPreKeyError::InvalidData(_))
         ));
     }
 
     #[test]
-    fn rotate_now_without_identity_returns_identity_error() {
-        let mgr = manager_no_identity();
+    fn checked_blob_rejects_unsupported_version() {
+        let mut blob = [0u8; SPK_BLOB_LEN];
+        blob[0] = 99;
         assert!(matches!(
-            mgr.rotate_now(),
-            Err(SignedPreKeyError::Identity(IdentityError::NotFound))
-        ));
-    }
-
-    #[test]
-    fn rotate_now_writes_exactly_blob_len_bytes() {
-        let mgr = manager_with_identity();
-        // Pre-seed an arbitrary blob to confirm full overwrite (not append).
-        mgr.storage
-            .lock()
-            .unwrap()
-            .store(SPK_KEY, &[0xFFu8; 50])
-            .unwrap();
-        mgr.rotate_now().unwrap();
-        let stored = mgr.storage.lock().unwrap().load(SPK_KEY).unwrap().unwrap();
-        assert_eq!(stored.len(), SPK_BLOB_LEN);
-        assert_eq!(stored[0], SPK_VERSION);
-    }
-
-    #[test]
-    fn decode_rejects_unsupported_version() {
-        // Well-formed length, but version byte = 99
-        let mut bad = [0u8; SPK_BLOB_LEN];
-        bad[0] = 99;
-        assert!(matches!(
-            decode_spk(&bad),
-            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
-        ));
-    }
-
-    #[test]
-    fn read_stored_timestamp_rejects_unsupported_version() {
-        let mgr = manager_with_identity();
-        let mut bad = [0u8; SPK_BLOB_LEN];
-        bad[0] = 99;
-        mgr.storage.lock().unwrap().store(SPK_KEY, &bad).unwrap();
-        assert!(matches!(
-            mgr.rotate_if_stale(),
+            checked_blob(&blob),
             Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
         ));
     }
@@ -402,40 +432,13 @@ mod tests {
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         identity.generate_identity().unwrap();
 
-        let mgr_a = SignedPreKeyManager::new(Arc::clone(&storage), Arc::clone(&identity));
-        mgr_a.rotate_if_stale().unwrap();
-        let pk_a = mgr_a.current_bundle().unwrap().public_key;
-        drop(mgr_a);
+        let manager_a = SignedPreKeyManager::new(Arc::clone(&storage), Arc::clone(&identity));
+        manager_a.rotate_if_stale().unwrap();
+        let pk_a = manager_a.current_bundle().unwrap().public_key;
+        drop(manager_a);
 
-        let mgr_b = SignedPreKeyManager::new(storage, identity);
-        let pk_b = mgr_b.current_bundle().unwrap().public_key;
+        let manager_b = SignedPreKeyManager::new(storage, identity);
+        let pk_b = manager_b.current_bundle().unwrap().public_key;
         assert_eq!(pk_a.as_bytes(), pk_b.as_bytes());
-    }
-
-    #[test]
-    fn current_returns_invalid_data_for_corrupt_blob() {
-        let mgr = manager_with_identity();
-        mgr.storage
-            .lock()
-            .unwrap()
-            .store(SPK_KEY, &[0xAAu8; 50])
-            .unwrap();
-        assert!(matches!(
-            mgr.current(),
-            Err(SignedPreKeyError::InvalidData(_))
-        ));
-    }
-
-    #[test]
-    fn current_bundle_does_not_require_identity() {
-        // current_bundle reads from storage and decodes — no identity load.
-        let mgr = manager_no_identity();
-        let identity_signing = generate_signing_key_pair();
-        let spk = generate_signed_prekey(&identity_signing, 1_700_000_000);
-        let blob = encode_spk(&spk);
-        mgr.storage.lock().unwrap().store(SPK_KEY, &*blob).unwrap();
-
-        let bundle = mgr.current_bundle().unwrap();
-        assert_eq!(bundle.public_key.as_bytes(), spk.public().as_bytes());
     }
 }

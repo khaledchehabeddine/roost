@@ -1,20 +1,19 @@
+use crate::error::CryptoError;
+use crate::keys::SigningKeyPair;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::error::CryptoError;
-use crate::keys::SigningKeyPair;
-
-/// `v1` suffix lets a future format bump re-key the domain without ambiguity.
+/// Prevents SPK signatures from being confused with signatures over any other 32-byte payload the
+/// identity key might sign in a different context.
 const SPK_DOMAIN: &[u8] = b"hermes-spk-v1:";
 
-/// X25519 keypair signed by an Ed25519 identity key. Rotated periodically to bound
-/// compromise impact.
-//
-// Safety: Holds X25519 secret material. Omits Clone, Debug, Serialize per crypto.md.
-// ZeroizeOnDrop scrubs the secret. Non-secret fields use #[zeroize(skip)] because
-// ed25519_dalek::Signature does not implement Zeroize.
+/// X25519 keypair signed by an Ed25519 identity key. Rotated periodically so a leaked SPK
+/// expires at the next rotation.
+///
+/// ZeroizeOnDrop scrubs the secret on a drop. #[zeroize(skip)] is required because
+/// ed25519_dalek::Signature doesn't impl Zeroize.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SignedPreKey {
     secret_key: StaticSecret,
@@ -26,8 +25,8 @@ pub struct SignedPreKey {
     created_at: u64,
 }
 
-/// Public form of a [`SignedPreKey`]. Identity verifying key is not embedded —
-/// [`verify_bundle`] takes it separately to match the X3DH-lite contract.
+/// Public form of a [`SignedPreKey`]. Identity verifying key is not embedded — [`verify_bundle`]
+/// takes it separately to match the X3DH-lite contract.
 #[derive(Clone, Debug)]
 pub struct PreKeyBundle {
     pub public_key: PublicKey,
@@ -93,8 +92,8 @@ pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> Sig
     }
 }
 
-/// Verifies against `SPK_DOMAIN || bundle.public_key.as_bytes()` — signatures produced
-/// over the bare pubkey will fail.
+/// Verifies against `SPK_DOMAIN || bundle.public_key.as_bytes()` — signatures produced over the
+/// bare pubkey will fail.
 pub fn verify_bundle(
     bundle: &PreKeyBundle,
     peer_identity: &VerifyingKey,
@@ -172,6 +171,22 @@ mod tests {
     }
 
     #[test]
+    fn signature_without_domain_prefix_fails_verification() {
+        let identity = generate_signing_key_pair();
+        let kp = generate_key_pair();
+        let bare_signature = identity.sign(kp.public.as_bytes());
+        let bundle = PreKeyBundle {
+            public_key: kp.public,
+            signature: bare_signature,
+            created_at: FIXED_TS,
+        };
+        assert!(matches!(
+            verify_bundle(&bundle, &identity.verifying),
+            Err(CryptoError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
     fn bundle_fields_match_signed_prekey() {
         let identity = generate_signing_key_pair();
         let spk = generate_signed_prekey(&identity, FIXED_TS);
@@ -225,25 +240,5 @@ mod tests {
         );
         let bundle = restored.bundle();
         assert!(verify_bundle(&bundle, &identity.verifying).is_ok());
-    }
-
-    #[test]
-    fn signature_without_domain_prefix_fails_verification() {
-        // Regression guard for #57: a signature produced over the bare 32-byte X25519
-        // public key (i.e. without the SPK_DOMAIN prefix) must not validate. Otherwise an
-        // attacker who can convince the identity key to sign 32 raw bytes elsewhere could
-        // replay that signature as an SPK signature.
-        let identity = generate_signing_key_pair();
-        let kp = generate_key_pair();
-        let bare_signature = identity.sign(kp.public.as_bytes());
-        let bundle = PreKeyBundle {
-            public_key: kp.public,
-            signature: bare_signature,
-            created_at: FIXED_TS,
-        };
-        assert!(matches!(
-            verify_bundle(&bundle, &identity.verifying),
-            Err(CryptoError::SignatureInvalid)
-        ));
     }
 }
