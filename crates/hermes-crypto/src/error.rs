@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Debug)]
 pub enum CryptoError {
     Aead,
+    HandshakeSpkMismatch,
     HkdfExpand,
     InvalidHmacKey,
     InvalidState(&'static str),
@@ -15,6 +16,10 @@ impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Aead => write!(f, "XChaCha20-Poly1305 encryption or decryption failed"),
+            Self::HandshakeSpkMismatch => write!(
+                f,
+                "handshake envelope SPK reference does not match local signed prekey"
+            ),
             Self::HkdfExpand => write!(f, "HKDF-SHA256 expand exceeded output limit"),
             Self::InvalidHmacKey => write!(f, "HMAC-SHA256 rejected the provided key"),
             Self::InvalidState(context) => {

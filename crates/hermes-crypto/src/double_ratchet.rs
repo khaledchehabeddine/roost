@@ -32,6 +32,19 @@ impl Header {
         buf[36..40].copy_from_slice(&self.n.to_be_bytes());
         buf
     }
+
+    /// Inverse of [`Self::serialize`]. Infallible — every 32-byte string is a valid X25519
+    /// public key (dalek clamps internally on use), and the fixed input length leaves nothing
+    /// to fail on.
+    pub fn deserialize(bytes: &[u8; 40]) -> Self {
+        let mut pk_bytes = [0u8; 32];
+        pk_bytes.copy_from_slice(&bytes[..32]);
+        Self {
+            public_key: PublicKey::from(pk_bytes),
+            pn: u32::from_be_bytes([bytes[32], bytes[33], bytes[34], bytes[35]]),
+            n: u32::from_be_bytes([bytes[36], bytes[37], bytes[38], bytes[39]]),
+        }
+    }
 }
 
 /// Session state for the Double Ratchet algorithm between two peers.
@@ -354,6 +367,23 @@ mod tests {
         assert_eq!(&buf[..32], kp.public.as_bytes());
         assert_eq!(u32::from_be_bytes(buf[32..36].try_into().unwrap()), 42);
         assert_eq!(u32::from_be_bytes(buf[36..40].try_into().unwrap()), 7);
+    }
+
+    #[test]
+    fn header_serialize_deserialize_round_trip() {
+        let kp = generate_key_pair();
+        let original = Header {
+            public_key: kp.public,
+            pn: 1_234_567,
+            n: 89,
+        };
+
+        let buf = original.serialize();
+        let restored = Header::deserialize(&buf);
+
+        assert_eq!(restored.public_key.as_bytes(), original.public_key.as_bytes());
+        assert_eq!(restored.pn, original.pn);
+        assert_eq!(restored.n, original.n);
     }
 
     #[test]
