@@ -49,7 +49,6 @@ pub struct SigningKeyPair {
 }
 
 impl SigningKeyPair {
-    /// Signs `message` and returns the Ed25519 signature.
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)
@@ -90,6 +89,10 @@ pub fn generate_signing_key_pair() -> SigningKeyPair {
 mod tests {
     use super::*;
     use ed25519_dalek::Verifier;
+
+    fn hex(s: &str) -> Vec<u8> {
+        hex::decode(s).unwrap()
+    }
 
     // --- RFC 7748 §6.1: X25519 test vector ---
     // https://www.rfc-editor.org/rfc/rfc7748#section-6.1
@@ -246,9 +249,5 @@ mod tests {
         let kp = generate_signing_key_pair();
         let restored = SigningKeyPair::from_signing_bytes(*kp.to_signing_bytes());
         assert_eq!(kp.verifying.as_bytes(), restored.verifying.as_bytes());
-    }
-
-    fn hex(s: &str) -> Vec<u8> {
-        hex::decode(s).unwrap()
     }
 }

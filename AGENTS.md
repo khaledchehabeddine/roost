@@ -15,6 +15,18 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 ## Coding Guidelines
 
+### Agent Config Style
+
+When creating or modifying agents, skills, rules, or root config files (`AGENTS.md`, `CLAUDE.md`):
+
+- State principles only — no inline code examples, worked scenarios, or "for instance" blocks that age
+- Every line must be actionable — if it restates what the tool already enforces or what the code already shows, delete it
+- Keep Claude and Codex configs in sync — changes to one must be mirrored to the other
+- Leverage each tool's native features:
+  - Claude: path-scoped `.claude/rules/`, `!` context injection, `allowed-tools`, `disable-model-invocation`
+  - Codex: `AGENTS.md` inline guidelines, `.codex/agents/` TOML definitions
+- Don't duplicate rules across layers — if a rule lives in a path-scoped file, don't repeat it in the root config
+
 ### Crypto
 
 - Protocol: Double Ratchet — replayed messages must be rejected, ratchet steps must follow correct sequence, expired keys must be deleted
@@ -33,6 +45,12 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Errors never cross the UniFFI boundary — only domain errors defined in the UniFFI Definition Language (UDL) propagate to the platform layer
 - Error `Display` implementations should be detailed and developer-facing
 
+### Rust Docs
+
+- Document only what cannot be inferred from name, signature, variant types, or visibility
+- Document "why" decisions when not captured in a decision record; reference the DR when one exists
+- Prefer deleting a doc over leaving a low-information one
+
 ### Rust Style
 
 - Module ordering: `use` declarations → types → traits → impls → functions
@@ -41,18 +59,6 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 ### UniFFI
 
 - FFI-incompatible core types must be re-wrapped within the `hermes-uniffi` crate
-
-### Agent Config Style
-
-When creating or modifying agents, skills, rules, or root config files (`AGENTS.md`, `CLAUDE.md`):
-
-- State principles only — no inline code examples, worked scenarios, or "for instance" blocks that age
-- Every line must be actionable — if it restates what the tool already enforces or what the code already shows, delete it
-- Keep Claude and Codex configs in sync — changes to one must be mirrored to the other
-- Leverage each tool's native features:
-  - Claude: path-scoped `.claude/rules/`, `!` context injection, `allowed-tools`, `disable-model-invocation`
-  - Codex: `AGENTS.md` inline guidelines, `.codex/agents/` TOML definitions
-- Don't duplicate rules across layers — if a rule lives in a path-scoped file, don't repeat it in the root config
 
 ## Workflow
 

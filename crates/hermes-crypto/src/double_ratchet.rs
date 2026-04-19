@@ -75,7 +75,7 @@ impl RatchetState {
     /// Initializes the ratchet as the initiator.
     ///
     /// Generates a fresh key pair, performs the initial DH exchange with `dhr`, and derives the
-    /// first sending chain key. The initiator can send immediately after init.
+    /// first sending chain key. The initiator can send immediately after initialization.
     pub fn init_initiator(rk: RootKey, dhr: &PublicKey) -> Result<Self, CryptoError> {
         let dhs = generate_key_pair();
         let dh_output = dhs.diffie_hellman(dhr);
@@ -326,6 +326,21 @@ mod tests {
     use crate::keys::generate_key_pair;
     use crate::ratchet::RootKey;
 
+    /// Returns a fresh initiator/responder pair with shared associated data.
+    fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>) {
+        let shared_secret = [0x42u8; 32];
+        let responder_keypair = generate_key_pair();
+        let responder_public = responder_keypair.public;
+
+        let initiator =
+            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_public)
+                .unwrap();
+        let responder =
+            RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_keypair);
+        let ad = b"initiator_identity||responder_identity".to_vec();
+        (initiator, responder, ad)
+    }
+
     #[test]
     fn header_serialize_round_trip() {
         let kp = generate_key_pair();
@@ -565,20 +580,5 @@ mod tests {
         let (h2_real, ct2_real) = initiator.ratchet_encrypt(m2, &ad).unwrap();
         let pt = responder.ratchet_decrypt(&ct2_real, &h2_real, &ad).unwrap();
         assert_eq!(pt.as_slice(), m2);
-    }
-
-    /// Returns a fresh initiator/responder pair with shared associated data.
-    fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>) {
-        let shared_secret = [0x42u8; 32];
-        let responder_keypair = generate_key_pair();
-        let responder_public = responder_keypair.public;
-
-        let initiator =
-            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_public)
-                .unwrap();
-        let responder =
-            RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_keypair);
-        let ad = b"initiator_identity||responder_identity".to_vec();
-        (initiator, responder, ad)
     }
 }

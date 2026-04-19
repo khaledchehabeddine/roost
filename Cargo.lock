@@ -490,6 +490,7 @@ name = "hermes-uniffi"
 version = "0.1.0"
 dependencies = [
  "hermes-core",
+ "hermes-crypto",
  "uniffi",
  "zeroize",
 ]
