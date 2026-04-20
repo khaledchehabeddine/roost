@@ -5,7 +5,7 @@ version.workspace = true
 
 [dependencies]
 # Dalek and KDF/MAC crates share digest 0.10 — bump together
-# Dalek and Rand crates share rand_core 0.6 — bump together
+# Dalek and rand crates share rand_core 0.6 — bump together
 # Dalek crates
 ed25519-dalek = { version = "2.2.0", features = ["fast", "rand_core", "zeroize"] }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
@@ -13,9 +13,13 @@ x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
 hkdf = "0.12.4"
 hmac = "0.12.1"
 sha2 = "0.10.9"
+# Serialization crates
+postcard = { version = "1.1.3", features = ["use-std"] }
+serde = { version = "1.0.228", features = ["derive"] }
 # Utility crates
 chacha20poly1305 = "0.10.1"
 rand = { version = "0.8.5", features = ["getrandom"] }
+subtle = "2.6.1"
 zeroize = { version = "1.8.2", features = ["derive"] }
 
 [dev-dependencies]
