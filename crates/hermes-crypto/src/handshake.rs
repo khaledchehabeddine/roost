@@ -298,13 +298,9 @@ mod tests {
         let sk_init =
             derive_sk_initiator(&s.alice_ik, &alice_ek, &s.bob_ik.public, s.bob_spk.public())
                 .unwrap();
-        let sk_resp = derive_sk_responder(
-            &s.alice_ik.public,
-            &alice_ek.public,
-            &s.bob_ik,
-            &s.bob_spk,
-        )
-        .unwrap();
+        let sk_resp =
+            derive_sk_responder(&s.alice_ik.public, &alice_ek.public, &s.bob_ik, &s.bob_spk)
+                .unwrap();
 
         assert_eq!(sk_init.as_bytes(), sk_resp.as_bytes());
     }
