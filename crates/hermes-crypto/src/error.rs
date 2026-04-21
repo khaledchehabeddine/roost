@@ -9,7 +9,10 @@ pub enum CryptoError {
     InvalidState(&'static str),
     MaxSkipExceeded,
     MaxSkippedKeysExceeded,
+    RatchetStateDecode,
+    RatchetStateEncode,
     SignatureInvalid,
+    UnsupportedRatchetVersion(u8),
 }
 
 impl fmt::Display for CryptoError {
@@ -29,7 +32,12 @@ impl fmt::Display for CryptoError {
             Self::MaxSkippedKeysExceeded => {
                 write!(f, "cached skipped message keys total exceeds global limit")
             }
+            Self::RatchetStateDecode => write!(f, "ratchet state bytes failed to decode"),
+            Self::RatchetStateEncode => write!(f, "ratchet state failed to encode"),
             Self::SignatureInvalid => write!(f, "Ed25519 signature verification failed"),
+            Self::UnsupportedRatchetVersion(v) => {
+                write!(f, "unsupported ratchet state format version: {v}")
+            }
         }
     }
 }

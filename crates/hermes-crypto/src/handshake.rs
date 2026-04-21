@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn initiate_accept_round_trip() {
         let s = setup();
-        let plaintext = b"hello from alice";
+        let plaintext = b"hello from Alice";
 
         let (_, envelope) = initiate(
             &s.alice_ik,
