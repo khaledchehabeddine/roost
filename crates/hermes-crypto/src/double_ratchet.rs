@@ -4,15 +4,17 @@ use crate::ratchet::{ChainKey, MessageKey, RootKey, kdf_ck, kdf_rk};
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::collections::HashMap;
-use zeroize::Zeroizing;
+use std::collections::BTreeMap;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// Maximum number of message keys to skip in a single ratchet step.
 const MAX_SKIP: u32 = 100;
 /// Global cap across all ratchet chains, preventing memory exhaustion from repeated DH steps.
 const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 const HKDF_MK_INFO: &[u8] = b"HermesRatchet_MK";
+const RATCHET_STATE_VERSION: u8 = 1;
 
 /// Message header transmitted alongside each ciphertext.
 pub struct Header {
@@ -52,26 +54,14 @@ pub struct RatchetState {
     nr: u32,
     /// Number of messages sent in the previous sending chain.
     pn: u32,
-    /// Cached message keys for out-of-order decryption, keyed by (sender public key, message number).
-    mk_skipped: HashMap<(PublicKey, u32), MessageKey>,
+    /// Cached message keys for out-of-order decryption, keyed by (sender public key bytes,
+    /// message number). `BTreeMap` is used instead of `HashMap` so serialization order is
+    /// deterministic — required to satisfy the byte-identical re-serialization contract on
+    /// [`RatchetState::to_bytes`]. O(log n) lookups are negligible at the 500-entry cap.
+    mk_skipped: BTreeMap<([u8; 32], u32), MessageKey>,
 }
 
 impl RatchetState {
-    /// Private to avoid exposing `Clone` on a type holding secret material.
-    fn snapshot(&self) -> Self {
-        Self {
-            dhs: KeyPair::from_secret_bytes(*self.dhs.to_secret_bytes()),
-            dhr: self.dhr,
-            rk: self.rk.clone(),
-            cks: self.cks.clone(),
-            ckr: self.ckr.clone(),
-            ns: self.ns,
-            nr: self.nr,
-            pn: self.pn,
-            mk_skipped: self.mk_skipped.clone(),
-        }
-    }
-
     /// Initializes the ratchet as the initiator.
     ///
     /// Generates a fresh key pair, performs the initial DH exchange with `dhr`, and derives the
@@ -90,7 +80,7 @@ impl RatchetState {
             ns: 0,
             nr: 0,
             pn: 0,
-            mk_skipped: HashMap::new(),
+            mk_skipped: BTreeMap::new(),
         })
     }
 
@@ -108,7 +98,7 @@ impl RatchetState {
             ns: 0,
             nr: 0,
             pn: 0,
-            mk_skipped: HashMap::new(),
+            mk_skipped: BTreeMap::new(),
         }
     }
 
@@ -182,6 +172,82 @@ impl RatchetState {
         Ok(plaintext)
     }
 
+    /// Serializes the session for persistent storage as an opaque blob.
+    ///
+    /// Callers MUST overwrite the previously stored blob — never append a new entry alongside an
+    /// old one. Forward secrecy depends on past states being destroyed on every state change; a
+    /// device compromise that recovers stale blobs exposes past message keys.
+    pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        let wire = RatchetStateWire {
+            version: RATCHET_STATE_VERSION,
+            dhs_secret: *self.dhs.to_secret_bytes(),
+            dhr: self.dhr.map(|pk| *pk.as_bytes()),
+            rk: *self.rk.as_bytes(),
+            cks: self.cks.as_ref().map(|ck| *ck.as_bytes()),
+            ckr: self.ckr.as_ref().map(|ck| *ck.as_bytes()),
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+            mk_skipped: self
+                .mk_skipped
+                .iter()
+                .map(|(k, v)| (*k, *v.as_bytes()))
+                .collect(),
+        };
+        postcard::to_stdvec(&wire)
+            .map(Zeroizing::new)
+            .map_err(|_| CryptoError::RatchetStateEncode)
+    }
+
+    /// Restores a session from a blob produced by [`Self::to_bytes`].
+    ///
+    /// Version mismatches return [`CryptoError::UnsupportedRatchetVersion`], structural decode
+    /// failures return [`CryptoError::RatchetStateDecode`], and a blob whose `mk_skipped` exceeds
+    /// [`MAX_SKIPPED_KEYS_TOTAL`] returns [`CryptoError::MaxSkippedKeysExceeded`] — persisted
+    /// blobs are treated as external input so the in-memory cap can't be bypassed by a tampered
+    /// or corrupt store.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let version = *bytes.first().ok_or(CryptoError::RatchetStateDecode)?;
+        if version != RATCHET_STATE_VERSION {
+            return Err(CryptoError::UnsupportedRatchetVersion(version));
+        }
+        let wire: RatchetStateWire =
+            postcard::from_bytes(bytes).map_err(|_| CryptoError::RatchetStateDecode)?;
+        if wire.mk_skipped.len() > MAX_SKIPPED_KEYS_TOTAL {
+            return Err(CryptoError::MaxSkippedKeysExceeded);
+        }
+        Ok(Self {
+            dhs: KeyPair::from_secret_bytes(wire.dhs_secret),
+            dhr: wire.dhr.map(PublicKey::from),
+            rk: RootKey::from_bytes(wire.rk),
+            cks: wire.cks.map(ChainKey::from_bytes),
+            ckr: wire.ckr.map(ChainKey::from_bytes),
+            ns: wire.ns,
+            nr: wire.nr,
+            pn: wire.pn,
+            mk_skipped: wire
+                .mk_skipped
+                .iter()
+                .map(|(k, v)| (*k, MessageKey(*v)))
+                .collect(),
+        })
+    }
+
+    /// Private to avoid exposing `Clone` on a type holding secret material.
+    fn snapshot(&self) -> Self {
+        Self {
+            dhs: KeyPair::from_secret_bytes(*self.dhs.to_secret_bytes()),
+            dhr: self.dhr,
+            rk: self.rk.clone(),
+            cks: self.cks.clone(),
+            ckr: self.ckr.clone(),
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+            mk_skipped: self.mk_skipped.clone(),
+        }
+    }
+
     /// Attempts to decrypt using a previously cached skipped message key.
     ///
     /// Re-inserts the key if decryption fails, preventing an attacker from burning legitimate
@@ -192,7 +258,7 @@ impl RatchetState {
         header: &Header,
         ad: &[u8],
     ) -> Result<Option<Zeroizing<Vec<u8>>>, CryptoError> {
-        let key = (header.public_key, header.n);
+        let key = (*header.public_key.as_bytes(), header.n);
         if let Some(mk) = self.mk_skipped.remove(&key) {
             match decrypt(ciphertext, ad, header, &mk) {
                 Ok(plaintext) => Ok(Some(plaintext)),
@@ -224,7 +290,7 @@ impl RatchetState {
             let mut current_ck = ChainKey::from_bytes(*ckr.as_bytes());
             while self.nr < until_n {
                 let (next_ck, mk) = kdf_ck(&current_ck)?;
-                self.mk_skipped.insert((dhr, self.nr), mk);
+                self.mk_skipped.insert((*dhr.as_bytes(), self.nr), mk);
                 current_ck = next_ck;
                 self.nr += 1;
             }
@@ -255,6 +321,42 @@ impl RatchetState {
         Ok(())
     }
 }
+
+/// Raw-byte serde mirror of [`RatchetState`] for [`RatchetState::to_bytes`] /
+/// [`RatchetState::from_bytes`].
+#[derive(Deserialize, Serialize)]
+struct RatchetStateWire {
+    version: u8,
+    dhs_secret: [u8; 32],
+    dhr: Option<[u8; 32]>,
+    rk: [u8; 32],
+    cks: Option<[u8; 32]>,
+    ckr: Option<[u8; 32]>,
+    ns: u32,
+    nr: u32,
+    pn: u32,
+    mk_skipped: BTreeMap<([u8; 32], u32), [u8; 32]>,
+}
+
+/// Manual Drop instead of deriving `ZeroizeOnDrop` — the tuple key `([u8; 32], u32)` doesn't
+/// implement `Zeroize`, which blocks the derive.
+impl Drop for RatchetStateWire {
+    fn drop(&mut self) {
+        self.dhs_secret.zeroize();
+        self.rk.zeroize();
+        if let Some(ref mut cks) = self.cks {
+            cks.zeroize();
+        }
+        if let Some(ref mut ckr) = self.ckr {
+            ckr.zeroize();
+        }
+        for value in self.mk_skipped.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
+impl ZeroizeOnDrop for RatchetStateWire {}
 
 /// Encrypts plaintext with XChaCha20-Poly1305 using a derived encryption key and nonce.
 fn encrypt(
@@ -580,5 +682,95 @@ mod tests {
         let (h2_real, ct2_real) = initiator.ratchet_encrypt(m2, &ad).unwrap();
         let pt = responder.ratchet_decrypt(&ct2_real, &h2_real, &ad).unwrap();
         assert_eq!(pt.as_slice(), m2);
+    }
+
+    #[test]
+    fn to_bytes_round_trip_is_byte_identical() {
+        let (initiator, _, _) = setup_pair();
+        let bytes1 = initiator.to_bytes().unwrap();
+        let restored = RatchetState::from_bytes(&bytes1).unwrap();
+        let bytes2 = restored.to_bytes().unwrap();
+        assert_eq!(&*bytes1, &*bytes2);
+    }
+
+    #[test]
+    fn restored_state_continues_session() {
+        let (mut initiator, mut responder, ad) = setup_pair();
+
+        let (h1, ct1) = initiator.ratchet_encrypt(b"msg 1", &ad).unwrap();
+        responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
+
+        let bytes = initiator.to_bytes().unwrap();
+        drop(initiator);
+        let mut restored = RatchetState::from_bytes(&bytes).unwrap();
+
+        let (h2, ct2) = restored.ratchet_encrypt(b"msg 2", &ad).unwrap();
+        let pt = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
+        assert_eq!(pt.as_slice(), b"msg 2");
+    }
+
+    #[test]
+    fn mk_skipped_survives_round_trip() {
+        let (mut initiator, mut responder, ad) = setup_pair();
+
+        let (h1, ct1) = initiator.ratchet_encrypt(b"msg 1", &ad).unwrap();
+        let (h2, ct2) = initiator.ratchet_encrypt(b"msg 2", &ad).unwrap();
+        let (h3, ct3) = initiator.ratchet_encrypt(b"msg 3", &ad).unwrap();
+
+        responder.ratchet_decrypt(&ct1, &h1, &ad).unwrap();
+        responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
+        assert!(!responder.mk_skipped.is_empty());
+
+        let bytes = responder.to_bytes().unwrap();
+        drop(responder);
+        let mut restored = RatchetState::from_bytes(&bytes).unwrap();
+
+        let pt = restored.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
+        assert_eq!(pt.as_slice(), b"msg 2");
+    }
+
+    #[test]
+    fn from_bytes_rejects_unsupported_version() {
+        let (initiator, _, _) = setup_pair();
+        let mut bytes = initiator.to_bytes().unwrap().to_vec();
+        bytes[0] = 0xFF;
+        assert!(matches!(
+            RatchetState::from_bytes(&bytes),
+            Err(CryptoError::UnsupportedRatchetVersion(0xFF))
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_malformed_blob() {
+        let (initiator, _, _) = setup_pair();
+        let bytes = initiator.to_bytes().unwrap();
+        let truncated = &bytes[..1];
+        assert!(matches!(
+            RatchetState::from_bytes(truncated),
+            Err(CryptoError::RatchetStateDecode)
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_oversized_mk_skipped() {
+        let oversized = RatchetStateWire {
+            version: RATCHET_STATE_VERSION,
+            dhs_secret: [0; 32],
+            dhr: None,
+            rk: [0; 32],
+            cks: None,
+            ckr: None,
+            ns: 0,
+            nr: 0,
+            pn: 0,
+            mk_skipped: (0..=MAX_SKIPPED_KEYS_TOTAL as u32)
+                .map(|i| (([0; 32], i), [0; 32]))
+                .collect(),
+        };
+        let bytes = postcard::to_stdvec(&oversized).unwrap();
+        assert!(matches!(
+            RatchetState::from_bytes(&bytes),
+            Err(CryptoError::MaxSkippedKeysExceeded)
+        ));
     }
 }

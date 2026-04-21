@@ -24,7 +24,7 @@ const IKM_LEN: usize = 32 * 4;
 /// being stored as a single `[u8; 40]` array. Serde's auto-derived `Deserialize` only covers
 /// arrays up to `[T; 32]`, so storing 40 bytes directly would require the `serde-big-array`
 /// crate or handwritten implementation. Flattening sidesteps both.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HandshakeEnvelope {
     pub initiator_ik: [u8; 32],
     pub initiator_ek: [u8; 32],
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn initiate_accept_round_trip() {
         let s = setup();
-        let plaintext = b"hello from alice";
+        let plaintext = b"hello from Alice";
 
         let (_, envelope) = initiate(
             &s.alice_ik,
