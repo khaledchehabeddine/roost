@@ -8,11 +8,11 @@ allowed-tools: Bash(ls *) Read Write
 
 ## Context
 
-- Existing decisions: !`ls docs/decisions/`
+- Existing decisions: !`ls docs/decisions/[0-9]*.md`
 
 ## Task
 
-1. Read `template.md` for the decision record format
+1. Read `docs/decisions/TEMPLATE.md` for the decision record format
 2. Determine the next sequential four-digit number from the existing files
 3. Generate kebab-case filename from `$ARGUMENTS`: `NNNN-<short-title>.md`, confirm with user
 4. Ask the user: "What was decided?"
