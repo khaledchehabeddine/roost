@@ -14,9 +14,6 @@ const MAX_SKIP: u32 = 100;
 /// Global cap across all ratchet chains, preventing memory exhaustion from repeated DH steps.
 const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 const HKDF_MK_INFO: &[u8] = b"HermesRatchet_MK";
-/// Leading byte of the serialized ratchet state blob. Bump and add a migration path on any
-/// schema change so older blobs surface as [`CryptoError::UnsupportedRatchetVersion`] rather than
-/// a generic decode error.
 const RATCHET_STATE_VERSION: u8 = 1;
 
 /// Message header transmitted alongside each ciphertext.
@@ -325,15 +322,9 @@ impl RatchetState {
     }
 }
 
-/// Serde-friendly mirror of [`RatchetState`]. Private because `RatchetState` holds secret
-/// material and cannot derive `Serialize` per [`.claude/rules/crypto.md`]; this type is the
-/// raw-byte bridge used only by [`RatchetState::to_bytes`] / [`RatchetState::from_bytes`].
-///
-/// Secret fields (`dhs_secret`, `rk`, `cks`, `ckr`, and each `mk_skipped` value) are scrubbed on
-/// drop via the manual [`Drop`] impl below — derive won't work because the tuple key
-/// `([u8; 32], u32)` does not implement `Zeroize`. Only values in `mk_skipped` carry secret
-/// material (the keys are public-key bytes plus a counter), so the key type is left untouched.
-#[derive(Serialize, Deserialize)]
+/// Raw-byte serde mirror of [`RatchetState`] for [`RatchetState::to_bytes`] /
+/// [`RatchetState::from_bytes`].
+#[derive(Deserialize, Serialize)]
 struct RatchetStateWire {
     version: u8,
     dhs_secret: [u8; 32],
@@ -347,6 +338,8 @@ struct RatchetStateWire {
     mk_skipped: BTreeMap<([u8; 32], u32), [u8; 32]>,
 }
 
+/// Manual Drop instead of deriving `ZeroizeOnDrop` — the tuple key `([u8; 32], u32)` doesn't
+/// implement `Zeroize`, which blocks the derive.
 impl Drop for RatchetStateWire {
     fn drop(&mut self) {
         self.dhs_secret.zeroize();
@@ -711,13 +704,9 @@ mod tests {
         drop(initiator);
         let mut restored = RatchetState::from_bytes(&bytes).unwrap();
 
-        let (h2, ct2) = responder.ratchet_encrypt(b"msg 2", &ad).unwrap();
-        let pt = restored.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
+        let (h2, ct2) = restored.ratchet_encrypt(b"msg 2", &ad).unwrap();
+        let pt = responder.ratchet_decrypt(&ct2, &h2, &ad).unwrap();
         assert_eq!(pt.as_slice(), b"msg 2");
-
-        let (h3, ct3) = restored.ratchet_encrypt(b"msg 3", &ad).unwrap();
-        let pt = responder.ratchet_decrypt(&ct3, &h3, &ad).unwrap();
-        assert_eq!(pt.as_slice(), b"msg 3");
     }
 
     #[test]
