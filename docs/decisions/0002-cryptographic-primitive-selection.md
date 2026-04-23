@@ -5,7 +5,8 @@
 
 ## Decision
 
-X25519 (key exchange) and Ed25519 (signing) are the cryptographic primitives for Hermes, both derived from Curve25519 and implemented via `x25519-dalek` and `ed25519-dalek` (built on `curve25519-dalek`).
+X25519 (key exchange) and Ed25519 (signing) are the cryptographic primitives for Hermes, both derived from Curve25519
+and implemented via `x25519-dalek` and `ed25519-dalek` (built on `curve25519-dalek`).
 
 ## Why
 
