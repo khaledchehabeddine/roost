@@ -124,9 +124,9 @@ mod tests {
     /// Algorithm: HKDF-SHA256(salt = root_key, ikm = dh_output, info = [`RK_INFO`], L = 64).
     /// Output split: `okm[0..32] = new_rk`, `okm[32..64] = new_ck`.
     ///
-    /// Expected values derived with pyca/cryptography 46 (HKDF, X25519) via a one-shot
-    /// script; auditors can re-derive from the inputs and algorithm above using any
-    /// HKDF-SHA256 implementation they trust.
+    /// Expected values derived with pyca/cryptography 46 (HKDF, X25519). Auditors can
+    /// re-derive from the inputs and algorithm above using any HKDF-SHA256 implementation
+    /// they trust.
     #[test]
     fn kdf_rk_known_answer() {
         const EXPECTED_RK: [u8; 32] = [
@@ -184,9 +184,9 @@ mod tests {
     /// Algorithm: message key = HMAC-SHA256(key = chain_key, data = [`CK_MESSAGE_KEY_INPUT`]);
     /// next chain key = HMAC-SHA256(key = chain_key, data = [`CK_CHAIN_KEY_INPUT`]).
     ///
-    /// Expected values derived with Python's `hmac` module against SHA-256 via a one-shot
-    /// script; auditors can re-derive from the two HMAC-SHA256 invocations above using any
-    /// tool they trust (e.g. `openssl dgst -sha256 -mac HMAC -macopt hexkey:...`).
+    /// Expected values derived with Python's `hmac` module against SHA-256. Auditors can
+    /// re-derive from the two HMAC-SHA256 invocations above using any tool they trust
+    /// (e.g. `openssl dgst -sha256 -mac HMAC -macopt hexkey:...`).
     #[test]
     fn kdf_ck_known_answer() {
         let (new_ck, mk) = kdf_ck(&ChainKey([0u8; 32])).unwrap();
@@ -222,7 +222,7 @@ mod tests {
     /// [`kdf_ck_known_answer`]'s output, providing an internal consistency check across the two
     /// tests.
     ///
-    /// Expected values derived with Python's `hmac` module via a one-shot script.
+    /// Expected values derived with Python's `hmac` module.
     #[test]
     fn kdf_ck_chain_advancement_known_answer() {
         // Each entry is `(expected_ck_{i+1}, expected_mk_i)` for i in 0..10.

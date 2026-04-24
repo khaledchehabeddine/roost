@@ -428,6 +428,16 @@ mod tests {
     use crate::keys::generate_key_pair;
     use crate::ratchet::RootKey;
 
+    /// The libsodium-reference ciphertext for the fixed AEAD KAT inputs.
+    ///
+    /// Referenced by both [`aead_encrypt_known_answer`] and [`aead_decrypt_known_answer`], so the
+    /// two tests cannot drift silently if one is regenerated without the other.
+    const AEAD_KAT_EXPECTED_CIPHERTEXT: [u8; 44] = [
+        0x91, 0x16, 0x40, 0xd9, 0xfd, 0xe7, 0xe2, 0xea, 0x55, 0x82, 0xd5, 0x28, 0xd8, 0x6c, 0x14,
+        0x7a, 0xab, 0xe0, 0x97, 0x1b, 0xd6, 0x6c, 0xe1, 0x92, 0x0b, 0x2d, 0x98, 0x59, 0x43, 0x13,
+        0xe5, 0xbf, 0xd0, 0x8e, 0xdf, 0x7e, 0xec, 0xbf, 0x8a, 0xe2, 0x2a, 0x21, 0x42, 0x9d,
+    ];
+
     /// Returns a fresh initiator/responder pair with shared associated data.
     fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>) {
         let shared_secret = [0x42u8; 32];
@@ -781,7 +791,7 @@ mod tests {
     /// Algorithm: HKDF-SHA256(salt = None, ikm = mk, info = [`HKDF_MK_INFO`], L = 56).
     /// Output split: `okm[0..32] = enc_key`, `okm[32..56] = nonce` (24-byte XNonce).
     ///
-    /// Expected values derived with pyca/cryptography 46 (HKDF-SHA256) via a one-shot script.
+    /// Expected values derived with pyca/cryptography 46 (HKDF-SHA256).
     #[test]
     fn expand_message_key_known_answer() {
         const EXPECTED_ENC_KEY: [u8; 32] = [
@@ -801,7 +811,7 @@ mod tests {
         assert_eq!(nonce, EXPECTED_NONCE);
     }
 
-    /// Known-answer test for [`encrypt`] and [`decrypt`] (XChaCha20-Poly1305 with header AD).
+    /// Known-answer test for [`encrypt`] (XChaCha20-Poly1305 with header AD).
     ///
     /// Inputs:
     /// - `mk = MessageKey([0; 32])` (`enc_key` and `nonce` match
@@ -820,28 +830,44 @@ mod tests {
     /// Expected ciphertext derived with libsodium (pynacl 1.5's
     /// `crypto_aead_xchacha20poly1305_ietf_encrypt`) — deliberately a different implementation
     /// than the RustCrypto `chacha20poly1305` crate under test.
+    ///
+    /// The decrypt direction has a paired KAT at [`aead_decrypt_known_answer`].
     #[test]
-    fn aead_encrypt_decrypt_known_answer() {
-        const EXPECTED_CIPHERTEXT: [u8; 44] = [
-            0x91, 0x16, 0x40, 0xd9, 0xfd, 0xe7, 0xe2, 0xea, 0x55, 0x82, 0xd5, 0x28, 0xd8, 0x6c,
-            0x14, 0x7a, 0xab, 0xe0, 0x97, 0x1b, 0xd6, 0x6c, 0xe1, 0x92, 0x0b, 0x2d, 0x98, 0x59,
-            0x43, 0x13, 0xe5, 0xbf, 0xd0, 0x8e, 0xdf, 0x7e, 0xec, 0xbf, 0x8a, 0xe2, 0x2a, 0x21,
-            0x42, 0x9d,
-        ];
-
+    fn aead_encrypt_known_answer() {
         let mk = MessageKey([0u8; 32]);
         let plaintext = b"Hermes test vector plaintext";
         let caller_ad = b"initiator_identity||responder_identity";
         let header = Header {
-            public_key: crate::KeyPair::from_secret_bytes([0x99u8; 32]).public,
+            public_key: KeyPair::from_secret_bytes([0x99u8; 32]).public,
             pn: 0,
             n: 0,
         };
 
         let ciphertext = encrypt(plaintext, caller_ad, &header, &mk).unwrap();
-        assert_eq!(ciphertext.as_slice(), &EXPECTED_CIPHERTEXT);
+        assert_eq!(ciphertext.as_slice(), &AEAD_KAT_EXPECTED_CIPHERTEXT);
+    }
 
-        let recovered = decrypt(&ciphertext, caller_ad, &header, &mk).unwrap();
-        assert_eq!(recovered.as_slice(), plaintext);
+    /// Known-answer test for [`decrypt`] (XChaCha20-Poly1305 with header AD).
+    ///
+    /// Inputs: the same `mk`, `caller_ad`, and `header` as [`aead_encrypt_known_answer`], with
+    /// [`AEAD_KAT_EXPECTED_CIPHERTEXT`] as the ciphertext input.
+    ///
+    /// Covers the class of bug where `encrypt` and `decrypt` share a matching fault (e.g., a
+    /// future refactor of `build_full_ad` affecting both call sites) — round-trip tests would
+    /// pass in that case because both sides agree. This KAT catches the divergence from
+    /// libsodium's reference.
+    #[test]
+    fn aead_decrypt_known_answer() {
+        let mk = MessageKey([0u8; 32]);
+        let expected_plaintext = b"Hermes test vector plaintext";
+        let caller_ad = b"initiator_identity||responder_identity";
+        let header = Header {
+            public_key: KeyPair::from_secret_bytes([0x99u8; 32]).public,
+            pn: 0,
+            n: 0,
+        };
+
+        let recovered = decrypt(&AEAD_KAT_EXPECTED_CIPHERTEXT, caller_ad, &header, &mk).unwrap();
+        assert_eq!(recovered.as_slice(), expected_plaintext);
     }
 }
