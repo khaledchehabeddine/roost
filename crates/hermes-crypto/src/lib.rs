@@ -30,9 +30,6 @@ pub mod keys;
 pub mod ratchet;
 pub mod signed_prekey;
 
-#[cfg(test)]
-mod integration_tests;
-
 pub use double_ratchet::{Header, RatchetState};
 pub use error::CryptoError;
 pub use handshake::{

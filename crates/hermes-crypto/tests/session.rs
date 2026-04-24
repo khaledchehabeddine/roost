@@ -1,14 +1,12 @@
-//! Integration tests exercising two [`RatchetState`] instances bootstrapped via the X3DH-lite
-//! handshake. Covers the scenarios from issue #38 that cross module boundaries and cannot be
-//! asserted from within a single module's unit tests.
+//! Integration tests exercising two `RatchetState` instances bootstrapped via the X3DH-lite
+//! handshake. Covers session-level scenarios that cross module boundaries and exercise the
+//! public API the way a downstream consumer (e.g. `hermes-core`) would.
 
-use crate::double_ratchet::{Header, RatchetState};
-use crate::error::CryptoError;
-use crate::handshake::{HandshakeEnvelope, accept, initial_ad, initiate};
-use crate::keys::{
-    KeyPair, Signature, SigningKeyPair, generate_key_pair, generate_signing_key_pair,
+use hermes_crypto::{
+    CryptoError, HandshakeEnvelope, Header, KeyPair, RatchetState, Signature, SignedPreKey,
+    SigningKeyPair, accept, generate_key_pair, generate_signed_prekey, generate_signing_key_pair,
+    initial_ad, initiate,
 };
-use crate::signed_prekey::{SignedPreKey, generate_signed_prekey};
 
 const FIXED_TS: u64 = 1_700_000_000;
 
@@ -39,7 +37,7 @@ fn bootstrap(s: &Setup, plaintext: &[u8]) -> (RatchetState, RatchetState, Handsh
         plaintext,
     )
     .unwrap();
-    let (bob, _decrypted) = accept(&envelope, &s.bob_ik, &s.bob_spk).unwrap();
+    let (bob, _) = accept(&envelope, &s.bob_ik, &s.bob_spk).unwrap();
     (alice, bob, envelope)
 }
 
@@ -186,14 +184,12 @@ fn tampered_spk_signature_rejects_before_any_key_work() {
 }
 
 #[test]
-fn spk_rotation_does_not_invalidate_active_session() {
+fn ratchet_is_self_contained_after_bootstrap() {
     let s = setup();
     let (mut alice, mut bob, _) = bootstrap(&s, b"hello");
     let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
 
-    // Ratchet state is independent of the responder's SPK once bootstrapped — rotation must not
-    // invalidate an active session. The new SPK is intentionally unused below.
-    let _rotated = generate_signed_prekey(&s.bob_signing, FIXED_TS + 86_400);
+    drop(s);
 
     let (h, ct) = bob.ratchet_encrypt(b"still here", &ad).unwrap();
     assert_eq!(

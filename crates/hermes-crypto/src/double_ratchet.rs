@@ -233,8 +233,7 @@ impl RatchetState {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn skipped_key_count(&self) -> usize {
+    pub fn skipped_key_count(&self) -> usize {
         self.mk_skipped.len()
     }
 
