@@ -233,6 +233,10 @@ impl RatchetState {
         })
     }
 
+    pub fn skipped_key_count(&self) -> usize {
+        self.mk_skipped.len()
+    }
+
     /// Private to avoid exposing `Clone` on a type holding secret material.
     fn snapshot(&self) -> Self {
         Self {
