@@ -233,8 +233,6 @@ impl RatchetState {
         })
     }
 
-    /// Test-only observability hook for [`mk_skipped`]. Crate-scoped so the production API stays
-    /// minimal while integration tests can still assert skipped-key lifecycle behavior.
     #[cfg(test)]
     pub(crate) fn skipped_key_count(&self) -> usize {
         self.mk_skipped.len()

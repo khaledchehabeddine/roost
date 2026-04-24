@@ -155,8 +155,13 @@ fn tampered_header_rolls_back_state() {
     };
     assert!(matches!(
         bob.ratchet_decrypt(&ct, &tampered, &ad),
-        Err(CryptoError::Aead),
+        Err(CryptoError::Aead)
     ));
+    assert_eq!(
+        bob.skipped_key_count(),
+        0,
+        "failed decrypt must not leak skipped keys from the discarded snapshot",
+    );
 
     let decrypted = bob.ratchet_decrypt(&ct, &h, &ad).unwrap();
     assert_eq!(decrypted.as_slice(), b"legit");
