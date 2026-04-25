@@ -2,36 +2,20 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Bash(git commit*)",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "cargo audit"
-          }
-        ]
-      },
-      {
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "cargo fmt --check"
-          },
+            "command": "bash scripts/hooks/audit-on-commit.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "apply_patch",
+        "hooks": [
           {
             "type": "command",
-            "command": "cargo clippy --quiet -- -D warnings"
-          },
-          {
-            "type": "command",
-            "command": "cargo test --quiet"
-          },
-          {
-            "type": "command",
-            "command": "cargo llvm-cov -p hermes-core --fail-under-lines 80 --quiet"
-          },
-          {
-            "type": "command",
-            "command": "cargo llvm-cov -p hermes-crypto --fail-under-lines 80 --quiet"
+            "command": "bash scripts/hooks/check.sh"
           }
         ]
       }

@@ -9,7 +9,7 @@ on:
 
 jobs:
   coverage:
-    name: Line Coverage
+    name: Test & Coverage
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
     steps:
@@ -26,8 +26,11 @@ jobs:
       - name: Cache Dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Run Tests with Coverage
+        run: cargo llvm-cov --workspace --no-report
+
       - name: Check hermes-core Coverage
-        run: cargo llvm-cov -p hermes-core --fail-under-lines 80
+        run: cargo llvm-cov report -p hermes-core --fail-under-lines 80
 
       - name: Check hermes-crypto Coverage
-        run: cargo llvm-cov -p hermes-crypto --fail-under-lines 80
+        run: cargo llvm-cov report -p hermes-crypto --fail-under-lines 80

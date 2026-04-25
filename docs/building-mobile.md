@@ -5,7 +5,7 @@
 Requires [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) and the Android NDK:
 
 ```bash
-./scripts/build-android.sh
+./scripts/build/android.sh
 ```
 
 ## iOS
@@ -13,7 +13,7 @@ Requires [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) and the Android NDK:
 Requires Xcode command-line tools:
 
 ```bash
-./scripts/build-xcframework.sh
+./scripts/build/xcframework.sh
 ```
 
 ## Manual Bindings
