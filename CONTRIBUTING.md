@@ -14,18 +14,21 @@ feature/ble-peer-discovery
 
 ## Commits
 
-Format: `<type>: <summary>\n\n- <what changed>\n- <what changed>`
+Format: `<type>: <summary>\n- <what changed>\n- <what changed>`
 
 Types: `feat` `fix` `chore` `docs` `ci` `refactor` `test`
+
+If an AI agent contributed, append a `Co-Authored-By:` trailer naming the agent.
 
 ### Example
 
 ```
 feat: add Curve25519 key generation to hermes-crypto
-
 - Add `generate_keypair()` returning `(PublicKey, SecretKey)`
 - Add `KeyPair` struct to hermes-crypto public API
 - Add unit tests for key generation and round-trip encoding
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 ```
 
 ## Pull Requests

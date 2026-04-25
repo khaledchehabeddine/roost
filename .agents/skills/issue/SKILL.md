@@ -23,7 +23,7 @@ description: Trigger when the user wants to file a new GitHub issue on the Herme
    - Security → auto-apply `security`
    - Task / Parent → ask the user to pick from available labels
 7. Optionally pick a milestone — skip if none
-8. Read the corresponding template from `assets/<type>.md` and construct the issue body with the user's answers
+8. Read the corresponding template from `.github/issue-scaffolds/<type>.md` and construct the issue body with the user's answers
 9. Create the issue:
    - With milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --milestone "<milestone>" --assignee "@me" --project "Hermes"`
    - Without milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --assignee "@me" --project "Hermes"`

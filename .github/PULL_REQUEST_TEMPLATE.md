@@ -6,4 +6,13 @@
 
 <!-- Bullet points only -->
 
-<!-- If decision records were added or modified, append a "## Decision Record" section listing them as: NNNN: Title. Otherwise, omit the section entirely. -->
+## Decision Record
+
+<!-- Decision records added or modified, listed as: NNNN: Title. Bullet points only. Omit section if empty. -->
+
+## Known Constraints
+
+<!-- Known limitations or deferred follow-ups. Bullet points only. Omit section if empty. -->
+
+---
+Created with [<agent name>](<url>).
