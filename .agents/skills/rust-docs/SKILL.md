@@ -5,10 +5,11 @@ description: Trigger when the user wants to add or update /// doc comments on pu
 
 ## Steps
 
-1. Read the Rust Style section in `AGENTS.md` for doc comment conventions
-2. If no target path is provided, ask the user for the crate or file path
-   - Crate name: find all `pub` items across the crate
-   - File path: scope to that file only
-3. Audit and update doc comments on `pub` items following the style guide
-4. Run `cargo doc -p <crate> --no-deps` and confirm no warnings
-5. Show the user a summary of what was added or changed
+1. Determine target: if no crate or file path is provided, ask the user
+2. Identify the tier per file location:
+   - `crates/hermes-uniffi/` → **T1** (rich)
+   - `crates/hermes-core/`, `crates/hermes-crypto/`, `crates/hermes-transport-ble/` → **T2** (standard Rust)
+   - `pub(crate)` or private items in any crate → **T3** (minimal)
+3. Read [docs/rust-docs-style.md](../../../docs/rust-docs-style.md) for the tier's doc style spec
+4. Audit existing docs against the spec; add or update so each item conforms
+5. Run `cargo doc -p <crate> --no-deps` and confirm no warnings

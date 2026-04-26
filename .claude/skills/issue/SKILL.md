@@ -22,7 +22,7 @@ Create a GitHub issue:
    - Security → `security`
    - Task / Parent → `gh label list --json name`, ask the user to pick
 4. Ask the user to pick a milestone via `gh milestone list --json number,title`, skip if none
-5. Read `.github/issue-scaffolds/<type>.md` and construct the issue body using the user's answers
+5. Read the corresponding template from `.github/issue-scaffolds/<type>.md` and construct the issue body using the user's answers
 6. Create the issue:
    - With milestone: `gh issue create --title "$ARGUMENTS" --body "<body>" --label "<label>" --milestone "<milestone>" --project "Hermes"`
    - Without milestone: `gh issue create --title "$ARGUMENTS" --body "<body>" --label "<label>" --project "Hermes"`

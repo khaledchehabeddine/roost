@@ -29,7 +29,7 @@ When creating or modifying agents, skills, rules, or root config files (`AGENTS.
 
 ### Crypto
 
-- Protocol: Double Ratchet — replayed messages must be rejected, ratchet steps must follow correct sequence, expired keys must be deleted
+- Protocol: Double Ratchet — replayed messages must be rejected, ratchet steps must follow the correct sequence, expired keys must be deleted
 - Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
 - Comparisons of MACs, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
 - `Zeroizing` wrapping: required for heap secrets (`Vec<u8>`, decrypted output) and FFI boundaries — not needed for stack-local values consumed immediately by a constructor

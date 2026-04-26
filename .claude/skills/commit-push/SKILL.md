@@ -10,7 +10,7 @@ Commit and push changes:
 1. Fetch pending changes: `git diff HEAD`.
 2. Branch check:
    - Run `git branch --show-current`. Skip the rest of this step if not on `main`.
-   - With `$ARGUMENTS`: `gh issue view $ARGUMENTS --json number,title,labels`, propose `<label>/<issue-title-kebab-case>`, confirm with the user, then `git checkout -b <branch>` and `gh issue develop $ARGUMENTS --checkout`.
+   - With `$ARGUMENTS`: `gh issue view $ARGUMENTS --json number,title,labels`, propose `<label>/<issue-title-kebab-case>`, confirm with the user, then `gh issue develop $ARGUMENTS --name <branch> --checkout`.
    - Without `$ARGUMENTS`: `gh label list --json name`, ask the user to pick a label and provide a description, propose `<label>/<description-kebab-case>`, confirm with the user, then `git checkout -b <branch>`.
 3. AI review gate:
    - Dispatch `rust-code-reviewer` and `security-auditor` in parallel — one message, two `Agent` calls — with the pending diff in each prompt.
