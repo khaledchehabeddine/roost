@@ -1,4 +1,4 @@
-name: Audit
+name: Deny
 
 on:
   pull_request:
@@ -15,13 +15,11 @@ permissions:
   issues: write
 
 jobs:
-  audit:
-    name: Cargo Audit
+  deny:
+    name: Cargo Deny
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v6
 
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: EmbarkStudios/cargo-deny-action@v2

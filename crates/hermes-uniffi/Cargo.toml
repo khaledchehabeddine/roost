@@ -1,6 +1,7 @@
 [package]
 name = "hermes-uniffi"
 edition.workspace = true
+publish.workspace = true
 version.workspace = true
 
 [lib]
@@ -16,7 +17,7 @@ name = "uniffi-bindgen-swift"
 path = "uniffi-bindgen-swift.rs"
 
 [dependencies]
-hermes-core = { path = "../hermes-core" }
-hermes-crypto = { path = "../hermes-crypto" }
+hermes-core = { path = "../hermes-core", version = "0.3.0" }
+hermes-crypto = { path = "../hermes-crypto", version = "0.3.0" }
 uniffi = { version = "0.31.0", features = ["cli"] }
 zeroize = "1.8.2"

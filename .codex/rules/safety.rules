@@ -1,12 +1,4 @@
 prefix_rule(
-    pattern = ["git", "push", ["--force", "-f"]],
-    decision = "forbidden",
-    justification = "Force push is forbidden. Use --force-with-lease instead.",
-    match = ["git push --force", "git push -f origin main"],
-    not_match = ["git push origin main", "git push --force-with-lease"],
-)
-
-prefix_rule(
     pattern = ["cargo", "publish"],
     decision = "prompt",
     justification = "Publishing crates to crates.io requires maintainer review.",
@@ -15,17 +7,41 @@ prefix_rule(
 )
 
 prefix_rule(
+    pattern = ["git", "clean", ["-df", "-dfx", "-fd", "-fdx"]],
+    decision = "prompt",
+    justification = "git clean -fd deletes untracked files. Confirm intent before discarding work.",
+    match = ["git clean -fd", "git clean -fdx src/"],
+    not_match = ["git clean -n", "git clean --dry-run"],
+)
+
+prefix_rule(
+    pattern = ["git", "clean", ["-d", "-f"], ["-d", "-f"]],
+    decision = "prompt",
+    justification = "git clean with separated -d -f flags deletes untracked files. Confirm intent before discarding work.",
+    match = ["git clean -f -d", "git clean -d -f src/"],
+    not_match = ["git clean -n", "git clean --dry-run"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["-f", "--force"]],
+    decision = "forbidden",
+    justification = "Force push is forbidden. Use --force-with-lease instead.",
+    match = ["git push --force", "git push -f origin main"],
+    not_match = ["git push origin main", "git push --force-with-lease"],
+)
+
+prefix_rule(
+    pattern = ["git", "reset", "--hard"],
+    decision = "forbidden",
+    justification = "Hard reset silently discards uncommitted changes. Stash, branch, or commit before resetting.",
+    match = ["git reset --hard", "git reset --hard HEAD~1"],
+    not_match = ["git reset --soft HEAD~1", "git reset HEAD file.rs"],
+)
+
+prefix_rule(
     pattern = ["rm", "-rf"],
     decision = "prompt",
     justification = "Recursive force delete is destructive. Confirm the target path.",
     match = ["rm -rf target", "rm -rf /tmp/build"],
     not_match = ["rm file.txt", "rm -r dir"],
-)
-
-prefix_rule(
-    pattern = ["git", "reset", "--hard"],
-    decision = "prompt",
-    justification = "Hard reset discards uncommitted changes. Consider stashing first.",
-    match = ["git reset --hard", "git reset --hard HEAD~1"],
-    not_match = ["git reset --soft HEAD~1", "git reset HEAD file.rs"],
 )

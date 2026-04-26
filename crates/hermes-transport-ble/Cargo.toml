@@ -1,6 +1,7 @@
 [package]
 name = "hermes-transport-ble"
 edition.workspace = true
+publish.workspace = true
 version.workspace = true
 
 [dependencies]

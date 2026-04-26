@@ -7,7 +7,7 @@
           {
             "type": "command",
             "if": "Bash(git commit *)",
-            "command": "bash scripts/hooks/audit.sh"
+            "command": "bash scripts/hooks/deny.sh"
           }
         ]
       },
