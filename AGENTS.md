@@ -15,50 +15,48 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 ## Coding Guidelines
 
-### Agent Config Style
+### Agent Config
 
-When creating or modifying agents, skills, rules, or root config files (`AGENTS.md`, `CLAUDE.md`):
-
-- State principles only — no inline code examples, worked scenarios, or "for instance" blocks that age
-- Every line must be actionable — if it restates what the tool already enforces or what the code already shows, delete it
-- Keep Claude and Codex configs in sync — changes to one must be mirrored to the other
-- Leverage each tool's native features:
-  - Claude: path-scoped `.claude/rules/`, `!` context injection, `allowed-tools`, `disable-model-invocation`
-  - Codex: `AGENTS.md` inline guidelines, `.codex/agents/` TOML definitions
-- Don't duplicate rules across layers — if a rule lives in a path-scoped file, don't repeat it in the root config
+- When updating one agent's customization, mirror the change in the other agent's equivalent (Claude ↔ Codex)
+- Follow the structure and style from existing peer customizations of the same type within the same agent — applies to root config files, rules, agents, and skills
 
 ### Crypto
 
-- Protocol: Double Ratchet — replayed messages must be rejected, ratchet steps must follow the correct sequence, expired keys must be deleted
-- Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
-- Comparisons of MACs, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
-- `Zeroizing` wrapping: required for heap secrets (`Vec<u8>`, decrypted output) and FFI boundaries — not needed for stack-local values consumed immediately by a constructor
+- Cryptographic primitives:
+  - Encryption: XChaCha20-Poly1305
+  - Key exchange: X25519
+  - Signing: Ed25519
+  - Key derivation: Argon2id
+- Production randomness must use `OsRng` — no other RNG source outside test modules
+- AEAD nonces must be derived alongside the message key via HKDF — never randomly under a long-lived key
+- Every HKDF call must use a distinct info string for domain separation
+- Wrap heap secrets (`Vec<u8>`, decrypted output) and FFI-bound values in `Zeroizing`. Stack-locals consumed immediately by a constructor don't need wrapping.
 - Wrap decrypted output in `Zeroizing::new()` immediately — before any validation or early returns
 - Types holding secret material must not derive `Clone`, `Debug`, or `Serialize` unless they also derive `ZeroizeOnDrop` — add a comment explaining why
-- Production randomness must use `OsRng` — no other RNG source outside test modules
-- Encryption: XChaCha20-Poly1305 · Key exchange: X25519 · Signing: Ed25519 · Key derivation: Argon2id
+- Comparisons of MACs, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
+- Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
+- Protocol: Double Ratchet:
+  - Replayed messages must be rejected
+  - Ratchet steps must follow the correct sequence
+  - Expired keys must be deleted
+  - Skipped message keys must have a hard cap (per chain and total) and a max age — drop the oldest on overflow
 
 ### Error Handling
 
-- All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
 - Each crate defines its own domain error type
-- Errors never cross the UniFFI boundary — only domain errors defined in the UniFFI Definition Language (UDL) propagate to the platform layer
-- Error `Display` implementations should be detailed and developer-facing
-
-### Rust Docs
-
-- Document only what cannot be inferred from name, signature, variant types, or visibility
-- Document "why" decisions when not captured in a decision record; reference the DR when one exists
-- Prefer deleting a doc over leaving a low-information one
+- All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
+- Error `Display` implementations should be detailed enough to debug from logs alone — not localized UI strings
+- Error `Display` must never include secret material — key bytes, plaintext, decrypted output, or seeds. Use reference identifiers (key IDs, message numbers) instead.
 
 ### Rust Style
 
-- Module ordering: `use` declarations → types → traits → impls → functions
+- Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions
 - No `pub use` glob re-exports
 
 ### UniFFI
 
-- FFI-incompatible core types must be re-wrapped within the `hermes-uniffi` crate
+- FFI-incompatible core types must be wrapped within the `hermes-uniffi` crate
+- Errors crossing the UniFFI boundary must use `#[derive(uniffi::Error)]` — library errors and panics cannot propagate
 
 ## Workflow
 
