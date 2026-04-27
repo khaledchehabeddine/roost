@@ -41,6 +41,16 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
   - Expired keys must be deleted
   - Skipped message keys must have a hard cap (per chain and total) and a max age — drop the oldest on overflow
 
+### Dependencies
+
+- Necessity check before adding any dep — can the standard library or an existing dep cover the need?
+- For crypto-adjacent crates (touching keys, signatures, encryption, KDFs): require maintainer reputation (RustCrypto org, dalek-cryptography, etc.) and audit history
+- MSRV of any added dep must be ≤ Hermes' MSRV (currently `1.94.0` per `rust-toolchain.toml`)
+- Prefer audited crates: `subtle` for constant-time, `zeroize` for secret zeroing, `rand` (`OsRng`) for production randomness, `hkdf`/`hmac`/`sha2` for KDF/MAC, dalek crates for asymmetric primitives
+- `cargo-deny` mechanically enforces license, advisory, source, and yanked policy — see `deny.toml`. This rule covers the human-judgment criteria cargo-deny cannot enforce
+- Pin major versions in each crate's `Cargo.toml` (current pattern); when a dep is shared across two or more crates, hoist to `[workspace.dependencies]`. Update via `cargo update -p <crate>` with explicit reasoning in commit message
+- Note shared sub-dependencies in comments (e.g., "Dalek and KDF crates share `digest 0.10` — bump together")
+
 ### Error Handling
 
 - Each crate defines its own domain error type
@@ -48,10 +58,34 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Error `Display` implementations should be detailed enough to debug from logs alone — not localized UI strings
 - Error `Display` must never include secret material — key bytes, plaintext, decrypted output, or seeds. Use reference identifiers (key IDs, message numbers) instead.
 
+### Public API
+
+- Semver discipline:
+  - Source-breaking changes (renaming a `pub` item, changing a signature) require a major version bump or a deprecation period
+  - Binary-breaking changes (changing struct field layout when the struct is `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump
+  - Prefer adding a new function over breaking an existing one
+- `pub` minimization — every `pub` item must have an external consumer (another crate, the FFI surface, or a documented public re-export). `pub` items with no consumer are dead code; demote to `pub(crate)` or remove
+- FFI-exposed APIs (`#[uniffi::export]`, `#[derive(uniffi::*)]`) require corresponding `From<InternalError> for HermesError` impls within `hermes-uniffi` for every error type they can return
+- No `unwrap()`, `expect()`, or `panic!()` in `#[uniffi::export]` paths — use `Result<T, HermesError>` for fallible operations
+- Async exports must declare cancellation safety (the future being dropped mid-await must not leave persistent state in an inconsistent shape)
+- Public types must have rustdoc per `docs/agents/rust-docs/style.md` tier (T1 for `hermes-uniffi`, T2 for other crates)
+- Deprecation removes after one full release cycle minimum — never in the same release that introduced the deprecation
+
 ### Rust Style
 
 - Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions
 - No `pub use` glob re-exports
+
+### Tests
+
+- Inline unit tests live in `#[cfg(test)] mod tests { ... }` at the bottom of the source file they exercise — not in a sibling `tests.rs` module
+- Integration tests live in `crates/<crate>/tests/<scenario>.rs` and exercise only the public API
+- One scenario per integration test file — split rather than grow into mega-files
+- KAT vector tests cite their derivation source (RFC, upstream library + version, or paired derivation script) in a doc comment alongside the expected constant
+- KAT expected outputs live in named constants (`<PRIMITIVE>_KAT_EXPECTED`) — never inlined as literals at the assertion site
+- Test inputs are deterministic — fixed timestamps (`const FIXED_TS: u64 = ...`), seeded RNGs (`ChaCha20Rng::seed_from_u64`), or fixed byte arrays. No `SystemTime::now()` or `OsRng` in test paths
+- No shared mutable state across tests — each test owns its `Setup` via a `setup()` function, no `static mut` or `Lazy<>`
+- Test-only dependencies live under `[dev-dependencies]` in Cargo.toml — never `[dependencies]`
 
 ### UniFFI
 

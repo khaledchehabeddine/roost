@@ -14,6 +14,7 @@ Commit and push changes:
    - Without `$ARGUMENTS`: `gh label list --json name`, ask the user to pick a label and provide a description, propose `<label>/<description-kebab-case>`, confirm with the user, then `git checkout -b <branch>`.
 3. AI review gate:
    - Dispatch `rust-code-reviewer` and `security-auditor` in parallel — one message, two `Agent` calls — with the pending diff in each prompt.
+   - If the diff touches `crates/*/src/lib.rs` or `crates/hermes-uniffi/**`, also dispatch `api-reviewer` in the same parallel batch.
    - `critical` findings block — surface the finding and proposed fix; do not proceed until the user confirms resolution.
    - `improvement` and `learning` findings are shown but do not block.
 4. Confirm with the user they reviewed the diff.

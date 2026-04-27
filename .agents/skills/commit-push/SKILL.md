@@ -28,7 +28,10 @@ Skip if already on a feature branch.
 ### 3. AI review gate
 
 Invoke the `rust-code-reviewer` and `security-auditor` agents in parallel on the pending diff.
-- **critical** findings from either agent’s block — surface the finding and proposed fix; do not proceed until the user confirms resolution
+
+If the diff touches `crates/*/src/lib.rs` or `crates/hermes-uniffi/**`, also invoke the `api-reviewer` agent in the same parallel batch.
+
+- **critical** findings from any agent block — surface the finding and proposed fix; do not proceed until the user confirms resolution
 - **improvement** and **learning** findings are shown but do not block
 
 ### 4. Confirm
