@@ -1,28 +1,31 @@
 ---
-name: issue
 description: Create a GitHub issue and link it to the project board
 argument-hint: [title]
 disable-model-invocation: true
 allowed-tools: Bash(gh *) Read
 ---
 
-Create a GitHub issue:
-1. Ask the user to pick an issue type:
-   - Task — Feature, chore, docs, or any other unit of work
-   - Parent — Tracking issue for a group of related tasks
-   - Bug — Report a defect or unexpected behavior
-   - Security — Security vulnerability or hardening task
-2. Prompt for the type's fields, then ask for any optional notes:
-   - Task: description, acceptance criteria
-   - Parent: description
-   - Bug: description, reproduction, expected behavior
-   - Security: summary, impact, location, severity (Critical/High/Medium/Low), optional suggested fix
-3. Pick a label:
+When creating a GitHub issue:
+
+1. **Pick an issue type**:
+   - **Task** — feature/chore/docs unit
+   - **Parent** — tracking issue for related child tasks
+   - **Bug** — defect or unexpected behavior
+   - **Security** — vulnerability or hardening task
+2. **Prompt for the type's fields**:
+   - **Task** — summary + acceptance criteria
+   - **Parent** — summary
+   - **Bug** — summary + reproduction + expected behavior
+   - **Security** — summary + impact + location + severity (Critical/High/Medium/Low) + optional suggested fix
+   - Then ask for any optional notes
+3. **Pick a label**:
+   - Task / Parent → `gh label list --json name`, ask the user to pick
    - Bug → `bug`
    - Security → `security`
-   - Task / Parent → `gh label list --json name`, ask the user to pick
-4. Ask the user to pick a milestone via `gh milestone list --json number,title`, skip if none
-5. Read the corresponding template from `.github/issue-scaffolds/<type>.md` and construct the issue body using the user's answers
-6. Create the issue:
+4. **Pick a milestone**:
+   - `gh milestone list --json number,title`, ask the user
+   - Skip if none
+5. **Build the body**: read the template at `.github/issue-scaffolds/<type>.md` and fill with the user's answers
+6. **Create the issue**:
    - With milestone: `gh issue create --title "$ARGUMENTS" --body "<body>" --label "<label>" --milestone "<milestone>" --project "Hermes"`
-   - Without milestone: `gh issue create --title "$ARGUMENTS" --body "<body>" --label "<label>" --project "Hermes"`
+   - Without milestone: same command minus `--milestone`

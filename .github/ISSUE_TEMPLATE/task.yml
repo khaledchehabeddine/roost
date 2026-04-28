@@ -3,7 +3,7 @@ description: Feature, chore, docs, or any other unit of work
 body:
   - type: textarea
     attributes:
-      label: Description
+      label: Summary
       description: Short paragraph summarizing the task
     validations:
       required: true

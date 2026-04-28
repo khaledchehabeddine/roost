@@ -9,5 +9,9 @@ paths:
 
 # Agent Config Rules
 
-- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation — do not harmonize style across agents
-- Follow the structure and style from existing peer customizations of the same type within the same agent — applies to root config files, rules, agents, and skills
+- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation
+- Follow the structure and style from existing peer customizations of the same type within the same agent
+- Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.)
+- Pattern-skill descriptions list the same items as the body, in the same order
+- Skills that set `paths:` must not restate the location filter in their description — `paths:` gates autoloading
+- Customization descriptions don't explicitly reference the project name (Hermes). Literal paths like `crates/hermes-uniffi` are exceptions

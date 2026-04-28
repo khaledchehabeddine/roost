@@ -4,7 +4,7 @@ labels: ["bug"]
 body:
   - type: textarea
     attributes:
-      label: Description
+      label: Summary
       description: What went wrong
     validations:
       required: true

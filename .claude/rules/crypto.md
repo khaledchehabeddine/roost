@@ -13,14 +13,10 @@ paths:
   - Key derivation: Argon2id
 - Production randomness must use `OsRng` — no other RNG source outside test modules
 - AEAD nonces must be derived alongside the message key via HKDF — never randomly under a long-lived key
-- Every HKDF call must use a distinct info string for domain separation
-- Wrap heap secrets (`Vec<u8>`, decrypted output) and FFI-bound values in `Zeroizing`. Stack-locals consumed immediately by a constructor don't need wrapping.
-- Wrap decrypted output in `Zeroizing::new()` immediately — before any validation or early returns
+- Every HKDF call must use a distinct, non-empty `info` string for domain separation
+- Wrap heap secrets (`Vec<u8>`, decrypted output) and FFI-bound values in `Zeroizing` immediately — before validation or early returns. Stack-locals consumed immediately by a constructor don't need wrapping
+- Custom secret-bearing structs derive `Zeroize, ZeroizeOnDrop`. Mark fields with `#[zeroize(skip)]` if they are non-secret or if the field's type doesn't impl `Zeroize` (e.g., `ed25519_dalek::Signature`)
 - Types holding secret material must not derive `Clone`, `Debug`, or `Serialize` unless they also derive `ZeroizeOnDrop` — add a comment explaining why
-- Comparisons of MACs, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
+- Comparisons of MACs, keys, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
 - Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
-- Protocol: Double Ratchet:
-  - Replayed messages must be rejected
-  - Ratchet steps must follow the correct sequence
-  - Expired keys must be deleted
-  - Skipped message keys must have a hard cap (per chain and total) — reject on overflow rather than evict (eviction-based caches are vulnerable to flooding; conservative rejection preserves replay protection)
+- Protocol invariants (Double Ratchet, X3DH-lite): replay rejection, ratchet ordering, key expiration, skipped-key caps — see [docs/agents/crypto-protocol-state.md](../../docs/agents/crypto-protocol-state.md) for detail
