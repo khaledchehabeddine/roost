@@ -8,13 +8,13 @@ In Hermes: `XChaCha20-Poly1305` with 24-byte `XNonce`, derived via `HKDF-SHA256`
 
 ## Why it matters
 
-**Nonce reuse under the same key is total break** for ChaCha20-Poly1305 (and AES-GCM): keystream XOR-cancels and the auth key can be recovered. Random nonces under a long-lived key risk collision; derived nonces eliminate the risk by tying the (key, nonce) pair to a per-message message key that is never reused.
+Nonce reuse under the same key is total break for ChaCha20-Poly1305 (and AES-GCM): keystream XOR-cancels and the auth key can be recovered. Random nonces under a long-lived key risk collision; derived nonces eliminate the risk by tying the (key, nonce) pair to a per-message message key that is never reused.
 
-**Domain separation**: HKDF calls with the same IKM but different `info` strings produce uncorrelated outputs. Reusing `info` across unrelated derivations means an attacker who learns one purpose's output can compute the other. Each call site needs a distinct `info`. Examples in Hermes: `b"HermesX3DHLite"` (handshake.rs), `RK_INFO = b"HermesRatchet_RK"` (ratchet.rs), `HKDF_MK_INFO = b"HermesRatchet_MK"` (message-key expansion in double_ratchet.rs).
+Domain separation: HKDF calls with the same IKM but different `info` strings produce uncorrelated outputs. Reusing `info` across unrelated derivations means an attacker who learns one purpose's output can compute the other. Each call site needs a distinct `info`. Examples in Hermes: `b"HermesX3DHLite"` (handshake.rs), `RK_INFO = b"HermesRatchet_RK"` (ratchet.rs), `HKDF_MK_INFO = b"HermesRatchet_MK"` (message-key expansion in double_ratchet.rs).
 
-## Hermes example
+## Implementation
 
-From `crates/hermes-crypto/src/double_ratchet.rs:404-418` — message-key expansion derives both key and nonce in a single HKDF call:
+Message-key expansion derives both key and nonce in a single HKDF call:
 
 ```rust
 /// Expands a message key into a 32-byte encryption key and 24-byte nonce via HKDF-SHA256.

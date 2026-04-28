@@ -22,9 +22,9 @@ In Hermes: use `subtle::ConstantTimeEq::ct_eq`.
 - Comparing public values that don't depend on secrets (lengths, version bytes, public keys *of attacker's choosing*)
 - Branching on a value the attacker already controls (no information to leak)
 
-## Hermes example
+## Implementation
 
-From `crates/hermes-crypto/src/handshake.rs:78-84` — sanity-checking that the envelope's signed-prekey reference matches the local SPK before deriving the shared secret:
+Sanity-checking an envelope's signed-prekey reference against a local SPK before deriving the shared secret:
 
 ```rust
 use subtle::ConstantTimeEq;

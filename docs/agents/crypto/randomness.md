@@ -10,15 +10,13 @@ In Hermes: every key-generation site uses `OsRng` directly (no thread-local wrap
 
 Cryptographic security collapses without unpredictable randomness:
 
-- **Predictable seeds → predictable keys.** An attacker who guesses the seed reproduces every secret derived from it.
-- **Statistical weakness → distinguishability.** Even RNGs that "look random" but have low entropy let an attacker bias the keyspace search.
-- **Single-source-of-truth simplifies audit.** Reviewers can grep for `OsRng` and confirm every production key path uses it.
+- Predictable seeds → predictable keys. An attacker who guesses the seed reproduces every secret derived from it.
+- Statistical weakness → distinguishability. Even RNGs that "look random" but have low entropy let an attacker bias the keyspace search.
+- Single-source-of-truth simplifies audit. Reviewers can grep for `OsRng` and confirm every production key path uses it.
 
 `OsRng` reads from the OS entropy pool (`/dev/urandom` on Linux/macOS, `BCryptGenRandom` on Windows, `getrandom(2)` syscall when available). The OS pool is continuously seeded from hardware sources and is the platform's strongest entropy guarantee.
 
-## Hermes example
-
-From `crates/hermes-crypto/src/keys.rs`:
+## Implementation
 
 ```rust
 use rand::rngs::OsRng;

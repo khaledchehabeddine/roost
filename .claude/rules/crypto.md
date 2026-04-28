@@ -23,4 +23,4 @@ paths:
   - Replayed messages must be rejected
   - Ratchet steps must follow the correct sequence
   - Expired keys must be deleted
-  - Skipped message keys must have a hard cap (per chain and total) and a max age — drop the oldest on overflow
+  - Skipped message keys must have a hard cap (per chain and total) — reject on overflow rather than evict (eviction-based caches are vulnerable to flooding; conservative rejection preserves replay protection)

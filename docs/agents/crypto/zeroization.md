@@ -28,7 +28,7 @@ pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
 
 ### 2. `#[derive(Zeroize, ZeroizeOnDrop)]` on secret-bearing structs
 
-For custom types that hold secrets alongside other fields. From `crates/hermes-crypto/src/signed_prekey.rs:17-26`:
+For custom types that hold secrets alongside other fields:
 
 ```rust
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -47,8 +47,8 @@ pub struct SignedPreKey {
 ```
 
 Two reasons `#[zeroize(skip)]` shows up:
-1. **The field is not secret** (public_key, created_at) — scrubbing is unnecessary
-2. **The field's type doesn't impl Zeroize** (signature) — required to make the `#[derive(Zeroize)]` compile
+1. The field is not secret (public_key, created_at) — scrubbing is unnecessary
+2. The field's type doesn't impl Zeroize (signature) — required to make the `#[derive(Zeroize)]` compile
 
 Both reasons appear in this struct. The `Signature` case is the load-bearing one — without `#[zeroize(skip)]`, the derive fails.
 

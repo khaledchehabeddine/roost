@@ -1,6 +1,6 @@
 ---
 name: uniffi-patterns
-description: Apply Hermes' UniFFI patterns when designing or modifying the FFI surface — error wrapping at the boundary, type bridges (Vec<u8>, Arc, primitives), foreign-implementable traits, async constraints, proc-macro mode. Use when working in crates/hermes-uniffi.
+description: Apply Hermes' UniFFI patterns when designing or modifying the FFI surface — error wrapping at the boundary, type bridges (Vec<u8>, Arc, primitives), foreign-implementable traits, proc-macro mode. Use when working in crates/hermes-uniffi.
 allowed-tools: Read Glob Grep
 paths:
   - "crates/hermes-uniffi/**"
@@ -16,7 +16,6 @@ When the task involves... read this reference:
 
 - Defining or modifying error types crossing the FFI (panics, error derives, `From` chains) → [error-boundary.md](../../../docs/agents/uniffi/error-boundary.md)
 - Choosing types at the FFI boundary (`Vec<u8>` vs `Arc<T>`, primitives, custom types) → [type-bridges.md](../../../docs/agents/uniffi/type-bridges.md)
-- Adding async APIs (constraints, runtime selection, error propagation) → [async-patterns.md](../../../docs/agents/uniffi/async-patterns.md)
 - Choosing between UDL and proc-macro modes (Hermes uses proc-macro — when does UDL win) → [udl-vs-proc-macro.md](../../../docs/agents/uniffi/udl-vs-proc-macro.md)
 
 ## Quick checklist

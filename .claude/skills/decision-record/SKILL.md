@@ -2,6 +2,7 @@
 name: decision-record
 description: Scaffold a new architectural decision record
 argument-hint: [short-title]
+disable-model-invocation: true
 allowed-tools: Bash(ls *) Read Write
 ---
 

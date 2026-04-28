@@ -23,21 +23,20 @@ Principles:
 - Hardening must earn its maintenance cost — don't recommend builder patterns or fluent APIs unless the current shape has demonstrated friction
 
 Review checklist:
-1. **Breaking-change tracking** — identify source-breaking, binary-breaking, and semver-breaking changes. Flag any that lack deprecation strategy or version bump
-2. **FFI compatibility** — types crossing UniFFI must be FFI-representable. Flag `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, or external-crate types without conversion
-3. **Visibility minimization** — `pub` should be the smallest necessary surface. Flag `pub` items only used within the crate (should be `pub(crate)`) or unused (dead code)
-4. **Naming** — Rust API guidelines + Swift/Kotlin client idioms. Flag inconsistent casing, unclear abbreviations, names that conflict with target-language reserved words
-5. **Error types** — domain errors wrap at the boundary (`hermes-uniffi::HermesError`); no internal errors leak. Flag `Result<T, internal_error::Type>` in a `pub` signature
-6. **Async patterns** — `Send` bounds, UniFFI async constraints (Tokio runtime, cancellation safety). Flag `async fn` exports without addressing cancellation semantics
-7. **Ergonomics** — common-case ease (constructor, simple call), footgun avoidance, builder-vs-constructor when fields are many
+1. Breaking-change tracking — identify source-breaking, binary-breaking, and semver-breaking changes. Flag any that lack deprecation strategy or version bump
+2. FFI compatibility — types crossing UniFFI must be FFI-representable. Flag `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, or external-crate types without conversion
+3. Visibility minimization — `pub` should be the smallest necessary surface. Flag `pub` items only used within the crate (should be `pub(crate)`) or unused (dead code)
+4. Naming — Rust API guidelines + Swift/Kotlin client idioms. Flag inconsistent casing, unclear abbreviations, names that conflict with target-language reserved words
+5. Error types — domain errors wrap at the boundary (`hermes-uniffi::HermesError`); no internal errors leak. Flag `Result<T, internal_error::Type>` in a `pub` signature
+6. Ergonomics — common-case ease (constructor, simple call), footgun avoidance, builder-vs-constructor when fields are many
 
 (Type design and rustdoc coverage are out of scope here — `rust-code-reviewer` covers ownership and lifetimes; the `rust-docs` skill handles doc completeness.)
 
 Output format per finding:
 - `file:line`
-- **What** — the API design problem (one sentence)
-- **Why** — the consumer-facing impact (broken usage, source-breaking, FFI failure, etc.)
-- **How** — the corrected API shape (with example)
+- What — the API design problem (one sentence)
+- Why — the consumer-facing impact (broken usage, source-breaking, FFI failure, etc.)
+- How — the corrected API shape (with example)
 - Category: `critical`, `improvement`, `learning`
 - `confidence: low` when unsure
 
@@ -51,4 +50,4 @@ Rules:
 - If a finding depends on context you couldn't load (e.g., binding generation behavior), say so and name what would confirm it
 - Do NOT duplicate `rust-code-reviewer`'s focus areas (correctness, idiom, panic safety, internal lifetimes) — those are out of scope here
 
-End with an **API Summary**: `PASS`, `PASS WITH NOTES`, or `BLOCK`.
+End with an API Summary: `PASS`, `PASS WITH NOTES`, or `BLOCK`.

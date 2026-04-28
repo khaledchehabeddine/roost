@@ -17,7 +17,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 ### Agent Config
 
-- When updating one agent's customization, mirror the change in the other agent's equivalent (Claude ↔ Codex)
+- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation — do not harmonize style across agents
 - Follow the structure and style from existing peer customizations of the same type within the same agent — applies to root config files, rules, agents, and skills
 
 ### Crypto
@@ -39,7 +39,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
   - Replayed messages must be rejected
   - Ratchet steps must follow the correct sequence
   - Expired keys must be deleted
-  - Skipped message keys must have a hard cap (per chain and total) and a max age — drop the oldest on overflow
+  - Skipped message keys must have a hard cap (per chain and total) — reject on overflow rather than evict (eviction-based caches are vulnerable to flooding; conservative rejection preserves replay protection)
 
 ### Dependencies
 
@@ -49,7 +49,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Prefer audited crates: `subtle` for constant-time, `zeroize` for secret zeroing, `rand` (`OsRng`) for production randomness, `hkdf`/`hmac`/`sha2` for KDF/MAC, dalek crates for asymmetric primitives
 - `cargo-deny` mechanically enforces license, advisory, source, and yanked policy — see `deny.toml`. This rule covers the human-judgment criteria cargo-deny cannot enforce
 - Pin major versions in each crate's `Cargo.toml` (current pattern); when a dep is shared across two or more crates, hoist to `[workspace.dependencies]`. Update via `cargo update -p <crate>` with explicit reasoning in commit message
-- Note shared sub-dependencies in comments (e.g., "Dalek and KDF crates share `digest 0.10` — bump together")
+- After bumping any crypto-adjacent dep, run `cargo deny check bans` to catch new transitive duplicates. If a duplicate is unavoidable (e.g., build-time tool), add an explicit entry to `deny.toml`'s `[bans] skip` with reasoning
 
 ### Error Handling
 
@@ -60,16 +60,12 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 ### Public API
 
-- Semver discipline:
-  - Source-breaking changes (renaming a `pub` item, changing a signature) require a major version bump or a deprecation period
-  - Binary-breaking changes (changing struct field layout when the struct is `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump
-  - Prefer adding a new function over breaking an existing one
+- Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump — affects Swift/Kotlin bindings
+- Prefer adding a new function over breaking an existing one
 - `pub` minimization — every `pub` item must have an external consumer (another crate, the FFI surface, or a documented public re-export). `pub` items with no consumer are dead code; demote to `pub(crate)` or remove
 - FFI-exposed APIs (`#[uniffi::export]`, `#[derive(uniffi::*)]`) require corresponding `From<InternalError> for HermesError` impls within `hermes-uniffi` for every error type they can return
 - No `unwrap()`, `expect()`, or `panic!()` in `#[uniffi::export]` paths — use `Result<T, HermesError>` for fallible operations
-- Async exports must declare cancellation safety (the future being dropped mid-await must not leave persistent state in an inconsistent shape)
 - Public types must have rustdoc per `docs/agents/rust-docs/style.md` tier (T1 for `hermes-uniffi`, T2 for other crates)
-- Deprecation removes after one full release cycle minimum — never in the same release that introduced the deprecation
 
 ### Rust Style
 
@@ -83,7 +79,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - One scenario per integration test file — split rather than grow into mega-files
 - KAT vector tests cite their derivation source (RFC, upstream library + version, or paired derivation script) in a doc comment alongside the expected constant
 - KAT expected outputs live in named constants (`<PRIMITIVE>_KAT_EXPECTED`) — never inlined as literals at the assertion site
-- Test inputs are deterministic — fixed timestamps (`const FIXED_TS: u64 = ...`), seeded RNGs (`ChaCha20Rng::seed_from_u64`), or fixed byte arrays. No `SystemTime::now()` or `OsRng` in test paths
+- Test inputs are deterministic — fixed timestamps (`const FIXED_TS: u64 = ...`) or fixed byte arrays. No `SystemTime::now()` or `OsRng` in test paths. See `crates/hermes-crypto/tests/session.rs` for the established pattern
 - No shared mutable state across tests — each test owns its `Setup` via a `setup()` function, no `static mut` or `Lazy<>`
 - Test-only dependencies live under `[dev-dependencies]` in Cargo.toml — never `[dependencies]`
 

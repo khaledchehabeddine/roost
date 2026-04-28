@@ -4,9 +4,9 @@
 
 Three audience-based tiers, by location:
 
-- **T1** — UniFFI-exposed APIs in `crates/hermes-uniffi/`, read by SDK consumers via the generated bindings.
-- **T2** — Cross-crate `pub` items in `hermes-core`, `hermes-crypto`, and `hermes-transport-ble`, read by Rust contributors wiring the crates together.
-- **T3** — `pub(crate)` or private items in any crate, read by contributors editing the crate itself.
+- T1 — UniFFI-exposed APIs in `crates/hermes-uniffi/`, read by SDK consumers via the generated bindings.
+- T2 — Cross-crate `pub` items in `hermes-core`, `hermes-crypto`, and `hermes-transport-ble`, read by Rust contributors wiring the crates together.
+- T3 — `pub(crate)` or private items in any crate, read by contributors editing the crate itself.
 
 ## Per-tier content
 
@@ -60,9 +60,6 @@ Require:
 
 ## Lint enforcement
 
-Per-crate via `Cargo.toml [lints]`:
+Doc presence is enforced mechanically via `Cargo.toml [lints]` — see the workspace and per-crate lint config for current coverage. T1 (`hermes-uniffi`) is configured strictest because its surface ships to external bindings consumers.
 
-| Crate           | Enforced lints                                                 |
-|-----------------|----------------------------------------------------------------|
-| `hermes-uniffi` | `missing_crate_level_docs = "warn"` + `missing_docs = "warn"`  |
-| Other crates    | `missing_crate_level_docs = "warn"` (inherited from workspace) |
+Lints catch missing docs only. Tier-based content quality (T1/T2/T3 sections, `# Examples`, tone) is reviewed by the `rust-docs` skill.

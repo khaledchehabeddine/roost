@@ -24,8 +24,7 @@ Review checklist:
 3. Visibility minimization — pub should be the smallest necessary surface. Flag pub items only used within the crate (should be pub(crate)) or unused (dead code)
 4. Naming — Rust API guidelines + Swift/Kotlin client idioms. Flag inconsistent casing, unclear abbreviations, names that conflict with target-language reserved words
 5. Error types — domain errors wrap at the boundary (hermes-uniffi::HermesError); no internal errors leak. Flag Result<T, internal_error::Type> in a pub signature
-6. Async patterns — Send bounds, UniFFI async constraints (Tokio runtime, cancellation safety). Flag async fn exports without addressing cancellation semantics
-7. Ergonomics — common-case ease (constructor, simple call), footgun avoidance, builder-vs-constructor when fields are many
+6. Ergonomics — common-case ease (constructor, simple call), footgun avoidance, builder-vs-constructor when fields are many
 
 (Type design and rustdoc coverage are out of scope here — rust-code-reviewer covers ownership and lifetimes; the rust-docs skill handles doc completeness.)
 

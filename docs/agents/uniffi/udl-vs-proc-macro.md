@@ -2,8 +2,6 @@
 
 ## Hermes uses proc-macro
 
-From `crates/hermes-uniffi/src/lib.rs`:
-
 ```rust
 uniffi::setup_scaffolding!("hermes");
 

@@ -29,7 +29,7 @@ Audit checklist:
    - Out-of-order receipt — try_skipped_message_keys invoked before chain advance
    - Replay windows — bounded across DH ratchet rotations
    - Key compromise recovery — chain keys deleted after use; DH ratchet step rotates ephemeral keys
-   - State persistence — deserialization re-validates the MAX_SKIPPED_KEYS_TOTAL cap (otherwise a tampered persisted blob bypasses the runtime cap). If RatchetState ever becomes Sync or shared across tasks, audit for races that could lose ratchet state
+   - State persistence — deserialization re-validates the MAX_SKIPPED_KEYS_TOTAL cap (otherwise a tampered persisted blob bypasses the runtime cap)
    - Header authentication before state change — failed decryption must not advance chain, evict skipped keys, or update receiving DH key
 6. Unsafe blocks — flag for manual review. Explain the invariant and whether a safe alternative exists
 7. Injection & deserialization — flag unsafe deserialization of untrusted data without schema validation. Verify no format strings or command strings are built from external input

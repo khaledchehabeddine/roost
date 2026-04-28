@@ -1,6 +1,6 @@
 ---
 name: uniffi-patterns
-description: Trigger when designing or modifying the UniFFI surface in Hermes — adding errors that cross the FFI, choosing types at the boundary, exposing foreign-implementable traits, or working with async UniFFI. Not for general Rust API design unrelated to FFI.
+description: Trigger when designing or modifying the UniFFI surface in Hermes — adding errors that cross the FFI, choosing types at the boundary, or exposing foreign-implementable traits. Not for general Rust API design unrelated to FFI.
 ---
 
 # Hermes UniFFI Patterns
@@ -13,7 +13,6 @@ When the task involves... read this reference:
 
 - Defining or modifying error types crossing the FFI (panics, error derives, `From` chains) → [error-boundary.md](../../../docs/agents/uniffi/error-boundary.md)
 - Choosing types at the FFI boundary (`Vec<u8>` vs `Arc<T>`, primitives, custom types) → [type-bridges.md](../../../docs/agents/uniffi/type-bridges.md)
-- Adding async APIs (constraints, runtime selection, error propagation) → [async-patterns.md](../../../docs/agents/uniffi/async-patterns.md)
 - Choosing between UDL and proc-macro modes (Hermes uses proc-macro — when does UDL win) → [udl-vs-proc-macro.md](../../../docs/agents/uniffi/udl-vs-proc-macro.md)
 
 ## Quick checklist

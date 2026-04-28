@@ -8,14 +8,14 @@ Choose types at the FFI boundary that UniFFI can represent in both Swift and Kot
 
 UniFFI generates bindings for both Swift and Kotlin from the same Rust signatures. Each language has different type-system constraints, and UniFFI translates conservatively:
 
-- **Primitives** (`u8`, `u32`, `i64`, `bool`, `f64`) — direct mapping, free
-- **`String`** — UTF-8, allocated on each call
-- **`Vec<u8>`** — byte array, copied across the boundary
-- **`Option<T>`** — nullable in Swift/Kotlin
-- **`Vec<T>`** — list/array in client languages
-- **`Arc<T>` where `T: uniffi::Object`** — reference-counted handle to a Rust-managed object
-- **Records** (structs with `#[derive(uniffi::Record)]`) — value types, all fields FFI-compatible
-- **Errors** (`#[derive(uniffi::Error)]`) — typed enum errors
+- Primitives (`u8`, `u32`, `i64`, `bool`, `f64`) — direct mapping, free
+- `String` — UTF-8, allocated on each call
+- `Vec<u8>` — byte array, copied across the boundary
+- `Option<T>` — nullable in Swift/Kotlin
+- `Vec<T>` — list/array in client languages
+- `Arc<T>` where `T: uniffi::Object` — reference-counted handle to a Rust-managed object
+- Records (structs with `#[derive(uniffi::Record)]`) — value types, all fields FFI-compatible
+- Errors (`#[derive(uniffi::Error)]`) — typed enum errors
 
 What UniFFI does NOT support (these must be wrapped):
 
@@ -25,7 +25,7 @@ What UniFFI does NOT support (these must be wrapped):
 - Custom types from external crates without UniFFI derives (e.g., `chrono::DateTime`, `uuid::Uuid` need conversion)
 - Tuples — use a Record instead
 
-## Hermes patterns
+## Patterns
 
 ### Objects: `Arc<Mutex<Inner>>` for shared state
 
@@ -76,7 +76,7 @@ let bytes = self.storage.load(key)?;  // Vec<u8>
 let secret = bytes.map(Zeroizing::new); // Zeroizing<Vec<u8>>
 ```
 
-The doc comment in `crates/hermes-uniffi/src/lib.rs` for `SecureStorage` makes this explicit:
+The `SecureStorage` doc comment makes this explicit:
 
 > `value` and `load` return bare `Vec<u8>` because UniFFI does not support `Zeroizing`. The `SecureStorageAdapter` wraps loaded values in `Zeroizing` on the Rust side.
 
@@ -108,8 +108,6 @@ pub struct RatchetState(hermes_crypto::RatchetState);
 
 ## Wrapping FFI-incompatible internal types
 
-The Hermes-specific rule says: *FFI-incompatible core types must be wrapped within the `hermes-uniffi` crate.*
-
 Pattern:
 
 ```rust
@@ -140,5 +138,4 @@ The wrapper:
 
 - AGENTS.md `## Coding Guidelines > UniFFI` — the enforceable rule
 - [error-boundary.md](error-boundary.md) — what error types are allowed in `Result<T, E>`
-- [async-patterns.md](async-patterns.md) — additional constraints on async functions
 - UniFFI book on types: <https://mozilla.github.io/uniffi-rs/latest/types/index.html>

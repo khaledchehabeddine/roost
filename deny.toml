@@ -14,8 +14,15 @@ allow = [
 private = { ignore = true }
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+
+# Build-time / codegen duplicates only — neither version-duplicate ships in the production binary.
+# Run `cargo deny check bans` after any dep bump; if a new duplicate is unavoidable, add it here with reasoning.
+skip = [
+    { name = "getrandom", version = "=0.4.2", reason = "tempfile via uniffi_bindgen/uniffi_pipeline (build-time codegen, not in production binary)" },
+    { name = "winnow", version = "=1.0.1", reason = "toml via uniffi_bindgen (build-time codegen, not in production binary)" },
+]
 
 [advisories]
 version = 2

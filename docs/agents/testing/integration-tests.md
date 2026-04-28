@@ -6,24 +6,24 @@ Integration tests live in `crates/<crate>/tests/<scenario>.rs` and exercise only
 
 Inline unit tests (`#[cfg(test)] mod tests { ... }`) test internal logic. Integration tests test the contract.
 
-In Hermes: see `crates/hermes-crypto/tests/session.rs` for the canonical pattern — two `RatchetState` instances bootstrapped via X3DH-lite, exchanging messages.
+Canonical pattern: two `RatchetState` instances bootstrapped via X3DH-lite exchange messages back and forth.
 
 ## Why it matters
 
 Unit tests miss two important classes of bugs:
 
-1. **API surface regressions** — a refactor that changes a public type signature breaks downstream consumers. Inline tests use internals so they don't catch this. Integration tests do.
-2. **Cross-module composition bugs** — module A and module B each work in isolation, but their composition is wrong. Inline tests of A and B both pass; the bug only appears when they're orchestrated together.
+1. API surface regressions — a refactor that changes a public type signature breaks downstream consumers. Inline tests use internals so they don't catch this. Integration tests do.
+2. Cross-module composition bugs — module A and module B each work in isolation, but their composition is wrong. Inline tests of A and B both pass; the bug only appears when they're orchestrated together.
 
 Integration tests treat the crate as a black box, which is the only way to verify the box is well-shaped.
 
-## Hermes structure
+## Structure
 
-See `crates/hermes-crypto/tests/session.rs` for the canonical pattern. Three things to mirror in new integration tests:
+Three things to include in any new integration test:
 
-1. **Module-level docstring states the test file's purpose** — what scenario, what crosses what boundary
-2. **`use hermes_crypto::{...}` imports public names only** — if a test needs an internal item, that's a smell (move the test inline, or surface the item)
-3. **`Setup` struct + `setup()` function as the shared fixture** — tests own their state via `setup()`; no global mutable state. Use `const FIXED_TS: u64 = 1_700_000_000;` for any timestamp input.
+1. Module-level docstring states the test file's purpose — what scenario, what crosses what boundary
+2. `use hermes_crypto::{...}` imports public names only — if a test needs an internal item, that's a smell (move the test inline, or surface the item)
+3. `Setup` struct + `setup()` function as the shared fixture — tests own their state via `setup()`; no global mutable state. Use `const FIXED_TS: u64 = 1_700_000_000;` for any timestamp input.
 
 ## Apply when
 
@@ -59,9 +59,9 @@ One file per scenario. Avoid mega-files like `tests/integration.rs` that test ev
 
 Integration tests are particularly prone to flakiness because they exercise more state. Hermes' patterns:
 
-- **Fixed timestamps**: `const FIXED_TS: u64 = 1_700_000_000;` — never `SystemTime::now()`
-- **Setup struct**: each test calls `setup()` and gets fresh state; no `static mut`, no `Lazy<>`
-- **Deterministic key generation in setup is acceptable** *within a test file* — but each test should call `setup()` independently, not share results across tests
+- Fixed timestamps: `const FIXED_TS: u64 = 1_700_000_000;` — never `SystemTime::now()`
+- Setup struct: each test calls `setup()` and gets fresh state; no `static mut`, no `Lazy<>`
+- Deterministic key generation in setup is acceptable *within a test file* — but each test should call `setup()` independently, not share results across tests
 
 When a test absolutely needs ordering (e.g., "send 3 messages then crash, restore, deliver out-of-order"), make the ordering explicit in the test body — don't depend on cross-test ordering.
 
@@ -110,4 +110,3 @@ For each integration test file, verify:
 
 - AGENTS.md `## Coding Guidelines > Tests` — enforceable rules
 - [kat-vectors.md](kat-vectors.md) — for testing primitives, not compositions
-- [proptest.md](proptest.md) — for invariant-based testing of compositions

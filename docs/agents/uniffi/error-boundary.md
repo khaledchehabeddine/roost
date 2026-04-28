@@ -14,9 +14,7 @@ UniFFI's binding generators (Swift, Kotlin) cannot represent arbitrary Rust type
 
 A single `HermesError` enum funnels every fallible operation into one client-visible shape. Variants describe *what went wrong* in client-relevant terms (`AlreadyExists`, `NotFound`, `DecryptionFailed`), not internal implementation details (`LockPoisoned`, `HkdfExpand`).
 
-## Hermes structure
-
-From `crates/hermes-uniffi/src/lib.rs`:
+## Structure
 
 ```rust
 /// Errors surfaced across the FFI boundary.
@@ -56,13 +54,9 @@ impl From<IdentityError> for HermesError {
 
 Three patterns to notice:
 
-1. **Variants are client-meaningful** — `AlreadyExists`, `NotFound` map to error states the client app needs to handle differently
-2. **Internal failures get `InternalError { reason }`** — lock poisoning, clock skew, programmer errors. The client doesn't branch on these; it logs and surfaces a generic failure.
-3. **`From` impls live in `lib.rs`** — single conversion table. Adding a new internal error variant means adding one `From` arm.
-
-## Hermes-specific rule
-
-> Errors crossing the UniFFI boundary must use `#[derive(uniffi::Error)]` — library errors and panics cannot propagate.
+1. Variants are client-meaningful — `AlreadyExists`, `NotFound` map to error states the client app needs to handle differently
+2. Internal failures get `InternalError { reason }` — lock poisoning, clock skew, programmer errors. The client doesn't branch on these; it logs and surfaces a generic failure.
+3. `From` impls live in `lib.rs` — single conversion table. Adding a new internal error variant means adding one `From` arm.
 
 ## Apply when
 

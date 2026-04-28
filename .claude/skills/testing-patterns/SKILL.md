@@ -1,6 +1,6 @@
 ---
 name: testing-patterns
-description: Apply Hermes' testing patterns when writing or reviewing tests — Known Answer Tests for crypto primitives, integration tests across crate boundaries, property-based tests for invariants, async test patterns for transport code. Use when adding tests or refactoring test layout.
+description: Apply Hermes' testing patterns when writing or reviewing tests — Known Answer Tests for crypto primitives, integration tests across crate boundaries. Use when adding tests or refactoring test layout.
 allowed-tools: Read Glob Grep
 paths:
   - "crates/**/*.rs"
@@ -16,8 +16,6 @@ When the task involves... read this reference:
 
 - Adding a Known Answer Test for a crypto primitive (HKDF, AEAD, signing, ratchet step) → [kat-vectors.md](../../../docs/agents/testing/kat-vectors.md)
 - Writing an integration test that crosses crate or module boundaries → [integration-tests.md](../../../docs/agents/testing/integration-tests.md)
-- Verifying an algebraic invariant or round-trip property → [proptest.md](../../../docs/agents/testing/proptest.md)
-- Writing tests for async code (transport-ble, future async storage) → [async-tests.md](../../../docs/agents/testing/async-tests.md)
 
 ## Quick checklist
 

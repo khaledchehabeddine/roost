@@ -55,10 +55,10 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["git", "tag", "-d"],
+    pattern = ["git", "tag", ["-d", "--delete"]],
     decision = "prompt",
     justification = "git tag -d deletes a local tag. Confirm before removing — local-only deletion is recoverable from remote, but releases lose their reference if both sides are deleted.",
-    match = ["git tag -d v0.3.0"],
+    match = ["git tag -d v0.3.0", "git tag --delete v0.3.0"],
     not_match = ["git tag", "git tag v0.4.0"],
 )
 

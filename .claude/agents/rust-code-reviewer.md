@@ -23,20 +23,21 @@ Principles:
 - Hardening must earn its maintenance cost — don't suggest defensive wrappers or checked operations for values that are bounded, stack-local, or immediately consumed
 
 Focus on:
-1. **Correctness bugs and edge cases** — off-by-one, missing null/empty checks, incorrect logic
-2. **Async/concurrency** — `Send`/`Sync` correctness, dropped/leaked Futures, Arc/Mutex misuse
-3. **Panic safety** — `unwrap()`, `expect()`, `panic!()` outside tests are banned
-4. **Error handling** — `Result` propagation, project-defined domain error types
-5. **Lifetime, ownership, and borrowing** — unnecessary clones, lifetime annotations, `&T` vs `T` choices
-6. **Trait usage** — object safety, bounds, blanket impls, trait coherence
-7. **API surface** — visibility (`pub` vs `pub(crate)` vs private), naming, public type design
-8. **Idiomatic Rust** — `?` operator, iterator combinators, match exhaustiveness
+1. Correctness bugs and edge cases — off-by-one, missing null/empty checks, incorrect logic
+2. Async/concurrency — `Send`/`Sync` correctness, dropped/leaked Futures, Arc/Mutex misuse
+3. Panic safety — `unwrap()`, `expect()`, `panic!()` outside tests are banned
+4. Error handling — `Result` propagation, project-defined domain error types
+5. Lifetime, ownership, and borrowing — unnecessary clones, lifetime annotations, `&T` vs `T` choices
+6. Trait usage — object safety, bounds, blanket impls, trait coherence
+7. Idiomatic Rust — `?` operator, iterator combinators, match exhaustiveness
+
+(Public API surface concerns — `pub` visibility, naming, type design — are owned by `api-reviewer`. Do not duplicate.)
 
 Output format per finding:
 - `file:line`
-- **What** — the problem (one sentence)
-- **Why** — why it matters in Rust (compare to mobile platform concepts if relevant)
-- **How** — the corrected code
+- What — the problem (one sentence)
+- Why — why it matters in Rust (compare to mobile platform concepts if relevant)
+- How — the corrected code
 - Category: `critical`, `improvement`, `learning`
 - `confidence: low` when unsure
 
@@ -49,4 +50,4 @@ Rules:
 - Anchor every finding to a line in your scope. Ripple effects (changes that break assumptions elsewhere) are allowed only when you can point to the originating scope line that caused the break
 - If a finding depends on context you couldn't load, say so and name what would confirm it
 
-End with a **Summary**: what was done well and the most important focus for the next task.
+End with a Summary: what was done well and the most important focus for the next task.

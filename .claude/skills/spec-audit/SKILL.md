@@ -1,8 +1,7 @@
 ---
 name: spec-audit
-description: Audit a Hermes implementation against an authoritative specification (RFC, Signal whitepaper, NIST publication). Walks the spec section-by-section, tags each requirement as conformant/divergent/ambiguous/unimplemented, outputs a structured report. Use when implementing or modifying spec-defined protocols.
+description: Audit a Hermes implementation against an authoritative specification (RFC, Signal whitepaper, NIST publication). Walks the spec section-by-section, tags each requirement as conformant/divergent/ambiguous/unimplemented, surfaces a concise summary in the conversation. Use when implementing or modifying spec-defined protocols.
 argument-hint: [spec-name-or-url]
-disable-model-invocation: true
 allowed-tools: Bash(grep *) Bash(find *) Read WebFetch
 ---
 
@@ -25,9 +24,8 @@ Audit an implementation against a specification:
      - **✗ Divergent** — intentional deviation; note Hermes' justification (cite ADR if one exists)
      - **⚠ Ambiguous** — spec is unclear; note our interpretation
      - **⊘ Unimplemented** — spec describes optional/future functionality not yet built
-5. Output structured report as a markdown document. Suggested location: `docs/audits/<YYYY-MM-DD>-<spec-name>.md` or attach to a security issue
-6. For every **divergent** finding without an existing ADR, suggest scheduling a `decision-record` to capture the rationale
-7. For every **unimplemented** finding that is security-relevant (not just feature gap), suggest opening a security issue via `issue` skill
-8. Surface the report to the user; do NOT auto-create issues or ADRs
+5. Surface findings in the conversation as a concise summary — lead with Divergent and Unimplemented (high priority), then Ambiguous, then Conformant as a count only. Each non-conformant item: spec section + `file:line` reference. Offer the full Conformant list on request
+6. For every divergent finding without an existing ADR, suggest `/decision-record` to capture the rationale
+7. For every security-relevant unimplemented finding, suggest `/issue` to track. Do NOT auto-create either
 
 Pairs with `security-auditor` (this skill produces the input; security-auditor enforces conformance at commit time).

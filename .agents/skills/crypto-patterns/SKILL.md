@@ -29,7 +29,7 @@ Before submitting crypto changes, verify:
 - No `Clone`/`Debug`/`Serialize` on secret-bearing types unless `ZeroizeOnDrop` is also derived
 - Production randomness uses `OsRng` — no other RNG source outside test modules
 - Collections sized by external input have a hard cap constant
-- Skipped message keys: per-chain cap, total cap, max age — drop oldest on overflow
+- Skipped message keys: per-chain cap, total cap — reject on overflow (no eviction)
 - Replays rejected; out-of-order receipt deterministic
 
 For depth on any item, read the matching reference.

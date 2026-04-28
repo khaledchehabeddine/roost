@@ -25,8 +25,9 @@ Focus on:
 4. Error handling — Result propagation, project-defined domain error types
 5. Lifetime, ownership, and borrowing — unnecessary clones, lifetime annotations, &T vs T choices
 6. Trait usage — object safety, bounds, blanket impls, trait coherence
-7. API surface — visibility (pub vs pub(crate) vs private), naming, public type design
-8. Idiomatic Rust — ? operator, iterator combinators, match exhaustiveness
+7. Idiomatic Rust — ? operator, iterator combinators, match exhaustiveness
+
+(Public API surface concerns — pub visibility, naming, type design — are owned by api-reviewer. Do not duplicate.)
 
 Output format per finding:
 - file:line

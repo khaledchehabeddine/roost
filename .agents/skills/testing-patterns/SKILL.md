@@ -1,6 +1,6 @@
 ---
 name: testing-patterns
-description: Trigger when writing or reviewing tests in Hermes — adding Known Answer Tests for crypto primitives, structuring integration tests, applying property-based testing, or testing async code. Not for general Rust test scaffolding unrelated to Hermes' patterns.
+description: Trigger when writing or reviewing tests in Hermes — adding Known Answer Tests for crypto primitives or structuring integration tests. Not for general Rust test scaffolding unrelated to Hermes' patterns.
 ---
 
 # Hermes Testing Patterns
@@ -13,8 +13,6 @@ When the task involves... read this reference:
 
 - Adding a Known Answer Test for a crypto primitive (HKDF, AEAD, signing, ratchet step) → [kat-vectors.md](../../../docs/agents/testing/kat-vectors.md)
 - Writing an integration test that crosses crate or module boundaries → [integration-tests.md](../../../docs/agents/testing/integration-tests.md)
-- Verifying an algebraic invariant or round-trip property → [proptest.md](../../../docs/agents/testing/proptest.md)
-- Writing tests for async code (transport-ble, future async storage) → [async-tests.md](../../../docs/agents/testing/async-tests.md)
 
 ## Quick checklist
 

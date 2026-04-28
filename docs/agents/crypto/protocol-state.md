@@ -8,22 +8,20 @@ Protocol state machines must reject invalid transitions deterministically. For H
 - Out-of-order messages handled via bounded skipped-key cache
 - Expired or evicted keys deleted (forward secrecy)
 - Header authentication before any state change
-- Hard caps on per-chain and total skipped keys; max-age eviction
+- Hard caps on per-chain and total skipped keys; reject on overflow rather than evict
 
 ## Why it matters
 
 Protocol-state bugs are the highest-impact class of vulnerability in messaging crypto:
 
-- **Replay attacks** allow an attacker to resend captured messages, breaking authenticity and replay-protection guarantees
-- **Out-of-order DoS** — unbounded skipped-key storage lets an attacker exhaust memory by sending forged headers with high message numbers
-- **Forward secrecy violations** — failing to delete used keys means past sessions remain decryptable if device state leaks
-- **Race conditions in state restoration** — concurrent message receipt or interrupted persistence can leave the ratchet in a state that re-decrypts a message
+- Replay attacks allow an attacker to resend captured messages, breaking authenticity and replay-protection guarantees
+- Out-of-order DoS — unbounded skipped-key storage lets an attacker exhaust memory by sending forged headers with high message numbers
+- Forward secrecy violations — failing to delete used keys means past sessions remain decryptable if device state leaks
+- Race conditions in state restoration — concurrent message receipt or interrupted persistence can leave the ratchet in a state that re-decrypts a message
 
 These bugs aren't catch-all "security issues" — they're protocol-specific invariants documented in the Signal/Double Ratchet spec, and missing any one of them is a known-class vulnerability.
 
-## Hermes' Double Ratchet invariants
-
-From `crates/hermes-crypto/src/double_ratchet.rs`:
+## Double Ratchet invariants
 
 ### Hard caps
 
@@ -112,17 +110,16 @@ fn restore(blob: &[u8]) -> Result<Self, _> {
 
 Before approving protocol changes:
 
-1. **Replays rejected** — messages cannot be decrypted twice (skipped-key cache uses `remove`, not `get`)
-2. **DH ratchet ordering** — state advances *only* on successful authenticated decryption
-3. **Skipped-key handling** — hard cap enforced both at runtime AND at deserialization
-4. **Out-of-order receipt** — `try_skipped_message_keys` called before chain advance
-5. **Replay windows** — per-chain and across DH ratchet rotations
-6. **Key compromise recovery** — chain keys deleted after use; DH ratchet step rotates ephemeral keys
-7. **State persistence races** — concurrent receipt path is safe (no unprotected mutation that could lose ratchet state)
+1. Replays rejected — messages cannot be decrypted twice (skipped-key cache uses `remove`, not `get`)
+2. DH ratchet ordering — state advances *only* on successful authenticated decryption
+3. Skipped-key handling — hard cap enforced both at runtime AND at deserialization
+4. Out-of-order receipt — `try_skipped_message_keys` called before chain advance
+5. Replay windows — per-chain and across DH ratchet rotations
+6. Key compromise recovery — chain keys deleted after use; DH ratchet step rotates ephemeral keys
 
-## Hermes example: skipped-key overflow
+## Skipped-key overflow rationale
 
-From `crates/hermes-crypto/src/double_ratchet.rs:280-288` — when skipping would push the cache past `MAX_SKIPPED_KEYS_TOTAL`, the operation rejects rather than evicting:
+When skipping would push the cache past `MAX_SKIPPED_KEYS_TOTAL`, the operation rejects rather than evicts:
 
 ```rust
 fn skip_message_keys(&mut self, until_n: u32) -> Result<(), CryptoError> {
@@ -138,8 +135,6 @@ fn skip_message_keys(&mut self, until_n: u32) -> Result<(), CryptoError> {
 ```
 
 Why error rather than evict: the cache is `BTreeMap<([u8; 32], u32), MessageKey>` keyed by `(sender_pubkey, n)`. "Oldest" is not well-defined — `iter().next()` returns the lex-smallest *pubkey*, not the temporally-oldest entry. Evicting in that order would let an adversary who can shape traffic selectively drop a *victim sender's* cached keys (a denial-of-decryption attack). Error-on-overflow avoids this; the trade-off is that legitimate out-of-order traffic past the cap fails to decrypt and must be re-sent.
-
-Note: AGENTS.md's `## Coding Guidelines > Crypto` rule states "drop the oldest on overflow" as the intended behavior. The current implementation is more conservative (error). If eviction is added later, it will need a time-ordered secondary index — naive `BTreeMap` iteration is unsafe.
 
 ## See also
 

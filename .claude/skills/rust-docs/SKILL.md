@@ -1,6 +1,6 @@
 ---
 name: rust-docs
-description: Add or update Rust doc comments
+description: Audit and update /// doc comments on public Rust items per the project's documentation tier system (T1 for hermes-uniffi, T2 for core crates, T3 for pub(crate)/private). Use when documenting new items or auditing existing coverage in any crate.
 argument-hint: [crate-or-file-path]
 allowed-tools: Bash(cargo doc *) Edit MultiEdit Read
 paths: "**/*.rs"

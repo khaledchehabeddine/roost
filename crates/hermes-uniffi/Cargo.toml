@@ -21,3 +21,7 @@ hermes-core = { path = "../hermes-core", version = "0.3.0" }
 hermes-crypto = { path = "../hermes-crypto", version = "0.3.0" }
 uniffi = { version = "0.31.0", features = ["cli"] }
 zeroize = "1.8.2"
+
+[lints.rust]
+missing_crate_level_docs = "warn"
+missing_docs = "warn"

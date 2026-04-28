@@ -1,6 +1,6 @@
 ---
 name: spec-audit
-description: Trigger when auditing a Hermes implementation against an authoritative specification (RFC, Signal whitepaper, NIST publication). Walks the spec section-by-section, tags conformance, outputs a structured report. Not for general code review — use rust-code-reviewer for that.
+description: Trigger when auditing a Hermes implementation against an authoritative specification (RFC, Signal whitepaper, NIST publication). Walks the spec section-by-section, tags conformance, surfaces a concise summary in the conversation. Not for general code review — use rust-code-reviewer for that.
 ---
 
 ## Steps
@@ -36,18 +36,15 @@ For each normative requirement:
   - **⚠ Ambiguous** — spec is unclear; note our interpretation
   - **⊘ Unimplemented** — spec describes optional/future functionality not yet built
 
-### 5. Output the report
+### 5. Surface findings
 
-Structured markdown document. Suggested location: `docs/audits/<YYYY-MM-DD>-<spec-name>.md` or attach to a security issue.
+Concise conversation summary, not a separate file. Lead with **Divergent** and **Unimplemented** (high priority), then **Ambiguous**, then **Conformant** as a count only. Each non-conformant item: spec section + `file:line` reference. Offer the full Conformant list on request.
 
 ### 6. Suggest follow-ups
 
 - For every **divergent** finding without an existing ADR, suggest scheduling a `decision-record` to capture the rationale
 - For every **unimplemented** finding that is security-relevant, suggest opening a security issue via the `issue` skill
-
-### 7. Surface the report
-
-Show the report to the user; do NOT auto-create issues or ADRs.
+- Do NOT auto-create issues or ADRs — only suggest
 
 ## See also
 

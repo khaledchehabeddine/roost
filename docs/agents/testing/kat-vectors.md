@@ -10,9 +10,9 @@ In Hermes: KATs guard every crypto primitive — HKDF expansion, AEAD encrypt/de
 
 Cryptographic correctness is unfalsifiable from positive testing alone — an encrypt/decrypt round-trip succeeds even when both directions are wrong in the same way. KATs anchor the implementation to an independent ground truth; if a KAT breaks, either the implementation or its spec interpretation changed, and that warrants explicit review.
 
-## Hermes KAT structure
+## Structure
 
-From `crates/hermes-crypto/src/double_ratchet.rs:838` — the KAT pattern Hermes uses:
+A KAT pattern in practice:
 
 ```rust
 #[cfg(test)]
@@ -49,9 +49,9 @@ mod tests {
 
 Three things make this a good KAT:
 
-1. **Doc comment cites the derivation source** — not just "libsodium" but the specific function call. A reviewer can re-derive independently.
-2. **Same expected constant used by both directions** (encrypt + decrypt) — proves round-trip consistency *and* spec conformance simultaneously.
-3. **Inputs are minimal and fixed** — `[0u8; 32]` keys, empty AD, short plaintext. Easy to re-derive by hand.
+1. Doc comment cites the derivation source — not just "libsodium" but the specific function call. A reviewer can re-derive independently.
+2. Same expected constant used by both directions (encrypt + decrypt) — proves round-trip consistency *and* spec conformance simultaneously.
+3. Inputs are minimal and fixed — `[0u8; 32]` keys, empty AD, short plaintext. Easy to re-derive by hand.
 
 ## Apply when
 
@@ -69,12 +69,12 @@ Three things make this a good KAT:
 
 Trustworthy sources, in order of preference:
 
-1. **RFC test vectors** (e.g., RFC 5869 appendix A for HKDF, RFC 8439 for ChaCha20-Poly1305). These are normative — if your output doesn't match, you're wrong by definition.
-2. **Reference implementation outputs** (libsodium, BoringSSL, OpenSSL). Trusted because they're widely deployed and audited.
-3. **Independent Rust crate output** (pyca/cryptography from Python, also widely audited). Acceptable when no RFC vectors exist.
-4. **Hand-derived from spec** (last resort, requires careful review).
+1. RFC test vectors (e.g., RFC 5869 appendix A for HKDF, RFC 8439 for ChaCha20-Poly1305). These are normative — if your output doesn't match, you're wrong by definition.
+2. Reference implementation outputs (libsodium, BoringSSL, OpenSSL). Trusted because they're widely deployed and audited.
+3. Independent Rust crate output (pyca/cryptography from Python, also widely audited). Acceptable when no RFC vectors exist.
+4. Hand-derived from spec (last resort, requires careful review).
 
-**Avoid**: deriving the KAT by running your own implementation. That tests "the implementation matches itself," which is a tautology.
+Avoid: deriving the KAT by running your own implementation. That tests "the implementation matches itself," which is a tautology.
 
 ## Writing the derivation script
 
