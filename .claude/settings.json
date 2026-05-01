@@ -2,11 +2,12 @@
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Bash(git commit*)",
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "cargo audit"
+            "if": "Bash(git commit *)",
+            "command": "bash scripts/hooks/deny.sh"
           }
         ]
       },
@@ -15,23 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cargo fmt --check"
-          },
-          {
-            "type": "command",
-            "command": "cargo clippy --quiet -- -D warnings"
-          },
-          {
-            "type": "command",
-            "command": "cargo test --quiet"
-          },
-          {
-            "type": "command",
-            "command": "cargo llvm-cov -p hermes-core --fail-under-lines 80 --quiet"
-          },
-          {
-            "type": "command",
-            "command": "cargo llvm-cov -p hermes-crypto --fail-under-lines 80 --quiet"
+            "command": "bash scripts/hooks/check.sh"
           }
         ]
       }

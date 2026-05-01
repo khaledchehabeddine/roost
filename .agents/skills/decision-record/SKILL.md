@@ -3,13 +3,13 @@ name: decision-record
 description: Trigger when the user wants to record a new architectural decision. Not for updating, superseding, or deleting existing records.
 ---
 
-## Steps
+# Decision Record
 
-1. Run `ls docs/decisions/` to find existing records
-2. Read `assets/template.md` for the decision record format
-3. Determine the next sequential four-digit number from existing files
-4. Generate kebab-case filename from the provided title: `NNNN-<short-title>.md`, confirm with user
-5. Ask the user: "What was decided?"
-6. Ask the user: "Why?"
-7. Write the file to `docs/decisions/NNNN-<short-title>.md` using the template with today's date and the user's answers
-8. Show the created file path and content for review
+## Workflow
+
+1. Read [docs/decisions/TEMPLATE.md](../../../docs/decisions/TEMPLATE.md) for the decision record format
+2. Find the next four-digit number: run `ls docs/decisions/[0-9]*.md`, take the highest and add one
+3. Generate filename `NNNN-<short-title-kebab-case>.md` from the provided title; confirm with the user
+4. Ask the user: "What was decided?"
+5. Ask the user: "Why?"
+6. Write `docs/decisions/NNNN-<short-title-kebab-case>.md` using the template, today's date, and the user's answers

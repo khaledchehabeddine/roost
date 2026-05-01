@@ -15,50 +15,85 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 ## Coding Guidelines
 
-### Agent Config Style
+### Agent Config
 
-When creating or modifying agents, skills, rules, or root config files (`AGENTS.md`, `CLAUDE.md`):
-
-- State principles only — no inline code examples, worked scenarios, or "for instance" blocks that age
-- Every line must be actionable — if it restates what the tool already enforces or what the code already shows, delete it
-- Keep Claude and Codex configs in sync — changes to one must be mirrored to the other
-- Leverage each tool's native features:
-  - Claude: path-scoped `.claude/rules/`, `!` context injection, `allowed-tools`, `disable-model-invocation`
-  - Codex: `AGENTS.md` inline guidelines, `.codex/agents/` TOML definitions
-- Don't duplicate rules across layers — if a rule lives in a path-scoped file, don't repeat it in the root config
+- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation — do not harmonize style across agents
+- Follow the structure and style from existing peer customizations of the same type within the same agent — applies to root config files, rules, agents, and skills
+- Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.) — not mechanical alphabetical sort
+- Pattern-skill descriptions enumerate the same items as the body, in the same order
+- Skills that set `paths:` must not restate the location filter in their description — `paths:` gates auto-loading; descriptions describe activity
+- Customization descriptions don't explicitly reference the project name (Hermes) — context is implicit from the repo. Literal paths like `crates/hermes-uniffi` are exceptions (they identify actual files, not prose)
 
 ### Crypto
 
-- Protocol: Double Ratchet — replayed messages must be rejected, ratchet steps must follow correct sequence, expired keys must be deleted
-- Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
-- Comparisons of MACs, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
-- `Zeroizing` wrapping: required for heap secrets (`Vec<u8>`, decrypted output) and FFI boundaries — not needed for stack-local values consumed immediately by a constructor
-- Wrap decrypted output in `Zeroizing::new()` immediately — before any validation or early returns
-- Types holding secret material must not derive `Clone`, `Debug`, or `Serialize` unless they also derive `ZeroizeOnDrop` — add a comment explaining why
+- Cryptographic primitives:
+  - Encryption: XChaCha20-Poly1305
+  - Key exchange: X25519
+  - Signing: Ed25519
+  - Key derivation: Argon2id
 - Production randomness must use `OsRng` — no other RNG source outside test modules
-- Encryption: XChaCha20-Poly1305 · Key exchange: X25519 · Signing: Ed25519 · Key derivation: Argon2id
+- AEAD nonces must be derived alongside the message key via HKDF — never randomly under a long-lived key
+- Every HKDF call must use a distinct, non-empty `info` string for domain separation
+- Wrap heap secrets (`Vec<u8>`, decrypted output) and FFI-bound values in `Zeroizing` immediately — before validation or early returns. Stack-locals consumed immediately by a constructor don't need wrapping
+- Custom secret-bearing structs derive `Zeroize, ZeroizeOnDrop`. Mark fields with `#[zeroize(skip)]` if they are non-secret or if the field's type doesn't impl `Zeroize` (e.g., `ed25519_dalek::Signature`)
+- Types holding secret material must not derive `Clone`, `Debug`, or `Serialize` unless they also derive `ZeroizeOnDrop` — add a comment explaining why
+- Comparisons of MACs, keys, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
+- Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
+- Protocol invariants (Double Ratchet, X3DH-lite): replay rejection, ratchet ordering, key expiration, skipped-key caps — see `docs/agents/crypto-protocol-state.md` for detail
+
+### Dependencies
+
+- Necessity check before adding any dep — can the standard library or an existing dep cover the need?
+- MSRV of any added dep must be ≤ workspace MSRV (see `rust-toolchain.toml`)
+- For crypto-adjacent crates (touching keys, signatures, encryption, KDFs): require maintainer reputation (RustCrypto org, dalek-cryptography, etc.) and audit history
+- Prefer audited crates: `subtle` for constant-time, `zeroize` for secret zeroing, `rand` (`OsRng`) for production randomness, `hkdf`/`hmac`/`sha2` for KDF/MAC, dalek crates for asymmetric primitives
+- Pin major versions in each crate's `Cargo.toml`; hoist shared deps to `[workspace.dependencies]`. Update via `cargo update -p <crate>` with reasoning in the commit message
+- License, advisory, source, and yanked policy: enforced by `cargo-deny` — see `deny.toml`
+- After bumping any crypto-adjacent dep, run `cargo deny check bans` for transitive duplicates. Allowed duplicates need an explicit `[bans] skip` entry in `deny.toml` with reasoning
 
 ### Error Handling
 
-- All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
 - Each crate defines its own domain error type
-- Errors never cross the UniFFI boundary — only domain errors defined in the UniFFI Definition Language (UDL) propagate to the platform layer
-- Error `Display` implementations should be detailed and developer-facing
+- All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
+- Error `Display` implementations should be detailed enough to debug from logs alone — not localized UI strings
+- Error `Display` must never include secret material — key bytes, plaintext, decrypted output, or seeds. Use reference identifiers (key IDs, message numbers) instead
 
-### Rust Docs
+### Public API
 
-- Document only what cannot be inferred from name, signature, variant types, or visibility
-- Document "why" decisions when not captured in a decision record; reference the DR when one exists
-- Prefer deleting a doc over leaving a low-information one
+- Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump — affects Swift/Kotlin bindings
+- Prefer adding a new function over breaking an existing one
+- `pub` minimization — every `pub` item must have an external consumer (another crate, the FFI surface, or a documented public re-export). `pub` items with no consumer are dead code; demote to `pub(crate)` or remove
+- Internal errors crossing the FFI must convert to `HermesError` via `From` impls
+- No `unwrap()`, `expect()`, or `panic!()` in `#[uniffi::export]` paths — use `Result<T, HermesError>` for fallible operations
+- Public types must have rustdoc per `docs/agents/rust-docs-style.md` tier (T1 for `hermes-uniffi`, T2 for other crates)
 
 ### Rust Style
 
-- Module ordering: `use` declarations → types → traits → impls → functions
+- Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions
 - No `pub use` glob re-exports
+
+### Tests
+
+- Inline unit tests live in `#[cfg(test)] mod tests { ... }` at the bottom of the source file they exercise
+- Integration tests live in `crates/<crate>/tests/<scenario>.rs` and exercise only the public API; if a test needs an internal item, the test belongs inline
+- One scenario per integration test file
+- Module docstring on integration tests states the scenario and what crosses what boundary
+- Test-only dependencies live under `[dev-dependencies]` in Cargo.toml
+- Test inputs are deterministic — no `SystemTime::now()` or `OsRng` in test paths
+- No shared mutable state across tests — each test owns its `Setup` via a `setup()` function, no `static mut` or `Lazy<>`
+- KAT vector tests cite the specific function call (e.g., `pyca/cryptography 46 HKDF-SHA256`) in a doc comment alongside the expected constant
+- KAT expected outputs live in named constants (`<PRIMITIVE>_KAT_EXPECTED`); both directions (encrypt/decrypt, sign/verify) reference the same constant
+- KAT derivation source preference: RFC vectors → reference implementation → independent crate/library → hand-derived (flag for security-auditor review)
+- KAT expected outputs must never be derived against the implementation under test
 
 ### UniFFI
 
-- FFI-incompatible core types must be re-wrapped within the `hermes-uniffi` crate
+- FFI-incompatible core types must be wrapped within the `hermes-uniffi` crate. Common cases: `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, external-crate types without conversion
+- Stateful types wrap with `#[derive(uniffi::Object)]` and interior mutability — decouples internal type evolution from FFI stability
+- Foreign-implementable traits use `#[uniffi::export(with_foreign)]` to let clients implement Rust-callable traits
+- Secret bytes cross the FFI as bare `Vec<u8>` and wrap in `Zeroizing` immediately on the Rust side — wrapping happens in the adapter layer, not in client code
+- Errors crossing the UniFFI boundary must use `#[derive(uniffi::Error)]` — library errors and panics cannot propagate
+- `HermesError` variants describe failures in client-relevant terms (e.g., `AlreadyExists`, `NotFound`). Internal failures the client cannot meaningfully handle (e.g., lock poisoning, KDF output overflow) reduce to a generic `InternalError { reason: String }` — the `reason` is for logs, not for client logic
 
 ## Workflow
 

@@ -8,6 +8,7 @@ The shared cryptographic and networking core for a private, peer-to-peer encrypt
 git clone git@github.com:RelayNet/hermes.git
 cd hermes
 rustup show
+cargo install cargo-deny cargo-llvm-cov
 cargo build --workspace
 ```
 

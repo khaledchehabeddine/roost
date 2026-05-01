@@ -1,11 +1,15 @@
 [package]
 name = "hermes-core"
 edition.workspace = true
+publish.workspace = true
 version.workspace = true
 
 [dependencies]
 argon2 = "0.5.3"
 chacha20poly1305 = "0.10.1"
 getrandom = "0.2.17"
-hermes-crypto = { path = "../hermes-crypto" }
+hermes-crypto = { path = "../hermes-crypto", version = "0.3.0" }
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }
+
+[lints]
+workspace = true

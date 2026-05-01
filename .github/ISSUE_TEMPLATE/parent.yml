@@ -2,9 +2,12 @@ name: Parent
 description: Tracking issue for a group of related tasks
 body:
   - type: textarea
-    id: description
     attributes:
-      label: Description
+      label: Summary
       description: One paragraph summarizing the scope and goal
     validations:
       required: true
+  - type: textarea
+    attributes:
+      label: Notes
+      description: Additional context, links, or edge cases

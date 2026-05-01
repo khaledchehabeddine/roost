@@ -1,52 +1,40 @@
 ---
-name: commit-push
 description: Stage, commit, push, and create or update a pull request
-argument-hint: [issue-id]
+argument-hint: [issue-number]
 disable-model-invocation: true
-allowed-tools: Bash(gh *) Bash(git *) Read
+allowed-tools: Agent Bash(gh *) Bash(git *) Read
 ---
 
-## Context
+When committing and pushing changes:
 
-- Current branch: !`git branch --show-current`
-- Current status: !`git status`
-- Staged diff: !`git diff --staged`
-- Diff against main: !`git diff main...HEAD`
-
-## Task
-
-### 1. Branch check
-
-Skip if not on `main`.
-
-If on `main` with `$ARGUMENTS`:
-- `gh issue view $ARGUMENTS --json number,title,labels`
-- Branch as `<label>/<issue-title-kebab-case>`, confirm with user
-- `git checkout -b <branch>` then `gh issue develop $ARGUMENTS --checkout`
-
-If on `main` without `$ARGUMENTS`:
-- `gh label list --json name` — user picks label and provides description
-- Branch as `<label>/<description-kebab-case>`, confirm with user
-- `git checkout -b <branch>`
-
-### 2. Code review gate
-
-- Invoke `rust-code-reviewer` and `security-auditor` agents on the staged diff
-- **critical** issues from either agent block the commit — do not proceed until the user confirms resolution
-- **improvement** and **learning** issues are shown but do not block
-
-### 3. Commit
-
-- Infer a commit message from staged diff following `CONTRIBUTING.md` format, confirm with user
-- `git add -A && git commit -m "<message>"`
-
-### 4. Push
-
-- `git push -u origin HEAD`
-
-### 5. Pull request
-
-- Title: `<Type>: <Short Description>` derived from branch name
-- Body: derived from diff against main using `PULL_REQUEST_TEMPLATE.md` structure
-- No open PR: `gh pr create --title "<title>" --body "<body>" --draft --assignee "@me" --label "<branch-type>"`
-- PR exists: `gh pr edit --body "<body>"`
+1. **Fetch pending changes**: `git diff HEAD`
+2. **Branch check**: run `git branch --show-current`
+   - On `main` with `$ARGUMENTS`:
+     - `gh issue view $ARGUMENTS --json number,title,labels`
+     - Propose `<label>/<issue-title-kebab-case>`, confirm with the user
+     - `gh issue develop $ARGUMENTS --name <branch> --checkout`
+   - On `main` without `$ARGUMENTS`:
+     - `gh label list --json name`
+     - Ask the user to pick a label and provide a description
+     - Propose `<label>/<description-kebab-case>`, confirm with the user
+     - `git checkout -b <branch>`
+   - Not on `main`: skip
+3. **AI review gate**:
+   - Dispatch `rust-code-reviewer` and `security-auditor` in parallel — one message, two `Agent` calls — with the pending diff
+   - Also dispatch `api-reviewer` in the same parallel batch when either holds:
+     - A new cross-crate public item is added or modified: `git diff HEAD | grep -E '^\+pub [a-z]'` returns output
+     - The diff touches `crates/hermes-uniffi/**`
+   - Findings handling:
+     - `critical` findings block — surface the finding and proposed fix; do not proceed until the user confirms resolution
+     - `improvement` and `learning` findings are advisory
+4. **Commit**:
+   - Compose a message from the pending diff per [CONTRIBUTING.md](../../../CONTRIBUTING.md), confirm with the user
+   - `git add -A && git commit -m "<message>"`
+5. **Push**: `git push -u origin HEAD`
+6. **Pull request**:
+   - Fetch the full diff: `git diff main...HEAD`
+   - Fill the body using [.github/PULL_REQUEST_TEMPLATE.md](../../../.github/PULL_REQUEST_TEMPLATE.md)
+   - Title: from step 2 branch — `/` → `: `, `-` → space, title-case (e.g., `feature/ble-transport-retry` → `Feature: BLE Transport Retry`)
+   - Footer link: `[Claude Code](https://claude.com/claude-code)`
+   - No open PR: `gh pr create --title "<title>" --body "<body>" --draft --assignee "@me" --label "<label>"`
+   - PR exists: `gh pr edit --body "<body>"`

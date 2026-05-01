@@ -1,0 +1,28 @@
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+private = { ignore = true }
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+    { name = "getrandom", version = "=0.4.2", reason = "tempfile via uniffi_bindgen/uniffi_pipeline (build-time codegen, not in production binary)" },
+    { name = "winnow", version = "=1.0.1", reason = "toml via uniffi_bindgen (build-time codegen, not in production binary)" },
+]
+
+[advisories]
+version = 2
+unmaintained = "workspace"
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
