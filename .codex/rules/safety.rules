@@ -7,27 +7,11 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["cargo", "yank"],
-    decision = "forbidden",
-    justification = "cargo yank withdraws a published version from crates.io and breaks downstream consumers. Coordinate manually instead.",
-    match = ["cargo yank --vers 0.3.0", "cargo yank --version 0.3.0 hermes-crypto"],
-    not_match = ["cargo test", "cargo publish"],
-)
-
-prefix_rule(
     pattern = ["gh", "release", "delete"],
     decision = "prompt",
     justification = "gh release delete removes a published GitHub release. Confirm intent before discarding release assets and notes.",
     match = ["gh release delete v0.3.0"],
     not_match = ["gh release create", "gh release view"],
-)
-
-prefix_rule(
-    pattern = ["git", "clean", ["-df", "-dfx", "-fd", "-fdx"]],
-    decision = "prompt",
-    justification = "git clean -fd deletes untracked files. Confirm intent before discarding work.",
-    match = ["git clean -fd", "git clean -fdx src/"],
-    not_match = ["git clean -n", "git clean --dry-run"],
 )
 
 prefix_rule(
@@ -39,19 +23,19 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["git", "push", ["-f", "--force"]],
-    decision = "forbidden",
-    justification = "Force push is forbidden. Use --force-with-lease instead.",
-    match = ["git push --force", "git push -f origin main"],
-    not_match = ["git push origin main", "git push --force-with-lease"],
+    pattern = ["git", "clean", ["-df", "-dfx", "-fd", "-fdx"]],
+    decision = "prompt",
+    justification = "git clean -fd deletes untracked files. Confirm intent before discarding work.",
+    match = ["git clean -fd", "git clean -fdx src/"],
+    not_match = ["git clean -n", "git clean --dry-run"],
 )
 
 prefix_rule(
     pattern = ["git", "reset", "--hard"],
-    decision = "forbidden",
-    justification = "Hard reset silently discards uncommitted changes. Stash, branch, or commit before resetting.",
+    decision = "prompt",
+    justification = "Hard reset silently discards uncommitted changes. Confirm intent before resetting; use --keep to refuse if work would be lost.",
     match = ["git reset --hard", "git reset --hard HEAD~1"],
-    not_match = ["git reset --soft HEAD~1", "git reset HEAD file.rs"],
+    not_match = ["git reset --soft HEAD~1", "git reset HEAD file.rs", "git reset --keep HEAD~1"],
 )
 
 prefix_rule(
@@ -63,9 +47,33 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["rm", "-rf"],
+    pattern = ["rm", ["-r", "-f"], ["-r", "-f"]],
+    decision = "prompt",
+    justification = "Recursive force delete with separated flags is destructive. Confirm the target path.",
+    match = ["rm -r -f target", "rm -f -r /tmp/build"],
+    not_match = ["rm -r dir", "rm -f file"],
+)
+
+prefix_rule(
+    pattern = ["rm", ["-rf", "-fr"]],
     decision = "prompt",
     justification = "Recursive force delete is destructive. Confirm the target path.",
-    match = ["rm -rf target", "rm -rf /tmp/build"],
+    match = ["rm -rf target", "rm -fr /tmp/build"],
     not_match = ["rm file.txt", "rm -r dir"],
+)
+
+prefix_rule(
+    pattern = ["cargo", "yank"],
+    decision = "forbidden",
+    justification = "cargo yank withdraws a published version from crates.io and breaks downstream consumers. Coordinate manually instead.",
+    match = ["cargo yank --vers 0.3.0", "cargo yank --version 0.3.0 hermes-crypto"],
+    not_match = ["cargo test", "cargo publish"],
+)
+
+prefix_rule(
+    pattern = ["git", "push", ["-f", "--force"]],
+    decision = "forbidden",
+    justification = "Force push is forbidden. Use --force-with-lease instead.",
+    match = ["git push --force", "git push -f origin main"],
+    not_match = ["git push origin main", "git push --force-with-lease"],
 )
