@@ -8,7 +8,7 @@ description: Trigger when the user wants to commit and push their current change
 ## Workflow
 
 1. Fetch pending changes: `git diff HEAD`
-2. Branch check: run `git branch --show-current`. On a feature branch: skip. Otherwise, create a feature branch:
+2. Branch check: run `git branch --show-current`. If the branch already follows `<type>/<description>` per [CONTRIBUTING.md](../../../CONTRIBUTING.md), skip. Otherwise, create a feature branch:
    - With an issue ID:
      - Run `gh issue view <id> --json number,title,labels`
      - Derive branch as `<label>/<issue-title-kebab-case>`, confirm with the user

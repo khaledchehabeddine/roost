@@ -38,7 +38,7 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 ## Worktrees
 
-For parallel sessions in isolation. Worktrees start in detached HEAD; `commit-push` creates the conformant branch at commit time, so the conventions above are unchanged.
+For parallel sessions in isolation. `commit-push` creates the conformant branch at commit time regardless of how the worktree was spawned, so the conventions above are unchanged.
 
 - **Claude Code:** `claude --worktree <name>`
 - **Codex App:** select "Worktree" in the thread composer
