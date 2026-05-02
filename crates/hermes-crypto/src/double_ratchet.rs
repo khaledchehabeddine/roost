@@ -27,7 +27,7 @@ impl Header {
     /// Serializes the header into a fixed 40-byte representation.
     ///
     /// Layout: 32-byte ratchet public key || 4-byte pn (big-endian) || 4-byte n (big-endian).
-    pub fn serialize(&self) -> [u8; 40] {
+    pub(crate) fn serialize(&self) -> [u8; 40] {
         let mut buf = [0u8; 40];
         buf[..32].copy_from_slice(self.public_key.as_bytes());
         buf[32..36].copy_from_slice(&self.pn.to_be_bytes());
@@ -66,7 +66,7 @@ impl RatchetState {
     ///
     /// Generates a fresh key pair, performs the initial DH exchange with `dhr`, and derives the
     /// first sending chain key. The initiator can send immediately after initialization.
-    pub fn init_initiator(rk: RootKey, dhr: &PublicKey) -> Result<Self, CryptoError> {
+    pub(crate) fn init_initiator(rk: RootKey, dhr: &PublicKey) -> Result<Self, CryptoError> {
         let dhs = generate_key_pair();
         let dh_output = dhs.diffie_hellman(dhr);
         let (rk, cks) = kdf_rk(&rk, &dh_output)?;
@@ -88,7 +88,7 @@ impl RatchetState {
     ///
     /// Stores the pre-existing key pair and root key. All chain keys remain `None` until the
     /// first message is received and triggers the DH ratchet step.
-    pub fn init_responder(rk: RootKey, dhs: KeyPair) -> Self {
+    pub(crate) fn init_responder(rk: RootKey, dhs: KeyPair) -> Self {
         Self {
             dhs,
             dhr: None,

@@ -104,7 +104,7 @@ pub fn accept(
 
 /// Initiator-side SK derivation. Three DHs composed into one HKDF run:
 /// `DH1 = IK_A·SPK_B`, `DH2 = EK_A·IK_B`, `DH3 = EK_A·SPK_B`.
-pub fn derive_sk_initiator(
+pub(crate) fn derive_sk_initiator(
     ik_a: &KeyPair,
     ek_a: &KeyPair,
     ik_b_pub: &PublicKey,
@@ -126,7 +126,7 @@ pub fn derive_sk_initiator(
 /// Responder-side SK derivation. Mirrors [`derive_sk_initiator`] with the complementary halves of
 /// each DH: `DH1 = SPK_B·IK_A`, `DH2 = IK_B·EK_A`, `DH3 = SPK_B·EK_A`. Must produce identical
 /// output for matched inputs.
-pub fn derive_sk_responder(
+pub(crate) fn derive_sk_responder(
     ik_a_pub: &PublicKey,
     ek_a_pub: &PublicKey,
     ik_b: &KeyPair,

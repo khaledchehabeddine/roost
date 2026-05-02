@@ -23,21 +23,18 @@
 //!   envelope that references a just-rotated SPK fails with [`CryptoError::HandshakeSpkMismatch`]
 //!   rather than falling back to an archived one.
 
-pub mod double_ratchet;
-pub mod error;
-pub mod handshake;
-pub mod keys;
-pub mod ratchet;
-pub mod signed_prekey;
+mod double_ratchet;
+mod error;
+mod handshake;
+mod keys;
+mod ratchet;
+mod signed_prekey;
 
 pub use double_ratchet::{Header, RatchetState};
 pub use error::CryptoError;
-pub use handshake::{
-    HandshakeEnvelope, accept, derive_sk_initiator, derive_sk_responder, initial_ad, initiate,
-};
+pub use handshake::{HandshakeEnvelope, accept, initial_ad, initiate};
 pub use keys::{
     KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,
     generate_signing_key_pair,
 };
-pub use ratchet::{ChainKey, MessageKey, RootKey, kdf_ck, kdf_rk};
 pub use signed_prekey::{PreKeyBundle, SignedPreKey, generate_signed_prekey, verify_bundle};
