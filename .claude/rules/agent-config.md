@@ -9,6 +9,8 @@ paths:
 
 # Agent Config Rules
 
+- Customizations that benefit collaborators on this project must live in project scope (`.agents/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`)
+- Customization may live in user scope only if it neither shapes the project's workflow nor improves agent quality for collaborators
 - When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation
 - Follow the structure and style from existing peer customizations of the same type within the same agent
 - Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.)
