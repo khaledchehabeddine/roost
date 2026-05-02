@@ -62,12 +62,13 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 ### Public API
 
-- Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump — affects Swift/Kotlin bindings
+- Modules are organizational, not public-API boundaries
+- `pub` minimization — every `pub` item needs an out-of-crate user (a `pub use` at `lib.rs` doesn't count)
+- Public types must have rustdoc per `docs/agents/rust-docs-style.md` tier (T1 for `hermes-uniffi`, T2 for other crates)
 - Prefer adding a new function over breaking an existing one
-- `pub` minimization — every `pub` item must have an external consumer (another crate, the FFI surface, or a documented public re-export). `pub` items with no consumer are dead code; demote to `pub(crate)` or remove
+- Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump — affects Swift/Kotlin bindings
 - Internal errors crossing the FFI must convert to `HermesError` via `From` impls
 - No `unwrap()`, `expect()`, or `panic!()` in `#[uniffi::export]` paths — use `Result<T, HermesError>` for fallible operations
-- Public types must have rustdoc per `docs/agents/rust-docs-style.md` tier (T1 for `hermes-uniffi`, T2 for other crates)
 
 ### Rust Style
 

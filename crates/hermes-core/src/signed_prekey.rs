@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
-pub const SPK_ROTATION_WINDOW_DAYS: u64 = 7;
+pub(crate) const SPK_ROTATION_WINDOW_DAYS: u64 = 7;
 
 const SPK_KEY: &str = "prekey/signed";
 const SPK_VERSION: u8 = 1;

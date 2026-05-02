@@ -10,38 +10,38 @@ const CK_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
 /// Root key for the Double Ratchet root chain.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct RootKey(pub(crate) [u8; 32]);
+pub(crate) struct RootKey(pub(crate) [u8; 32]);
 
 /// Chain key for the Double Ratchet sending/receiving chain.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct ChainKey(pub(crate) [u8; 32]);
+pub(crate) struct ChainKey(pub(crate) [u8; 32]);
 
 /// Single-use message encryption key derived from a chain key.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct MessageKey(pub(crate) [u8; 32]);
+pub(crate) struct MessageKey(pub(crate) [u8; 32]);
 
 impl RootKey {
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
 
 impl ChainKey {
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
 
 impl MessageKey {
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -51,7 +51,7 @@ impl MessageKey {
 /// Uses HKDF-SHA256 with the root key as salt, DH output as input keying material, and [`RK_INFO`]
 /// as the info string. Produces 64 bytes of output, split into a 32-byte root key and a 32-byte
 /// chain key.
-pub fn kdf_rk(
+pub(crate) fn kdf_rk(
     root_key: &RootKey,
     dh_output: &SharedSecret,
 ) -> Result<(RootKey, ChainKey), CryptoError> {
@@ -73,7 +73,7 @@ pub fn kdf_rk(
 /// Uses HMAC-SHA256 with the chain key as the HMAC key:
 /// - Message key = HMAC(chain_key, [`CK_MESSAGE_KEY_INPUT`])
 /// - Next chain key = HMAC(chain_key, [`CK_CHAIN_KEY_INPUT`])
-pub fn kdf_ck(chain_key: &ChainKey) -> Result<(ChainKey, MessageKey), CryptoError> {
+pub(crate) fn kdf_ck(chain_key: &ChainKey) -> Result<(ChainKey, MessageKey), CryptoError> {
     let mut mac_mk =
         Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| CryptoError::InvalidHmacKey)?;
     mac_mk.update(CK_MESSAGE_KEY_INPUT);
