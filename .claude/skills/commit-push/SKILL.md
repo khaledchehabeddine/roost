@@ -8,17 +8,16 @@ allowed-tools: Agent Bash(gh *) Bash(git *) Read
 When committing and pushing changes:
 
 1. **Fetch pending changes**: `git diff HEAD`
-2. **Branch check**: run `git branch --show-current`
-   - On `main` with `$ARGUMENTS`:
+2. **Branch check**: run `git branch --show-current`. On a feature branch: skip. Otherwise, create a feature branch:
+   - With `$ARGUMENTS`:
      - `gh issue view $ARGUMENTS --json number,title,labels`
      - Propose `<label>/<issue-title-kebab-case>`, confirm with the user
      - `gh issue develop $ARGUMENTS --name <branch> --checkout`
-   - On `main` without `$ARGUMENTS`:
+   - Without `$ARGUMENTS`:
      - `gh label list --json name`
      - Ask the user to pick a label and provide a description
      - Propose `<label>/<description-kebab-case>`, confirm with the user
      - `git checkout -b <branch>`
-   - Not on `main`: skip
 3. **AI review gate**:
    - Dispatch `rust-code-reviewer` and `security-auditor` in parallel — one message, two `Agent` calls — with the pending diff
    - Also dispatch `api-reviewer` in the same parallel batch when either holds:

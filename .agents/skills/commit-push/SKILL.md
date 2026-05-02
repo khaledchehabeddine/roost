@@ -8,17 +8,16 @@ description: Trigger when the user wants to commit and push their current change
 ## Workflow
 
 1. Fetch pending changes: `git diff HEAD`
-2. Branch check: run `git branch --show-current`
-   - On `main` with an issue ID provided:
+2. Branch check: run `git branch --show-current`. On a feature branch: skip. Otherwise, create a feature branch:
+   - With an issue ID:
      - Run `gh issue view <id> --json number,title,labels`
      - Derive branch as `<label>/<issue-title-kebab-case>`, confirm with the user
      - Run `gh issue develop <id> --name <branch> --checkout`
-   - On `main` without an issue ID:
+   - Without an issue ID:
      - Run `gh label list --json name`
      - Ask the user to pick a label and provide a description
      - Derive branch as `<label>/<description-kebab-case>`, confirm with the user
      - Run `git checkout -b <branch>`
-   - Not on `main`: skip
 3. AI review gate:
    - Invoke `rust-code-reviewer` and `security-auditor` in parallel on the pending diff
    - Also invoke `api-reviewer` in the same parallel batch when either holds:

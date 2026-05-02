@@ -23,6 +23,8 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Pattern-skill descriptions enumerate the same items as the body, in the same order
 - Skills that set `paths:` must not restate the location filter in their description — `paths:` gates auto-loading; descriptions describe activity
 - Customization descriptions don't explicitly reference the project name (Hermes) — context is implicit from the repo. Literal paths like `crates/hermes-uniffi` are exceptions (they identify actual files, not prose)
+- Customizations that benefit collaborators on this project MUST live in project scope (`.agents/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`)
+- A customization may live in user scope only if it neither shapes the project's workflow nor improves agent quality for collaborators
 
 ### Crypto
 

@@ -4,6 +4,7 @@ target
 # Claude Code
 .claude/agent-memory-local/
 .claude/settings.local.json
+.claude/worktrees/
 
 # Codex
 .codex/config.local.toml

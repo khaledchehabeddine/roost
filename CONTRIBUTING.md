@@ -35,3 +35,11 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 - All CI workflows must pass
 - See [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) for the required PR structure
+
+## Worktrees
+
+For parallel sessions in isolation. Worktrees start in detached HEAD; `commit-push` creates the conformant branch at commit time, so the conventions above are unchanged.
+
+- **Claude Code:** `claude --worktree <name>`
+- **Codex App:** select "Worktree" in the thread composer
+- **Codex CLI:** `git worktree add --detach <path> origin/HEAD && cd <path> && codex`
