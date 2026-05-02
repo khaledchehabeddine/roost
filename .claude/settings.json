@@ -1,30 +1,5 @@
 {
-  "permissions": {
-    "deny": [
-      "Bash(cargo publish*)",
-      "Bash(cargo yank*)",
-      "Bash(git push --force)",
-      "Bash(git push --force *)",
-      "Bash(git push -f*)",
-      "Bash(git reset --hard*)",
-      "Bash(rm -f -r*)",
-      "Bash(rm -fr*)",
-      "Bash(rm -r -f*)",
-      "Bash(rm -rf*)"
-    ]
-  },
   "hooks": {
-    "WorktreeCreate": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": ".claude/hooks/worktree-create.sh"
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Bash",
@@ -45,6 +20,42 @@
           }
         ]
       }
+    ],
+    "WorktreeCreate": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/worktree-create.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "ask": [
+      "Bash(cargo publish*)",
+      "Bash(gh release delete*)",
+      "Bash(git clean -d -f*)",
+      "Bash(git clean -df*)",
+      "Bash(git clean -dfx*)",
+      "Bash(git clean -f -d*)",
+      "Bash(git clean -fd*)",
+      "Bash(git clean -fdx*)",
+      "Bash(git reset --hard*)",
+      "Bash(git tag --delete*)",
+      "Bash(git tag -d*)",
+      "Bash(rm -f -r*)",
+      "Bash(rm -fr*)",
+      "Bash(rm -r -f*)",
+      "Bash(rm -rf*)"
+    ],
+    "deny": [
+      "Bash(cargo yank*)",
+      "Bash(git push --force)",
+      "Bash(git push --force *)",
+      "Bash(git push -f*)"
     ]
   }
 }
