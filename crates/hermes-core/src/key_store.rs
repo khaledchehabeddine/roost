@@ -26,7 +26,7 @@ impl fmt::Display for KeyStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             KeyStoreError::Identity(e) => write!(f, "identity: {e}"),
-            KeyStoreError::SignedPreKey(e) => write!(f, "signed prekey: {e}"),
+            KeyStoreError::SignedPreKey(e) => write!(f, "signed pre-key: {e}"),
         }
     }
 }
