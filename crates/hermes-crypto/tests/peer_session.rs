@@ -46,7 +46,7 @@ fn round_trip_advances_dh_ratchet() {
     let s = setup();
     let (mut alice, mut bob, envelope) = bootstrap(&s, b"hello");
     let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
-    let initial_alice_dh = envelope.ratchet_pk;
+    let initial_alice_dh = envelope.ratchet_public_key;
 
     let (bob_h, bob_ct) = bob.ratchet_encrypt(b"hi back", &ad).unwrap();
     let decrypted = alice.ratchet_decrypt(&bob_ct, &bob_h, &ad).unwrap();
@@ -67,7 +67,7 @@ fn consecutive_sends_use_symmetric_ratchet_only() {
     let s = setup();
     let (mut alice, mut bob, envelope) = bootstrap(&s, b"msg-0");
     let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
-    let alice_dh = envelope.ratchet_pk;
+    let alice_dh = envelope.ratchet_public_key;
 
     let mut items = Vec::new();
     for i in 1..=5 {

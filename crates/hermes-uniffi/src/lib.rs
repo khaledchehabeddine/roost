@@ -40,8 +40,8 @@
 uniffi::setup_scaffolding!("hermes");
 
 use hermes_core::{
-    IdentityError, KeyStore as CoreKeyStore, KeyStoreError, SecureStorage as CoreSecureStorage,
-    SignedPreKeyError, StorageError,
+    Identity as CoreIdentity, IdentityError, KeyStore as CoreKeyStore, KeyStoreError,
+    SecureStorage as CoreSecureStorage, SignedPreKeyError, StorageError,
 };
 use hermes_crypto::SignedPreKeyBundle as CoreSignedPreKeyBundle;
 use std::sync::{Arc, Mutex};
@@ -170,6 +170,15 @@ pub struct Identity {
     pub verifying_key: Vec<u8>,
 }
 
+impl From<CoreIdentity> for Identity {
+    fn from(id: CoreIdentity) -> Self {
+        Identity {
+            public_key: id.public_key().as_bytes().to_vec(),
+            verifying_key: id.verifying_key().as_bytes().to_vec(),
+        }
+    }
+}
+
 /// Public material a peer needs to start a session with this identity. Signed by the identity's
 /// Ed25519 key over [`SignedPreKeyBundle::public_key`].
 ///
@@ -291,37 +300,28 @@ impl InMemorySecureStorage {
     }
 }
 
+impl InMemorySecureStorage {
+    fn lock_inner(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, hermes_core::InMemorySecureStorage>, HermesError> {
+        self.inner.lock().map_err(|_| HermesError::InternalError {
+            reason: "storage lock poisoned".into(),
+        })
+    }
+}
+
 #[uniffi::export]
 impl SecureStorage for InMemorySecureStorage {
     fn store(&self, key: String, value: Vec<u8>) -> Result<(), HermesError> {
-        Ok(self
-            .inner
-            .lock()
-            .map_err(|_| HermesError::InternalError {
-                reason: "storage lock poisoned".into(),
-            })?
-            .store(&key, &value)?)
+        Ok(self.lock_inner()?.store(&key, &value)?)
     }
 
     fn load(&self, key: String) -> Result<Option<Vec<u8>>, HermesError> {
-        let result = self
-            .inner
-            .lock()
-            .map_err(|_| HermesError::InternalError {
-                reason: "storage lock poisoned".into(),
-            })?
-            .load(&key)?;
-        Ok(result.map(|z| z.to_vec()))
+        Ok(self.lock_inner()?.load(&key)?.map(|z| z.to_vec()))
     }
 
     fn delete(&self, key: String) -> Result<(), HermesError> {
-        Ok(self
-            .inner
-            .lock()
-            .map_err(|_| HermesError::InternalError {
-                reason: "storage lock poisoned".into(),
-            })?
-            .delete(&key)?)
+        Ok(self.lock_inner()?.delete(&key)?)
     }
 }
 
@@ -423,11 +423,7 @@ impl KeyStore {
     /// # Performance
     /// Two CSPRNG draws (32 bytes each), two `SecureStorage::store` calls.
     pub fn generate_identity(&self) -> Result<Identity, HermesError> {
-        let id = self.inner.identity().generate_identity()?;
-        Ok(Identity {
-            public_key: id.public_key().as_bytes().to_vec(),
-            verifying_key: id.verifying_key().as_bytes().to_vec(),
-        })
+        Ok(self.inner.generate_identity()?.into())
     }
 
     /// Loads the stored identity's public material.
@@ -457,11 +453,7 @@ impl KeyStore {
     /// # Performance
     /// Two `SecureStorage::load` calls.
     pub fn load_identity(&self) -> Result<Identity, HermesError> {
-        let id = self.inner.identity().load_identity()?;
-        Ok(Identity {
-            public_key: id.public_key().as_bytes().to_vec(),
-            verifying_key: id.verifying_key().as_bytes().to_vec(),
-        })
+        Ok(self.inner.load_identity()?.into())
     }
 
     /// Exports the current identity as a passphrase-encrypted blob.
@@ -497,7 +489,7 @@ impl KeyStore {
     /// # Performance
     /// One Argon2id derivation (deliberately expensive: ~64 MiB RAM, ~100ms on modern hardware).
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, HermesError> {
-        Ok(self.inner.identity().export_encrypted_backup(&passphrase)?)
+        Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
 
     /// Restores an identity from an encrypted backup, replacing any current identity.
@@ -681,7 +673,7 @@ impl KeyStore {
     /// # Performance
     /// One [`SecureStorage::load`] call.
     pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, HermesError> {
-        Ok(self.inner.signed_prekey().current_bundle()?.into())
+        Ok(self.inner.current_signed_prekey_bundle()?.into())
     }
 
     /// Clears the stored identity and signed pre-key. Idempotent.

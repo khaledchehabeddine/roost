@@ -5,15 +5,15 @@ use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-/// Prevents SPK signatures from being confused with signatures over any other 32-byte payload the
-/// identity key might sign in a different context.
+/// Prevents signed pre-key signatures from being confused with signatures over any other 32-byte
+/// payload the identity key might sign in a different context.
 const SPK_DOMAIN: &[u8] = b"hermes-spk-v1:";
 
-/// X25519 keypair signed by an Ed25519 identity key. Rotated periodically so a leaked SPK
-/// expires at the next rotation.
+/// X25519 keypair signed by an Ed25519 identity key. Rotated periodically so a leaked signed
+/// pre-key expires at the next rotation.
 ///
-/// ZeroizeOnDrop scrubs the secret on a drop. #[zeroize(skip)] is required because
-/// ed25519_dalek::Signature doesn't impl Zeroize.
+/// ZeroizeOnDrop scrubs the secret on drop. `#[zeroize(skip)]` is required because
+/// `ed25519_dalek::Signature` doesn't impl `Zeroize`.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SignedPreKey {
     secret_key: StaticSecret,
@@ -36,17 +36,18 @@ impl SignedPreKey {
         &self.signature
     }
 
-    /// Returns the Unix timestamp (seconds) when this SPK was generated.
+    /// Returns the Unix timestamp (seconds) when this signed pre-key was generated.
     pub fn created_at(&self) -> u64 {
         self.created_at
     }
 
-    /// Performs an X25519 Diffie–Hellman exchange between this SPK's secret and `peer`.
+    /// Performs an X25519 Diffie–Hellman exchange between this signed pre-key's secret and
+    /// `peer`.
     pub fn diffie_hellman(&self, peer: &PublicKey) -> SharedSecret {
         self.secret_key.diffie_hellman(peer)
     }
 
-    /// Exports the SPK secret key bytes for secure storage. Intended only for
+    /// Exports the signed pre-key's secret bytes for secure storage. Intended only for
     /// `hermes-core::SignedPreKeyManager` persistence.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret_key.to_bytes())
@@ -65,7 +66,7 @@ impl SignedPreKey {
         }
     }
 
-    /// Returns the public form of this SPK for distribution to peers.
+    /// Returns the public form of this signed pre-key for distribution to peers.
     pub fn bundle(&self) -> SignedPreKeyBundle {
         SignedPreKeyBundle {
             public_key: self.public_key,
@@ -79,8 +80,13 @@ impl SignedPreKey {
 /// takes it separately to match the X3DH-lite contract.
 #[derive(Clone, Debug)]
 pub struct SignedPreKeyBundle {
+    /// X25519 public key the peer uses to derive the second and third X3DH-lite DH outputs.
     pub public_key: PublicKey,
+    /// Ed25519 signature over `SPK_DOMAIN || public_key.as_bytes()`, produced by the owning
+    /// identity's signing key.
     pub signature: Signature,
+    /// Unix timestamp (seconds) at generation. Used by responders to gate session establishment
+    /// on signed-pre-key freshness.
     pub created_at: u64,
 }
 

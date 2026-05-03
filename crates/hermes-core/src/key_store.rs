@@ -1,4 +1,4 @@
-use crate::identity::{IdentityError, IdentityManager};
+use crate::identity::{Identity, IdentityError, IdentityManager};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
 use hermes_crypto::SignedPreKeyBundle;
@@ -53,11 +53,6 @@ struct KeyStoreInner {
 
 /// Facade over [`IdentityManager`] and [`SignedPreKeyManager`], sharing a single
 /// [`SecureStorage`]. Cheap to clone — internally an `Arc`.
-///
-/// Most consumers should use the facade methods directly ([`Self::has_identity`],
-/// [`Self::rotate_signed_prekey_if_stale`], [`Self::reset`], etc.). The
-/// [`Self::identity`] and [`Self::signed_prekey`] accessors expose the sub-managers for
-/// callers that need finer control.
 #[derive(Clone)]
 pub struct KeyStore(Arc<KeyStoreInner>);
 
@@ -74,14 +69,47 @@ impl KeyStore {
         }))
     }
 
-    /// Returns the shared [`IdentityManager`] handle.
-    pub fn identity(&self) -> Arc<IdentityManager> {
-        Arc::clone(&self.0.identity)
+    /// Generates a fresh identity (X25519 + Ed25519 key pairs) and persists it.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Identity`] (`AlreadyExists`) if an identity is already stored.
+    /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure.
+    /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
+    pub fn generate_identity(&self) -> Result<Identity, KeyStoreError> {
+        Ok(self.0.identity.generate_identity()?)
     }
 
-    /// Returns the shared [`SignedPreKeyManager`] handle.
-    pub fn signed_prekey(&self) -> Arc<SignedPreKeyManager> {
-        Arc::clone(&self.0.signed_prekey)
+    /// Loads the stored identity.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Identity`] (`NotFound`) if no identity is stored.
+    /// - [`KeyStoreError::Identity`] (`Corrupt`) if only one of the two identity keys is present.
+    /// - [`KeyStoreError::Identity`] (`InvalidData`) if a stored key has the wrong byte length.
+    /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure.
+    /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
+    pub fn load_identity(&self) -> Result<Identity, KeyStoreError> {
+        Ok(self.0.identity.load_identity()?)
+    }
+
+    /// Exports the stored identity as a passphrase-encrypted backup blob.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Identity`] (`NotFound` / `Corrupt` / `InvalidData`) when loading the
+    ///   identity to export fails.
+    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on RNG failure or encryption error.
+    /// - [`KeyStoreError::Identity`] (`Storage` / `LockPoisoned`) on storage failures.
+    pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
+        Ok(self.0.identity.export_encrypted_backup(passphrase)?)
+    }
+
+    /// Returns the currently-stored signed pre-key bundle.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if no signed pre-key is stored or the
+    ///   stored blob is malformed.
+    /// - [`KeyStoreError::SignedPreKey`] (`Storage` / `LockPoisoned`) on storage failures.
+    pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+        Ok(self.0.signed_prekey.current_bundle()?)
     }
 
     /// Returns `true` if an X25519 identity key is present.
@@ -194,48 +222,38 @@ mod tests {
     fn key_store_clone_shares_storage() {
         let ks_a = store();
         let ks_b = ks_a.clone();
-        ks_a.identity().generate_identity().unwrap();
-        assert!(ks_b.identity().load_identity().is_ok());
-    }
-
-    #[test]
-    fn two_identity_handles_share_storage() {
-        let ks = store();
-        let id_a = ks.identity();
-        let id_b = ks.identity();
-        let generated = id_a.generate_identity().unwrap();
-        let loaded = id_b.load_identity().unwrap();
-        assert_eq!(generated.public_key(), loaded.public_key());
+        ks_a.generate_identity().unwrap();
+        assert!(ks_b.load_identity().is_ok());
     }
 
     #[test]
     fn sub_manager_writes_do_not_collide() {
         let ks = store();
-        ks.identity().generate_identity().unwrap();
+        ks.generate_identity().unwrap();
         ks.rotate_signed_prekey_if_stale().unwrap();
-        assert!(ks.identity().load_identity().is_ok());
-        assert!(ks.signed_prekey().current_bundle().is_ok());
+        assert!(ks.load_identity().is_ok());
+        assert!(ks.current_signed_prekey_bundle().is_ok());
     }
 
     #[test]
     fn import_encrypted_backup_clears_stale_spk() {
         let ks_b = store();
-        ks_b.identity().generate_identity().unwrap();
+        ks_b.generate_identity().unwrap();
         ks_b.rotate_signed_prekey_if_stale().unwrap();
 
         let ks_a = store();
-        ks_a.identity().generate_identity().unwrap();
-        let backup = ks_a.identity().export_encrypted_backup("pass").unwrap();
+        ks_a.generate_identity().unwrap();
+        let backup = ks_a.export_encrypted_backup("pass").unwrap();
 
         // Importing ks_a's backup into ks_b must clear ks_b's stale SPK (signed by old id)
         ks_b.import_encrypted_backup(&backup, "pass").unwrap();
         assert!(matches!(
-            ks_b.signed_prekey().current_bundle(),
-            Err(SignedPreKeyError::InvalidData(_))
+            ks_b.current_signed_prekey_bundle(),
+            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::InvalidData(_)))
         ));
 
-        let imported = ks_b.identity().load_identity().unwrap();
-        let original = ks_a.identity().load_identity().unwrap();
+        let imported = ks_b.load_identity().unwrap();
+        let original = ks_a.load_identity().unwrap();
         assert_eq!(
             imported.verifying_key().as_bytes(),
             original.verifying_key().as_bytes()
@@ -245,37 +263,37 @@ mod tests {
     #[test]
     fn import_then_rotate_yields_spk_signed_by_imported_identity() {
         let ks_a = store();
-        ks_a.identity().generate_identity().unwrap();
+        ks_a.generate_identity().unwrap();
         ks_a.rotate_signed_prekey_if_stale().unwrap();
 
         let ks_b = store();
-        ks_b.identity().generate_identity().unwrap();
-        let backup = ks_b.identity().export_encrypted_backup("pass").unwrap();
+        ks_b.generate_identity().unwrap();
+        let backup = ks_b.export_encrypted_backup("pass").unwrap();
 
         ks_a.import_encrypted_backup(&backup, "pass").unwrap();
         ks_a.rotate_signed_prekey_if_stale().unwrap();
 
-        let new_bundle = ks_a.signed_prekey().current_bundle().unwrap();
-        let imported = ks_a.identity().load_identity().unwrap();
+        let new_bundle = ks_a.current_signed_prekey_bundle().unwrap();
+        let imported = ks_a.load_identity().unwrap();
         assert!(verify_bundle(&new_bundle, imported.verifying_key()).is_ok());
     }
 
     #[test]
     fn import_with_wrong_passphrase_does_not_disturb_existing_state() {
         let ks_a = store();
-        ks_a.identity().generate_identity().unwrap();
+        ks_a.generate_identity().unwrap();
         ks_a.rotate_signed_prekey_if_stale().unwrap();
-        let original_id = ks_a.identity().load_identity().unwrap();
-        let original_spk = ks_a.signed_prekey().current_bundle().unwrap().public_key;
+        let original_id = ks_a.load_identity().unwrap();
+        let original_spk = ks_a.current_signed_prekey_bundle().unwrap().public_key;
 
         let ks_b = store();
-        ks_b.identity().generate_identity().unwrap();
-        let backup = ks_b.identity().export_encrypted_backup("right").unwrap();
+        ks_b.generate_identity().unwrap();
+        let backup = ks_b.export_encrypted_backup("right").unwrap();
 
         assert!(ks_a.import_encrypted_backup(&backup, "wrong").is_err());
 
-        let id = ks_a.identity().load_identity().unwrap();
-        let spk = ks_a.signed_prekey().current_bundle().unwrap().public_key;
+        let id = ks_a.load_identity().unwrap();
+        let spk = ks_a.current_signed_prekey_bundle().unwrap().public_key;
         assert_eq!(original_id.public_key(), id.public_key());
         assert_eq!(original_spk.as_bytes(), spk.as_bytes());
     }
@@ -283,32 +301,32 @@ mod tests {
     #[test]
     fn reset_clears_identity_and_spk() {
         let ks = store();
-        ks.identity().generate_identity().unwrap();
+        ks.generate_identity().unwrap();
         ks.rotate_signed_prekey_if_stale().unwrap();
 
         ks.reset().unwrap();
 
         assert!(matches!(
-            ks.identity().load_identity(),
-            Err(IdentityError::NotFound)
+            ks.load_identity(),
+            Err(KeyStoreError::Identity(IdentityError::NotFound))
         ));
         assert!(matches!(
-            ks.signed_prekey().current_bundle(),
-            Err(SignedPreKeyError::InvalidData(_))
+            ks.current_signed_prekey_bundle(),
+            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::InvalidData(_)))
         ));
     }
 
     #[test]
     fn reset_returns_store_to_first_launch_state() {
         let ks = store();
-        ks.identity().generate_identity().unwrap();
+        ks.generate_identity().unwrap();
         ks.rotate_signed_prekey_if_stale().unwrap();
 
         ks.reset().unwrap();
 
-        ks.identity().generate_identity().unwrap();
+        ks.generate_identity().unwrap();
         ks.rotate_signed_prekey_if_stale().unwrap();
-        assert!(ks.signed_prekey().current_bundle().is_ok());
+        assert!(ks.current_signed_prekey_bundle().is_ok());
     }
 
     #[test]

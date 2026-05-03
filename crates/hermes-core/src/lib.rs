@@ -16,9 +16,9 @@
 //! use hermes_core::{InMemorySecureStorage, KeyStore};
 //!
 //! let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-//! store.identity().generate_identity()?;
+//! store.generate_identity()?;
 //! let _ = store.rotate_signed_prekey_if_stale()?;
-//! let bundle = store.signed_prekey().current_bundle()?;
+//! let bundle = store.current_signed_prekey_bundle()?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 

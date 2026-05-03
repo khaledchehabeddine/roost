@@ -38,12 +38,8 @@ impl IdentityManager {
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, IdentityError> {
         let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
 
-        let mut salt = [0u8; SALT_LEN];
-        getrandom::getrandom(&mut salt).map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
-
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        getrandom::getrandom(&mut nonce_bytes)
-            .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        let salt: [u8; SALT_LEN] = random_bytes()?;
+        let nonce_bytes: [u8; NONCE_LEN] = random_bytes()?;
 
         let key_bytes = derive_key(passphrase, &salt)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
@@ -109,6 +105,14 @@ impl IdentityManager {
             .map_err(super::log_storage_err)?;
         Ok(())
     }
+}
+
+/// Draws `N` cryptographic random bytes from the OS CSPRNG, mapping any failure to
+/// [`IdentityError::BackupFailed`].
+fn random_bytes<const N: usize>() -> Result<[u8; N], IdentityError> {
+    let mut buf = [0u8; N];
+    getrandom::getrandom(&mut buf).map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+    Ok(buf)
 }
 
 /// Derives a 32-byte encryption key from `passphrase` and `salt` using Argon2id.

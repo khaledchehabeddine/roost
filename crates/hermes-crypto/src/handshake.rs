@@ -1,6 +1,6 @@
 use crate::double_ratchet::{Header, RatchetState};
 use crate::error::CryptoError;
-use crate::keys::{KeyPair, PublicKey, VerifyingKey, generate_key_pair};
+use crate::keys::{KeyPair, PublicKey, SharedSecret, VerifyingKey, generate_key_pair};
 use crate::ratchet::RootKey;
 use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_bundle};
 use hkdf::Hkdf;
@@ -20,18 +20,26 @@ const IKM_LEN: usize = 32 * 4;
 /// Wire form of a handshake initiation. Holds only public material — no secret-zeroing derives
 /// needed.
 ///
-/// The ratchet header is flattened into its three fields (`ratchet_pk`, `pn`, `n`) instead of
-/// being stored as a single `[u8; 40]` array. Serde's auto-derived `Deserialize` only covers
-/// arrays up to `[T; 32]`, so storing 40 bytes directly would require the `serde-big-array`
-/// crate or handwritten implementation. Flattening sidesteps both.
+/// The ratchet header is flattened into its three fields (`ratchet_public_key`,
+/// `previous_chain_length`, `message_number`) instead of being stored as a single `[u8; 40]`
+/// array. Serde's auto-derived `Deserialize` only covers arrays up to `[T; 32]`, so storing
+/// 40 bytes directly would require the `serde-big-array` crate or a handwritten
+/// implementation. Flattening sidesteps both.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HandshakeEnvelope {
-    pub initiator_ik: [u8; 32],
-    pub initiator_ek: [u8; 32],
-    pub responder_signed_prekey_ref: [u8; 32],
-    pub ratchet_pk: [u8; 32],
-    pub pn: u32,
-    pub n: u32,
+    /// Initiator's X25519 identity public key.
+    pub initiator_identity_key: [u8; 32],
+    /// Initiator's X25519 ephemeral public key (fresh per handshake).
+    pub initiator_ephemeral_key: [u8; 32],
+    /// X25519 public key of the responder's signed pre-key the initiator targeted.
+    pub responder_signed_prekey_public: [u8; 32],
+    /// Ratchet public key for the first message (Double Ratchet `DHr`).
+    pub ratchet_public_key: [u8; 32],
+    /// Number of messages sent in the previous chain (Double Ratchet `PN`).
+    pub previous_chain_length: u32,
+    /// Sequence number of this message in the current chain (Double Ratchet `N`).
+    pub message_number: u32,
+    /// First-message ciphertext under the freshly-derived ratchet message key.
     pub ciphertext: Vec<u8>,
 }
 
@@ -62,12 +70,12 @@ pub fn initiate(
     let (header, ciphertext) = state.ratchet_encrypt(plaintext, &ad)?;
 
     let envelope = HandshakeEnvelope {
-        initiator_ik: *ik.public.as_bytes(),
-        initiator_ek: *ek.public.as_bytes(),
-        responder_signed_prekey_ref: *spk_b_pub.as_bytes(),
-        ratchet_pk: *header.public_key.as_bytes(),
-        pn: header.pn,
-        n: header.n,
+        initiator_identity_key: *ik.public.as_bytes(),
+        initiator_ephemeral_key: *ek.public.as_bytes(),
+        responder_signed_prekey_public: *spk_b_pub.as_bytes(),
+        ratchet_public_key: *header.public_key.as_bytes(),
+        previous_chain_length: header.pn,
+        message_number: header.n,
         ciphertext,
     };
 
@@ -78,8 +86,9 @@ pub fn initiate(
 /// the ratchet, and decrypt the first message.
 ///
 /// # Errors
-/// - [`CryptoError::HandshakeSignedPreKeyMismatch`] when `envelope.responder_signed_prekey_ref`
-///   does not match `spk.public()`. Compared in constant time.
+/// - [`CryptoError::HandshakeSignedPreKeyMismatch`] when
+///   `envelope.responder_signed_prekey_public` does not match `signed_prekey.public()`.
+///   Compared in constant time.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for SK derivation fails.
 /// - [`CryptoError::Aead`] when first-message decryption fails (tampered ciphertext, wrong
 ///   associated data, or wrong key).
@@ -89,16 +98,16 @@ pub fn accept(
     ik: &KeyPair,
     signed_prekey: &SignedPreKey,
 ) -> Result<(RatchetState, Zeroizing<Vec<u8>>), CryptoError> {
-    let signed_prekey_ref_matches: bool = envelope
-        .responder_signed_prekey_ref
+    let signed_prekey_matches: bool = envelope
+        .responder_signed_prekey_public
         .ct_eq(signed_prekey.public().as_bytes())
         .into();
-    if !signed_prekey_ref_matches {
+    if !signed_prekey_matches {
         return Err(CryptoError::HandshakeSignedPreKeyMismatch);
     }
 
-    let initiator_ik_pub = PublicKey::from(envelope.initiator_ik);
-    let initiator_ek_pub = PublicKey::from(envelope.initiator_ek);
+    let initiator_ik_pub = PublicKey::from(envelope.initiator_identity_key);
+    let initiator_ek_pub = PublicKey::from(envelope.initiator_ephemeral_key);
 
     let sk = derive_sk_responder(&initiator_ik_pub, &initiator_ek_pub, ik, signed_prekey)?;
 
@@ -106,9 +115,9 @@ pub fn accept(
     let mut state = RatchetState::init_responder(sk, signed_prekey_keypair);
 
     let header = Header {
-        public_key: PublicKey::from(envelope.ratchet_pk),
-        pn: envelope.pn,
-        n: envelope.n,
+        public_key: PublicKey::from(envelope.ratchet_public_key),
+        pn: envelope.previous_chain_length,
+        n: envelope.message_number,
     };
     let ad = initial_ad(&initiator_ik_pub, &ik.public);
     let plaintext = state.ratchet_decrypt(&envelope.ciphertext, &header, &ad)?;
@@ -127,14 +136,7 @@ pub(crate) fn derive_sk_initiator(
     let dh1 = ik_a.diffie_hellman(spk_b_pub);
     let dh2 = ek_a.diffie_hellman(ik_b_pub);
     let dh3 = ek_a.diffie_hellman(spk_b_pub);
-
-    let mut ikm: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(IKM_LEN));
-    ikm.extend_from_slice(&F_PREFIX);
-    ikm.extend_from_slice(dh1.as_bytes());
-    ikm.extend_from_slice(dh2.as_bytes());
-    ikm.extend_from_slice(dh3.as_bytes());
-
-    hkdf_sk_from_ikm(&ikm)
+    derive_sk_from_dhs(&dh1, &dh2, &dh3)
 }
 
 /// Responder-side SK derivation. Mirrors [`derive_sk_initiator`] with the complementary halves of
@@ -149,18 +151,25 @@ pub(crate) fn derive_sk_responder(
     let dh1 = spk_b.diffie_hellman(ik_a_pub);
     let dh2 = ik_b.diffie_hellman(ek_a_pub);
     let dh3 = spk_b.diffie_hellman(ek_a_pub);
+    derive_sk_from_dhs(&dh1, &dh2, &dh3)
+}
 
+/// Concatenates `F_PREFIX || DH1 || DH2 || DH3` into IKM and runs HKDF-SHA256 once.
+fn derive_sk_from_dhs(
+    dh1: &SharedSecret,
+    dh2: &SharedSecret,
+    dh3: &SharedSecret,
+) -> Result<RootKey, CryptoError> {
     let mut ikm: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(IKM_LEN));
     ikm.extend_from_slice(&F_PREFIX);
     ikm.extend_from_slice(dh1.as_bytes());
     ikm.extend_from_slice(dh2.as_bytes());
     ikm.extend_from_slice(dh3.as_bytes());
-
     hkdf_sk_from_ikm(&ikm)
 }
 
-/// Associated data for the first ratcheted message: initiator X25519 IK pubkey, then responder
-/// X25519 IK pubkey. Both sides reconstruct the same 64-byte sequence.
+/// Associated data for the first ratcheted message: initiator X25519 identity public key, then
+/// responder X25519 identity public key. Both sides reconstruct the same 64-byte sequence.
 #[must_use]
 pub fn initial_ad(initiator_ik: &PublicKey, responder_ik: &PublicKey) -> [u8; 64] {
     let mut ad = [0u8; 64];
@@ -296,7 +305,7 @@ mod tests {
         )
         .unwrap();
 
-        envelope.responder_signed_prekey_ref[0] ^= 0x01;
+        envelope.responder_signed_prekey_public[0] ^= 0x01;
 
         assert!(matches!(
             accept(&envelope, &s.bob_ik, &s.bob_spk),

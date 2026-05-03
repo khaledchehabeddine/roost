@@ -234,9 +234,8 @@ impl IdentityManager {
     }
 }
 
-/// Logs system-level storage errors internally and maps them to [`IdentityError::Storage`].
+/// Maps a [`StorageError`] from the underlying [`SecureStorage`] into [`IdentityError::Storage`].
 fn log_storage_err(e: StorageError) -> IdentityError {
-    eprintln!("[hermes-core] storage error: {e}");
     IdentityError::Storage(e)
 }
 

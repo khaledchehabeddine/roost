@@ -41,6 +41,40 @@ pub struct RatchetState {
     mk_skipped: BTreeMap<([u8; 32], u32), MessageKey>,
 }
 
+/// Raw-byte serde mirror of [`RatchetState`] for [`RatchetState::to_bytes`] /
+/// [`RatchetState::from_bytes`].
+#[derive(Deserialize, Serialize)]
+struct RatchetStateWire {
+    version: u8,
+    dhs_secret: [u8; 32],
+    dhr: Option<[u8; 32]>,
+    rk: [u8; 32],
+    cks: Option<[u8; 32]>,
+    ckr: Option<[u8; 32]>,
+    ns: u32,
+    nr: u32,
+    pn: u32,
+    mk_skipped: BTreeMap<([u8; 32], u32), [u8; 32]>,
+}
+
+/// Manual Drop instead of deriving `ZeroizeOnDrop` — the tuple key `([u8; 32], u32)` doesn't
+/// implement `Zeroize`, which blocks the derive.
+impl Drop for RatchetStateWire {
+    fn drop(&mut self) {
+        self.dhs_secret.zeroize();
+        self.rk.zeroize();
+        if let Some(ref mut cks) = self.cks {
+            cks.zeroize();
+        }
+        if let Some(ref mut ckr) = self.ckr {
+            ckr.zeroize();
+        }
+        for value in self.mk_skipped.values_mut() {
+            value.zeroize();
+        }
+    }
+}
+
 impl RatchetState {
     /// Initializes the ratchet as the initiator.
     ///
@@ -283,6 +317,14 @@ impl RatchetState {
 
     /// Advances the receiving chain and caches skipped message keys up to `until_n`.
     fn skip_message_keys(&mut self, until_n: u32) -> Result<(), CryptoError> {
+        // Duplicate or backwards-numbered messages reach this path with `until_n < self.nr`
+        // (the skipped-key cache misses on a re-delivery, the DH-key branch is skipped, and
+        // we land here). Without this guard the `until_n - self.nr` subtraction below
+        // underflows on attacker-influenceable wire fields.
+        if until_n < self.nr {
+            return Ok(());
+        }
+
         if until_n > self.nr + MAX_SKIP {
             return Err(CryptoError::MaxSkipExceeded);
         }
@@ -328,40 +370,6 @@ impl RatchetState {
         self.cks = Some(cks);
 
         Ok(())
-    }
-}
-
-/// Raw-byte serde mirror of [`RatchetState`] for [`RatchetState::to_bytes`] /
-/// [`RatchetState::from_bytes`].
-#[derive(Deserialize, Serialize)]
-struct RatchetStateWire {
-    version: u8,
-    dhs_secret: [u8; 32],
-    dhr: Option<[u8; 32]>,
-    rk: [u8; 32],
-    cks: Option<[u8; 32]>,
-    ckr: Option<[u8; 32]>,
-    ns: u32,
-    nr: u32,
-    pn: u32,
-    mk_skipped: BTreeMap<([u8; 32], u32), [u8; 32]>,
-}
-
-/// Manual Drop instead of deriving `ZeroizeOnDrop` — the tuple key `([u8; 32], u32)` doesn't
-/// implement `Zeroize`, which blocks the derive.
-impl Drop for RatchetStateWire {
-    fn drop(&mut self) {
-        self.dhs_secret.zeroize();
-        self.rk.zeroize();
-        if let Some(ref mut cks) = self.cks {
-            cks.zeroize();
-        }
-        if let Some(ref mut ckr) = self.ckr {
-            ckr.zeroize();
-        }
-        for value in self.mk_skipped.values_mut() {
-            value.zeroize();
-        }
     }
 }
 
@@ -574,6 +582,22 @@ mod tests {
         let wrong_ad = b"wrong_identity_keys";
 
         let result = responder.ratchet_decrypt(&ciphertext, &header, wrong_ad);
+        assert!(matches!(result, Err(CryptoError::Aead)));
+    }
+
+    #[test]
+    fn duplicate_message_under_current_dh_key_fails_without_underflow() {
+        // After a message is decrypted under the current DH key, its message key is consumed
+        // and not re-cached. A duplicate arriving with the same `header.n` goes through:
+        // try_skipped_message_keys (miss) -> dh_ratchet branch (skipped, same dhr) ->
+        // skip_message_keys(header.n) where header.n < state.nr. Pre-fix, the
+        // `until_n - self.nr` subtraction underflowed on attacker-influenceable wire fields.
+        let (mut initiator, mut responder, ad) = setup_pair();
+        let (header, ciphertext) = initiator.ratchet_encrypt(b"hello", &ad).unwrap();
+        responder.ratchet_decrypt(&ciphertext, &header, &ad).unwrap();
+
+        // Replay the same ciphertext+header. Must return cleanly, not panic.
+        let result = responder.ratchet_decrypt(&ciphertext, &header, &ad);
         assert!(matches!(result, Err(CryptoError::Aead)));
     }
 
