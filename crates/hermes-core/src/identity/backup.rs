@@ -193,12 +193,13 @@ mod tests {
     }
 
     #[test]
-    fn two_exports_produce_different_ciphertexts() {
+    fn each_export_uses_fresh_salt_and_nonce() {
         let m = manager();
         m.generate_identity().unwrap();
         let b1 = m.export_encrypted_backup("passphrase").unwrap();
         let b2 = m.export_encrypted_backup("passphrase").unwrap();
-        // Salt and nonce are random, so the blobs must differ
+        // Each export must draw fresh salt + nonce — nonce reuse breaks
+        // XChaCha20-Poly1305 confidentiality.
         assert_ne!(b1, b2);
     }
 
