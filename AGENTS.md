@@ -58,14 +58,22 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Each crate defines its own domain error type
 - All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
 - Error `Display` implementations should be detailed enough to debug from logs alone — not localized UI strings
+- `Display` impls use lowercase first word, no trailing period (consistent across the workspace); acronym handling follows the public-API scope ladder
 - Error `Display` must never include secret material — key bytes, plaintext, decrypted output, or seeds. Use reference identifiers (key IDs, message numbers) instead
+- Every error variant doc states the recovery action a caller should take
+- Every method's `# Errors` distinguishes pre-mutation failures from post-commit failures when the recovery action differs
+- No blanket "on any error, do X" wording — that hides the variant where the recovery is destructive
+- Every guarantee a doc comment makes (atomicity, rollback, partial-failure handling, detectability) must match what the code actually does. Limitations get documented explicitly, not implied by silence
 
 ### Public API
 
 - Modules are organizational, not public-API boundaries
 - `pub` minimization — every `pub` item needs an out-of-crate user (a `pub use` at `lib.rs` doesn't count)
-- Public types must have rustdoc per `docs/agents/rust-docs-style.md` tier (T1 for `hermes-uniffi`, T2 for other crates)
+- Secret-bearing types must not be reachable from `pub` accessors without an out-of-crate consumer who specifically needs the secret form. Bundle-returning facades demote secret-returning helpers
+- Public types must have rustdoc per `docs/agents/rust-docs-style.md` tier (T1 for `hermes-uniffi` including `#[uniffi::export(with_foreign)]` traits, T2 for other crates)
+- Acronym tolerance scales by scope: T1 (no acronyms except universal); T2 (industry-standard primitives only — `KDF`/`AEAD`/`HKDF`/`MAC`); T3 (`pub(crate)`) allows protocol shorthand; function-local is unrestricted
 - Prefer adding a new function over breaking an existing one
+- Pre-1.0 breaks are fine but every public-symbol change must be enumerated in the PR description / release notes: type/method/field/parameter renames, return-type changes, visibility demotions
 - Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump — affects Swift/Kotlin bindings
 - Internal errors crossing the FFI must convert to `HermesError` via `From` impls
 - No `unwrap()`, `expect()`, or `panic!()` in `#[uniffi::export]` paths — use `Result<T, HermesError>` for fallible operations
@@ -74,6 +82,11 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 - Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions
 - No `pub use` glob re-exports
+- Functions: verbs for actions (`generate_*`, `rotate_*`); nouns for accessors (`current_bundle`); predicates with `is_*`/`has_*`
+- No `get_` prefix on accessors
+- `try_*` prefix only when contrasting with a non-fallible variant in the same scope
+- Constructor shape: `Type::new(...)` canonical; `Type::from_<form>(...)` for alternate sources; `Type::with_<thing>(...)` for builders
+- Type suffixes: `*Error`, `*Bundle`, `*Manager` (only when paired with the type it manages). Avoid `*Helper`, `*Util`, `*Service`
 
 ### Tests
 
