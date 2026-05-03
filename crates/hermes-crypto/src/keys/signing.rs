@@ -58,7 +58,7 @@ mod tests {
     /// RFC 8032 §7.1 Ed25519 test vector with empty message.
     /// <https://www.rfc-editor.org/rfc/rfc8032#section-7.1>
     #[test]
-    fn ed25519_rfc8032_test1_empty_message() {
+    fn ed25519_rfc8032_test1_vector() {
         let secret = hex32("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60");
         let expected_public =
             hex32("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
