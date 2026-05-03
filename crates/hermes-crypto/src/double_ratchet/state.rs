@@ -118,7 +118,7 @@ impl RatchetState {
 
     /// Encrypts `plaintext` and returns the message header and ciphertext.
     ///
-    /// `ad` should be the associated data of both parties' identity public keys.
+    /// `associated_data` should be the associated data of both parties' identity public keys.
     ///
     /// # Errors
     /// - [`CryptoError::InvalidState`] if the sending chain key is not yet initialized
@@ -128,7 +128,7 @@ impl RatchetState {
     pub fn ratchet_encrypt(
         &mut self,
         plaintext: &[u8],
-        ad: &[u8],
+        associated_data: &[u8],
     ) -> Result<(Header, Vec<u8>), CryptoError> {
         let cks = self.cks.as_ref().ok_or(CryptoError::InvalidState(
             "sending chain key not initialized",
@@ -143,13 +143,13 @@ impl RatchetState {
         };
         self.ns += 1;
 
-        let ciphertext = encrypt(plaintext, ad, &header, &mk)?;
+        let ciphertext = encrypt(plaintext, associated_data, &header, &mk)?;
         Ok((header, ciphertext))
     }
 
     /// Decrypts `ciphertext` using the provided `header` and associated data.
     ///
-    /// `ad` must match the associated data provided at encryption time.
+    /// `associated_data` must match the value provided at encryption time.
     ///
     /// Handles three cases in order:
     /// 1. Out-of-order message — looks up a previously skipped key
@@ -173,9 +173,10 @@ impl RatchetState {
         &mut self,
         ciphertext: &[u8],
         header: &Header,
-        ad: &[u8],
+        associated_data: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
-        if let Some(plaintext) = self.try_skipped_message_keys(ciphertext, header, ad)? {
+        if let Some(plaintext) = self.try_skipped_message_keys(ciphertext, header, associated_data)?
+        {
             return Ok(plaintext);
         }
 
@@ -195,7 +196,7 @@ impl RatchetState {
         state.ckr = Some(new_ckr);
         state.nr += 1;
 
-        let plaintext = decrypt(ciphertext, ad, header, &mk)?;
+        let plaintext = decrypt(ciphertext, associated_data, header, &mk)?;
 
         *self = state;
         Ok(plaintext)

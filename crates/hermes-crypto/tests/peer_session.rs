@@ -5,7 +5,7 @@
 use hermes_crypto::{
     CryptoError, HandshakeEnvelope, Header, KeyPair, RatchetState, Signature, SignedPreKey,
     SigningKeyPair, accept, generate_key_pair, generate_signed_prekey, generate_signing_key_pair,
-    initial_ad, initiate,
+    initial_associated_data, initiate,
 };
 
 const FIXED_TS: u64 = 1_700_000_000;
@@ -45,7 +45,7 @@ fn bootstrap(s: &Setup, plaintext: &[u8]) -> (RatchetState, RatchetState, Handsh
 fn round_trip_advances_dh_ratchet() {
     let s = setup();
     let (mut alice, mut bob, envelope) = bootstrap(&s, b"hello");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let ad = initial_associated_data(&s.alice_ik.public, &s.bob_ik.public);
     let initial_alice_dh = envelope.ratchet_public_key;
 
     let (bob_h, bob_ct) = bob.ratchet_encrypt(b"hi back", &ad).unwrap();
@@ -66,7 +66,7 @@ fn round_trip_advances_dh_ratchet() {
 fn consecutive_sends_use_symmetric_ratchet_only() {
     let s = setup();
     let (mut alice, mut bob, envelope) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let ad = initial_associated_data(&s.alice_ik.public, &s.bob_ik.public);
     let alice_dh = envelope.ratchet_public_key;
 
     let mut items = Vec::new();
@@ -90,7 +90,7 @@ fn consecutive_sends_use_symmetric_ratchet_only() {
 fn out_of_order_delivery_uses_skipped_keys() {
     let s = setup();
     let (mut alice, mut bob, _) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let ad = initial_associated_data(&s.alice_ik.public, &s.bob_ik.public);
 
     let mut items = Vec::new();
     for i in 1..=5 {
@@ -110,7 +110,7 @@ fn out_of_order_delivery_uses_skipped_keys() {
 fn skipped_keys_are_consumed_after_use() {
     let s = setup();
     let (mut alice, mut bob, _) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let ad = initial_associated_data(&s.alice_ik.public, &s.bob_ik.public);
 
     let mut items = Vec::new();
     for i in 1..=5 {
@@ -142,7 +142,7 @@ fn skipped_keys_are_consumed_after_use() {
 fn tampered_header_rolls_back_state() {
     let s = setup();
     let (mut alice, mut bob, _) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let ad = initial_associated_data(&s.alice_ik.public, &s.bob_ik.public);
 
     let (h, ct) = alice.ratchet_encrypt(b"legit", &ad).unwrap();
 
@@ -187,7 +187,7 @@ fn tampered_spk_signature_rejects_before_any_key_work() {
 fn ratchet_is_self_contained_after_bootstrap() {
     let s = setup();
     let (mut alice, mut bob, _) = bootstrap(&s, b"hello");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let ad = initial_associated_data(&s.alice_ik.public, &s.bob_ik.public);
 
     drop(s);
 

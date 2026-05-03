@@ -152,8 +152,17 @@ impl IdentityManager {
     /// - [`IdentityError::Storage`] on platform storage failure.
     /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
     ///
-    /// If the X25519 store succeeds but the Ed25519 store fails, the partial-write leaves
-    /// storage in a `Corrupt` state. Call [`crate::KeyStore::reset`] before retrying.
+    /// Partial-write detectability:
+    /// - If no identity exists and only the X25519 half is written, [`Self::load_identity`]
+    ///   reports [`IdentityError::Corrupt`].
+    /// - If an Ed25519 half is *already* present from an earlier partial state and a fresh
+    ///   X25519 store then succeeds while the Ed25519 store fails, on-disk storage holds a
+    ///   chimera (X25519 from the new identity, Ed25519 from the previous one) that
+    ///   [`Self::load_identity`] cannot detect — there is no signed binding between the two
+    ///   halves in the current schema.
+    ///
+    /// Recovery: call [`crate::KeyStore::reset`] before retrying after any failure of this
+    /// method.
     pub fn generate_identity(&self) -> Result<Identity, IdentityError> {
         let mut storage = self.lock_storage()?;
 

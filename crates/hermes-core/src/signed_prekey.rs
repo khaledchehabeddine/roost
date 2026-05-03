@@ -87,7 +87,7 @@ impl From<StorageError> for SignedPreKeyError {
 /// [`SecureStorage`].
 ///
 /// Holds a shared handle to the [`IdentityManager`] (whose Ed25519 signing key signs each new
-/// SPK). Cheap to clone — internally an `Arc`.
+/// signed pre-key). Cheap to clone — internally an `Arc`.
 pub struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
@@ -114,15 +114,15 @@ impl SignedPreKeyManager {
         let storage = self.lock_storage()?;
         let raw = storage
             .load(SPK_KEY)?
-            .ok_or_else(|| SignedPreKeyError::InvalidData("no signed prekey present".into()))?;
+            .ok_or_else(|| SignedPreKeyError::InvalidData("no signed pre-key stored".into()))?;
         Ok(decode_spk(checked_blob(&raw)?))
     }
 
     /// Returns the public form of the current [`SignedPreKey`] for distribution to peers.
     ///
     /// # Errors
-    /// - [`SignedPreKeyError::InvalidData`] if no SPK is stored, the stored blob has the wrong
-    ///   length, or its version byte is unsupported. Call
+    /// - [`SignedPreKeyError::InvalidData`] if no signed pre-key is stored, the stored blob has
+    ///   the wrong length, or its version byte is unsupported. Call
     ///   [`crate::KeyStore::rotate_signed_prekey_if_stale`] first to seed one.
     /// - [`SignedPreKeyError::Storage`] on platform storage failure.
     /// - [`SignedPreKeyError::LockPoisoned`] on storage lock poisoning.
@@ -232,7 +232,7 @@ fn checked_blob(raw: &[u8]) -> Result<&[u8; SPK_BLOB_LEN], SignedPreKeyError> {
     })?;
     if blob[0] != SPK_VERSION {
         return Err(SignedPreKeyError::InvalidData(format!(
-            "unsupported SPK format version: {}",
+            "unsupported signed pre-key format version: {}",
             blob[0]
         )));
     }

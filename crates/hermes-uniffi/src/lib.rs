@@ -479,7 +479,8 @@ impl KeyStore {
     /// - [`HermesError::NotFound`] if no identity is stored.
     /// - [`HermesError::Corrupt`] if only one of the two identity keys is present.
     /// - [`HermesError::InvalidData`] if a stored identity key has the wrong byte length.
-    /// - [`HermesError::BackupFailed`] on RNG failure or encryption error.
+    /// - [`HermesError::BackupFailed`] on RNG failure, Argon2id derivation error, or AEAD
+    ///   encryption failure.
     /// - [`HermesError::Storage`] on platform storage failure during identity load.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
     ///
@@ -512,9 +513,16 @@ impl KeyStore {
     /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
     /// # use std::sync::Arc;
     /// # fn main() -> Result<(), HermesError> {
-    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
-    /// # let blob = vec![];
-    /// store.import_encrypted_backup(blob, "strong passphrase".into())?;
+    /// // Source device: generate an identity and export an encrypted backup.
+    /// let source: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// let source_store = KeyStore::new(source);
+    /// source_store.generate_identity()?;
+    /// let blob = source_store.export_encrypted_backup("strong passphrase".into())?;
+    ///
+    /// // Destination device: import the blob into a fresh keystore.
+    /// let dest: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// let dest_store = KeyStore::new(dest);
+    /// dest_store.import_encrypted_backup(blob, "strong passphrase".into())?;
     /// # Ok(()) }
     /// ```
     ///

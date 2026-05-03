@@ -72,7 +72,7 @@ pub fn initiate(
     )?;
     let mut state = RatchetState::init_initiator(sk, &peer_signed_prekey_public)?;
 
-    let ad = initial_ad(&identity_key.public, peer_identity_key);
+    let ad = initial_associated_data(&identity_key.public, peer_identity_key);
     let (header, ciphertext) = state.ratchet_encrypt(plaintext, &ad)?;
 
     let envelope = HandshakeEnvelope {
@@ -130,7 +130,7 @@ pub fn accept(
         pn: envelope.previous_chain_length,
         n: envelope.message_number,
     };
-    let ad = initial_ad(&initiator_identity_pub, &identity_key.public);
+    let ad = initial_associated_data(&initiator_identity_pub, &identity_key.public);
     let plaintext = state.ratchet_decrypt(&envelope.ciphertext, &header, &ad)?;
 
     Ok((state, plaintext))
@@ -182,7 +182,7 @@ fn derive_sk_from_dhs(
 /// Associated data for the first ratcheted message: initiator X25519 identity public key, then
 /// responder X25519 identity public key. Both sides reconstruct the same 64-byte sequence.
 #[must_use]
-pub fn initial_ad(
+pub fn initial_associated_data(
     initiator_identity_key: &PublicKey,
     responder_identity_key: &PublicKey,
 ) -> [u8; 64] {
@@ -343,10 +343,10 @@ mod tests {
     }
 
     #[test]
-    fn initial_ad_layout_is_initiator_then_responder() {
+    fn initial_associated_data_layout_is_initiator_then_responder() {
         let a = generate_key_pair();
         let b = generate_key_pair();
-        let ad = initial_ad(&a.public, &b.public);
+        let ad = initial_associated_data(&a.public, &b.public);
 
         assert_eq!(&ad[..32], a.public.as_bytes());
         assert_eq!(&ad[32..], b.public.as_bytes());

@@ -102,7 +102,8 @@ impl KeyStore {
     /// # Errors
     /// - [`KeyStoreError::Identity`] (`NotFound` / `Corrupt` / `InvalidData`) when loading the
     ///   identity to export fails.
-    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on RNG failure or encryption error.
+    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on RNG failure, Argon2id derivation error,
+    ///   or AEAD encryption failure.
     /// - [`KeyStoreError::Identity`] (`Storage` / `LockPoisoned`) on storage failures.
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
         Ok(self.0.identity.export_encrypted_backup(passphrase)?)
@@ -183,7 +184,7 @@ impl KeyStore {
     }
 
     /// Restores an identity from an encrypted backup, replacing any current identity and
-    /// clearing the previously stored SPK.
+    /// clearing the previously stored signed pre-key.
     ///
     /// Decrypt-then-commit: pre-mutation failures (`DecryptionFailed`, wrong-length
     /// `InvalidData`, Argon2 `BackupFailed`) leave any existing identity untouched. Failures
@@ -215,10 +216,10 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Clears the stored SPK and identity. Idempotent.
+    /// Clears the stored signed pre-key and identity. Idempotent.
     ///
-    /// Partial-failure safe: if SPK delete succeeds but identity delete fails, retrying
-    /// [`Self::reset`] completes the reset.
+    /// Partial-failure safe: if the signed-pre-key delete succeeds but identity delete fails,
+    /// retrying [`Self::reset`] completes the reset.
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Storage` / `LockPoisoned`) on signed-pre-key delete

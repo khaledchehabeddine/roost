@@ -46,7 +46,7 @@ mod signed_prekey;
 
 pub use double_ratchet::{Header, RatchetState};
 pub use error::CryptoError;
-pub use handshake::{HandshakeEnvelope, accept, initial_ad, initiate};
+pub use handshake::{HandshakeEnvelope, accept, initial_associated_data, initiate};
 pub use keys::{
     KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,
     generate_signing_key_pair,
