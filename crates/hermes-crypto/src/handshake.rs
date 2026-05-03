@@ -2,7 +2,7 @@ use crate::double_ratchet::{Header, RatchetState};
 use crate::error::CryptoError;
 use crate::keys::{KeyPair, PublicKey, VerifyingKey, generate_key_pair};
 use crate::ratchet::RootKey;
-use crate::signed_prekey::{PreKeyBundle, SignedPreKey, verify_bundle};
+use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_bundle};
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -37,11 +37,17 @@ pub struct HandshakeEnvelope {
 
 /// Full initiator flow: verify the peer's bundle, derive SK, seed the ratchet, encrypt the first
 /// message, and assemble the envelope.
+///
+/// # Errors
+/// - [`CryptoError::SignatureInvalid`] when `peer_bundle` does not verify under `peer_ik_vk`.
+/// - [`CryptoError::HkdfExpand`] when the HKDF run for SK derivation fails.
+/// - [`CryptoError::Aead`] when first-message encryption fails.
+/// - [`CryptoError::InvalidState`] when ratchet seeding produces an invalid initial state.
 pub fn initiate(
     ik: &KeyPair,
     peer_ik_vk: &VerifyingKey,
     peer_ik_x25519: &PublicKey,
-    peer_bundle: &PreKeyBundle,
+    peer_bundle: &SignedPreKeyBundle,
     plaintext: &[u8],
 ) -> Result<(RatchetState, HandshakeEnvelope), CryptoError> {
     verify_bundle(peer_bundle, peer_ik_vk)?;
@@ -70,6 +76,14 @@ pub fn initiate(
 
 /// Full responder flow: constant-time match the envelope's SPK ref, derive SK, seed the ratchet,
 /// and decrypt the first message.
+///
+/// # Errors
+/// - [`CryptoError::HandshakeSpkMismatch`] when `envelope.responder_spk_ref` does not match
+///   `spk.public()`. Compared in constant time.
+/// - [`CryptoError::HkdfExpand`] when the HKDF run for SK derivation fails.
+/// - [`CryptoError::Aead`] when first-message decryption fails (tampered ciphertext, wrong
+///   associated data, or wrong key).
+/// - [`CryptoError::InvalidState`] when ratchet decryption observes an invalid receiving state.
 pub fn accept(
     envelope: &HandshakeEnvelope,
     ik: &KeyPair,

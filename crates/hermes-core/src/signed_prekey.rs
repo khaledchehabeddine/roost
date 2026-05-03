@@ -1,6 +1,6 @@
 use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
-use hermes_crypto::{PreKeyBundle, SignedPreKey, generate_signed_prekey};
+use hermes_crypto::{SignedPreKey, SignedPreKeyBundle, generate_signed_prekey};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -17,12 +17,20 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// Defends against clock-manipulation that would otherwise freeze rotation forever.
 const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
 
+/// Errors returned by [`SignedPreKeyManager`] operations.
 #[derive(Debug)]
 pub enum SignedPreKeyError {
+    /// System clock is before the Unix epoch — the timestamp arithmetic for SPK rotation cannot
+    /// proceed.
     Clock,
+    /// SPK rotation requires loading the identity's signing key. Wraps the identity's error.
     Identity(IdentityError),
+    /// Stored SPK blob is malformed (wrong length or unsupported version). Inner string
+    /// describes the reason.
     InvalidData(String),
+    /// The internal storage lock was poisoned by a panicked thread.
     LockPoisoned,
+    /// The underlying [`SecureStorage`] returned an error.
     Storage(StorageError),
 }
 
@@ -60,12 +68,18 @@ impl From<StorageError> for SignedPreKeyError {
     }
 }
 
+/// Manages the local signed pre-key — generation, rotation, and persistence via
+/// [`SecureStorage`].
+///
+/// Holds a shared handle to the [`IdentityManager`] (whose Ed25519 signing key signs each new
+/// SPK). Cheap to clone — internally an `Arc`.
 pub struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
 }
 
 impl SignedPreKeyManager {
+    /// Constructs a manager backed by the given storage and identity manager. Cheap — no I/O.
     pub fn new(
         storage: Arc<Mutex<Box<dyn SecureStorage>>>,
         identity: Arc<IdentityManager>,
@@ -73,8 +87,15 @@ impl SignedPreKeyManager {
         SignedPreKeyManager { storage, identity }
     }
 
-    /// Returns `InvalidData` if no SPK is stored — call [`Self::rotate_if_stale`] first.
-    pub fn current(&self) -> Result<SignedPreKey, SignedPreKeyError> {
+    /// Loads the current [`SignedPreKey`] from storage. Internal — exposes the secret-bearing
+    /// type, so consumers should use [`Self::current_bundle`] instead.
+    ///
+    /// # Errors
+    /// - [`SignedPreKeyError::InvalidData`] if no SPK is stored — call
+    ///   [`Self::rotate_if_stale`] first.
+    /// - [`SignedPreKeyError::Storage`] on platform storage failure.
+    /// - [`SignedPreKeyError::LockPoisoned`] on storage lock poisoning.
+    pub(crate) fn current(&self) -> Result<SignedPreKey, SignedPreKeyError> {
         let storage = self.lock_storage()?;
         let raw = storage
             .load(SPK_KEY)?
@@ -82,10 +103,17 @@ impl SignedPreKeyManager {
         Ok(decode_spk(checked_blob(&raw)?))
     }
 
-    pub fn current_bundle(&self) -> Result<PreKeyBundle, SignedPreKeyError> {
+    /// Returns the public form of the current [`SignedPreKey`] for distribution to peers.
+    ///
+    /// # Errors
+    /// Same as [`Self::current`].
+    pub fn current_bundle(&self) -> Result<SignedPreKeyBundle, SignedPreKeyError> {
         Ok(self.current()?.bundle())
     }
 
+    /// Returns the freshly-rotated SPK if rotation occurred, or `None` if the stored SPK is still
+    /// fresh. Lets callers conditionally upload the new bundle to peers without re-fetching.
+    ///
     /// Timestamp policy:
     /// - Missing → rotate.
     /// - More than [`FUTURE_TIMESTAMP_TOLERANCE_SECS`] ahead of now → rotate.
@@ -93,7 +121,15 @@ impl SignedPreKeyManager {
     /// - Older than [`SPK_ROTATION_WINDOW_DAYS`] → rotate.
     ///
     /// Wrong blob length or version surfaces `InvalidData` rather than silently overwrite.
-    pub fn rotate_if_stale(&self) -> Result<(), SignedPreKeyError> {
+    ///
+    /// # Errors
+    /// - [`SignedPreKeyError::Identity`] (`NotFound` / `Corrupt` / `InvalidData`) when loading
+    ///   the identity fails (only when rotation is required).
+    /// - [`SignedPreKeyError::InvalidData`] if the stored SPK has wrong length or version.
+    /// - [`SignedPreKeyError::Storage`] on platform storage failure.
+    /// - [`SignedPreKeyError::Clock`] if the system clock is before the Unix epoch.
+    /// - [`SignedPreKeyError::LockPoisoned`] on storage lock poisoning.
+    pub fn rotate_if_stale(&self) -> Result<Option<SignedPreKey>, SignedPreKeyError> {
         let now = now_secs()?;
         let needs_rotation = match self.read_stored_created_at()? {
             None => true,
@@ -102,9 +138,10 @@ impl SignedPreKeyManager {
             Some(ts) => now - ts > SPK_ROTATION_WINDOW_DAYS * SECONDS_PER_DAY,
         };
         if needs_rotation {
-            self.rotate_now()?;
+            Ok(Some(self.rotate_now()?))
+        } else {
+            Ok(None)
         }
-        Ok(())
     }
 
     /// Applications should use [`crate::KeyStore::reset`] — it clears identity and SPK together.
@@ -113,7 +150,15 @@ impl SignedPreKeyManager {
         Ok(storage.delete(SPK_KEY)?)
     }
 
-    /// Atomic via a single [`SecureStorage::store`] call — no partial-write window.
+    /// Forces an immediate SPK rotation. Atomic via a single [`SecureStorage::store`] call —
+    /// no partial-write window.
+    ///
+    /// # Errors
+    /// - [`SignedPreKeyError::Identity`] (`NotFound` / `Corrupt` / `InvalidData`) when loading
+    ///   the identity fails.
+    /// - [`SignedPreKeyError::Storage`] on platform storage failure.
+    /// - [`SignedPreKeyError::Clock`] if the system clock is before the Unix epoch.
+    /// - [`SignedPreKeyError::LockPoisoned`] on storage lock poisoning.
     pub fn rotate_now(&self) -> Result<SignedPreKey, SignedPreKeyError> {
         let identity = self.identity.load_identity()?;
         let now = now_secs()?;
@@ -249,7 +294,8 @@ mod tests {
     #[test]
     fn rotate_if_stale_seeds_first_spk() {
         let manager = manager_with_identity();
-        manager.rotate_if_stale().unwrap();
+        let rotated = manager.rotate_if_stale().unwrap();
+        assert!(rotated.is_some(), "first call must rotate (no SPK stored)");
         let bundle = manager.current_bundle().unwrap();
         let identity = manager.identity.load_identity().unwrap();
         assert!(verify_bundle(&bundle, identity.verifying_key()).is_ok());
@@ -258,9 +304,10 @@ mod tests {
     #[test]
     fn rotate_if_stale_keeps_fresh_spk() {
         let manager = manager_with_identity();
-        manager.rotate_if_stale().unwrap();
+        assert!(manager.rotate_if_stale().unwrap().is_some());
         let first = manager.current_bundle().unwrap().public_key;
-        manager.rotate_if_stale().unwrap();
+        let second_call = manager.rotate_if_stale().unwrap();
+        assert!(second_call.is_none(), "fresh SPK must not rotate");
         let second = manager.current_bundle().unwrap().public_key;
         assert_eq!(first.as_bytes(), second.as_bytes());
     }
@@ -282,7 +329,8 @@ mod tests {
             .store(SPK_KEY, &*blob)
             .unwrap();
 
-        manager.rotate_if_stale().unwrap();
+        let rotated = manager.rotate_if_stale().unwrap();
+        assert!(rotated.is_some(), "backdated SPK must trigger rotation");
         let rotated_pk = manager.current_bundle().unwrap().public_key;
         assert_ne!(rotated_pk.as_bytes(), stale.public().as_bytes());
         assert_ne!(rotated_pk.as_bytes(), original_pk.as_bytes());

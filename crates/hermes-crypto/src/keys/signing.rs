@@ -1,3 +1,6 @@
+//! Ed25519 signing key pair. Re-exports [`Signature`] and [`VerifyingKey`] from `ed25519_dalek`
+//! so consumers don't depend on the upstream crate directly.
+
 pub use ed25519_dalek::{Signature, VerifyingKey};
 
 use ed25519_dalek::SigningKey;
@@ -14,6 +17,8 @@ pub struct SigningKeyPair {
 }
 
 impl SigningKeyPair {
+    /// Signs `message` with this pair's Ed25519 signing key. Deterministic — identical inputs
+    /// produce identical signatures.
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)

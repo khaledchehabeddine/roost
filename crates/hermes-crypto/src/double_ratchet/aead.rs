@@ -1,3 +1,7 @@
+//! XChaCha20-Poly1305 AEAD layer for the Double Ratchet: derives a per-message encryption key
+//! and nonce from the message key via HKDF-SHA256, then encrypts/decrypts with the serialized
+//! header bound into the associated data.
+
 use super::header::Header;
 use crate::error::CryptoError;
 use crate::ratchet::MessageKey;

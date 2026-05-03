@@ -26,27 +26,33 @@ pub struct SignedPreKey {
 }
 
 impl SignedPreKey {
+    /// Returns the X25519 public key.
     pub fn public(&self) -> &PublicKey {
         &self.public_key
     }
 
+    /// Returns the Ed25519 signature over `SPK_DOMAIN || public_key`.
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
 
+    /// Returns the Unix timestamp (seconds) when this SPK was generated.
     pub fn created_at(&self) -> u64 {
         self.created_at
     }
 
+    /// Performs an X25519 Diffie–Hellman exchange between this SPK's secret and `peer`.
     pub fn diffie_hellman(&self, peer: &PublicKey) -> SharedSecret {
         self.secret_key.diffie_hellman(peer)
     }
 
-    /// Intended only for `hermes-core::SignedPreKeyManager` persistence.
+    /// Exports the SPK secret key bytes for secure storage. Intended only for
+    /// `hermes-core::SignedPreKeyManager` persistence.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret_key.to_bytes())
     }
 
+    /// Restores a [`SignedPreKey`] from its persisted parts (secret bytes, signature, timestamp).
     pub fn from_secret_bytes(secret: [u8; 32], signature: [u8; 64], created_at: u64) -> Self {
         let secret_key = StaticSecret::from(secret);
         let public_key = PublicKey::from(&secret_key);
@@ -59,8 +65,9 @@ impl SignedPreKey {
         }
     }
 
-    pub fn bundle(&self) -> PreKeyBundle {
-        PreKeyBundle {
+    /// Returns the public form of this SPK for distribution to peers.
+    pub fn bundle(&self) -> SignedPreKeyBundle {
+        SignedPreKeyBundle {
             public_key: self.public_key,
             signature: self.signature,
             created_at: self.created_at,
@@ -71,13 +78,14 @@ impl SignedPreKey {
 /// Public form of a [`SignedPreKey`]. Identity verifying key is not embedded — [`verify_bundle`]
 /// takes it separately to match the X3DH-lite contract.
 #[derive(Clone, Debug)]
-pub struct PreKeyBundle {
+pub struct SignedPreKeyBundle {
     pub public_key: PublicKey,
     pub signature: Signature,
     pub created_at: u64,
 }
 
-/// Signs `SPK_DOMAIN || public_key.as_bytes()`.
+/// Generates a fresh [`SignedPreKey`], signing `SPK_DOMAIN || public_key.as_bytes()` with
+/// `identity`'s Ed25519 key.
 #[must_use]
 pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> SignedPreKey {
     let secret_key = StaticSecret::random_from_rng(OsRng);
@@ -92,10 +100,14 @@ pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> Sig
     }
 }
 
-/// Verifies against `SPK_DOMAIN || bundle.public_key.as_bytes()` — signatures produced over the
-/// bare pubkey will fail.
+/// Verifies that `bundle.signature` is `peer_identity`'s Ed25519 signature over
+/// `SPK_DOMAIN || bundle.public_key.as_bytes()` — signatures produced over the bare pubkey will
+/// fail.
+///
+/// # Errors
+/// - [`CryptoError::SignatureInvalid`] when the signature does not validate.
 pub fn verify_bundle(
-    bundle: &PreKeyBundle,
+    bundle: &SignedPreKeyBundle,
     peer_identity: &VerifyingKey,
 ) -> Result<(), CryptoError> {
     let payload = spk_signed_payload(&bundle.public_key);
@@ -147,7 +159,7 @@ mod tests {
         let bundle = spk.bundle();
         let mut sig_bytes = bundle.signature.to_bytes();
         sig_bytes[0] ^= 0x01;
-        let tampered = PreKeyBundle {
+        let tampered = SignedPreKeyBundle {
             public_key: bundle.public_key,
             signature: Signature::from_bytes(&sig_bytes),
             created_at: bundle.created_at,
@@ -175,7 +187,7 @@ mod tests {
         let identity = generate_signing_key_pair();
         let kp = generate_key_pair();
         let bare_signature = identity.sign(kp.public.as_bytes());
-        let bundle = PreKeyBundle {
+        let bundle = SignedPreKeyBundle {
             public_key: kp.public,
             signature: bare_signature,
             created_at: FIXED_TS,

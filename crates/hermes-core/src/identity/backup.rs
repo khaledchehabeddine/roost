@@ -1,3 +1,6 @@
+//! Passphrase-encrypted identity backup: Argon2id key derivation + XChaCha20-Poly1305 envelope
+//! for portable identity export and restore.
+
 use super::{IDENTITY_ED25519_KEY, IDENTITY_X25519_KEY, IdentityError, IdentityManager};
 use argon2::{Argon2, Params};
 use chacha20poly1305::{

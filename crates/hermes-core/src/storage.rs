@@ -9,6 +9,8 @@ use zeroize::Zeroizing;
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum StorageError {
+    /// I/O or permission failure from the platform secure-storage backend. Inner string carries
+    /// the platform-specific error message for logging.
     IO(String),
 }
 
@@ -49,6 +51,7 @@ pub struct InMemorySecureStorage {
 }
 
 impl InMemorySecureStorage {
+    /// Creates an empty in-memory storage instance.
     pub fn new() -> Self {
         Self::default()
     }

@@ -1,3 +1,6 @@
+//! X25519 Diffie–Hellman key pair. Re-exports [`PublicKey`] and [`SharedSecret`] from
+//! `x25519_dalek` so consumers don't depend on the upstream crate directly.
+
 pub use x25519_dalek::{PublicKey, SharedSecret};
 
 use rand::rngs::OsRng;

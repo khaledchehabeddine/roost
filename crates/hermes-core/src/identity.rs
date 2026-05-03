@@ -18,31 +18,39 @@ const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 /// Errors returned by [`IdentityManager`] operations.
 #[derive(Debug)]
 pub enum IdentityError {
+    /// An identity is already stored. The caller should load the existing identity rather than
+    /// generate a new one.
     AlreadyExists,
+    /// Encrypted-backup creation failed. Inner string carries diagnostic context for logs.
     BackupFailed(String),
-    /// Only one of the two identity keys is present in storage, indicating a partial writing.
+    /// Only one of the two identity keys is present in storage, indicating a partial write.
     Corrupt,
+    /// Backup decryption failed: wrong passphrase, tampered ciphertext, or wrong cipher
+    /// parameters.
     DecryptionFailed,
+    /// Stored bytes are malformed or the wrong length. Inner string describes what was invalid.
     InvalidData(String),
     /// The internal storage lock was poisoned by a panicked thread.
     LockPoisoned,
+    /// No identity is stored.
     NotFound,
+    /// The underlying [`SecureStorage`] returned an error.
     Storage(StorageError),
 }
 
 impl fmt::Display for IdentityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IdentityError::AlreadyExists => write!(f, "Identity already exists"),
-            IdentityError::BackupFailed(reason) => write!(f, "Backup failed: {reason}"),
-            IdentityError::Corrupt => write!(f, "Identity data is corrupt"),
+            IdentityError::AlreadyExists => write!(f, "identity already exists"),
+            IdentityError::BackupFailed(reason) => write!(f, "backup failed: {reason}"),
+            IdentityError::Corrupt => write!(f, "identity data is corrupt"),
             IdentityError::DecryptionFailed => {
-                write!(f, "Decryption failed: wrong passphrase or corrupt backup")
+                write!(f, "decryption failed: wrong passphrase or corrupt backup")
             }
-            IdentityError::InvalidData(reason) => write!(f, "Invalid identity data: {reason}"),
-            IdentityError::LockPoisoned => write!(f, "Internal lock poisoned"),
-            IdentityError::NotFound => write!(f, "No identity found"),
-            IdentityError::Storage(err) => write!(f, "Storage error: {err}"),
+            IdentityError::InvalidData(reason) => write!(f, "invalid identity data: {reason}"),
+            IdentityError::LockPoisoned => write!(f, "internal lock poisoned"),
+            IdentityError::NotFound => write!(f, "no identity found"),
+            IdentityError::Storage(err) => write!(f, "storage error: {err}"),
         }
     }
 }
@@ -100,6 +108,7 @@ pub struct IdentityManager {
 }
 
 impl IdentityManager {
+    /// Constructs a manager backed by the given shared storage handle. Cheap — no I/O.
     pub fn new(storage: Arc<Mutex<Box<dyn SecureStorage>>>) -> Self {
         IdentityManager { storage }
     }
@@ -111,12 +120,13 @@ impl IdentityManager {
 
     /// Generates a new identity and persists it to storage.
     ///
-    /// Returns [`IdentityError::AlreadyExists`] if an X25519 identity key is already stored.
+    /// # Errors
+    /// - [`IdentityError::AlreadyExists`] if an X25519 identity key is already stored.
+    /// - [`IdentityError::Storage`] on platform storage failure.
+    /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
     ///
-    /// If the X25519 key is stored successfully but writing the Ed25519 key fails, the X25519 key
-    /// is deleted to leave storage in a clean state. If that cleanup also fails, the error is
-    /// logged, and the original writing error is returned — the identity can be re-created by
-    /// calling this method again.
+    /// If the X25519 store succeeds but the Ed25519 store fails, the partial-write leaves
+    /// storage in a `Corrupt` state. Call [`crate::KeyStore::reset`] before retrying.
     pub fn generate_identity(&self) -> Result<Identity, IdentityError> {
         let mut storage = self.lock_storage()?;
 
@@ -146,8 +156,12 @@ impl IdentityManager {
 
     /// Loads the existing identity from storage.
     ///
-    /// Returns [`IdentityError::NotFound`] if neither key is present.
-    /// Returns [`IdentityError::Corrupt`] if only one of the two keys is present.
+    /// # Errors
+    /// - [`IdentityError::NotFound`] if neither key is present.
+    /// - [`IdentityError::Corrupt`] if only one of the two keys is present.
+    /// - [`IdentityError::InvalidData`] if a stored key has the wrong byte length.
+    /// - [`IdentityError::Storage`] on platform storage failure.
+    /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
     pub fn load_identity(&self) -> Result<Identity, IdentityError> {
         let (x25519, ed25519) = self.load_key_bytes()?;
 
@@ -155,6 +169,24 @@ impl IdentityManager {
             key_pair: KeyPair::from_secret_bytes(*x25519),
             signing_key_pair: SigningKeyPair::from_signing_bytes(*ed25519),
         })
+    }
+
+    /// Returns `true` if an X25519 identity key is present.
+    ///
+    /// Non-mutating storage probe. Lets callers gate setup flows without resorting to
+    /// catching [`IdentityError::NotFound`] from [`Self::load_identity`]. The Ed25519
+    /// component is not checked, so callers must still handle [`IdentityError::Corrupt`]
+    /// from [`Self::load_identity`] in case of partial-write damage.
+    ///
+    /// # Errors
+    /// - [`IdentityError::Storage`] on platform storage failure.
+    /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
+    pub fn has_identity(&self) -> Result<bool, IdentityError> {
+        let storage = self.lock_storage()?;
+        Ok(storage
+            .load(IDENTITY_X25519_KEY)
+            .map_err(log_storage_err)?
+            .is_some())
     }
 
     /// Applications must use [`crate::KeyStore::reset`] — direct identity-only deletion would

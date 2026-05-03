@@ -37,4 +37,4 @@ pub use keys::{
     KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,
     generate_signing_key_pair,
 };
-pub use signed_prekey::{PreKeyBundle, SignedPreKey, generate_signed_prekey, verify_bundle};
+pub use signed_prekey::{SignedPreKey, SignedPreKeyBundle, generate_signed_prekey, verify_bundle};

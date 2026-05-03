@@ -1,3 +1,5 @@
+//! Wire-format Double Ratchet message header — the bytes prepended to every ciphertext.
+
 use crate::keys::PublicKey;
 
 /// Message header transmitted alongside each ciphertext.

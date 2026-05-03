@@ -1,3 +1,6 @@
+//! Double Ratchet session state machine: DH ratchet, symmetric chain advancement, skipped-key
+//! cache, and snapshot/restore via [`RatchetState::to_bytes`] / [`RatchetState::from_bytes`].
+
 use super::aead::{decrypt, encrypt};
 use super::header::Header;
 use crate::error::CryptoError;
@@ -210,6 +213,8 @@ impl RatchetState {
         })
     }
 
+    /// Returns the number of cached message keys awaiting out-of-order delivery. Capped
+    /// internally at 500 across all chains.
     pub fn skipped_key_count(&self) -> usize {
         self.mk_skipped.len()
     }
