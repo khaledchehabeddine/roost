@@ -1,7 +1,6 @@
 ---
 paths:
-  - "crates/*/src/lib.rs"
-  - "crates/hermes-uniffi/**"
+  - "crates/*/src/**/*.rs"
 ---
 
 # Public API Rules

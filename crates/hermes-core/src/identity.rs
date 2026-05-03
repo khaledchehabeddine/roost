@@ -18,10 +18,15 @@ const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 /// Errors returned by [`IdentityManager`] operations.
 #[derive(Debug)]
 pub enum IdentityError {
-    /// An identity is already stored. The caller should load the existing identity rather than
-    /// generate a new one.
+    /// An identity is already stored.
+    ///
+    /// Recovery: load the existing identity instead of generating a new one. Generating again
+    /// would clobber the device's keys and break peer trust.
     AlreadyExists,
     /// Encrypted-backup creation failed. Inner string carries diagnostic context for logs.
+    ///
+    /// Recovery: surface a generic error to the user; the inner string is for telemetry only
+    /// and may indicate RNG, KDF, or AEAD failure.
     BackupFailed(String),
     /// Only one of the two identity keys is present in storage, indicating a partial write.
     ///
@@ -29,17 +34,34 @@ pub enum IdentityError {
     /// overwrite where both stores exist but came from different identities (X25519 from the
     /// new write, Ed25519 from the previous identity) is *not* detectable here — the two keys
     /// have no signed binding to each other in the current schema.
+    ///
+    /// Recovery: prompt the user to restore from backup or reset the keystore. The on-disk
+    /// state cannot be salvaged without an external source of truth.
     Corrupt,
     /// Backup decryption failed: wrong passphrase, tampered ciphertext, or wrong cipher
     /// parameters.
+    ///
+    /// Recovery: ask the user to re-enter the passphrase. No storage mutation has occurred.
     DecryptionFailed,
     /// Stored bytes are malformed or the wrong length. Inner string describes what was invalid.
+    ///
+    /// Recovery: validate the source of the bytes (corrupt blob, wrong-version stored data) and
+    /// surface a user-actionable message. Storage may need to be reset.
     InvalidData(String),
     /// The internal storage lock was poisoned by a panicked thread.
+    ///
+    /// Recovery: surface a generic error and consider restarting the app. The underlying
+    /// storage may be in an inconsistent state.
     LockPoisoned,
     /// No identity is stored.
+    ///
+    /// Recovery: call [`IdentityManager::generate_identity`] (first launch) or import an
+    /// encrypted backup (restore).
     NotFound,
     /// The underlying [`SecureStorage`] returned an error.
+    ///
+    /// Recovery: surface to the user; persistent failures may indicate revoked permissions or
+    /// platform misconfiguration. Retrying after a transient I/O fault is safe.
     Storage(StorageError),
 }
 

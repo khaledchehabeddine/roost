@@ -47,32 +47,38 @@ pub struct HandshakeEnvelope {
 /// message, and assemble the envelope.
 ///
 /// # Errors
-/// - [`CryptoError::SignatureInvalid`] when `peer_bundle` does not verify under `peer_ik_vk`.
+/// - [`CryptoError::SignatureInvalid`] when `peer_bundle` does not verify under
+///   `peer_identity_verifying_key`.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for SK derivation fails.
 /// - [`CryptoError::Aead`] when first-message encryption fails.
 /// - [`CryptoError::InvalidState`] when ratchet seeding produces an invalid initial state.
 pub fn initiate(
-    ik: &KeyPair,
-    peer_ik_vk: &VerifyingKey,
-    peer_ik_x25519: &PublicKey,
+    identity_key: &KeyPair,
+    peer_identity_verifying_key: &VerifyingKey,
+    peer_identity_key: &PublicKey,
     peer_bundle: &SignedPreKeyBundle,
     plaintext: &[u8],
 ) -> Result<(RatchetState, HandshakeEnvelope), CryptoError> {
-    verify_bundle(peer_bundle, peer_ik_vk)?;
+    verify_bundle(peer_bundle, peer_identity_verifying_key)?;
 
-    let ek = generate_key_pair();
-    let spk_b_pub = peer_bundle.public_key;
+    let ephemeral_key = generate_key_pair();
+    let peer_signed_prekey_public = peer_bundle.public_key;
 
-    let sk = derive_sk_initiator(ik, &ek, peer_ik_x25519, &spk_b_pub)?;
-    let mut state = RatchetState::init_initiator(sk, &spk_b_pub)?;
+    let sk = derive_sk_initiator(
+        identity_key,
+        &ephemeral_key,
+        peer_identity_key,
+        &peer_signed_prekey_public,
+    )?;
+    let mut state = RatchetState::init_initiator(sk, &peer_signed_prekey_public)?;
 
-    let ad = initial_ad(&ik.public, peer_ik_x25519);
+    let ad = initial_ad(&identity_key.public, peer_identity_key);
     let (header, ciphertext) = state.ratchet_encrypt(plaintext, &ad)?;
 
     let envelope = HandshakeEnvelope {
-        initiator_identity_key: *ik.public.as_bytes(),
-        initiator_ephemeral_key: *ek.public.as_bytes(),
-        responder_signed_prekey_public: *spk_b_pub.as_bytes(),
+        initiator_identity_key: *identity_key.public.as_bytes(),
+        initiator_ephemeral_key: *ephemeral_key.public.as_bytes(),
+        responder_signed_prekey_public: *peer_signed_prekey_public.as_bytes(),
         ratchet_public_key: *header.public_key.as_bytes(),
         previous_chain_length: header.pn,
         message_number: header.n,
@@ -95,7 +101,7 @@ pub fn initiate(
 /// - [`CryptoError::InvalidState`] when ratchet decryption observes an invalid receiving state.
 pub fn accept(
     envelope: &HandshakeEnvelope,
-    ik: &KeyPair,
+    identity_key: &KeyPair,
     signed_prekey: &SignedPreKey,
 ) -> Result<(RatchetState, Zeroizing<Vec<u8>>), CryptoError> {
     let signed_prekey_matches: bool = envelope
@@ -106,10 +112,15 @@ pub fn accept(
         return Err(CryptoError::HandshakeSignedPreKeyMismatch);
     }
 
-    let initiator_ik_pub = PublicKey::from(envelope.initiator_identity_key);
-    let initiator_ek_pub = PublicKey::from(envelope.initiator_ephemeral_key);
+    let initiator_identity_pub = PublicKey::from(envelope.initiator_identity_key);
+    let initiator_ephemeral_pub = PublicKey::from(envelope.initiator_ephemeral_key);
 
-    let sk = derive_sk_responder(&initiator_ik_pub, &initiator_ek_pub, ik, signed_prekey)?;
+    let sk = derive_sk_responder(
+        &initiator_identity_pub,
+        &initiator_ephemeral_pub,
+        identity_key,
+        signed_prekey,
+    )?;
 
     let signed_prekey_keypair = KeyPair::from_secret_bytes(*signed_prekey.to_secret_bytes());
     let mut state = RatchetState::init_responder(sk, signed_prekey_keypair);
@@ -119,7 +130,7 @@ pub fn accept(
         pn: envelope.previous_chain_length,
         n: envelope.message_number,
     };
-    let ad = initial_ad(&initiator_ik_pub, &ik.public);
+    let ad = initial_ad(&initiator_identity_pub, &identity_key.public);
     let plaintext = state.ratchet_decrypt(&envelope.ciphertext, &header, &ad)?;
 
     Ok((state, plaintext))
@@ -171,10 +182,13 @@ fn derive_sk_from_dhs(
 /// Associated data for the first ratcheted message: initiator X25519 identity public key, then
 /// responder X25519 identity public key. Both sides reconstruct the same 64-byte sequence.
 #[must_use]
-pub fn initial_ad(initiator_ik: &PublicKey, responder_ik: &PublicKey) -> [u8; 64] {
+pub fn initial_ad(
+    initiator_identity_key: &PublicKey,
+    responder_identity_key: &PublicKey,
+) -> [u8; 64] {
     let mut ad = [0u8; 64];
-    ad[..32].copy_from_slice(initiator_ik.as_bytes());
-    ad[32..].copy_from_slice(responder_ik.as_bytes());
+    ad[..32].copy_from_slice(initiator_identity_key.as_bytes());
+    ad[32..].copy_from_slice(responder_identity_key.as_bytes());
     ad
 }
 

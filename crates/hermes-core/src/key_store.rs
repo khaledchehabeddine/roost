@@ -11,8 +11,14 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug)]
 pub enum KeyStoreError {
     /// Wraps an [`IdentityError`] from the underlying [`IdentityManager`].
+    ///
+    /// Recovery: see the wrapped [`IdentityError`] variant.
     Identity(IdentityError),
-    /// Wraps a [`SignedPreKeyError`] from the underlying [`SignedPreKeyManager`].
+    /// Wraps a [`SignedPreKeyError`] from the underlying [`SignedPreKeyManager`]. Note that
+    /// rotation errors that originate in the identity layer arrive nested here as
+    /// `SignedPreKey(Identity(_))` — the manager wraps `IdentityError` before the facade does.
+    ///
+    /// Recovery: see the wrapped [`SignedPreKeyError`] variant.
     SignedPreKey(SignedPreKeyError),
 }
 
@@ -127,18 +133,26 @@ impl KeyStore {
     }
 
     /// Call once at app launch. Returns the freshly-rotated bundle when rotation occurred,
-    /// `None` when the stored SPK is still fresh.
+    /// `None` when the stored signed pre-key is still fresh.
     ///
     /// `Some(bundle)` is the cheap signal to upload the new bundle to peers; `None` means there's
     /// nothing new to push.
     ///
     /// # Errors
-    /// - [`KeyStoreError::Identity`] (`NotFound`) if no identity is stored.
-    /// - [`KeyStoreError::Identity`] (`Corrupt`) if only one of the two identity keys is present.
-    /// - [`KeyStoreError::Identity`] (`InvalidData`) if a stored identity key has the wrong byte length.
-    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored SPK has wrong length or version.
-    /// - [`KeyStoreError::SignedPreKey`] (`Storage`) on platform storage failure.
-    /// - [`KeyStoreError::SignedPreKey`] (`Clock` / `LockPoisoned`) on internal failures.
+    ///
+    /// All errors arrive wrapped in [`KeyStoreError::SignedPreKey`]. The inner
+    /// [`SignedPreKeyError`] cascade:
+    ///
+    /// - `Identity(NotFound)` if no identity is stored.
+    /// - `Identity(Corrupt)` if only one of the two identity keys is present.
+    /// - `Identity(InvalidData)` if a stored identity key has the wrong byte length.
+    /// - `Identity(Storage)` / `Identity(LockPoisoned)` on storage failure while loading the
+    ///   identity to sign the new signed pre-key.
+    /// - `InvalidData` if the stored signed-pre-key blob has the wrong length or unsupported
+    ///   version.
+    /// - `Storage` / `LockPoisoned` on platform storage failure during signed-pre-key load or
+    ///   store.
+    /// - `Clock` if the system clock is before the Unix epoch.
     pub fn rotate_signed_prekey_if_stale(
         &self,
     ) -> Result<Option<SignedPreKeyBundle>, KeyStoreError> {
@@ -149,15 +163,21 @@ impl KeyStore {
             .map(|spk| spk.bundle()))
     }
 
-    /// Forces an immediate SPK rotation regardless of staleness. Use for explicit user actions
-    /// like "Reset Keys". Always returns the new bundle.
+    /// Forces an immediate signed-pre-key rotation regardless of staleness. Use for explicit
+    /// user actions like "Reset Keys". Always returns the new bundle.
     ///
     /// # Errors
-    /// - [`KeyStoreError::Identity`] (`NotFound`) if no identity is stored.
-    /// - [`KeyStoreError::Identity`] (`Corrupt`) if only one of the two identity keys is present.
-    /// - [`KeyStoreError::Identity`] (`InvalidData`) if a stored identity key has the wrong byte length.
-    /// - [`KeyStoreError::SignedPreKey`] (`Storage`) on platform storage failure.
-    /// - [`KeyStoreError::SignedPreKey`] (`Clock` / `LockPoisoned`) on internal failures.
+    ///
+    /// All errors arrive wrapped in [`KeyStoreError::SignedPreKey`]. The inner
+    /// [`SignedPreKeyError`] cascade:
+    ///
+    /// - `Identity(NotFound)` if no identity is stored.
+    /// - `Identity(Corrupt)` if only one of the two identity keys is present.
+    /// - `Identity(InvalidData)` if a stored identity key has the wrong byte length.
+    /// - `Identity(Storage)` / `Identity(LockPoisoned)` on storage failure while loading the
+    ///   identity.
+    /// - `Storage` / `LockPoisoned` on platform storage failure during the signed-pre-key store.
+    /// - `Clock` if the system clock is before the Unix epoch.
     pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
         Ok(self.0.signed_prekey.rotate_now()?.bundle())
     }
@@ -177,10 +197,13 @@ impl KeyStore {
     /// post-commit failure as a hard requirement to call [`Self::reset`] before reuse.
     ///
     /// # Errors
-    /// - [`KeyStoreError::Identity`] (`DecryptionFailed`) on wrong passphrase or tampered blob
-    /// - [`KeyStoreError::Identity`] (`InvalidData`) on wrong blob length
-    /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure
-    /// - [`KeyStoreError::SignedPreKey`] (`Storage`) on SPK delete failure
+    /// - [`KeyStoreError::Identity`] (`DecryptionFailed`) on wrong passphrase or tampered blob.
+    /// - [`KeyStoreError::Identity`] (`InvalidData`) on wrong blob length.
+    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on Argon2id parameter or derivation failure.
+    /// - [`KeyStoreError::Identity`] (`Storage` / `LockPoisoned`) on storage failure while
+    ///   committing the new identity.
+    /// - [`KeyStoreError::SignedPreKey`] (`Storage` / `LockPoisoned`) on signed-pre-key delete
+    ///   failure.
     pub fn import_encrypted_backup(
         &self,
         data: &[u8],
@@ -198,9 +221,9 @@ impl KeyStore {
     /// [`Self::reset`] completes the reset.
     ///
     /// # Errors
-    /// - [`KeyStoreError::SignedPreKey`] (`Storage`) on SPK delete failure.
-    /// - [`KeyStoreError::Identity`] (`Storage`) on identity delete failure.
-    /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
+    /// - [`KeyStoreError::SignedPreKey`] (`Storage` / `LockPoisoned`) on signed-pre-key delete
+    ///   failure.
+    /// - [`KeyStoreError::Identity`] (`Storage` / `LockPoisoned`) on identity delete failure.
     pub fn reset(&self) -> Result<(), KeyStoreError> {
         self.0.signed_prekey.reset()?;
         self.0.identity.reset()?;

@@ -31,7 +31,8 @@ impl SignedPreKey {
         &self.public_key
     }
 
-    /// Returns the Ed25519 signature over `SPK_DOMAIN || public_key`.
+    /// Returns the Ed25519 signature over the signed-pre-key domain-separated payload (prefix
+    /// `b"hermes-spk-v1:"` followed by `public_key.as_bytes()`).
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
@@ -82,7 +83,8 @@ impl SignedPreKey {
 pub struct SignedPreKeyBundle {
     /// X25519 public key the peer uses to derive the second and third X3DH-lite DH outputs.
     pub public_key: PublicKey,
-    /// Ed25519 signature over `SPK_DOMAIN || public_key.as_bytes()`, produced by the owning
+    /// Ed25519 signature over the signed-pre-key domain-separated payload (prefix
+    /// `b"hermes-spk-v1:"` followed by `public_key.as_bytes()`), produced by the owning
     /// identity's signing key.
     pub signature: Signature,
     /// Unix timestamp (seconds) at generation. Used by responders to gate session establishment
@@ -90,8 +92,8 @@ pub struct SignedPreKeyBundle {
     pub created_at: u64,
 }
 
-/// Generates a fresh [`SignedPreKey`], signing `SPK_DOMAIN || public_key.as_bytes()` with
-/// `identity`'s Ed25519 key.
+/// Generates a fresh [`SignedPreKey`], signing the domain-separated payload
+/// (`b"hermes-spk-v1:"` followed by `public_key.as_bytes()`) with `identity`'s Ed25519 key.
 #[must_use]
 pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> SignedPreKey {
     let secret_key = StaticSecret::random_from_rng(OsRng);
@@ -106,9 +108,9 @@ pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> Sig
     }
 }
 
-/// Verifies that `bundle.signature` is `peer_identity`'s Ed25519 signature over
-/// `SPK_DOMAIN || bundle.public_key.as_bytes()` — signatures produced over the bare pubkey will
-/// fail.
+/// Verifies that `bundle.signature` is `peer_identity`'s Ed25519 signature over the
+/// domain-separated payload (`b"hermes-spk-v1:"` followed by `bundle.public_key.as_bytes()`) —
+/// signatures produced over the bare pubkey will fail.
 ///
 /// # Errors
 /// - [`CryptoError::SignatureInvalid`] when the signature does not validate.

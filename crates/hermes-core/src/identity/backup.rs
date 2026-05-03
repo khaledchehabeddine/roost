@@ -33,8 +33,13 @@ impl IdentityManager {
     /// The plaintext is the concatenation of the X25519 secret key (32 bytes) and
     /// the Ed25519 signing key (32 bytes).
     ///
-    /// Returns [`IdentityError::NotFound`] if no identity is stored, or
-    /// [`IdentityError::BackupFailed`] on encryption or RNG failure.
+    /// # Errors
+    /// - [`IdentityError::NotFound`] if no identity is stored.
+    /// - [`IdentityError::Corrupt`] if only one of the two identity keys is present.
+    /// - [`IdentityError::InvalidData`] if a stored identity key has the wrong byte length.
+    /// - [`IdentityError::Storage`] on platform storage failure while loading the identity.
+    /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
+    /// - [`IdentityError::BackupFailed`] on RNG, Argon2id derivation, or AEAD encryption failure.
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, IdentityError> {
         let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
 

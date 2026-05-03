@@ -11,6 +11,9 @@ use zeroize::Zeroizing;
 pub enum StorageError {
     /// I/O or permission failure from the platform secure-storage backend. Inner string carries
     /// the platform-specific error message for logging.
+    ///
+    /// Recovery: surface the error to the user; persistent failures may indicate revoked
+    /// permissions or platform misconfiguration. Retrying after a transient I/O fault is safe.
     IO(String),
 }
 
@@ -27,18 +30,29 @@ impl std::error::Error for StorageError {}
 /// A key-value storage abstraction for sensitive byte payloads.
 ///
 /// Implementations are expected to back this with platform secure storage (iOS Keychain,
-/// Android Keystore).
+/// Android Keystore). The FFI layer in `hermes-uniffi` re-exports a foreign-implementable
+/// version of this trait; see [`crate::InMemorySecureStorage`] for a reference impl suitable
+/// for tests.
 pub trait SecureStorage: Send {
     /// Stores `value` under `key`, overwriting any existing entry.
+    ///
+    /// # Errors
+    /// - [`StorageError::IO`] on platform Keychain or Keystore failure.
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError>;
 
     /// Returns the value stored under `key`, or `None` if not present.
     ///
     /// The returned bytes are wrapped in [`Zeroizing`], so they are scrubbed from memory when the
     /// caller drops them.
+    ///
+    /// # Errors
+    /// - [`StorageError::IO`] on platform Keychain or Keystore failure.
     fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError>;
 
     /// Removes the value stored under `key`. Does nothing if the key is not present.
+    ///
+    /// # Errors
+    /// - [`StorageError::IO`] on platform Keychain or Keystore failure.
     fn delete(&mut self, key: &str) -> Result<(), StorageError>;
 }
 

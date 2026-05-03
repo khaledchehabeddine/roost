@@ -20,17 +20,30 @@ const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
 /// Errors returned by [`SignedPreKeyManager`] operations.
 #[derive(Debug)]
 pub enum SignedPreKeyError {
-    /// System clock is before the Unix epoch — the timestamp arithmetic for SPK rotation cannot
-    /// proceed.
+    /// System clock is before the Unix epoch — the timestamp arithmetic for signed-pre-key
+    /// rotation cannot proceed.
+    ///
+    /// Recovery: surface a generic error to the user. Indicates a misconfigured device clock.
     Clock,
-    /// SPK rotation requires loading the identity's signing key. Wraps the identity's error.
+    /// Signed-pre-key rotation requires loading the identity's signing key. Wraps the
+    /// identity's error.
+    ///
+    /// Recovery: see the wrapped [`IdentityError`] — usually `NotFound` (generate an identity
+    /// first) or `Corrupt` (reset the keystore).
     Identity(IdentityError),
-    /// Stored SPK blob is malformed (wrong length or unsupported version). Inner string
-    /// describes the reason.
+    /// Stored signed-pre-key blob is malformed (wrong length or unsupported version). Inner
+    /// string describes the reason.
+    ///
+    /// Recovery: rotate immediately to overwrite the malformed blob, or reset the keystore.
     InvalidData(String),
     /// The internal storage lock was poisoned by a panicked thread.
+    ///
+    /// Recovery: surface a generic error and consider restarting the app.
     LockPoisoned,
     /// The underlying [`SecureStorage`] returned an error.
+    ///
+    /// Recovery: surface to the user; persistent failures may indicate revoked permissions or
+    /// platform misconfiguration.
     Storage(StorageError),
 }
 

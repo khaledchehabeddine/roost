@@ -573,7 +573,7 @@ impl KeyStore {
     }
 
     /// Rotates the signed pre-key if the stored one is missing or older than the rotation
-    /// window. Returns the new bundle when rotation occurred, `None` when the stored SPK is
+    /// window. Returns the new bundle when rotation occurred, `None` when the stored signed pre-key is
     /// still fresh.
     ///
     /// Call once at app launch. The `Some(bundle)` return is the cheap signal to upload the new
@@ -597,7 +597,7 @@ impl KeyStore {
     /// # Errors
     /// - [`HermesError::NotFound`] if no identity is stored — generate one first.
     /// - [`HermesError::Corrupt`] if only one of the two identity keys is present.
-    /// - [`HermesError::InvalidData`] if the stored SPK has wrong length or version.
+    /// - [`HermesError::InvalidData`] if the stored signed pre-key has wrong length or version.
     /// - [`HermesError::Storage`] on platform storage failure.
     /// - [`HermesError::InternalError`] on storage lock poisoning or system clock anomaly.
     ///
@@ -678,9 +678,9 @@ impl KeyStore {
 
     /// Clears the stored identity and signed pre-key. Idempotent.
     ///
-    /// Two-step: SPK is cleared first (so a partial failure leaves no SPK signed by an
-    /// already-deleted identity), then the identity. Re-running after a partial failure
-    /// completes the reset.
+    /// Two-step: the signed pre-key is cleared first (so a partial failure leaves no signed
+    /// pre-key signed by an already-deleted identity), then the identity. Re-running after a
+    /// partial failure completes the reset.
     ///
     /// # Examples
     /// ```no_run
