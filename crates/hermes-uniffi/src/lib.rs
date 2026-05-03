@@ -243,6 +243,16 @@ impl Default for InMemorySecureStorage {
 #[uniffi::export]
 impl InMemorySecureStorage {
     /// Creates an empty in-memory storage instance for use in tests and prototypes.
+    ///
+    /// # Examples
+    /// ```
+    /// use hermes::InMemorySecureStorage;
+    ///
+    /// let _storage = InMemorySecureStorage::new();
+    /// ```
+    ///
+    /// # Panics
+    /// Never panics.
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
@@ -337,6 +347,18 @@ impl KeyStore {
     /// Cheap — no I/O, no key generation. Use [`Self::has_identity`] afterward to decide
     /// whether to generate or import.
     ///
+    /// # Examples
+    /// ```no_run
+    /// use hermes::{InMemorySecureStorage, KeyStore, SecureStorage};
+    /// use std::sync::Arc;
+    ///
+    /// let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// let _store = KeyStore::new(storage);
+    /// ```
+    ///
+    /// # Panics
+    /// Never panics.
+    ///
     /// # Performance
     /// O(1). One small heap allocation for the inner adapter.
     #[uniffi::constructor]
@@ -349,10 +371,24 @@ impl KeyStore {
     /// Generates a fresh identity (X25519 + Ed25519 key pairs) and persists it via
     /// [`SecureStorage`].
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// let identity = store.generate_identity()?;
+    /// assert_eq!(identity.public_key.len(), 32);
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::AlreadyExists`] if an identity is already stored — load it instead.
     /// - [`HermesError::Storage`] if the platform Keychain or Keystore returns an error.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning surfaces as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// Two CSPRNG draws (32 bytes each), two `SecureStorage::store` calls.
@@ -366,6 +402,17 @@ impl KeyStore {
 
     /// Loads the stored identity's public material.
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// # store.generate_identity()?;
+    /// let identity = store.load_identity()?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::NotFound`] if no identity is stored — call [`Self::generate_identity`]
     ///   or [`Self::import_encrypted_backup`].
@@ -373,6 +420,9 @@ impl KeyStore {
     /// - [`HermesError::InvalidData`] if a stored key has the wrong byte length.
     /// - [`HermesError::Storage`] on platform storage failure.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning surfaces as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// Two `SecureStorage::load` calls.
@@ -392,11 +442,27 @@ impl KeyStore {
     /// Format: `[Argon2id salt (16B)] | [XChaCha20-Poly1305 nonce (24B)] | [ciphertext (80B)]`.
     /// Argon2id parameters: m=64MiB, t=3, p=1.
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// # store.generate_identity()?;
+    /// let blob = store.export_encrypted_backup("strong passphrase".into())?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::NotFound`] if no identity is stored.
+    /// - [`HermesError::Corrupt`] if only one of the two identity keys is present.
+    /// - [`HermesError::InvalidData`] if a stored identity key has the wrong byte length.
     /// - [`HermesError::BackupFailed`] on RNG failure or encryption error.
-    /// - [`HermesError::Storage`] on platform storage failure.
+    /// - [`HermesError::Storage`] on platform storage failure during identity load.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning surfaces as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// One Argon2id derivation (deliberately expensive: ~64 MiB RAM, ~100ms on modern hardware).
@@ -411,12 +477,30 @@ impl KeyStore {
     /// stored signed pre-key is cleared (it was signed by the now-replaced identity); call
     /// [`Self::rotate_signed_prekey_if_stale`] to seed a new one.
     ///
+    /// On any error from this method, treat the keystore as compromised and call [`Self::reset`]
+    /// before reuse — a partial failure during the overwrite of an existing identity can leave
+    /// storage with an inconsistent X25519/Ed25519 pair that [`Self::load_identity`] cannot detect.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// # let blob = vec![];
+    /// store.import_encrypted_backup(blob, "strong passphrase".into())?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::DecryptionFailed`] on wrong passphrase or tampered ciphertext.
     /// - [`HermesError::InvalidData`] if the blob length is wrong.
     /// - [`HermesError::BackupFailed`] on Argon2id parameter error.
     /// - [`HermesError::Storage`] on platform storage failure during commit.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning surfaces as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// One Argon2id derivation (~64 MiB RAM, ~100ms).
@@ -437,9 +521,24 @@ impl KeyStore {
     /// must still handle [`HermesError::Corrupt`] from [`Self::load_identity`] in case of
     /// partial-write damage.
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// if !store.has_identity()? {
+    ///     store.generate_identity()?;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::Storage`] on platform storage failure.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning surfaces as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// One `SecureStorage::load` call.
@@ -455,12 +554,29 @@ impl KeyStore {
     /// bundle to peers — `None` means there is nothing new to push, so the consumer can skip
     /// the upload step entirely.
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// # store.generate_identity()?;
+    /// if let Some(new_bundle) = store.rotate_signed_prekey_if_stale()? {
+    ///     // upload `new_bundle` to peers
+    ///     let _ = new_bundle;
+    /// }
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::NotFound`] if no identity is stored — generate one first.
     /// - [`HermesError::Corrupt`] if only one of the two identity keys is present.
     /// - [`HermesError::InvalidData`] if the stored SPK has wrong length or version.
     /// - [`HermesError::Storage`] on platform storage failure.
     /// - [`HermesError::InternalError`] on storage lock poisoning or system clock anomaly.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning and clock anomalies surface as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// One [`SecureStorage::load`] always; one CSPRNG draw + Ed25519 sign + [`SecureStorage::store`]
@@ -475,12 +591,26 @@ impl KeyStore {
     /// Use for explicit user actions ("Reset Keys") or test scenarios where the consumer wants
     /// fresh material independent of the rotation window.
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// # store.generate_identity()?;
+    /// let new_bundle = store.rotate_signed_prekey_now()?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::NotFound`] if no identity is stored.
     /// - [`HermesError::Corrupt`] if only one of the two identity keys is present.
     /// - [`HermesError::InvalidData`] if a stored identity key has the wrong byte length.
     /// - [`HermesError::Storage`] on platform storage failure.
     /// - [`HermesError::InternalError`] on storage lock poisoning or system clock anomaly.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning and clock anomalies surface as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// One CSPRNG draw + Ed25519 sign + one [`SecureStorage::store`] call.
@@ -492,11 +622,27 @@ impl KeyStore {
     ///
     /// Hand this to peers asking for the bundle they need to start a session.
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// # store.generate_identity()?;
+    /// # store.rotate_signed_prekey_if_stale()?;
+    /// let bundle = store.current_signed_prekey_bundle()?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
-    /// - [`HermesError::InvalidData`] if no SPK is stored — call
-    ///   [`Self::rotate_signed_prekey_if_stale`] first.
+    /// - [`HermesError::InvalidData`] if no signed pre-key is stored, the stored blob has the
+    ///   wrong length, or its version byte is unsupported. Call
+    ///   [`Self::rotate_signed_prekey_if_stale`] first to seed one.
     /// - [`HermesError::Storage`] on platform storage failure.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning surfaces as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// One [`SecureStorage::load`] call.
@@ -510,9 +656,22 @@ impl KeyStore {
     /// already-deleted identity), then the identity. Re-running after a partial failure
     /// completes the reset.
     ///
+    /// # Examples
+    /// ```no_run
+    /// # use hermes::{HermesError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn main() -> Result<(), HermesError> {
+    /// # let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()) as Arc<dyn SecureStorage>);
+    /// store.reset()?;
+    /// # Ok(()) }
+    /// ```
+    ///
     /// # Errors
     /// - [`HermesError::Storage`] on platform storage failure.
     /// - [`HermesError::InternalError`] on storage lock poisoning.
+    ///
+    /// # Panics
+    /// Never panics. Lock poisoning surfaces as [`HermesError::InternalError`].
     ///
     /// # Performance
     /// Up to three [`SecureStorage::delete`] calls.

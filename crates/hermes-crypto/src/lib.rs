@@ -1,6 +1,20 @@
 //! Cryptographic primitives for Hermes: identity keys, signed prekeys, the X3DH-lite handshake,
 //! and the Double Ratchet.
 //!
+//! # Examples
+//!
+//! Generate a signed pre-key bundle and verify it under the owning identity's verifying key:
+//!
+//! ```
+//! use hermes_crypto::{generate_signed_prekey, generate_signing_key_pair, verify_bundle};
+//!
+//! let signing = generate_signing_key_pair();
+//! let spk = generate_signed_prekey(&signing, 1_700_000_000);
+//! let bundle = spk.bundle();
+//!
+//! verify_bundle(&bundle, &signing.verifying).unwrap();
+//! ```
+//!
 //! # X3DH-lite handshake
 //!
 //! Bootstraps a Double Ratchet session over an asynchronous channel. Unlike Signal's X3DH, there
@@ -10,7 +24,7 @@
 //!
 //! Three DHs are required to achieve *contributory binding*: each party's long-term and ephemeral
 //! material participates in at least two of the three shared secrets, so neither side alone can
-//! predict SK. See [`handshake`] for the initiator and responder flows.
+//! predict SK. See [`initiate`] and [`accept`] for the per-side flows.
 //!
 //! # Known gaps (future work)
 //!
@@ -19,9 +33,9 @@
 //!   crypto primitive.
 //! * Re-handshake policy is undefined. After a session is established, there is no protocol for
 //!   either side to rotate the underlying SK without tearing down the ratchet.
-//! * Signed prekey archival is not implemented. The responder stores only the current SPK, so an
-//!   envelope that references a just-rotated SPK fails with [`CryptoError::HandshakeSpkMismatch`]
-//!   rather than falling back to an archived one.
+//! * Signed pre-key archival is not implemented. The responder stores only the current signed
+//!   pre-key, so an envelope that references a just-rotated one fails with
+//!   [`CryptoError::HandshakeSignedPreKeyMismatch`] rather than falling back to an archived one.
 
 mod double_ratchet;
 mod error;

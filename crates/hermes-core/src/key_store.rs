@@ -141,6 +141,12 @@ impl KeyStore {
     /// failure during commit may leave the keystore in a `Corrupt` state (SPK cleared,
     /// identity partially written); recover by calling [`Self::reset`] and retrying.
     ///
+    /// Caveat when overwriting an existing identity: if the X25519 store succeeds and the
+    /// Ed25519 store then fails, on-disk storage holds X25519 from the new identity and
+    /// Ed25519 from the previous one. [`IdentityManager::load_identity`] cannot detect this
+    /// chimera because the schema has no signed binding between the two halves. Treat any
+    /// failure of this method as a hard requirement to call [`Self::reset`] before reuse.
+    ///
     /// # Errors
     /// - [`KeyStoreError::Identity`] (`DecryptionFailed`) on wrong passphrase or tampered blob
     /// - [`KeyStoreError::Identity`] (`InvalidData`) on wrong blob length

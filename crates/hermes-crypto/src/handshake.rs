@@ -28,7 +28,7 @@ const IKM_LEN: usize = 32 * 4;
 pub struct HandshakeEnvelope {
     pub initiator_ik: [u8; 32],
     pub initiator_ek: [u8; 32],
-    pub responder_spk_ref: [u8; 32],
+    pub responder_signed_prekey_ref: [u8; 32],
     pub ratchet_pk: [u8; 32],
     pub pn: u32,
     pub n: u32,
@@ -64,7 +64,7 @@ pub fn initiate(
     let envelope = HandshakeEnvelope {
         initiator_ik: *ik.public.as_bytes(),
         initiator_ek: *ek.public.as_bytes(),
-        responder_spk_ref: *spk_b_pub.as_bytes(),
+        responder_signed_prekey_ref: *spk_b_pub.as_bytes(),
         ratchet_pk: *header.public_key.as_bytes(),
         pn: header.pn,
         n: header.n,
@@ -74,12 +74,12 @@ pub fn initiate(
     Ok((state, envelope))
 }
 
-/// Full responder flow: constant-time match the envelope's SPK ref, derive SK, seed the ratchet,
-/// and decrypt the first message.
+/// Full responder flow: constant-time match the envelope's signed pre-key ref, derive SK, seed
+/// the ratchet, and decrypt the first message.
 ///
 /// # Errors
-/// - [`CryptoError::HandshakeSpkMismatch`] when `envelope.responder_spk_ref` does not match
-///   `spk.public()`. Compared in constant time.
+/// - [`CryptoError::HandshakeSignedPreKeyMismatch`] when `envelope.responder_signed_prekey_ref`
+///   does not match `spk.public()`. Compared in constant time.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for SK derivation fails.
 /// - [`CryptoError::Aead`] when first-message decryption fails (tampered ciphertext, wrong
 ///   associated data, or wrong key).
@@ -89,12 +89,12 @@ pub fn accept(
     ik: &KeyPair,
     spk: &SignedPreKey,
 ) -> Result<(RatchetState, Zeroizing<Vec<u8>>), CryptoError> {
-    let spk_ref_matches: bool = envelope
-        .responder_spk_ref
+    let signed_prekey_ref_matches: bool = envelope
+        .responder_signed_prekey_ref
         .ct_eq(spk.public().as_bytes())
         .into();
-    if !spk_ref_matches {
-        return Err(CryptoError::HandshakeSpkMismatch);
+    if !signed_prekey_ref_matches {
+        return Err(CryptoError::HandshakeSignedPreKeyMismatch);
     }
 
     let initiator_ik_pub = PublicKey::from(envelope.initiator_ik);
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_rejects_mismatched_spk_ref() {
+    fn accept_rejects_mismatched_signed_prekey_ref() {
         let s = setup();
 
         let (_, mut envelope) = initiate(
@@ -296,11 +296,11 @@ mod tests {
         )
         .unwrap();
 
-        envelope.responder_spk_ref[0] ^= 0x01;
+        envelope.responder_signed_prekey_ref[0] ^= 0x01;
 
         assert!(matches!(
             accept(&envelope, &s.bob_ik, &s.bob_spk),
-            Err(CryptoError::HandshakeSpkMismatch)
+            Err(CryptoError::HandshakeSignedPreKeyMismatch)
         ));
     }
 

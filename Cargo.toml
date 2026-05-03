@@ -12,5 +12,5 @@ edition = "2024"
 publish = false
 version = "0.3.0"
 
-[workspace.lints.rust]
+[workspace.lints.rustdoc]
 missing_crate_level_docs = "warn"

@@ -6,8 +6,8 @@ pub enum CryptoError {
     /// XChaCha20-Poly1305 encryption or decryption failed (tampered ciphertext, wrong key, or
     /// wrong associated data).
     Aead,
-    /// The handshake envelope's SPK reference does not match the local signed pre-key.
-    HandshakeSpkMismatch,
+    /// The handshake envelope's signed pre-key reference does not match the local signed pre-key.
+    HandshakeSignedPreKeyMismatch,
     /// HKDF-SHA256 `expand` exceeded its output-length limit.
     HkdfExpand,
     /// HMAC-SHA256 rejected the provided key (zero-length or otherwise invalid).
@@ -33,9 +33,9 @@ impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Aead => write!(f, "XChaCha20-Poly1305 encryption or decryption failed"),
-            Self::HandshakeSpkMismatch => write!(
+            Self::HandshakeSignedPreKeyMismatch => write!(
                 f,
-                "handshake envelope SPK reference does not match local signed prekey"
+                "handshake envelope signed pre-key reference does not match local signed pre-key"
             ),
             Self::HkdfExpand => write!(f, "HKDF-SHA256 expand exceeded output limit"),
             Self::InvalidHmacKey => write!(f, "HMAC-SHA256 rejected the provided key"),

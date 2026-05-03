@@ -24,6 +24,11 @@ pub enum IdentityError {
     /// Encrypted-backup creation failed. Inner string carries diagnostic context for logs.
     BackupFailed(String),
     /// Only one of the two identity keys is present in storage, indicating a partial write.
+    ///
+    /// Detected by [`IdentityManager::load_identity`] only when a half is *missing*. A partial
+    /// overwrite where both stores exist but came from different identities (X25519 from the
+    /// new write, Ed25519 from the previous identity) is *not* detectable here — the two keys
+    /// have no signed binding to each other in the current schema.
     Corrupt,
     /// Backup decryption failed: wrong passphrase, tampered ciphertext, or wrong cipher
     /// parameters.
@@ -264,6 +269,36 @@ mod tests {
     fn load_identity_without_generate_returns_not_found() {
         let m = manager();
         assert!(matches!(m.load_identity(), Err(IdentityError::NotFound)));
+    }
+
+    #[test]
+    fn has_identity_is_false_before_generate() {
+        let m = manager();
+        assert!(!m.has_identity().unwrap());
+    }
+
+    #[test]
+    fn has_identity_is_true_after_generate() {
+        let m = manager();
+        m.generate_identity().unwrap();
+        assert!(m.has_identity().unwrap());
+    }
+
+    #[test]
+    fn has_identity_returns_true_when_only_x25519_half_present() {
+        // Probe is based on X25519 presence only — Ed25519 may be missing without
+        // has_identity flagging it. Callers must handle Corrupt from load_identity.
+        let storage = Arc::new(Mutex::new(
+            Box::new(InMemorySecureStorage::new()) as Box<dyn SecureStorage>,
+        ));
+        storage
+            .lock()
+            .unwrap()
+            .store(IDENTITY_X25519_KEY, &[0u8; 32])
+            .unwrap();
+        let m = IdentityManager::new(storage);
+        assert!(m.has_identity().unwrap());
+        assert!(matches!(m.load_identity(), Err(IdentityError::Corrupt)));
     }
 
     #[test]

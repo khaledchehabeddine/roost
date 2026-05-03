@@ -5,7 +5,9 @@ publish.workspace = true
 version.workspace = true
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# `rlib` lets doctests compile and run; FFI consumers use `cdylib` (Swift dylib) or
+# `staticlib` (Android static link). Adding `rlib` does not change either FFI artifact.
+crate-type = ["cdylib", "staticlib", "rlib"]
 name = "hermes"
 
 [[bin]]
@@ -23,5 +25,7 @@ uniffi = { version = "0.31.1", features = ["cli"] }
 zeroize = "1.8.2"
 
 [lints.rust]
-missing_crate_level_docs = "warn"
 missing_docs = "warn"
+
+[lints.rustdoc]
+missing_crate_level_docs = "warn"

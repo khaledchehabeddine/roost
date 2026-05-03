@@ -183,9 +183,9 @@ impl RatchetState {
     ///
     /// Version mismatches return [`CryptoError::UnsupportedRatchetVersion`], structural decode
     /// failures return [`CryptoError::RatchetStateDecode`], and a blob whose `mk_skipped` exceeds
-    /// [`MAX_SKIPPED_KEYS_TOTAL`] returns [`CryptoError::MaxSkippedKeysExceeded`] — persisted
-    /// blobs are treated as external input so the in-memory cap can't be bypassed by a tampered
-    /// or corrupt store.
+    /// the in-memory skipped-key cap returns [`CryptoError::MaxSkippedKeysExceeded`] — persisted
+    /// blobs are treated as external input so the cap can't be bypassed by a tampered or corrupt
+    /// store.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         let version = *bytes.first().ok_or(CryptoError::RatchetStateDecode)?;
         if version != RATCHET_STATE_VERSION {

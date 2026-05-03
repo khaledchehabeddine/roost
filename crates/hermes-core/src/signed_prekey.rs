@@ -106,7 +106,11 @@ impl SignedPreKeyManager {
     /// Returns the public form of the current [`SignedPreKey`] for distribution to peers.
     ///
     /// # Errors
-    /// Same as [`Self::current`].
+    /// - [`SignedPreKeyError::InvalidData`] if no SPK is stored, the stored blob has the wrong
+    ///   length, or its version byte is unsupported. Call
+    ///   [`crate::KeyStore::rotate_signed_prekey_if_stale`] first to seed one.
+    /// - [`SignedPreKeyError::Storage`] on platform storage failure.
+    /// - [`SignedPreKeyError::LockPoisoned`] on storage lock poisoning.
     pub fn current_bundle(&self) -> Result<SignedPreKeyBundle, SignedPreKeyError> {
         Ok(self.current()?.bundle())
     }
@@ -129,7 +133,7 @@ impl SignedPreKeyManager {
     /// - [`SignedPreKeyError::Storage`] on platform storage failure.
     /// - [`SignedPreKeyError::Clock`] if the system clock is before the Unix epoch.
     /// - [`SignedPreKeyError::LockPoisoned`] on storage lock poisoning.
-    pub fn rotate_if_stale(&self) -> Result<Option<SignedPreKey>, SignedPreKeyError> {
+    pub(crate) fn rotate_if_stale(&self) -> Result<Option<SignedPreKey>, SignedPreKeyError> {
         let now = now_secs()?;
         let needs_rotation = match self.read_stored_created_at()? {
             None => true,
@@ -159,7 +163,7 @@ impl SignedPreKeyManager {
     /// - [`SignedPreKeyError::Storage`] on platform storage failure.
     /// - [`SignedPreKeyError::Clock`] if the system clock is before the Unix epoch.
     /// - [`SignedPreKeyError::LockPoisoned`] on storage lock poisoning.
-    pub fn rotate_now(&self) -> Result<SignedPreKey, SignedPreKeyError> {
+    pub(crate) fn rotate_now(&self) -> Result<SignedPreKey, SignedPreKeyError> {
         let identity = self.identity.load_identity()?;
         let now = now_secs()?;
         let spk = generate_signed_prekey(identity.signing_key_pair(), now);
@@ -294,9 +298,13 @@ mod tests {
     #[test]
     fn rotate_if_stale_seeds_first_spk() {
         let manager = manager_with_identity();
-        let rotated = manager.rotate_if_stale().unwrap();
-        assert!(rotated.is_some(), "first call must rotate (no SPK stored)");
+        let rotated = manager.rotate_if_stale().unwrap().expect("first call must rotate");
         let bundle = manager.current_bundle().unwrap();
+        assert_eq!(
+            rotated.public().as_bytes(),
+            bundle.public_key.as_bytes(),
+            "returned SPK must match persisted bundle",
+        );
         let identity = manager.identity.load_identity().unwrap();
         assert!(verify_bundle(&bundle, identity.verifying_key()).is_ok());
     }
@@ -329,9 +337,16 @@ mod tests {
             .store(SPK_KEY, &*blob)
             .unwrap();
 
-        let rotated = manager.rotate_if_stale().unwrap();
-        assert!(rotated.is_some(), "backdated SPK must trigger rotation");
+        let rotated = manager
+            .rotate_if_stale()
+            .unwrap()
+            .expect("backdated SPK must trigger rotation");
         let rotated_pk = manager.current_bundle().unwrap().public_key;
+        assert_eq!(
+            rotated.public().as_bytes(),
+            rotated_pk.as_bytes(),
+            "returned SPK must match persisted bundle",
+        );
         assert_ne!(rotated_pk.as_bytes(), stale.public().as_bytes());
         assert_ne!(rotated_pk.as_bytes(), original_pk.as_bytes());
     }
