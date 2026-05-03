@@ -33,7 +33,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
   - Key exchange: X25519
   - Signing: Ed25519
   - Key derivation: Argon2id
-- Production randomness must come from the OS CSPRNG — `OsRng` or `getrandom::getrandom`. No `thread_rng()`, seeded RNGs, or test RNGs outside test modules
+- Production randomness must come from the OS CSPRNG — `OsRng` or `getrandom`. No `thread_rng()`, seeded, or non-cryptographic RNGs outside test modules
 - AEAD nonces must be derived alongside the message key via HKDF — never randomly under a long-lived key
 - Every HKDF call must use a distinct, non-empty `info` string for domain separation
 - Wrap heap secrets (`Vec<u8>`, decrypted output) and FFI-bound values in `Zeroizing` immediately — before validation or early returns. Stack-locals consumed immediately by a constructor don't need wrapping
