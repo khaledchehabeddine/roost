@@ -82,7 +82,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - One scenario per integration test file
 - Module docstring on integration tests states the scenario and what crosses what boundary
 - Test-only dependencies live under `[dev-dependencies]` in Cargo.toml
-- Test inputs are deterministic — no `SystemTime::now()` or `OsRng` in test paths
+- Test assertions must not depend on `SystemTime::now()` or `OsRng` outputs — both may be opaque inputs (e.g., relative timestamps, round-trip keys)
 - No shared mutable state across tests — each test owns its `Setup` via a `setup()` function, no `static mut` or `Lazy<>`
 - KAT vector tests cite the specific function call (e.g., `pyca/cryptography 46 HKDF-SHA256`) in a doc comment alongside the expected constant
 - KAT expected outputs live in named constants (`<PRIMITIVE>_KAT_EXPECTED`); both directions (encrypt/decrypt, sign/verify) reference the same constant
