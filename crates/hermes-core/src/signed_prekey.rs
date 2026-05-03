@@ -192,18 +192,22 @@ mod tests {
         Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())))
     }
 
-    fn manager(with_identity: bool) -> SignedPreKeyManager {
+    fn manager_with_identity() -> SignedPreKeyManager {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        if with_identity {
-            identity.generate_identity().unwrap();
-        }
+        identity.generate_identity().unwrap();
+        SignedPreKeyManager::new(storage, identity)
+    }
+
+    fn manager_no_identity() -> SignedPreKeyManager {
+        let storage = shared_storage();
+        let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         SignedPreKeyManager::new(storage, identity)
     }
 
     #[test]
     fn current_without_stored_spk_returns_invalid_data() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         assert!(matches!(
             manager.current(),
             Err(SignedPreKeyError::InvalidData(_))
@@ -212,7 +216,7 @@ mod tests {
 
     #[test]
     fn current_returns_invalid_data_for_corrupt_blob() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         manager
             .storage
             .lock()
@@ -227,7 +231,7 @@ mod tests {
 
     #[test]
     fn current_bundle_does_not_require_identity() {
-        let manager = manager(false);
+        let manager = manager_no_identity();
         let identity_signing = generate_signing_key_pair();
         let spk = generate_signed_prekey(&identity_signing, 1_700_000_000);
         let blob = encode_spk(&spk);
@@ -244,7 +248,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_seeds_first_spk() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         manager.rotate_if_stale().unwrap();
         let bundle = manager.current_bundle().unwrap();
         let identity = manager.identity.load_identity().unwrap();
@@ -253,7 +257,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_keeps_fresh_spk() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         manager.rotate_if_stale().unwrap();
         let first = manager.current_bundle().unwrap().public_key;
         manager.rotate_if_stale().unwrap();
@@ -263,7 +267,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_replaces_backdated_spk() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         manager.rotate_if_stale().unwrap();
         let original_pk = manager.current_bundle().unwrap().public_key;
 
@@ -286,7 +290,7 @@ mod tests {
 
     #[test]
     fn future_created_at_does_not_rotate() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         let identity = manager.identity.load_identity().unwrap();
         let timestamp = now_secs().unwrap() + 100_000;
         let spk = generate_signed_prekey(identity.signing_key_pair(), timestamp);
@@ -305,7 +309,7 @@ mod tests {
 
     #[test]
     fn far_future_created_at_triggers_rotation() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         let identity = manager.identity.load_identity().unwrap();
         let timestamp = now_secs().unwrap() + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10;
         let spk = generate_signed_prekey(identity.signing_key_pair(), timestamp);
@@ -324,7 +328,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_rejects_unsupported_version() {
-        let manager = manager(true);
+        let manager = manager_with_identity();
         let mut blob = [0u8; SPK_BLOB_LEN];
         blob[0] = 99;
         manager
@@ -341,7 +345,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_without_identity_returns_identity_error() {
-        let manager = manager(false);
+        let manager = manager_no_identity();
         assert!(matches!(
             manager.rotate_if_stale(),
             Err(SignedPreKeyError::Identity(IdentityError::NotFound))
@@ -350,7 +354,7 @@ mod tests {
 
     #[test]
     fn rotate_now_without_identity_returns_identity_error() {
-        let manager = manager(false);
+        let manager = manager_no_identity();
         assert!(matches!(
             manager.rotate_now(),
             Err(SignedPreKeyError::Identity(IdentityError::NotFound))
