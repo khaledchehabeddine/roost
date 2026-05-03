@@ -12,14 +12,6 @@ const CK_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct RootKey(pub(crate) [u8; 32]);
 
-/// Chain key for the Double Ratchet sending/receiving chain.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub(crate) struct ChainKey(pub(crate) [u8; 32]);
-
-/// Single-use message encryption key derived from a chain key.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub(crate) struct MessageKey(pub(crate) [u8; 32]);
-
 impl RootKey {
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -30,6 +22,10 @@ impl RootKey {
     }
 }
 
+/// Chain key for the Double Ratchet sending/receiving chain.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub(crate) struct ChainKey(pub(crate) [u8; 32]);
+
 impl ChainKey {
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
@@ -39,6 +35,10 @@ impl ChainKey {
         &self.0
     }
 }
+
+/// Single-use message encryption key derived from a chain key.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub(crate) struct MessageKey(pub(crate) [u8; 32]);
 
 impl MessageKey {
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {

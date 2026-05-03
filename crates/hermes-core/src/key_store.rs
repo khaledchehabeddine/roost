@@ -41,14 +41,14 @@ impl From<SignedPreKeyError> for KeyStoreError {
     }
 }
 
-/// All sub-managers vended by the same `KeyStore` share one `SecureStorage`.
-#[derive(Clone)]
-pub struct KeyStore(Arc<KeyStoreInner>);
-
 struct KeyStoreInner {
     identity: Arc<IdentityManager>,
     signed_prekey: Arc<SignedPreKeyManager>,
 }
+
+/// All sub-managers vended by the same `KeyStore` share one `SecureStorage`.
+#[derive(Clone)]
+pub struct KeyStore(Arc<KeyStoreInner>);
 
 impl KeyStore {
     pub fn new(storage: Box<dyn SecureStorage>) -> Self {

@@ -25,15 +25,6 @@ pub struct SignedPreKey {
     created_at: u64,
 }
 
-/// Public form of a [`SignedPreKey`]. Identity verifying key is not embedded — [`verify_bundle`]
-/// takes it separately to match the X3DH-lite contract.
-#[derive(Clone, Debug)]
-pub struct PreKeyBundle {
-    pub public_key: PublicKey,
-    pub signature: Signature,
-    pub created_at: u64,
-}
-
 impl SignedPreKey {
     pub fn public(&self) -> &PublicKey {
         &self.public_key
@@ -75,6 +66,15 @@ impl SignedPreKey {
             created_at: self.created_at,
         }
     }
+}
+
+/// Public form of a [`SignedPreKey`]. Identity verifying key is not embedded — [`verify_bundle`]
+/// takes it separately to match the X3DH-lite contract.
+#[derive(Clone, Debug)]
+pub struct PreKeyBundle {
+    pub public_key: PublicKey,
+    pub signature: Signature,
+    pub created_at: u64,
 }
 
 /// Signs `SPK_DOMAIN || public_key.as_bytes()`.
