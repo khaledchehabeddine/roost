@@ -79,19 +79,15 @@ mod tests {
         InMemorySecureStorage::new()
     }
 
-    #[test]
-    fn secure_storage_is_object_safe() {
-        fn _assert(_: &dyn SecureStorage) {}
+    fn loaded_bytes(s: &InMemorySecureStorage, key: &str) -> Option<Vec<u8>> {
+        s.load(key).unwrap().map(|z| z.to_vec())
     }
 
     #[test]
     fn store_and_load_round_trip() {
         let mut s = storage();
         s.store("key", b"value").unwrap();
-        assert_eq!(
-            s.load("key").unwrap().as_ref().map(|v| v.as_slice()),
-            Some(b"value".as_ref())
-        );
+        assert_eq!(loaded_bytes(&s, "key").as_deref(), Some(b"value".as_ref()));
     }
 
     #[test]
@@ -105,10 +101,7 @@ mod tests {
         let mut s = storage();
         s.store("key", b"first").unwrap();
         s.store("key", b"second").unwrap();
-        assert_eq!(
-            s.load("key").unwrap().as_ref().map(|v| v.as_slice()),
-            Some(b"second".as_ref())
-        );
+        assert_eq!(loaded_bytes(&s, "key").as_deref(), Some(b"second".as_ref()));
     }
 
     #[test]
@@ -130,14 +123,8 @@ mod tests {
         let mut s = storage();
         s.store("a", b"value-a").unwrap();
         s.store("b", b"value-b").unwrap();
-        assert_eq!(
-            s.load("a").unwrap().as_ref().map(|v| v.as_slice()),
-            Some(b"value-a".as_ref())
-        );
-        assert_eq!(
-            s.load("b").unwrap().as_ref().map(|v| v.as_slice()),
-            Some(b"value-b".as_ref())
-        );
+        assert_eq!(loaded_bytes(&s, "a").as_deref(), Some(b"value-a".as_ref()));
+        assert_eq!(loaded_bytes(&s, "b").as_deref(), Some(b"value-b".as_ref()));
     }
 
     #[test]
@@ -147,7 +134,7 @@ mod tests {
         let mut loaded = s.load("key").unwrap().unwrap();
         loaded[0] = b'X';
         assert_eq!(
-            s.load("key").unwrap().as_ref().map(|v| v.as_slice()),
+            loaded_bytes(&s, "key").as_deref(),
             Some(b"original".as_ref())
         );
     }

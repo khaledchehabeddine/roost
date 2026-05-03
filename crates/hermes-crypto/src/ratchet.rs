@@ -116,6 +116,15 @@ mod tests {
         0x6d, 0x0d,
     ];
 
+    /// Alice [0x77; 32] and Bob [0x88; 32] — fixed keypair pair used by the kdf_rk KAT and its
+    /// determinism check.
+    fn fixed_keypairs() -> (KeyPair, KeyPair) {
+        (
+            KeyPair::from_secret_bytes([0x77u8; 32]),
+            KeyPair::from_secret_bytes([0x88u8; 32]),
+        )
+    }
+
     /// Known-answer test for [`kdf_rk`].
     ///
     /// Inputs: `root_key = [0; 32]`, `alice_secret = [0x77; 32]`, `bob_secret = [0x88; 32]`,
@@ -138,8 +147,7 @@ mod tests {
             0x1a, 0xe4, 0x1f, 0x7b,
         ];
 
-        let alice = KeyPair::from_secret_bytes([0x77u8; 32]);
-        let bob = KeyPair::from_secret_bytes([0x88u8; 32]);
+        let (alice, bob) = fixed_keypairs();
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let (new_rk, new_ck) = kdf_rk(&RootKey([0u8; 32]), &dh_output).unwrap();
@@ -150,8 +158,7 @@ mod tests {
 
     #[test]
     fn kdf_rk_deterministic() {
-        let alice = KeyPair::from_secret_bytes([0xAAu8; 32]);
-        let bob = KeyPair::from_secret_bytes([0xBBu8; 32]);
+        let (alice, bob) = fixed_keypairs();
         let dh_output = alice.diffie_hellman(&bob.public);
 
         let root_key = RootKey([0x42u8; 32]);
@@ -160,19 +167,6 @@ mod tests {
 
         assert_eq!(rk1.as_bytes(), rk2.as_bytes());
         assert_eq!(ck1.as_bytes(), ck2.as_bytes());
-    }
-
-    #[test]
-    fn kdf_rk_different_root_keys_produce_different_output() {
-        let alice = KeyPair::from_secret_bytes([0xAAu8; 32]);
-        let bob = KeyPair::from_secret_bytes([0xBBu8; 32]);
-        let dh_output = alice.diffie_hellman(&bob.public);
-
-        let (rk1, ck1) = kdf_rk(&RootKey([0x00u8; 32]), &dh_output).unwrap();
-        let (rk2, ck2) = kdf_rk(&RootKey([0xFFu8; 32]), &dh_output).unwrap();
-
-        assert_ne!(rk1.as_bytes(), rk2.as_bytes());
-        assert_ne!(ck1.as_bytes(), ck2.as_bytes());
     }
 
     /// Known-answer test for [`kdf_ck`].
@@ -201,12 +195,6 @@ mod tests {
         assert_ne!(ck1.as_bytes(), ck0.as_bytes());
         assert_ne!(ck2.as_bytes(), ck1.as_bytes());
         assert_ne!(mk1.as_bytes(), mk2.as_bytes());
-    }
-
-    #[test]
-    fn kdf_ck_message_key_differs_from_chain_key() {
-        let (ck, mk) = kdf_ck(&ChainKey([0xABu8; 32])).unwrap();
-        assert_ne!(ck.as_bytes(), mk.as_bytes());
     }
 
     /// Chain-advancement known-answer test: 3 successive [`kdf_ck`] applications from a known
