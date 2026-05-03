@@ -204,18 +204,39 @@ impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
 /// `value` and `load` cross the FFI as bare `Vec<u8>` because UniFFI does not support
 /// `Zeroizing`. Hermes wraps loaded values in `Zeroizing` on the Rust side immediately;
 /// implementors must take the same care on the platform side.
+///
+/// # Implementing
+///
+/// On Swift, conform to the generated protocol; on Kotlin, implement the generated interface.
+/// All methods are called synchronously from Rust. Implementations must not panic — surface any
+/// platform error as [`HermesError::Storage`] with a descriptive `reason`.
+///
+/// See [`InMemorySecureStorage`] for a reference implementation suitable for tests.
 #[uniffi::export(with_foreign)]
 pub trait SecureStorage: Send + Sync {
     /// Stores `value` under `key`, overwriting any existing entry.
     ///
     /// # Errors
     /// - [`HermesError::Storage`] when the platform Keychain or Keystore returns an error.
+    ///
+    /// # Panics
+    /// Implementations must not panic. Surface platform errors as [`HermesError::Storage`].
+    ///
+    /// # Performance
+    /// Implementations should be O(1) amortized in `value.len()`. Hermes calls this on the
+    /// foreground thread of the consumer.
     fn store(&self, key: String, value: Vec<u8>) -> Result<(), HermesError>;
 
     /// Returns the value stored under `key`, or `None` if not present.
     ///
     /// # Errors
     /// - [`HermesError::Storage`] when the platform Keychain or Keystore returns an error.
+    ///
+    /// # Panics
+    /// Implementations must not panic. Surface platform errors as [`HermesError::Storage`].
+    ///
+    /// # Performance
+    /// Implementations should be O(1) amortized. Hermes calls this on the foreground thread.
     fn load(&self, key: String) -> Result<Option<Vec<u8>>, HermesError>;
 
     /// Removes the value stored under `key`. Idempotent — does nothing if the key is not
@@ -223,6 +244,12 @@ pub trait SecureStorage: Send + Sync {
     ///
     /// # Errors
     /// - [`HermesError::Storage`] when the platform Keychain or Keystore returns an error.
+    ///
+    /// # Panics
+    /// Implementations must not panic. Surface platform errors as [`HermesError::Storage`].
+    ///
+    /// # Performance
+    /// Implementations should be O(1) amortized. Hermes calls this on the foreground thread.
     fn delete(&self, key: String) -> Result<(), HermesError>;
 }
 
@@ -253,6 +280,9 @@ impl InMemorySecureStorage {
     ///
     /// # Panics
     /// Never panics.
+    ///
+    /// # Performance
+    /// O(1). Allocates a single empty `HashMap`.
     #[uniffi::constructor]
     pub fn new() -> Self {
         Self {
@@ -477,9 +507,13 @@ impl KeyStore {
     /// stored signed pre-key is cleared (it was signed by the now-replaced identity); call
     /// [`Self::rotate_signed_prekey_if_stale`] to seed a new one.
     ///
-    /// On any error from this method, treat the keystore as compromised and call [`Self::reset`]
-    /// before reuse — a partial failure during the overwrite of an existing identity can leave
-    /// storage with an inconsistent X25519/Ed25519 pair that [`Self::load_identity`] cannot detect.
+    /// Pre-mutation failures ([`HermesError::DecryptionFailed`], [`HermesError::InvalidData`],
+    /// [`HermesError::BackupFailed`]) leave any existing identity untouched. Failures returned
+    /// after commit begins ([`HermesError::Storage`], [`HermesError::InternalError`]) may have
+    /// partially written the new identity; in that case treat the keystore as compromised and
+    /// call [`Self::reset`] before reuse — partial overwrite of an existing identity can leave
+    /// storage with an inconsistent X25519/Ed25519 pair that [`Self::load_identity`] cannot
+    /// detect.
     ///
     /// # Examples
     /// ```no_run

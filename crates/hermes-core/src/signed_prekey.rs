@@ -39,7 +39,9 @@ impl fmt::Display for SignedPreKeyError {
         match self {
             SignedPreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
             SignedPreKeyError::Identity(e) => write!(f, "identity: {e}"),
-            SignedPreKeyError::InvalidData(reason) => write!(f, "invalid SPK data: {reason}"),
+            SignedPreKeyError::InvalidData(reason) => {
+                write!(f, "invalid signed pre-key data: {reason}")
+            }
             SignedPreKeyError::LockPoisoned => write!(f, "internal lock poisoned"),
             SignedPreKeyError::Storage(e) => write!(f, "storage: {e}"),
         }

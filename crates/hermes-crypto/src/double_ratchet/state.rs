@@ -86,7 +86,11 @@ impl RatchetState {
     ///
     /// `ad` should be the associated data of both parties' identity public keys.
     ///
-    /// Returns `InvalidState` if the sending chain key is not yet initialized.
+    /// # Errors
+    /// - [`CryptoError::InvalidState`] if the sending chain key is not yet initialized
+    ///   (responder calling encrypt before any incoming message has driven the DH ratchet).
+    /// - [`CryptoError::InvalidHmacKey`] if the chain-key KDF rejects its input.
+    /// - [`CryptoError::Aead`] if XChaCha20-Poly1305 encryption fails.
     pub fn ratchet_encrypt(
         &mut self,
         plaintext: &[u8],
@@ -120,6 +124,17 @@ impl RatchetState {
     ///
     /// All state mutations happen on a clone; the original state is only replaced on successful
     /// decryption.
+    ///
+    /// # Errors
+    /// - [`CryptoError::Aead`] on tampered ciphertext, wrong associated data, or wrong key.
+    /// - [`CryptoError::MaxSkipExceeded`] if the header asks to skip more than the per-step
+    ///   skip limit (defends against memory exhaustion via crafted headers).
+    /// - [`CryptoError::MaxSkippedKeysExceeded`] if accepting this message would push the
+    ///   global skipped-key cache past its cap.
+    /// - [`CryptoError::InvalidState`] if the receiving chain key is not set after a DH
+    ///   ratchet step (indicates internal invariant violation).
+    /// - [`CryptoError::InvalidHmacKey`] if the chain-key KDF rejects its input.
+    /// - [`CryptoError::HkdfExpand`] if the root-key KDF run during a DH ratchet step fails.
     pub fn ratchet_decrypt(
         &mut self,
         ciphertext: &[u8],
@@ -157,6 +172,11 @@ impl RatchetState {
     /// Callers MUST overwrite the previously stored blob — never append a new entry alongside an
     /// old one. Forward secrecy depends on past states being destroyed on every state change; a
     /// device compromise that recovers stale blobs exposes past message keys.
+    ///
+    /// # Errors
+    /// - [`CryptoError::RatchetStateEncode`] if `postcard` serialization fails (allocation
+    ///   failure or unsupported field shape — neither is reachable with the current state
+    ///   layout, but the error is surfaced rather than panicking).
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
         let wire = RatchetStateWire {
             version: RATCHET_STATE_VERSION,
@@ -179,13 +199,16 @@ impl RatchetState {
             .map_err(|_| CryptoError::RatchetStateEncode)
     }
 
-    /// Restores a session from a blob produced by [`Self::to_bytes`].
+    /// Restores a session from a blob produced by [`Self::to_bytes`]. Persisted blobs are
+    /// treated as external input so the in-memory skipped-key cap can't be bypassed by a
+    /// tampered or corrupt store.
     ///
-    /// Version mismatches return [`CryptoError::UnsupportedRatchetVersion`], structural decode
-    /// failures return [`CryptoError::RatchetStateDecode`], and a blob whose `mk_skipped` exceeds
-    /// the in-memory skipped-key cap returns [`CryptoError::MaxSkippedKeysExceeded`] — persisted
-    /// blobs are treated as external input so the cap can't be bypassed by a tampered or corrupt
-    /// store.
+    /// # Errors
+    /// - [`CryptoError::UnsupportedRatchetVersion`] if the version byte is not the format
+    ///   this build understands.
+    /// - [`CryptoError::RatchetStateDecode`] if the blob fails structural decode (truncated,
+    ///   tampered, or corrupt).
+    /// - [`CryptoError::MaxSkippedKeysExceeded`] if `mk_skipped` exceeds the skipped-key cap.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         let version = *bytes.first().ok_or(CryptoError::RatchetStateDecode)?;
         if version != RATCHET_STATE_VERSION {

@@ -87,11 +87,11 @@ pub fn initiate(
 pub fn accept(
     envelope: &HandshakeEnvelope,
     ik: &KeyPair,
-    spk: &SignedPreKey,
+    signed_prekey: &SignedPreKey,
 ) -> Result<(RatchetState, Zeroizing<Vec<u8>>), CryptoError> {
     let signed_prekey_ref_matches: bool = envelope
         .responder_signed_prekey_ref
-        .ct_eq(spk.public().as_bytes())
+        .ct_eq(signed_prekey.public().as_bytes())
         .into();
     if !signed_prekey_ref_matches {
         return Err(CryptoError::HandshakeSignedPreKeyMismatch);
@@ -100,10 +100,10 @@ pub fn accept(
     let initiator_ik_pub = PublicKey::from(envelope.initiator_ik);
     let initiator_ek_pub = PublicKey::from(envelope.initiator_ek);
 
-    let sk = derive_sk_responder(&initiator_ik_pub, &initiator_ek_pub, ik, spk)?;
+    let sk = derive_sk_responder(&initiator_ik_pub, &initiator_ek_pub, ik, signed_prekey)?;
 
-    let spk_keypair = KeyPair::from_secret_bytes(*spk.to_secret_bytes());
-    let mut state = RatchetState::init_responder(sk, spk_keypair);
+    let signed_prekey_keypair = KeyPair::from_secret_bytes(*signed_prekey.to_secret_bytes());
+    let mut state = RatchetState::init_responder(sk, signed_prekey_keypair);
 
     let header = Header {
         public_key: PublicKey::from(envelope.ratchet_pk),
