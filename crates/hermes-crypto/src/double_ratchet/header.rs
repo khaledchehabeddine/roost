@@ -1,24 +1,26 @@
-//! Wire-format Double Ratchet message header — the bytes prepended to every ciphertext.
+//! Wire-format Double Ratchet header prepended to each ciphertext.
 
 use crate::keys::PublicKey;
 
-/// Message header transmitted alongside each ciphertext.
+/// Double Ratchet message header transmitted with each ciphertext.
 pub struct Header {
+    /// Ratchet public key for the sender's current sending chain.
     pub public_key: PublicKey,
-    pub pn: u32,
-    pub n: u32,
+    /// Number of messages sent in the sender's previous sending chain.
+    pub previous_chain_length: u32,
+    /// Sequence number of this message in the sender's current sending chain.
+    pub message_number: u32,
 }
 
 impl Header {
-    /// Serializes the header into a fixed 40-byte representation.
-    ///
-    /// Layout: 32-byte ratchet public key || 4-byte pn (big-endian) || 4-byte n (big-endian).
+    // Serializes the header as `public_key || previous_chain_length || message_number`.
+    // Count fields are encoded as big-endian u32 values.
     pub(super) fn serialize(&self) -> [u8; 40] {
-        let mut buf = [0u8; 40];
-        buf[..32].copy_from_slice(self.public_key.as_bytes());
-        buf[32..36].copy_from_slice(&self.pn.to_be_bytes());
-        buf[36..40].copy_from_slice(&self.n.to_be_bytes());
-        buf
+        let mut serialized = [0u8; 40];
+        serialized[..32].copy_from_slice(self.public_key.as_bytes());
+        serialized[32..36].copy_from_slice(&self.previous_chain_length.to_be_bytes());
+        serialized[36..40].copy_from_slice(&self.message_number.to_be_bytes());
+        serialized
     }
 }
 
@@ -28,17 +30,25 @@ mod tests {
     use crate::keys::generate_key_pair;
 
     #[test]
-    fn header_serialize_round_trip() {
-        let kp = generate_key_pair();
+    fn serialize_writes_public_key_and_counters() {
+        let key_pair = generate_key_pair();
+        let previous_chain_length = 42;
+        let message_number = 7;
         let header = Header {
-            public_key: kp.public,
-            pn: 42,
-            n: 7,
+            public_key: key_pair.public,
+            previous_chain_length,
+            message_number,
         };
 
-        let buf = header.serialize();
-        assert_eq!(&buf[..32], kp.public.as_bytes());
-        assert_eq!(u32::from_be_bytes(buf[32..36].try_into().unwrap()), 42);
-        assert_eq!(u32::from_be_bytes(buf[36..40].try_into().unwrap()), 7);
+        let serialized = header.serialize();
+        assert_eq!(&serialized[..32], key_pair.public.as_bytes());
+        assert_eq!(
+            u32::from_be_bytes(serialized[32..36].try_into().unwrap()),
+            previous_chain_length
+        );
+        assert_eq!(
+            u32::from_be_bytes(serialized[36..40].try_into().unwrap()),
+            message_number
+        );
     }
 }

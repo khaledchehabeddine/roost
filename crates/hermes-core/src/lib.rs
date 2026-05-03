@@ -1,24 +1,32 @@
-//! Application-layer key management for Hermes.
+//! Application-layer key management for private messaging clients.
 //!
-//! Wraps the cryptographic primitives in [`hermes_crypto`] with persistence, lifecycle
-//! management, and a [`SecureStorage`] trait that platforms (iOS Keychain, Android Keystore)
-//! plug into.
+//! This crate wraps [`hermes_crypto`] primitives with persistence, identity lifecycle management,
+//! and signed-pre-key rotation for Rust callers wiring the core into apps. Platform adapters
+//! provide a [`SecureStorage`] implementation backed by secure storage.
 //!
-//! # Mental model
+//! # Overview
 //!
-//! [`KeyStore`] is the single entry point. It owns an [`IdentityManager`] (X25519 + Ed25519
-//! identity keys) and a [`SignedPreKeyManager`] (rotating signed pre-key for handshake
-//! initiation) and serializes their access to the underlying [`SecureStorage`].
+//! [`KeyStore`] is the entry point for identity setup, encrypted backup import and export, and
+//! signed-pre-key publication. It serializes access to the underlying storage so callers can share
+//! a cloned handle across application components.
 //!
-//! # Quick start
+//! # Examples
 //!
 //! ```
 //! use hermes_core::{InMemorySecureStorage, KeyStore};
 //!
+//! # fn publish_signed_prekey_bundle(
+//! #     _bundle: &hermes_crypto::SignedPreKeyBundle,
+//! # ) -> Result<(), Box<dyn std::error::Error>> {
+//! #     Ok(())
+//! # }
 //! let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
 //! store.generate_identity()?;
-//! let _ = store.rotate_signed_prekey_if_stale()?;
-//! let bundle = store.current_signed_prekey_bundle()?;
+//! let bundle = match store.rotate_signed_prekey_if_stale()? {
+//!     Some(bundle) => bundle,
+//!     None => store.current_signed_prekey_bundle()?,
+//! };
+//! publish_signed_prekey_bundle(&bundle)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -27,7 +35,7 @@ mod key_store;
 mod signed_prekey;
 mod storage;
 
-pub use identity::{Identity, IdentityError, IdentityManager};
+pub use identity::{Identity, IdentityError};
 pub use key_store::{KeyStore, KeyStoreError};
-pub use signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
+pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};

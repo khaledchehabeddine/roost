@@ -10,58 +10,29 @@ use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
-type KeyBytes = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
+type IdentityKeyBytes = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 
 const IDENTITY_X25519_KEY: &str = "identity/x25519";
 const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 
-/// Errors returned by [`IdentityManager`] operations.
+/// Errors returned by identity operations.
 #[derive(Debug)]
 pub enum IdentityError {
     /// An identity is already stored.
-    ///
-    /// Recovery: load the existing identity instead of generating a new one. Generating again
-    /// would clobber the device's keys and break peer trust.
     AlreadyExists,
-    /// Encrypted-backup creation failed. Inner string carries diagnostic context for logs.
-    ///
-    /// Recovery: surface a generic error to the user; the inner string is for telemetry only
-    /// and may indicate RNG, KDF, or AEAD failure.
+    /// Encrypted backup creation failed during randomness, key derivation, or encryption.
     BackupFailed(String),
-    /// Only one of the two identity keys is present in storage, indicating a partial write.
-    ///
-    /// Detected by [`IdentityManager::load_identity`] only when a half is *missing*. A partial
-    /// overwrite where both stores exist but came from different identities (X25519 from the
-    /// new write, Ed25519 from the previous identity) is *not* detectable here — the two keys
-    /// have no signed binding to each other in the current schema.
-    ///
-    /// Recovery: prompt the user to restore from backup or reset the keystore. The on-disk
-    /// state cannot be salvaged without an external source of truth.
+    /// Only one of the two identity keys is present in storage.
     Corrupt,
-    /// Backup decryption failed: wrong passphrase, tampered ciphertext, or wrong cipher
-    /// parameters.
-    ///
-    /// Recovery: ask the user to re-enter the passphrase. No storage mutation has occurred.
+    /// Backup decryption failed because the passphrase or ciphertext was invalid.
     DecryptionFailed,
-    /// Stored bytes are malformed or the wrong length. Inner string describes what was invalid.
-    ///
-    /// Recovery: validate the source of the bytes (corrupt blob, wrong-version stored data) and
-    /// surface a user-actionable message. Storage may need to be reset.
+    /// Stored identity or backup bytes are malformed.
     InvalidData(String),
     /// The internal storage lock was poisoned by a panicked thread.
-    ///
-    /// Recovery: surface a generic error and consider restarting the app. The underlying
-    /// storage may be in an inconsistent state.
     LockPoisoned,
     /// No identity is stored.
-    ///
-    /// Recovery: call [`IdentityManager::generate_identity`] (first launch) or import an
-    /// encrypted backup (restore).
     NotFound,
     /// The underlying [`SecureStorage`] returned an error.
-    ///
-    /// Recovery: surface to the user; persistent failures may indicate revoked permissions or
-    /// platform misconfiguration. Retrying after a transient I/O fault is safe.
     Storage(StorageError),
 }
 
@@ -91,84 +62,58 @@ impl Error for IdentityError {
     }
 }
 
-/// A Hermes identity consisting of an X25519 key pair and an Ed25519 signing key pair.
+/// A local identity containing X25519 and Ed25519 key pairs.
 pub struct Identity {
     key_pair: KeyPair,
     signing_key_pair: SigningKeyPair,
 }
 
 impl Identity {
-    /// Returns the X25519 public key.
+    /// Returns the X25519 [`PublicKey`].
     pub fn public_key(&self) -> &PublicKey {
         &self.key_pair.public
     }
 
-    /// Returns the Ed25519 verifying key.
+    /// Returns the Ed25519 [`VerifyingKey`].
     pub fn verifying_key(&self) -> &VerifyingKey {
         &self.signing_key_pair.verifying
     }
 
-    /// Performs an X25519 Diffie–Hellman exchange with the given public key.
+    /// Performs an X25519 Diffie–Hellman exchange with the given [`PublicKey`] and returns the
+    /// [`SharedSecret`].
     pub fn diffie_hellman(&self, their_public: &PublicKey) -> SharedSecret {
         self.key_pair.diffie_hellman(their_public)
     }
 
-    /// Signs `message` with the Ed25519 signing key and returns the signature.
+    /// Signs `message` with the Ed25519 signing key and returns the [`Signature`].
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key_pair.sign(message)
     }
 
-    /// Application code signs via [`Self::sign`]; this exposes the keypair to crate-internal
-    /// callers (SPK signing) only.
     pub(crate) fn signing_key_pair(&self) -> &SigningKeyPair {
+        // Signed-pre-key rotation needs direct signing-key access inside the crate.
         &self.signing_key_pair
     }
 }
 
-/// Manages creation and retrieval of the local Hermes identity.
-///
-/// Identities are persisted via a [`SecureStorage`] backend. On real devices this
-/// will be the iOS Keychain or Android Keystore; in tests use
-/// [`crate::InMemorySecureStorage`].
-pub struct IdentityManager {
+pub(crate) struct IdentityManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
 }
 
 impl IdentityManager {
-    /// Constructs a manager backed by the given shared storage handle. Cheap — no I/O.
-    pub fn new(storage: Arc<Mutex<Box<dyn SecureStorage>>>) -> Self {
+    pub(crate) fn new(storage: Arc<Mutex<Box<dyn SecureStorage>>>) -> Self {
         IdentityManager { storage }
     }
 
-    /// Acquires the storage lock, mapping a poisoned mutex to [`IdentityError::LockPoisoned`].
     fn lock_storage(&self) -> Result<MutexGuard<'_, Box<dyn SecureStorage>>, IdentityError> {
         self.storage.lock().map_err(|_| IdentityError::LockPoisoned)
     }
 
-    /// Generates a new identity and persists it to storage.
-    ///
-    /// # Errors
-    /// - [`IdentityError::AlreadyExists`] if an X25519 identity key is already stored.
-    /// - [`IdentityError::Storage`] on platform storage failure.
-    /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
-    ///
-    /// Partial-write detectability:
-    /// - If no identity exists and only the X25519 half is written, [`Self::load_identity`]
-    ///   reports [`IdentityError::Corrupt`].
-    /// - If an Ed25519 half is *already* present from an earlier partial state and a fresh
-    ///   X25519 store then succeeds while the Ed25519 store fails, on-disk storage holds a
-    ///   chimera (X25519 from the new identity, Ed25519 from the previous one) that
-    ///   [`Self::load_identity`] cannot detect — there is no signed binding between the two
-    ///   halves in the current schema.
-    ///
-    /// Recovery: call [`crate::KeyStore::reset`] before retrying after any failure of this
-    /// method.
-    pub fn generate_identity(&self) -> Result<Identity, IdentityError> {
+    pub(crate) fn generate_identity(&self) -> Result<Identity, IdentityError> {
         let mut storage = self.lock_storage()?;
-
         let identity_exists = storage
             .load(IDENTITY_X25519_KEY)
-            .map_err(log_storage_err)?
+            .map_err(map_storage_err)?
             .is_some();
         if identity_exists {
             return Err(IdentityError::AlreadyExists);
@@ -176,97 +121,73 @@ impl IdentityManager {
 
         let key_pair = generate_key_pair();
         let signing_key_pair = generate_signing_key_pair();
-
+        // A failed Ed25519 store after a successful X25519 store can leave the storage partially
+        // updated.
         storage
             .store(IDENTITY_X25519_KEY, &*key_pair.to_secret_bytes())
-            .map_err(log_storage_err)?;
+            .map_err(map_storage_err)?;
         storage
             .store(IDENTITY_ED25519_KEY, &*signing_key_pair.to_signing_bytes())
-            .map_err(log_storage_err)?;
-
+            .map_err(map_storage_err)?;
         Ok(Identity {
             key_pair,
             signing_key_pair,
         })
     }
 
-    /// Loads the existing identity from storage.
-    ///
-    /// # Errors
-    /// - [`IdentityError::NotFound`] if neither key is present.
-    /// - [`IdentityError::Corrupt`] if only one of the two keys is present.
-    /// - [`IdentityError::InvalidData`] if a stored key has the wrong byte length.
-    /// - [`IdentityError::Storage`] on platform storage failure.
-    /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
-    pub fn load_identity(&self) -> Result<Identity, IdentityError> {
-        let (x25519, ed25519) = self.load_key_bytes()?;
-
+    pub(crate) fn load_identity(&self) -> Result<Identity, IdentityError> {
+        let (x25519, ed25519) = self.load_identity_key_bytes()?;
         Ok(Identity {
             key_pair: KeyPair::from_secret_bytes(*x25519),
             signing_key_pair: SigningKeyPair::from_signing_bytes(*ed25519),
         })
     }
 
-    /// Returns `true` if an X25519 identity key is present.
-    ///
-    /// Non-mutating storage probe. Lets callers gate setup flows without resorting to
-    /// catching [`IdentityError::NotFound`] from [`Self::load_identity`]. The Ed25519
-    /// component is not checked, so callers must still handle [`IdentityError::Corrupt`]
-    /// from [`Self::load_identity`] in case of partial-write damage.
-    ///
-    /// # Errors
-    /// - [`IdentityError::Storage`] on platform storage failure.
-    /// - [`IdentityError::LockPoisoned`] on storage lock poisoning.
-    pub fn has_identity(&self) -> Result<bool, IdentityError> {
+    pub(crate) fn has_identity(&self) -> Result<bool, IdentityError> {
         let storage = self.lock_storage()?;
         Ok(storage
             .load(IDENTITY_X25519_KEY)
-            .map_err(log_storage_err)?
+            .map_err(map_storage_err)?
             .is_some())
     }
 
-    /// Applications must use [`crate::KeyStore::reset`] — direct identity-only deletion would
-    /// orphan the SPK signed by this identity.
+    // Use `KeyStore::reset` so the identity and signed pre-key are cleared together.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
         storage
             .delete(IDENTITY_X25519_KEY)
-            .map_err(log_storage_err)?;
+            .map_err(map_storage_err)?;
         storage
             .delete(IDENTITY_ED25519_KEY)
-            .map_err(log_storage_err)?;
+            .map_err(map_storage_err)?;
         Ok(())
     }
 
-    /// Reads both identity keys from storage, validates their length, and returns fixed-size arrays.
-    fn load_key_bytes(&self) -> Result<KeyBytes, IdentityError> {
+    fn load_identity_key_bytes(&self) -> Result<IdentityKeyBytes, IdentityError> {
         let storage = self.lock_storage()?;
-        let (x_vec, e_vec) = match (
-            storage.load(IDENTITY_X25519_KEY).map_err(log_storage_err)?,
+        let (x25519_vec, ed25519_vec) = match (
+            storage.load(IDENTITY_X25519_KEY).map_err(map_storage_err)?,
             storage
                 .load(IDENTITY_ED25519_KEY)
-                .map_err(log_storage_err)?,
+                .map_err(map_storage_err)?,
         ) {
             (None, None) => return Err(IdentityError::NotFound),
             (Some(_), None) | (None, Some(_)) => return Err(IdentityError::Corrupt),
-            (Some(x), Some(e)) => (x, e),
+            (Some(x25519), Some(ed25519)) => (x25519, ed25519),
         };
-
-        let x_bytes: [u8; 32] = x_vec
+        let x25519_bytes: [u8; 32] = x25519_vec
             .as_slice()
             .try_into()
             .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
-        let e_bytes: [u8; 32] = e_vec
+        let ed25519_bytes: [u8; 32] = ed25519_vec
             .as_slice()
             .try_into()
             .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
-
-        Ok((Zeroizing::new(x_bytes), Zeroizing::new(e_bytes)))
+        Ok((Zeroizing::new(x25519_bytes), Zeroizing::new(ed25519_bytes)))
     }
 }
 
-/// Maps a [`StorageError`] from the underlying [`SecureStorage`] into [`IdentityError::Storage`].
-fn log_storage_err(e: StorageError) -> IdentityError {
+fn map_storage_err(e: StorageError) -> IdentityError {
     IdentityError::Storage(e)
 }
 
@@ -281,100 +202,111 @@ mod tests {
 
     #[test]
     fn generate_identity_succeeds() {
-        let m = manager();
-        assert!(m.generate_identity().is_ok());
+        let manager = manager();
+        assert!(manager.generate_identity().is_ok());
     }
 
     #[test]
     fn generate_identity_twice_returns_already_exists() {
-        let m = manager();
-        m.generate_identity().unwrap();
+        let manager = manager();
+        manager.generate_identity().unwrap();
         assert!(matches!(
-            m.generate_identity(),
+            manager.generate_identity(),
             Err(IdentityError::AlreadyExists)
         ));
     }
 
     #[test]
     fn load_identity_without_generate_returns_not_found() {
-        let m = manager();
-        assert!(matches!(m.load_identity(), Err(IdentityError::NotFound)));
+        let manager = manager();
+        assert!(matches!(
+            manager.load_identity(),
+            Err(IdentityError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn load_identity_returns_same_public_keys() {
+        let manager = manager();
+        let generated_identity = manager.generate_identity().unwrap();
+        let loaded_identity = manager.load_identity().unwrap();
+        assert_eq!(
+            generated_identity.public_key(),
+            loaded_identity.public_key()
+        );
+        assert_eq!(
+            generated_identity.verifying_key().as_bytes(),
+            loaded_identity.verifying_key().as_bytes()
+        );
+    }
+
+    #[test]
+    fn load_identity_returns_corrupt_when_only_one_key_present() {
+        let manager = manager();
+        manager.generate_identity().unwrap();
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .delete(IDENTITY_ED25519_KEY)
+            .unwrap();
+        assert!(matches!(
+            manager.load_identity(),
+            Err(IdentityError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn sign_round_trip_after_load_identity() {
+        let manager = manager();
+        let generated_identity = manager.generate_identity().unwrap();
+        let loaded_identity = manager.load_identity().unwrap();
+        let message = b"hermes test message";
+        // Ed25519 signing is deterministic, so identical keys produce identical signatures.
+        assert_eq!(
+            generated_identity.sign(message).to_bytes(),
+            loaded_identity.sign(message).to_bytes()
+        );
+    }
+
+    #[test]
+    fn diffie_hellman_round_trip_after_load_identity() {
+        let manager = manager();
+        manager.generate_identity().unwrap();
+        let loaded_identity = manager.load_identity().unwrap();
+        let peer_key_pair = generate_key_pair();
+        let identity_shared_secret = loaded_identity.diffie_hellman(&peer_key_pair.public);
+        let peer_shared_secret = peer_key_pair.diffie_hellman(loaded_identity.public_key());
+        assert_eq!(
+            identity_shared_secret.as_bytes(),
+            peer_shared_secret.as_bytes()
+        );
     }
 
     #[test]
     fn has_identity_is_false_before_generate() {
-        let m = manager();
-        assert!(!m.has_identity().unwrap());
+        let manager = manager();
+        assert!(!manager.has_identity().unwrap());
     }
 
     #[test]
     fn has_identity_is_true_after_generate() {
-        let m = manager();
-        m.generate_identity().unwrap();
-        assert!(m.has_identity().unwrap());
+        let manager = manager();
+        manager.generate_identity().unwrap();
+        assert!(manager.has_identity().unwrap());
     }
 
     #[test]
     fn has_identity_returns_true_when_only_x25519_half_present() {
-        // Probe is based on X25519 presence only — Ed25519 may be missing without
-        // has_identity flagging it. Callers must handle Corrupt from load_identity.
         let storage = Arc::new(Mutex::new(
-            Box::new(InMemorySecureStorage::new()) as Box<dyn SecureStorage>,
+            Box::new(InMemorySecureStorage::new()) as Box<dyn SecureStorage>
         ));
         storage
             .lock()
             .unwrap()
             .store(IDENTITY_X25519_KEY, &[0u8; 32])
             .unwrap();
-        let m = IdentityManager::new(storage);
-        assert!(m.has_identity().unwrap());
-        assert!(matches!(m.load_identity(), Err(IdentityError::Corrupt)));
-    }
-
-    #[test]
-    fn load_identity_returns_same_public_keys() {
-        let m = manager();
-        let generated = m.generate_identity().unwrap();
-        let loaded = m.load_identity().unwrap();
-        assert_eq!(generated.public_key(), loaded.public_key());
-        assert_eq!(
-            generated.verifying_key().as_bytes(),
-            loaded.verifying_key().as_bytes()
-        );
-    }
-
-    #[test]
-    fn sign_round_trip_after_load_identity() {
-        let m = manager();
-        let generated = m.generate_identity().unwrap();
-        let loaded = m.load_identity().unwrap();
-        let message = b"hermes test message";
-        // Ed25519 is deterministic — identical keys produce identical signatures
-        assert_eq!(
-            generated.sign(message).to_bytes(),
-            loaded.sign(message).to_bytes()
-        );
-    }
-
-    #[test]
-    fn diffie_hellman_round_trip_after_load_identity() {
-        let m = manager();
-        let loaded = m.generate_identity().unwrap();
-        let peer = generate_key_pair();
-        let shared_a = loaded.diffie_hellman(&peer.public);
-        let shared_b = peer.diffie_hellman(loaded.public_key());
-        assert_eq!(shared_a.as_bytes(), shared_b.as_bytes());
-    }
-
-    #[test]
-    fn load_identity_returns_corrupt_when_only_one_key_present() {
-        let m = manager();
-        m.generate_identity().unwrap();
-        m.storage
-            .lock()
-            .unwrap()
-            .delete(IDENTITY_ED25519_KEY)
-            .unwrap();
-        assert!(matches!(m.load_identity(), Err(IdentityError::Corrupt)));
+        let manager = IdentityManager::new(storage);
+        assert!(manager.has_identity().unwrap());
     }
 }

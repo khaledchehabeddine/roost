@@ -5,9 +5,7 @@ publish.workspace = true
 version.workspace = true
 
 [lib]
-# `rlib` lets doctests compile and run; FFI consumers use `cdylib` (Swift dylib) or
-# `staticlib` (Android static link). Adding `rlib` does not change either FFI artifact.
-crate-type = ["cdylib", "staticlib", "rlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
 name = "hermes"
 
 [[bin]]

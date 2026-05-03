@@ -1,5 +1,4 @@
-//! UniFFI scaffolding-binding generator entry point. Run via
-//! `cargo run -p hermes-uniffi --bin uniffi-bindgen`.
+//! Generates UniFFI scaffolding bindings.
 
 fn main() {
     uniffi::uniffi_bindgen_main()

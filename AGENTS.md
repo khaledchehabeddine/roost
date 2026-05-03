@@ -19,12 +19,12 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 - Customizations that benefit collaborators on this project must live in project scope (`.agents/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`)
 - Customization may live in user scope only if it neither shapes the project's workflow nor improves agent quality for collaborators
-- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation — do not harmonize style across agents
-- Follow the structure and style from existing peer customizations of the same type within the same agent — applies to root config files, rules, agents, and skills
-- Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.) — not mechanical alphabetical sort
+- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation
+- Follow the structure and style from existing peer customizations of the same type within the same agent
+- Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.)
 - Pattern-skill descriptions list the same items as the body, in the same order
-- Skills that set `paths:` must not restate the location filter in their description — `paths:` gates autoloading; descriptions describe activity
-- Customization descriptions don't explicitly reference the project name (Hermes) — context is implicit from the repo. Literal paths like `crates/hermes-uniffi` are exceptions (they identify actual files, not prose)
+- Skills that set `paths:` must not restate the location filter in their description — `paths:` gates autoloading
+- Customization descriptions don't explicitly reference the project name (Hermes). Literal paths like `crates/hermes-uniffi` are exceptions
 
 ### Crypto
 
@@ -48,45 +48,46 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Necessity check before adding any dep — can the standard library or an existing dep cover the need?
 - MSRV of any added dep must be ≤ workspace MSRV (see `rust-toolchain.toml`)
 - For crypto-adjacent crates (touching keys, signatures, encryption, KDFs): require maintainer reputation (RustCrypto org, dalek-cryptography, etc.) and audit history
-- Prefer audited crates: `subtle` for constant-time, `zeroize` for secret zeroing, `rand` (`OsRng`) for production randomness, `hkdf`/`hmac`/`sha2` for KDF/MAC, dalek crates for asymmetric primitives
+- Prefer audited crates
 - Pin major versions in each crate's `Cargo.toml`; hoist shared deps to `[workspace.dependencies]`. Update via `cargo update -p <crate>` with reasoning in the commit message
-- License, advisory, source, and yanked policy: enforced by `cargo-deny` — see `deny.toml`
+- License, advisory, source, and yanked policy: enforced by `cargo-deny`
 - After bumping any crypto-adjacent dep, run `cargo deny check bans` for transitive duplicates. Allowed duplicates need an explicit `[bans] skip` entry in `deny.toml` with reasoning
 
 ### Error Handling
 
 - Each crate defines its own domain error type
 - All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
-- Error `Display` implementations should be detailed enough to debug from logs alone — not localized UI strings
-- `Display` impls use lowercase first word, no trailing period (consistent across the workspace); acronym handling follows the public-API scope ladder
-- Error `Display` must never include secret material — key bytes, plaintext, decrypted output, or seeds. Use reference identifiers (key IDs, message numbers) instead
-- Every error variant doc states the recovery action a caller should take
-- Every method's `# Errors` distinguishes pre-mutation failures from post-commit failures when the recovery action differs
-- No blanket "on any error, do X" wording — that hides the variant where the recovery is destructive
-- Every guarantee a doc comment makes (atomicity, rollback, partial-failure handling, detectability) must match what the code actually does. Limitations get documented explicitly, not implied by silence
+- Error text (Display, Debug, source chain) is for operator logs — concise, debug-useful, lowercase first word, no trailing period (composes via `{e}` chaining)
+- Never include secret material — key bytes, plaintext, seeds. Reference by stable identifiers (key IDs, message numbers) instead
 
 ### Public API
 
 - Modules are organizational, not public-API boundaries
 - `pub` minimization — every `pub` item needs an out-of-crate user (a `pub use` at `lib.rs` doesn't count)
-- Secret-bearing types must not be reachable from `pub` accessors without an out-of-crate consumer who specifically needs the secret form. Bundle-returning facades demote secret-returning helpers
-- Public types must have rustdoc per `docs/agents/rust-docs-style.md` tier (T1 for `hermes-uniffi` including `#[uniffi::export(with_foreign)]` traits, T2 for other crates)
-- Acronym tolerance scales by scope: T1 (no acronyms except universal); T2 (industry-standard primitives only — `KDF`/`AEAD`/`HKDF`/`MAC`); T3 (`pub(crate)`) allows protocol shorthand; function-local is unrestricted
-- Prefer adding a new function over breaking an existing one
-- Pre-1.0 breaks are fine but every public-symbol change must be enumerated in the PR description / release notes: type/method/field/parameter renames, return-type changes, visibility demotions
-- Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump — affects Swift/Kotlin bindings
-- Internal errors crossing the FFI must convert to `HermesError` via `From` impls
-- No `unwrap()`, `expect()`, or `panic!()` in `#[uniffi::export]` paths — use `Result<T, HermesError>` for fallible operations
+- Secret-bearing types additionally require a consumer who specifically needs the secret form
+- Acronym tolerance scales with proximity to consumers, tightest at the FFI boundary:
+  - `#[uniffi::export]` (T1): none except universal (`URL`, `HTTP`, `JSON`); all crypto terms spelled out (`signed_prekey`, not `spk`)
+  - Cross-crate `pub` (T2): industry-standard primitives only (`KDF`, `AEAD`, `HKDF`, `MAC`); no protocol-internal acronyms (`SPK`, `OPK`, `IK`)
+  - `pub(crate)` (T3): protocol shorthand fine (`spk`, `ik`, `ek`, `dh`, `ad`)
+  - Function-local: anything readable in context
+- Public types must follow project rustdoc guidelines — see `docs/agents/rust-docs-style.md`
+- Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump
 
 ### Rust Style
 
 - Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions
 - No `pub use` glob re-exports
-- Functions: verbs for actions (`generate_*`, `rotate_*`); nouns for accessors (`current_bundle`); predicates with `is_*`/`has_*`
+- Local names: short when one obvious value is in scope; role names when same-shaped values coexist (including tests)
+- Functions: verbs for actions (`generate_*`, `rotate_*`, `verify_*`); nouns for accessors (`current_bundle`, `public_key`); predicates with `is_*`/`has_*`
 - No `get_` prefix on accessors
-- `try_*` prefix only when contrasting with a non-fallible variant in the same scope
-- Constructor shape: `Type::new(...)` canonical; `Type::from_<form>(...)` for alternate sources; `Type::with_<thing>(...)` for builders
-- Type suffixes: `*Error`, `*Bundle`, `*Manager` (only when paired with the type it manages). Avoid `*Helper`, `*Util`, `*Service`
+- `try_*` prefix only when contrasting with a non-fallible variant in the same scope — not as a generic `Result`-returning marker
+- Constructors: `Type::new(...)` canonical; `Type::from_<form>(...)` for alternate sources (e.g., `from_secret_bytes`); `Type::with_<thing>(...)` for builder-style
+- Type suffixes:
+  - `*Error` for errors
+  - `*Bundle` for containers of related public material
+  - `*Manager` only when paired with the type it manages (e.g., `IdentityManager` vs `Identity`)
+  - `*Store` for facades composing multiple managers (e.g., `KeyStore` over `IdentityManager` + `SignedPreKeyManager`)
+  - Avoid `*Helper`, `*Util`, `*Service`
 
 ### Tests
 
@@ -97,19 +98,17 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - Test-only dependencies live under `[dev-dependencies]` in Cargo.toml
 - Test assertions must not depend on `SystemTime::now()` or `OsRng` outputs — both may be opaque inputs (e.g., relative timestamps, round-trip keys)
 - No shared mutable state across tests — each test owns its `Setup` via a `setup()` function, no `static mut` or `Lazy<>`
-- KAT vector tests cite the specific function call (e.g., `pyca/cryptography 46 HKDF-SHA256`) in a doc comment alongside the expected constant
-- KAT expected outputs live in named constants (`<PRIMITIVE>_KAT_EXPECTED`); both directions (encrypt/decrypt, sign/verify) reference the same constant
-- KAT derivation source preference: RFC vectors → reference implementation → independent crate/library → hand-derived (flag for security-auditor review)
-- KAT expected outputs must never be derived against the implementation under test
 
 ### UniFFI
 
-- FFI-incompatible core types must be wrapped within the `hermes-uniffi` crate. Common cases: `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, external-crate types without conversion
+- FFI-incompatible core types must be wrapped in the `hermes-uniffi` crate — `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, external-crate types without conversion
+- Secret bytes cross as bare `Vec<u8>` and wrap in `Zeroizing` immediately in the adapter layer, not client code
 - Stateful types wrap with `#[derive(uniffi::Object)]` and interior mutability — decouples internal type evolution from FFI stability
 - Foreign-implementable traits use `#[uniffi::export(with_foreign)]` to let clients implement Rust-callable traits
-- Secret bytes cross the FFI as bare `Vec<u8>` and wrap in `Zeroizing` immediately on the Rust side — wrapping happens in the adapter layer, not in client code
 - Errors crossing the UniFFI boundary must use `#[derive(uniffi::Error)]` — library errors and panics cannot propagate
-- `HermesError` variants describe failures in client-relevant terms (e.g., `AlreadyExists`, `NotFound`). Internal failures the client cannot meaningfully handle (e.g., lock poisoning, KDF output overflow) reduce to a generic `InternalError { reason: String }` — the `reason` is for logs, not for client logic
+- Internal errors convert to `HermesError` via `From` impls
+- `HermesError` variants describe failures in client-relevant terms (e.g., `AlreadyExists`, `NotFound`)
+- Internal failures the client cannot meaningfully handle (e.g., lock poisoning, KDF output overflow) reduce to a generic `InternalError { reason: String }` — `reason` is for logs, not client logic
 
 ## Workflow
 
