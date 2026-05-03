@@ -13,22 +13,6 @@ const MAX_SKIP: u32 = 100;
 const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 const RATCHET_STATE_VERSION: u8 = 1;
 
-/// Raw-byte serde mirror of [`RatchetState`] for [`RatchetState::to_bytes`] /
-/// [`RatchetState::from_bytes`].
-#[derive(Deserialize, Serialize)]
-struct RatchetStateWire {
-    version: u8,
-    dhs_secret: [u8; 32],
-    dhr: Option<[u8; 32]>,
-    rk: [u8; 32],
-    cks: Option<[u8; 32]>,
-    ckr: Option<[u8; 32]>,
-    ns: u32,
-    nr: u32,
-    pn: u32,
-    mk_skipped: BTreeMap<([u8; 32], u32), [u8; 32]>,
-}
-
 /// Session state for the Double Ratchet algorithm between two peers.
 pub struct RatchetState {
     /// Sending ratchet key pair.
@@ -317,6 +301,22 @@ impl RatchetState {
 
         Ok(())
     }
+}
+
+/// Raw-byte serde mirror of [`RatchetState`] for [`RatchetState::to_bytes`] /
+/// [`RatchetState::from_bytes`].
+#[derive(Deserialize, Serialize)]
+struct RatchetStateWire {
+    version: u8,
+    dhs_secret: [u8; 32],
+    dhr: Option<[u8; 32]>,
+    rk: [u8; 32],
+    cks: Option<[u8; 32]>,
+    ckr: Option<[u8; 32]>,
+    ns: u32,
+    nr: u32,
+    pn: u32,
+    mk_skipped: BTreeMap<([u8; 32], u32), [u8; 32]>,
 }
 
 /// Manual Drop instead of deriving `ZeroizeOnDrop` — the tuple key `([u8; 32], u32)` doesn't
