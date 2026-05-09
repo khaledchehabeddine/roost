@@ -12,5 +12,11 @@ edition = "2024"
 publish = false
 version = "0.3.0"
 
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+new_without_default = "allow"
+
 [workspace.lints.rustdoc]
 missing_crate_level_docs = "warn"

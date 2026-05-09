@@ -22,8 +22,5 @@ hermes-crypto = { path = "../hermes-crypto", version = "0.3.0" }
 uniffi = { version = "0.31.1", features = ["cli"] }
 zeroize = "1.8.2"
 
-[lints.rust]
-missing_docs = "warn"
-
-[lints.rustdoc]
-missing_crate_level_docs = "warn"
+[lints]
+workspace = true

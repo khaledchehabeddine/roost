@@ -149,7 +149,9 @@ mod tests {
     /// ```text
     /// encryption_key, nonce = expand_message_key(message_key)
     /// authenticated_data = associated_data || header.serialize()
-    /// ciphertext = XChaCha20-Poly1305-Encrypt(encryption_key, nonce, plaintext, authenticated_data)
+    /// ciphertext = XChaCha20-Poly1305-Encrypt(
+    ///   encryption_key, nonce, plaintext, authenticated_data
+    /// )
     /// ```
     ///
     /// Output: `ciphertext = AEAD_KAT_EXPECTED_CIPHERTEXT`
@@ -183,7 +185,9 @@ mod tests {
     /// ```text
     /// encryption_key, nonce = expand_message_key(message_key)
     /// authenticated_data = associated_data || header.serialize()
-    /// plaintext = XChaCha20-Poly1305-Decrypt(encryption_key, nonce, ciphertext, authenticated_data)
+    /// plaintext = XChaCha20-Poly1305-Decrypt(
+    ///   encryption_key, nonce, ciphertext, authenticated_data
+    /// )
     /// ```
     ///
     /// Output: `plaintext = b"Hermes test vector plaintext"`
