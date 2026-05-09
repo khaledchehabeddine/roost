@@ -10,6 +10,11 @@ cd hermes
 rustup show
 cargo install cargo-deny cargo-llvm-cov
 cargo build --workspace
+```
+
+Run tests:
+
+```bash
 cargo test --workspace
 ```
 
