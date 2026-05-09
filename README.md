@@ -18,6 +18,15 @@ Generate documentation:
 cargo doc --workspace --open
 ```
 
+## Architecture
+
+Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B"):
+
+- `hermes-crypto`
+- `hermes-core` → `hermes-crypto`
+- `hermes-transport-ble`
+- `hermes-uniffi` → `hermes-core`, `hermes-crypto`
+
 ## Docs
 
 - [`docs/decisions/`](docs/decisions/) — architectural decisions and reasoning
