@@ -12,11 +12,26 @@ cargo install cargo-deny cargo-llvm-cov
 cargo build --workspace
 ```
 
+Run tests:
+
+```bash
+cargo test --workspace
+```
+
 Generate documentation:
 
 ```bash
 cargo doc --workspace --open
 ```
+
+## Architecture
+
+Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B"):
+
+- `hermes-crypto`
+- `hermes-core` → `hermes-crypto`
+- `hermes-transport-ble`
+- `hermes-uniffi` → `hermes-core`, `hermes-crypto`
 
 ## Docs
 

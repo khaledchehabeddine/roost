@@ -5,11 +5,11 @@
 
 ## Decision
 
-`SecureStorage` is a Rust trait with `store`, `load`, and `delete` methods that `IdentityManager` depends on via a generic type parameter. The host app provides platform implementations (iOS Keychain, Android Keystore) at construction time. An `InMemorySecureStorage` implementation ships in `hermes-core` for use in tests.
+`SecureStorage` is a Rust trait with methods that `KeyStore` consumes as a trait object. The client app provides platform implementations at construction time. An `InMemorySecureStorage` implementation is added for testing.
 
 ## Why
 
-- `IdentityManager` cannot call platform APIs directly — `hermes-core` is pure Rust with no iOS or Android dependencies
-- A generic type parameter (`IdentityManager<S: SecureStorage>`) lets the compiler monomorphize the correct backend with zero runtime overhead; no dynamic dispatch required
+- Managers in `hermes-core` cannot call platform APIs directly
+- A trait object lets the in-crate managers (`IdentityManager`, `SignedPreKeyManager`) share a single storage instance and erases the storage type at the FFI boundary
 - `InMemorySecureStorage` provides a self-contained test backend with no OS dependencies
 - Keeping the trait in `hermes-core` rather than `hermes-uniffi` means the storage contract is defined at the layer that owns identity logic, not at the FFI boundary

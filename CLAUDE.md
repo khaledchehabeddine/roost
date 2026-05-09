@@ -6,12 +6,7 @@ Hermes is the shared cryptographic and networking core for a private, peer-to-pe
 
 ## Architecture
 
-Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B"):
-
-- `hermes-crypto`
-- `hermes-core` → `hermes-crypto`
-- `hermes-transport-ble` → `hermes-core`
-- `hermes-uniffi` → `hermes-core`, `hermes-transport-ble`
+See [`README.md`](README.md#architecture) for the crate dependency graph.
 
 ## Workflow
 
