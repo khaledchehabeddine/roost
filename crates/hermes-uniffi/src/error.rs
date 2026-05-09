@@ -40,6 +40,8 @@ pub enum HermesError {
     },
 }
 
+impl std::error::Error for HermesError {}
+
 impl std::fmt::Display for HermesError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -54,8 +56,6 @@ impl std::fmt::Display for HermesError {
         }
     }
 }
-
-impl std::error::Error for HermesError {}
 
 impl From<IdentityError> for HermesError {
     fn from(e: IdentityError) -> Self {
