@@ -10,6 +10,6 @@
 ## Why
 
 - Managers in `hermes-core` cannot call platform APIs directly
-- A trait object lets the in-crate managers (`IdentityManager`, `SignedPreKeyManager`) share a single storage instance through `Arc<Mutex<Box<dyn _>>>` and erases the storage type at the FFI boundary
+- A trait object lets the in-crate managers (`IdentityManager`, `SignedPreKeyManager`) share a single storage instance and erases the storage type at the FFI boundary
 - `InMemorySecureStorage` provides a self-contained test backend with no OS dependencies
 - Keeping the trait in `hermes-core` rather than `hermes-uniffi` means the storage contract is defined at the layer that owns identity logic, not at the FFI boundary
