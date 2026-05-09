@@ -5,7 +5,7 @@ publish.workspace = true
 version.workspace = true
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
 name = "hermes"
 
 [[bin]]
@@ -17,11 +17,12 @@ name = "uniffi-bindgen-swift"
 path = "uniffi-bindgen-swift.rs"
 
 [dependencies]
-hermes-core = { path = "../hermes-core", version = "0.3.0" }
-hermes-crypto = { path = "../hermes-crypto", version = "0.3.0" }
+# Local
+hermes-core.workspace = true
+hermes-crypto.workspace = true
+# Utility
 uniffi = { version = "0.31.1", features = ["cli"] }
-zeroize = "1.8.2"
+zeroize.workspace = true
 
-[lints.rust]
-missing_crate_level_docs = "warn"
-missing_docs = "warn"
+[lints]
+workspace = true

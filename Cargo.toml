@@ -12,5 +12,19 @@ edition = "2024"
 publish = false
 version = "0.3.0"
 
+[workspace.dependencies]
+# Local
+hermes-core = { path = "crates/hermes-core", version = "0.3.0" }
+hermes-crypto = { path = "crates/hermes-crypto", version = "0.3.0" }
+# Utility
+chacha20poly1305 = "0.10.1"
+zeroize = "1.8.2"
+
 [workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+new_without_default = "allow"
+
+[workspace.lints.rustdoc]
 missing_crate_level_docs = "warn"
