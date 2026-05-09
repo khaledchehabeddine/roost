@@ -77,6 +77,7 @@ Required for every crate, regardless of tier:
 - Function summary starts with third-person verb ("Returns", "Generates", "Parses")
 - Type summary is a noun phrase ("A cryptographic session shared between two peers.")
 - Use intra-doc links for public API items when navigation helps explain the contract: `[Type]`, `[Type::method]`, or `[Type::Variant]`
+- Prefer short rendered link text. Use explicit targets when rustdoc cannot resolve the short form or the target is outside lexical scope: ``[`Type`](crate::module::Type)`` or ``[`Type`](other_crate::Type)``. Show the full path in rendered text only when the namespace differentiates two same-named items in the same doc block
 - Use plain text for domain concepts, private items in public docs, and repeat mentions unless each link clarifies a distinct contract
 - Avoid naming the crate or project when the surrounding docs already make the context clear
 - Public docs include implementation details only when they affect correct use, resource planning, interoperability, or error interpretation
