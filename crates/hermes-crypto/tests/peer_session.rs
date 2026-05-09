@@ -1,158 +1,236 @@
-//! Integration tests exercising two `RatchetState` instances bootstrapped via the X3DH-lite
-//! handshake. Covers session-level scenarios that cross module boundaries and exercise the
-//! public API the way a downstream consumer (e.g. `hermes-core`) would.
+//! Session-level integration tests for peers bootstrapped through the X3DH-lite handshake.
+//!
+//! These scenarios cross the handshake, signed pre-key, and Double Ratchet modules through the
+//! public API the way a downstream crate would.
 
 use hermes_crypto::{
     CryptoError, HandshakeEnvelope, Header, KeyPair, RatchetState, Signature, SignedPreKey,
     SigningKeyPair, accept, generate_key_pair, generate_signed_prekey, generate_signing_key_pair,
-    initial_ad, initiate,
+    initial_associated_data, initiate,
 };
 
-const FIXED_TS: u64 = 1_700_000_000;
+const FIXED_CREATED_AT: u64 = 1_700_000_000;
 
 struct Setup {
-    alice_ik: KeyPair,
-    bob_ik: KeyPair,
-    bob_signing: SigningKeyPair,
-    bob_spk: SignedPreKey,
+    alice_identity_key: KeyPair,
+    bob_identity_key: KeyPair,
+    bob_signing_key: SigningKeyPair,
+    bob_signed_prekey: SignedPreKey,
 }
 
 fn setup() -> Setup {
-    let bob_signing = generate_signing_key_pair();
-    let bob_spk = generate_signed_prekey(&bob_signing, FIXED_TS);
+    let bob_signing_key = generate_signing_key_pair();
+    let bob_signed_prekey = generate_signed_prekey(&bob_signing_key, FIXED_CREATED_AT);
     Setup {
-        alice_ik: generate_key_pair(),
-        bob_ik: generate_key_pair(),
-        bob_signing,
-        bob_spk,
+        alice_identity_key: generate_key_pair(),
+        bob_identity_key: generate_key_pair(),
+        bob_signing_key,
+        bob_signed_prekey,
     }
 }
 
-fn bootstrap(s: &Setup, plaintext: &[u8]) -> (RatchetState, RatchetState, HandshakeEnvelope) {
+fn bootstrap(setup: &Setup, plaintext: &[u8]) -> (RatchetState, RatchetState, HandshakeEnvelope) {
     let (alice, envelope) = initiate(
-        &s.alice_ik,
-        &s.bob_signing.verifying,
-        &s.bob_ik.public,
-        &s.bob_spk.bundle(),
+        &setup.alice_identity_key,
+        &setup.bob_signing_key.verifying,
+        &setup.bob_identity_key.public,
+        &setup.bob_signed_prekey.bundle(),
         plaintext,
     )
     .unwrap();
-    let (bob, _) = accept(&envelope, &s.bob_ik, &s.bob_spk).unwrap();
+    let (bob, _) = accept(&envelope, &setup.bob_identity_key, &setup.bob_signed_prekey).unwrap();
     (alice, bob, envelope)
 }
 
 #[test]
-fn round_trip_advances_dh_ratchet() {
-    let s = setup();
-    let (mut alice, mut bob, envelope) = bootstrap(&s, b"hello");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
-    let initial_alice_dh = envelope.ratchet_pk;
+fn round_trip_advances_diffie_hellman_ratchet() {
+    let setup = setup();
+    let (mut alice, mut bob, envelope) = bootstrap(&setup, b"hello");
+    let associated_data = initial_associated_data(
+        &setup.alice_identity_key.public,
+        &setup.bob_identity_key.public,
+    );
+    let initial_alice_ratchet_public_key = envelope.ratchet_public_key;
 
-    let (bob_h, bob_ct) = bob.ratchet_encrypt(b"hi back", &ad).unwrap();
-    let decrypted = alice.ratchet_decrypt(&bob_ct, &bob_h, &ad).unwrap();
+    let (bob_header, bob_ciphertext) = bob.ratchet_encrypt(b"hi back", &associated_data).unwrap();
+    let decrypted = alice
+        .ratchet_decrypt(&bob_ciphertext, &bob_header, &associated_data)
+        .unwrap();
     assert_eq!(decrypted.as_slice(), b"hi back");
 
-    let (alice_h, alice_ct) = alice.ratchet_encrypt(b"round 2", &ad).unwrap();
+    let (alice_header, alice_ciphertext) =
+        alice.ratchet_encrypt(b"round 2", &associated_data).unwrap();
     assert_ne!(
-        alice_h.public_key.as_bytes(),
-        &initial_alice_dh,
-        "DH ratchet did not advance on Alice after receiving Bob's reply",
+        alice_header.public_key.as_bytes(),
+        &initial_alice_ratchet_public_key,
+        "Diffie-Hellman ratchet did not advance on Alice after receiving Bob's reply",
     );
-    let decrypted = bob.ratchet_decrypt(&alice_ct, &alice_h, &ad).unwrap();
+    let decrypted = bob
+        .ratchet_decrypt(&alice_ciphertext, &alice_header, &associated_data)
+        .unwrap();
     assert_eq!(decrypted.as_slice(), b"round 2");
 }
 
 #[test]
 fn consecutive_sends_use_symmetric_ratchet_only() {
-    let s = setup();
-    let (mut alice, mut bob, envelope) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
-    let alice_dh = envelope.ratchet_pk;
+    let setup = setup();
+    let (mut alice, mut bob, envelope) = bootstrap(&setup, b"msg-0");
+    let associated_data = initial_associated_data(
+        &setup.alice_identity_key.public,
+        &setup.bob_identity_key.public,
+    );
+    let alice_ratchet_public_key = envelope.ratchet_public_key;
 
-    let mut items = Vec::new();
+    let mut messages = Vec::new();
     for i in 1..=5 {
-        let pt = format!("msg-{i}");
-        let (h, ct) = alice.ratchet_encrypt(pt.as_bytes(), &ad).unwrap();
-        items.push((pt, h, ct));
+        let plaintext = format!("msg-{i}");
+        let (header, ciphertext) = alice
+            .ratchet_encrypt(plaintext.as_bytes(), &associated_data)
+            .unwrap();
+        messages.push((plaintext, header, ciphertext));
     }
 
-    for (_, h, _) in &items {
-        assert_eq!(h.public_key.as_bytes(), &alice_dh);
+    for (_, header, _) in &messages {
+        assert_eq!(header.public_key.as_bytes(), &alice_ratchet_public_key);
     }
 
-    for (pt, h, ct) in &items {
-        let decrypted = bob.ratchet_decrypt(ct, h, &ad).unwrap();
-        assert_eq!(decrypted.as_slice(), pt.as_bytes());
+    for (plaintext, header, ciphertext) in &messages {
+        let decrypted = bob
+            .ratchet_decrypt(ciphertext, header, &associated_data)
+            .unwrap();
+        assert_eq!(decrypted.as_slice(), plaintext.as_bytes());
     }
 }
 
 #[test]
 fn out_of_order_delivery_uses_skipped_keys() {
-    let s = setup();
-    let (mut alice, mut bob, _) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let setup = setup();
+    let (mut alice, mut bob, _) = bootstrap(&setup, b"msg-0");
+    let associated_data = initial_associated_data(
+        &setup.alice_identity_key.public,
+        &setup.bob_identity_key.public,
+    );
 
-    let mut items = Vec::new();
+    let mut messages = Vec::new();
     for i in 1..=5 {
-        let pt = format!("msg-{i}");
-        let (h, ct) = alice.ratchet_encrypt(pt.as_bytes(), &ad).unwrap();
-        items.push((pt, h, ct));
+        let plaintext = format!("msg-{i}");
+        let (header, ciphertext) = alice
+            .ratchet_encrypt(plaintext.as_bytes(), &associated_data)
+            .unwrap();
+        messages.push((plaintext, header, ciphertext));
     }
 
-    for idx in [0usize, 2, 4, 1, 3] {
-        let (pt, h, ct) = &items[idx];
-        let decrypted = bob.ratchet_decrypt(ct, h, &ad).unwrap();
-        assert_eq!(decrypted.as_slice(), pt.as_bytes());
+    for delivery_index in [0usize, 2, 4, 1, 3] {
+        let (plaintext, header, ciphertext) = &messages[delivery_index];
+        let decrypted = bob
+            .ratchet_decrypt(ciphertext, header, &associated_data)
+            .unwrap();
+        assert_eq!(decrypted.as_slice(), plaintext.as_bytes());
     }
 }
 
 #[test]
 fn skipped_keys_are_consumed_after_use() {
-    let s = setup();
-    let (mut alice, mut bob, _) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let setup = setup();
+    let (mut alice, mut bob, _) = bootstrap(&setup, b"msg-0");
+    let associated_data = initial_associated_data(
+        &setup.alice_identity_key.public,
+        &setup.bob_identity_key.public,
+    );
 
-    let mut items = Vec::new();
+    let mut messages = Vec::new();
     for i in 1..=5 {
-        let (h, ct) = alice
-            .ratchet_encrypt(format!("msg-{i}").as_bytes(), &ad)
+        let (header, ciphertext) = alice
+            .ratchet_encrypt(format!("msg-{i}").as_bytes(), &associated_data)
             .unwrap();
-        items.push((h, ct));
+        messages.push((header, ciphertext));
     }
 
     assert_eq!(bob.skipped_key_count(), 0);
-
-    bob.ratchet_decrypt(&items[0].1, &items[0].0, &ad).unwrap();
+    bob.ratchet_decrypt(&messages[0].1, &messages[0].0, &associated_data)
+        .unwrap();
     assert_eq!(bob.skipped_key_count(), 0);
-
-    bob.ratchet_decrypt(&items[2].1, &items[2].0, &ad).unwrap();
+    bob.ratchet_decrypt(&messages[2].1, &messages[2].0, &associated_data)
+        .unwrap();
     assert_eq!(bob.skipped_key_count(), 1);
-
-    bob.ratchet_decrypt(&items[4].1, &items[4].0, &ad).unwrap();
+    bob.ratchet_decrypt(&messages[4].1, &messages[4].0, &associated_data)
+        .unwrap();
     assert_eq!(bob.skipped_key_count(), 2);
-
-    bob.ratchet_decrypt(&items[1].1, &items[1].0, &ad).unwrap();
+    bob.ratchet_decrypt(&messages[1].1, &messages[1].0, &associated_data)
+        .unwrap();
     assert_eq!(bob.skipped_key_count(), 1);
-
-    bob.ratchet_decrypt(&items[3].1, &items[3].0, &ad).unwrap();
+    bob.ratchet_decrypt(&messages[3].1, &messages[3].0, &associated_data)
+        .unwrap();
     assert_eq!(bob.skipped_key_count(), 0);
 }
 
 #[test]
+fn ratchet_is_self_contained_after_bootstrap() {
+    let setup = setup();
+    let (mut alice, mut bob, _) = bootstrap(&setup, b"hello");
+    let associated_data = initial_associated_data(
+        &setup.alice_identity_key.public,
+        &setup.bob_identity_key.public,
+    );
+
+    drop(setup);
+
+    let bob_message = b"still here";
+    let (bob_header, bob_ciphertext) = bob.ratchet_encrypt(bob_message, &associated_data).unwrap();
+    assert_eq!(
+        alice
+            .ratchet_decrypt(&bob_ciphertext, &bob_header, &associated_data)
+            .unwrap()
+            .as_slice(),
+        bob_message,
+    );
+
+    let alice_message = b"acknowledged";
+    let (alice_header, alice_ciphertext) = alice
+        .ratchet_encrypt(alice_message, &associated_data)
+        .unwrap();
+    assert_eq!(
+        bob.ratchet_decrypt(&alice_ciphertext, &alice_header, &associated_data)
+            .unwrap()
+            .as_slice(),
+        alice_message,
+    );
+}
+
+#[test]
+fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
+    let setup = setup();
+    let mut bundle = setup.bob_signed_prekey.bundle();
+    let mut signature_bytes = bundle.signature.to_bytes();
+    signature_bytes[0] ^= 0x01;
+    bundle.signature = Signature::from_bytes(&signature_bytes);
+    let result = initiate(
+        &setup.alice_identity_key,
+        &setup.bob_signing_key.verifying,
+        &setup.bob_identity_key.public,
+        &bundle,
+        b"payload",
+    );
+    assert!(matches!(result, Err(CryptoError::SignatureInvalid)));
+}
+
+#[test]
 fn tampered_header_rolls_back_state() {
-    let s = setup();
-    let (mut alice, mut bob, _) = bootstrap(&s, b"msg-0");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
+    let setup = setup();
+    let (mut alice, mut bob, _) = bootstrap(&setup, b"msg-0");
+    let associated_data = initial_associated_data(
+        &setup.alice_identity_key.public,
+        &setup.bob_identity_key.public,
+    );
 
-    let (h, ct) = alice.ratchet_encrypt(b"legit", &ad).unwrap();
-
+    let (header, ciphertext) = alice.ratchet_encrypt(b"legit", &associated_data).unwrap();
     let tampered = Header {
-        public_key: h.public_key,
-        pn: h.pn,
-        n: h.n + 10,
+        public_key: header.public_key,
+        previous_chain_length: header.previous_chain_length,
+        message_number: header.message_number + 10,
     };
     assert!(matches!(
-        bob.ratchet_decrypt(&ct, &tampered, &ad),
+        bob.ratchet_decrypt(&ciphertext, &tampered, &associated_data),
         Err(CryptoError::Aead)
     ));
     assert_eq!(
@@ -161,45 +239,8 @@ fn tampered_header_rolls_back_state() {
         "failed decrypt must not leak skipped keys from the discarded snapshot",
     );
 
-    let decrypted = bob.ratchet_decrypt(&ct, &h, &ad).unwrap();
+    let decrypted = bob
+        .ratchet_decrypt(&ciphertext, &header, &associated_data)
+        .unwrap();
     assert_eq!(decrypted.as_slice(), b"legit");
-}
-
-#[test]
-fn tampered_spk_signature_rejects_before_any_key_work() {
-    let s = setup();
-    let mut bundle = s.bob_spk.bundle();
-    let mut sig_bytes = bundle.signature.to_bytes();
-    sig_bytes[0] ^= 0x01;
-    bundle.signature = Signature::from_bytes(&sig_bytes);
-
-    let result = initiate(
-        &s.alice_ik,
-        &s.bob_signing.verifying,
-        &s.bob_ik.public,
-        &bundle,
-        b"payload",
-    );
-    assert!(matches!(result, Err(CryptoError::SignatureInvalid)));
-}
-
-#[test]
-fn ratchet_is_self_contained_after_bootstrap() {
-    let s = setup();
-    let (mut alice, mut bob, _) = bootstrap(&s, b"hello");
-    let ad = initial_ad(&s.alice_ik.public, &s.bob_ik.public);
-
-    drop(s);
-
-    let (h, ct) = bob.ratchet_encrypt(b"still here", &ad).unwrap();
-    assert_eq!(
-        alice.ratchet_decrypt(&ct, &h, &ad).unwrap().as_slice(),
-        b"still here",
-    );
-
-    let (h, ct) = alice.ratchet_encrypt(b"acknowledged", &ad).unwrap();
-    assert_eq!(
-        bob.ratchet_decrypt(&ct, &h, &ad).unwrap().as_slice(),
-        b"acknowledged",
-    );
 }

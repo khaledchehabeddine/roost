@@ -24,7 +24,7 @@ If an AI agent contributed, append a `Co-Authored-By:` trailer naming the agent.
 
 ```
 feat: add Curve25519 key generation to hermes-crypto
-- Add `generate_keypair()` returning `(PublicKey, SecretKey)`
+- Add `generate_key_pair()` returning `(PublicKey, SecretKey)`
 - Add `KeyPair` struct to hermes-crypto public API
 - Add unit tests for key generation and round-trip encoding
 

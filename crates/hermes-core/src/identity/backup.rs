@@ -1,3 +1,5 @@
+//! Passphrase-encrypted identity backup using Argon2id and XChaCha20-Poly1305.
+
 use super::{IDENTITY_ED25519_KEY, IDENTITY_X25519_KEY, IdentityError, IdentityManager};
 use argon2::{Argon2, Params};
 use chacha20poly1305::{
@@ -9,43 +11,29 @@ use zeroize::Zeroizing;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
-/// Argon2id memory cost in KiB. Primary defense: forces attackers to provision large amounts
-/// of RAM per guess, defeating GPU and ASIC brute-force. OWASP baseline: 65,536 KiB (64 MiB).
+// Argon2id memory cost is in KiB. Memory is the primary brute-force defense. Time adds CPU work
+// without raising memory use.
 const ARGON2_M_COST: u32 = 65536;
-/// Argon2id time cost (iterations). Secondary defense: increases CPU work per guess without
-/// raising memory requirements. OWASP baseline: 3.
 const ARGON2_T_COST: u32 = 3;
-/// Argon2id parallelism. OWASP baseline: 1. Security comes from [`ARGON2_M_COST`] and
-/// [`ARGON2_T_COST`], not parallelism.
 const ARGON2_P_COST: u32 = 1;
-/// Argon2id output length in bytes. 32 bytes is the length of a XChaCha20-Poly1305 key.
 const ARGON2_OUTPUT_LEN: usize = 32;
 
 impl IdentityManager {
-    /// Exports the current identity as an encrypted backup blob.
-    ///
-    /// The backup format is:
-    /// `[Argon2id salt (16B)] + [XChaCha20-Poly1305 nonce (24B)] + [ciphertext (nB)]`
-    ///
-    /// The plaintext is the concatenation of the X25519 secret key (32 bytes) and
-    /// the Ed25519 signing key (32 bytes).
-    ///
-    /// Returns [`IdentityError::NotFound`] if no identity is stored, or
-    /// [`IdentityError::BackupFailed`] on encryption or RNG failure.
-    pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, IdentityError> {
-        let (x25519_bytes, ed25519_bytes) = self.load_key_bytes()?;
+    // Exports the current identity as an encrypted backup blob.
+    pub(crate) fn export_encrypted_backup(
+        &self,
+        passphrase: &str,
+    ) -> Result<Vec<u8>, IdentityError> {
+        let (x25519_bytes, ed25519_bytes) = self.load_identity_key_bytes()?;
 
-        let mut salt = [0u8; SALT_LEN];
-        getrandom::getrandom(&mut salt).map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
-
-        let mut nonce_bytes = [0u8; NONCE_LEN];
-        getrandom::getrandom(&mut nonce_bytes)
-            .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        let salt: [u8; SALT_LEN] = random_bytes()?;
+        let nonce_bytes: [u8; NONCE_LEN] = random_bytes()?;
 
         let key_bytes = derive_key(passphrase, &salt)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
         let nonce = XNonce::from_slice(&nonce_bytes);
 
+        // Plaintext layout: X25519 secret (32 bytes) | Ed25519 secret (32 bytes).
         let mut plaintext = Zeroizing::new([0u8; 64]);
         plaintext[..32].copy_from_slice(&*x25519_bytes);
         plaintext[32..].copy_from_slice(&*ed25519_bytes);
@@ -54,6 +42,7 @@ impl IdentityManager {
             .encrypt(nonce, &plaintext[..])
             .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
 
+        // Backup layout: salt (16 bytes) | nonce (24 bytes) | ciphertext and tag (80 bytes).
         let mut backup = Vec::with_capacity(SALT_LEN + NONCE_LEN + ciphertext.len());
         backup.extend_from_slice(&salt);
         backup.extend_from_slice(&nonce_bytes);
@@ -61,14 +50,13 @@ impl IdentityManager {
         Ok(backup)
     }
 
-    /// Decrypts a blob produced by [`Self::export_encrypted_backup`] into the raw
-    /// `[X25519 secret (32) | Ed25519 secret (32)]` plaintext.
+    // Decrypts a backup blob into identity plaintext.
     pub(crate) fn decrypt_backup(
         &self,
         data: &[u8],
         passphrase: &str,
     ) -> Result<Zeroizing<[u8; 64]>, IdentityError> {
-        // salt (16) + nonce (24) + ciphertext (64) + Poly1305 tag (16) = 120 bytes
+        // Only accept the fixed identity plaintext layout.
         if data.len() != SALT_LEN + NONCE_LEN + 64 + 16 {
             return Err(IdentityError::InvalidData("invalid backup length".into()));
         }
@@ -92,7 +80,7 @@ impl IdentityManager {
         Ok(plaintext)
     }
 
-    /// Plaintext layout: `[X25519 secret (32) | Ed25519 secret (32)]`.
+    // Stores decrypted identity plaintext.
     pub(crate) fn store_decrypted_identity(
         &self,
         plaintext: &[u8; 64],
@@ -100,15 +88,20 @@ impl IdentityManager {
         let mut storage = self.lock_storage()?;
         storage
             .store(IDENTITY_X25519_KEY, &plaintext[..32])
-            .map_err(super::log_storage_err)?;
+            .map_err(super::map_storage_err)?;
         storage
             .store(IDENTITY_ED25519_KEY, &plaintext[32..])
-            .map_err(super::log_storage_err)?;
+            .map_err(super::map_storage_err)?;
         Ok(())
     }
 }
 
-/// Derives a 32-byte encryption key from `passphrase` and `salt` using Argon2id.
+fn random_bytes<const N: usize>() -> Result<[u8; N], IdentityError> {
+    let mut buf = [0u8; N];
+    getrandom::getrandom(&mut buf).map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+    Ok(buf)
+}
+
 fn derive_key(
     passphrase: &str,
     salt: &[u8],
@@ -140,91 +133,100 @@ mod tests {
 
     #[test]
     fn export_backup_without_identity_returns_not_found() {
-        let m = manager();
+        let manager = manager();
         assert!(matches!(
-            m.export_encrypted_backup("passphrase"),
+            manager.export_encrypted_backup("passphrase"),
             Err(IdentityError::NotFound)
         ));
     }
 
     #[test]
-    fn export_import_round_trip_restores_identity() {
-        let m = manager();
-        let original = m.generate_identity().unwrap();
+    fn each_export_uses_fresh_salt_and_nonce() {
+        let manager = manager();
+        manager.generate_identity().unwrap();
+        let first_backup = manager.export_encrypted_backup("passphrase").unwrap();
+        let second_backup = manager.export_encrypted_backup("passphrase").unwrap();
+        // Nonce reuse would break XChaCha20-Poly1305 confidentiality.
+        assert_ne!(first_backup, second_backup);
+    }
 
-        let backup = m.export_encrypted_backup("correct-passphrase").unwrap();
-
-        let m2 = manager();
-        let plaintext = m2.decrypt_backup(&backup, "correct-passphrase").unwrap();
-        m2.store_decrypted_identity(&plaintext).unwrap();
-        let restored = m2.load_identity().unwrap();
-
-        assert_eq!(original.public_key(), restored.public_key());
-        assert_eq!(
-            original.verifying_key().as_bytes(),
-            restored.verifying_key().as_bytes()
-        );
+    #[test]
+    fn decrypt_backup_rejects_invalid_length() {
+        let manager = manager();
+        assert!(matches!(
+            manager.decrypt_backup(&[0u8; 10], "passphrase"),
+            Err(IdentityError::InvalidData(_))
+        ));
+        assert!(matches!(
+            manager.decrypt_backup(&[0u8; 121], "passphrase"),
+            Err(IdentityError::InvalidData(_))
+        ));
     }
 
     #[test]
     fn decrypt_backup_with_wrong_passphrase_returns_decryption_failed() {
-        let m = manager();
-        m.generate_identity().unwrap();
-        let backup = m.export_encrypted_backup("correct-passphrase").unwrap();
+        let source_manager = manager();
+        source_manager.generate_identity().unwrap();
+        let backup = source_manager
+            .export_encrypted_backup("correct-passphrase")
+            .unwrap();
 
-        let m2 = manager();
+        let destination_manager = manager();
         assert!(matches!(
-            m2.decrypt_backup(&backup, "wrong-passphrase"),
+            destination_manager.decrypt_backup(&backup, "wrong-passphrase"),
             Err(IdentityError::DecryptionFailed)
         ));
     }
 
     #[test]
-    fn decrypt_backup_rejects_invalid_length() {
-        let m = manager();
-        assert!(matches!(
-            m.decrypt_backup(&[0u8; 10], "passphrase"),
-            Err(IdentityError::InvalidData(_))
-        ));
-        assert!(matches!(
-            m.decrypt_backup(&[0u8; 121], "passphrase"),
-            Err(IdentityError::InvalidData(_))
-        ));
-    }
+    fn export_import_round_trip_restores_identity() {
+        let source_manager = manager();
+        let original_identity = source_manager.generate_identity().unwrap();
+        let backup = source_manager
+            .export_encrypted_backup("correct-passphrase")
+            .unwrap();
 
-    #[test]
-    fn each_export_uses_fresh_salt_and_nonce() {
-        let m = manager();
-        m.generate_identity().unwrap();
-        let b1 = m.export_encrypted_backup("passphrase").unwrap();
-        let b2 = m.export_encrypted_backup("passphrase").unwrap();
-        // Each export must draw fresh salt + nonce — nonce reuse breaks
-        // XChaCha20-Poly1305 confidentiality.
-        assert_ne!(b1, b2);
+        let destination_manager = manager();
+        let plaintext = destination_manager
+            .decrypt_backup(&backup, "correct-passphrase")
+            .unwrap();
+        destination_manager
+            .store_decrypted_identity(&plaintext)
+            .unwrap();
+        let restored_identity = destination_manager.load_identity().unwrap();
+
+        assert_eq!(
+            original_identity.public_key(),
+            restored_identity.public_key()
+        );
+        assert_eq!(
+            original_identity.verifying_key().as_bytes(),
+            restored_identity.verifying_key().as_bytes()
+        );
     }
 
     #[test]
     fn argon2id_derive_key_is_deterministic() {
         let passphrase = "passphrase";
         let salt = [0x00u8; 16];
-        let key1 = derive_key(passphrase, &salt).unwrap();
-        let key2 = derive_key(passphrase, &salt).unwrap();
-        assert_eq!(*key1, *key2);
+        let first_key = derive_key(passphrase, &salt).unwrap();
+        let second_key = derive_key(passphrase, &salt).unwrap();
+        assert_eq!(*first_key, *second_key);
     }
 
     #[test]
     fn argon2id_different_passphrases_produce_different_keys() {
         let salt = [0x01u8; 16];
-        let key1 = derive_key("passphrase-one", &salt).unwrap();
-        let key2 = derive_key("passphrase-two", &salt).unwrap();
-        assert_ne!(*key1, *key2);
+        let first_key = derive_key("passphrase-one", &salt).unwrap();
+        let second_key = derive_key("passphrase-two", &salt).unwrap();
+        assert_ne!(*first_key, *second_key);
     }
 
     #[test]
     fn argon2id_different_salts_produce_different_keys() {
         let passphrase = "passphrase";
-        let key1 = derive_key(passphrase, &[0x00u8; 16]).unwrap();
-        let key2 = derive_key(passphrase, &[0x01u8; 16]).unwrap();
-        assert_ne!(*key1, *key2);
+        let first_key = derive_key(passphrase, &[0x00u8; 16]).unwrap();
+        let second_key = derive_key(passphrase, &[0x01u8; 16]).unwrap();
+        assert_ne!(*first_key, *second_key);
     }
 }

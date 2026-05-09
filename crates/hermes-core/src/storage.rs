@@ -3,12 +3,10 @@ use std::fmt;
 use zeroize::Zeroizing;
 
 /// Errors returned by [`SecureStorage`] implementations.
-///
-/// `InMemorySecureStorage` is infallible, but real backends (iOS Keychain, Android Keystore) will
-/// surface I/O and permission errors through this type.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum StorageError {
+    /// Platform storage returned an I/O or permission failure.
     IO(String),
 }
 
@@ -24,31 +22,40 @@ impl std::error::Error for StorageError {}
 
 /// A key-value storage abstraction for sensitive byte payloads.
 ///
-/// Implementations are expected to back this with platform secure storage (iOS Keychain,
-/// Android Keystore).
+/// Implementations usually wrap platform secure storage. The UniFFI crate exposes a
+/// foreign-implementable adapter for clients.
 pub trait SecureStorage: Send {
     /// Stores `value` under `key`, overwriting any existing entry.
+    ///
+    /// # Errors
+    /// - [`StorageError::IO`] on platform storage failure.
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError>;
 
     /// Returns the value stored under `key`, or `None` if not present.
     ///
-    /// The returned bytes are wrapped in [`Zeroizing`], so they are scrubbed from memory when the
-    /// caller drops them.
+    /// The returned bytes are wrapped in [`Zeroizing`].
+    ///
+    /// # Errors
+    /// - [`StorageError::IO`] on platform storage failure.
     fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError>;
 
     /// Removes the value stored under `key`. Does nothing if the key is not present.
+    ///
+    /// # Errors
+    /// - [`StorageError::IO`] on platform storage failure.
     fn delete(&mut self, key: &str) -> Result<(), StorageError>;
 }
 
-/// An in-memory [`SecureStorage`] implementation for use in tests.
+/// An in-memory [`SecureStorage`] implementation for tests.
 ///
-/// Not suitable for production — data is not persisted and has no platform security guarantees.
+/// Not suitable for production as data is not persisted and has no platform security guarantees.
 #[derive(Default)]
 pub struct InMemorySecureStorage {
     entries: HashMap<String, Zeroizing<Vec<u8>>>,
 }
 
 impl InMemorySecureStorage {
+    /// Creates an empty in-memory storage instance.
     pub fn new() -> Self {
         Self::default()
     }
@@ -75,67 +82,79 @@ impl SecureStorage for InMemorySecureStorage {
 mod tests {
     use super::*;
 
-    fn storage() -> InMemorySecureStorage {
+    fn memory_storage() -> InMemorySecureStorage {
         InMemorySecureStorage::new()
     }
 
-    fn loaded_bytes(s: &InMemorySecureStorage, key: &str) -> Option<Vec<u8>> {
-        s.load(key).unwrap().map(|z| z.to_vec())
+    fn loaded_bytes(storage: &InMemorySecureStorage, key: &str) -> Option<Vec<u8>> {
+        storage.load(key).unwrap().map(|bytes| bytes.to_vec())
     }
 
     #[test]
     fn store_and_load_round_trip() {
-        let mut s = storage();
-        s.store("key", b"value").unwrap();
-        assert_eq!(loaded_bytes(&s, "key").as_deref(), Some(b"value".as_ref()));
-    }
-
-    #[test]
-    fn load_missing_key_returns_none() {
-        let s = storage();
-        assert_eq!(s.load("missing").unwrap(), None);
+        let mut storage = memory_storage();
+        storage.store("key", b"value").unwrap();
+        assert_eq!(
+            loaded_bytes(&storage, "key").as_deref(),
+            Some(b"value".as_ref())
+        );
     }
 
     #[test]
     fn store_overwrites_existing_value() {
-        let mut s = storage();
-        s.store("key", b"first").unwrap();
-        s.store("key", b"second").unwrap();
-        assert_eq!(loaded_bytes(&s, "key").as_deref(), Some(b"second".as_ref()));
-    }
-
-    #[test]
-    fn delete_removes_entry() {
-        let mut s = storage();
-        s.store("key", b"value").unwrap();
-        s.delete("key").unwrap();
-        assert_eq!(s.load("key").unwrap(), None);
-    }
-
-    #[test]
-    fn delete_missing_key_is_noop() {
-        let mut s = storage();
-        assert!(s.delete("missing").is_ok());
+        let mut storage = memory_storage();
+        storage.store("key", b"first").unwrap();
+        storage.store("key", b"second").unwrap();
+        assert_eq!(
+            loaded_bytes(&storage, "key").as_deref(),
+            Some(b"second".as_ref())
+        );
     }
 
     #[test]
     fn independent_keys_do_not_interfere() {
-        let mut s = storage();
-        s.store("a", b"value-a").unwrap();
-        s.store("b", b"value-b").unwrap();
-        assert_eq!(loaded_bytes(&s, "a").as_deref(), Some(b"value-a".as_ref()));
-        assert_eq!(loaded_bytes(&s, "b").as_deref(), Some(b"value-b".as_ref()));
+        let mut storage = memory_storage();
+        storage.store("a", b"value-a").unwrap();
+        storage.store("b", b"value-b").unwrap();
+        assert_eq!(
+            loaded_bytes(&storage, "a").as_deref(),
+            Some(b"value-a".as_ref())
+        );
+        assert_eq!(
+            loaded_bytes(&storage, "b").as_deref(),
+            Some(b"value-b".as_ref())
+        );
+    }
+
+    #[test]
+    fn load_missing_key_returns_none() {
+        let storage = memory_storage();
+        assert_eq!(storage.load("missing").unwrap(), None);
     }
 
     #[test]
     fn load_returns_independent_copy() {
-        let mut s = storage();
-        s.store("key", b"original").unwrap();
-        let mut loaded = s.load("key").unwrap().unwrap();
+        let mut storage = memory_storage();
+        storage.store("key", b"original").unwrap();
+        let mut loaded = storage.load("key").unwrap().unwrap();
         loaded[0] = b'X';
         assert_eq!(
-            loaded_bytes(&s, "key").as_deref(),
+            loaded_bytes(&storage, "key").as_deref(),
             Some(b"original".as_ref())
         );
+    }
+
+    #[test]
+    fn delete_removes_entry() {
+        let mut storage = memory_storage();
+        storage.store("key", b"value").unwrap();
+        storage.delete("key").unwrap();
+        assert_eq!(storage.load("key").unwrap(), None);
+    }
+
+    #[test]
+    fn delete_missing_key_is_noop() {
+        let mut storage = memory_storage();
+        assert!(storage.delete("missing").is_ok());
     }
 }
