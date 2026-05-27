@@ -24,5 +24,5 @@ description: Trigger when the user wants to file a new GitHub issue on the proje
 4. Ask the user to pick a milestone via `gh milestone list --json number,title`; skip if none
 5. Read the corresponding template from `.github/issue-scaffolds/<type>.md` and construct the issue body with the user's answers
 6. Create the issue:
-   - With milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --milestone "<milestone>" --project "Hermes"`
-   - Without milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --project "Hermes"`
+   - With milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --milestone "<milestone>" --project "Aether"`
+   - Without milestone: `gh issue create --title "<title>" --body "<body>" --label "<label>" --project "Aether"`

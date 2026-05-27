@@ -5,7 +5,7 @@
 
 ## Decision
 
-XChaCha20-Poly1305 (via the `chacha20poly1305` crate's `XChaCha20Poly1305` type, 24-byte nonce) is the AEAD cipher for every ratcheted message in Hermes.
+XChaCha20-Poly1305 (via the `chacha20poly1305` crate's `XChaCha20Poly1305` type, 24-byte nonce) is the AEAD cipher for every ratcheted message in Aether.
 
 ## Why
 

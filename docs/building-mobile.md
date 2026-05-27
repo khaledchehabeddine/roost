@@ -19,17 +19,17 @@ Requires Xcode command-line tools:
 ## Manual Bindings
 
 ```bash
-cargo build -p hermes-uniffi
+cargo build -p aether-uniffi
 
 # Kotlin
 cargo run --bin uniffi-bindgen -- generate \
-    target/debug/libhermes.dylib \
+    target/debug/libaether.dylib \
     --language kotlin \
     --out-dir target/bindings/kotlin
 
 # Swift (headers + sources)
 cargo run --bin uniffi-bindgen-swift -- \
-    target/debug/libhermes.dylib \
+    target/debug/libaether.dylib \
     target/bindings/swift \
     --swift-sources --headers
 ```

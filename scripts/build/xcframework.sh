@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-CRATE="hermes-uniffi"
-LIB="libhermes"
+CRATE="aether-uniffi"
+LIB="libaether"
 OUT="target/xcframework"
 
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
@@ -32,7 +32,7 @@ xcodebuild -create-xcframework \
     -headers "$OUT/Headers" \
     -library "target/aarch64-apple-ios-sim/release/${LIB}.a" \
     -headers "$OUT/Headers" \
-    -output "$OUT/Hermes.xcframework"
+    -output "$OUT/Aether.xcframework"
 
-echo "xcframework written to $OUT/Hermes.xcframework"
+echo "xcframework written to $OUT/Aether.xcframework"
 echo "Swift sources written to $OUT/Sources/"

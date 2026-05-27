@@ -16,4 +16,4 @@ paths:
 - Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.)
 - Pattern-skill descriptions list the same items as the body, in the same order
 - Skills that set `paths:` must not restate the location filter in their description — `paths:` gates autoloading
-- Customization descriptions don't explicitly reference the project name (Hermes). Literal paths like `crates/hermes-uniffi` are exceptions
+- Customization descriptions don't explicitly reference the project name (Aether). Literal paths like `crates/aether-uniffi` are exceptions

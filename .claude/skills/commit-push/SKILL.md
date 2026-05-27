@@ -23,7 +23,7 @@ When committing and pushing changes:
    - Dispatch `rust-code-reviewer` and `security-auditor` in parallel — one message, two `Agent` calls — with the pending diff
    - Also dispatch `api-reviewer` in the same parallel batch when either holds:
      - A new cross-crate public item is added or modified: `git diff HEAD | grep -E '^\+pub [a-z]'` returns output
-     - The diff touches `crates/hermes-uniffi/**`
+     - The diff touches `crates/aether-uniffi/**`
    - Findings handling:
      - `critical` findings block — surface the finding and proposed fix; do not proceed until the user confirms resolution
      - `improvement` and `learning` findings are advisory
@@ -34,7 +34,7 @@ When committing and pushing changes:
 7. **Pull request**:
    - Fetch the full diff: `git diff main...HEAD`
    - Fill the body using [.github/PULL_REQUEST_TEMPLATE.md](../../../.github/PULL_REQUEST_TEMPLATE.md)
-   - Title: from step 3 branch — `/` → `: `, `-` → space, title-case (e.g., `feature/ble-transport-retry` → `Feature: BLE Transport Retry`)
+   - Title: from step 3 branch — `/` → `: `, `-` → space, title-case (e.g., `feature/signed-prekey-rotation` → `Feature: Signed Prekey Rotation`)
    - Footer link: `[Claude Code](https://claude.com/claude-code)`
    - No open PR: `gh pr create --title "<title>" --body "<body>" --draft --assignee "@me" --label "<label>"`
    - PR exists: `gh pr edit --body "<body>"`

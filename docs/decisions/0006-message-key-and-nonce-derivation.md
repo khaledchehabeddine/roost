@@ -9,7 +9,7 @@ Each ratchet message key is expanded via HKDF-SHA256 with a protocol-specific in
 
 ## Why
 
-- Saves 24 bytes per message on the wire — meaningful under BLE MTU pressure (20-byte default, 247-byte negotiated)
+- Avoids transmitting the 24-byte nonce with each message
 - Each message key is used exactly once, so random nonce adds no security over a deterministic one
 - A distinct HKDF info string domain-separates this derivation from other HKDF outputs in the crate, preventing cross-protocol key reuse
 - Salt is omitted per RFC 5869 §3.1 — the chain-derived message key is already pseudo-random

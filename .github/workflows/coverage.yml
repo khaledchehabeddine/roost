@@ -29,8 +29,8 @@ jobs:
       - name: Run Tests with Coverage
         run: cargo llvm-cov --workspace --no-report
 
-      - name: Check hermes-core Coverage
-        run: cargo llvm-cov report -p hermes-core --fail-under-lines 80
+      - name: Check aether-core Coverage
+        run: cargo llvm-cov report -p aether-core --fail-under-lines 80
 
-      - name: Check hermes-crypto Coverage
-        run: cargo llvm-cov report -p hermes-crypto --fail-under-lines 80
+      - name: Check aether-crypto Coverage
+        run: cargo llvm-cov report -p aether-crypto --fail-under-lines 80
