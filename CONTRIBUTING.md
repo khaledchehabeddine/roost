@@ -23,9 +23,9 @@ If an AI agent contributed, append a `Co-Authored-By:` trailer naming the agent.
 ### Example
 
 ```
-feat: add Curve25519 key generation to hermes-crypto
+feat: add Curve25519 key generation to aether-crypto
 - Add `generate_key_pair()` returning `(PublicKey, SecretKey)`
-- Add `KeyPair` struct to hermes-crypto public API
+- Add `KeyPair` struct to aether-crypto public API
 - Add unit tests for key generation and round-trip encoding
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>

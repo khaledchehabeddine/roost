@@ -21,20 +21,20 @@ jobs:
       - name: Cache Dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build hermes-uniffi
-        run: cargo build -p hermes-uniffi
+      - name: Build aether-uniffi
+        run: cargo build -p aether-uniffi
 
       - name: Generate Kotlin Bindings
         run: |
           cargo run --bin uniffi-bindgen -- generate \
-            target/debug/libhermes.dylib \
+            target/debug/libaether.dylib \
             --language kotlin \
             --out-dir target/bindings/kotlin
 
       - name: Generate Swift Bindings
         run: |
           cargo run --bin uniffi-bindgen-swift -- \
-            target/debug/libhermes.dylib \
+            target/debug/libaether.dylib \
             target/bindings/swift \
             --swift-sources --headers
 
@@ -43,4 +43,4 @@ jobs:
 
       # Compilation verification requires Gradle + UniFFI runtime; verify generation only
       - name: Verify Kotlin Generated
-        run: test -s target/bindings/kotlin/com/relay/hermes/hermes.kt
+        run: test -s target/bindings/kotlin/com/relay/aether/aether.kt

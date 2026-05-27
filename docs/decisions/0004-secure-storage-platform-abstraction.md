@@ -9,7 +9,7 @@
 
 ## Why
 
-- Managers in `hermes-core` cannot call platform APIs directly
+- Managers in `aether-core` cannot call platform APIs directly
 - A trait object lets the in-crate managers (`IdentityManager`, `SignedPreKeyManager`) share a single storage instance and erases the storage type at the FFI boundary
 - `InMemorySecureStorage` provides a self-contained test backend with no OS dependencies
-- Keeping the trait in `hermes-core` rather than `hermes-uniffi` means the storage contract is defined at the layer that owns identity logic, not at the FFI boundary
+- Keeping the trait in `aether-core` rather than `aether-uniffi` means the storage contract is defined at the layer that owns identity logic, not at the FFI boundary

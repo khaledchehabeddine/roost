@@ -1,7 +1,7 @@
 ---
 paths:
-  - "crates/hermes-core/**/*.rs"
-  - "crates/hermes-crypto/**/*.rs"
+  - "crates/aether-core/**/*.rs"
+  - "crates/aether-crypto/**/*.rs"
 ---
 
 # Crypto Rules

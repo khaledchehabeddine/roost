@@ -1,8 +1,8 @@
-# Hermes
+# Aether
 
 ## Overview
 
-Hermes is the shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
+Aether is the shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
 
 ## Architecture
 
@@ -19,7 +19,7 @@ See [`README.md`](README.md#architecture) for the crate dependency graph.
 - Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.)
 - Pattern-skill descriptions list the same items as the body, in the same order
 - Skills that set `paths:` must not restate the location filter in their description — `paths:` gates autoloading
-- Customization descriptions don't explicitly reference the project name (Hermes). Literal paths like `crates/hermes-uniffi` are exceptions
+- Customization descriptions don't explicitly reference the project name (Aether). Literal paths like `crates/aether-uniffi` are exceptions
 
 ### Crypto
 
@@ -96,13 +96,13 @@ See [`README.md`](README.md#architecture) for the crate dependency graph.
 
 ### UniFFI
 
-- FFI-incompatible core types must be wrapped in the `hermes-uniffi` crate — `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, external-crate types without conversion
+- FFI-incompatible core types must be wrapped in the `aether-uniffi` crate — `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, external-crate types without conversion
 - Secret bytes cross as bare `Vec<u8>` and wrap in `Zeroizing` immediately in the adapter layer, not client code
 - Stateful types wrap with `#[derive(uniffi::Object)]` and interior mutability — decouples internal type evolution from FFI stability
 - Foreign-implementable traits use `#[uniffi::export(with_foreign)]` to let clients implement Rust-callable traits
 - Errors crossing the UniFFI boundary must use `#[derive(uniffi::Error)]` — library errors and panics cannot propagate
-- Internal errors convert to `HermesError` via `From` impls
-- `HermesError` variants describe failures in client-relevant terms (e.g., `AlreadyExists`, `NotFound`)
+- Internal errors convert to `AetherError` via `From` impls
+- `AetherError` variants describe failures in client-relevant terms (e.g., `AlreadyExists`, `NotFound`)
 - Internal failures the client cannot meaningfully handle (e.g., lock poisoning, KDF output overflow) reduce to a generic `InternalError { reason: String }` — `reason` is for logs, not client logic
 
 ## Workflow

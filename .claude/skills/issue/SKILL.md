@@ -27,5 +27,5 @@ When creating a GitHub issue:
    - Skip if none
 5. **Build the body**: read the template at `.github/issue-scaffolds/<type>.md` and fill with the user's answers
 6. **Create the issue**:
-   - With milestone: `gh issue create --title "$ARGUMENTS" --body "<body>" --label "<label>" --milestone "<milestone>" --project "Hermes"`
+   - With milestone: `gh issue create --title "$ARGUMENTS" --body "<body>" --label "<label>" --milestone "<milestone>" --project "Aether"`
    - Without milestone: same command minus `--milestone`

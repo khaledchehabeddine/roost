@@ -1,21 +1,20 @@
 [workspace]
 members = [
-    "crates/hermes-core",
-    "crates/hermes-crypto",
-    "crates/hermes-transport-ble",
-    "crates/hermes-uniffi"
+    "crates/aether-core",
+    "crates/aether-crypto",
+    "crates/aether-uniffi"
 ]
 resolver = "3"
 
 [workspace.package]
 edition = "2024"
 publish = false
-version = "0.3.0"
+version = "0.4.0"
 
 [workspace.dependencies]
 # Local
-hermes-core = { path = "crates/hermes-core", version = "0.3.0" }
-hermes-crypto = { path = "crates/hermes-crypto", version = "0.3.0" }
+aether-core = { path = "crates/aether-core", version = "0.4.0" }
+aether-crypto = { path = "crates/aether-crypto", version = "0.4.0" }
 # Utility
 chacha20poly1305 = "0.10.1"
 zeroize = "1.8.2"

@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-CRATE="hermes-uniffi"
-LIB="libhermes"
+CRATE="aether-uniffi"
+LIB="libaether"
 OUT="target/android"
 
 TARGETS=(

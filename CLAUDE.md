@@ -1,8 +1,8 @@
-# Hermes
+# Aether
 
 ## Overview
 
-Hermes is the shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
+Aether is the shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
 
 ## Architecture
 

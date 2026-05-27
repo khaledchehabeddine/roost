@@ -1,0 +1,5 @@
+[bindings.kotlin]
+package_name = "com.relay.aether"
+
+[bindings.swift]
+module_name = "Aether"
