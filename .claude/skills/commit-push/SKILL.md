@@ -34,7 +34,7 @@ When committing and pushing changes:
 7. **Pull request**:
    - Fetch the full diff: `git diff main...HEAD`
    - Fill the body using [.github/PULL_REQUEST_TEMPLATE.md](../../../.github/PULL_REQUEST_TEMPLATE.md)
-   - Title: from step 3 branch — `/` → `: `, `-` → space, title-case (e.g., `feature/ble-transport-retry` → `Feature: BLE Transport Retry`)
+   - Title: from step 3 branch — `/` → `: `, `-` → space, title-case (e.g., `feature/signed-prekey-rotation` → `Feature: Signed Prekey Rotation`)
    - Footer link: `[Claude Code](https://claude.com/claude-code)`
    - No open PR: `gh pr create --title "<title>" --body "<body>" --draft --assignee "@me" --label "<label>"`
    - PR exists: `gh pr edit --body "<body>"`

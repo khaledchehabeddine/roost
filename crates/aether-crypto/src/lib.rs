@@ -1,4 +1,4 @@
-//! Cryptographic primitives for private peer-to-peer messaging.
+//! Cryptographic primitives for private end-to-end encrypted messaging.
 //!
 //! This crate provides the key, signature, handshake, and Double Ratchet building blocks used by
 //! integrating crates. Integrating crates handles identity persistence, replay tracking, and

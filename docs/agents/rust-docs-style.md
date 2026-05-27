@@ -3,7 +3,7 @@
 ## Tiers
 
 - T1 — UniFFI-exposed APIs in `crates/aether-uniffi/`, read by SDK consumers via the generated bindings
-- T2 — Cross-crate `pub` items in `aether-core`, `aether-crypto`, and `aether-transport-ble`, read by Rust contributors wiring the crates together
+- T2 — Cross-crate `pub` items in `aether-core` and `aether-crypto`, read by Rust contributors wiring the crates together
 - T3 — `pub(crate)` or private items in any crate, read by contributors editing the crate itself
 
 ## Per-tier content

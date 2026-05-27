@@ -5,8 +5,8 @@ use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const RK_INFO: &[u8] = b"AetherRatchet_RK";
-const CK_MESSAGE_KEY_INPUT: &[u8] = &[0x01];
-const CK_CHAIN_KEY_INPUT: &[u8] = &[0x02];
+const MESSAGE_KEY_INPUT: &[u8] = &[0x01];
+const NEXT_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
 // Root key for the Double Ratchet root chain.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -74,12 +74,12 @@ pub(crate) fn kdf_rk(
 pub(crate) fn kdf_ck(chain_key: &ChainKey) -> Result<(ChainKey, MessageKey), CryptoError> {
     let mut mac_mk =
         Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| CryptoError::InvalidHmacKey)?;
-    mac_mk.update(CK_MESSAGE_KEY_INPUT);
+    mac_mk.update(MESSAGE_KEY_INPUT);
     let mut mk_result = mac_mk.finalize().into_bytes();
 
     let mut mac_ck =
         Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| CryptoError::InvalidHmacKey)?;
-    mac_ck.update(CK_CHAIN_KEY_INPUT);
+    mac_ck.update(NEXT_CHAIN_KEY_INPUT);
     let mut ck_result = mac_ck.finalize().into_bytes();
 
     let mut mk = Zeroizing::new([0u8; 32]);
@@ -198,8 +198,8 @@ mod tests {
     ///
     /// Derivation:
     /// ```text
-    /// message_key = HMAC-SHA256(key = chain_key, data = CK_MESSAGE_KEY_INPUT)
-    /// next_chain_key = HMAC-SHA256(key = chain_key, data = CK_CHAIN_KEY_INPUT)
+    /// message_key = HMAC-SHA256(key = chain_key, data = MESSAGE_KEY_INPUT)
+    /// next_chain_key = HMAC-SHA256(key = chain_key, data = NEXT_CHAIN_KEY_INPUT)
     /// ```
     ///
     /// Output:
@@ -222,8 +222,8 @@ mod tests {
     /// Derivation:
     /// ```text
     /// for each step i:
-    ///   mk_i = HMAC-SHA256(key = ck_i, data = CK_MESSAGE_KEY_INPUT)
-    ///   ck_{i+1} = HMAC-SHA256(key = ck_i, data = CK_CHAIN_KEY_INPUT)
+    ///   mk_i = HMAC-SHA256(key = ck_i, data = MESSAGE_KEY_INPUT)
+    ///   ck_{i+1} = HMAC-SHA256(key = ck_i, data = NEXT_CHAIN_KEY_INPUT)
     /// ```
     ///
     /// Output: `KDF_CK_KAT_EXPECTED_CHAIN_STEPS`

@@ -1,6 +1,6 @@
 # Aether
 
-The shared cryptographic and networking core for a private, peer-to-peer encrypted messaging system that works offline over short-range wireless links.
+The shared cryptographic and networking core for a private, end-to-end encrypted cloud messaging system.
 
 ## Setup
 
@@ -30,7 +30,6 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 
 - `aether-crypto`
 - `aether-core` → `aether-crypto`
-- `aether-transport-ble`
 - `aether-uniffi` → `aether-core`, `aether-crypto`
 
 ## Docs

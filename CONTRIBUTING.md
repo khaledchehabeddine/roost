@@ -9,7 +9,7 @@ Types match the repo's GitHub labels — run `gh label list` to see the current 
 ### Example
 
 ```
-feature/ble-peer-discovery
+feature/signed-prekey-rotation
 ```
 
 ## Commits
