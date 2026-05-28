@@ -8,7 +8,7 @@
 
 ## Decision Record
 
-<!-- Decision records added or modified, listed as: NNNN: Title. Bullet points only. Omit section if empty. -->
+<!-- Decision records added or modified, listed as: NNNN: Title (path). Bullet points only. Omit section if empty. -->
 
 ## Known Constraints
 
