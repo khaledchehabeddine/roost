@@ -35,3 +35,22 @@ Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 
 - All CI workflows must pass
 - See [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) for the required PR structure
+
+## Decision Records
+
+Architectural decisions live as ADRs:
+
+- `docs/adr/` — cross-crate / workspace-wide decisions
+- `crates/<crate>/docs/adr/` — crate-specific decisions
+
+Filename: `NNNN-slug.md`, sequential within each folder. Format: see [`docs/adr/TEMPLATE.md`](docs/adr/TEMPLATE.md).
+
+Open an ADR when a change is all three of:
+
+1. **Hard to reverse** — the cost of changing your mind later is meaningful
+2. **Surprising without context** — a future reader will wonder "why did they do it this way?"
+3. **The result of a real trade-off** — there were genuine alternatives, and you picked one for specific reasons
+
+Trivial fixes and reversible choices don't need one.
+
+In Claude Code, `/design-review-with-docs` grills a plan and offers ADRs that pass the gate. ADRs may also be written by hand using the template above.

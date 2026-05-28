@@ -4,8 +4,6 @@ The orchestration layer that exposes high-level entities — Sessions, Identitie
 
 ## Language
 
-{For each term: bold the name with optional cardinality in parentheses, write a one or two sentence definition of what it IS, list aliases to avoid.}
-
 **Device** (one or more per Identity):
 A specific installation that holds private key material for an Identity. Different Devices under one Identity may receive different copies of the same Session's Messages.
 Avoid: client, installation, instance
@@ -24,8 +22,6 @@ Avoid: connection, conversation, chat
 
 ## Example
 
-{A short dialogue between a dev and a domain expert that uses the terms naturally and surfaces boundaries between related concepts.}
-
 **Dev:** When Alice adds her tablet, do we create a new Session?
 
 **Domain expert:** No. The Session is anchored to the Identity pair, not the Devices. Alice's tablet is another Device under her Identity. The Session keeps going. The new Device picks up Messages from wherever it joined.
@@ -36,6 +32,4 @@ Avoid: connection, conversation, chat
 
 ## Flagged Ambiguities
 
-{For each ambiguity: bold the conflicting term(s), state the conflict, give the resolution. Use "None currently." when empty.}
-
-**Session** (cryptographic) vs **session** (app login state): The cryptographic Session is the Double Ratchet state between two Identities. A lowercase "session" in host-app context is the user's logged-in state in the surrounding application. These are unrelated. Reserve capitalized `Session` for the cryptographic concept.
+**Session** (cryptographic) vs **session** (app login state): The cryptographic Session is the Double Ratchet state between two Identities; the lowercase host-app "session" is the user's logged-in state. Reserve capitalized `Session` for the cryptographic concept.

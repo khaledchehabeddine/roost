@@ -108,4 +108,5 @@ See [`README.md`](README.md#architecture) for the crate dependency graph.
 ## Workflow
 
 - See `CONTRIBUTING.md` for branches, commits, and PR conventions
-- After responding to a non-obvious discovery, fix, or workaround, suggest creating a decision record or an `AGENTS.md` update
+- After any change to cross-crate public API, cryptographic constructions, FFI at `crates/aether-uniffi/`, or workspace architecture, evaluate against the ADR gate (hard to reverse + surprising without context + result of real trade-off). If all three hold, propose creating an ADR using [`docs/adr/TEMPLATE.md`](docs/adr/TEMPLATE.md) — `docs/adr/` for cross-crate decisions, the owning crate's `docs/adr/` for crate-specific
+- After a non-obvious project-specific discovery or workaround worth keeping, suggest an `AGENTS.md` update

@@ -4,8 +4,6 @@ Cryptographic primitives, key derivation, and protocol mechanics. Stateless from
 
 ## Language
 
-{For each term: bold the name with optional cardinality in parentheses, write a one or two sentence definition of what it IS, list aliases to avoid.}
-
 **AEAD** (one per ciphertext):
 An authenticated-encryption-with-associated-data primitive. In Aether this is XChaCha20-Poly1305 — encryption that also authenticates and is detectable on tamper.
 Avoid: cipher, encryption
@@ -22,13 +20,11 @@ Avoid: IV, salt
 The Double Ratchet state machine that advances on every Message, providing forward secrecy and post-compromise recovery.
 Avoid: chain, state machine
 
-**X3DH-lite** (one execution per Session):
-Aether's variant of Signal's X3DH key agreement: three DH operations with no one-time prekeys. Produces the root key that seeds the Ratchet.
+**X3DH** (one execution per Session):
+Signal's X3DH key agreement: four DH operations across the identity key, ephemeral key, signed pre-key, and one-time pre-key when available. Produces the root key that seeds the Ratchet.
 Avoid: handshake, key agreement
 
 ## Example
-
-{A short dialogue between a dev and a domain expert that uses the terms naturally and surfaces boundaries between related concepts.}
 
 **Dev:** When we derive a Nonce, can we use the message counter as the HKDF salt?
 
@@ -40,6 +36,4 @@ Avoid: handshake, key agreement
 
 ## Flagged Ambiguities
 
-{For each ambiguity: bold the conflicting term(s), state the conflict, give the resolution. Use "None currently." when empty.}
-
-**OPK** (one-time prekey): Aether does not use one-time prekeys. The X3DH-lite handshake uses only the responder's signed prekey, deliberately trading forward secrecy against SPK compromise for stateless responders. See `docs/adr/0004-x3dh-lite-handshake.md` in this crate.
+**SPK** (signed pre-key) vs **OPK** (one-time pre-key): Both are X3DH inputs with different lifecycles — the SPK rotates weekly and serves as the fallback when OPKs are exhausted, while an OPK is consumed by a single handshake. See `docs/adr/0004-x3dh-handshake.md` in this crate.
