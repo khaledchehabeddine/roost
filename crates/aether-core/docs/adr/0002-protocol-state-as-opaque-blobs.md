@@ -1,0 +1,5 @@
+# Protocol State as Opaque Blobs
+
+**Status:** Accepted
+
+Cryptographic and protocol state — ratchet/session, prekeys, sender certificate, deduplication set, pending acknowledgments — is produced by the library as opaque byte blobs and persisted by the consumer through a get/set interface, because the consumer owns persistence on the platform (Keychain, encrypted database, etc.) and inspecting blob contents on either side would couple the two layers tightly. The library holds no authoritative in-memory copy across operations — each blob is loaded at operation start and the advanced blob is written back at the end — so the consumer can serialize mutations through a single write transaction over its store without holding library locks across operation boundaries. The consumer's store must be atomic + durable, crash-consistent, and integrity-preserving, and a blob that fails to decode is treated as a fault rather than a trigger to silently reinitialize, because silent reinitialization would roll the ratchet backward and silently break forward secrecy.

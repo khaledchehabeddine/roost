@@ -1,0 +1,5 @@
+# Cryptographic Test Vector Derivation
+
+**Status:** Accepted
+
+Test vectors for primitives without canonical published values — the Double Ratchet most importantly — are computed using external reference tools (pyca/cryptography, libsodium) that share no code with the RustCrypto crates used in production, because vectors derived inside the same ecosystem would only prove the code agrees with itself rather than with an independent implementation of the primitive. The byte values are committed as constants next to each test with a doc comment recording inputs, algorithm, and tool family; the derivation script is not committed because committing it would offer auditors a path-of-least-resistance pass without exercising independent judgment, while omitting it forces each reviewer to bring their own derivation tool and a passing test then means three independent implementations agree. Where canonical published vectors exist (RFC 7748 for X25519, RFC 8032 for Ed25519) the library uses those directly, since re-deriving them would only add work without strengthening the attestation an RFC already provides.
