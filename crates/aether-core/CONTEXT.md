@@ -4,12 +4,12 @@ The orchestration layer that exposes high-level entities — Sessions, Identitie
 
 ## Language
 
-**Device** (one or more per Identity):
-A specific installation that holds private key material for an Identity. Different Devices under one Identity may receive different copies of the same Session's Messages.
+**Device** (exactly one per Identity):
+The app install that holds the private key material for an Identity. A new Device starts a new Identity unless the user restores an Identity backup onto it.
 Avoid: client, installation, instance
 
-**Identity** (one or more Devices):
-A long-lived public-key persona that one or more Devices share. Identifies a participant across Sessions.
+**Identity** (exactly one Device):
+A long-lived public-key persona held by a single Device. Identifies a participant across Sessions.
 Avoid: user, account, profile
 
 **Message** (many per Session):
@@ -22,13 +22,13 @@ Avoid: connection, conversation, chat
 
 ## Example
 
-**Dev:** When Alice adds her tablet, do we create a new Session?
+**Dev:** If a user reinstalls the app, do they keep their Identity?
 
-**Domain expert:** No. The Session is anchored to the Identity pair, not the Devices. Alice's tablet is another Device under her Identity. The Session keeps going. The new Device picks up Messages from wherever it joined.
+**Domain expert:** No — Identity is bound to private key material held on the Device. A fresh install starts a new Identity unless the user restores from an Identity backup, which re-creates the Identity on the new install.
 
-**Dev:** So all of Alice's Devices see the same Message stream?
+**Dev:** Then why distinguish Identity from Device at all in the MVP?
 
-**Domain expert:** Logically yes, but each Device decrypts independently. The Identity is the addressing unit; the Device is the decryption unit. Two Devices under one Identity can be at different positions in the ratchet.
+**Domain expert:** Identity is the addressing unit — Sessions pair two Identities and sender certificates bind to Identity keys. Device is the persistence unit — it owns the private material in platform secure storage. Even at one-to-one, separating them keeps Session establishment, sender certificates, and Identity backup independent of where the bytes physically live.
 
 ## Flagged Ambiguities
 

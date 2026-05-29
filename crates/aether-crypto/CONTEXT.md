@@ -36,4 +36,4 @@ Avoid: handshake, key agreement
 
 ## Flagged Ambiguities
 
-**SPK** (signed pre-key) vs **OPK** (one-time pre-key): Both are X3DH inputs with different lifecycles — the SPK rotates weekly and serves as the fallback when OPKs are exhausted, while an OPK is consumed by a single handshake. See `docs/adr/0004-x3dh-handshake.md` in this crate.
+None currently.

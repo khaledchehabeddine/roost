@@ -1,5 +1,5 @@
-# Deduplication via Keyed-BLAKE3 Digest
+# Deduplication Digest
 
-**Status:** Accepted
+**Status:** Proposed
 
 Received messages are deduplicated before decryption by a 16-byte keyed-BLAKE3 digest of the encrypted bytes, keyed per-identity so digests cannot be correlated across identities by an outside party or precomputed without the per-identity key. The digest set is bounded with a consumer-supplied capacity and evicts oldest-first as a sliding window so the set cannot grow without limit, and it is persisted as protocol state so deduplication survives an application restart. Deduplicating ahead of decryption drops benign duplicates (the same message arriving over two transports, an app-relaunch retry) before the Double Ratchet would otherwise consume a one-time message key on the duplicate and lose the ability to decrypt the original; this digest layer is one of three replay defenses, alongside the ratchet's counter-based rejection of cryptographic replays and the idempotent acknowledgment-and-retry handling that absorbs any replay surviving the first two layers.
