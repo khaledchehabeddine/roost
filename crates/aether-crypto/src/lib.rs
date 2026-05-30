@@ -15,9 +15,11 @@
 //!
 //! ```
 //! use aether_crypto::{generate_signed_prekey, generate_signing_key_pair, verify_bundle};
+//! use rand::rngs::OsRng;
 //!
-//! let signing = generate_signing_key_pair();
-//! let signed_prekey = generate_signed_prekey(&signing, 1_700_000_000);
+//! let mut rng = OsRng;
+//! let signing = generate_signing_key_pair(&mut rng);
+//! let signed_prekey = generate_signed_prekey(&mut rng, &signing, 1_700_000_000);
 //! let bundle = signed_prekey.bundle();
 //!
 //! verify_bundle(&bundle, &signing.verifying)?;

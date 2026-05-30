@@ -30,10 +30,13 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod clock;
 mod identity;
 mod key_store;
 mod signed_prekey;
 mod storage;
+#[cfg(test)]
+mod test_support;
 
 pub use identity::{Identity, IdentityError};
 pub use key_store::{KeyStore, KeyStoreError};

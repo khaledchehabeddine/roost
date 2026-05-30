@@ -28,10 +28,12 @@ impl Header {
 mod tests {
     use super::*;
     use crate::keys::generate_key_pair;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     #[test]
     fn serialize_writes_public_key_and_counters() {
-        let key_pair = generate_key_pair();
+        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([5u8; 32]));
         let previous_chain_length = 42;
         let message_number = 7;
         let header = Header {

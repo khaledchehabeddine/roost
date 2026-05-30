@@ -4,6 +4,10 @@ The orchestration layer that exposes high-level entities — Sessions, Identitie
 
 ## Language
 
+**Clock** (one per KeyStore):
+The injected source of wall-clock time for autonomous maintenance scheduling — currently signed-pre-key rotation deciding when a stored key is stale. `SystemClock` in production; a virtual clock in tests makes rotation reproducible.
+Avoid: timer, time source
+
 **Device** (exactly one per Identity):
 The app install that holds the private key material for an Identity. A new Device starts a new Identity unless the user restores an Identity backup onto it.
 Avoid: client, installation, instance
@@ -34,14 +38,16 @@ Avoid: connection, conversation, chat
 
 ## Example
 
-**Dev:** If a user reinstalls the app, do they keep their Identity?
+**Dev:** If a user re-installs the app, do they keep their Identity?
 
-**Domain expert:** No — Identity is bound to private key material held on the Device. A fresh install starts a new Identity unless the user restores from an Identity backup, which re-creates the Identity on the new install.
+**Domain expert:** No — Identity is bound to private key material held on the Device. A fresh installation starts a new Identity unless the user restores from an Identity backup, which re-creates the Identity on the new installation.
 
 **Dev:** Then why distinguish Identity from Device at all in the MVP?
 
 **Domain expert:** Identity is the addressing unit — Sessions pair two Identities and sender certificates bind to Identity keys. Device is the persistence unit — it owns the private material in platform secure storage. Even at one-to-one, separating them keeps Session establishment, sender certificates, and Identity backup independent of where the bytes physically live.
 
 ## Flagged Ambiguities
+
+**Clock time** (maintenance) vs **reference time** (validation): Rotation reads "now" from an injected `Clock` because it is library-initiated maintenance. Validation verdicts (e.g., sender-certificate expiry, [ADR 0002](../../docs/adr/0002-sender-certificate-validation.md)) instead take a caller-supplied reference timestamp, so the verdict stays a reproducible pure function of its inputs. Reserve the `Clock` for maintenance scheduling; do not route validation through it.
 
 **Session** (cryptographic) vs **session** (app login state): The cryptographic Session is the Double Ratchet state between two Identities; the lowercase host-app "session" is the user's logged-in state. Reserve capitalized `Session` for the cryptographic concept.

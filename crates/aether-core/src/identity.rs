@@ -5,6 +5,7 @@ use aether_crypto::{
     KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,
     generate_signing_key_pair,
 };
+use rand::{CryptoRng, RngCore};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -109,7 +110,10 @@ impl IdentityManager {
         self.storage.lock().map_err(|_| IdentityError::LockPoisoned)
     }
 
-    pub(crate) fn generate_identity(&self) -> Result<Identity, IdentityError> {
+    pub(crate) fn generate_identity<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<Identity, IdentityError> {
         let mut storage = self.lock_storage()?;
         let identity_exists = storage
             .load(IDENTITY_X25519_KEY)
@@ -119,8 +123,8 @@ impl IdentityManager {
             return Err(IdentityError::AlreadyExists);
         }
 
-        let key_pair = generate_key_pair();
-        let signing_key_pair = generate_signing_key_pair();
+        let key_pair = generate_key_pair(rng);
+        let signing_key_pair = generate_signing_key_pair(rng);
         // A failed Ed25519 store after a successful X25519 store can leave the storage partially
         // updated.
         storage
@@ -195,6 +199,7 @@ fn map_storage_err(e: StorageError) -> IdentityError {
 mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
+    use rand::rngs::OsRng;
 
     fn manager() -> IdentityManager {
         IdentityManager::new(Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new()))))
@@ -203,15 +208,15 @@ mod tests {
     #[test]
     fn generate_identity_succeeds() {
         let manager = manager();
-        assert!(manager.generate_identity().is_ok());
+        assert!(manager.generate_identity(&mut OsRng).is_ok());
     }
 
     #[test]
     fn generate_identity_twice_returns_already_exists() {
         let manager = manager();
-        manager.generate_identity().unwrap();
+        manager.generate_identity(&mut OsRng).unwrap();
         assert!(matches!(
-            manager.generate_identity(),
+            manager.generate_identity(&mut OsRng),
             Err(IdentityError::AlreadyExists)
         ));
     }
@@ -228,7 +233,7 @@ mod tests {
     #[test]
     fn load_identity_returns_same_public_keys() {
         let manager = manager();
-        let generated_identity = manager.generate_identity().unwrap();
+        let generated_identity = manager.generate_identity(&mut OsRng).unwrap();
         let loaded_identity = manager.load_identity().unwrap();
         assert_eq!(
             generated_identity.public_key(),
@@ -243,7 +248,7 @@ mod tests {
     #[test]
     fn load_identity_returns_corrupt_when_only_one_key_present() {
         let manager = manager();
-        manager.generate_identity().unwrap();
+        manager.generate_identity(&mut OsRng).unwrap();
         manager
             .storage
             .lock()
@@ -259,7 +264,7 @@ mod tests {
     #[test]
     fn sign_round_trip_after_load_identity() {
         let manager = manager();
-        let generated_identity = manager.generate_identity().unwrap();
+        let generated_identity = manager.generate_identity(&mut OsRng).unwrap();
         let loaded_identity = manager.load_identity().unwrap();
         let message = b"aether test message";
         // Ed25519 signing is deterministic, so identical keys produce identical signatures.
@@ -272,9 +277,9 @@ mod tests {
     #[test]
     fn diffie_hellman_round_trip_after_load_identity() {
         let manager = manager();
-        manager.generate_identity().unwrap();
+        manager.generate_identity(&mut OsRng).unwrap();
         let loaded_identity = manager.load_identity().unwrap();
-        let peer_key_pair = generate_key_pair();
+        let peer_key_pair = generate_key_pair(&mut OsRng);
         let identity_shared_secret = loaded_identity.diffie_hellman(&peer_key_pair.public);
         let peer_shared_secret = peer_key_pair.diffie_hellman(loaded_identity.public_key());
         assert_eq!(
@@ -292,7 +297,7 @@ mod tests {
     #[test]
     fn has_identity_is_true_after_generate() {
         let manager = manager();
-        manager.generate_identity().unwrap();
+        manager.generate_identity(&mut OsRng).unwrap();
         assert!(manager.has_identity().unwrap());
     }
 

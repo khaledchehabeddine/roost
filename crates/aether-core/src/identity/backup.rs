@@ -6,6 +6,7 @@ use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit},
 };
+use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
 const SALT_LEN: usize = 16;
@@ -20,14 +21,15 @@ const ARGON2_OUTPUT_LEN: usize = 32;
 
 impl IdentityManager {
     // Exports the current identity as an encrypted backup blob.
-    pub(crate) fn export_encrypted_backup(
+    pub(crate) fn export_encrypted_backup<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         passphrase: &str,
     ) -> Result<Vec<u8>, IdentityError> {
         let (x25519_bytes, ed25519_bytes) = self.load_identity_key_bytes()?;
 
-        let salt: [u8; SALT_LEN] = random_bytes()?;
-        let nonce_bytes: [u8; NONCE_LEN] = random_bytes()?;
+        let salt: [u8; SALT_LEN] = random_bytes(rng)?;
+        let nonce_bytes: [u8; NONCE_LEN] = random_bytes(rng)?;
 
         let key_bytes = derive_key(passphrase, &salt)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
@@ -96,9 +98,14 @@ impl IdentityManager {
     }
 }
 
-fn random_bytes<const N: usize>() -> Result<[u8; N], IdentityError> {
+// Salt and nonce come from the injected CSPRNG via the fallible `try_fill_bytes` (panics on
+// entropy failure) so an RNG failure surfaces as `BackupFailed`.
+fn random_bytes<const N: usize, R: RngCore + CryptoRng>(
+    rng: &mut R,
+) -> Result<[u8; N], IdentityError> {
     let mut buf = [0u8; N];
-    getrandom::getrandom(&mut buf).map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+    rng.try_fill_bytes(&mut buf)
+        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
     Ok(buf)
 }
 
@@ -125,6 +132,7 @@ fn derive_key(
 mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
+    use rand::rngs::OsRng;
     use std::sync::{Arc, Mutex};
 
     fn manager() -> IdentityManager {
@@ -135,7 +143,7 @@ mod tests {
     fn export_backup_without_identity_returns_not_found() {
         let manager = manager();
         assert!(matches!(
-            manager.export_encrypted_backup("passphrase"),
+            manager.export_encrypted_backup(&mut OsRng, "passphrase"),
             Err(IdentityError::NotFound)
         ));
     }
@@ -143,9 +151,13 @@ mod tests {
     #[test]
     fn each_export_uses_fresh_salt_and_nonce() {
         let manager = manager();
-        manager.generate_identity().unwrap();
-        let first_backup = manager.export_encrypted_backup("passphrase").unwrap();
-        let second_backup = manager.export_encrypted_backup("passphrase").unwrap();
+        manager.generate_identity(&mut OsRng).unwrap();
+        let first_backup = manager
+            .export_encrypted_backup(&mut OsRng, "passphrase")
+            .unwrap();
+        let second_backup = manager
+            .export_encrypted_backup(&mut OsRng, "passphrase")
+            .unwrap();
         // Nonce reuse would break XChaCha20-Poly1305 confidentiality.
         assert_ne!(first_backup, second_backup);
     }
@@ -166,9 +178,9 @@ mod tests {
     #[test]
     fn decrypt_backup_with_wrong_passphrase_returns_decryption_failed() {
         let source_manager = manager();
-        source_manager.generate_identity().unwrap();
+        source_manager.generate_identity(&mut OsRng).unwrap();
         let backup = source_manager
-            .export_encrypted_backup("correct-passphrase")
+            .export_encrypted_backup(&mut OsRng, "correct-passphrase")
             .unwrap();
 
         let destination_manager = manager();
@@ -181,9 +193,9 @@ mod tests {
     #[test]
     fn export_import_round_trip_restores_identity() {
         let source_manager = manager();
-        let original_identity = source_manager.generate_identity().unwrap();
+        let original_identity = source_manager.generate_identity(&mut OsRng).unwrap();
         let backup = source_manager
-            .export_encrypted_backup("correct-passphrase")
+            .export_encrypted_backup(&mut OsRng, "correct-passphrase")
             .unwrap();
 
         let destination_manager = manager();
@@ -228,5 +240,24 @@ mod tests {
         let first_key = derive_key(passphrase, &[0x00u8; 16]).unwrap();
         let second_key = derive_key(passphrase, &[0x01u8; 16]).unwrap();
         assert_ne!(*first_key, *second_key);
+    }
+
+    #[test]
+    fn export_is_deterministic_under_seed() {
+        // Identity keys, salt, and nonce all come from the seeded RNG, so the same seed must yield
+        // a byte-identical backup blob and a different seed must not.
+        fn export(seed: [u8; 32]) -> Vec<u8> {
+            use crate::test_support::Sandbox;
+
+            let mut sandbox = Sandbox::new(seed, 1_700_000_000);
+            let (identity, _) = sandbox.managers();
+            identity.generate_identity(&mut sandbox.rng).unwrap();
+            identity
+                .export_encrypted_backup(&mut sandbox.rng, "passphrase")
+                .unwrap()
+        }
+
+        assert_eq!(export([9u8; 32]), export([9u8; 32]));
+        assert_ne!(export([9u8; 32]), export([10u8; 32]));
     }
 }

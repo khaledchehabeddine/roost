@@ -6,6 +6,7 @@ use super::header::Header;
 use crate::error::CryptoError;
 use crate::keys::{KeyPair, PublicKey, generate_key_pair};
 use crate::ratchet::{ChainKey, MessageKey, RootKey, kdf_ck, kdf_rk};
+use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -77,8 +78,12 @@ impl Drop for RatchetStateWire {
 
 impl RatchetState {
     // Initializes the initiator side with its first sending chain ready.
-    pub(crate) fn init_initiator(rk: RootKey, dhr: &PublicKey) -> Result<Self, CryptoError> {
-        let dhs = generate_key_pair();
+    pub(crate) fn init_initiator<R: RngCore + CryptoRng>(
+        rng: &mut R,
+        rk: RootKey,
+        dhr: &PublicKey,
+    ) -> Result<Self, CryptoError> {
+        let dhs = generate_key_pair(rng);
         let dh_output = dhs.diffie_hellman(dhr);
         let (rk, cks) = kdf_rk(&rk, &dh_output)?;
         Ok(Self {
@@ -147,6 +152,10 @@ impl RatchetState {
     /// `associated_data` must match the value provided at encryption time. If authentication
     /// fails, the session state is restored to its previous value.
     ///
+    /// When `header` carries a new ratchet public key, a Diffie-Hellman ratchet step draws a fresh
+    /// key pair from `rng`. On authentication failure the session state rolls back, but `rng` has
+    /// already advanced.
+    ///
     /// Decryption handles three cases in order:
     /// 1. Out-of-order message: looks up a previously skipped key.
     /// 2. New ratchet public key: advances the DH ratchet before decrypting.
@@ -162,8 +171,9 @@ impl RatchetState {
     ///   skip limit.
     /// - [`CryptoError::MaxSkippedKeysExceeded`] if accepting this message pushes the global
     ///   skipped-key cache past the limit.
-    pub fn ratchet_decrypt(
+    pub fn ratchet_decrypt<R: RngCore + CryptoRng>(
         &mut self,
+        rng: &mut R,
         ciphertext: &[u8],
         header: &Header,
         associated_data: &[u8],
@@ -177,7 +187,7 @@ impl RatchetState {
         let mut state = self.snapshot();
         if Some(header.public_key) != state.dhr {
             state.skip_message_keys(header.previous_chain_length)?;
-            state.dh_ratchet_step(header)?;
+            state.dh_ratchet_step(rng, header)?;
         }
         state.skip_message_keys(header.message_number)?;
         let ckr = state.ckr.as_ref().ok_or(CryptoError::InvalidState(
@@ -334,7 +344,11 @@ impl RatchetState {
     }
 
     // Performs a DH ratchet step and derives new receiving and sending chains.
-    fn dh_ratchet_step(&mut self, header: &Header) -> Result<(), CryptoError> {
+    fn dh_ratchet_step<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        header: &Header,
+    ) -> Result<(), CryptoError> {
         self.pn = self.ns;
         self.ns = 0;
         self.nr = 0;
@@ -345,7 +359,7 @@ impl RatchetState {
         self.rk = rk;
         self.ckr = Some(ckr);
 
-        self.dhs = generate_key_pair();
+        self.dhs = generate_key_pair(rng);
         let dh_send = self.dhs.diffie_hellman(&header.public_key);
         let (rk, cks) = kdf_rk(&self.rk, &dh_send)?;
         self.rk = rk;
@@ -360,25 +374,32 @@ impl ZeroizeOnDrop for RatchetStateWire {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
-    // Returns a fresh initiator/responder pair with shared associated data.
-    fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>) {
+    // Returns a fresh initiator/responder pair, shared associated data, and the seeded RNG that
+    // produced their keys. Callers keep drawing ratchet keys from it during decrypt.
+    fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>, ChaCha20Rng) {
+        let mut rng = ChaCha20Rng::from_seed([0x11u8; 32]);
         let shared_secret = [0x42u8; 32];
-        let responder_key_pair = generate_key_pair();
+        let responder_key_pair = generate_key_pair(&mut rng);
         let responder_public_key = responder_key_pair.public;
 
-        let initiator =
-            RatchetState::init_initiator(RootKey::from_bytes(shared_secret), &responder_public_key)
-                .unwrap();
+        let initiator = RatchetState::init_initiator(
+            &mut rng,
+            RootKey::from_bytes(shared_secret),
+            &responder_public_key,
+        )
+        .unwrap();
         let responder =
             RatchetState::init_responder(RootKey::from_bytes(shared_secret), responder_key_pair);
         let associated_data = b"initiator_identity||responder_identity".to_vec();
-        (initiator, responder, associated_data)
+        (initiator, responder, associated_data, rng)
     }
 
     #[test]
     fn init_initiator_sets_sending_chain() {
-        let (initiator, _, _) = setup_pair();
+        let (initiator, _, _, _) = setup_pair();
         assert!(initiator.dhr.is_some());
         assert!(initiator.cks.is_some());
         assert!(initiator.ckr.is_none());
@@ -389,7 +410,7 @@ mod tests {
 
     #[test]
     fn init_responder_has_no_chains() {
-        let (_, responder, _) = setup_pair();
+        let (_, responder, _, _) = setup_pair();
         assert!(responder.dhr.is_none());
         assert!(responder.cks.is_none());
         assert!(responder.ckr.is_none());
@@ -400,7 +421,7 @@ mod tests {
 
     #[test]
     fn responder_encrypt_before_receiving_fails() {
-        let (_, mut responder, associated_data) = setup_pair();
+        let (_, mut responder, associated_data, _) = setup_pair();
 
         let result = responder.ratchet_encrypt(b"premature send", &associated_data);
         assert!(matches!(result, Err(CryptoError::InvalidState(_))));
@@ -408,21 +429,21 @@ mod tests {
 
     #[test]
     fn encrypt_then_decrypt_round_trip() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let message = b"hello responder";
         let (header, ciphertext) = initiator
             .ratchet_encrypt(message, &associated_data)
             .unwrap();
         let plaintext = responder
-            .ratchet_decrypt(&ciphertext, &header, &associated_data)
+            .ratchet_decrypt(&mut rng, &ciphertext, &header, &associated_data)
             .unwrap();
         assert_eq!(plaintext.as_slice(), message);
     }
 
     #[test]
     fn each_message_has_unique_ciphertext() {
-        let (mut initiator, _, associated_data) = setup_pair();
+        let (mut initiator, _, associated_data, _) = setup_pair();
 
         let plaintext = b"same plaintext";
         let (_, first_ciphertext) = initiator
@@ -436,14 +457,14 @@ mod tests {
 
     #[test]
     fn ping_pong_exchange() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let first_message = b"message 1";
         let (first_header, first_ciphertext) = initiator
             .ratchet_encrypt(first_message, &associated_data)
             .unwrap();
         let first_plaintext = responder
-            .ratchet_decrypt(&first_ciphertext, &first_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &first_ciphertext, &first_header, &associated_data)
             .unwrap();
         assert_eq!(first_plaintext.as_slice(), first_message);
 
@@ -452,7 +473,12 @@ mod tests {
             .ratchet_encrypt(second_message, &associated_data)
             .unwrap();
         let second_plaintext = initiator
-            .ratchet_decrypt(&second_ciphertext, &second_header, &associated_data)
+            .ratchet_decrypt(
+                &mut rng,
+                &second_ciphertext,
+                &second_header,
+                &associated_data,
+            )
             .unwrap();
         assert_eq!(second_plaintext.as_slice(), second_message);
 
@@ -461,7 +487,7 @@ mod tests {
             .ratchet_encrypt(third_message, &associated_data)
             .unwrap();
         let third_plaintext = responder
-            .ratchet_decrypt(&third_ciphertext, &third_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &third_ciphertext, &third_header, &associated_data)
             .unwrap();
         assert_eq!(third_plaintext.as_slice(), third_message);
 
@@ -470,14 +496,19 @@ mod tests {
             .ratchet_encrypt(fourth_message, &associated_data)
             .unwrap();
         let fourth_plaintext = initiator
-            .ratchet_decrypt(&fourth_ciphertext, &fourth_header, &associated_data)
+            .ratchet_decrypt(
+                &mut rng,
+                &fourth_ciphertext,
+                &fourth_header,
+                &associated_data,
+            )
             .unwrap();
         assert_eq!(fourth_plaintext.as_slice(), fourth_message);
     }
 
     #[test]
     fn multiple_messages_same_direction() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let first_message = b"msg 1";
         let second_message = b"msg 2";
@@ -493,13 +524,18 @@ mod tests {
             .unwrap();
 
         let first_plaintext = responder
-            .ratchet_decrypt(&first_ciphertext, &first_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &first_ciphertext, &first_header, &associated_data)
             .unwrap();
         let second_plaintext = responder
-            .ratchet_decrypt(&second_ciphertext, &second_header, &associated_data)
+            .ratchet_decrypt(
+                &mut rng,
+                &second_ciphertext,
+                &second_header,
+                &associated_data,
+            )
             .unwrap();
         let third_plaintext = responder
-            .ratchet_decrypt(&third_ciphertext, &third_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &third_ciphertext, &third_header, &associated_data)
             .unwrap();
         assert_eq!(first_plaintext.as_slice(), first_message);
         assert_eq!(second_plaintext.as_slice(), second_message);
@@ -508,7 +544,7 @@ mod tests {
 
     #[test]
     fn out_of_order_delivery() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let first_message = b"msg 1";
         let second_message = b"msg 2";
@@ -524,13 +560,18 @@ mod tests {
             .unwrap();
 
         let third_plaintext = responder
-            .ratchet_decrypt(&third_ciphertext, &third_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &third_ciphertext, &third_header, &associated_data)
             .unwrap();
         let second_plaintext = responder
-            .ratchet_decrypt(&second_ciphertext, &second_header, &associated_data)
+            .ratchet_decrypt(
+                &mut rng,
+                &second_ciphertext,
+                &second_header,
+                &associated_data,
+            )
             .unwrap();
         let first_plaintext = responder
-            .ratchet_decrypt(&first_ciphertext, &first_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &first_ciphertext, &first_header, &associated_data)
             .unwrap();
         assert_eq!(first_plaintext.as_slice(), first_message);
         assert_eq!(second_plaintext.as_slice(), second_message);
@@ -539,7 +580,7 @@ mod tests {
 
     #[test]
     fn max_skip_rejects_large_message_gap() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let (last_header, last_ciphertext) = (0..MAX_SKIP + 2)
             .map(|message_number| {
@@ -550,13 +591,14 @@ mod tests {
             .last()
             .unwrap();
 
-        let result = responder.ratchet_decrypt(&last_ciphertext, &last_header, &associated_data);
+        let result =
+            responder.ratchet_decrypt(&mut rng, &last_ciphertext, &last_header, &associated_data);
         assert!(matches!(result, Err(CryptoError::MaxSkipExceeded)));
     }
 
     #[test]
     fn max_skipped_keys_rejects_cache_overflow() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let overflow_step = MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP;
         for step in 0..=overflow_step {
@@ -573,12 +615,17 @@ mod tests {
                 .unwrap();
             if step == overflow_step {
                 assert!(matches!(
-                    responder.ratchet_decrypt(&last_ciphertext, &last_header, &associated_data),
+                    responder.ratchet_decrypt(
+                        &mut rng,
+                        &last_ciphertext,
+                        &last_header,
+                        &associated_data
+                    ),
                     Err(CryptoError::MaxSkippedKeysExceeded)
                 ));
             } else {
                 responder
-                    .ratchet_decrypt(&last_ciphertext, &last_header, &associated_data)
+                    .ratchet_decrypt(&mut rng, &last_ciphertext, &last_header, &associated_data)
                     .unwrap();
             }
         }
@@ -586,53 +633,54 @@ mod tests {
 
     #[test]
     fn tampered_ciphertext_fails() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let (header, mut ciphertext) = initiator
             .ratchet_encrypt(b"secret", &associated_data)
             .unwrap();
         ciphertext[0] ^= 0xFF;
 
-        let result = responder.ratchet_decrypt(&ciphertext, &header, &associated_data);
+        let result = responder.ratchet_decrypt(&mut rng, &ciphertext, &header, &associated_data);
         assert!(matches!(result, Err(CryptoError::Aead)));
     }
 
     #[test]
     fn tampered_associated_data_fails() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let (header, ciphertext) = initiator
             .ratchet_encrypt(b"secret", &associated_data)
             .unwrap();
         let wrong_associated_data = b"wrong_identity_keys";
 
-        let result = responder.ratchet_decrypt(&ciphertext, &header, wrong_associated_data);
+        let result =
+            responder.ratchet_decrypt(&mut rng, &ciphertext, &header, wrong_associated_data);
         assert!(matches!(result, Err(CryptoError::Aead)));
     }
 
     // Duplicate current-chain messages must fail without under-flowing the skip calculation.
     #[test]
     fn duplicate_message_under_current_dh_key_fails_without_underflow() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
         let (header, ciphertext) = initiator
             .ratchet_encrypt(b"hello", &associated_data)
             .unwrap();
         responder
-            .ratchet_decrypt(&ciphertext, &header, &associated_data)
+            .ratchet_decrypt(&mut rng, &ciphertext, &header, &associated_data)
             .unwrap();
-        let result = responder.ratchet_decrypt(&ciphertext, &header, &associated_data);
+        let result = responder.ratchet_decrypt(&mut rng, &ciphertext, &header, &associated_data);
         assert!(matches!(result, Err(CryptoError::Aead)));
     }
 
     #[test]
     fn failed_decrypt_rolls_back_state() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let (first_header, first_ciphertext) = initiator
             .ratchet_encrypt(b"msg 1", &associated_data)
             .unwrap();
         responder
-            .ratchet_decrypt(&first_ciphertext, &first_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &first_ciphertext, &first_header, &associated_data)
             .unwrap();
 
         let receiving_count_before = responder.nr;
@@ -643,8 +691,12 @@ mod tests {
             .ratchet_encrypt(b"msg 2", &associated_data)
             .unwrap();
         second_ciphertext[0] ^= 0xFF;
-        let result =
-            responder.ratchet_decrypt(&second_ciphertext, &second_header, &associated_data);
+        let result = responder.ratchet_decrypt(
+            &mut rng,
+            &second_ciphertext,
+            &second_header,
+            &associated_data,
+        );
         assert!(matches!(result, Err(CryptoError::Aead)));
 
         assert_eq!(responder.nr, receiving_count_before);
@@ -654,7 +706,7 @@ mod tests {
 
     #[test]
     fn to_bytes_round_trip_is_byte_identical() {
-        let (initiator, _, _) = setup_pair();
+        let (initiator, _, _, _) = setup_pair();
         let original_bytes = initiator.to_bytes().unwrap();
         let restored = RatchetState::from_bytes(&original_bytes).unwrap();
         let restored_bytes = restored.to_bytes().unwrap();
@@ -663,13 +715,13 @@ mod tests {
 
     #[test]
     fn restored_state_continues_session() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let (first_header, first_ciphertext) = initiator
             .ratchet_encrypt(b"msg 1", &associated_data)
             .unwrap();
         responder
-            .ratchet_decrypt(&first_ciphertext, &first_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &first_ciphertext, &first_header, &associated_data)
             .unwrap();
 
         let bytes = initiator.to_bytes().unwrap();
@@ -679,14 +731,19 @@ mod tests {
         let (second_header, second_ciphertext) =
             restored.ratchet_encrypt(message, &associated_data).unwrap();
         let plaintext = responder
-            .ratchet_decrypt(&second_ciphertext, &second_header, &associated_data)
+            .ratchet_decrypt(
+                &mut rng,
+                &second_ciphertext,
+                &second_header,
+                &associated_data,
+            )
             .unwrap();
         assert_eq!(plaintext.as_slice(), message);
     }
 
     #[test]
     fn skipped_message_keys_survive_round_trip() {
-        let (mut initiator, mut responder, associated_data) = setup_pair();
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let (first_header, first_ciphertext) = initiator
             .ratchet_encrypt(b"msg 1", &associated_data)
@@ -699,10 +756,10 @@ mod tests {
             .unwrap();
 
         responder
-            .ratchet_decrypt(&first_ciphertext, &first_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &first_ciphertext, &first_header, &associated_data)
             .unwrap();
         responder
-            .ratchet_decrypt(&third_ciphertext, &third_header, &associated_data)
+            .ratchet_decrypt(&mut rng, &third_ciphertext, &third_header, &associated_data)
             .unwrap();
         assert!(!responder.mk_skipped.is_empty());
 
@@ -710,14 +767,19 @@ mod tests {
         let mut restored = RatchetState::from_bytes(&bytes).unwrap();
 
         let plaintext = restored
-            .ratchet_decrypt(&second_ciphertext, &second_header, &associated_data)
+            .ratchet_decrypt(
+                &mut rng,
+                &second_ciphertext,
+                &second_header,
+                &associated_data,
+            )
             .unwrap();
         assert_eq!(plaintext.as_slice(), b"msg 2");
     }
 
     #[test]
     fn from_bytes_rejects_unsupported_version() {
-        let (initiator, _, _) = setup_pair();
+        let (initiator, _, _, _) = setup_pair();
         let mut bytes = initiator.to_bytes().unwrap().to_vec();
         bytes[0] = 0xFF;
         assert!(matches!(
@@ -728,7 +790,7 @@ mod tests {
 
     #[test]
     fn from_bytes_rejects_malformed_blob() {
-        let (initiator, _, _) = setup_pair();
+        let (initiator, _, _, _) = setup_pair();
         let bytes = initiator.to_bytes().unwrap();
         let truncated = &bytes[..1];
         assert!(matches!(

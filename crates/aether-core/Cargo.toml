@@ -10,8 +10,11 @@ aether-crypto.workspace = true
 # Utility
 argon2 = "0.5.3"
 chacha20poly1305.workspace = true
-getrandom = "0.2.17"
+rand = { workspace = true, features = ["getrandom"] }
 zeroize.workspace = true
+
+[dev-dependencies]
+rand_chacha.workspace = true
 
 [lints]
 workspace = true

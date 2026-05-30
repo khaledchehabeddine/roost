@@ -19,7 +19,8 @@ dependencies = [
  "aether-crypto",
  "argon2",
  "chacha20poly1305",
- "getrandom 0.2.17",
+ "rand",
+ "rand_chacha",
  "zeroize",
 ]
 
@@ -34,6 +35,7 @@ dependencies = [
  "hmac",
  "postcard",
  "rand",
+ "rand_chacha",
  "serde",
  "sha2",
  "subtle",
