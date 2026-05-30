@@ -8,9 +8,21 @@ The orchestration layer that exposes high-level entities — Sessions, Identitie
 The app install that holds the private key material for an Identity. A new Device starts a new Identity unless the user restores an Identity backup onto it.
 Avoid: client, installation, instance
 
+**Discovery Key (DK)** (exactly one current per Identity):
+A rotatable keypair — an Ed25519 signing key plus X25519 key-agreement key — signed by the Identity Key. Its X25519 key is the X3DH identity key for the current Epoch and its Ed25519 key signs the prekey bundle, so rotating it refreshes discovery without touching the Identity Key.
+Avoid: prekey, ephemeral key
+
+**Epoch** (one per Discovery Key generation):
+The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch and invalidates the prior Epoch's pre-keys.
+Avoid: window, generation
+
 **Identity** (exactly one Device):
-A long-lived public-key persona held by a single Device. Identifies a participant across Sessions.
+A long-lived public-key persona held by a single Device, anchored by a permanent Identity Key and a rotatable Discovery Key. Identifies a participant across Sessions.
 Avoid: user, account, profile
+
+**Identity Key (IK)** (exactly one per Identity, permanent):
+The permanent keypair — an Ed25519 signing key plus X25519 key-agreement key — that anchors an Identity. Safety numbers and sender certificates bind to it and its Ed25519 key signs the Discovery Key; it never rotates and takes no part in the X3DH key agreement.
+Avoid: master key, root key
 
 **Message** (many per Session):
 A single ciphertext packet exchanged within a Session, addressed by `MessageID`.
