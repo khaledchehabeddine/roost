@@ -49,5 +49,5 @@ mod storage;
 
 pub use error::AetherError;
 pub use key_store::KeyStore;
-pub use records::{Identity, SignedPreKeyBundle};
+pub use records::{DiscoveryKeyBundle, DiscoveryKeyRotationBundle, Identity, SignedPreKeyBundle};
 pub use storage::{InMemorySecureStorage, SecureStorage};

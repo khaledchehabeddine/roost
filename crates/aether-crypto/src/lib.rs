@@ -6,23 +6,31 @@
 //!
 //! # Overview
 //!
-//! Callers publish an Ed25519-signed X25519 pre-key bundle, use the X3DH-lite handshake to agree
-//! on an initial ratchet root key, then exchange encrypted messages through [`RatchetState`].
-//! Public APIs return domain-specific [`CryptoError`] values for cryptographic failures and
-//! protocol-limit violations.
+//! Callers publish their identity key, a discovery-key bundle the identity key signs, and a signed
+//! pre-key bundle the discovery key signs. Peers use the X3DH-lite handshake to agree on an initial
+//! ratchet root key, then exchange encrypted messages through [`RatchetState`]. Public APIs return
+//! domain-specific [`CryptoError`] values for cryptographic failures and protocol-limit violations.
 //!
 //! # Examples
 //!
 //! ```
-//! use aether_crypto::{generate_signed_prekey, generate_signing_key_pair, verify_bundle};
+//! use aether_crypto::{
+//!     generate_discovery_key, generate_signed_prekey_for_discovery_key,
+//!     generate_signing_key_pair, verify_bundle, verify_discovery_key_bundle,
+//! };
 //! use rand::rngs::OsRng;
 //!
 //! let mut rng = OsRng;
-//! let signing = generate_signing_key_pair(&mut rng);
-//! let signed_prekey = generate_signed_prekey(&mut rng, &signing, 1_700_000_000);
-//! let bundle = signed_prekey.bundle();
+//! // The permanent identity key signs a rotatable discovery key (epoch 0).
+//! let identity = generate_signing_key_pair(&mut rng);
+//! let discovery_key = generate_discovery_key(&mut rng, &identity, 0, 1_700_000_000);
+//! let discovery_bundle = discovery_key.bundle();
+//! verify_discovery_key_bundle(&discovery_bundle, &identity.verifying)?;
 //!
-//! verify_bundle(&bundle, &signing.verifying)?;
+//! // The discovery key signs the published signed pre-key.
+//! let signed_prekey =
+//!     generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, 1_700_000_000);
+//! verify_bundle(&signed_prekey.bundle(), &discovery_bundle.verifying_key)?;
 //! # Ok::<(), aether_crypto::CryptoError>(())
 //! ```
 //!
@@ -45,6 +53,7 @@
 //! - Signed pre-key archival is not implemented. An envelope that references a just-rotated
 //!   signed pre-key fails with [`CryptoError::HandshakeSignedPreKeyMismatch`].
 
+mod discovery_key;
 mod double_ratchet;
 mod error;
 mod handshake;
@@ -52,6 +61,10 @@ mod keys;
 mod ratchet;
 mod signed_prekey;
 
+pub use discovery_key::{
+    DiscoveryKey, DiscoveryKeyBundle, generate_discovery_key,
+    generate_signed_prekey_for_discovery_key, verify_discovery_key_bundle,
+};
 pub use double_ratchet::{Header, RatchetState};
 pub use error::CryptoError;
 pub use handshake::{HandshakeEnvelope, accept, initial_associated_data, initiate};

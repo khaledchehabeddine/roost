@@ -45,6 +45,12 @@ pub struct HandshakeEnvelope {
 ///
 /// The initiator's ephemeral key and first ratchet key are drawn from `rng`.
 ///
+/// Note: under the two-key identity, a responder's signed pre-key is signed by its discovery key,
+/// not its identity key. This X3DH-lite handshake is unchanged pending the full-X3DH rewrite (see
+/// `aether-core`'s `0003-two-key-identity`); when wiring published bundles, pass the responder's
+/// discovery-key verifying key as `responder_identity_verifying_key` and its discovery-key X25519
+/// public as `responder_identity_key`.
+///
 /// # Errors
 /// - [`CryptoError::Aead`] when first-message encryption fails.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for root-key derivation fails.
@@ -96,6 +102,10 @@ pub fn initiate<R: RngCore + CryptoRng>(
 /// Accepts a handshake envelope and decrypts the first message.
 ///
 /// The responder's first ratchet key is drawn from `rng` during the initial DH ratchet step.
+///
+/// Note: under the two-key identity, `responder_identity_key` and `responder_signed_prekey` become
+/// the responder's discovery-key material once the full-X3DH rewrite lands; this X3DH-lite handshake
+/// is unchanged for now (see `aether-core`'s `0003-two-key-identity`).
 ///
 /// # Errors
 /// - [`CryptoError::Aead`] when first-message decryption fails (tampered ciphertext, wrong

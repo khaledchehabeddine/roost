@@ -2,7 +2,9 @@
 
 use crate::SecureStorage;
 use crate::error::AetherError;
-use crate::records::{Identity, SignedPreKeyBundle};
+use crate::records::{
+    DiscoveryKeyBundle, DiscoveryKeyRotationBundle, Identity, SignedPreKeyBundle,
+};
 use crate::storage::SecureStorageAdapter;
 use aether_core::KeyStore as CoreKeyStore;
 use std::sync::Arc;
@@ -121,8 +123,9 @@ impl KeyStore {
     /// Restores an identity from an encrypted backup, replacing any current identity.
     ///
     /// The backup is decrypted before storage changes begin, so a wrong passphrase leaves the
-    /// existing identity untouched. After a successful import, the stored signed pre-key is
-    /// cleared because it was signed by the replaced identity.
+    /// existing identity untouched. After a successful import, the previous signed pre-key and
+    /// discovery key are cleared and a fresh discovery key (epoch 0) is generated under the restored
+    /// identity, since the discovery key is not part of the backup.
     ///
     /// Errors from parsing, key derivation, or decryption happen before storage changes. Storage
     /// failures can occur after writing begins and may leave identity keys from different
@@ -148,7 +151,7 @@ impl KeyStore {
     /// # Errors
     /// - [`AetherError::BackupFailed`] on Argon2id parameter error.
     /// - [`AetherError::DecryptionFailed`] on wrong passphrase or tampered ciphertext.
-    /// - [`AetherError::InternalError`] on storage lock poisoning.
+    /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if the blob length is wrong.
     /// - [`AetherError::Storage`] on platform storage failure during commit.
     ///
@@ -290,6 +293,67 @@ impl KeyStore {
         Ok(self.inner.current_signed_prekey_bundle()?.into())
     }
 
+    /// Rotates the discovery key and its signed pre-key in one operation, returning both bundles.
+    ///
+    /// Verify [`DiscoveryKeyRotationBundle::discovery_key`] against the identity verifying key, then
+    /// verify [`DiscoveryKeyRotationBundle::signed_prekey`] against the discovery key's verifying
+    /// key. Publish both.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{
+    /// #     AetherError, DiscoveryKeyRotationBundle, InMemorySecureStorage, KeyStore, SecureStorage,
+    /// # };
+    /// # use std::sync::Arc;
+    /// # fn publish_rotation(_bundle: &DiscoveryKeyRotationBundle) -> Result<(), AetherError> {
+    /// #     Ok(())
+    /// # }
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// # store.generate_identity()?;
+    /// let rotation = store.rotate_discovery_key_now()?;
+    /// publish_rotation(&rotation)?;
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`AetherError::Corrupt`] if the stored discovery key does not verify against the identity.
+    /// - [`AetherError::InternalError`] on storage lock poisoning, system clock anomaly, or epoch
+    ///   exhaustion.
+    /// - [`AetherError::InvalidData`] if a stored discovery key is malformed.
+    /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn rotate_discovery_key_now(&self) -> Result<DiscoveryKeyRotationBundle, AetherError> {
+        Ok(self.inner.rotate_discovery_key_now()?.into())
+    }
+
+    /// Returns the current discovery-key bundle, verified against the identity key.
+    ///
+    /// Publish this alongside the signed pre-key bundle so peers can verify the trust chain.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, DiscoveryKeyBundle, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn send_to_peer(_bundle: &DiscoveryKeyBundle) -> Result<(), AetherError> { Ok(()) }
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// # store.generate_identity()?;
+    /// let bundle = store.current_discovery_key_bundle()?;
+    /// send_to_peer(&bundle)?;
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`AetherError::Corrupt`] if the stored discovery key does not verify against the identity.
+    /// - [`AetherError::InternalError`] on storage lock poisoning.
+    /// - [`AetherError::InvalidData`] if the stored discovery key is malformed.
+    /// - [`AetherError::NotFound`] if no discovery key is stored.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, AetherError> {
+        Ok(self.inner.current_discovery_key_bundle()?.into())
+    }
+
     /// Clears the stored identity and signed pre-key material.
     ///
     /// The signed pre-key is deleted before identity keys, so a partial failure does not leave a
@@ -318,7 +382,10 @@ impl KeyStore {
 mod tests {
     use super::KeyStore;
     use crate::{InMemorySecureStorage, SecureStorage};
-    use aether_crypto::{PublicKey, Signature, SignedPreKeyBundle, VerifyingKey, verify_bundle};
+    use aether_crypto::{
+        DiscoveryKeyBundle, PublicKey, Signature, SignedPreKeyBundle, VerifyingKey, verify_bundle,
+        verify_discovery_key_bundle,
+    };
     use std::sync::Arc;
 
     fn key_store() -> Arc<KeyStore> {
@@ -335,29 +402,86 @@ mod tests {
     }
 
     #[test]
-    fn key_store_generates_and_verifies_signed_prekey_bundle() {
+    fn key_store_signs_signed_prekey_with_discovery_key() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        let rotated_bundle = store.rotate_signed_prekey_if_stale().unwrap();
         assert!(
-            rotated_bundle.is_some(),
+            store.rotate_signed_prekey_if_stale().unwrap().is_some(),
             "first rotate must produce a bundle"
         );
 
-        let bundle = store.current_signed_prekey_bundle().unwrap();
-        assert_eq!(bundle.public_key.len(), 32);
-        assert_eq!(bundle.signature.len(), 64);
-        assert!(bundle.created_at > 0);
+        let discovery = store.current_discovery_key_bundle().unwrap();
+        assert_eq!(discovery.public_key.len(), 32);
+        assert_eq!(discovery.verifying_key.len(), 32);
+        assert_eq!(discovery.signature.len(), 64);
 
-        let verifying_bytes: [u8; 32] = identity.verifying_key.as_slice().try_into().unwrap();
-        let verifying_key = VerifyingKey::from_bytes(&verifying_bytes).unwrap();
-        let public_key_bytes: [u8; 32] = bundle.public_key.as_slice().try_into().unwrap();
-        let signature_bytes: [u8; 64] = bundle.signature.as_slice().try_into().unwrap();
-        let crypto_bundle = SignedPreKeyBundle {
-            public_key: PublicKey::from(public_key_bytes),
-            signature: Signature::from_bytes(&signature_bytes),
-            created_at: bundle.created_at,
+        let prekey = store.current_signed_prekey_bundle().unwrap();
+        assert_eq!(prekey.public_key.len(), 32);
+        assert_eq!(prekey.signature.len(), 64);
+        assert!(prekey.created_at > 0);
+
+        // The discovery key verifies under the identity; the signed pre-key verifies under the
+        // discovery key. The validating parser accepts the generated wire bytes.
+        let identity_verifying = VerifyingKey::from_bytes(
+            &<[u8; 32]>::try_from(identity.verifying_key.as_slice()).unwrap(),
+        )
+        .unwrap();
+        let crypto_discovery = DiscoveryKeyBundle::from_bytes(
+            &discovery.public_key,
+            &discovery.verifying_key,
+            &discovery.signature,
+            discovery.epoch,
+            discovery.created_at,
+        )
+        .unwrap();
+        assert!(verify_discovery_key_bundle(&crypto_discovery, &identity_verifying).is_ok());
+
+        let crypto_prekey = SignedPreKeyBundle {
+            public_key: PublicKey::from(
+                <[u8; 32]>::try_from(prekey.public_key.as_slice()).unwrap(),
+            ),
+            signature: Signature::from_bytes(
+                &<[u8; 64]>::try_from(prekey.signature.as_slice()).unwrap(),
+            ),
+            created_at: prekey.created_at,
         };
-        assert!(verify_bundle(&crypto_bundle, &verifying_key).is_ok());
+        assert!(verify_bundle(&crypto_prekey, &crypto_discovery.verifying_key).is_ok());
+    }
+
+    #[test]
+    fn rotate_discovery_key_now_returns_verifiable_bundles() {
+        let store = key_store();
+        let identity = store.generate_identity().unwrap();
+        let rotation = store.rotate_discovery_key_now().unwrap();
+        assert_eq!(rotation.discovery_key.public_key.len(), 32);
+        assert_eq!(rotation.discovery_key.verifying_key.len(), 32);
+        assert_eq!(rotation.discovery_key.signature.len(), 64);
+        assert_eq!(rotation.signed_prekey.public_key.len(), 32);
+        assert_eq!(rotation.signed_prekey.signature.len(), 64);
+
+        let identity_verifying = VerifyingKey::from_bytes(
+            &<[u8; 32]>::try_from(identity.verifying_key.as_slice()).unwrap(),
+        )
+        .unwrap();
+        let crypto_discovery = DiscoveryKeyBundle::from_bytes(
+            &rotation.discovery_key.public_key,
+            &rotation.discovery_key.verifying_key,
+            &rotation.discovery_key.signature,
+            rotation.discovery_key.epoch,
+            rotation.discovery_key.created_at,
+        )
+        .unwrap();
+        assert!(verify_discovery_key_bundle(&crypto_discovery, &identity_verifying).is_ok());
+
+        let crypto_prekey = SignedPreKeyBundle {
+            public_key: PublicKey::from(
+                <[u8; 32]>::try_from(rotation.signed_prekey.public_key.as_slice()).unwrap(),
+            ),
+            signature: Signature::from_bytes(
+                &<[u8; 64]>::try_from(rotation.signed_prekey.signature.as_slice()).unwrap(),
+            ),
+            created_at: rotation.signed_prekey.created_at,
+        };
+        assert!(verify_bundle(&crypto_prekey, &crypto_discovery.verifying_key).is_ok());
     }
 }

@@ -4,6 +4,7 @@
 //! These helpers pin both to fixed values, so identical inputs yield identical results.
 
 use crate::clock::{Clock, ManualClock};
+use crate::discovery_key::DiscoveryKeyManager;
 use crate::identity::IdentityManager;
 use crate::signed_prekey::SignedPreKeyManager;
 use crate::storage::{InMemorySecureStorage, SecureStorage};
@@ -28,15 +29,26 @@ impl Sandbox {
         }
     }
 
-    // Returns an identity manager and a signed-pre-key manager sharing this sandbox's storage and
-    // fixed clock.
-    pub(crate) fn managers(&self) -> (Arc<IdentityManager>, SignedPreKeyManager) {
+    // Returns identity, discovery-key, and signed-pre-key managers sharing this sandbox's storage
+    // and fixed clock.
+    pub(crate) fn managers(
+        &self,
+    ) -> (
+        Arc<IdentityManager>,
+        Arc<DiscoveryKeyManager>,
+        SignedPreKeyManager,
+    ) {
         let identity = Arc::new(IdentityManager::new(Arc::clone(&self.storage)));
-        let signed_prekey = SignedPreKeyManager::new(
+        let discovery = Arc::new(DiscoveryKeyManager::new(
             Arc::clone(&self.storage),
             Arc::clone(&identity),
             Arc::clone(&self.clock),
+        ));
+        let signed_prekey = SignedPreKeyManager::new(
+            Arc::clone(&self.storage),
+            Arc::clone(&discovery),
+            Arc::clone(&self.clock),
         );
-        (identity, signed_prekey)
+        (identity, discovery, signed_prekey)
     }
 }

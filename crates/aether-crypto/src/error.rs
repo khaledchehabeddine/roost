@@ -11,6 +11,8 @@ pub enum CryptoError {
     HkdfExpand,
     /// HMAC-SHA256 rejected a chain-key input.
     InvalidHmacKey,
+    /// A public key or signature failed length or canonical-encoding validation.
+    InvalidKeyEncoding,
     /// Ratchet state violated an internal invariant.
     InvalidState(&'static str),
     /// Message header asks to skip too many messages in one ratchet step.
@@ -37,6 +39,7 @@ impl fmt::Display for CryptoError {
             ),
             Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
             Self::InvalidHmacKey => write!(f, "hmac-sha256 rejected the provided key"),
+            Self::InvalidKeyEncoding => write!(f, "public key or signature encoding is invalid"),
             Self::InvalidState(context) => {
                 write!(f, "ratchet state invariant violated: {context}")
             }

@@ -250,7 +250,7 @@ mod tests {
             use crate::test_support::Sandbox;
 
             let mut sandbox = Sandbox::new(seed, 1_700_000_000);
-            let (identity, _) = sandbox.managers();
+            let (identity, _, _) = sandbox.managers();
             identity.generate_identity(&mut sandbox.rng).unwrap();
             identity
                 .export_encrypted_backup(&mut sandbox.rng, "passphrase")

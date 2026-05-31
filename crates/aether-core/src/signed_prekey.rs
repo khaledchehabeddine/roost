@@ -1,7 +1,7 @@
 use crate::clock::Clock;
-use crate::identity::{IdentityError, IdentityManager};
+use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
 use crate::storage::{SecureStorage, StorageError};
-use aether_crypto::{SignedPreKey, SignedPreKeyBundle, generate_signed_prekey};
+use aether_crypto::{SignedPreKey, SignedPreKeyBundle, generate_signed_prekey_for_discovery_key};
 use rand::{CryptoRng, RngCore};
 use std::error::Error;
 use std::fmt;
@@ -23,8 +23,8 @@ const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
 pub enum SignedPreKeyError {
     /// The system clock is before the Unix epoch.
     Clock,
-    /// Loading the identity for signed-pre-key rotation returned an [`IdentityError`].
-    Identity(IdentityError),
+    /// Loading the discovery key for signed-pre-key rotation returned a [`DiscoveryKeyError`].
+    Discovery(DiscoveryKeyError),
     /// Stored signed-pre-key data is malformed.
     InvalidData(String),
     /// The internal storage lock was poisoned by a panicked thread.
@@ -39,7 +39,7 @@ impl fmt::Display for SignedPreKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SignedPreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
-            SignedPreKeyError::Identity(e) => write!(f, "identity: {e}"),
+            SignedPreKeyError::Discovery(e) => write!(f, "discovery key: {e}"),
             SignedPreKeyError::InvalidData(reason) => {
                 write!(f, "invalid signed pre-key data: {reason}")
             }
@@ -53,16 +53,16 @@ impl fmt::Display for SignedPreKeyError {
 impl Error for SignedPreKeyError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            SignedPreKeyError::Identity(e) => Some(e),
+            SignedPreKeyError::Discovery(e) => Some(e),
             SignedPreKeyError::Storage(e) => Some(e),
             _ => None,
         }
     }
 }
 
-impl From<IdentityError> for SignedPreKeyError {
-    fn from(e: IdentityError) -> Self {
-        SignedPreKeyError::Identity(e)
+impl From<DiscoveryKeyError> for SignedPreKeyError {
+    fn from(e: DiscoveryKeyError) -> Self {
+        SignedPreKeyError::Discovery(e)
     }
 }
 
@@ -75,19 +75,19 @@ impl From<StorageError> for SignedPreKeyError {
 // Manages signed-pre-key generation, rotation, and persistence.
 pub(crate) struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
-    identity: Arc<IdentityManager>,
+    discovery: Arc<DiscoveryKeyManager>,
     clock: Arc<dyn Clock>,
 }
 
 impl SignedPreKeyManager {
     pub(crate) fn new(
         storage: Arc<Mutex<Box<dyn SecureStorage>>>,
-        identity: Arc<IdentityManager>,
+        discovery: Arc<DiscoveryKeyManager>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         SignedPreKeyManager {
             storage,
-            identity,
+            discovery,
             clock,
         }
     }
@@ -139,9 +139,9 @@ impl SignedPreKeyManager {
         &self,
         rng: &mut R,
     ) -> Result<SignedPreKey, SignedPreKeyError> {
-        let identity = self.identity.load_identity()?;
+        let discovery_key = self.discovery.current()?;
         let now = self.now_secs()?;
-        let signed_prekey = generate_signed_prekey(rng, identity.signing_key_pair(), now);
+        let signed_prekey = generate_signed_prekey_for_discovery_key(rng, &discovery_key, now);
         let blob = encode_signed_prekey(&signed_prekey);
         let mut storage = self.lock_storage()?;
         storage.store(SIGNED_PREKEY_KEY, &*blob)?;
@@ -212,8 +212,9 @@ fn checked_blob(raw: &[u8]) -> Result<&[u8; SIGNED_PREKEY_BLOB_LEN], SignedPreKe
 mod tests {
     use super::*;
     use crate::clock::ManualClock;
+    use crate::identity::IdentityManager;
     use crate::storage::InMemorySecureStorage;
-    use aether_crypto::{generate_signing_key_pair, verify_bundle};
+    use aether_crypto::{generate_signed_prekey, generate_signing_key_pair, verify_bundle};
     use rand::rngs::OsRng;
 
     const FIXED_NOW: u64 = 1_700_000_000;
@@ -222,22 +223,40 @@ mod tests {
         Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())))
     }
 
-    fn manager_with_identity() -> SignedPreKeyManager {
+    // Identity + established discovery key (epoch 0) + signed-pre-key manager, sharing storage.
+    fn manager_with_discovery() -> (Arc<DiscoveryKeyManager>, SignedPreKeyManager) {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         identity.generate_identity(&mut OsRng).unwrap();
-        SignedPreKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)))
+        let discovery = Arc::new(DiscoveryKeyManager::new(
+            Arc::clone(&storage),
+            identity,
+            Arc::new(ManualClock::new(FIXED_NOW)),
+        ));
+        discovery.rotate_now(&mut OsRng).unwrap();
+        let signed_prekey = SignedPreKeyManager::new(
+            storage,
+            Arc::clone(&discovery),
+            Arc::new(ManualClock::new(FIXED_NOW)),
+        );
+        (discovery, signed_prekey)
     }
 
-    fn manager_without_identity() -> SignedPreKeyManager {
+    // A signed-pre-key manager whose discovery manager has no identity and no discovery key.
+    fn manager_without_discovery_key() -> SignedPreKeyManager {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        SignedPreKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)))
+        let discovery = Arc::new(DiscoveryKeyManager::new(
+            Arc::clone(&storage),
+            identity,
+            Arc::new(ManualClock::new(FIXED_NOW)),
+        ));
+        SignedPreKeyManager::new(storage, discovery, Arc::new(ManualClock::new(FIXED_NOW)))
     }
 
     #[test]
     fn current_without_stored_signed_prekey_returns_not_found() {
-        let manager = manager_with_identity();
+        let (_discovery, manager) = manager_with_discovery();
         assert!(matches!(
             manager.current(),
             Err(SignedPreKeyError::NotFound)
@@ -246,7 +265,7 @@ mod tests {
 
     #[test]
     fn current_returns_invalid_data_for_corrupt_blob() {
-        let manager = manager_with_identity();
+        let (_discovery, manager) = manager_with_discovery();
         manager
             .storage
             .lock()
@@ -260,10 +279,10 @@ mod tests {
     }
 
     #[test]
-    fn current_bundle_does_not_require_identity() {
-        let manager = manager_without_identity();
-        let identity_signing_key = generate_signing_key_pair(&mut OsRng);
-        let signed_prekey = generate_signed_prekey(&mut OsRng, &identity_signing_key, FIXED_NOW);
+    fn current_bundle_does_not_require_discovery_key() {
+        let manager = manager_without_discovery_key();
+        let signing_key = generate_signing_key_pair(&mut OsRng);
+        let signed_prekey = generate_signed_prekey(&mut OsRng, &signing_key, FIXED_NOW);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -281,7 +300,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_seeds_first_signed_prekey() {
-        let manager = manager_with_identity();
+        let (discovery, manager) = manager_with_discovery();
         let rotated = manager
             .rotate_if_stale(&mut OsRng)
             .unwrap()
@@ -292,13 +311,14 @@ mod tests {
             bundle.public_key.as_bytes(),
             "returned signed pre-key must match persisted bundle",
         );
-        let identity = manager.identity.load_identity().unwrap();
-        assert!(verify_bundle(&bundle, identity.verifying_key()).is_ok());
+        // The signed pre-key is signed by the discovery key, not the identity key.
+        let discovery_bundle = discovery.current_bundle().unwrap();
+        assert!(verify_bundle(&bundle, &discovery_bundle.verifying_key).is_ok());
     }
 
     #[test]
     fn rotate_if_stale_keeps_fresh_signed_prekey() {
-        let manager = manager_with_identity();
+        let (_discovery, manager) = manager_with_discovery();
         assert!(manager.rotate_if_stale(&mut OsRng).unwrap().is_some());
         let initial_public_key = manager.current_bundle().unwrap().public_key;
         let second_rotation = manager.rotate_if_stale(&mut OsRng).unwrap();
@@ -312,15 +332,16 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_replaces_backdated_signed_prekey() {
-        let manager = manager_with_identity();
+        let (_discovery, manager) = manager_with_discovery();
         manager.rotate_if_stale(&mut OsRng).unwrap();
         let original_public_key = manager.current_bundle().unwrap().public_key;
 
-        let identity = manager.identity.load_identity().unwrap();
+        // The signer is irrelevant here; rotation staleness only reads the stored `created_at`.
+        let signing_key = generate_signing_key_pair(&mut OsRng);
         let backdated_timestamp =
             FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_DAYS + 1) * SECONDS_PER_DAY;
         let stale_signed_prekey =
-            generate_signed_prekey(&mut OsRng, identity.signing_key_pair(), backdated_timestamp);
+            generate_signed_prekey(&mut OsRng, &signing_key, backdated_timestamp);
         let blob = encode_signed_prekey(&stale_signed_prekey);
         manager
             .storage
@@ -351,11 +372,10 @@ mod tests {
 
     #[test]
     fn future_created_at_does_not_rotate() {
-        let manager = manager_with_identity();
-        let identity = manager.identity.load_identity().unwrap();
+        let (_discovery, manager) = manager_with_discovery();
+        let signing_key = generate_signing_key_pair(&mut OsRng);
         let timestamp = FIXED_NOW + 100_000;
-        let signed_prekey =
-            generate_signed_prekey(&mut OsRng, identity.signing_key_pair(), timestamp);
+        let signed_prekey = generate_signed_prekey(&mut OsRng, &signing_key, timestamp);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -371,11 +391,10 @@ mod tests {
 
     #[test]
     fn far_future_created_at_triggers_rotation() {
-        let manager = manager_with_identity();
-        let identity = manager.identity.load_identity().unwrap();
+        let (_discovery, manager) = manager_with_discovery();
+        let signing_key = generate_signing_key_pair(&mut OsRng);
         let timestamp = FIXED_NOW + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10;
-        let signed_prekey =
-            generate_signed_prekey(&mut OsRng, identity.signing_key_pair(), timestamp);
+        let signed_prekey = generate_signed_prekey(&mut OsRng, &signing_key, timestamp);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -391,7 +410,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_rejects_unsupported_version() {
-        let manager = manager_with_identity();
+        let (_discovery, manager) = manager_with_discovery();
         let mut blob = [0u8; SIGNED_PREKEY_BLOB_LEN];
         blob[0] = 99;
         manager
@@ -407,20 +426,20 @@ mod tests {
     }
 
     #[test]
-    fn rotate_if_stale_without_identity_returns_identity_error() {
-        let manager = manager_without_identity();
+    fn rotate_if_stale_without_discovery_key_returns_not_found() {
+        let manager = manager_without_discovery_key();
         assert!(matches!(
             manager.rotate_if_stale(&mut OsRng),
-            Err(SignedPreKeyError::Identity(IdentityError::NotFound))
+            Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
 
     #[test]
-    fn rotate_now_without_identity_returns_identity_error() {
-        let manager = manager_without_identity();
+    fn rotate_now_without_discovery_key_returns_not_found() {
+        let manager = manager_without_discovery_key();
         assert!(matches!(
             manager.rotate_now(&mut OsRng),
-            Err(SignedPreKeyError::Identity(IdentityError::NotFound))
+            Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
 
@@ -470,10 +489,16 @@ mod tests {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         identity.generate_identity(&mut OsRng).unwrap();
+        let discovery = Arc::new(DiscoveryKeyManager::new(
+            Arc::clone(&storage),
+            identity,
+            Arc::new(ManualClock::new(FIXED_NOW)),
+        ));
+        discovery.rotate_now(&mut OsRng).unwrap();
 
         let manager_a = SignedPreKeyManager::new(
             Arc::clone(&storage),
-            Arc::clone(&identity),
+            Arc::clone(&discovery),
             Arc::new(ManualClock::new(FIXED_NOW)),
         );
         manager_a.rotate_if_stale(&mut OsRng).unwrap();
@@ -481,7 +506,7 @@ mod tests {
         drop(manager_a);
 
         let manager_b =
-            SignedPreKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)));
+            SignedPreKeyManager::new(storage, discovery, Arc::new(ManualClock::new(FIXED_NOW)));
         let second_public_key = manager_b.current_bundle().unwrap().public_key;
         assert_eq!(first_public_key.as_bytes(), second_public_key.as_bytes());
     }
@@ -494,8 +519,9 @@ mod tests {
             use crate::test_support::Sandbox;
 
             let mut sandbox = Sandbox::new(seed, FIXED_NOW);
-            let (identity, signed_prekey) = sandbox.managers();
+            let (identity, discovery, signed_prekey) = sandbox.managers();
             identity.generate_identity(&mut sandbox.rng).unwrap();
+            discovery.rotate_now(&mut sandbox.rng).unwrap();
             let bundle = signed_prekey.rotate_now(&mut sandbox.rng).unwrap().bundle();
             (
                 *bundle.public_key.as_bytes(),

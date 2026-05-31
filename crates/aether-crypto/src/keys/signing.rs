@@ -7,13 +7,17 @@ pub use ed25519_dalek::{Signature, VerifyingKey};
 
 use ed25519_dalek::SigningKey;
 use rand::{CryptoRng, RngCore};
-use zeroize::Zeroizing;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An Ed25519 key pair for signing.
 ///
-/// The signing key stays private. Use [`Self::to_signing_bytes`] only when storing the key pair.
+/// The signing key stays private and is zeroed on drop (`SigningKey` is `ZeroizeOnDrop`, not
+/// `Zeroize`, so the pair derives `ZeroizeOnDrop` only). Use [`Self::to_signing_bytes`] only when
+/// storing the key pair.
+#[derive(ZeroizeOnDrop)]
 pub struct SigningKeyPair {
     /// Public verifying key shared with peers.
+    #[zeroize(skip)]
     pub verifying: VerifyingKey,
     signing: SigningKey,
 }
