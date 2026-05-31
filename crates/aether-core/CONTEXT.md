@@ -17,7 +17,7 @@ A rotatable keypair — an Ed25519 signing key plus X25519 key-agreement key —
 Avoid: prekey, ephemeral key
 
 **Epoch** (one per Discovery Key generation):
-The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. The counter is monotonic within one Device's storage lineage and restarts at 0 when an Identity is restored from backup, since the Discovery Key is not part of the backup; the Discovery Key's signed `created_at` timestamp, not Epoch magnitude, is the cross-lineage freshness signal.
+The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup creates a new Discovery Key at Epoch 0, so use the signed `created_at` timestamp to compare freshness across restored lineages.
 Avoid: window, generation
 
 **Identity** (exactly one Device):

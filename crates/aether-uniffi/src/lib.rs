@@ -1,27 +1,18 @@
 //! UniFFI bindings for the cryptographic core.
 //!
-//! This crate exposes the storage-backed identity API that UniFFI projects into foreign-language
-//! bindings. Consumers construct a single [`KeyStore`], provide a platform [`SecureStorage`]
-//! implementation, and use the keystore to manage the local identity and signed pre-key.
-//!
-//! # Overview
-//!
-//! [`KeyStore`] is the entry point for identity and signed-pre-key operations. It delegates
-//! persistence to [`SecureStorage`], which production apps must back with secure storage.
+//! This crate exposes the storage-backed [`KeyStore`] API and FFI-safe record types used by SDKs.
+//! Apps provide a platform [`SecureStorage`] implementation, then use one [`KeyStore`] for the app
+//! lifetime to manage the local identity and publication keys.
 //!
 //! # Examples
 //!
 //! ```
 //! use aether::{
-//!     AetherError, DiscoveryKeyBundle, InMemorySecureStorage, KeyStore, SecureStorage,
-//!     SignedPreKeyBundle,
+//!     AetherError, InMemorySecureStorage, KeyStore, PublicationBundle, SecureStorage,
 //! };
 //! use std::sync::Arc;
 //!
-//! # fn publish(
-//! #     _discovery_key: &DiscoveryKeyBundle,
-//! #     _signed_prekey: &SignedPreKeyBundle,
-//! # ) -> Result<(), AetherError> {
+//! # fn publish(_bundle: &PublicationBundle) -> Result<(), AetherError> {
 //! #     Ok(())
 //! # }
 //! let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
@@ -31,19 +22,10 @@
 //!     store.generate_identity()?;
 //! }
 //!
-//! // Publish a consistent discovery-key + signed-pre-key pair; peers verify the chain
-//! // identity -> discovery key -> signed pre-key.
 //! let publication = store.current_publication_bundle()?;
-//! publish(&publication.discovery_key, &publication.signed_prekey)?;
+//! publish(&publication)?;
 //! # Ok::<(), AetherError>(())
 //! ```
-//!
-//! # Key Concepts
-//!
-//! - Construct one [`KeyStore`] per app and retain it for the application lifetime.
-//! - [`SecureStorage`] is the platform hook. Production builds must back it with their own secure
-//!   storage implementation. [`InMemorySecureStorage`] is only for tests and prototypes.
-//! - All fallible methods return [`AetherError`].
 
 uniffi::setup_scaffolding!("aether");
 

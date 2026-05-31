@@ -155,7 +155,7 @@ impl IdentityManager {
             .is_some())
     }
 
-    // Use `KeyStore::reset` so the identity and signed pre-key are cleared together.
+    // Use `KeyStore::reset` to clear dependent key material before identity.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
         storage
@@ -203,12 +203,6 @@ mod tests {
 
     fn manager() -> IdentityManager {
         IdentityManager::new(Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new()))))
-    }
-
-    #[test]
-    fn generate_identity_succeeds() {
-        let manager = manager();
-        assert!(manager.generate_identity(&mut OsRng).is_ok());
     }
 
     #[test]

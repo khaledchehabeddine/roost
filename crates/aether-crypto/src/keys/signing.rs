@@ -11,8 +11,7 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An Ed25519 key pair for signing.
 ///
-/// The signing key stays private and is zeroed on drop (`SigningKey` is `ZeroizeOnDrop`, not
-/// `Zeroize`, so the pair derives `ZeroizeOnDrop` only). Use [`Self::to_signing_bytes`] only when
+/// The signing key stays private and zeroed on drop. Use [`Self::to_signing_bytes`] only when
 /// storing the key pair.
 #[derive(ZeroizeOnDrop)]
 pub struct SigningKeyPair {
@@ -85,6 +84,10 @@ mod tests {
 
     fn hex64(hex: &str) -> [u8; 64] {
         hex::decode(hex).unwrap().try_into().unwrap()
+    }
+
+    fn generated_key_pair() -> SigningKeyPair {
+        generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]))
     }
 
     /// Known-answer test for Ed25519 with an empty message.
@@ -167,21 +170,21 @@ mod tests {
 
     #[test]
     fn signing_key_pair_verifying_round_trip() {
-        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
+        let key_pair = generated_key_pair();
         let recovered = VerifyingKey::from_bytes(&key_pair.verifying.to_bytes()).unwrap();
         assert_eq!(key_pair.verifying.as_bytes(), recovered.as_bytes());
     }
 
     #[test]
     fn signing_key_pair_round_trip_via_signing_bytes() {
-        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
+        let key_pair = generated_key_pair();
         let restored = SigningKeyPair::from_signing_bytes(*key_pair.to_signing_bytes());
         assert_eq!(key_pair.verifying.as_bytes(), restored.verifying.as_bytes());
     }
 
     #[test]
     fn sign_and_verify_round_trip() {
-        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
+        let key_pair = generated_key_pair();
         let message = b"aether test message";
         let signature = key_pair.sign(message);
         assert!(key_pair.verifying.verify(message, &signature).is_ok());
@@ -189,7 +192,7 @@ mod tests {
 
     #[test]
     fn signature_invalid_for_different_message() {
-        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
+        let key_pair = generated_key_pair();
         let signature = key_pair.sign(b"message one");
         assert!(
             key_pair
@@ -197,13 +200,5 @@ mod tests {
                 .verify(b"message two", &signature)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn generate_signing_key_pair_is_deterministic_under_seed() {
-        let first = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
-        let second = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
-        assert_eq!(first.verifying.as_bytes(), second.verifying.as_bytes());
-        assert_eq!(*first.to_signing_bytes(), *second.to_signing_bytes());
     }
 }

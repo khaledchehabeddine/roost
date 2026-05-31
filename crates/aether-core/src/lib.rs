@@ -23,10 +23,8 @@
 //! #     Ok(())
 //! # }
 //! let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-//! // Generating an identity also mints its first discovery key (epoch 0).
 //! let identity = store.generate_identity()?;
-//! // Publish the identity plus a consistent discovery-key + signed-pre-key pair. Reading the two
-//! // bundles separately could race a concurrent rotation into a mismatched pair.
+//! // Publish the identity with a matching discovery-key + signed-pre-key pair.
 //! let publication = store.current_publication_bundle()?;
 //! publish_identity_bundle(&identity, &publication.discovery_key, &publication.signed_prekey)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -38,8 +36,6 @@ mod identity;
 mod key_store;
 mod signed_prekey;
 mod storage;
-#[cfg(test)]
-mod test_support;
 
 pub use discovery_key::DiscoveryKeyError;
 pub use identity::{Identity, IdentityError};

@@ -18,7 +18,7 @@ pub enum AetherError {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
-    /// Stored identity or discovery key material is corrupt or incomplete.
+    /// Stored identity, discovery key, or signed pre-key material is corrupt or incomplete.
     Corrupt,
     /// Backup decryption failed because the passphrase or backup bytes did not authenticate.
     DecryptionFailed,
@@ -32,7 +32,7 @@ pub enum AetherError {
         /// Description of what was invalid for logging only.
         reason: String,
     },
-    /// Requested identity or signed pre-key material is not stored.
+    /// Requested identity, discovery-key, or signed-pre-key material is not stored.
     NotFound,
     /// Underlying [`SecureStorage`](crate::SecureStorage) returned a platform error.
     Storage {
@@ -53,7 +53,7 @@ impl std::fmt::Display for AetherError {
             AetherError::DecryptionFailed => write!(f, "decryption failed"),
             AetherError::InternalError { reason } => write!(f, "internal error: {reason}"),
             AetherError::InvalidData { reason } => write!(f, "invalid data: {reason}"),
-            AetherError::NotFound => write!(f, "no identity found"),
+            AetherError::NotFound => write!(f, "key material not found"),
             AetherError::Storage { reason } => write!(f, "storage error: {reason}"),
         }
     }
@@ -84,6 +84,7 @@ impl From<SignedPreKeyError> for AetherError {
             SignedPreKeyError::Clock => AetherError::InternalError {
                 reason: "system clock is before Unix epoch".into(),
             },
+            SignedPreKeyError::Corrupt => AetherError::Corrupt,
             SignedPreKeyError::Discovery(e) => e.into(),
             SignedPreKeyError::InvalidData(reason) => AetherError::InvalidData { reason },
             SignedPreKeyError::LockPoisoned => AetherError::InternalError {
@@ -102,9 +103,6 @@ impl From<DiscoveryKeyError> for AetherError {
                 reason: "system clock is before Unix epoch".into(),
             },
             DiscoveryKeyError::Corrupt => AetherError::Corrupt,
-            DiscoveryKeyError::EpochExhausted => AetherError::InternalError {
-                reason: "discovery key epoch counter is exhausted".into(),
-            },
             DiscoveryKeyError::Identity(e) => e.into(),
             DiscoveryKeyError::InvalidData(reason) => AetherError::InvalidData { reason },
             DiscoveryKeyError::LockPoisoned => AetherError::InternalError {

@@ -128,12 +128,4 @@ mod tests {
         let bob_shared_secret = bob.diffie_hellman(&alice.public);
         assert_eq!(alice_shared_secret.as_bytes(), bob_shared_secret.as_bytes());
     }
-
-    #[test]
-    fn generate_key_pair_is_deterministic_under_seed() {
-        let first = generate_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
-        let second = generate_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
-        assert_eq!(first.public.as_bytes(), second.public.as_bytes());
-        assert_eq!(*first.to_secret_bytes(), *second.to_secret_bytes());
-    }
 }

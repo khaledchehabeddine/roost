@@ -3,7 +3,7 @@ use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager, DiscoveryKeyS
 use crate::identity::{Identity, IdentityError, IdentityManager};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
-use aether_crypto::{DiscoveryKeyBundle, SignedPreKeyBundle};
+use aether_crypto::{DiscoveryKeyBundle, SignedPreKeyBundle, verify_signed_prekey_bundle};
 use rand::rngs::OsRng;
 use std::error::Error;
 use std::fmt;
@@ -40,6 +40,12 @@ impl Error for KeyStoreError {
     }
 }
 
+impl From<DiscoveryKeyError> for KeyStoreError {
+    fn from(e: DiscoveryKeyError) -> Self {
+        KeyStoreError::Discovery(e)
+    }
+}
+
 impl From<IdentityError> for KeyStoreError {
     fn from(e: IdentityError) -> Self {
         KeyStoreError::Identity(e)
@@ -52,22 +58,15 @@ impl From<SignedPreKeyError> for KeyStoreError {
     }
 }
 
-impl From<DiscoveryKeyError> for KeyStoreError {
-    fn from(e: DiscoveryKeyError) -> Self {
-        KeyStoreError::Discovery(e)
-    }
-}
-
-/// A publishable pair: a discovery-key bundle and the signed pre-key signed under it.
+/// A key publication that verifies as identity -> discovery key -> signed pre-key.
 ///
-/// Returned by [`KeyStore::rotate_discovery_key_now`] and [`KeyStore::current_publication_bundle`].
-/// Verify [`Self::discovery_key`] against the identity verifying key, then verify
-/// [`Self::signed_prekey`] against the discovery key's verifying key.
+/// Peers verify [`Self::discovery_key`] with the identity verifying key, then verify
+/// [`Self::signed_prekey`] with the discovery key's verifying key.
 #[derive(Clone, Debug)]
 pub struct PublicationBundle {
-    /// The freshly generated discovery-key bundle.
+    /// The discovery key for this publication.
     pub discovery_key: DiscoveryKeyBundle,
-    /// The freshly generated signed pre-key, signed by the new discovery key.
+    /// The signed pre-key for this publication.
     pub signed_prekey: SignedPreKeyBundle,
 }
 
@@ -75,11 +74,11 @@ struct KeyStoreInner {
     identity: Arc<IdentityManager>,
     discovery: Arc<DiscoveryKeyManager>,
     signed_prekey: Arc<SignedPreKeyManager>,
-    // Serializes multi-step write operations; see `KeyStore::lifecycle_guard`.
+    // Coordinates operations that update more than one stored key.
     lifecycle: Mutex<()>,
 }
 
-/// Facade over identity and signed-pre-key managers sharing the same [`SecureStorage`].
+/// Facade over identity, discovery-key, and signed-pre-key managers sharing one [`SecureStorage`].
 ///
 /// Clones share the same underlying storage and synchronization.
 #[derive(Clone)]
@@ -113,47 +112,35 @@ impl KeyStore {
         }))
     }
 
-    // Serializes multi-step write operations (identity + discovery-key creation, rotation, import,
-    // and reset) so concurrent callers on cloned keystores cannot interleave into a persisted
-    // discovery key paired with a signed pre-key signed by a different discovery key. The storage
-    // mutex only serializes individual load/store calls, not the cross-key invariant. The guard
-    // protects `()`, so a lock poisoned by a panicked thread is recovered, not propagated.
-    fn lifecycle_guard(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.0
-            .lifecycle
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Generates a fresh [`Identity`] and its first discovery key (epoch 0), persisting both.
+    /// Generates a fresh [`Identity`] and discovery key, persisting both.
     ///
-    /// Storage is not transactional, so a prior call that stored the identity but failed before the
-    /// discovery key leaves an identity with no discovery key. A later call completes the discovery
-    /// key and succeeds rather than erroring. A malformed stored discovery key must be cleared with
+    /// If a previous call stored the identity but not the discovery key, this retries the
+    /// discovery key creation. A malformed stored discovery key must be cleared with
     /// [`Self::reset`] first.
     ///
     /// # Errors
-    /// - [`KeyStoreError::Identity`] (`AlreadyExists`) if a complete identity and discovery key exist.
+    /// - [`KeyStoreError::Identity`] (`AlreadyExists`) if a complete identity and discovery key
+    ///   exist.
     /// - [`KeyStoreError::Discovery`] (`InvalidData`) if a stored discovery key is malformed.
     /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::Identity`] | [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on
-    ///   storage failures.
+    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`)
+    ///   on storage failures.
     pub fn generate_identity(&self) -> Result<Identity, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let identity = match self.0.identity.generate_identity(&mut OsRng) {
             Ok(identity) => identity,
             // A prior partial creation may have stored the identity but not the discovery key.
             Err(IdentityError::AlreadyExists) => match self.0.discovery.stored_status()? {
-                DiscoveryKeyStatus::Present(_) => {
+                DiscoveryKeyStatus::Absent => self.0.identity.load_identity()?,
+                DiscoveryKeyStatus::Present { .. } => {
                     return Err(IdentityError::AlreadyExists.into());
                 }
                 DiscoveryKeyStatus::Malformed => {
                     return Err(DiscoveryKeyError::InvalidData(
-                        "stored discovery key is malformed; reset before regenerating".into(),
+                        "stored discovery key is malformed, must reset before regenerating".into(),
                     )
                     .into());
                 }
-                DiscoveryKeyStatus::Absent => self.0.identity.load_identity()?,
             },
             Err(e) => return Err(e.into()),
         };
@@ -173,98 +160,6 @@ impl KeyStore {
         Ok(self.0.identity.load_identity()?)
     }
 
-    /// Exports the stored identity as a passphrase-encrypted backup blob.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on RNG failure, Argon2id derivation error,
-    ///   or authenticated encryption failure.
-    /// - [`KeyStoreError::Identity`] (`Corrupt` | `InvalidData` | `NotFound`) when loading the
-    ///   identity to export fails.
-    /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
-        Ok(self
-            .0
-            .identity
-            .export_encrypted_backup(&mut OsRng, passphrase)?)
-    }
-
-    /// Returns the stored [`SignedPreKeyBundle`].
-    ///
-    /// The bundle is signed by the current discovery key, so verify it against the discovery key's
-    /// verifying key (from [`Self::current_discovery_key_bundle`]), not the identity key.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored blob is malformed.
-    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key is stored.
-    pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
-        Ok(self.0.signed_prekey.current_bundle()?)
-    }
-
-    /// Returns the current [`DiscoveryKeyBundle`], verified against the identity key.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Corrupt`) if the stored discovery key does not verify against
-    ///   the identity key.
-    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
-    /// - [`KeyStoreError::Discovery`] (`Identity`) if loading the identity to verify against fails.
-    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Discovery`] (`NotFound`) if no discovery key is stored.
-    pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, KeyStoreError> {
-        Ok(self.0.discovery.current_bundle()?)
-    }
-
-    /// Rotates the discovery key and its signed pre-key in one operation, returning both bundles.
-    ///
-    /// Advances the discovery-key epoch and generates a fresh signed pre-key signed by the new
-    /// discovery key. The previous signed pre-key is cleared before the new discovery key is stored,
-    /// so a partial failure leaves at most a missing signed pre-key, never one signed by a stale
-    /// discovery key.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::Discovery`] (`EpochExhausted`) if the epoch counter cannot advance.
-    /// - [`KeyStoreError::Discovery`] (`Identity`) if loading the identity fails.
-    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`)
-    ///   on storage failures.
-    pub fn rotate_discovery_key_now(&self) -> Result<PublicationBundle, KeyStoreError> {
-        let _lifecycle = self.lifecycle_guard();
-        self.0.signed_prekey.reset()?;
-        let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
-        let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
-        Ok(PublicationBundle {
-            discovery_key: discovery_key.bundle(),
-            signed_prekey: signed_prekey.bundle(),
-        })
-    }
-
-    /// Returns the current publishable pair: the discovery-key bundle and a signed pre-key signed
-    /// under it.
-    ///
-    /// Rotates the signed pre-key if it is missing or stale, then reads both bundles while holding
-    /// the lifecycle lock, so the returned pair is always internally consistent even if another
-    /// thread rotates the discovery key concurrently. Prefer this for identity publication: reading
-    /// [`Self::current_discovery_key_bundle`] and [`Self::current_signed_prekey_bundle`] separately
-    /// can race a concurrent rotation into a pair the peer rejects.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `NotFound`) if the discovery key
-    ///   is unverifiable, malformed, or absent.
-    /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`)
-    ///   on storage failures.
-    pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
-        let _lifecycle = self.lifecycle_guard();
-        self.0.signed_prekey.rotate_if_stale(&mut OsRng)?;
-        let discovery_key = self.0.discovery.current_bundle()?;
-        let signed_prekey = self.0.signed_prekey.current_bundle()?;
-        Ok(PublicationBundle {
-            discovery_key,
-            signed_prekey,
-        })
-    }
-
     /// Returns whether this keystore has identity data in storage.
     ///
     /// This is a presence check only. Use [`Self::load_identity`] to read and validate the stored
@@ -277,6 +172,87 @@ impl KeyStore {
         Ok(self.0.identity.has_identity()?)
     }
 
+    /// Returns the stored [`SignedPreKeyBundle`] without checking the full publication chain.
+    ///
+    /// Use [`Self::current_publication_bundle`] when publishing. It returns the matching discovery
+    /// key and verifies the pair before returning it.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored blob is malformed.
+    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
+    /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key is stored.
+    pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+        Ok(self.0.signed_prekey.current_bundle()?)
+    }
+
+    /// Returns the current [`DiscoveryKeyBundle`], verified against the identity key.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`Corrupt`) if the stored discovery key does not verify
+    ///   against the identity key.
+    /// - [`KeyStoreError::Discovery`] (`Identity`) if loading the verifying identity fails.
+    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
+    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on storage failures.
+    /// - [`KeyStoreError::Discovery`] (`NotFound`) if no discovery key is stored.
+    pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, KeyStoreError> {
+        Ok(self.0.discovery.current_bundle()?)
+    }
+
+    /// Returns a publishable key pair.
+    ///
+    /// Refreshes a missing or stale signed pre-key, then returns a [`PublicationBundle`] whose
+    /// keys verify together. Prefer this for identity publication over reading the two bundles
+    /// separately.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `NotFound`) if the discovery
+    ///   key is unverifiable, malformed, or absent.
+    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`]
+    ///   (`LockPoisoned` | `Storage`) on storage failures.
+    /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
+    /// - [`KeyStoreError::SignedPreKey`] (`Corrupt`) if the stored signed pre-key does not verify
+    ///   against the current discovery key.
+    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) if signed-pre-key rotation cannot load or
+    ///   verify the discovery key.
+    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
+    ///   malformed.
+    pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.0.signed_prekey.rotate_if_stale(&mut OsRng)?;
+        let discovery_key = self.0.discovery.current_bundle()?;
+        let signed_prekey = self.0.signed_prekey.current_bundle()?;
+        // Reject storage rollback/desync before publishing a mismatched pair.
+        verify_signed_prekey_bundle(&signed_prekey, &discovery_key.verifying_key)
+            .map_err(|_| SignedPreKeyError::Corrupt)?;
+        Ok(PublicationBundle {
+            discovery_key,
+            signed_prekey,
+        })
+    }
+
+    /// Rotates the discovery key and signed pre-key together.
+    ///
+    /// Advances the discovery-key epoch and returns a fresh [`PublicationBundle`]. If
+    /// signed-pre-key storage fails after the discovery key rotates, the old signed pre-key has
+    /// been cleared, so no stale signed pre-key remains publishable with the new discovery key.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
+    /// - [`KeyStoreError::Discovery`] (`Identity`) if loading the identity fails.
+    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
+    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`]
+    ///   (`LockPoisoned` | `Storage`) on storage failures.
+    pub fn rotate_discovery_key_now(&self) -> Result<PublicationBundle, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.0.signed_prekey.reset()?;
+        let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
+        let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
+        Ok(PublicationBundle {
+            discovery_key: discovery_key.bundle(),
+            signed_prekey: signed_prekey.bundle(),
+        })
+    }
+
     /// Rotates the stored signed pre-key when its bundle is stale or missing.
     ///
     /// Returns `Some(bundle)` when callers need to upload a new bundle, or `None` when no rotation
@@ -284,7 +260,8 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key fails.
+    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key
+    ///   fails.
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
     ///   malformed.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
@@ -306,34 +283,43 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key fails.
+    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key
+    ///   fails.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         Ok(self.0.signed_prekey.rotate_now(&mut OsRng)?.bundle())
     }
 
-    /// Restores an identity from an encrypted backup.
-    ///
-    /// Replaces any current identity, clears the previous signed pre-key and discovery key, and
-    /// mints a fresh discovery key (epoch 0) under the restored identity. The discovery key is not
-    /// part of the backup, so a restored device starts a new discovery epoch.
-    ///
-    /// Decryption and validation happen before storage mutation, so wrong passphrases, tampered
-    /// blobs, and wrong-length blobs leave the current state unchanged.
-    ///
-    /// Storage failures after writes begin may leave identity keys from different identities, or an
-    /// identity without a discovery key. That state is invalid until cleared by [`Self::reset`] or
-    /// repaired by [`Self::rotate_discovery_key_now`].
+    /// Exports the stored identity as a passphrase-encrypted backup blob.
     ///
     /// # Errors
+    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on RNG failure, Argon2id derivation error,
+    ///   or authenticated encryption failure.
+    /// - [`KeyStoreError::Identity`] (`Corrupt` | `InvalidData` | `NotFound`) when loading the
+    ///   identity to export fails.
+    /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failures.
+    pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
+        Ok(self
+            .0
+            .identity
+            .export_encrypted_backup(&mut OsRng, passphrase)?)
+    }
+
+    /// Restores an identity from an encrypted backup.
+    ///
+    /// Validates the backup before changing storage. On success, the restored identity has a fresh
+    /// discovery key and no signed pre-key. Callers can create one with
+    /// [`Self::rotate_signed_prekey_if_stale`].
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`Clock` | `LockPoisoned` | `Storage`) on discovery-key
+    ///   reset or generation failure.
     /// - [`KeyStoreError::Identity`] (`BackupFailed`) on Argon2id parameter or derivation failure.
     /// - [`KeyStoreError::Identity`] (`DecryptionFailed`) on wrong passphrase or tampered blob.
     /// - [`KeyStoreError::Identity`] (`InvalidData`) on wrong blob length.
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failure while
     ///   committing the new identity.
-    /// - [`KeyStoreError::Discovery`] (`Clock` | `LockPoisoned` | `Storage`) on discovery-key reset
-    ///   or generation failure.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
     ///   failure.
     pub fn import_encrypted_backup(
@@ -356,8 +342,9 @@ impl KeyStore {
     /// partial failure never leaves a key attached to material that is already gone.
     ///
     /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key delete
+    ///   failure.
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on identity delete failure.
-    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key delete failure.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
     ///   failure.
     pub fn reset(&self) -> Result<(), KeyStoreError> {
@@ -367,85 +354,56 @@ impl KeyStore {
         self.0.identity.reset()?;
         Ok(())
     }
+
+    // Keeps multikey updates from interleaving across cloned keystores. The per-storage mutex only
+    // protects individual storage calls. This guard protects the keychain invariant.
+    fn lifecycle_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::{InMemorySecureStorage, StorageError};
-    use aether_crypto::{verify_bundle, verify_discovery_key_bundle};
+    use aether_crypto::verify_discovery_key_bundle;
     use std::sync::atomic::{AtomicBool, Ordering};
     use zeroize::Zeroizing;
 
     // Storage keys are duplicated from the manager modules so tests can inspect and tamper.
-    const DISCOVERY_KEY_STORAGE_KEY: &str = "discovery/current";
-    const SIGNED_PREKEY_STORAGE_KEY: &str = "prekey/signed";
+    const DISCOVERY_KEY: &str = "discovery/current";
+    const SIGNED_PREKEY: &str = "prekey/signed";
+
+    type SharedStorage = Arc<Mutex<Box<dyn SecureStorage>>>;
 
     fn store() -> KeyStore {
         KeyStore::new(Box::new(InMemorySecureStorage::new()))
     }
 
-    // An in-memory store whose contents the test can inspect and mutate after handing a clone to a
-    // `KeyStore`.
-    #[derive(Clone)]
-    struct SharedMemoryStorage(Arc<Mutex<InMemorySecureStorage>>);
-
-    impl SharedMemoryStorage {
-        fn new() -> Self {
-            SharedMemoryStorage(Arc::new(Mutex::new(InMemorySecureStorage::new())))
-        }
-
-        fn load_blob(&self, key: &str) -> Vec<u8> {
-            self.0.lock().unwrap().load(key).unwrap().unwrap().to_vec()
-        }
-
-        fn put(&self, key: &str, value: &[u8]) {
-            self.0.lock().unwrap().store(key, value).unwrap();
-        }
-
-        fn remove(&self, key: &str) {
-            self.0.lock().unwrap().delete(key).unwrap();
-        }
-    }
-
-    impl SecureStorage for SharedMemoryStorage {
-        fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
-            self.0.lock().unwrap().store(key, value)
-        }
-        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
-            self.0.lock().unwrap().load(key)
-        }
-        fn delete(&mut self, key: &str) -> Result<(), StorageError> {
-            self.0.lock().unwrap().delete(key)
-        }
-    }
-
-    // Returns a `KeyStore` and a shared handle to its backing storage for inspection and tampering.
-    fn shared_store() -> (KeyStore, SharedMemoryStorage) {
-        let storage = SharedMemoryStorage::new();
-        (KeyStore::new(Box::new(storage.clone())), storage)
-    }
-
-    // An in-memory store that fails `store` for one key once armed, to exercise partial-failure paths.
-    struct FailingStorage {
-        inner: Arc<Mutex<InMemorySecureStorage>>,
-        fail_key: String,
-        armed: Arc<AtomicBool>,
-    }
-
-    impl SecureStorage for FailingStorage {
-        fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
-            if self.armed.load(Ordering::SeqCst) && key == self.fail_key {
-                return Err(StorageError::IO("injected store failure".into()));
-            }
-            self.inner.lock().unwrap().store(key, value)
-        }
-        fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
-            self.inner.lock().unwrap().load(key)
-        }
-        fn delete(&mut self, key: &str) -> Result<(), StorageError> {
-            self.inner.lock().unwrap().delete(key)
-        }
+    fn store_with_storage() -> (KeyStore, SharedStorage) {
+        let storage: SharedStorage = Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())));
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
+        let discovery = Arc::new(DiscoveryKeyManager::new(
+            Arc::clone(&storage),
+            Arc::clone(&identity),
+            Arc::clone(&clock),
+        ));
+        let signed_prekey = Arc::new(SignedPreKeyManager::new(
+            Arc::clone(&storage),
+            Arc::clone(&discovery),
+            clock,
+        ));
+        let key_store = KeyStore(Arc::new(KeyStoreInner {
+            identity,
+            discovery,
+            signed_prekey,
+            lifecycle: Mutex::new(()),
+        }));
+        (key_store, storage)
     }
 
     #[test]
@@ -457,12 +415,202 @@ mod tests {
     }
 
     #[test]
-    fn sub_manager_writes_do_not_collide() {
+    fn generate_identity_persists_discovery_key_at_epoch_zero() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let bundle = key_store.current_discovery_key_bundle().unwrap();
+        assert_eq!(bundle.epoch, 0);
+    }
+
+    #[test]
+    fn generate_identity_completes_partial_discovery_key() {
+        let (key_store, storage) = store_with_storage();
+        key_store.generate_identity().unwrap();
+        storage.lock().unwrap().delete(DISCOVERY_KEY).unwrap();
+        key_store.generate_identity().unwrap();
+        assert!(key_store.current_discovery_key_bundle().is_ok());
+    }
+
+    #[test]
+    fn generate_identity_rejects_malformed_discovery_key() {
+        let (key_store, storage) = store_with_storage();
+        key_store.generate_identity().unwrap();
+        storage
+            .lock()
+            .unwrap()
+            .store(DISCOVERY_KEY, &[0xAAu8; 50])
+            .unwrap();
+        assert!(matches!(
+            key_store.generate_identity(),
+            Err(KeyStoreError::Discovery(DiscoveryKeyError::InvalidData(_)))
+        ));
+    }
+
+    #[test]
+    fn load_identity_succeeds_without_discovery_key() {
+        let (key_store, storage) = store_with_storage();
+        key_store.generate_identity().unwrap();
+        storage.lock().unwrap().delete(DISCOVERY_KEY).unwrap();
+        assert!(key_store.load_identity().is_ok());
+    }
+
+    #[test]
+    fn current_publication_bundle_returns_verifiable_chain() {
+        let key_store = store();
+        let identity = key_store.generate_identity().unwrap();
+        let publication = key_store.current_publication_bundle().unwrap();
+        assert!(
+            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
+                .is_ok()
+        );
+        assert!(
+            verify_signed_prekey_bundle(
+                &publication.signed_prekey,
+                &publication.discovery_key.verifying_key
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn current_publication_bundle_rejects_prekey_signed_by_superseded_discovery_key() {
+        let (key_store, storage) = store_with_storage();
+        key_store.generate_identity().unwrap();
+        key_store.current_publication_bundle().unwrap();
+        let stale_prekey = storage
+            .lock()
+            .unwrap()
+            .load(SIGNED_PREKEY)
+            .unwrap()
+            .unwrap()
+            .to_vec();
+        key_store.rotate_discovery_key_now().unwrap();
+        storage
+            .lock()
+            .unwrap()
+            .store(SIGNED_PREKEY, &stale_prekey)
+            .unwrap();
+        assert!(matches!(
+            key_store.current_publication_bundle(),
+            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::Corrupt))
+        ));
+    }
+
+    #[test]
+    fn rotate_discovery_key_now_advances_epoch_and_refreshes_prekey() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let first_dk = key_store.current_discovery_key_bundle().unwrap();
+        assert_eq!(first_dk.epoch, 0);
+
+        let rotation = key_store.rotate_discovery_key_now().unwrap();
+        assert_eq!(rotation.discovery_key.epoch, 1);
+        assert_ne!(
+            rotation.discovery_key.public_key.as_bytes(),
+            first_dk.public_key.as_bytes()
+        );
+        assert!(
+            verify_signed_prekey_bundle(
+                &rotation.signed_prekey,
+                &rotation.discovery_key.verifying_key
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rotate_discovery_key_now_failure_leaves_no_mismatched_prekey() {
+        struct FailingSignedPreKeyStorage {
+            inner: InMemorySecureStorage,
+            should_fail: Arc<AtomicBool>,
+        }
+
+        impl SecureStorage for FailingSignedPreKeyStorage {
+            fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
+                if self.should_fail.load(Ordering::SeqCst) && key == SIGNED_PREKEY {
+                    return Err(StorageError::IO("injected store failure".into()));
+                }
+                self.inner.store(key, value)
+            }
+
+            fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
+                self.inner.load(key)
+            }
+
+            fn delete(&mut self, key: &str) -> Result<(), StorageError> {
+                self.inner.delete(key)
+            }
+        }
+
+        let should_fail = Arc::new(AtomicBool::new(false));
+        let storage = FailingSignedPreKeyStorage {
+            inner: InMemorySecureStorage::new(),
+            should_fail: Arc::clone(&should_fail),
+        };
+        let key_store = KeyStore::new(Box::new(storage));
+        key_store.generate_identity().unwrap();
+        assert!(key_store.rotate_signed_prekey_if_stale().unwrap().is_some());
+
+        should_fail.store(true, Ordering::SeqCst);
+        assert!(key_store.rotate_discovery_key_now().is_err());
+        should_fail.store(false, Ordering::SeqCst);
+
+        assert_eq!(key_store.current_discovery_key_bundle().unwrap().epoch, 1);
+        assert!(matches!(
+            key_store.current_signed_prekey_bundle(),
+            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
+        ));
+    }
+
+    #[test]
+    fn concurrent_rotations_keep_discovery_key_and_signed_prekey_consistent() {
         let key_store = store();
         key_store.generate_identity().unwrap();
         key_store.rotate_signed_prekey_if_stale().unwrap();
-        assert!(key_store.load_identity().is_ok());
-        assert!(key_store.current_signed_prekey_bundle().is_ok());
+
+        let rotate_discovery = key_store.clone();
+        let rotate_prekey = key_store.clone();
+        let discovery_thread = std::thread::spawn(move || {
+            for _ in 0..8 {
+                rotate_discovery.rotate_discovery_key_now().unwrap();
+            }
+        });
+        let prekey_thread = std::thread::spawn(move || {
+            for _ in 0..8 {
+                rotate_prekey.rotate_signed_prekey_now().unwrap();
+            }
+        });
+        discovery_thread.join().unwrap();
+        prekey_thread.join().unwrap();
+
+        let discovery = key_store.current_discovery_key_bundle().unwrap();
+        let prekey = key_store.current_signed_prekey_bundle().unwrap();
+        assert!(verify_signed_prekey_bundle(&prekey, &discovery.verifying_key).is_ok());
+    }
+
+    #[test]
+    fn concurrent_publication_and_rotation_stays_consistent() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+
+        let publisher = key_store.clone();
+        let rotator = key_store.clone();
+        let rotate_thread = std::thread::spawn(move || {
+            for _ in 0..8 {
+                rotator.rotate_discovery_key_now().unwrap();
+            }
+        });
+        for _ in 0..8 {
+            let publication = publisher.current_publication_bundle().unwrap();
+            assert!(
+                verify_signed_prekey_bundle(
+                    &publication.signed_prekey,
+                    &publication.discovery_key.verifying_key
+                )
+                .is_ok()
+            );
+        }
+        rotate_thread.join().unwrap();
     }
 
     #[test]
@@ -510,7 +658,6 @@ mod tests {
         source_store.generate_identity().unwrap();
         let backup = source_store.export_encrypted_backup("pass").unwrap();
 
-        // Import clears the stale signed pre-key from the previous identity.
         destination_store
             .import_encrypted_backup(&backup, "pass")
             .unwrap();
@@ -518,13 +665,6 @@ mod tests {
             destination_store.current_signed_prekey_bundle(),
             Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
         ));
-
-        let imported_identity = destination_store.load_identity().unwrap();
-        let source_identity = source_store.load_identity().unwrap();
-        assert_eq!(
-            imported_identity.verifying_key().as_bytes(),
-            source_identity.verifying_key().as_bytes()
-        );
     }
 
     #[test]
@@ -544,17 +684,17 @@ mod tests {
         let rotated_bundle = destination_store.current_signed_prekey_bundle().unwrap();
         let imported_identity = destination_store.load_identity().unwrap();
         let discovery_bundle = destination_store.current_discovery_key_bundle().unwrap();
-        // The fresh discovery key verifies under the imported identity, and the signed pre-key
-        // verifies under that discovery key.
         assert!(
             verify_discovery_key_bundle(&discovery_bundle, imported_identity.verifying_key())
                 .is_ok()
         );
-        assert!(verify_bundle(&rotated_bundle, &discovery_bundle.verifying_key).is_ok());
+        assert!(
+            verify_signed_prekey_bundle(&rotated_bundle, &discovery_bundle.verifying_key).is_ok()
+        );
     }
 
     #[test]
-    fn reset_clears_identity_and_signed_prekey() {
+    fn reset_clears_identity_discovery_key_and_signed_prekey() {
         let key_store = store();
         key_store.generate_identity().unwrap();
         key_store.rotate_signed_prekey_if_stale().unwrap();
@@ -564,20 +704,13 @@ mod tests {
             Err(KeyStoreError::Identity(IdentityError::NotFound))
         ));
         assert!(matches!(
+            key_store.current_discovery_key_bundle(),
+            Err(KeyStoreError::Discovery(DiscoveryKeyError::NotFound))
+        ));
+        assert!(matches!(
             key_store.current_signed_prekey_bundle(),
             Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
         ));
-    }
-
-    #[test]
-    fn reset_returns_store_to_first_launch_state() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_if_stale().unwrap();
-        key_store.reset().unwrap();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_if_stale().unwrap();
-        assert!(key_store.current_signed_prekey_bundle().is_ok());
     }
 
     #[test]
@@ -585,266 +718,5 @@ mod tests {
         let key_store = store();
         key_store.reset().unwrap();
         key_store.reset().unwrap();
-    }
-
-    #[test]
-    fn generate_identity_persists_discovery_key_at_epoch_zero() {
-        let key_store = store();
-        let identity = key_store.generate_identity().unwrap();
-        let bundle = key_store.current_discovery_key_bundle().unwrap();
-        assert_eq!(bundle.epoch, 0);
-        assert!(verify_discovery_key_bundle(&bundle, identity.verifying_key()).is_ok());
-    }
-
-    #[test]
-    fn generate_identity_twice_returns_already_exists() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        assert!(matches!(
-            key_store.generate_identity(),
-            Err(KeyStoreError::Identity(IdentityError::AlreadyExists))
-        ));
-    }
-
-    #[test]
-    fn load_identity_succeeds_without_discovery_key() {
-        let (key_store, storage) = shared_store();
-        key_store.generate_identity().unwrap();
-        // Drop the discovery key directly; the identity must still load (IK-only load).
-        storage.remove(DISCOVERY_KEY_STORAGE_KEY);
-        assert!(key_store.load_identity().is_ok());
-        assert!(matches!(
-            key_store.current_discovery_key_bundle(),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::NotFound))
-        ));
-    }
-
-    #[test]
-    fn current_discovery_key_bundle_rejects_tampered_signature() {
-        let (key_store, storage) = shared_store();
-        key_store.generate_identity().unwrap();
-        let mut blob = storage.load_blob(DISCOVERY_KEY_STORAGE_KEY);
-        blob[69] ^= 0x01; // flip a byte in the identity-signature region
-        storage.put(DISCOVERY_KEY_STORAGE_KEY, &blob);
-        assert!(matches!(
-            key_store.current_discovery_key_bundle(),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::Corrupt))
-        ));
-    }
-
-    #[test]
-    fn generate_identity_completes_partial_discovery_key() {
-        let (key_store, storage) = shared_store();
-        key_store.generate_identity().unwrap();
-        // Simulate a partial first launch: identity stored, discovery key never written.
-        storage.remove(DISCOVERY_KEY_STORAGE_KEY);
-        // A retry completes the discovery key rather than erroring with AlreadyExists.
-        key_store.generate_identity().unwrap();
-        assert!(key_store.current_discovery_key_bundle().is_ok());
-    }
-
-    #[test]
-    fn generate_identity_rejects_malformed_discovery_key() {
-        let (key_store, storage) = shared_store();
-        key_store.generate_identity().unwrap();
-        storage.put(DISCOVERY_KEY_STORAGE_KEY, &[0xAAu8; 50]);
-        assert!(matches!(
-            key_store.generate_identity(),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::InvalidData(_)))
-        ));
-    }
-
-    #[test]
-    fn rotate_discovery_key_now_advances_epoch_and_refreshes_prekey() {
-        let key_store = store();
-        let identity = key_store.generate_identity().unwrap();
-        let first_dk = key_store.current_discovery_key_bundle().unwrap();
-        assert_eq!(first_dk.epoch, 0);
-
-        let rotation = key_store.rotate_discovery_key_now().unwrap();
-        assert_eq!(rotation.discovery_key.epoch, 1);
-        assert_ne!(
-            rotation.discovery_key.public_key.as_bytes(),
-            first_dk.public_key.as_bytes()
-        );
-        // Identity keys stay stable across discovery-key rotation.
-        assert_eq!(
-            key_store
-                .load_identity()
-                .unwrap()
-                .verifying_key()
-                .as_bytes(),
-            identity.verifying_key().as_bytes()
-        );
-        // The returned bundles verify as a chain: identity -> discovery key -> signed pre-key.
-        assert!(
-            verify_discovery_key_bundle(&rotation.discovery_key, identity.verifying_key()).is_ok()
-        );
-        assert!(
-            verify_bundle(
-                &rotation.signed_prekey,
-                &rotation.discovery_key.verifying_key
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn repeated_rotations_match_persisted_state() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_discovery_key_now().unwrap();
-        let rotation = key_store.rotate_discovery_key_now().unwrap();
-        assert_eq!(rotation.discovery_key.epoch, 2);
-
-        let persisted_dk = key_store.current_discovery_key_bundle().unwrap();
-        let persisted_spk = key_store.current_signed_prekey_bundle().unwrap();
-        assert_eq!(
-            persisted_dk.public_key.as_bytes(),
-            rotation.discovery_key.public_key.as_bytes()
-        );
-        assert_eq!(persisted_dk.epoch, rotation.discovery_key.epoch);
-        assert_eq!(
-            persisted_spk.public_key.as_bytes(),
-            rotation.signed_prekey.public_key.as_bytes()
-        );
-    }
-
-    #[test]
-    fn rotate_discovery_key_now_failure_leaves_no_mismatched_prekey() {
-        let inner = Arc::new(Mutex::new(InMemorySecureStorage::new()));
-        let armed = Arc::new(AtomicBool::new(false));
-        let storage = FailingStorage {
-            inner: Arc::clone(&inner),
-            fail_key: SIGNED_PREKEY_STORAGE_KEY.to_string(),
-            armed: Arc::clone(&armed),
-        };
-        let key_store = KeyStore::new(Box::new(storage));
-        key_store.generate_identity().unwrap();
-        assert!(key_store.rotate_signed_prekey_if_stale().unwrap().is_some());
-
-        // Arm the failure: storing the new signed pre-key fails midway through rotation.
-        armed.store(true, Ordering::SeqCst);
-        assert!(key_store.rotate_discovery_key_now().is_err());
-        armed.store(false, Ordering::SeqCst);
-
-        // The discovery key advanced to epoch 1, and the stale epoch-0 pre-key was cleared rather
-        // than left paired with the new discovery key: no mismatched pair is observable.
-        assert_eq!(key_store.current_discovery_key_bundle().unwrap().epoch, 1);
-        assert!(matches!(
-            key_store.current_signed_prekey_bundle(),
-            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
-        ));
-    }
-
-    #[test]
-    fn reset_clears_discovery_key() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.reset().unwrap();
-        assert!(matches!(
-            key_store.current_discovery_key_bundle(),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::NotFound))
-        ));
-    }
-
-    #[test]
-    fn persistence_round_trip_restores_identity_and_discovery_key() {
-        let storage = SharedMemoryStorage::new();
-        let first = KeyStore::new(Box::new(storage.clone()));
-        first.generate_identity().unwrap();
-        first.rotate_discovery_key_now().unwrap();
-        let dk = first.current_discovery_key_bundle().unwrap();
-        let identity = first.load_identity().unwrap();
-        drop(first);
-
-        let second = KeyStore::new(Box::new(storage));
-        let restored_identity = second.load_identity().unwrap();
-        let restored_dk = second.current_discovery_key_bundle().unwrap();
-        assert_eq!(
-            restored_identity.verifying_key().as_bytes(),
-            identity.verifying_key().as_bytes()
-        );
-        assert_eq!(restored_dk.public_key.as_bytes(), dk.public_key.as_bytes());
-        assert_eq!(restored_dk.epoch, dk.epoch);
-    }
-
-    #[test]
-    fn concurrent_rotations_keep_discovery_key_and_signed_prekey_consistent() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_if_stale().unwrap();
-
-        // One thread rotates the discovery key (advancing the epoch); another rotates the signed
-        // pre-key (signing it under whatever discovery key is current). Without the lifecycle lock,
-        // an interleaving can persist a new discovery key paired with a stale-DK-signed pre-key.
-        let rotate_discovery = key_store.clone();
-        let rotate_prekey = key_store.clone();
-        let discovery_thread = std::thread::spawn(move || {
-            for _ in 0..40 {
-                rotate_discovery.rotate_discovery_key_now().unwrap();
-            }
-        });
-        let prekey_thread = std::thread::spawn(move || {
-            for _ in 0..40 {
-                rotate_prekey.rotate_signed_prekey_now().unwrap();
-            }
-        });
-        discovery_thread.join().unwrap();
-        prekey_thread.join().unwrap();
-
-        // The persisted signed pre-key must verify under the persisted discovery key.
-        let discovery = key_store.current_discovery_key_bundle().unwrap();
-        let prekey = key_store.current_signed_prekey_bundle().unwrap();
-        assert!(verify_bundle(&prekey, &discovery.verifying_key).is_ok());
-    }
-
-    #[test]
-    fn current_publication_bundle_returns_verifiable_chain() {
-        let key_store = store();
-        let identity = key_store.generate_identity().unwrap();
-        let publication = key_store.current_publication_bundle().unwrap();
-        // Chain verifies: identity -> discovery key -> signed pre-key.
-        assert!(
-            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
-                .is_ok()
-        );
-        assert!(
-            verify_bundle(
-                &publication.signed_prekey,
-                &publication.discovery_key.verifying_key
-            )
-            .is_ok()
-        );
-        // Reading the pair does not rotate the discovery key.
-        let again = key_store.current_publication_bundle().unwrap();
-        assert_eq!(again.discovery_key.epoch, publication.discovery_key.epoch);
-    }
-
-    #[test]
-    fn concurrent_publication_and_rotation_stays_consistent() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-
-        let publisher = key_store.clone();
-        let rotator = key_store.clone();
-        let rotate_thread = std::thread::spawn(move || {
-            for _ in 0..40 {
-                rotator.rotate_discovery_key_now().unwrap();
-            }
-        });
-        // Every atomically-read publication bundle verifies as a chain, even while the discovery
-        // key rotates concurrently — the read sequence runs inside the lifecycle critical section.
-        for _ in 0..40 {
-            let publication = publisher.current_publication_bundle().unwrap();
-            assert!(
-                verify_bundle(
-                    &publication.signed_prekey,
-                    &publication.discovery_key.verifying_key
-                )
-                .is_ok()
-            );
-        }
-        rotate_thread.join().unwrap();
     }
 }

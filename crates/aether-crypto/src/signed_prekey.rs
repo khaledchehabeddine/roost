@@ -10,8 +10,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 // Domain separator for signatures over signed pre-key public keys.
 const SIGNED_PREKEY_DOMAIN: &[u8] = b"aether-spk-v1:";
 
-/// An X25519 pre-key signed by an Ed25519 signing key — the discovery key, under the two-key
-/// identity.
+/// An X25519 pre-key signed by an Ed25519 signing key.
 ///
 /// The secret key is zeroed on drop. The public key, signature, and creation timestamp remain
 /// available through accessors and bundle export.
@@ -52,7 +51,9 @@ impl SignedPreKey {
         Zeroizing::new(self.secret_key.to_bytes())
     }
 
-    /// Restores a signed pre-key from its persisted parts.
+    /// Restores a signed pre-key from secret bytes and stored metadata.
+    ///
+    /// The public key is derived from `secret`. The stored signature is not verified here.
     pub fn from_secret_bytes(secret: [u8; 32], signature: [u8; 64], created_at: u64) -> Self {
         let secret_key = StaticSecret::from(secret);
         let public_key = PublicKey::from(&secret_key);
@@ -77,29 +78,29 @@ impl SignedPreKey {
 
 /// Public signed pre-key material distributed to peers.
 ///
-/// The signer's verifying key is not embedded. Callers pass it to [`verify_bundle`] separately — the
-/// discovery key's verifying key, under the two-key identity.
+/// The signer's verifying key is not embedded. Pass the verifying key to
+/// [`verify_signed_prekey_bundle`].
 #[derive(Clone, Debug)]
 pub struct SignedPreKeyBundle {
     /// X25519 public key used by the peer during handshake root-key derivation.
     pub public_key: PublicKey,
     /// Ed25519 signature over the domain-separated signed pre-key payload.
     pub signature: Signature,
-    /// Unix timestamp in seconds when the signed pre-key was generated.
+    /// Unix timestamp in seconds. The signature covers only [`Self::public_key`].
     pub created_at: u64,
 }
 
-/// Generates a signed pre-key signed by the given Ed25519 signing key, using `rng`.
+/// Generates a signed pre-key with the supplied Ed25519 signing key.
 #[must_use]
 pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
-    identity: &SigningKeyPair,
+    signing_key: &SigningKeyPair,
     created_at: u64,
 ) -> SignedPreKey {
     let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
     let payload = signed_prekey_payload(&public_key);
-    let signature = identity.sign(&payload);
+    let signature = signing_key.sign(&payload);
     SignedPreKey {
         secret_key,
         public_key,
@@ -110,16 +111,14 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
 
 /// Verifies a signed pre-key bundle against the verifying key that signed it.
 ///
-/// Under the two-key identity, that is the discovery key's verifying key.
-///
 /// # Errors
 /// - [`CryptoError::SignatureInvalid`] when the signature does not validate.
-pub fn verify_bundle(
+pub fn verify_signed_prekey_bundle(
     bundle: &SignedPreKeyBundle,
-    identity_verifying_key: &VerifyingKey,
+    signer_verifying_key: &VerifyingKey,
 ) -> Result<(), CryptoError> {
     let payload = signed_prekey_payload(&bundle.public_key);
-    identity_verifying_key
+    signer_verifying_key
         .verify(&payload, &bundle.signature)
         .map_err(|_| CryptoError::SignatureInvalid)
 }
@@ -145,10 +144,19 @@ mod tests {
     }
 
     #[test]
+    fn generate_and_verify_round_trip() {
+        let mut rng = seeded_rng();
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &signing_key, FIXED_CREATED_AT);
+        let bundle = signed_prekey.bundle();
+        assert!(verify_signed_prekey_bundle(&bundle, &signing_key.verifying).is_ok());
+    }
+
+    #[test]
     fn bundle_fields_match_signed_prekey() {
         let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &signing_key, FIXED_CREATED_AT);
         let bundle = signed_prekey.bundle();
         assert_eq!(
             bundle.public_key.as_bytes(),
@@ -162,25 +170,16 @@ mod tests {
     }
 
     #[test]
-    fn generate_and_verify_round_trip() {
-        let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
-        let bundle = signed_prekey.bundle();
-        assert!(verify_bundle(&bundle, &identity.verifying).is_ok());
-    }
-
-    #[test]
     fn verify_rejects_tampered_public_key() {
         let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &signing_key, FIXED_CREATED_AT);
         let mut bundle = signed_prekey.bundle();
         let mut public_key_bytes = *bundle.public_key.as_bytes();
         public_key_bytes[0] ^= 0x01;
         bundle.public_key = PublicKey::from(public_key_bytes);
         assert!(matches!(
-            verify_bundle(&bundle, &identity.verifying),
+            verify_signed_prekey_bundle(&bundle, &signing_key.verifying),
             Err(CryptoError::SignatureInvalid)
         ));
     }
@@ -188,8 +187,8 @@ mod tests {
     #[test]
     fn verify_rejects_tampered_signature() {
         let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &signing_key, FIXED_CREATED_AT);
         let bundle = signed_prekey.bundle();
         let mut signature_bytes = bundle.signature.to_bytes();
         signature_bytes[0] ^= 0x01;
@@ -199,20 +198,20 @@ mod tests {
             created_at: bundle.created_at,
         };
         assert!(matches!(
-            verify_bundle(&tampered, &identity.verifying),
+            verify_signed_prekey_bundle(&tampered, &signing_key.verifying),
             Err(CryptoError::SignatureInvalid)
         ));
     }
 
     #[test]
-    fn verify_rejects_wrong_identity() {
+    fn verify_rejects_wrong_signer() {
         let mut rng = seeded_rng();
-        let identity_a = generate_signing_key_pair(&mut rng);
-        let identity_b = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(&mut rng, &identity_a, FIXED_CREATED_AT);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let wrong_signing_key = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &signing_key, FIXED_CREATED_AT);
         let bundle = signed_prekey.bundle();
         assert!(matches!(
-            verify_bundle(&bundle, &identity_b.verifying),
+            verify_signed_prekey_bundle(&bundle, &wrong_signing_key.verifying),
             Err(CryptoError::SignatureInvalid)
         ));
     }
@@ -220,16 +219,16 @@ mod tests {
     #[test]
     fn signature_without_domain_prefix_fails_verification() {
         let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
+        let signing_key = generate_signing_key_pair(&mut rng);
         let key_pair = generate_key_pair(&mut rng);
-        let bare_signature = identity.sign(key_pair.public.as_bytes());
+        let bare_signature = signing_key.sign(key_pair.public.as_bytes());
         let bundle = SignedPreKeyBundle {
             public_key: key_pair.public,
             signature: bare_signature,
             created_at: FIXED_CREATED_AT,
         };
         assert!(matches!(
-            verify_bundle(&bundle, &identity.verifying),
+            verify_signed_prekey_bundle(&bundle, &signing_key.verifying),
             Err(CryptoError::SignatureInvalid)
         ));
     }
@@ -237,8 +236,8 @@ mod tests {
     #[test]
     fn from_secret_bytes_round_trip() {
         let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
-        let original = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let original = generate_signed_prekey(&mut rng, &signing_key, FIXED_CREATED_AT);
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
@@ -254,24 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn restored_bundle_verifies_against_original_identity() {
+    fn from_secret_bytes_restores_diffie_hellman_secret() {
         let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
-        let original = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
-        let restored = SignedPreKey::from_secret_bytes(
-            *original.to_secret_bytes(),
-            original.signature().to_bytes(),
-            original.created_at(),
-        );
-        let bundle = restored.bundle();
-        assert!(verify_bundle(&bundle, &identity.verifying).is_ok());
-    }
-
-    #[test]
-    fn diffie_hellman_after_from_secret_bytes() {
-        let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
-        let original = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let original = generate_signed_prekey(&mut rng, &signing_key, FIXED_CREATED_AT);
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),

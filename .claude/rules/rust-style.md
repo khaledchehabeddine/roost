@@ -5,7 +5,7 @@ paths:
 
 # Rust Style Rules
 
-- Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions
+- Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions, with each impl grouped with the type or trait it implements
 - No `pub use` glob re-exports
 - Local names: short when one obvious value is in scope; role names when same-shaped values coexist (including tests)
 - Functions: verbs for actions (`generate_*`, `rotate_*`, `verify_*`); nouns for accessors (`current_bundle`, `public_key`); predicates with `is_*`/`has_*`

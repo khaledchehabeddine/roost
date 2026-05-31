@@ -1,13 +1,13 @@
-//! UniFFI record types for public identity and signed pre-key material.
+//! UniFFI public identity and publication records.
 
 use aether_core::{Identity as CoreIdentity, PublicationBundle as CorePublicationBundle};
 use aether_crypto::{
     DiscoveryKeyBundle as CoreDiscoveryKeyBundle, SignedPreKeyBundle as CoreSignedPreKeyBundle,
 };
 
-/// Identity material exposed through UniFFI.
+/// Public identity material exposed through UniFFI.
 ///
-/// Contains only public key material. It is safe to cache and send to peers.
+/// Contains only public key material and is safe to cache or send to peers.
 #[derive(uniffi::Record)]
 pub struct Identity {
     /// X25519 public key bytes. Always 32 bytes.
@@ -25,18 +25,16 @@ impl From<CoreIdentity> for Identity {
     }
 }
 
-/// Public signed pre-key material a peer uses to start a session with this identity.
+/// Public signed pre-key material used to start a session.
 ///
-/// The current discovery key signs [`SignedPreKeyBundle::public_key`] with its Ed25519 key (the
-/// discovery key is itself signed by the identity key). The verifying key is not embedded; verifiers
-/// retrieve the discovery-key bundle separately and verify this bundle against its verifying key.
+/// Verify this bundle with the matching discovery-key verifying key.
 #[derive(uniffi::Record)]
 pub struct SignedPreKeyBundle {
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
     /// Ed25519 signature over `public_key`. Always 64 bytes.
     pub signature: Vec<u8>,
-    /// Unix timestamp in seconds when this signed pre-key was generated.
+    /// Generated timestamp in Unix seconds.
     pub created_at: u64,
 }
 
@@ -52,9 +50,7 @@ impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
 
 /// Public discovery-key material a peer uses to verify this identity's signed pre-keys.
 ///
-/// The permanent identity key signs this bundle; the identity verifying key is not embedded.
-/// Verifiers retrieve it separately and verify this bundle against it, then verify signed pre-keys
-/// against [`DiscoveryKeyBundle::verifying_key`].
+/// Verify this bundle with the identity verifying key before trusting [`Self::verifying_key`].
 #[derive(uniffi::Record)]
 pub struct DiscoveryKeyBundle {
     /// X25519 key-agreement public key bytes. Always 32 bytes.
@@ -63,9 +59,9 @@ pub struct DiscoveryKeyBundle {
     pub verifying_key: Vec<u8>,
     /// Identity-key Ed25519 signature over this discovery key. Always 64 bytes.
     pub signature: Vec<u8>,
-    /// Rotation epoch, monotonic within a storage lineage.
+    /// Rotation epoch, monotonic within one storage lineage.
     pub epoch: u32,
-    /// Unix timestamp in seconds when this discovery key was generated.
+    /// Generated timestamp in Unix seconds.
     pub created_at: u64,
 }
 
@@ -81,14 +77,14 @@ impl From<CoreDiscoveryKeyBundle> for DiscoveryKeyBundle {
     }
 }
 
-/// A publishable pair: a discovery-key bundle and the signed pre-key signed under it.
+/// A publishable discovery-key bundle and signed pre-key pair.
 ///
-/// Returned by `KeyStore::rotate_discovery_key_now` and `KeyStore::current_publication_bundle`.
+/// The signed pre-key verifies with the included discovery key.
 #[derive(uniffi::Record)]
 pub struct PublicationBundle {
-    /// The freshly generated discovery-key bundle.
+    /// Discovery-key bundle for this publication.
     pub discovery_key: DiscoveryKeyBundle,
-    /// The freshly generated signed pre-key, signed by the new discovery key.
+    /// Signed pre-key bundle for this publication.
     pub signed_prekey: SignedPreKeyBundle,
 }
 
