@@ -31,12 +31,10 @@
 //!     store.generate_identity()?;
 //! }
 //!
-//! // Publish the discovery-key bundle (signed by the identity key) alongside the signed pre-key
-//! // (signed by the discovery key); peers verify identity -> discovery key -> signed pre-key.
-//! let discovery_key = store.current_discovery_key_bundle()?;
-//! store.rotate_signed_prekey_if_stale()?;
-//! let signed_prekey = store.current_signed_prekey_bundle()?;
-//! publish(&discovery_key, &signed_prekey)?;
+//! // Publish a consistent discovery-key + signed-pre-key pair; peers verify the chain
+//! // identity -> discovery key -> signed pre-key.
+//! let publication = store.current_publication_bundle()?;
+//! publish(&publication.discovery_key, &publication.signed_prekey)?;
 //! # Ok::<(), AetherError>(())
 //! ```
 //!
@@ -56,5 +54,5 @@ mod storage;
 
 pub use error::AetherError;
 pub use key_store::KeyStore;
-pub use records::{DiscoveryKeyBundle, DiscoveryKeyRotationBundle, Identity, SignedPreKeyBundle};
+pub use records::{DiscoveryKeyBundle, Identity, PublicationBundle, SignedPreKeyBundle};
 pub use storage::{InMemorySecureStorage, SecureStorage};

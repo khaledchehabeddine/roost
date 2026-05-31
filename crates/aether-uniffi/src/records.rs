@@ -1,8 +1,6 @@
 //! UniFFI record types for public identity and signed pre-key material.
 
-use aether_core::{
-    DiscoveryKeyRotationBundle as CoreDiscoveryKeyRotationBundle, Identity as CoreIdentity,
-};
+use aether_core::{Identity as CoreIdentity, PublicationBundle as CorePublicationBundle};
 use aether_crypto::{
     DiscoveryKeyBundle as CoreDiscoveryKeyBundle, SignedPreKeyBundle as CoreSignedPreKeyBundle,
 };
@@ -83,18 +81,20 @@ impl From<CoreDiscoveryKeyBundle> for DiscoveryKeyBundle {
     }
 }
 
-/// The discovery-key and signed-pre-key bundles produced by a single discovery-key rotation.
+/// A publishable pair: a discovery-key bundle and the signed pre-key signed under it.
+///
+/// Returned by `KeyStore::rotate_discovery_key_now` and `KeyStore::current_publication_bundle`.
 #[derive(uniffi::Record)]
-pub struct DiscoveryKeyRotationBundle {
+pub struct PublicationBundle {
     /// The freshly generated discovery-key bundle.
     pub discovery_key: DiscoveryKeyBundle,
     /// The freshly generated signed pre-key, signed by the new discovery key.
     pub signed_prekey: SignedPreKeyBundle,
 }
 
-impl From<CoreDiscoveryKeyRotationBundle> for DiscoveryKeyRotationBundle {
-    fn from(b: CoreDiscoveryKeyRotationBundle) -> Self {
-        DiscoveryKeyRotationBundle {
+impl From<CorePublicationBundle> for PublicationBundle {
+    fn from(b: CorePublicationBundle) -> Self {
+        PublicationBundle {
             discovery_key: b.discovery_key.into(),
             signed_prekey: b.signed_prekey.into(),
         }

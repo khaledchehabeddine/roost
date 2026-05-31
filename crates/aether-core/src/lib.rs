@@ -25,14 +25,10 @@
 //! let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
 //! // Generating an identity also mints its first discovery key (epoch 0).
 //! let identity = store.generate_identity()?;
-//! let discovery_key = store.current_discovery_key_bundle()?;
-//! let signed_prekey = match store.rotate_signed_prekey_if_stale()? {
-//!     Some(bundle) => bundle,
-//!     None => store.current_signed_prekey_bundle()?,
-//! };
-//! // Publish the identity, the discovery-key bundle it signs, and the signed pre-key the
-//! // discovery key signs.
-//! publish_identity_bundle(&identity, &discovery_key, &signed_prekey)?;
+//! // Publish the identity plus a consistent discovery-key + signed-pre-key pair. Reading the two
+//! // bundles separately could race a concurrent rotation into a mismatched pair.
+//! let publication = store.current_publication_bundle()?;
+//! publish_identity_bundle(&identity, &publication.discovery_key, &publication.signed_prekey)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -47,6 +43,6 @@ mod test_support;
 
 pub use discovery_key::DiscoveryKeyError;
 pub use identity::{Identity, IdentityError};
-pub use key_store::{DiscoveryKeyRotationBundle, KeyStore, KeyStoreError};
+pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};

@@ -58,12 +58,13 @@ impl From<DiscoveryKeyError> for KeyStoreError {
     }
 }
 
-/// The discovery-key bundle and signed-pre-key bundle produced by a single discovery-key rotation.
+/// A publishable pair: a discovery-key bundle and the signed pre-key signed under it.
 ///
+/// Returned by [`KeyStore::rotate_discovery_key_now`] and [`KeyStore::current_publication_bundle`].
 /// Verify [`Self::discovery_key`] against the identity verifying key, then verify
 /// [`Self::signed_prekey`] against the discovery key's verifying key.
 #[derive(Clone, Debug)]
-pub struct DiscoveryKeyRotationBundle {
+pub struct PublicationBundle {
     /// The freshly generated discovery-key bundle.
     pub discovery_key: DiscoveryKeyBundle,
     /// The freshly generated signed pre-key, signed by the new discovery key.
@@ -227,14 +228,40 @@ impl KeyStore {
     /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
     /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`)
     ///   on storage failures.
-    pub fn rotate_discovery_key_now(&self) -> Result<DiscoveryKeyRotationBundle, KeyStoreError> {
+    pub fn rotate_discovery_key_now(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.0.signed_prekey.reset()?;
         let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
         let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
-        Ok(DiscoveryKeyRotationBundle {
+        Ok(PublicationBundle {
             discovery_key: discovery_key.bundle(),
             signed_prekey: signed_prekey.bundle(),
+        })
+    }
+
+    /// Returns the current publishable pair: the discovery-key bundle and a signed pre-key signed
+    /// under it.
+    ///
+    /// Rotates the signed pre-key if it is missing or stale, then reads both bundles while holding
+    /// the lifecycle lock, so the returned pair is always internally consistent even if another
+    /// thread rotates the discovery key concurrently. Prefer this for identity publication: reading
+    /// [`Self::current_discovery_key_bundle`] and [`Self::current_signed_prekey_bundle`] separately
+    /// can race a concurrent rotation into a pair the peer rejects.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `NotFound`) if the discovery key
+    ///   is unverifiable, malformed, or absent.
+    /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
+    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`)
+    ///   on storage failures.
+    pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.0.signed_prekey.rotate_if_stale(&mut OsRng)?;
+        let discovery_key = self.0.discovery.current_bundle()?;
+        let signed_prekey = self.0.signed_prekey.current_bundle()?;
+        Ok(PublicationBundle {
+            discovery_key,
+            signed_prekey,
         })
     }
 
@@ -257,7 +284,7 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::SignedPreKey`] (`Identity`) when loading the identity fails.
+    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key fails.
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
     ///   malformed.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
@@ -279,7 +306,7 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::SignedPreKey`] (`Identity`) when loading the identity fails.
+    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key fails.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
@@ -770,5 +797,54 @@ mod tests {
         let discovery = key_store.current_discovery_key_bundle().unwrap();
         let prekey = key_store.current_signed_prekey_bundle().unwrap();
         assert!(verify_bundle(&prekey, &discovery.verifying_key).is_ok());
+    }
+
+    #[test]
+    fn current_publication_bundle_returns_verifiable_chain() {
+        let key_store = store();
+        let identity = key_store.generate_identity().unwrap();
+        let publication = key_store.current_publication_bundle().unwrap();
+        // Chain verifies: identity -> discovery key -> signed pre-key.
+        assert!(
+            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
+                .is_ok()
+        );
+        assert!(
+            verify_bundle(
+                &publication.signed_prekey,
+                &publication.discovery_key.verifying_key
+            )
+            .is_ok()
+        );
+        // Reading the pair does not rotate the discovery key.
+        let again = key_store.current_publication_bundle().unwrap();
+        assert_eq!(again.discovery_key.epoch, publication.discovery_key.epoch);
+    }
+
+    #[test]
+    fn concurrent_publication_and_rotation_stays_consistent() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+
+        let publisher = key_store.clone();
+        let rotator = key_store.clone();
+        let rotate_thread = std::thread::spawn(move || {
+            for _ in 0..40 {
+                rotator.rotate_discovery_key_now().unwrap();
+            }
+        });
+        // Every atomically-read publication bundle verifies as a chain, even while the discovery
+        // key rotates concurrently — the read sequence runs inside the lifecycle critical section.
+        for _ in 0..40 {
+            let publication = publisher.current_publication_bundle().unwrap();
+            assert!(
+                verify_bundle(
+                    &publication.signed_prekey,
+                    &publication.discovery_key.verifying_key
+                )
+                .is_ok()
+            );
+        }
+        rotate_thread.join().unwrap();
     }
 }

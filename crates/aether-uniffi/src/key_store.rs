@@ -2,9 +2,7 @@
 
 use crate::SecureStorage;
 use crate::error::AetherError;
-use crate::records::{
-    DiscoveryKeyBundle, DiscoveryKeyRotationBundle, Identity, SignedPreKeyBundle,
-};
+use crate::records::{DiscoveryKeyBundle, Identity, PublicationBundle, SignedPreKeyBundle};
 use crate::storage::SecureStorageAdapter;
 use aether_core::KeyStore as CoreKeyStore;
 use std::sync::Arc;
@@ -197,8 +195,10 @@ impl KeyStore {
     /// Returns the new bundle when rotation occurred, `None` when the stored signed pre-key is
     /// still fresh.
     ///
-    /// Call once at app launch. Publish the returned bundle when this returns `Some`. `None` means
-    /// the stored bundle is unchanged.
+    /// Call once at app launch. The returned signed pre-key is signed by the current discovery key,
+    /// so publish it together with that discovery-key bundle — prefer
+    /// [`Self::current_publication_bundle`], which returns a consistent pair atomically. `None` means
+    /// the stored signed pre-key is unchanged.
     ///
     /// # Examples
     /// ```
@@ -219,11 +219,11 @@ impl KeyStore {
     /// ```
     ///
     /// # Errors
-    /// - [`AetherError::Corrupt`] if only one of the two identity keys is present.
+    /// - [`AetherError::Corrupt`] if the discovery key does not verify or identity keys are incomplete.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if the stored signed pre-key has the wrong length or
     ///   version.
-    /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn rotate_signed_prekey_if_stale(&self) -> Result<Option<SignedPreKeyBundle>, AetherError> {
         Ok(self.inner.rotate_signed_prekey_if_stale()?.map(Into::into))
@@ -252,10 +252,10 @@ impl KeyStore {
     /// ```
     ///
     /// # Errors
-    /// - [`AetherError::Corrupt`] if only one of the two identity keys is present.
+    /// - [`AetherError::Corrupt`] if the discovery key does not verify or identity keys are incomplete.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`AetherError::InvalidData`] if a stored identity key has the wrong byte length.
-    /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::InvalidData`] if a stored key has the wrong byte length.
+    /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, AetherError> {
         Ok(self.inner.rotate_signed_prekey_now()?.into())
@@ -295,17 +295,17 @@ impl KeyStore {
 
     /// Rotates the discovery key and its signed pre-key in one operation, returning both bundles.
     ///
-    /// Verify [`DiscoveryKeyRotationBundle::discovery_key`] against the identity verifying key, then
-    /// verify [`DiscoveryKeyRotationBundle::signed_prekey`] against the discovery key's verifying
+    /// Verify [`PublicationBundle::discovery_key`] against the identity verifying key, then
+    /// verify [`PublicationBundle::signed_prekey`] against the discovery key's verifying
     /// key. Publish both.
     ///
     /// # Examples
     /// ```
     /// # use aether::{
-    /// #     AetherError, DiscoveryKeyRotationBundle, InMemorySecureStorage, KeyStore, SecureStorage,
+    /// #     AetherError, PublicationBundle, InMemorySecureStorage, KeyStore, SecureStorage,
     /// # };
     /// # use std::sync::Arc;
-    /// # fn publish_rotation(_bundle: &DiscoveryKeyRotationBundle) -> Result<(), AetherError> {
+    /// # fn publish_rotation(_bundle: &PublicationBundle) -> Result<(), AetherError> {
     /// #     Ok(())
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
@@ -323,8 +323,38 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if a stored discovery key is malformed.
     /// - [`AetherError::NotFound`] if no identity is stored.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn rotate_discovery_key_now(&self) -> Result<DiscoveryKeyRotationBundle, AetherError> {
+    pub fn rotate_discovery_key_now(&self) -> Result<PublicationBundle, AetherError> {
         Ok(self.inner.rotate_discovery_key_now()?.into())
+    }
+
+    /// Returns the current publishable pair (discovery-key bundle + signed pre-key), atomically.
+    ///
+    /// Rotates the signed pre-key if stale, then reads both bundles under the keystore's lifecycle
+    /// lock, so the pair always verifies as a chain. Prefer this over reading the discovery-key and
+    /// signed-pre-key bundles separately, which can race a concurrent rotation into a pair the peer
+    /// rejects. Publish both bundles together.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, PublicationBundle, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn publish(_bundle: &PublicationBundle) -> Result<(), AetherError> { Ok(()) }
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// # store.generate_identity()?;
+    /// let publication = store.current_publication_bundle()?;
+    /// publish(&publication)?;
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`AetherError::Corrupt`] if the stored discovery key does not verify against the identity.
+    /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
+    /// - [`AetherError::InvalidData`] if the stored discovery key or signed pre-key is malformed.
+    /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn current_publication_bundle(&self) -> Result<PublicationBundle, AetherError> {
+        Ok(self.inner.current_publication_bundle()?.into())
     }
 
     /// Returns the current discovery-key bundle, verified against the identity key.
@@ -481,6 +511,40 @@ mod tests {
                 &<[u8; 64]>::try_from(rotation.signed_prekey.signature.as_slice()).unwrap(),
             ),
             created_at: rotation.signed_prekey.created_at,
+        };
+        assert!(verify_bundle(&crypto_prekey, &crypto_discovery.verifying_key).is_ok());
+    }
+
+    #[test]
+    fn current_publication_bundle_returns_verifiable_chain() {
+        let store = key_store();
+        let identity = store.generate_identity().unwrap();
+        let publication = store.current_publication_bundle().unwrap();
+        assert_eq!(publication.discovery_key.public_key.len(), 32);
+        assert_eq!(publication.signed_prekey.public_key.len(), 32);
+
+        let identity_verifying = VerifyingKey::from_bytes(
+            &<[u8; 32]>::try_from(identity.verifying_key.as_slice()).unwrap(),
+        )
+        .unwrap();
+        let crypto_discovery = DiscoveryKeyBundle::from_bytes(
+            &publication.discovery_key.public_key,
+            &publication.discovery_key.verifying_key,
+            &publication.discovery_key.signature,
+            publication.discovery_key.epoch,
+            publication.discovery_key.created_at,
+        )
+        .unwrap();
+        assert!(verify_discovery_key_bundle(&crypto_discovery, &identity_verifying).is_ok());
+
+        let crypto_prekey = SignedPreKeyBundle {
+            public_key: PublicKey::from(
+                <[u8; 32]>::try_from(publication.signed_prekey.public_key.as_slice()).unwrap(),
+            ),
+            signature: Signature::from_bytes(
+                &<[u8; 64]>::try_from(publication.signed_prekey.signature.as_slice()).unwrap(),
+            ),
+            created_at: publication.signed_prekey.created_at,
         };
         assert!(verify_bundle(&crypto_prekey, &crypto_discovery.verifying_key).is_ok());
     }
