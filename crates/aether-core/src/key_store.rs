@@ -1,7 +1,9 @@
+use crate::clock::{Clock, SystemClock};
 use crate::identity::{Identity, IdentityError, IdentityManager};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
 use aether_crypto::SignedPreKeyBundle;
+use rand::rngs::OsRng;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -57,11 +59,20 @@ struct KeyStoreInner {
 pub struct KeyStore(Arc<KeyStoreInner>);
 
 impl KeyStore {
-    /// Creates a keystore backed by `storage`.
+    /// Creates a keystore backed by `storage`, reading time from the system clock.
     pub fn new(storage: Box<dyn SecureStorage>) -> Self {
+        Self::with_clock(storage, Arc::new(SystemClock))
+    }
+
+    // Creates a keystore backed by `storage`, reading time from `clock`.
+    pub(crate) fn with_clock(storage: Box<dyn SecureStorage>, clock: Arc<dyn Clock>) -> Self {
         let storage = Arc::new(Mutex::new(storage));
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        let signed_prekey = Arc::new(SignedPreKeyManager::new(storage, Arc::clone(&identity)));
+        let signed_prekey = Arc::new(SignedPreKeyManager::new(
+            storage,
+            Arc::clone(&identity),
+            clock,
+        ));
         KeyStore(Arc::new(KeyStoreInner {
             identity,
             signed_prekey,
@@ -75,7 +86,7 @@ impl KeyStore {
     /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
     /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure.
     pub fn generate_identity(&self) -> Result<Identity, KeyStoreError> {
-        Ok(self.0.identity.generate_identity()?)
+        Ok(self.0.identity.generate_identity(&mut OsRng)?)
     }
 
     /// Loads the stored [`Identity`].
@@ -99,7 +110,10 @@ impl KeyStore {
     ///   identity to export fails.
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failures.
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
-        Ok(self.0.identity.export_encrypted_backup(passphrase)?)
+        Ok(self
+            .0
+            .identity
+            .export_encrypted_backup(&mut OsRng, passphrase)?)
     }
 
     /// Returns the stored [`SignedPreKeyBundle`].
@@ -141,7 +155,7 @@ impl KeyStore {
         Ok(self
             .0
             .signed_prekey
-            .rotate_if_stale()?
+            .rotate_if_stale(&mut OsRng)?
             .map(|signed_prekey| signed_prekey.bundle()))
     }
 
@@ -155,7 +169,7 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`Identity`) when loading the identity fails.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
-        Ok(self.0.signed_prekey.rotate_now()?.bundle())
+        Ok(self.0.signed_prekey.rotate_now(&mut OsRng)?.bundle())
     }
 
     /// Restores an identity from an encrypted backup.

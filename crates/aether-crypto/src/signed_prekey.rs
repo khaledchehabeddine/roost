@@ -3,7 +3,7 @@
 use crate::error::CryptoError;
 use crate::keys::SigningKeyPair;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -87,10 +87,14 @@ pub struct SignedPreKeyBundle {
     pub created_at: u64,
 }
 
-/// Generates a signed pre-key using the identity signing key.
+/// Generates a signed pre-key using the identity signing key and `rng`.
 #[must_use]
-pub fn generate_signed_prekey(identity: &SigningKeyPair, created_at: u64) -> SignedPreKey {
-    let secret_key = StaticSecret::random_from_rng(OsRng);
+pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    identity: &SigningKeyPair,
+    created_at: u64,
+) -> SignedPreKey {
+    let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
     let payload = signed_prekey_payload(&public_key);
     let signature = identity.sign(&payload);
@@ -127,13 +131,20 @@ fn signed_prekey_payload(public_key: &PublicKey) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::keys::{generate_key_pair, generate_signing_key_pair};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     const FIXED_CREATED_AT: u64 = 1_700_000_000;
 
+    fn seeded_rng() -> ChaCha20Rng {
+        ChaCha20Rng::from_seed([4u8; 32])
+    }
+
     #[test]
     fn bundle_fields_match_signed_prekey() {
-        let identity = generate_signing_key_pair();
-        let signed_prekey = generate_signed_prekey(&identity, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
         let bundle = signed_prekey.bundle();
         assert_eq!(
             bundle.public_key.as_bytes(),
@@ -148,16 +159,18 @@ mod tests {
 
     #[test]
     fn generate_and_verify_round_trip() {
-        let identity = generate_signing_key_pair();
-        let signed_prekey = generate_signed_prekey(&identity, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
         let bundle = signed_prekey.bundle();
         assert!(verify_bundle(&bundle, &identity.verifying).is_ok());
     }
 
     #[test]
     fn verify_rejects_tampered_public_key() {
-        let identity = generate_signing_key_pair();
-        let signed_prekey = generate_signed_prekey(&identity, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
         let mut bundle = signed_prekey.bundle();
         let mut public_key_bytes = *bundle.public_key.as_bytes();
         public_key_bytes[0] ^= 0x01;
@@ -170,8 +183,9 @@ mod tests {
 
     #[test]
     fn verify_rejects_tampered_signature() {
-        let identity = generate_signing_key_pair();
-        let signed_prekey = generate_signed_prekey(&identity, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
         let bundle = signed_prekey.bundle();
         let mut signature_bytes = bundle.signature.to_bytes();
         signature_bytes[0] ^= 0x01;
@@ -188,9 +202,10 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_identity() {
-        let identity_a = generate_signing_key_pair();
-        let identity_b = generate_signing_key_pair();
-        let signed_prekey = generate_signed_prekey(&identity_a, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity_a = generate_signing_key_pair(&mut rng);
+        let identity_b = generate_signing_key_pair(&mut rng);
+        let signed_prekey = generate_signed_prekey(&mut rng, &identity_a, FIXED_CREATED_AT);
         let bundle = signed_prekey.bundle();
         assert!(matches!(
             verify_bundle(&bundle, &identity_b.verifying),
@@ -200,8 +215,9 @@ mod tests {
 
     #[test]
     fn signature_without_domain_prefix_fails_verification() {
-        let identity = generate_signing_key_pair();
-        let key_pair = generate_key_pair();
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let key_pair = generate_key_pair(&mut rng);
         let bare_signature = identity.sign(key_pair.public.as_bytes());
         let bundle = SignedPreKeyBundle {
             public_key: key_pair.public,
@@ -216,8 +232,9 @@ mod tests {
 
     #[test]
     fn from_secret_bytes_round_trip() {
-        let identity = generate_signing_key_pair();
-        let original = generate_signed_prekey(&identity, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let original = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
@@ -234,8 +251,9 @@ mod tests {
 
     #[test]
     fn restored_bundle_verifies_against_original_identity() {
-        let identity = generate_signing_key_pair();
-        let original = generate_signed_prekey(&identity, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let original = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
@@ -247,14 +265,15 @@ mod tests {
 
     #[test]
     fn diffie_hellman_after_from_secret_bytes() {
-        let identity = generate_signing_key_pair();
-        let original = generate_signed_prekey(&identity, FIXED_CREATED_AT);
+        let mut rng = seeded_rng();
+        let identity = generate_signing_key_pair(&mut rng);
+        let original = generate_signed_prekey(&mut rng, &identity, FIXED_CREATED_AT);
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
             original.created_at(),
         );
-        let peer = generate_key_pair();
+        let peer = generate_key_pair(&mut rng);
         let original_shared_secret = original.diffie_hellman(&peer.public);
         let restored_shared_secret = restored.diffie_hellman(&peer.public);
         assert_eq!(

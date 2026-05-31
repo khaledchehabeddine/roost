@@ -2,8 +2,8 @@
 
 ## Contexts
 
-- [Core](crates/aether-core/CONTEXT.md) — high-level entity types and orchestration for Sessions, Identities, Devices, and Messages
 - [Crypto](crates/aether-crypto/CONTEXT.md) — cryptographic primitives, key derivation, and protocol mechanics
+- [Core](crates/aether-core/CONTEXT.md) — high-level entity types and orchestration for Sessions, Identities, Devices, and Messages
 - [UniFFI](crates/aether-uniffi/CONTEXT.md) — platform FFI bindings that expose the Core API to host apps
 
 ## Relationships

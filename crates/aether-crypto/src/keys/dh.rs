@@ -5,7 +5,7 @@
 
 pub use x25519_dalek::{PublicKey, SharedSecret};
 
-use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
 use x25519_dalek::StaticSecret;
 use zeroize::Zeroizing;
 
@@ -39,10 +39,10 @@ impl KeyPair {
     }
 }
 
-/// Generates a fresh X25519 key pair using the OS CSPRNG.
+/// Generates a fresh X25519 key pair using `rng`.
 #[must_use]
-pub fn generate_key_pair() -> KeyPair {
-    let secret = StaticSecret::random_from_rng(OsRng);
+pub fn generate_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> KeyPair {
+    let secret = StaticSecret::random_from_rng(&mut *rng);
     let public = PublicKey::from(&secret);
     KeyPair { public, secret }
 }
@@ -50,6 +50,8 @@ pub fn generate_key_pair() -> KeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     const X25519_RFC7748_KAT_ALICE_SECRET_HEX: &str =
         "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
@@ -104,25 +106,34 @@ mod tests {
 
     #[test]
     fn key_pair_public_round_trip() {
-        let key_pair = generate_key_pair();
+        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([1u8; 32]));
         let recovered = PublicKey::from(*key_pair.public.as_bytes());
         assert_eq!(key_pair.public.as_bytes(), recovered.as_bytes());
     }
 
     #[test]
     fn key_pair_round_trip_via_secret_bytes() {
-        let key_pair = generate_key_pair();
+        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([1u8; 32]));
         let restored = KeyPair::from_secret_bytes(*key_pair.to_secret_bytes());
         assert_eq!(key_pair.public.as_bytes(), restored.public.as_bytes());
     }
 
     #[test]
     fn diffie_hellman_agreement_is_symmetric() {
-        let alice = generate_key_pair();
-        let bob = generate_key_pair();
+        let mut rng = ChaCha20Rng::from_seed([2u8; 32]);
+        let alice = generate_key_pair(&mut rng);
+        let bob = generate_key_pair(&mut rng);
 
         let alice_shared_secret = alice.diffie_hellman(&bob.public);
         let bob_shared_secret = bob.diffie_hellman(&alice.public);
         assert_eq!(alice_shared_secret.as_bytes(), bob_shared_secret.as_bytes());
+    }
+
+    #[test]
+    fn generate_key_pair_is_deterministic_under_seed() {
+        let first = generate_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
+        let second = generate_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
+        assert_eq!(first.public.as_bytes(), second.public.as_bytes());
+        assert_eq!(*first.to_secret_bytes(), *second.to_secret_bytes());
     }
 }

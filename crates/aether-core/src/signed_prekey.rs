@@ -1,10 +1,11 @@
+use crate::clock::Clock;
 use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
 use aether_crypto::{SignedPreKey, SignedPreKeyBundle, generate_signed_prekey};
+use rand::{CryptoRng, RngCore};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroizing;
 
 pub(crate) const SIGNED_PREKEY_ROTATION_WINDOW_DAYS: u64 = 7;
@@ -75,14 +76,20 @@ impl From<StorageError> for SignedPreKeyError {
 pub(crate) struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
+    clock: Arc<dyn Clock>,
 }
 
 impl SignedPreKeyManager {
     pub(crate) fn new(
         storage: Arc<Mutex<Box<dyn SecureStorage>>>,
         identity: Arc<IdentityManager>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
-        SignedPreKeyManager { storage, identity }
+        SignedPreKeyManager {
+            storage,
+            identity,
+            clock,
+        }
     }
 
     // Loads the secret signed pre-key from storage.
@@ -101,8 +108,11 @@ impl SignedPreKeyManager {
 
     // Rotates missing, stale, and far-future signed pre-keys. Slightly future timestamps stay
     // valid to tolerate clock skew.
-    pub(crate) fn rotate_if_stale(&self) -> Result<Option<SignedPreKey>, SignedPreKeyError> {
-        let now = now_secs()?;
+    pub(crate) fn rotate_if_stale<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<Option<SignedPreKey>, SignedPreKeyError> {
+        let now = self.now_secs()?;
         let needs_rotation = match self.read_stored_created_at()? {
             None => true,
             Some(timestamp) if timestamp > now + FUTURE_TIMESTAMP_TOLERANCE_SECS => true,
@@ -112,7 +122,7 @@ impl SignedPreKeyManager {
             }
         };
         if needs_rotation {
-            Ok(Some(self.rotate_now()?))
+            Ok(Some(self.rotate_now(rng)?))
         } else {
             Ok(None)
         }
@@ -125,10 +135,13 @@ impl SignedPreKeyManager {
     }
 
     // Forces an immediate signed-pre-key rotation.
-    pub(crate) fn rotate_now(&self) -> Result<SignedPreKey, SignedPreKeyError> {
+    pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<SignedPreKey, SignedPreKeyError> {
         let identity = self.identity.load_identity()?;
-        let now = now_secs()?;
-        let signed_prekey = generate_signed_prekey(identity.signing_key_pair(), now);
+        let now = self.now_secs()?;
+        let signed_prekey = generate_signed_prekey(rng, identity.signing_key_pair(), now);
         let blob = encode_signed_prekey(&signed_prekey);
         let mut storage = self.lock_storage()?;
         storage.store(SIGNED_PREKEY_KEY, &*blob)?;
@@ -150,6 +163,12 @@ impl SignedPreKeyManager {
         self.storage
             .lock()
             .map_err(|_| SignedPreKeyError::LockPoisoned)
+    }
+
+    fn now_secs(&self) -> Result<u64, SignedPreKeyError> {
+        self.clock
+            .now_unix_secs()
+            .map_err(|_| SignedPreKeyError::Clock)
     }
 }
 
@@ -189,18 +208,15 @@ fn checked_blob(raw: &[u8]) -> Result<&[u8; SIGNED_PREKEY_BLOB_LEN], SignedPreKe
     Ok(blob)
 }
 
-fn now_secs() -> Result<u64, SignedPreKeyError> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .map_err(|_| SignedPreKeyError::Clock)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::ManualClock;
     use crate::storage::InMemorySecureStorage;
     use aether_crypto::{generate_signing_key_pair, verify_bundle};
+    use rand::rngs::OsRng;
+
+    const FIXED_NOW: u64 = 1_700_000_000;
 
     fn shared_storage() -> Arc<Mutex<Box<dyn SecureStorage>>> {
         Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())))
@@ -209,14 +225,14 @@ mod tests {
     fn manager_with_identity() -> SignedPreKeyManager {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        identity.generate_identity().unwrap();
-        SignedPreKeyManager::new(storage, identity)
+        identity.generate_identity(&mut OsRng).unwrap();
+        SignedPreKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)))
     }
 
     fn manager_without_identity() -> SignedPreKeyManager {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        SignedPreKeyManager::new(storage, identity)
+        SignedPreKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)))
     }
 
     #[test]
@@ -246,8 +262,8 @@ mod tests {
     #[test]
     fn current_bundle_does_not_require_identity() {
         let manager = manager_without_identity();
-        let identity_signing_key = generate_signing_key_pair();
-        let signed_prekey = generate_signed_prekey(&identity_signing_key, 1_700_000_000);
+        let identity_signing_key = generate_signing_key_pair(&mut OsRng);
+        let signed_prekey = generate_signed_prekey(&mut OsRng, &identity_signing_key, FIXED_NOW);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -267,7 +283,7 @@ mod tests {
     fn rotate_if_stale_seeds_first_signed_prekey() {
         let manager = manager_with_identity();
         let rotated = manager
-            .rotate_if_stale()
+            .rotate_if_stale(&mut OsRng)
             .unwrap()
             .expect("first call must rotate");
         let bundle = manager.current_bundle().unwrap();
@@ -283,9 +299,9 @@ mod tests {
     #[test]
     fn rotate_if_stale_keeps_fresh_signed_prekey() {
         let manager = manager_with_identity();
-        assert!(manager.rotate_if_stale().unwrap().is_some());
+        assert!(manager.rotate_if_stale(&mut OsRng).unwrap().is_some());
         let initial_public_key = manager.current_bundle().unwrap().public_key;
-        let second_rotation = manager.rotate_if_stale().unwrap();
+        let second_rotation = manager.rotate_if_stale(&mut OsRng).unwrap();
         assert!(
             second_rotation.is_none(),
             "fresh signed pre-key must not rotate"
@@ -297,14 +313,14 @@ mod tests {
     #[test]
     fn rotate_if_stale_replaces_backdated_signed_prekey() {
         let manager = manager_with_identity();
-        manager.rotate_if_stale().unwrap();
+        manager.rotate_if_stale(&mut OsRng).unwrap();
         let original_public_key = manager.current_bundle().unwrap().public_key;
 
         let identity = manager.identity.load_identity().unwrap();
         let backdated_timestamp =
-            now_secs().unwrap() - (SIGNED_PREKEY_ROTATION_WINDOW_DAYS + 1) * SECONDS_PER_DAY;
+            FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_DAYS + 1) * SECONDS_PER_DAY;
         let stale_signed_prekey =
-            generate_signed_prekey(identity.signing_key_pair(), backdated_timestamp);
+            generate_signed_prekey(&mut OsRng, identity.signing_key_pair(), backdated_timestamp);
         let blob = encode_signed_prekey(&stale_signed_prekey);
         manager
             .storage
@@ -314,7 +330,7 @@ mod tests {
             .unwrap();
 
         let rotated = manager
-            .rotate_if_stale()
+            .rotate_if_stale(&mut OsRng)
             .unwrap()
             .expect("backdated signed pre-key must trigger rotation");
         let rotated_public_key = manager.current_bundle().unwrap().public_key;
@@ -337,8 +353,9 @@ mod tests {
     fn future_created_at_does_not_rotate() {
         let manager = manager_with_identity();
         let identity = manager.identity.load_identity().unwrap();
-        let timestamp = now_secs().unwrap() + 100_000;
-        let signed_prekey = generate_signed_prekey(identity.signing_key_pair(), timestamp);
+        let timestamp = FIXED_NOW + 100_000;
+        let signed_prekey =
+            generate_signed_prekey(&mut OsRng, identity.signing_key_pair(), timestamp);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -347,7 +364,7 @@ mod tests {
             .store(SIGNED_PREKEY_KEY, &*blob)
             .unwrap();
 
-        manager.rotate_if_stale().unwrap();
+        manager.rotate_if_stale(&mut OsRng).unwrap();
         let public_key = manager.current_bundle().unwrap().public_key;
         assert_eq!(public_key.as_bytes(), signed_prekey.public().as_bytes());
     }
@@ -356,8 +373,9 @@ mod tests {
     fn far_future_created_at_triggers_rotation() {
         let manager = manager_with_identity();
         let identity = manager.identity.load_identity().unwrap();
-        let timestamp = now_secs().unwrap() + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10;
-        let signed_prekey = generate_signed_prekey(identity.signing_key_pair(), timestamp);
+        let timestamp = FIXED_NOW + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10;
+        let signed_prekey =
+            generate_signed_prekey(&mut OsRng, identity.signing_key_pair(), timestamp);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -366,7 +384,7 @@ mod tests {
             .store(SIGNED_PREKEY_KEY, &*blob)
             .unwrap();
 
-        manager.rotate_if_stale().unwrap();
+        manager.rotate_if_stale(&mut OsRng).unwrap();
         let public_key = manager.current_bundle().unwrap().public_key;
         assert_ne!(public_key.as_bytes(), signed_prekey.public().as_bytes());
     }
@@ -383,7 +401,7 @@ mod tests {
             .store(SIGNED_PREKEY_KEY, &blob)
             .unwrap();
         assert!(matches!(
-            manager.rotate_if_stale(),
+            manager.rotate_if_stale(&mut OsRng),
             Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
         ));
     }
@@ -392,7 +410,7 @@ mod tests {
     fn rotate_if_stale_without_identity_returns_identity_error() {
         let manager = manager_without_identity();
         assert!(matches!(
-            manager.rotate_if_stale(),
+            manager.rotate_if_stale(&mut OsRng),
             Err(SignedPreKeyError::Identity(IdentityError::NotFound))
         ));
     }
@@ -401,15 +419,15 @@ mod tests {
     fn rotate_now_without_identity_returns_identity_error() {
         let manager = manager_without_identity();
         assert!(matches!(
-            manager.rotate_now(),
+            manager.rotate_now(&mut OsRng),
             Err(SignedPreKeyError::Identity(IdentityError::NotFound))
         ));
     }
 
     #[test]
     fn encode_decode_signed_prekey_round_trip() {
-        let identity_signing_key = generate_signing_key_pair();
-        let original = generate_signed_prekey(&identity_signing_key, 1_700_000_000);
+        let identity_signing_key = generate_signing_key_pair(&mut OsRng);
+        let original = generate_signed_prekey(&mut OsRng, &identity_signing_key, FIXED_NOW);
         let blob = encode_signed_prekey(&original);
         assert_eq!(blob.len(), SIGNED_PREKEY_BLOB_LEN);
         let restored = decode_signed_prekey(&blob);
@@ -451,15 +469,42 @@ mod tests {
     fn persistence_round_trip_via_two_managers() {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        identity.generate_identity().unwrap();
+        identity.generate_identity(&mut OsRng).unwrap();
 
-        let manager_a = SignedPreKeyManager::new(Arc::clone(&storage), Arc::clone(&identity));
-        manager_a.rotate_if_stale().unwrap();
+        let manager_a = SignedPreKeyManager::new(
+            Arc::clone(&storage),
+            Arc::clone(&identity),
+            Arc::new(ManualClock::new(FIXED_NOW)),
+        );
+        manager_a.rotate_if_stale(&mut OsRng).unwrap();
         let first_public_key = manager_a.current_bundle().unwrap().public_key;
         drop(manager_a);
 
-        let manager_b = SignedPreKeyManager::new(storage, identity);
+        let manager_b =
+            SignedPreKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)));
         let second_public_key = manager_b.current_bundle().unwrap().public_key;
         assert_eq!(first_public_key.as_bytes(), second_public_key.as_bytes());
+    }
+
+    #[test]
+    fn rotation_is_deterministic_under_seed_and_clock() {
+        // Same seed + clock must yield a byte-identical bundle (public key, signature, created_at)
+        // and a different seed must not.
+        fn rotate(seed: [u8; 32]) -> ([u8; 32], [u8; 64], u64) {
+            use crate::test_support::Sandbox;
+
+            let mut sandbox = Sandbox::new(seed, FIXED_NOW);
+            let (identity, signed_prekey) = sandbox.managers();
+            identity.generate_identity(&mut sandbox.rng).unwrap();
+            let bundle = signed_prekey.rotate_now(&mut sandbox.rng).unwrap().bundle();
+            (
+                *bundle.public_key.as_bytes(),
+                bundle.signature.to_bytes(),
+                bundle.created_at,
+            )
+        }
+
+        assert_eq!(rotate([7u8; 32]), rotate([7u8; 32]));
+        assert_ne!(rotate([7u8; 32]).0, rotate([8u8; 32]).0);
     }
 }

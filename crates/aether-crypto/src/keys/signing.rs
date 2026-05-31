@@ -6,7 +6,7 @@
 pub use ed25519_dalek::{Signature, VerifyingKey};
 
 use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
 use zeroize::Zeroizing;
 
 /// An Ed25519 key pair for signing.
@@ -42,10 +42,10 @@ impl SigningKeyPair {
     }
 }
 
-/// Generates a fresh Ed25519 key pair using the OS CSPRNG.
+/// Generates a fresh Ed25519 key pair using `rng`.
 #[must_use]
-pub fn generate_signing_key_pair() -> SigningKeyPair {
-    let signing = SigningKey::generate(&mut OsRng);
+pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKeyPair {
+    let signing = SigningKey::generate(&mut *rng);
     let verifying = signing.verifying_key();
     SigningKeyPair { signing, verifying }
 }
@@ -54,6 +54,8 @@ pub fn generate_signing_key_pair() -> SigningKeyPair {
 mod tests {
     use super::*;
     use ed25519_dalek::Verifier;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     const ED25519_RFC8032_TEST1_KAT_SECRET_HEX: &str =
         "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60";
@@ -161,21 +163,21 @@ mod tests {
 
     #[test]
     fn signing_key_pair_verifying_round_trip() {
-        let key_pair = generate_signing_key_pair();
+        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
         let recovered = VerifyingKey::from_bytes(&key_pair.verifying.to_bytes()).unwrap();
         assert_eq!(key_pair.verifying.as_bytes(), recovered.as_bytes());
     }
 
     #[test]
     fn signing_key_pair_round_trip_via_signing_bytes() {
-        let key_pair = generate_signing_key_pair();
+        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
         let restored = SigningKeyPair::from_signing_bytes(*key_pair.to_signing_bytes());
         assert_eq!(key_pair.verifying.as_bytes(), restored.verifying.as_bytes());
     }
 
     #[test]
     fn sign_and_verify_round_trip() {
-        let key_pair = generate_signing_key_pair();
+        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
         let message = b"aether test message";
         let signature = key_pair.sign(message);
         assert!(key_pair.verifying.verify(message, &signature).is_ok());
@@ -183,7 +185,7 @@ mod tests {
 
     #[test]
     fn signature_invalid_for_different_message() {
-        let key_pair = generate_signing_key_pair();
+        let key_pair = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]));
         let signature = key_pair.sign(b"message one");
         assert!(
             key_pair
@@ -191,5 +193,13 @@ mod tests {
                 .verify(b"message two", &signature)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn generate_signing_key_pair_is_deterministic_under_seed() {
+        let first = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
+        let second = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([9u8; 32]));
+        assert_eq!(first.verifying.as_bytes(), second.verifying.as_bytes());
+        assert_eq!(*first.to_signing_bytes(), *second.to_signing_bytes());
     }
 }

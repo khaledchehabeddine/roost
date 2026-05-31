@@ -6,6 +6,7 @@ use crate::keys::{KeyPair, PublicKey, SharedSecret, VerifyingKey, generate_key_p
 use crate::ratchet::RootKey;
 use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_bundle};
 use hkdf::Hkdf;
+use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -42,13 +43,16 @@ pub struct HandshakeEnvelope {
 
 /// Starts a handshake as the initiator and encrypts the first message.
 ///
+/// The initiator's ephemeral key and first ratchet key are drawn from `rng`.
+///
 /// # Errors
 /// - [`CryptoError::Aead`] when first-message encryption fails.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for root-key derivation fails.
 /// - [`CryptoError::InvalidState`] when ratchet seeding produces an invalid initial state.
 /// - [`CryptoError::SignatureInvalid`] when `responder_signed_prekey_bundle` does not verify under
 ///   `responder_identity_verifying_key`.
-pub fn initiate(
+pub fn initiate<R: RngCore + CryptoRng>(
+    rng: &mut R,
     initiator_identity_key: &KeyPair,
     responder_identity_verifying_key: &VerifyingKey,
     responder_identity_key: &PublicKey,
@@ -60,7 +64,7 @@ pub fn initiate(
         responder_identity_verifying_key,
     )?;
 
-    let initiator_ephemeral_key = generate_key_pair();
+    let initiator_ephemeral_key = generate_key_pair(rng);
     let responder_signed_prekey_public_key = responder_signed_prekey_bundle.public_key;
 
     let root_key = derive_root_key_initiator(
@@ -69,7 +73,8 @@ pub fn initiate(
         responder_identity_key,
         &responder_signed_prekey_public_key,
     )?;
-    let mut state = RatchetState::init_initiator(root_key, &responder_signed_prekey_public_key)?;
+    let mut state =
+        RatchetState::init_initiator(rng, root_key, &responder_signed_prekey_public_key)?;
 
     let associated_data =
         initial_associated_data(&initiator_identity_key.public, responder_identity_key);
@@ -90,6 +95,8 @@ pub fn initiate(
 
 /// Accepts a handshake envelope and decrypts the first message.
 ///
+/// The responder's first ratchet key is drawn from `rng` during the initial DH ratchet step.
+///
 /// # Errors
 /// - [`CryptoError::Aead`] when first-message decryption fails (tampered ciphertext, wrong
 ///   associated data, or wrong key).
@@ -98,7 +105,8 @@ pub fn initiate(
 ///   `responder_signed_prekey.public()`.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for root-key derivation fails.
 /// - [`CryptoError::InvalidState`] when ratchet decryption observes an invalid receiving state.
-pub fn accept(
+pub fn accept<R: RngCore + CryptoRng>(
+    rng: &mut R,
     envelope: &HandshakeEnvelope,
     responder_identity_key: &KeyPair,
     responder_signed_prekey: &SignedPreKey,
@@ -133,7 +141,7 @@ pub fn accept(
         &initiator_identity_public_key,
         &responder_identity_key.public,
     );
-    let plaintext = state.ratchet_decrypt(&envelope.ciphertext, &header, &associated_data)?;
+    let plaintext = state.ratchet_decrypt(rng, &envelope.ciphertext, &header, &associated_data)?;
 
     Ok((state, plaintext))
 }
@@ -215,6 +223,8 @@ mod tests {
     use super::*;
     use crate::keys::{SigningKeyPair, generate_key_pair, generate_signing_key_pair};
     use crate::signed_prekey::generate_signed_prekey;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     const FIXED_TS: u64 = 1_700_000_000;
 
@@ -225,21 +235,24 @@ mod tests {
         bob_signed_prekey: SignedPreKey,
     }
 
-    fn setup() -> Setup {
-        let bob_signing_key = generate_signing_key_pair();
-        let bob_signed_prekey = generate_signed_prekey(&bob_signing_key, FIXED_TS);
-        Setup {
-            alice_identity_key: generate_key_pair(),
-            bob_identity_key: generate_key_pair(),
+    fn setup() -> (Setup, ChaCha20Rng) {
+        let mut rng = ChaCha20Rng::from_seed([0x22u8; 32]);
+        let bob_signing_key = generate_signing_key_pair(&mut rng);
+        let bob_signed_prekey = generate_signed_prekey(&mut rng, &bob_signing_key, FIXED_TS);
+        let setup = Setup {
+            alice_identity_key: generate_key_pair(&mut rng),
+            bob_identity_key: generate_key_pair(&mut rng),
             bob_signing_key,
             bob_signed_prekey,
-        }
+        };
+        (setup, rng)
     }
 
     #[test]
     fn initial_associated_data_layout_is_initiator_then_responder() {
-        let initiator_identity_key = generate_key_pair();
-        let responder_identity_key = generate_key_pair();
+        let mut rng = ChaCha20Rng::from_seed([0x23u8; 32]);
+        let initiator_identity_key = generate_key_pair(&mut rng);
+        let responder_identity_key = generate_key_pair(&mut rng);
         let associated_data = initial_associated_data(
             &initiator_identity_key.public,
             &responder_identity_key.public,
@@ -256,8 +269,8 @@ mod tests {
 
     #[test]
     fn initiator_and_responder_derive_identical_root_key() {
-        let setup = setup();
-        let alice_ephemeral_key = generate_key_pair();
+        let (setup, mut rng) = setup();
+        let alice_ephemeral_key = generate_key_pair(&mut rng);
         let initiator_root_key = derive_root_key_initiator(
             &setup.alice_identity_key,
             &alice_ephemeral_key,
@@ -277,9 +290,10 @@ mod tests {
 
     #[test]
     fn initiate_accept_round_trip() {
-        let setup = setup();
+        let (setup, mut rng) = setup();
         let plaintext = b"hello from Alice";
         let (_, envelope) = initiate(
+            &mut rng,
             &setup.alice_identity_key,
             &setup.bob_signing_key.verifying,
             &setup.bob_identity_key.public,
@@ -287,16 +301,22 @@ mod tests {
             plaintext,
         )
         .unwrap();
-        let (_, decrypted) =
-            accept(&envelope, &setup.bob_identity_key, &setup.bob_signed_prekey).unwrap();
+        let (_, decrypted) = accept(
+            &mut rng,
+            &envelope,
+            &setup.bob_identity_key,
+            &setup.bob_signed_prekey,
+        )
+        .unwrap();
         assert_eq!(decrypted.as_slice(), plaintext);
     }
 
     #[test]
     fn initiate_rejects_bundle_under_wrong_verifying_key() {
-        let setup = setup();
-        let wrong_signing_key = generate_signing_key_pair();
+        let (setup, mut rng) = setup();
+        let wrong_signing_key = generate_signing_key_pair(&mut rng);
         let result = initiate(
+            &mut rng,
             &setup.alice_identity_key,
             &wrong_signing_key.verifying,
             &setup.bob_identity_key.public,
@@ -308,8 +328,9 @@ mod tests {
 
     #[test]
     fn accept_rejects_mismatched_signed_prekey_public_key() {
-        let setup = setup();
+        let (setup, mut rng) = setup();
         let (_, mut envelope) = initiate(
+            &mut rng,
             &setup.alice_identity_key,
             &setup.bob_signing_key.verifying,
             &setup.bob_identity_key.public,
@@ -319,15 +340,21 @@ mod tests {
         .unwrap();
         envelope.responder_signed_prekey_public_key[0] ^= 0x01;
         assert!(matches!(
-            accept(&envelope, &setup.bob_identity_key, &setup.bob_signed_prekey),
+            accept(
+                &mut rng,
+                &envelope,
+                &setup.bob_identity_key,
+                &setup.bob_signed_prekey
+            ),
             Err(CryptoError::HandshakeSignedPreKeyMismatch)
         ));
     }
 
     #[test]
     fn accept_rejects_tampered_ciphertext() {
-        let setup = setup();
+        let (setup, mut rng) = setup();
         let (_, mut envelope) = initiate(
+            &mut rng,
             &setup.alice_identity_key,
             &setup.bob_signing_key.verifying,
             &setup.bob_identity_key.public,
@@ -337,16 +364,22 @@ mod tests {
         .unwrap();
         envelope.ciphertext[0] ^= 0xFF;
         assert!(matches!(
-            accept(&envelope, &setup.bob_identity_key, &setup.bob_signed_prekey),
+            accept(
+                &mut rng,
+                &envelope,
+                &setup.bob_identity_key,
+                &setup.bob_signed_prekey
+            ),
             Err(CryptoError::Aead)
         ));
     }
 
     #[test]
     fn envelope_survives_wire_round_trip() {
-        let setup = setup();
+        let (setup, mut rng) = setup();
         let plaintext = b"serialize me";
         let (_, envelope) = initiate(
+            &mut rng,
             &setup.alice_identity_key,
             &setup.bob_signing_key.verifying,
             &setup.bob_identity_key.public,
@@ -358,6 +391,7 @@ mod tests {
 
         let decoded_envelope: HandshakeEnvelope = postcard::from_bytes(&bytes).unwrap();
         let (_, decrypted) = accept(
+            &mut rng,
             &decoded_envelope,
             &setup.bob_identity_key,
             &setup.bob_signed_prekey,

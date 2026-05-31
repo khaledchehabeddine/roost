@@ -8,6 +8,10 @@ Cryptographic primitives, key derivation, and protocol mechanics. Stateless from
 An authenticated-encryption-with-associated-data primitive. In Aether this is XChaCha20-Poly1305 — encryption that also authenticates and is detectable on tamper.
 Avoid: cipher, encryption
 
+**CSPRNG** (injected per operation):
+The cryptographically secure RNG every key-generating operation draws from, taken as `rng: &mut R` (`RngCore + CryptoRng`). Production passes `OsRng`; tests pass a seeded RNG for reproducible vectors. Randomness is never read ambiently inside this crate.
+Avoid: random, entropy source
+
 **HKDF** (one per derivation step):
 The HMAC-based key derivation function from RFC 5869, used with SHA-256, a protocol-specific info string, and no salt on chain-derived inputs.
 Avoid: KDF, key derivation function
