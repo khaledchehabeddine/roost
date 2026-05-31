@@ -10,7 +10,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 // Domain separator for signatures over signed pre-key public keys.
 const SIGNED_PREKEY_DOMAIN: &[u8] = b"aether-spk-v1:";
 
-/// An X25519 pre-key signed by an Ed25519 identity key.
+/// An X25519 pre-key signed by an Ed25519 signing key — the discovery key, under the two-key
+/// identity.
 ///
 /// The secret key is zeroed on drop. The public key, signature, and creation timestamp remain
 /// available through accessors and bundle export.
@@ -76,7 +77,8 @@ impl SignedPreKey {
 
 /// Public signed pre-key material distributed to peers.
 ///
-/// The identity verifying key is not embedded. Callers pass it to [`verify_bundle`] separately.
+/// The signer's verifying key is not embedded. Callers pass it to [`verify_bundle`] separately — the
+/// discovery key's verifying key, under the two-key identity.
 #[derive(Clone, Debug)]
 pub struct SignedPreKeyBundle {
     /// X25519 public key used by the peer during handshake root-key derivation.
@@ -87,7 +89,7 @@ pub struct SignedPreKeyBundle {
     pub created_at: u64,
 }
 
-/// Generates a signed pre-key using the identity signing key and `rng`.
+/// Generates a signed pre-key signed by the given Ed25519 signing key, using `rng`.
 #[must_use]
 pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
@@ -106,7 +108,9 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     }
 }
 
-/// Verifies that a signed pre-key bundle belongs to an identity verifying key.
+/// Verifies a signed pre-key bundle against the verifying key that signed it.
+///
+/// Under the two-key identity, that is the discovery key's verifying key.
 ///
 /// # Errors
 /// - [`CryptoError::SignatureInvalid`] when the signature does not validate.

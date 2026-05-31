@@ -7,7 +7,7 @@ use aether_crypto::{DiscoveryKeyBundle, SignedPreKeyBundle};
 use rand::rngs::OsRng;
 use std::error::Error;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Errors returned by [`KeyStore`] operations.
 #[derive(Debug)]
@@ -74,6 +74,8 @@ struct KeyStoreInner {
     identity: Arc<IdentityManager>,
     discovery: Arc<DiscoveryKeyManager>,
     signed_prekey: Arc<SignedPreKeyManager>,
+    // Serializes multi-step write operations; see `KeyStore::lifecycle_guard`.
+    lifecycle: Mutex<()>,
 }
 
 /// Facade over identity and signed-pre-key managers sharing the same [`SecureStorage`].
@@ -106,7 +108,20 @@ impl KeyStore {
             identity,
             discovery,
             signed_prekey,
+            lifecycle: Mutex::new(()),
         }))
+    }
+
+    // Serializes multi-step write operations (identity + discovery-key creation, rotation, import,
+    // and reset) so concurrent callers on cloned keystores cannot interleave into a persisted
+    // discovery key paired with a signed pre-key signed by a different discovery key. The storage
+    // mutex only serializes individual load/store calls, not the cross-key invariant. The guard
+    // protects `()`, so a lock poisoned by a panicked thread is recovered, not propagated.
+    fn lifecycle_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Generates a fresh [`Identity`] and its first discovery key (epoch 0), persisting both.
@@ -123,6 +138,7 @@ impl KeyStore {
     /// - [`KeyStoreError::Identity`] | [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on
     ///   storage failures.
     pub fn generate_identity(&self) -> Result<Identity, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
         let identity = match self.0.identity.generate_identity(&mut OsRng) {
             Ok(identity) => identity,
             // A prior partial creation may have stored the identity but not the discovery key.
@@ -212,6 +228,7 @@ impl KeyStore {
     /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`)
     ///   on storage failures.
     pub fn rotate_discovery_key_now(&self) -> Result<DiscoveryKeyRotationBundle, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
         self.0.signed_prekey.reset()?;
         let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
         let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
@@ -247,6 +264,7 @@ impl KeyStore {
     pub fn rotate_signed_prekey_if_stale(
         &self,
     ) -> Result<Option<SignedPreKeyBundle>, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
         Ok(self
             .0
             .signed_prekey
@@ -264,6 +282,7 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`Identity`) when loading the identity fails.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
         Ok(self.0.signed_prekey.rotate_now(&mut OsRng)?.bundle())
     }
 
@@ -295,6 +314,7 @@ impl KeyStore {
         data: &[u8],
         passphrase: &str,
     ) -> Result<(), KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
         let plaintext = self.0.identity.decrypt_backup(data, passphrase)?;
         self.0.signed_prekey.reset()?;
         self.0.discovery.reset()?;
@@ -314,6 +334,7 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
     ///   failure.
     pub fn reset(&self) -> Result<(), KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
         self.0.signed_prekey.reset()?;
         self.0.discovery.reset()?;
         self.0.identity.reset()?;
@@ -719,5 +740,35 @@ mod tests {
         );
         assert_eq!(restored_dk.public_key.as_bytes(), dk.public_key.as_bytes());
         assert_eq!(restored_dk.epoch, dk.epoch);
+    }
+
+    #[test]
+    fn concurrent_rotations_keep_discovery_key_and_signed_prekey_consistent() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_if_stale().unwrap();
+
+        // One thread rotates the discovery key (advancing the epoch); another rotates the signed
+        // pre-key (signing it under whatever discovery key is current). Without the lifecycle lock,
+        // an interleaving can persist a new discovery key paired with a stale-DK-signed pre-key.
+        let rotate_discovery = key_store.clone();
+        let rotate_prekey = key_store.clone();
+        let discovery_thread = std::thread::spawn(move || {
+            for _ in 0..40 {
+                rotate_discovery.rotate_discovery_key_now().unwrap();
+            }
+        });
+        let prekey_thread = std::thread::spawn(move || {
+            for _ in 0..40 {
+                rotate_prekey.rotate_signed_prekey_now().unwrap();
+            }
+        });
+        discovery_thread.join().unwrap();
+        prekey_thread.join().unwrap();
+
+        // The persisted signed pre-key must verify under the persisted discovery key.
+        let discovery = key_store.current_discovery_key_bundle().unwrap();
+        let prekey = key_store.current_signed_prekey_bundle().unwrap();
+        assert!(verify_bundle(&prekey, &discovery.verifying_key).is_ok());
     }
 }

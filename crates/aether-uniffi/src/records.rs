@@ -29,9 +29,9 @@ impl From<CoreIdentity> for Identity {
 
 /// Public signed pre-key material a peer uses to start a session with this identity.
 ///
-/// The owning identity signs [`SignedPreKeyBundle::public_key`] with its Ed25519 key. The identity
-/// verifying key is not embedded. Verifiers retrieve it separately and pass it alongside this
-/// bundle.
+/// The current discovery key signs [`SignedPreKeyBundle::public_key`] with its Ed25519 key (the
+/// discovery key is itself signed by the identity key). The verifying key is not embedded; verifiers
+/// retrieve the discovery-key bundle separately and verify this bundle against its verifying key.
 #[derive(uniffi::Record)]
 pub struct SignedPreKeyBundle {
     /// X25519 public key bytes. Always 32 bytes.

@@ -13,11 +13,15 @@
 //!
 //! ```
 //! use aether::{
-//!     AetherError, InMemorySecureStorage, KeyStore, SecureStorage, SignedPreKeyBundle,
+//!     AetherError, DiscoveryKeyBundle, InMemorySecureStorage, KeyStore, SecureStorage,
+//!     SignedPreKeyBundle,
 //! };
 //! use std::sync::Arc;
 //!
-//! # fn publish_signed_prekey_bundle(_bundle: &SignedPreKeyBundle) -> Result<(), AetherError> {
+//! # fn publish(
+//! #     _discovery_key: &DiscoveryKeyBundle,
+//! #     _signed_prekey: &SignedPreKeyBundle,
+//! # ) -> Result<(), AetherError> {
 //! #     Ok(())
 //! # }
 //! let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
@@ -27,9 +31,12 @@
 //!     store.generate_identity()?;
 //! }
 //!
-//! if let Some(new_bundle) = store.rotate_signed_prekey_if_stale()? {
-//!     publish_signed_prekey_bundle(&new_bundle)?;
-//! }
+//! // Publish the discovery-key bundle (signed by the identity key) alongside the signed pre-key
+//! // (signed by the discovery key); peers verify identity -> discovery key -> signed pre-key.
+//! let discovery_key = store.current_discovery_key_bundle()?;
+//! store.rotate_signed_prekey_if_stale()?;
+//! let signed_prekey = store.current_signed_prekey_bundle()?;
+//! publish(&discovery_key, &signed_prekey)?;
 //! # Ok::<(), AetherError>(())
 //! ```
 //!
