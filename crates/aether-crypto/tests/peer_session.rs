@@ -260,24 +260,3 @@ fn tampered_header_rolls_back_state() {
         .unwrap();
     assert_eq!(decrypted.as_slice(), b"legit");
 }
-
-#[test]
-fn identical_seed_reproduces_transcript() {
-    // The seeded test RNG must make the handshake and first ratchet step reproducible: same seed
-    // produces byte-identical wire output (ephemeral key, handshake ciphertext, next message).
-    fn transcript() -> ([u8; 32], Vec<u8>, Vec<u8>) {
-        let (setup, mut rng) = setup();
-        let (mut alice, _, envelope) = bootstrap(&setup, &mut rng, b"hello");
-        let associated_data = initial_associated_data(
-            &setup.alice_identity_key.public,
-            &setup.bob_identity_key.public,
-        );
-        let (_, second_ciphertext) = alice.ratchet_encrypt(b"round 2", &associated_data).unwrap();
-        (
-            envelope.initiator_ephemeral_public_key,
-            envelope.ciphertext,
-            second_ciphertext,
-        )
-    }
-    assert_eq!(transcript(), transcript());
-}

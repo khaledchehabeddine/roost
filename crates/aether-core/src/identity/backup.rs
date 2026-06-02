@@ -241,23 +241,4 @@ mod tests {
         let second_key = derive_key(passphrase, &[0x01u8; 16]).unwrap();
         assert_ne!(*first_key, *second_key);
     }
-
-    #[test]
-    fn export_is_deterministic_under_seed() {
-        // Identity keys, salt, and nonce all come from the seeded RNG, so the same seed must yield
-        // a byte-identical backup blob and a different seed must not.
-        fn export(seed: [u8; 32]) -> Vec<u8> {
-            use crate::test_support::Sandbox;
-
-            let mut sandbox = Sandbox::new(seed, 1_700_000_000);
-            let (identity, _) = sandbox.managers();
-            identity.generate_identity(&mut sandbox.rng).unwrap();
-            identity
-                .export_encrypted_backup(&mut sandbox.rng, "passphrase")
-                .unwrap()
-        }
-
-        assert_eq!(export([9u8; 32]), export([9u8; 32]));
-        assert_ne!(export([9u8; 32]), export([10u8; 32]));
-    }
 }

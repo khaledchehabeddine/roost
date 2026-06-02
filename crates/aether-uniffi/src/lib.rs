@@ -1,23 +1,18 @@
 //! UniFFI bindings for the cryptographic core.
 //!
-//! This crate exposes the storage-backed identity API that UniFFI projects into foreign-language
-//! bindings. Consumers construct a single [`KeyStore`], provide a platform [`SecureStorage`]
-//! implementation, and use the keystore to manage the local identity and signed pre-key.
-//!
-//! # Overview
-//!
-//! [`KeyStore`] is the entry point for identity and signed-pre-key operations. It delegates
-//! persistence to [`SecureStorage`], which production apps must back with secure storage.
+//! This crate exposes the storage-backed [`KeyStore`] API and FFI-safe record types used by SDKs.
+//! Apps provide a platform [`SecureStorage`] implementation, then use one [`KeyStore`] for the app
+//! lifetime to manage the local identity and publication keys.
 //!
 //! # Examples
 //!
 //! ```
 //! use aether::{
-//!     AetherError, InMemorySecureStorage, KeyStore, SecureStorage, SignedPreKeyBundle,
+//!     AetherError, InMemorySecureStorage, KeyStore, PublicationBundle, SecureStorage,
 //! };
 //! use std::sync::Arc;
 //!
-//! # fn publish_signed_prekey_bundle(_bundle: &SignedPreKeyBundle) -> Result<(), AetherError> {
+//! # fn publish(_bundle: &PublicationBundle) -> Result<(), AetherError> {
 //! #     Ok(())
 //! # }
 //! let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
@@ -27,18 +22,10 @@
 //!     store.generate_identity()?;
 //! }
 //!
-//! if let Some(new_bundle) = store.rotate_signed_prekey_if_stale()? {
-//!     publish_signed_prekey_bundle(&new_bundle)?;
-//! }
+//! let publication = store.current_publication_bundle()?;
+//! publish(&publication)?;
 //! # Ok::<(), AetherError>(())
 //! ```
-//!
-//! # Key Concepts
-//!
-//! - Construct one [`KeyStore`] per app and retain it for the application lifetime.
-//! - [`SecureStorage`] is the platform hook. Production builds must back it with their own secure
-//!   storage implementation. [`InMemorySecureStorage`] is only for tests and prototypes.
-//! - All fallible methods return [`AetherError`].
 
 uniffi::setup_scaffolding!("aether");
 
@@ -49,5 +36,5 @@ mod storage;
 
 pub use error::AetherError;
 pub use key_store::KeyStore;
-pub use records::{Identity, SignedPreKeyBundle};
+pub use records::{DiscoveryKeyBundle, Identity, PublicationBundle, SignedPreKeyBundle};
 pub use storage::{InMemorySecureStorage, SecureStorage};

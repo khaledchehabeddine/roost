@@ -1,0 +1,461 @@
+use crate::clock::Clock;
+use crate::identity::{IdentityError, IdentityManager};
+use crate::storage::{SecureStorage, StorageError};
+use aether_crypto::{
+    DiscoveryKey, DiscoveryKeyBundle, generate_discovery_key, verify_discovery_key_bundle,
+};
+use rand::{CryptoRng, RngCore};
+use std::error::Error;
+use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
+use zeroize::Zeroizing;
+
+const DISCOVERY_KEY: &str = "discovery/current";
+const DISCOVERY_KEY_VERSION: u8 = 1;
+// Blob layout: version (1) | epoch (4) | x25519 secret (32) | ed25519 secret (32) |
+// identity signature (64) | created_at (8).
+const DISCOVERY_KEY_BLOB_LEN: usize = 1 + 4 + 32 + 32 + 64 + 8;
+
+/// Errors returned by discovery-key operations.
+#[derive(Debug)]
+pub enum DiscoveryKeyError {
+    /// The system clock is before the Unix epoch.
+    Clock,
+    /// The stored discovery key's signature does not verify against the identity key.
+    Corrupt,
+    /// Loading the identity for discovery-key signing or verification returned an
+    /// [`IdentityError`].
+    Identity(IdentityError),
+    /// Stored discovery-key data is malformed.
+    InvalidData(String),
+    /// The internal storage lock was poisoned by a panicked thread.
+    LockPoisoned,
+    /// No discovery key is stored.
+    NotFound,
+    /// The underlying [`SecureStorage`] returned an error.
+    Storage(StorageError),
+}
+
+impl fmt::Display for DiscoveryKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DiscoveryKeyError::Clock => write!(f, "system clock is before Unix epoch"),
+            DiscoveryKeyError::Corrupt => {
+                write!(
+                    f,
+                    "stored discovery-key signature does not match the identity key"
+                )
+            }
+            DiscoveryKeyError::Identity(e) => write!(f, "identity: {e}"),
+            DiscoveryKeyError::InvalidData(reason) => {
+                write!(f, "invalid discovery-key data: {reason}")
+            }
+            DiscoveryKeyError::LockPoisoned => write!(f, "internal lock poisoned"),
+            DiscoveryKeyError::NotFound => write!(f, "no discovery key stored"),
+            DiscoveryKeyError::Storage(e) => write!(f, "storage: {e}"),
+        }
+    }
+}
+
+impl Error for DiscoveryKeyError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            DiscoveryKeyError::Identity(e) => Some(e),
+            DiscoveryKeyError::Storage(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<IdentityError> for DiscoveryKeyError {
+    fn from(e: IdentityError) -> Self {
+        DiscoveryKeyError::Identity(e)
+    }
+}
+
+impl From<StorageError> for DiscoveryKeyError {
+    fn from(e: StorageError) -> Self {
+        DiscoveryKeyError::Storage(e)
+    }
+}
+
+pub(crate) enum DiscoveryKeyStatus {
+    Absent,
+    Present { epoch: u32 },
+    Malformed,
+}
+
+// Manages discovery key generation, rotation, verification, and persistence.
+pub(crate) struct DiscoveryKeyManager {
+    storage: Arc<Mutex<Box<dyn SecureStorage>>>,
+    identity: Arc<IdentityManager>,
+    clock: Arc<dyn Clock>,
+}
+
+impl DiscoveryKeyManager {
+    pub(crate) fn new(
+        storage: Arc<Mutex<Box<dyn SecureStorage>>>,
+        identity: Arc<IdentityManager>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        DiscoveryKeyManager {
+            storage,
+            identity,
+            clock,
+        }
+    }
+
+    // Loads the discovery key and verifies its signature against the identity key.
+    pub(crate) fn current(&self) -> Result<DiscoveryKey, DiscoveryKeyError> {
+        let discovery_key = self.load_stored()?;
+        let identity = self.identity.load_identity()?;
+        verify_discovery_key_bundle(&discovery_key.bundle(), identity.verifying_key())
+            .map_err(|_| DiscoveryKeyError::Corrupt)?;
+        Ok(discovery_key)
+    }
+
+    // Returns the discovery-key bundle to distribute to peers, verified against the identity key.
+    pub(crate) fn current_bundle(&self) -> Result<DiscoveryKeyBundle, DiscoveryKeyError> {
+        Ok(self.current()?.bundle())
+    }
+
+    pub(crate) fn stored_status(&self) -> Result<DiscoveryKeyStatus, DiscoveryKeyError> {
+        let Some(raw) = self.load_raw()? else {
+            return Ok(DiscoveryKeyStatus::Absent);
+        };
+        Ok(match checked_blob(&raw) {
+            Ok(blob) => DiscoveryKeyStatus::Present {
+                epoch: read_epoch(blob),
+            },
+            Err(_) => DiscoveryKeyStatus::Malformed,
+        })
+    }
+
+    // The next epoch increments the stored one, recovering a signature-mismatched key. A malformed
+    // blob returns `InvalidData` until cleared with `reset`.
+    pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<DiscoveryKey, DiscoveryKeyError> {
+        let identity = self.identity.load_identity()?;
+        let epoch = match self.stored_status()? {
+            DiscoveryKeyStatus::Absent => 0,
+            DiscoveryKeyStatus::Present { epoch } => epoch.saturating_add(1),
+            DiscoveryKeyStatus::Malformed => {
+                return Err(DiscoveryKeyError::InvalidData(
+                    "stored discovery key is malformed, must reset before rotating".into(),
+                ));
+            }
+        };
+        let now = self.now_secs()?;
+        let discovery_key = generate_discovery_key(rng, identity.signing_key_pair(), epoch, now);
+        let blob = encode_discovery_key(&discovery_key);
+        let mut storage = self.lock_storage()?;
+        storage.store(DISCOVERY_KEY, &*blob)?;
+        Ok(discovery_key)
+    }
+
+    // Use `KeyStore::reset` to clear signed pre-key state before discovery key and identity.
+    pub(crate) fn reset(&self) -> Result<(), DiscoveryKeyError> {
+        let mut storage = self.lock_storage()?;
+        Ok(storage.delete(DISCOVERY_KEY)?)
+    }
+
+    fn load_stored(&self) -> Result<DiscoveryKey, DiscoveryKeyError> {
+        let raw = self.load_raw()?.ok_or(DiscoveryKeyError::NotFound)?;
+        Ok(decode_discovery_key(checked_blob(&raw)?))
+    }
+
+    // Reads the raw stored blob and drops the storage guard before returning, so the caller can
+    // then load the identity without deadlock.
+    fn load_raw(&self) -> Result<Option<Zeroizing<Vec<u8>>>, DiscoveryKeyError> {
+        Ok(self.lock_storage()?.load(DISCOVERY_KEY)?)
+    }
+
+    fn lock_storage(&self) -> Result<MutexGuard<'_, Box<dyn SecureStorage>>, DiscoveryKeyError> {
+        self.storage
+            .lock()
+            .map_err(|_| DiscoveryKeyError::LockPoisoned)
+    }
+
+    fn now_secs(&self) -> Result<u64, DiscoveryKeyError> {
+        self.clock
+            .now_unix_secs()
+            .map_err(|_| DiscoveryKeyError::Clock)
+    }
+}
+
+fn checked_blob(raw: &[u8]) -> Result<&[u8; DISCOVERY_KEY_BLOB_LEN], DiscoveryKeyError> {
+    let blob: &[u8; DISCOVERY_KEY_BLOB_LEN] = raw.try_into().map_err(|_| {
+        DiscoveryKeyError::InvalidData(format!(
+            "expected {DISCOVERY_KEY_BLOB_LEN} bytes, got {}",
+            raw.len()
+        ))
+    })?;
+    if blob[0] != DISCOVERY_KEY_VERSION {
+        return Err(DiscoveryKeyError::InvalidData(format!(
+            "unsupported discovery key format version: {}",
+            blob[0]
+        )));
+    }
+    Ok(blob)
+}
+
+fn encode_discovery_key(discovery_key: &DiscoveryKey) -> Zeroizing<[u8; DISCOVERY_KEY_BLOB_LEN]> {
+    let mut blob = Zeroizing::new([0u8; DISCOVERY_KEY_BLOB_LEN]);
+    blob[0] = DISCOVERY_KEY_VERSION;
+    blob[1..5].copy_from_slice(&discovery_key.epoch().to_be_bytes());
+    blob[5..37].copy_from_slice(&*discovery_key.key_agreement_secret_bytes());
+    blob[37..69].copy_from_slice(&*discovery_key.signing_secret_bytes());
+    blob[69..133].copy_from_slice(&discovery_key.identity_signature().to_bytes());
+    blob[133..DISCOVERY_KEY_BLOB_LEN].copy_from_slice(&discovery_key.created_at().to_be_bytes());
+    blob
+}
+
+fn decode_discovery_key(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> DiscoveryKey {
+    let mut key_agreement_secret = [0u8; 32];
+    key_agreement_secret.copy_from_slice(&blob[5..37]);
+    let mut signing_secret = [0u8; 32];
+    signing_secret.copy_from_slice(&blob[37..69]);
+    let mut signature = [0u8; 64];
+    signature.copy_from_slice(&blob[69..133]);
+    let epoch = read_epoch(blob);
+    let mut created_at_bytes = [0u8; 8];
+    created_at_bytes.copy_from_slice(&blob[133..DISCOVERY_KEY_BLOB_LEN]);
+    DiscoveryKey::from_secret_bytes(
+        key_agreement_secret,
+        signing_secret,
+        epoch,
+        u64::from_be_bytes(created_at_bytes),
+        signature,
+    )
+}
+
+fn read_epoch(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> u32 {
+    let mut epoch_bytes = [0u8; 4];
+    epoch_bytes.copy_from_slice(&blob[1..5]);
+    u32::from_be_bytes(epoch_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::ManualClock;
+    use crate::storage::InMemorySecureStorage;
+    use rand::rngs::OsRng;
+
+    const FIXED_NOW: u64 = 1_700_000_000;
+
+    struct DiscoveryKeySetup {
+        identity: Arc<IdentityManager>,
+        manager: DiscoveryKeyManager,
+    }
+
+    fn shared_storage() -> Arc<Mutex<Box<dyn SecureStorage>>> {
+        Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())))
+    }
+
+    fn setup_with_identity() -> DiscoveryKeySetup {
+        let storage = shared_storage();
+        let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
+        identity.generate_identity(&mut OsRng).unwrap();
+        let discovery = DiscoveryKeyManager::new(
+            storage,
+            Arc::clone(&identity),
+            Arc::new(ManualClock::new(FIXED_NOW)),
+        );
+        DiscoveryKeySetup {
+            identity,
+            manager: discovery,
+        }
+    }
+
+    fn manager_without_identity() -> DiscoveryKeyManager {
+        let storage = shared_storage();
+        let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
+        DiscoveryKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)))
+    }
+
+    #[test]
+    fn current_without_stored_discovery_key_returns_not_found() {
+        let discovery = setup_with_identity().manager;
+        assert!(matches!(
+            discovery.current(),
+            Err(DiscoveryKeyError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn current_returns_invalid_data_for_malformed_blob() {
+        let discovery = setup_with_identity().manager;
+        discovery
+            .lock_storage()
+            .unwrap()
+            .store(DISCOVERY_KEY, &[0xAAu8; 50])
+            .unwrap();
+        assert!(matches!(
+            discovery.current(),
+            Err(DiscoveryKeyError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn current_returns_corrupt_for_tampered_signature() {
+        let discovery = setup_with_identity().manager;
+        discovery.rotate_now(&mut OsRng).unwrap();
+        // Flip a byte inside the stored signature region.
+        let mut blob = discovery
+            .lock_storage()
+            .unwrap()
+            .load(DISCOVERY_KEY)
+            .unwrap()
+            .unwrap()
+            .to_vec();
+        blob[69] ^= 0x01;
+        discovery
+            .lock_storage()
+            .unwrap()
+            .store(DISCOVERY_KEY, &blob)
+            .unwrap();
+        assert!(matches!(
+            discovery.current(),
+            Err(DiscoveryKeyError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn stored_status_reports_absent_present_and_malformed() {
+        let discovery = setup_with_identity().manager;
+        assert!(matches!(
+            discovery.stored_status().unwrap(),
+            DiscoveryKeyStatus::Absent
+        ));
+        discovery.rotate_now(&mut OsRng).unwrap();
+        assert!(matches!(
+            discovery.stored_status().unwrap(),
+            DiscoveryKeyStatus::Present { epoch: 0 }
+        ));
+        discovery
+            .lock_storage()
+            .unwrap()
+            .store(DISCOVERY_KEY, &[0xAAu8; 50])
+            .unwrap();
+        assert!(matches!(
+            discovery.stored_status().unwrap(),
+            DiscoveryKeyStatus::Malformed
+        ));
+    }
+
+    #[test]
+    fn rotate_now_establishes_epoch_zero_and_verifies() {
+        let DiscoveryKeySetup {
+            identity,
+            manager: discovery,
+        } = setup_with_identity();
+        let rotated = discovery.rotate_now(&mut OsRng).unwrap();
+        assert_eq!(rotated.epoch(), 0);
+        let bundle = discovery.current_bundle().unwrap();
+        assert_eq!(bundle.epoch, 0);
+        let loaded_identity = identity.load_identity().unwrap();
+        assert!(verify_discovery_key_bundle(&bundle, loaded_identity.verifying_key()).is_ok());
+    }
+
+    #[test]
+    fn rotate_now_advances_epoch() {
+        let discovery = setup_with_identity().manager;
+        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 0);
+        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 1);
+        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 2);
+    }
+
+    #[test]
+    fn rotate_now_recovers_from_tampered_signature_preserving_epoch() {
+        let discovery = setup_with_identity().manager;
+        // Reach epoch 1 first, so recovery to epoch 2 proves the stored epoch is read, not reset.
+        discovery.rotate_now(&mut OsRng).unwrap();
+        let rotated = discovery.rotate_now(&mut OsRng).unwrap();
+        assert_eq!(rotated.epoch(), 1);
+
+        // Corrupt the signature of the epoch-1 key.
+        let mut blob = discovery
+            .lock_storage()
+            .unwrap()
+            .load(DISCOVERY_KEY)
+            .unwrap()
+            .unwrap()
+            .to_vec();
+        blob[69] ^= 0x01;
+        discovery
+            .lock_storage()
+            .unwrap()
+            .store(DISCOVERY_KEY, &blob)
+            .unwrap();
+        assert!(matches!(
+            discovery.current(),
+            Err(DiscoveryKeyError::Corrupt)
+        ));
+
+        let recovered = discovery.rotate_now(&mut OsRng).unwrap();
+        assert_eq!(recovered.epoch(), 2);
+        assert!(discovery.current().is_ok());
+    }
+
+    #[test]
+    fn rotate_now_rejects_malformed_blob() {
+        let discovery = setup_with_identity().manager;
+        discovery
+            .lock_storage()
+            .unwrap()
+            .store(DISCOVERY_KEY, &[0xAAu8; 50])
+            .unwrap();
+        assert!(matches!(
+            discovery.rotate_now(&mut OsRng),
+            Err(DiscoveryKeyError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn rotate_now_without_identity_returns_identity_error() {
+        let discovery = manager_without_identity();
+        assert!(matches!(
+            discovery.rotate_now(&mut OsRng),
+            Err(DiscoveryKeyError::Identity(IdentityError::NotFound))
+        ));
+    }
+
+    #[test]
+    fn reset_clears_malformed_blob_then_rotation_starts_at_zero() {
+        let discovery = setup_with_identity().manager;
+        discovery
+            .lock_storage()
+            .unwrap()
+            .store(DISCOVERY_KEY, &[0xAAu8; 50])
+            .unwrap();
+        discovery.reset().unwrap();
+        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 0);
+    }
+
+    #[test]
+    fn encode_decode_round_trip() {
+        let identity = setup_with_identity().identity;
+        let loaded = identity.load_identity().unwrap();
+        let original = generate_discovery_key(&mut OsRng, loaded.signing_key_pair(), 9, FIXED_NOW);
+        let blob = encode_discovery_key(&original);
+        assert_eq!(blob.len(), DISCOVERY_KEY_BLOB_LEN);
+        let restored = decode_discovery_key(&blob);
+        assert_eq!(
+            original.public_key().as_bytes(),
+            restored.public_key().as_bytes()
+        );
+        assert_eq!(
+            original.verifying_key().as_bytes(),
+            restored.verifying_key().as_bytes(),
+        );
+        assert_eq!(
+            original.identity_signature().to_bytes(),
+            restored.identity_signature().to_bytes()
+        );
+        assert_eq!(restored.epoch(), 9);
+        assert_eq!(restored.created_at(), FIXED_NOW);
+    }
+}

@@ -15,30 +15,30 @@
 //! ```
 //! use aether_core::{InMemorySecureStorage, KeyStore};
 //!
-//! # fn publish_signed_prekey_bundle(
-//! #     _bundle: &aether_crypto::SignedPreKeyBundle,
+//! # fn publish_identity_bundle(
+//! #     _identity: &aether_core::Identity,
+//! #     _discovery_key: &aether_crypto::DiscoveryKeyBundle,
+//! #     _signed_prekey: &aether_crypto::SignedPreKeyBundle,
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
 //! #     Ok(())
 //! # }
 //! let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-//! store.generate_identity()?;
-//! let bundle = match store.rotate_signed_prekey_if_stale()? {
-//!     Some(bundle) => bundle,
-//!     None => store.current_signed_prekey_bundle()?,
-//! };
-//! publish_signed_prekey_bundle(&bundle)?;
+//! let identity = store.generate_identity()?;
+//! // Publish the identity with a matching discovery-key + signed-pre-key pair.
+//! let publication = store.current_publication_bundle()?;
+//! publish_identity_bundle(&identity, &publication.discovery_key, &publication.signed_prekey)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
 mod clock;
+mod discovery_key;
 mod identity;
 mod key_store;
 mod signed_prekey;
 mod storage;
-#[cfg(test)]
-mod test_support;
 
+pub use discovery_key::DiscoveryKeyError;
 pub use identity::{Identity, IdentityError};
-pub use key_store::{KeyStore, KeyStoreError};
+pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};

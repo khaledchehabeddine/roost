@@ -79,7 +79,7 @@ See [`README.md`](README.md#architecture) for the crate dependency graph.
 
 ### Rust Style
 
-- Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions
+- Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions, with each impl grouped with the type or trait it implements
 - No `pub use` glob re-exports
 - Local names: short when one obvious value is in scope; role names when same-shaped values coexist (including tests)
 - Functions: verbs for actions (`generate_*`, `rotate_*`, `verify_*`); nouns for accessors (`current_bundle`, `public_key`); predicates with `is_*`/`has_*`
@@ -95,6 +95,9 @@ See [`README.md`](README.md#architecture) for the crate dependency graph.
 
 ### Tests
 
+- Test names define behavior scope. Assertions should prove that named behavior and its required preconditions
+- Avoid duplicate coverage at the same responsibility layer. Higher-level tests focus on the contract added by that layer
+- Keep repeated coverage when it protects a security/protocol invariant or verifies behavior across an API, persistence, serialization, FFI, or other boundary
 - Inline unit tests live in `#[cfg(test)] mod tests { ... }` at the bottom of the source file they exercise
 - Integration tests live in `crates/<crate>/tests/<scenario>.rs` and exercise only the public API; if a test needs an internal item, the test belongs inline
 - One scenario per integration test file

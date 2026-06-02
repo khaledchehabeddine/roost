@@ -4,7 +4,7 @@ use crate::double_ratchet::{Header, RatchetState};
 use crate::error::CryptoError;
 use crate::keys::{KeyPair, PublicKey, SharedSecret, VerifyingKey, generate_key_pair};
 use crate::ratchet::RootKey;
-use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_bundle};
+use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_signed_prekey_bundle};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,12 @@ pub struct HandshakeEnvelope {
 ///
 /// The initiator's ephemeral key and first ratchet key are drawn from `rng`.
 ///
+/// Pass the responder's discovery-key verifying key as `responder_identity_verifying_key`. It
+/// verifies `responder_signed_prekey_bundle`.
+///
+/// Pass the responder's X25519 identity public key as `responder_identity_key`. It is used in
+/// X3DH-lite root-key derivation and first-message associated data.
+///
 /// # Errors
 /// - [`CryptoError::Aead`] when first-message encryption fails.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for root-key derivation fails.
@@ -59,7 +65,7 @@ pub fn initiate<R: RngCore + CryptoRng>(
     responder_signed_prekey_bundle: &SignedPreKeyBundle,
     plaintext: &[u8],
 ) -> Result<(RatchetState, HandshakeEnvelope), CryptoError> {
-    verify_bundle(
+    verify_signed_prekey_bundle(
         responder_signed_prekey_bundle,
         responder_identity_verifying_key,
     )?;
@@ -96,6 +102,12 @@ pub fn initiate<R: RngCore + CryptoRng>(
 /// Accepts a handshake envelope and decrypts the first message.
 ///
 /// The responder's first ratchet key is drawn from `rng` during the initial DH ratchet step.
+///
+/// `responder_identity_key` is the local responder's X25519 identity key pair. It is used in
+/// X3DH-lite root-key derivation and first-message associated data.
+///
+/// This function checks that the envelope targets `responder_signed_prekey`, but it does not
+/// verify the signed pre-key signature.
 ///
 /// # Errors
 /// - [`CryptoError::Aead`] when first-message decryption fails (tampered ciphertext, wrong

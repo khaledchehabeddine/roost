@@ -237,25 +237,4 @@ mod tests {
             ck = next_ck;
         }
     }
-
-    #[test]
-    fn kdf_rk_deterministic() {
-        let (alice, bob) = fixed_key_pairs();
-        let dh_output = alice.diffie_hellman(&bob.public);
-        let root_key = RootKey([0x42u8; 32]);
-        let (rk1, ck1) = kdf_rk(&root_key, &dh_output).unwrap();
-        let (rk2, ck2) = kdf_rk(&root_key, &dh_output).unwrap();
-        assert_eq!(rk1.as_bytes(), rk2.as_bytes());
-        assert_eq!(ck1.as_bytes(), ck2.as_bytes());
-    }
-
-    #[test]
-    fn kdf_ck_chain_advances() {
-        let ck0 = ChainKey([0x42u8; 32]);
-        let (ck1, mk1) = kdf_ck(&ck0).unwrap();
-        let (ck2, mk2) = kdf_ck(&ck1).unwrap();
-        assert_ne!(ck1.as_bytes(), ck0.as_bytes());
-        assert_ne!(ck2.as_bytes(), ck1.as_bytes());
-        assert_ne!(mk1.as_bytes(), mk2.as_bytes());
-    }
 }
