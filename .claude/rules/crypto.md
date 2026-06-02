@@ -19,4 +19,4 @@ paths:
 - Types holding secret material must not derive `Clone`, `Debug`, or `Serialize` unless they also derive `ZeroizeOnDrop` — add a comment explaining why
 - Comparisons of MACs, keys, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
 - Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
-- Protocol invariants (Double Ratchet, X3DH-lite): replay rejection, ratchet ordering, key expiration, skipped-key caps — see [docs/agents/crypto-protocol-state.md](../../docs/agents/crypto-protocol-state.md) for detail
+- Protocol invariants (Double Ratchet, X3DH): replay rejection, ratchet ordering, key expiration, skipped-key caps — see [docs/agents/crypto-protocol-state.md](../../docs/agents/crypto-protocol-state.md) for detail

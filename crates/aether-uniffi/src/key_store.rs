@@ -211,8 +211,9 @@ impl KeyStore {
 
     /// Rotates the discovery key and signed pre-key together, returning both bundles.
     ///
-    /// The discovery-key and signed-pre-key rotations are one operation. Publish both returned
-    /// bundles together so peers can verify the full trust chain.
+    /// The discovery-key and signed-pre-key rotations are one operation. Stored one-time pre-keys
+    /// are cleared before the discovery-key epoch advances. Publish both returned bundles together
+    /// so peers can verify the full trust chain.
     ///
     /// # Examples
     /// ```
@@ -353,7 +354,8 @@ impl KeyStore {
     ///
     /// The backup is decrypted before storage changes begin, so a wrong passphrase leaves the
     /// existing identity untouched. On success, the restored identity gets a fresh discovery key and
-    /// no signed pre-key. Call [`Self::rotate_signed_prekey_if_stale`] before publishing.
+    /// no one-time pre-keys or signed pre-key. Call [`Self::rotate_signed_prekey_if_stale`] before
+    /// publishing.
     ///
     /// Storage failures can happen after writes begin and may leave incomplete key material. Call
     /// [`Self::reset`] before using the keystore again after a failed import.
@@ -395,7 +397,7 @@ impl KeyStore {
             .map_err(Into::into)
     }
 
-    /// Clears the stored signed pre-key, discovery-key, and identity material.
+    /// Clears the stored one-time pre-keys, signed pre-key, discovery-key, and identity material.
     ///
     /// Deletion runs dependents-first, so a partial failure does not leave newer key material
     /// attached to a missing identity. Calling this on an empty store succeeds. Calling it again
@@ -465,6 +467,7 @@ mod tests {
             signature: Signature::from_bytes(
                 &<[u8; 64]>::try_from(bundle.signature.as_slice()).unwrap(),
             ),
+            epoch: bundle.epoch,
             created_at: bundle.created_at,
         }
     }

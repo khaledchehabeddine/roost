@@ -5,6 +5,8 @@ use std::fmt;
 pub enum CryptoError {
     /// XChaCha20-Poly1305 encryption or decryption failed.
     Aead,
+    /// Handshake envelope initiator discovery-key reference does not match the verified bundle.
+    HandshakeDiscoveryKeyMismatch,
     /// Handshake envelope targets a different signed pre-key than the local one.
     HandshakeSignedPreKeyMismatch,
     /// HKDF-SHA256 rejected the requested output length.
@@ -17,14 +19,20 @@ pub enum CryptoError {
     InvalidState(&'static str),
     /// Message header asks to skip too many messages in one ratchet step.
     MaxSkipExceeded,
-    /// Accepting the message would exceed the skipped-key cache limit.
+    /// Persisted ratchet state exceeds the skipped-key cache limit.
     MaxSkippedKeysExceeded,
+    /// Handshake envelope names a one-time pre-key that was not supplied.
+    MissingOneTimePreKey,
+    /// Handshake envelope one-time pre-key reference does not match the local one.
+    OneTimePreKeyMismatch,
     /// Persisted ratchet state bytes failed to decode.
     RatchetStateDecode,
     /// Ratchet state failed to encode for persistence.
     RatchetStateEncode,
     /// Ed25519 signature verification failed.
     SignatureInvalid,
+    /// Pre-key material belongs to a superseded discovery-key epoch.
+    StalePreKey,
     /// Persisted ratchet state uses a format version this build does not understand.
     UnsupportedRatchetVersion(u8),
 }
@@ -33,6 +41,10 @@ impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Aead => write!(f, "xchacha20-poly1305 encryption or decryption failed"),
+            Self::HandshakeDiscoveryKeyMismatch => write!(
+                f,
+                "handshake envelope discovery-key reference does not match verified discovery key"
+            ),
             Self::HandshakeSignedPreKeyMismatch => write!(
                 f,
                 "handshake envelope signed pre-key reference does not match local signed pre-key"
@@ -47,9 +59,15 @@ impl fmt::Display for CryptoError {
             Self::MaxSkippedKeysExceeded => {
                 write!(f, "cached skipped message keys total exceeds global limit")
             }
+            Self::MissingOneTimePreKey => write!(f, "handshake one-time pre-key is missing"),
+            Self::OneTimePreKeyMismatch => write!(
+                f,
+                "handshake envelope one-time pre-key reference does not match local one-time pre-key"
+            ),
             Self::RatchetStateDecode => write!(f, "ratchet state bytes failed to decode"),
             Self::RatchetStateEncode => write!(f, "ratchet state failed to encode"),
             Self::SignatureInvalid => write!(f, "ed25519 signature verification failed"),
+            Self::StalePreKey => write!(f, "pre-key belongs to a superseded discovery-key epoch"),
             Self::UnsupportedRatchetVersion(v) => {
                 write!(f, "unsupported ratchet state format version: {v}")
             }
