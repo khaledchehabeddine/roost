@@ -25,7 +25,7 @@ The Double Ratchet state machine that advances on every Message, providing forwa
 Avoid: chain, state machine
 
 **X3DH** (one execution per Session):
-Signal's X3DH key agreement: four DH operations across the identity key, ephemeral key, signed pre-key, and one-time pre-key when available. Produces the root key that seeds the Ratchet.
+Signal's X3DH key agreement: four DH operations across the discovery key, ephemeral key, signed pre-key, and one-time pre-key when available. Produces the root key that seeds the Ratchet.
 Avoid: handshake, key agreement
 
 ## Example

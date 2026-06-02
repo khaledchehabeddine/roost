@@ -11,9 +11,12 @@ use zeroize::Zeroizing;
 pub(crate) const SIGNED_PREKEY_ROTATION_WINDOW_DAYS: u64 = 7;
 
 const SIGNED_PREKEY_KEY: &str = "prekey/signed";
-const SIGNED_PREKEY_VERSION: u8 = 1;
-// Blob layout: version (1 byte) | secret (32 bytes) | signature (64 bytes) | created_at (8 bytes).
-const SIGNED_PREKEY_BLOB_LEN: usize = 1 + 32 + 64 + 8;
+const SIGNED_PREKEY_V1_VERSION: u8 = 1;
+const SIGNED_PREKEY_VERSION: u8 = 2;
+// v1 layout: version (1) | secret (32) | signature (64) | created_at (8).
+const SIGNED_PREKEY_V1_BLOB_LEN: usize = 1 + 32 + 64 + 8;
+// v2 layout: version (1) | secret (32) | signature (64) | epoch (4) | created_at (8).
+const SIGNED_PREKEY_BLOB_LEN: usize = 1 + 32 + 64 + 4 + 8;
 const SECONDS_PER_DAY: u64 = 86_400;
 // Rotate far-future timestamps so clock manipulation cannot freeze rotation forever.
 const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
@@ -121,13 +124,18 @@ impl SignedPreKeyManager {
         rng: &mut R,
     ) -> Result<Option<SignedPreKey>, SignedPreKeyError> {
         let now = self.now_secs()?;
-        let needs_rotation = match self.read_stored_created_at()? {
+        let needs_rotation = match self.read_stored_metadata()? {
             None => true,
-            Some(timestamp) if timestamp > now + FUTURE_TIMESTAMP_TOLERANCE_SECS => true,
-            Some(timestamp) if timestamp > now => false,
-            Some(timestamp) => {
-                now - timestamp > SIGNED_PREKEY_ROTATION_WINDOW_DAYS * SECONDS_PER_DAY
-            }
+            Some(StoredSignedPreKeyMetadata::V1) => true,
+            Some(StoredSignedPreKeyMetadata::V2 {
+                created_at: timestamp,
+            }) if timestamp > now + FUTURE_TIMESTAMP_TOLERANCE_SECS => true,
+            Some(StoredSignedPreKeyMetadata::V2 {
+                created_at: timestamp,
+            }) if timestamp > now => false,
+            Some(StoredSignedPreKeyMetadata::V2 {
+                created_at: timestamp,
+            }) => now - timestamp > SIGNED_PREKEY_ROTATION_WINDOW_DAYS * SECONDS_PER_DAY,
         };
         if needs_rotation {
             Ok(Some(self.rotate_now(rng)?))
@@ -156,15 +164,22 @@ impl SignedPreKeyManager {
         Ok(signed_prekey)
     }
 
-    fn read_stored_created_at(&self) -> Result<Option<u64>, SignedPreKeyError> {
+    fn read_stored_metadata(
+        &self,
+    ) -> Result<Option<StoredSignedPreKeyMetadata>, SignedPreKeyError> {
         let storage = self.lock_storage()?;
         let Some(raw) = storage.load(SIGNED_PREKEY_KEY)? else {
             return Ok(None);
         };
+        if raw.len() == SIGNED_PREKEY_V1_BLOB_LEN && raw[0] == SIGNED_PREKEY_V1_VERSION {
+            return Ok(Some(StoredSignedPreKeyMetadata::V1));
+        }
         let blob = checked_blob(&raw)?;
         let mut timestamp_bytes = [0u8; 8];
-        timestamp_bytes.copy_from_slice(&blob[97..SIGNED_PREKEY_BLOB_LEN]);
-        Ok(Some(u64::from_be_bytes(timestamp_bytes)))
+        timestamp_bytes.copy_from_slice(&blob[101..SIGNED_PREKEY_BLOB_LEN]);
+        Ok(Some(StoredSignedPreKeyMetadata::V2 {
+            created_at: u64::from_be_bytes(timestamp_bytes),
+        }))
     }
 
     fn lock_storage(&self) -> Result<MutexGuard<'_, Box<dyn SecureStorage>>, SignedPreKeyError> {
@@ -180,12 +195,18 @@ impl SignedPreKeyManager {
     }
 }
 
+enum StoredSignedPreKeyMetadata {
+    V1,
+    V2 { created_at: u64 },
+}
+
 fn encode_signed_prekey(signed_prekey: &SignedPreKey) -> Zeroizing<[u8; SIGNED_PREKEY_BLOB_LEN]> {
     let mut blob = Zeroizing::new([0u8; SIGNED_PREKEY_BLOB_LEN]);
     blob[0] = SIGNED_PREKEY_VERSION;
     blob[1..33].copy_from_slice(&*signed_prekey.to_secret_bytes());
     blob[33..97].copy_from_slice(&signed_prekey.signature().to_bytes());
-    blob[97..SIGNED_PREKEY_BLOB_LEN].copy_from_slice(&signed_prekey.created_at().to_be_bytes());
+    blob[97..101].copy_from_slice(&signed_prekey.epoch().to_be_bytes());
+    blob[101..SIGNED_PREKEY_BLOB_LEN].copy_from_slice(&signed_prekey.created_at().to_be_bytes());
     blob
 }
 
@@ -194,10 +215,13 @@ fn decode_signed_prekey(blob: &[u8; SIGNED_PREKEY_BLOB_LEN]) -> SignedPreKey {
     secret.copy_from_slice(&blob[1..33]);
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&blob[33..97]);
+    let mut epoch_bytes = [0u8; 4];
+    epoch_bytes.copy_from_slice(&blob[97..101]);
     let mut timestamp_bytes = [0u8; 8];
-    timestamp_bytes.copy_from_slice(&blob[97..SIGNED_PREKEY_BLOB_LEN]);
+    timestamp_bytes.copy_from_slice(&blob[101..SIGNED_PREKEY_BLOB_LEN]);
+    let epoch = u32::from_be_bytes(epoch_bytes);
     let created_at = u64::from_be_bytes(timestamp_bytes);
-    SignedPreKey::from_secret_bytes(secret, signature, created_at)
+    SignedPreKey::from_secret_bytes(secret, signature, epoch, created_at)
 }
 
 fn checked_blob(raw: &[u8]) -> Result<&[u8; SIGNED_PREKEY_BLOB_LEN], SignedPreKeyError> {
@@ -228,6 +252,7 @@ mod tests {
     use rand::rngs::OsRng;
 
     const FIXED_NOW: u64 = 1_700_000_000;
+    const FIXED_EPOCH: u32 = 3;
 
     struct SignedPreKeySetup {
         discovery: Arc<DiscoveryKeyManager>,
@@ -275,7 +300,8 @@ mod tests {
         created_at: u64,
     ) -> SignedPreKey {
         let signing_key = generate_signing_key_pair(&mut OsRng);
-        let signed_prekey = generate_signed_prekey(&mut OsRng, &signing_key, created_at);
+        let signed_prekey =
+            generate_signed_prekey(&mut OsRng, &signing_key, FIXED_EPOCH, created_at);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -419,6 +445,29 @@ mod tests {
     }
 
     #[test]
+    fn rotate_if_stale_replaces_v1_signed_prekey() {
+        let manager = setup_with_discovery_key().manager;
+        let mut legacy = [0u8; SIGNED_PREKEY_V1_BLOB_LEN];
+        legacy[0] = SIGNED_PREKEY_V1_VERSION;
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(SIGNED_PREKEY_KEY, &legacy)
+            .unwrap();
+
+        let rotated = manager
+            .rotate_if_stale(&mut OsRng)
+            .unwrap()
+            .expect("v1 signed pre-key must rotate");
+
+        assert_eq!(
+            manager.current_bundle().unwrap().public_key.as_bytes(),
+            rotated.public().as_bytes()
+        );
+    }
+
+    #[test]
     fn rotate_if_stale_without_discovery_key_returns_not_found() {
         let manager = manager_without_discovery_key();
         assert!(matches!(
@@ -439,7 +488,8 @@ mod tests {
     #[test]
     fn encode_decode_signed_prekey_round_trip() {
         let identity_signing_key = generate_signing_key_pair(&mut OsRng);
-        let original = generate_signed_prekey(&mut OsRng, &identity_signing_key, FIXED_NOW);
+        let original =
+            generate_signed_prekey(&mut OsRng, &identity_signing_key, FIXED_EPOCH, FIXED_NOW);
         let blob = encode_signed_prekey(&original);
         assert_eq!(blob.len(), SIGNED_PREKEY_BLOB_LEN);
         let restored = decode_signed_prekey(&blob);
@@ -448,6 +498,7 @@ mod tests {
             restored.signature().to_bytes(),
             original.signature().to_bytes()
         );
+        assert_eq!(restored.epoch(), original.epoch());
         assert_eq!(restored.created_at(), original.created_at());
     }
 

@@ -15,7 +15,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 const MAX_SKIP: u32 = 100;
 // Caps all cached skipped-message keys, so repeated DH steps cannot exhaust memory.
 const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
-const RATCHET_STATE_VERSION: u8 = 1;
+const RATCHET_STATE_VERSION: u8 = 2;
 
 /// A Double Ratchet session state between two peers.
 ///
@@ -39,8 +39,10 @@ pub struct RatchetState {
     // Number of messages sent in the previous sending chain.
     pn: u32,
     // Cached keys for out-of-order messages, keyed by sender public key bytes and message number.
-    // `BTreeMap` keeps serialized snapshots deterministic.
-    mk_skipped: BTreeMap<([u8; 32], u32), MessageKey>,
+    // `BTreeMap` keeps lookup and serialized snapshots deterministic.
+    mk_skipped: BTreeMap<([u8; 32], u32), SkippedMessageKey>,
+    // Monotonic first-insertion sequence used for deterministic oldest-first eviction.
+    next_skipped_key_sequence: u64,
 }
 
 // Serde-friendly wire form for `to_bytes` / `from_bytes`.
@@ -55,7 +57,21 @@ struct RatchetStateWire {
     ns: u32,
     nr: u32,
     pn: u32,
-    mk_skipped: BTreeMap<([u8; 32], u32), [u8; 32]>,
+    mk_skipped: BTreeMap<([u8; 32], u32), SkippedMessageKeyWire>,
+    next_skipped_key_sequence: u64,
+}
+
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+struct SkippedMessageKey {
+    message_key: MessageKey,
+    sequence: u64,
+}
+
+#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+struct SkippedMessageKeyWire {
+    message_key: [u8; 32],
+    #[zeroize(skip)]
+    sequence: u64,
 }
 
 // The tuple key in `mk_skipped` does not implement `Zeroize`, so the secret fields are wiped
@@ -71,7 +87,7 @@ impl Drop for RatchetStateWire {
             ckr.zeroize();
         }
         for value in self.mk_skipped.values_mut() {
-            value.zeroize();
+            value.message_key.zeroize();
         }
     }
 }
@@ -96,6 +112,7 @@ impl RatchetState {
             nr: 0,
             pn: 0,
             mk_skipped: BTreeMap::new(),
+            next_skipped_key_sequence: 0,
         })
     }
 
@@ -111,6 +128,7 @@ impl RatchetState {
             nr: 0,
             pn: 0,
             mk_skipped: BTreeMap::new(),
+            next_skipped_key_sequence: 0,
         }
     }
 
@@ -223,8 +241,17 @@ impl RatchetState {
             mk_skipped: self
                 .mk_skipped
                 .iter()
-                .map(|(k, v)| (*k, *v.as_bytes()))
+                .map(|(k, v)| {
+                    (
+                        *k,
+                        SkippedMessageKeyWire {
+                            message_key: *v.message_key.as_bytes(),
+                            sequence: v.sequence,
+                        },
+                    )
+                })
                 .collect(),
+            next_skipped_key_sequence: self.next_skipped_key_sequence,
         };
         postcard::to_stdvec(&wire)
             .map(Zeroizing::new)
@@ -252,6 +279,20 @@ impl RatchetState {
         if wire.mk_skipped.len() > MAX_SKIPPED_KEYS_TOTAL {
             return Err(CryptoError::MaxSkippedKeysExceeded);
         }
+        let max_sequence = wire
+            .mk_skipped
+            .values()
+            .map(|v| v.sequence)
+            .max()
+            .unwrap_or(0);
+        if !wire.mk_skipped.is_empty() {
+            let min_next_sequence = max_sequence
+                .checked_add(1)
+                .ok_or(CryptoError::RatchetStateDecode)?;
+            if wire.next_skipped_key_sequence < min_next_sequence {
+                return Err(CryptoError::RatchetStateDecode);
+            }
+        }
         Ok(Self {
             dhs: KeyPair::from_secret_bytes(wire.dhs_secret),
             dhr: wire.dhr.map(PublicKey::from),
@@ -264,8 +305,17 @@ impl RatchetState {
             mk_skipped: wire
                 .mk_skipped
                 .iter()
-                .map(|(k, v)| (*k, MessageKey(*v)))
+                .map(|(k, v)| {
+                    (
+                        *k,
+                        SkippedMessageKey {
+                            message_key: MessageKey(v.message_key),
+                            sequence: v.sequence,
+                        },
+                    )
+                })
                 .collect(),
+            next_skipped_key_sequence: wire.next_skipped_key_sequence,
         })
     }
 
@@ -286,6 +336,7 @@ impl RatchetState {
             nr: self.nr,
             pn: self.pn,
             mk_skipped: self.mk_skipped.clone(),
+            next_skipped_key_sequence: self.next_skipped_key_sequence,
         }
     }
 
@@ -297,11 +348,11 @@ impl RatchetState {
         associated_data: &[u8],
     ) -> Result<Option<Zeroizing<Vec<u8>>>, CryptoError> {
         let key = (*header.public_key.as_bytes(), header.message_number);
-        if let Some(mk) = self.mk_skipped.remove(&key) {
-            match decrypt(ciphertext, associated_data, header, &mk) {
+        if let Some(skipped) = self.mk_skipped.remove(&key) {
+            match decrypt(ciphertext, associated_data, header, &skipped.message_key) {
                 Ok(plaintext) => Ok(Some(plaintext)),
                 Err(e) => {
-                    self.mk_skipped.insert(key, mk);
+                    self.mk_skipped.insert(key, skipped);
                     Err(e)
                 }
             }
@@ -321,11 +372,6 @@ impl RatchetState {
             return Err(CryptoError::MaxSkipExceeded);
         }
 
-        let keys_to_skip = (until_n - self.nr) as usize;
-        if self.mk_skipped.len() + keys_to_skip > MAX_SKIPPED_KEYS_TOTAL {
-            return Err(CryptoError::MaxSkippedKeysExceeded);
-        }
-
         if let Some(ref ckr) = self.ckr {
             let dhr = self.dhr.ok_or(CryptoError::InvalidState(
                 "dhr not set when skipping message keys",
@@ -333,7 +379,7 @@ impl RatchetState {
             let mut current_ck = ChainKey::from_bytes(*ckr.as_bytes());
             while self.nr < until_n {
                 let (next_ck, mk) = kdf_ck(&current_ck)?;
-                self.mk_skipped.insert((*dhr.as_bytes(), self.nr), mk);
+                self.insert_skipped_message_key((*dhr.as_bytes(), self.nr), mk)?;
                 current_ck = next_ck;
                 self.nr += 1;
             }
@@ -341,6 +387,40 @@ impl RatchetState {
         }
 
         Ok(())
+    }
+
+    fn insert_skipped_message_key(
+        &mut self,
+        key: ([u8; 32], u32),
+        message_key: MessageKey,
+    ) -> Result<(), CryptoError> {
+        let sequence = self.next_skipped_key_sequence;
+        self.next_skipped_key_sequence = self
+            .next_skipped_key_sequence
+            .checked_add(1)
+            .ok_or(CryptoError::InvalidState("skipped-key sequence exhausted"))?;
+        self.mk_skipped.insert(
+            key,
+            SkippedMessageKey {
+                message_key,
+                sequence,
+            },
+        );
+        while self.mk_skipped.len() > MAX_SKIPPED_KEYS_TOTAL {
+            self.evict_oldest_skipped_message_key();
+        }
+        Ok(())
+    }
+
+    fn evict_oldest_skipped_message_key(&mut self) {
+        let oldest_key = self
+            .mk_skipped
+            .iter()
+            .min_by_key(|(key, skipped)| (skipped.sequence, *key))
+            .map(|(key, _)| *key);
+        if let Some(oldest_key) = oldest_key {
+            self.mk_skipped.remove(&oldest_key);
+        }
     }
 
     // Performs a DH ratchet step and derives new receiving and sending chains.
@@ -597,12 +677,14 @@ mod tests {
     }
 
     #[test]
-    fn max_skipped_keys_rejects_cache_overflow() {
+    fn max_skipped_keys_evicts_oldest_entries() {
         let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let overflow_step = MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP;
+        let mut oldest_skipped = None;
+        let mut newest_skipped = None;
         for step in 0..=overflow_step {
-            let (last_header, last_ciphertext) = (0..=MAX_SKIP)
+            let mut messages: Vec<_> = (0..=MAX_SKIP)
                 .map(|message_number| {
                     initiator
                         .ratchet_encrypt(
@@ -611,24 +693,112 @@ mod tests {
                         )
                         .unwrap()
                 })
-                .last()
-                .unwrap();
-            if step == overflow_step {
-                assert!(matches!(
-                    responder.ratchet_decrypt(
-                        &mut rng,
-                        &last_ciphertext,
-                        &last_header,
-                        &associated_data
-                    ),
-                    Err(CryptoError::MaxSkippedKeysExceeded)
-                ));
-            } else {
-                responder
-                    .ratchet_decrypt(&mut rng, &last_ciphertext, &last_header, &associated_data)
-                    .unwrap();
+                .collect();
+            let first_message = messages.remove(0);
+            if step == 0 {
+                oldest_skipped = Some(first_message);
+            } else if step == overflow_step {
+                newest_skipped = Some(first_message);
             }
+            let (last_header, last_ciphertext) = messages.last().unwrap();
+            responder
+                .ratchet_decrypt(&mut rng, last_ciphertext, last_header, &associated_data)
+                .unwrap();
         }
+
+        assert_eq!(responder.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
+
+        let (oldest_header, oldest_ciphertext) = oldest_skipped.unwrap();
+        assert!(matches!(
+            responder.ratchet_decrypt(
+                &mut rng,
+                &oldest_ciphertext,
+                &oldest_header,
+                &associated_data
+            ),
+            Err(CryptoError::Aead)
+        ));
+
+        let (newest_header, newest_ciphertext) = newest_skipped.unwrap();
+        let plaintext = responder
+            .ratchet_decrypt(
+                &mut rng,
+                &newest_ciphertext,
+                &newest_header,
+                &associated_data,
+            )
+            .unwrap();
+        assert_eq!(plaintext.as_slice(), b"step 5 msg 0");
+    }
+
+    #[test]
+    fn restored_skipped_key_sequence_evicts_oldest_survivor() {
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
+
+        let fill_steps = MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP;
+        let mut oldest_survivor = None;
+        for step in 0..fill_steps {
+            let mut messages: Vec<_> = (0..=MAX_SKIP)
+                .map(|message_number| {
+                    initiator
+                        .ratchet_encrypt(
+                            format!("fill {step} msg {message_number}").as_bytes(),
+                            &associated_data,
+                        )
+                        .unwrap()
+                })
+                .collect();
+            let first_message = messages.remove(0);
+            if step == 0 {
+                oldest_survivor = Some(first_message);
+            }
+            let (last_header, last_ciphertext) = messages.last().unwrap();
+            responder
+                .ratchet_decrypt(&mut rng, last_ciphertext, last_header, &associated_data)
+                .unwrap();
+        }
+        assert_eq!(responder.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
+
+        let bytes = responder.to_bytes().unwrap();
+        let mut restored = RatchetState::from_bytes(&bytes).unwrap();
+
+        let mut messages: Vec<_> = (0..=MAX_SKIP)
+            .map(|message_number| {
+                initiator
+                    .ratchet_encrypt(
+                        format!("after restore msg {message_number}").as_bytes(),
+                        &associated_data,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let newest_survivor = messages.remove(0);
+        let (last_header, last_ciphertext) = messages.last().unwrap();
+        restored
+            .ratchet_decrypt(&mut rng, last_ciphertext, last_header, &associated_data)
+            .unwrap();
+
+        let (oldest_header, oldest_ciphertext) = oldest_survivor.unwrap();
+        assert!(matches!(
+            restored.ratchet_decrypt(
+                &mut rng,
+                &oldest_ciphertext,
+                &oldest_header,
+                &associated_data
+            ),
+            Err(CryptoError::Aead)
+        ));
+
+        let (newest_header, newest_ciphertext) = newest_survivor;
+        let plaintext = restored
+            .ratchet_decrypt(
+                &mut rng,
+                &newest_ciphertext,
+                &newest_header,
+                &associated_data,
+            )
+            .unwrap();
+        assert_eq!(plaintext.as_slice(), b"after restore msg 0");
     }
 
     #[test]
@@ -812,8 +982,17 @@ mod tests {
             nr: 0,
             pn: 0,
             mk_skipped: (0..=MAX_SKIPPED_KEYS_TOTAL as u32)
-                .map(|i| (([0; 32], i), [0; 32]))
+                .map(|i| {
+                    (
+                        ([0; 32], i),
+                        SkippedMessageKeyWire {
+                            message_key: [0; 32],
+                            sequence: u64::from(i),
+                        },
+                    )
+                })
                 .collect(),
+            next_skipped_key_sequence: MAX_SKIPPED_KEYS_TOTAL as u64 + 1,
         };
         let bytes = postcard::to_stdvec(&oversized).unwrap();
         assert!(matches!(

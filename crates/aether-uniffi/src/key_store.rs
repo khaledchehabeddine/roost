@@ -465,6 +465,7 @@ mod tests {
             signature: Signature::from_bytes(
                 &<[u8; 64]>::try_from(bundle.signature.as_slice()).unwrap(),
             ),
+            epoch: bundle.epoch,
             created_at: bundle.created_at,
         }
     }

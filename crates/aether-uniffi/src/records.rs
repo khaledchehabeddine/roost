@@ -32,8 +32,12 @@ impl From<CoreIdentity> for Identity {
 pub struct SignedPreKeyBundle {
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
-    /// Ed25519 signature over `public_key`. Always 64 bytes.
+    /// Ed25519 signature over
+    /// `b"aether-spk-v2:" || public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()`.
+    /// Always 64 bytes.
     pub signature: Vec<u8>,
+    /// Discovery-key epoch this signed pre-key is bound to.
+    pub epoch: u32,
     /// Generated timestamp in Unix seconds.
     pub created_at: u64,
 }
@@ -43,6 +47,7 @@ impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
         SignedPreKeyBundle {
             public_key: b.public_key.as_bytes().to_vec(),
             signature: b.signature.to_bytes().to_vec(),
+            epoch: b.epoch,
             created_at: b.created_at,
         }
     }
