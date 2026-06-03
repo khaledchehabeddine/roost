@@ -372,7 +372,7 @@ mod tests {
     use crate::discovery_key::{
         DiscoveryKey, generate_discovery_key, generate_signed_prekey_for_discovery_key,
     };
-    use crate::keys::{SigningKeyPair, generate_key_pair, generate_signing_key_pair};
+    use crate::keys::{KeyPair, SigningKeyPair, generate_key_pair, generate_signing_key_pair};
     use crate::one_time_prekey::{OneTimePreKey, generate_one_time_prekey};
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -415,6 +415,55 @@ mod tests {
             signed_prekey: setup.bob_signed_prekey.bundle(),
             one_time_prekey: include_one_time.then(|| setup.bob_one_time_prekey.bundle()),
         }
+    }
+
+    /// Known-answer test for full X3DH root-key derivation with an OPK.
+    ///
+    /// Source: Aether's X25519 constructors and X3DH HKDF ordering
+    ///
+    /// Inputs:
+    /// - `alice_discovery_secret = [0x21; 32]`
+    /// - `alice_ephemeral_secret = [0x22; 32]`
+    /// - `bob_discovery_secret = [0x31; 32]`
+    /// - `bob_signed_prekey_secret = [0x41; 32]`
+    /// - `bob_one_time_prekey_secret = [0x51; 32]`
+    ///
+    /// Output: `HKDF(F_PREFIX || DH1 || DH2 || DH3 || DH4, HKDF_INFO_WITH_ONE_TIME_PREKEY)`.
+    #[test]
+    fn full_x3dh_root_key_known_answer() {
+        const EXPECTED_ROOT_KEY: [u8; 32] = [
+            37, 114, 118, 16, 206, 110, 38, 225, 178, 22, 80, 11, 242, 49, 87, 75, 125, 141, 118,
+            80, 116, 222, 245, 127, 124, 93, 20, 223, 192, 12, 79, 133,
+        ];
+
+        let alice_discovery_key =
+            DiscoveryKey::from_secret_bytes([0x21u8; 32], [0x71u8; 32], 2, FIXED_TS, [0u8; 64]);
+        let alice_ephemeral_key = KeyPair::from_secret_bytes([0x22u8; 32]);
+        let bob_discovery_key =
+            DiscoveryKey::from_secret_bytes([0x31u8; 32], [0x72u8; 32], 3, FIXED_TS, [0u8; 64]);
+        let bob_signed_prekey =
+            SignedPreKey::from_secret_bytes([0x41u8; 32], [0u8; 64], 3, FIXED_TS);
+        let bob_one_time_prekey = OneTimePreKey::from_secret_bytes(9, [0x51u8; 32], 3, FIXED_TS);
+
+        let initiator_root_key = derive_root_key_initiator(
+            &alice_discovery_key,
+            &alice_ephemeral_key,
+            bob_discovery_key.public_key(),
+            bob_signed_prekey.public(),
+            Some(bob_one_time_prekey.public()),
+        )
+        .unwrap();
+        let responder_root_key = derive_root_key_responder(
+            alice_discovery_key.public_key(),
+            &alice_ephemeral_key.public,
+            &bob_discovery_key,
+            &bob_signed_prekey,
+            Some(&bob_one_time_prekey),
+        )
+        .unwrap();
+
+        assert_eq!(initiator_root_key.as_bytes(), responder_root_key.as_bytes());
+        assert_eq!(initiator_root_key.as_bytes(), &EXPECTED_ROOT_KEY);
     }
 
     #[test]

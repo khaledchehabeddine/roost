@@ -1,0 +1,129 @@
+{
+  "rng_seed": [
+    51, 51, 51, 51, 51, 51, 51, 51,
+    51, 51, 51, 51, 51, 51, 51, 51,
+    51, 51, 51, 51, 51, 51, 51, 51,
+    51, 51, 51, 51, 51, 51, 51, 51
+  ],
+  "created_at": 1700000000,
+  "alice_discovery_epoch": 1,
+  "bob_discovery_epoch": 2,
+  "bob_one_time_prekey_id": 7,
+  "handshake_plaintext": "transcript handshake",
+  "handshake_envelope": {
+    "initiator_discovery_public_key": [
+      94, 159, 116, 134, 75, 237, 237, 31,
+      88, 131, 48, 208, 14, 152, 119, 134,
+      30, 78, 199, 239, 120, 226, 109, 213,
+      66, 56, 140, 0, 58, 7, 47, 119
+    ],
+    "initiator_ephemeral_public_key": [
+      94, 147, 137, 108, 148, 119, 10, 179,
+      28, 13, 54, 58, 155, 213, 112, 185,
+      186, 251, 238, 178, 155, 114, 194, 139,
+      138, 130, 10, 111, 7, 22, 118, 16
+    ],
+    "responder_discovery_epoch": 2,
+    "responder_signed_prekey_public_key": [
+      253, 193, 22, 129, 174, 26, 121, 118,
+      178, 245, 124, 233, 128, 223, 222, 114,
+      150, 245, 174, 177, 84, 9, 82, 138,
+      224, 142, 179, 114, 176, 190, 168, 58
+    ],
+    "one_time_prekey_id": 7,
+    "one_time_prekey_public_key": [
+      60, 113, 241, 108, 128, 182, 144, 229,
+      119, 91, 194, 50, 23, 144, 76, 133,
+      123, 81, 228, 117, 92, 247, 113, 173,
+      48, 130, 11, 62, 141, 169, 145, 60
+    ],
+    "ratchet_public_key": [
+      200, 124, 239, 187, 114, 233, 54, 93,
+      103, 169, 125, 67, 17, 32, 69, 204,
+      245, 92, 48, 80, 154, 24, 173, 206,
+      94, 53, 5, 128, 134, 252, 237, 4
+    ],
+    "previous_chain_length": 0,
+    "message_number": 0,
+    "ciphertext_hex": "0df21961789f4b68f0285e0e94915a886b21ef8bcd9f8c613eaacbfa42a1e3c257d7428d"
+  },
+  "messages": [
+    {
+      "sender": "bob",
+      "plaintext": "bob reply 1",
+      "header": {
+        "public_key": [
+          91, 41, 32, 198, 204, 113, 184, 246,
+          166, 11, 70, 185, 128, 44, 200, 250,
+          209, 44, 48, 9, 196, 24, 80, 87,
+          62, 202, 151, 9, 2, 242, 1, 60
+        ],
+        "previous_chain_length": 0,
+        "message_number": 0
+      },
+      "ciphertext_hex": "f45bc8f8ae76d4cc301f433625cdbea75284b6cb9f5df3d45798e3"
+    },
+    {
+      "sender": "alice",
+      "plaintext": "alice follow-up 1",
+      "header": {
+        "public_key": [
+          232, 178, 67, 72, 5, 86, 158, 98,
+          51, 4, 187, 229, 75, 186, 70, 27,
+          145, 96, 42, 107, 115, 9, 41, 80,
+          141, 163, 111, 154, 135, 9, 205, 1
+        ],
+        "previous_chain_length": 1,
+        "message_number": 0
+      },
+      "ciphertext_hex": "aaba960251c93775df154307b0ac7964d689ad1f8efe2d1c609a7bc82cf7e68b04"
+    },
+    {
+      "sender": "alice",
+      "plaintext": "alice follow-up 2",
+      "header": {
+        "public_key": [
+          232, 178, 67, 72, 5, 86, 158, 98,
+          51, 4, 187, 229, 75, 186, 70, 27,
+          145, 96, 42, 107, 115, 9, 41, 80,
+          141, 163, 111, 154, 135, 9, 205, 1
+        ],
+        "previous_chain_length": 1,
+        "message_number": 1
+      },
+      "ciphertext_hex": "b311bf910dd414e440415af99ec6f7c182309f93d292cb96b35a49e9b6c373cadd"
+    },
+    {
+      "sender": "bob",
+      "plaintext": "bob reply 2",
+      "header": {
+        "public_key": [
+          93, 127, 27, 142, 21, 8, 5, 115,
+          234, 69, 250, 47, 1, 221, 207, 112,
+          138, 57, 91, 173, 169, 17, 151, 26,
+          185, 103, 95, 197, 200, 205, 139, 67
+        ],
+        "previous_chain_length": 1,
+        "message_number": 0
+      },
+      "ciphertext_hex": "e5002555bf1555bc8a3dc3a7c2bce727f7908f23cdfc0e85f320c0"
+    },
+    {
+      "sender": "alice",
+      "plaintext": "alice final",
+      "header": {
+        "public_key": [
+          108, 91, 32, 34, 127, 221, 123, 59,
+          95, 153, 255, 35, 131, 231, 105, 247,
+          56, 181, 254, 201, 162, 153, 247, 220,
+          42, 19, 68, 118, 46, 146, 52, 0
+        ],
+        "previous_chain_length": 2,
+        "message_number": 0
+      },
+      "ciphertext_hex": "b6475b333cd2f87e0f8fd1371a89653f8d01289b564c8f6ed5aaee"
+    }
+  ],
+  "expected_alice_state_sha256": "9c7defab1ba437e2da4536f7187583bfdb89a25e2712d2dcfd65ed8bddf3693c",
+  "expected_bob_state_sha256": "e796821e57a7391da56d691f48821fca7b4127d53bbd0281e51e47ba87dbf1cf"
+}

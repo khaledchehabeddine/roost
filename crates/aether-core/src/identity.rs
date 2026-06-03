@@ -199,10 +199,44 @@ fn map_storage_err(e: StorageError) -> IdentityError {
 mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
+    use rand::SeedableRng;
     use rand::rngs::OsRng;
+    use rand_chacha::ChaCha20Rng;
 
     fn manager() -> IdentityManager {
         IdentityManager::new(Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new()))))
+    }
+
+    /// Known-answer test for deterministic identity-key generation and storage encoding.
+    ///
+    /// Source: `rand_chacha` 0.3 `ChaCha20Rng` with Aether key constructors
+    ///
+    /// Inputs:
+    /// - `rng_seed = [0x49; 32]`
+    ///
+    /// Output: `identity/x25519 secret || identity/ed25519 secret`.
+    #[test]
+    fn generate_identity_known_answer_and_canonical_storage_encoding() {
+        const EXPECTED_CANONICAL_IDENTITY_SECRET: [u8; 64] = [
+            38, 66, 93, 82, 83, 101, 158, 207, 181, 252, 75, 95, 72, 220, 75, 134, 99, 244, 117,
+            171, 95, 230, 17, 124, 185, 206, 38, 77, 69, 114, 38, 71, 70, 17, 62, 74, 208, 54, 58,
+            109, 199, 137, 67, 242, 51, 3, 21, 21, 45, 241, 16, 205, 23, 211, 147, 33, 6, 0, 90,
+            170, 13, 30, 167, 208,
+        ];
+
+        let manager = manager();
+        let mut rng = ChaCha20Rng::from_seed([0x49u8; 32]);
+
+        manager.generate_identity(&mut rng).unwrap();
+
+        let storage = manager.storage.lock().unwrap();
+        let x25519 = storage.load(IDENTITY_X25519_KEY).unwrap().unwrap();
+        let ed25519 = storage.load(IDENTITY_ED25519_KEY).unwrap().unwrap();
+        let mut canonical = [0u8; 64];
+        canonical[..32].copy_from_slice(&x25519);
+        canonical[32..].copy_from_slice(&ed25519);
+
+        assert_eq!(canonical, EXPECTED_CANONICAL_IDENTITY_SECRET);
     }
 
     #[test]
