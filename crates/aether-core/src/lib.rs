@@ -34,11 +34,13 @@ mod clock;
 mod discovery_key;
 mod identity;
 mod key_store;
+mod one_time_prekey;
 mod signed_prekey;
 mod storage;
 
 pub use discovery_key::DiscoveryKeyError;
 pub use identity::{Identity, IdentityError};
 pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
+pub use one_time_prekey::OneTimePreKeyError;
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};

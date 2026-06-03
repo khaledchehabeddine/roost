@@ -12,8 +12,8 @@ pub(crate) const SIGNED_PREKEY_ROTATION_WINDOW_DAYS: u64 = 7;
 
 const SIGNED_PREKEY_KEY: &str = "prekey/signed";
 const SIGNED_PREKEY_VERSION: u8 = 1;
-// Blob layout: version (1 byte) | secret (32 bytes) | signature (64 bytes) | created_at (8 bytes).
-const SIGNED_PREKEY_BLOB_LEN: usize = 1 + 32 + 64 + 8;
+// Blob layout: version (1) | secret (32) | signature (64) | epoch (4) | created_at (8).
+const SIGNED_PREKEY_BLOB_LEN: usize = 1 + 32 + 64 + 4 + 8;
 const SECONDS_PER_DAY: u64 = 86_400;
 // Rotate far-future timestamps so clock manipulation cannot freeze rotation forever.
 const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
@@ -163,7 +163,7 @@ impl SignedPreKeyManager {
         };
         let blob = checked_blob(&raw)?;
         let mut timestamp_bytes = [0u8; 8];
-        timestamp_bytes.copy_from_slice(&blob[97..SIGNED_PREKEY_BLOB_LEN]);
+        timestamp_bytes.copy_from_slice(&blob[101..SIGNED_PREKEY_BLOB_LEN]);
         Ok(Some(u64::from_be_bytes(timestamp_bytes)))
     }
 
@@ -185,7 +185,8 @@ fn encode_signed_prekey(signed_prekey: &SignedPreKey) -> Zeroizing<[u8; SIGNED_P
     blob[0] = SIGNED_PREKEY_VERSION;
     blob[1..33].copy_from_slice(&*signed_prekey.to_secret_bytes());
     blob[33..97].copy_from_slice(&signed_prekey.signature().to_bytes());
-    blob[97..SIGNED_PREKEY_BLOB_LEN].copy_from_slice(&signed_prekey.created_at().to_be_bytes());
+    blob[97..101].copy_from_slice(&signed_prekey.epoch().to_be_bytes());
+    blob[101..SIGNED_PREKEY_BLOB_LEN].copy_from_slice(&signed_prekey.created_at().to_be_bytes());
     blob
 }
 
@@ -194,10 +195,13 @@ fn decode_signed_prekey(blob: &[u8; SIGNED_PREKEY_BLOB_LEN]) -> SignedPreKey {
     secret.copy_from_slice(&blob[1..33]);
     let mut signature = [0u8; 64];
     signature.copy_from_slice(&blob[33..97]);
+    let mut epoch_bytes = [0u8; 4];
+    epoch_bytes.copy_from_slice(&blob[97..101]);
     let mut timestamp_bytes = [0u8; 8];
-    timestamp_bytes.copy_from_slice(&blob[97..SIGNED_PREKEY_BLOB_LEN]);
+    timestamp_bytes.copy_from_slice(&blob[101..SIGNED_PREKEY_BLOB_LEN]);
+    let epoch = u32::from_be_bytes(epoch_bytes);
     let created_at = u64::from_be_bytes(timestamp_bytes);
-    SignedPreKey::from_secret_bytes(secret, signature, created_at)
+    SignedPreKey::from_secret_bytes(secret, signature, epoch, created_at)
 }
 
 fn checked_blob(raw: &[u8]) -> Result<&[u8; SIGNED_PREKEY_BLOB_LEN], SignedPreKeyError> {
@@ -228,6 +232,7 @@ mod tests {
     use rand::rngs::OsRng;
 
     const FIXED_NOW: u64 = 1_700_000_000;
+    const FIXED_EPOCH: u32 = 3;
 
     struct SignedPreKeySetup {
         discovery: Arc<DiscoveryKeyManager>,
@@ -275,7 +280,8 @@ mod tests {
         created_at: u64,
     ) -> SignedPreKey {
         let signing_key = generate_signing_key_pair(&mut OsRng);
-        let signed_prekey = generate_signed_prekey(&mut OsRng, &signing_key, created_at);
+        let signed_prekey =
+            generate_signed_prekey(&mut OsRng, &signing_key, FIXED_EPOCH, created_at);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -439,7 +445,8 @@ mod tests {
     #[test]
     fn encode_decode_signed_prekey_round_trip() {
         let identity_signing_key = generate_signing_key_pair(&mut OsRng);
-        let original = generate_signed_prekey(&mut OsRng, &identity_signing_key, FIXED_NOW);
+        let original =
+            generate_signed_prekey(&mut OsRng, &identity_signing_key, FIXED_EPOCH, FIXED_NOW);
         let blob = encode_signed_prekey(&original);
         assert_eq!(blob.len(), SIGNED_PREKEY_BLOB_LEN);
         let restored = decode_signed_prekey(&blob);
@@ -448,6 +455,7 @@ mod tests {
             restored.signature().to_bytes(),
             original.signature().to_bytes()
         );
+        assert_eq!(restored.epoch(), original.epoch());
         assert_eq!(restored.created_at(), original.created_at());
     }
 

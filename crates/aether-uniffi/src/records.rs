@@ -34,6 +34,8 @@ pub struct SignedPreKeyBundle {
     pub public_key: Vec<u8>,
     /// Ed25519 signature over `public_key`. Always 64 bytes.
     pub signature: Vec<u8>,
+    /// Discovery-key epoch this signed pre-key is bound to.
+    pub epoch: u32,
     /// Generated timestamp in Unix seconds.
     pub created_at: u64,
 }
@@ -43,6 +45,7 @@ impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
         SignedPreKeyBundle {
             public_key: b.public_key.as_bytes().to_vec(),
             signature: b.signature.to_bytes().to_vec(),
+            epoch: b.epoch,
             created_at: b.created_at,
         }
     }

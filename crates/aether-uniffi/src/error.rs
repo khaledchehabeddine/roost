@@ -1,7 +1,8 @@
 //! Error mapping for failures crossing the UniFFI boundary.
 
 use aether_core::{
-    DiscoveryKeyError, IdentityError, KeyStoreError, SignedPreKeyError, StorageError,
+    DiscoveryKeyError, IdentityError, KeyStoreError, OneTimePreKeyError, SignedPreKeyError,
+    StorageError,
 };
 
 /// Errors surfaced across the UniFFI boundary.
@@ -96,6 +97,26 @@ impl From<SignedPreKeyError> for AetherError {
     }
 }
 
+impl From<OneTimePreKeyError> for AetherError {
+    fn from(e: OneTimePreKeyError) -> Self {
+        match e {
+            OneTimePreKeyError::Clock => AetherError::InternalError {
+                reason: "system clock is before Unix epoch".into(),
+            },
+            OneTimePreKeyError::Discovery(e) => e.into(),
+            OneTimePreKeyError::InvalidData(reason) => AetherError::InvalidData { reason },
+            OneTimePreKeyError::LockPoisoned => AetherError::InternalError {
+                reason: "internal lock poisoned".into(),
+            },
+            OneTimePreKeyError::NotFound => AetherError::NotFound,
+            OneTimePreKeyError::StaleEpoch => AetherError::InvalidData {
+                reason: "one-time pre-key belongs to a superseded discovery-key epoch".into(),
+            },
+            OneTimePreKeyError::Storage(e) => e.into(),
+        }
+    }
+}
+
 impl From<DiscoveryKeyError> for AetherError {
     fn from(e: DiscoveryKeyError) -> Self {
         match e {
@@ -127,6 +148,7 @@ impl From<KeyStoreError> for AetherError {
         match e {
             KeyStoreError::Discovery(e) => e.into(),
             KeyStoreError::Identity(e) => e.into(),
+            KeyStoreError::OneTimePreKey(e) => e.into(),
             KeyStoreError::SignedPreKey(e) => e.into(),
         }
     }

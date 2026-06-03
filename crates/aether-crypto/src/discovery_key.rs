@@ -236,7 +236,7 @@ pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
     discovery_key: &DiscoveryKey,
     created_at: u64,
 ) -> SignedPreKey {
-    generate_signed_prekey(rng, &discovery_key.signing, created_at)
+    generate_signed_prekey(rng, &discovery_key.signing, discovery_key.epoch, created_at)
 }
 
 #[cfg(test)]

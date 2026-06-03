@@ -1,9 +1,13 @@
 use crate::clock::{Clock, SystemClock};
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager, DiscoveryKeyStatus};
 use crate::identity::{Identity, IdentityError, IdentityManager};
+use crate::one_time_prekey::{OneTimePreKeyError, OneTimePreKeyManager};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
-use aether_crypto::{DiscoveryKeyBundle, SignedPreKeyBundle, verify_signed_prekey_bundle};
+use aether_crypto::{
+    DiscoveryKeyBundle, OneTimePreKey, OneTimePreKeyBundle, SignedPreKeyBundle,
+    verify_signed_prekey_bundle,
+};
 use rand::rngs::OsRng;
 use std::error::Error;
 use std::fmt;
@@ -16,6 +20,8 @@ pub enum KeyStoreError {
     Discovery(DiscoveryKeyError),
     /// An identity-layer operation failed.
     Identity(IdentityError),
+    /// A one-time-pre-key operation failed.
+    OneTimePreKey(OneTimePreKeyError),
     /// A signed-pre-key operation failed.
     SignedPreKey(SignedPreKeyError),
 }
@@ -25,6 +31,7 @@ impl fmt::Display for KeyStoreError {
         match self {
             KeyStoreError::Discovery(e) => write!(f, "discovery key: {e}"),
             KeyStoreError::Identity(e) => write!(f, "identity: {e}"),
+            KeyStoreError::OneTimePreKey(e) => write!(f, "one-time pre-key: {e}"),
             KeyStoreError::SignedPreKey(e) => write!(f, "signed pre-key: {e}"),
         }
     }
@@ -35,6 +42,7 @@ impl Error for KeyStoreError {
         match self {
             KeyStoreError::Discovery(e) => Some(e),
             KeyStoreError::Identity(e) => Some(e),
+            KeyStoreError::OneTimePreKey(e) => Some(e),
             KeyStoreError::SignedPreKey(e) => Some(e),
         }
     }
@@ -49,6 +57,12 @@ impl From<DiscoveryKeyError> for KeyStoreError {
 impl From<IdentityError> for KeyStoreError {
     fn from(e: IdentityError) -> Self {
         KeyStoreError::Identity(e)
+    }
+}
+
+impl From<OneTimePreKeyError> for KeyStoreError {
+    fn from(e: OneTimePreKeyError) -> Self {
+        KeyStoreError::OneTimePreKey(e)
     }
 }
 
@@ -73,6 +87,7 @@ pub struct PublicationBundle {
 struct KeyStoreInner {
     identity: Arc<IdentityManager>,
     discovery: Arc<DiscoveryKeyManager>,
+    one_time_prekey: Arc<OneTimePreKeyManager>,
     signed_prekey: Arc<SignedPreKeyManager>,
     // Coordinates operations that update more than one stored key.
     lifecycle: Mutex<()>,
@@ -99,6 +114,11 @@ impl KeyStore {
             Arc::clone(&identity),
             Arc::clone(&clock),
         ));
+        let one_time_prekey = Arc::new(OneTimePreKeyManager::new(
+            Arc::clone(&storage),
+            Arc::clone(&discovery),
+            Arc::clone(&clock),
+        ));
         let signed_prekey = Arc::new(SignedPreKeyManager::new(
             storage,
             Arc::clone(&discovery),
@@ -107,6 +127,7 @@ impl KeyStore {
         KeyStore(Arc::new(KeyStoreInner {
             identity,
             discovery,
+            one_time_prekey,
             signed_prekey,
             lifecycle: Mutex::new(()),
         }))
@@ -202,7 +223,8 @@ impl KeyStore {
     ///
     /// Refreshes a missing or stale signed pre-key, then returns a [`PublicationBundle`] whose
     /// keys verify together. Prefer this for identity publication over reading the two bundles
-    /// separately.
+    /// separately. One-time pre-key bundles are managed by
+    /// [`Self::replenish_one_time_prekeys`].
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `NotFound`) if the discovery
@@ -230,20 +252,50 @@ impl KeyStore {
         })
     }
 
+    /// Replenishes the stored one-time pre-key pool.
+    ///
+    /// Returns the bundles created by this call. A missing or stale pool is rebuilt for the
+    /// current discovery-key epoch; a current pool above the replenish threshold is left unchanged
+    /// and returns an empty list.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
+    /// - [`KeyStoreError::OneTimePreKey`] (`Discovery`) if the discovery key is malformed,
+    ///   unverifiable, or absent.
+    /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
+    ///   malformed.
+    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
+    pub fn replenish_one_time_prekeys(&self) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        Ok(self.0.one_time_prekey.replenish(&mut OsRng)?)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn consume_one_time_prekey(
+        &self,
+        epoch: u32,
+        id: u64,
+    ) -> Result<OneTimePreKey, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        Ok(self.0.one_time_prekey.consume_one_time_prekey(epoch, id)?)
+    }
+
     /// Rotates the discovery key and signed pre-key together.
     ///
-    /// Advances the discovery-key epoch and returns a fresh [`PublicationBundle`]. If
-    /// signed-pre-key storage fails after the discovery key rotates, the old signed pre-key has
-    /// been cleared, so no stale signed pre-key remains publishable with the new discovery key.
+    /// Advances the discovery-key epoch, clears epoch-bound one-time pre-keys, and returns a fresh
+    /// [`PublicationBundle`]. If signed-pre-key storage fails after the discovery key rotates, the
+    /// old signed pre-key has been cleared, so no stale signed pre-key remains publishable with
+    /// the new discovery key.
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
     /// - [`KeyStoreError::Discovery`] (`Identity`) if loading the identity fails.
     /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`]
-    ///   (`LockPoisoned` | `Storage`) on storage failures.
+    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::OneTimePreKey`] |
+    ///   [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     pub fn rotate_discovery_key_now(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
+        self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
         let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
         let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
@@ -309,7 +361,8 @@ impl KeyStore {
     /// Restores an identity from an encrypted backup.
     ///
     /// Validates the backup before changing storage. On success, the restored identity has a fresh
-    /// discovery key and no signed pre-key. Callers can create one with
+    /// discovery key and no one-time pre-keys or signed pre-key. Callers can create a signed
+    /// pre-key with
     /// [`Self::rotate_signed_prekey_if_stale`].
     ///
     /// # Errors
@@ -320,6 +373,8 @@ impl KeyStore {
     /// - [`KeyStoreError::Identity`] (`InvalidData`) on wrong blob length.
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failure while
     ///   committing the new identity.
+    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on one-time-pre-key delete
+    ///   failure.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
     ///   failure.
     pub fn import_encrypted_backup(
@@ -329,6 +384,7 @@ impl KeyStore {
     ) -> Result<(), KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let plaintext = self.0.identity.decrypt_backup(data, passphrase)?;
+        self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
         self.0.discovery.reset()?;
         self.0.identity.store_decrypted_identity(&plaintext)?;
@@ -336,19 +392,22 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Clears the stored signed pre-key, discovery key, and identity.
+    /// Clears the stored one-time pre-keys, signed pre-key, discovery key, and identity.
     ///
-    /// Deletion runs dependents-first (signed pre-key, then discovery key, then identity), so a
-    /// partial failure never leaves a key attached to material that is already gone.
+    /// Deletion runs dependents-first (pre-keys, then discovery key, then identity), so a partial
+    /// failure never leaves a key attached to material that is already gone.
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key delete
     ///   failure.
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on identity delete failure.
+    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on one-time-pre-key delete
+    ///   failure.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
     ///   failure.
     pub fn reset(&self) -> Result<(), KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
+        self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
         self.0.discovery.reset()?;
         self.0.identity.reset()?;
@@ -368,8 +427,13 @@ impl KeyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::one_time_prekey::{
+        ONE_TIME_PREKEY_POOL_TARGET, ONE_TIME_PREKEY_REPLENISH_THRESHOLD,
+    };
     use crate::storage::{InMemorySecureStorage, StorageError};
     use aether_crypto::verify_discovery_key_bundle;
+    use std::collections::HashSet;
+    use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, Ordering};
     use zeroize::Zeroizing;
 
@@ -392,6 +456,11 @@ mod tests {
             Arc::clone(&identity),
             Arc::clone(&clock),
         ));
+        let one_time_prekey = Arc::new(OneTimePreKeyManager::new(
+            Arc::clone(&storage),
+            Arc::clone(&discovery),
+            Arc::clone(&clock),
+        ));
         let signed_prekey = Arc::new(SignedPreKeyManager::new(
             Arc::clone(&storage),
             Arc::clone(&discovery),
@@ -400,6 +469,7 @@ mod tests {
         let key_store = KeyStore(Arc::new(KeyStoreInner {
             identity,
             discovery,
+            one_time_prekey,
             signed_prekey,
             lifecycle: Mutex::new(()),
         }));
@@ -470,6 +540,149 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn replenish_one_time_prekeys_creates_initial_pool() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let discovery = key_store.current_discovery_key_bundle().unwrap();
+        let bundles = key_store.replenish_one_time_prekeys().unwrap();
+        assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
+        assert!(bundles.iter().all(|bundle| bundle.epoch == discovery.epoch));
+    }
+
+    #[test]
+    fn replenish_one_time_prekeys_returns_empty_above_threshold() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store.replenish_one_time_prekeys().unwrap();
+        let bundles = key_store.replenish_one_time_prekeys().unwrap();
+        assert!(bundles.is_empty());
+    }
+
+    #[test]
+    fn replenish_one_time_prekeys_tops_up_at_threshold() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let epoch = key_store.current_discovery_key_bundle().unwrap().epoch;
+        let bundles = key_store.replenish_one_time_prekeys().unwrap();
+        let keys_to_use = ONE_TIME_PREKEY_POOL_TARGET - ONE_TIME_PREKEY_REPLENISH_THRESHOLD;
+        for bundle in bundles.iter().take(keys_to_use) {
+            key_store.consume_one_time_prekey(epoch, bundle.id).unwrap();
+        }
+        let replenished = key_store.replenish_one_time_prekeys().unwrap();
+        assert_eq!(replenished.len(), keys_to_use);
+        assert_eq!(
+            replenished.first().map(|bundle| bundle.id),
+            Some(ONE_TIME_PREKEY_POOL_TARGET as u64)
+        );
+    }
+
+    #[test]
+    fn consume_one_time_prekey_consumes_secret_once() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let epoch = key_store.current_discovery_key_bundle().unwrap().epoch;
+        let bundle = key_store.replenish_one_time_prekeys().unwrap().remove(0);
+        let prekey = key_store.consume_one_time_prekey(epoch, bundle.id).unwrap();
+        assert_eq!(prekey.id(), bundle.id);
+        assert!(matches!(
+            key_store.consume_one_time_prekey(epoch, bundle.id),
+            Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::NotFound))
+        ));
+    }
+
+    #[test]
+    fn concurrent_consume_returns_one_time_prekey_once() {
+        const THREADS: usize = 8;
+
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let epoch = key_store.current_discovery_key_bundle().unwrap().epoch;
+        let bundle = key_store.replenish_one_time_prekeys().unwrap().remove(0);
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut threads = Vec::new();
+        for _ in 0..THREADS {
+            let key_store = key_store.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                key_store
+                    .consume_one_time_prekey(epoch, bundle.id)
+                    .ok()
+                    .map(|prekey| prekey.id())
+            }));
+        }
+        let successes: Vec<u64> = threads
+            .into_iter()
+            .filter_map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(successes.len(), 1);
+        assert_eq!(successes[0], bundle.id);
+    }
+
+    #[test]
+    fn concurrent_replenish_does_not_return_duplicate_one_time_prekeys() {
+        const THREADS: usize = 8;
+
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let mut threads = Vec::new();
+        for _ in 0..THREADS {
+            let key_store = key_store.clone();
+            let barrier = Arc::clone(&barrier);
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                key_store.replenish_one_time_prekeys().unwrap()
+            }));
+        }
+        let bundles: Vec<_> = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect();
+        let ids: HashSet<_> = bundles.iter().map(|bundle| bundle.id).collect();
+        assert_eq!(
+            (bundles.len(), ids.len()),
+            (ONE_TIME_PREKEY_POOL_TARGET, ONE_TIME_PREKEY_POOL_TARGET)
+        );
+    }
+
+    #[test]
+    fn rotate_discovery_key_now_clears_one_time_prekey_pool() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store.replenish_one_time_prekeys().unwrap();
+        let rotation = key_store.rotate_discovery_key_now().unwrap();
+        let bundles = key_store.replenish_one_time_prekeys().unwrap();
+        assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
+        assert!(
+            bundles
+                .iter()
+                .all(|bundle| bundle.epoch == rotation.discovery_key.epoch)
+        );
+        assert_eq!(bundles.first().map(|bundle| bundle.id), Some(0));
+    }
+
+    #[test]
+    fn import_encrypted_backup_clears_stale_one_time_prekey_pool() {
+        let destination_store = store();
+        destination_store.generate_identity().unwrap();
+        destination_store.replenish_one_time_prekeys().unwrap();
+        let source_store = store();
+        source_store.generate_identity().unwrap();
+        let backup = source_store.export_encrypted_backup("pass").unwrap();
+        destination_store
+            .import_encrypted_backup(&backup, "pass")
+            .unwrap();
+        assert!(matches!(
+            destination_store
+                .0
+                .one_time_prekey
+                .consume_one_time_prekey(0, 0),
+            Err(OneTimePreKeyError::NotFound)
+        ));
     }
 
     #[test]
@@ -694,9 +907,10 @@ mod tests {
     }
 
     #[test]
-    fn reset_clears_identity_discovery_key_and_signed_prekey() {
+    fn reset_clears_identity_discovery_key_and_prekeys() {
         let key_store = store();
         key_store.generate_identity().unwrap();
+        key_store.replenish_one_time_prekeys().unwrap();
         key_store.rotate_signed_prekey_if_stale().unwrap();
         key_store.reset().unwrap();
         assert!(matches!(
@@ -706,6 +920,10 @@ mod tests {
         assert!(matches!(
             key_store.current_discovery_key_bundle(),
             Err(KeyStoreError::Discovery(DiscoveryKeyError::NotFound))
+        ));
+        assert!(matches!(
+            key_store.0.one_time_prekey.consume_one_time_prekey(0, 0),
+            Err(OneTimePreKeyError::NotFound)
         ));
         assert!(matches!(
             key_store.current_signed_prekey_bundle(),

@@ -1,11 +1,12 @@
-//! Session-level integration tests for peers bootstrapped through the X3DH-lite handshake.
+//! Session-level integration tests for peers bootstrapped through the X3DH handshake.
 //!
 //! These scenarios cross the handshake, signed pre-key, and Double Ratchet modules through the
 //! public API the way a downstream crate would.
 
 use aether_crypto::{
-    CryptoError, HandshakeEnvelope, Header, KeyPair, RatchetState, Signature, SignedPreKey,
-    SigningKeyPair, accept, generate_key_pair, generate_signed_prekey, generate_signing_key_pair,
+    CryptoError, DiscoveryKey, HandshakeEnvelope, Header, OneTimePreKey, PreKeyBundle,
+    RatchetState, Signature, SignedPreKey, SigningKeyPair, accept, generate_discovery_key,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
     initial_associated_data, initiate,
 };
 use rand::SeedableRng;
@@ -14,57 +15,84 @@ use rand_chacha::ChaCha20Rng;
 const FIXED_CREATED_AT: u64 = 1_700_000_000;
 
 struct Setup {
-    alice_identity_key: KeyPair,
-    bob_identity_key: KeyPair,
-    bob_signing_key: SigningKeyPair,
+    alice_identity: SigningKeyPair,
+    alice_discovery_key: DiscoveryKey,
+    bob_identity: SigningKeyPair,
+    bob_discovery_key: DiscoveryKey,
     bob_signed_prekey: SignedPreKey,
+    bob_one_time_prekey: Option<OneTimePreKey>,
 }
 
 fn setup() -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed([0x33u8; 32]);
-    let bob_signing_key = generate_signing_key_pair(&mut rng);
-    let bob_signed_prekey = generate_signed_prekey(&mut rng, &bob_signing_key, FIXED_CREATED_AT);
+    let alice_identity = generate_signing_key_pair(&mut rng);
+    let alice_discovery_key =
+        generate_discovery_key(&mut rng, &alice_identity, 1, FIXED_CREATED_AT);
+    let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, FIXED_CREATED_AT);
+    let bob_signed_prekey =
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, FIXED_CREATED_AT);
+    let bob_one_time_prekey =
+        generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), FIXED_CREATED_AT);
     let setup = Setup {
-        alice_identity_key: generate_key_pair(&mut rng),
-        bob_identity_key: generate_key_pair(&mut rng),
-        bob_signing_key,
+        alice_identity,
+        alice_discovery_key,
+        bob_identity,
+        bob_discovery_key,
         bob_signed_prekey,
+        bob_one_time_prekey: Some(bob_one_time_prekey),
     };
     (setup, rng)
 }
 
 fn bootstrap(
-    setup: &Setup,
+    setup: &mut Setup,
     rng: &mut ChaCha20Rng,
     plaintext: &[u8],
 ) -> (RatchetState, RatchetState, HandshakeEnvelope) {
+    let prekey_bundle = PreKeyBundle {
+        discovery_key: setup.bob_discovery_key.bundle(),
+        signed_prekey: setup.bob_signed_prekey.bundle(),
+        one_time_prekey: setup
+            .bob_one_time_prekey
+            .as_ref()
+            .map(OneTimePreKey::bundle),
+    };
     let (alice, envelope) = initiate(
         rng,
-        &setup.alice_identity_key,
-        &setup.bob_signing_key.verifying,
-        &setup.bob_identity_key.public,
-        &setup.bob_signed_prekey.bundle(),
+        &setup.alice_discovery_key,
+        &setup.bob_identity.verifying,
+        &prekey_bundle,
         plaintext,
     )
     .unwrap();
+    let bob_one_time_prekey = setup.bob_one_time_prekey.take();
     let (bob, _) = accept(
         rng,
         &envelope,
-        &setup.bob_identity_key,
+        &setup.alice_identity.verifying,
+        &setup.alice_discovery_key.bundle(),
+        &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
+        bob_one_time_prekey,
     )
     .unwrap();
     (alice, bob, envelope)
 }
 
+fn associated_data(setup: &Setup) -> [u8; 68] {
+    initial_associated_data(
+        setup.alice_discovery_key.public_key(),
+        setup.bob_discovery_key.public_key(),
+        setup.bob_discovery_key.epoch(),
+    )
+}
+
 #[test]
 fn round_trip_advances_diffie_hellman_ratchet() {
-    let (setup, mut rng) = setup();
-    let (mut alice, mut bob, envelope) = bootstrap(&setup, &mut rng, b"hello");
-    let associated_data = initial_associated_data(
-        &setup.alice_identity_key.public,
-        &setup.bob_identity_key.public,
-    );
+    let (mut setup, mut rng) = setup();
+    let (mut alice, mut bob, envelope) = bootstrap(&mut setup, &mut rng, b"hello");
+    let associated_data = associated_data(&setup);
     let initial_alice_ratchet_public_key = envelope.ratchet_public_key;
 
     let (bob_header, bob_ciphertext) = bob.ratchet_encrypt(b"hi back", &associated_data).unwrap();
@@ -88,12 +116,9 @@ fn round_trip_advances_diffie_hellman_ratchet() {
 
 #[test]
 fn consecutive_sends_use_symmetric_ratchet_only() {
-    let (setup, mut rng) = setup();
-    let (mut alice, mut bob, envelope) = bootstrap(&setup, &mut rng, b"msg-0");
-    let associated_data = initial_associated_data(
-        &setup.alice_identity_key.public,
-        &setup.bob_identity_key.public,
-    );
+    let (mut setup, mut rng) = setup();
+    let (mut alice, mut bob, envelope) = bootstrap(&mut setup, &mut rng, b"msg-0");
+    let associated_data = associated_data(&setup);
     let alice_ratchet_public_key = envelope.ratchet_public_key;
 
     let mut messages = Vec::new();
@@ -119,12 +144,9 @@ fn consecutive_sends_use_symmetric_ratchet_only() {
 
 #[test]
 fn out_of_order_delivery_uses_skipped_keys() {
-    let (setup, mut rng) = setup();
-    let (mut alice, mut bob, _) = bootstrap(&setup, &mut rng, b"msg-0");
-    let associated_data = initial_associated_data(
-        &setup.alice_identity_key.public,
-        &setup.bob_identity_key.public,
-    );
+    let (mut setup, mut rng) = setup();
+    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"msg-0");
+    let associated_data = associated_data(&setup);
 
     let mut messages = Vec::new();
     for i in 1..=5 {
@@ -146,12 +168,9 @@ fn out_of_order_delivery_uses_skipped_keys() {
 
 #[test]
 fn skipped_keys_are_consumed_after_use() {
-    let (setup, mut rng) = setup();
-    let (mut alice, mut bob, _) = bootstrap(&setup, &mut rng, b"msg-0");
-    let associated_data = initial_associated_data(
-        &setup.alice_identity_key.public,
-        &setup.bob_identity_key.public,
-    );
+    let (mut setup, mut rng) = setup();
+    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"msg-0");
+    let associated_data = associated_data(&setup);
 
     let mut messages = Vec::new();
     for i in 1..=5 {
@@ -181,12 +200,9 @@ fn skipped_keys_are_consumed_after_use() {
 
 #[test]
 fn ratchet_is_self_contained_after_bootstrap() {
-    let (setup, mut rng) = setup();
-    let (mut alice, mut bob, _) = bootstrap(&setup, &mut rng, b"hello");
-    let associated_data = initial_associated_data(
-        &setup.alice_identity_key.public,
-        &setup.bob_identity_key.public,
-    );
+    let (mut setup, mut rng) = setup();
+    let associated_data = associated_data(&setup);
+    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"hello");
 
     drop(setup);
 
@@ -219,12 +235,19 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
     let mut signature_bytes = bundle.signature.to_bytes();
     signature_bytes[0] ^= 0x01;
     bundle.signature = Signature::from_bytes(&signature_bytes);
+    let prekey_bundle = PreKeyBundle {
+        discovery_key: setup.bob_discovery_key.bundle(),
+        signed_prekey: bundle,
+        one_time_prekey: setup
+            .bob_one_time_prekey
+            .as_ref()
+            .map(OneTimePreKey::bundle),
+    };
     let result = initiate(
         &mut rng,
-        &setup.alice_identity_key,
-        &setup.bob_signing_key.verifying,
-        &setup.bob_identity_key.public,
-        &bundle,
+        &setup.alice_discovery_key,
+        &setup.bob_identity.verifying,
+        &prekey_bundle,
         b"payload",
     );
     assert!(matches!(result, Err(CryptoError::SignatureInvalid)));
@@ -232,12 +255,9 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
 
 #[test]
 fn tampered_header_rolls_back_state() {
-    let (setup, mut rng) = setup();
-    let (mut alice, mut bob, _) = bootstrap(&setup, &mut rng, b"msg-0");
-    let associated_data = initial_associated_data(
-        &setup.alice_identity_key.public,
-        &setup.bob_identity_key.public,
-    );
+    let (mut setup, mut rng) = setup();
+    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"msg-0");
+    let associated_data = associated_data(&setup);
 
     let (header, ciphertext) = alice.ratchet_encrypt(b"legit", &associated_data).unwrap();
     let tampered = Header {
