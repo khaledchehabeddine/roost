@@ -7,6 +7,10 @@ pub enum CryptoError {
     Aead,
     /// Handshake envelope initiator discovery-key reference does not match the verified bundle.
     HandshakeDiscoveryKeyMismatch,
+    /// Handshake envelope bytes failed to decode.
+    HandshakeEnvelopeDecode,
+    /// Handshake envelope failed to encode.
+    HandshakeEnvelopeEncode,
     /// Handshake envelope targets a different signed pre-key than the local one.
     HandshakeSignedPreKeyMismatch,
     /// HKDF-SHA256 rejected the requested output length.
@@ -45,6 +49,8 @@ impl fmt::Display for CryptoError {
                 f,
                 "handshake envelope discovery-key reference does not match verified discovery key"
             ),
+            Self::HandshakeEnvelopeDecode => write!(f, "handshake envelope bytes failed to decode"),
+            Self::HandshakeEnvelopeEncode => write!(f, "handshake envelope failed to encode"),
             Self::HandshakeSignedPreKeyMismatch => write!(
                 f,
                 "handshake envelope signed pre-key reference does not match local signed pre-key"

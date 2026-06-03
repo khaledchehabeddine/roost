@@ -21,6 +21,8 @@ const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:with-opk";
 const INPUT_KEYING_MATERIAL_LEN_WITHOUT_ONE_TIME_PREKEY: usize = 32 * 4;
 const INPUT_KEYING_MATERIAL_LEN_WITH_ONE_TIME_PREKEY: usize = 32 * 5;
+const MAX_HANDSHAKE_ENVELOPE_LEN: usize = 16 * 1024;
+const MAX_HANDSHAKE_CIPHERTEXT_LEN: usize = 8 * 1024;
 
 /// Public pre-key material used by the initiator to start an X3DH session.
 #[derive(Clone, Debug)]
@@ -36,7 +38,7 @@ pub struct PreKeyBundle {
 /// A serialized handshake request from an initiator to a responder.
 ///
 /// Holds public handshake material, the first ratchet header fields, and the first ciphertext.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct HandshakeEnvelope {
     /// Initiator's X25519 discovery public key.
     pub initiator_discovery_public_key: [u8; 32],
@@ -58,6 +60,82 @@ pub struct HandshakeEnvelope {
     pub message_number: u32,
     /// Ciphertext for the first handshake message.
     pub ciphertext: Vec<u8>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct HandshakeEnvelopeWire {
+    initiator_discovery_public_key: [u8; 32],
+    initiator_ephemeral_public_key: [u8; 32],
+    responder_discovery_epoch: u32,
+    responder_signed_prekey_public_key: [u8; 32],
+    one_time_prekey_id: Option<u64>,
+    one_time_prekey_public_key: Option<[u8; 32]>,
+    ratchet_public_key: [u8; 32],
+    previous_chain_length: u32,
+    message_number: u32,
+    ciphertext: Vec<u8>,
+}
+
+impl HandshakeEnvelope {
+    /// Serializes this handshake envelope for transport.
+    ///
+    /// # Errors
+    /// - [`CryptoError::HandshakeEnvelopeEncode`] when postcard rejects the envelope wire form.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, CryptoError> {
+        if self.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
+            return Err(CryptoError::HandshakeEnvelopeEncode);
+        }
+
+        let bytes = postcard::to_stdvec(&HandshakeEnvelopeWire {
+            initiator_discovery_public_key: self.initiator_discovery_public_key,
+            initiator_ephemeral_public_key: self.initiator_ephemeral_public_key,
+            responder_discovery_epoch: self.responder_discovery_epoch,
+            responder_signed_prekey_public_key: self.responder_signed_prekey_public_key,
+            one_time_prekey_id: self.one_time_prekey_id,
+            one_time_prekey_public_key: self.one_time_prekey_public_key,
+            ratchet_public_key: self.ratchet_public_key,
+            previous_chain_length: self.previous_chain_length,
+            message_number: self.message_number,
+            ciphertext: self.ciphertext.clone(),
+        })
+        .map_err(|_| CryptoError::HandshakeEnvelopeEncode)?;
+        if bytes.len() > MAX_HANDSHAKE_ENVELOPE_LEN {
+            return Err(CryptoError::HandshakeEnvelopeEncode);
+        }
+        Ok(bytes)
+    }
+
+    /// Restores a handshake envelope from bytes produced by [`Self::to_bytes`].
+    ///
+    /// This validates only structural decoding. [`accept`] authenticates the envelope against
+    /// verified discovery and pre-key material.
+    ///
+    /// # Errors
+    /// - [`CryptoError::HandshakeEnvelopeDecode`] when the bytes are malformed or oversized.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        if bytes.len() > MAX_HANDSHAKE_ENVELOPE_LEN {
+            return Err(CryptoError::HandshakeEnvelopeDecode);
+        }
+
+        let (wire, trailing): (HandshakeEnvelopeWire, &[u8]) =
+            postcard::take_from_bytes(bytes).map_err(|_| CryptoError::HandshakeEnvelopeDecode)?;
+        if !trailing.is_empty() || wire.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
+            return Err(CryptoError::HandshakeEnvelopeDecode);
+        }
+
+        Ok(Self {
+            initiator_discovery_public_key: wire.initiator_discovery_public_key,
+            initiator_ephemeral_public_key: wire.initiator_ephemeral_public_key,
+            responder_discovery_epoch: wire.responder_discovery_epoch,
+            responder_signed_prekey_public_key: wire.responder_signed_prekey_public_key,
+            one_time_prekey_id: wire.one_time_prekey_id,
+            one_time_prekey_public_key: wire.one_time_prekey_public_key,
+            ratchet_public_key: wire.ratchet_public_key,
+            previous_chain_length: wire.previous_chain_length,
+            message_number: wire.message_number,
+            ciphertext: wire.ciphertext,
+        })
+    }
 }
 
 /// Starts a handshake as the initiator and encrypts the first message.
@@ -756,9 +834,9 @@ mod tests {
             plaintext,
         )
         .unwrap();
-        let bytes = postcard::to_stdvec(&envelope).unwrap();
+        let bytes = envelope.to_bytes().unwrap();
 
-        let decoded_envelope: HandshakeEnvelope = postcard::from_bytes(&bytes).unwrap();
+        let decoded_envelope = HandshakeEnvelope::from_bytes(&bytes).unwrap();
         let (_, decrypted) = accept(
             &mut rng,
             &decoded_envelope,
@@ -770,5 +848,83 @@ mod tests {
         )
         .unwrap();
         assert_eq!(decrypted.as_slice(), plaintext);
+    }
+
+    #[test]
+    fn envelope_from_bytes_rejects_trailing_bytes() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let bundle = full_prekey_bundle(&setup, true);
+        let (_, envelope) = initiate(
+            &mut rng,
+            &setup.alice_discovery_key,
+            &setup.bob_identity.verifying,
+            &bundle,
+            b"payload",
+        )
+        .unwrap();
+        let mut bytes = envelope.to_bytes().unwrap();
+        bytes.push(0xFF);
+
+        assert!(matches!(
+            HandshakeEnvelope::from_bytes(&bytes),
+            Err(CryptoError::HandshakeEnvelopeDecode)
+        ));
+    }
+
+    #[test]
+    fn envelope_from_bytes_rejects_malformed_blob() {
+        assert!(matches!(
+            HandshakeEnvelope::from_bytes(b"not a postcard envelope"),
+            Err(CryptoError::HandshakeEnvelopeDecode)
+        ));
+    }
+
+    #[test]
+    fn envelope_from_bytes_rejects_oversized_blob() {
+        let bytes = vec![0u8; MAX_HANDSHAKE_ENVELOPE_LEN + 1];
+
+        assert!(matches!(
+            HandshakeEnvelope::from_bytes(&bytes),
+            Err(CryptoError::HandshakeEnvelopeDecode)
+        ));
+    }
+
+    #[test]
+    fn envelope_wire_api_rejects_oversized_ciphertext() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let bundle = full_prekey_bundle(&setup, true);
+        let (_, mut envelope) = initiate(
+            &mut rng,
+            &setup.alice_discovery_key,
+            &setup.bob_identity.verifying,
+            &bundle,
+            b"payload",
+        )
+        .unwrap();
+        envelope.ciphertext = vec![0u8; MAX_HANDSHAKE_CIPHERTEXT_LEN + 1];
+
+        assert!(matches!(
+            envelope.to_bytes(),
+            Err(CryptoError::HandshakeEnvelopeEncode)
+        ));
+
+        let bytes = postcard::to_stdvec(&HandshakeEnvelopeWire {
+            initiator_discovery_public_key: envelope.initiator_discovery_public_key,
+            initiator_ephemeral_public_key: envelope.initiator_ephemeral_public_key,
+            responder_discovery_epoch: envelope.responder_discovery_epoch,
+            responder_signed_prekey_public_key: envelope.responder_signed_prekey_public_key,
+            one_time_prekey_id: envelope.one_time_prekey_id,
+            one_time_prekey_public_key: envelope.one_time_prekey_public_key,
+            ratchet_public_key: envelope.ratchet_public_key,
+            previous_chain_length: envelope.previous_chain_length,
+            message_number: envelope.message_number,
+            ciphertext: envelope.ciphertext,
+        })
+        .unwrap();
+        assert!(bytes.len() <= MAX_HANDSHAKE_ENVELOPE_LEN);
+        assert!(matches!(
+            HandshakeEnvelope::from_bytes(&bytes),
+            Err(CryptoError::HandshakeEnvelopeDecode)
+        ));
     }
 }
