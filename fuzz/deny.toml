@@ -1,0 +1,26 @@
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "MIT",
+    "NCSA",
+    "Unicode-3.0",
+]
+private = { ignore = true }
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+    { name = "getrandom", version = "=0.3.4", reason = "build-time dependency through libfuzzer-sys" },
+]
+
+[advisories]
+version = 2
+unmaintained = "workspace"
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

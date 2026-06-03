@@ -1,5 +1,6 @@
 //! Provides one-time X25519 pre-keys for X3DH.
 
+use crate::error::CryptoError;
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -86,6 +87,32 @@ pub struct OneTimePreKeyBundle {
     pub created_at: u64,
 }
 
+impl OneTimePreKeyBundle {
+    /// Builds a bundle from received wire bytes.
+    ///
+    /// This validates byte lengths only. The epoch must still match the discovery-key bundle used
+    /// for session establishment.
+    ///
+    /// # Errors
+    /// - [`CryptoError::InvalidKeyEncoding`] when the public key has the wrong length.
+    pub fn from_bytes(
+        id: u64,
+        public_key: &[u8],
+        epoch: u32,
+        created_at: u64,
+    ) -> Result<Self, CryptoError> {
+        let public_key_bytes: [u8; 32] = public_key
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+        Ok(Self {
+            id,
+            public_key: PublicKey::from(public_key_bytes),
+            epoch,
+            created_at,
+        })
+    }
+}
+
 /// Generates a one-time pre-key using `rng`.
 #[must_use]
 pub fn generate_one_time_prekey<R: RngCore + CryptoRng>(
@@ -123,6 +150,34 @@ mod tests {
         );
         assert_eq!(bundle.epoch, one_time_prekey.epoch());
         assert_eq!(bundle.created_at, one_time_prekey.created_at());
+    }
+
+    #[test]
+    fn bundle_from_bytes_round_trip_preserves_fields() {
+        let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
+        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
+        let bundle = one_time_prekey.bundle();
+
+        let parsed = OneTimePreKeyBundle::from_bytes(
+            bundle.id,
+            bundle.public_key.as_bytes(),
+            bundle.epoch,
+            bundle.created_at,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.id, bundle.id);
+        assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
+        assert_eq!(parsed.epoch, bundle.epoch);
+        assert_eq!(parsed.created_at, bundle.created_at);
+    }
+
+    #[test]
+    fn bundle_from_bytes_rejects_wrong_public_key_length() {
+        assert!(matches!(
+            OneTimePreKeyBundle::from_bytes(9, &[0u8; 31], 3, 1_700_000_000),
+            Err(crate::CryptoError::InvalidKeyEncoding)
+        ));
     }
 
     #[test]

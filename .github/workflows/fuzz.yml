@@ -1,0 +1,55 @@
+name: Fuzz
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Cargo Fuzz
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      CARGO_FUZZ_VERSION: 0.13.1
+      FUZZ_RUNS: 256
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - identity_key_parsing
+          - prekey_bundle_parsing
+          - x3dh_message_parsing
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> fuzz/target
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked
+
+      - name: Build fuzz target
+        run: cargo +nightly fuzz build "${{ matrix.target }}"
+
+      - name: Smoke fuzz target
+        run: cargo +nightly fuzz run "${{ matrix.target }}" -- -runs="$FUZZ_RUNS"
+
+      - name: Upload fuzz artifacts
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}-${{ github.sha }}
+          path: fuzz/artifacts

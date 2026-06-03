@@ -1,0 +1,34 @@
+[package]
+name = "aether-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+aether-core = { version = "0.4.0", path = "../crates/aether-core" }
+aether-crypto = { version = "0.4.0", path = "../crates/aether-crypto" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "identity_key_parsing"
+path = "fuzz_targets/identity_key_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prekey_bundle_parsing"
+path = "fuzz_targets/prekey_bundle_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "x3dh_message_parsing"
+path = "fuzz_targets/x3dh_message_parsing.rs"
+test = false
+doc = false
+bench = false

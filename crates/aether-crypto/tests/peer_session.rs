@@ -115,6 +115,50 @@ fn round_trip_advances_diffie_hellman_ratchet() {
 }
 
 #[test]
+fn serialized_handshake_envelope_establishes_session_and_reply() {
+    let (mut setup, mut rng) = setup();
+    let prekey_bundle = PreKeyBundle {
+        discovery_key: setup.bob_discovery_key.bundle(),
+        signed_prekey: setup.bob_signed_prekey.bundle(),
+        one_time_prekey: setup
+            .bob_one_time_prekey
+            .as_ref()
+            .map(OneTimePreKey::bundle),
+    };
+    let (mut alice, envelope) = initiate(
+        &mut rng,
+        &setup.alice_discovery_key,
+        &setup.bob_identity.verifying,
+        &prekey_bundle,
+        b"hello serialized Bob",
+    )
+    .unwrap();
+    let envelope_bytes = envelope.to_bytes().unwrap();
+    let decoded_envelope = HandshakeEnvelope::from_bytes(&envelope_bytes).unwrap();
+    let bob_one_time_prekey = setup.bob_one_time_prekey.take();
+    let (mut bob, decrypted) = accept(
+        &mut rng,
+        &decoded_envelope,
+        &setup.alice_identity.verifying,
+        &setup.alice_discovery_key.bundle(),
+        &setup.bob_discovery_key,
+        &setup.bob_signed_prekey,
+        bob_one_time_prekey,
+    )
+    .unwrap();
+    assert_eq!(decrypted.as_slice(), b"hello serialized Bob");
+
+    let associated_data = associated_data(&setup);
+    let (reply_header, reply_ciphertext) = bob
+        .ratchet_encrypt(b"reply after serialization", &associated_data)
+        .unwrap();
+    let reply = alice
+        .ratchet_decrypt(&mut rng, &reply_ciphertext, &reply_header, &associated_data)
+        .unwrap();
+    assert_eq!(reply.as_slice(), b"reply after serialization");
+}
+
+#[test]
 fn consecutive_sends_use_symmetric_ratchet_only() {
     let (mut setup, mut rng) = setup();
     let (mut alice, mut bob, envelope) = bootstrap(&mut setup, &mut rng, b"msg-0");

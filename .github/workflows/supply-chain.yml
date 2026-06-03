@@ -1,0 +1,68 @@
+name: Supply Chain
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      CARGO_AUDIT_VERSION: 0.22.1
+      CARGO_DENY_VERSION: 0.19.8
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+
+      - name: Cargo audit
+        run: cargo audit --deny warnings
+
+      - name: Cargo audit fuzz
+        run: cargo audit --file fuzz/Cargo.lock --deny warnings
+
+      - name: Cargo deny fuzz
+        run: cargo deny --manifest-path fuzz/Cargo.toml --locked check --config fuzz/deny.toml
+
+  geiger:
+    name: Cargo Geiger
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    env:
+      CARGO_GEIGER_VERSION: 0.13.0
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-geiger
+        run: cargo install cargo-geiger --version "$CARGO_GEIGER_VERSION" --locked
+
+      - name: Verify unsafe baseline
+        run: |
+          bash scripts/security/unsafe-baseline.sh
+          git diff --exit-code docs/security/unsafe-baseline.md
