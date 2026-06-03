@@ -271,6 +271,50 @@ mod tests {
         }
     }
 
+    /// Known-answer test for discovery-key signing.
+    ///
+    /// Source: Aether's Ed25519 constructor over the documented discovery-key payload
+    ///
+    /// Inputs:
+    /// - `identity_signing_secret = [0x11; 32]`
+    /// - `key_agreement_public = [0x22; 32]`
+    /// - `discovery_signing_secret = [0x33; 32]`
+    /// - `epoch = 7`
+    /// - `created_at = 1_700_000_000`
+    ///
+    /// Output: Ed25519 signature over `discovery_key_payload(...)`.
+    #[test]
+    fn discovery_key_signing_known_answer() {
+        const EXPECTED_SIGNATURE: [u8; 64] = [
+            138, 144, 255, 185, 240, 201, 37, 47, 182, 74, 87, 59, 138, 253, 51, 108, 212, 61, 85,
+            148, 141, 220, 141, 178, 4, 229, 90, 193, 0, 193, 102, 140, 7, 98, 14, 162, 243, 109,
+            98, 116, 136, 251, 101, 71, 253, 167, 217, 251, 254, 111, 161, 139, 102, 57, 26, 32,
+            92, 6, 251, 235, 49, 140, 66, 8,
+        ];
+
+        let identity = SigningKeyPair::from_signing_bytes([0x11u8; 32]);
+        let key_agreement_public = PublicKey::from([0x22u8; 32]);
+        let discovery_signing = SigningKeyPair::from_signing_bytes([0x33u8; 32]);
+        let payload = discovery_key_payload(
+            &key_agreement_public,
+            &discovery_signing.verifying,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
+
+        let signature = identity.sign(&payload);
+        let bundle = DiscoveryKeyBundle {
+            public_key: key_agreement_public,
+            verifying_key: discovery_signing.verifying,
+            epoch: FIXED_EPOCH,
+            created_at: FIXED_CREATED_AT,
+            signature,
+        };
+
+        assert_eq!(signature.to_bytes(), EXPECTED_SIGNATURE);
+        assert!(verify_discovery_key_bundle(&bundle, &identity.verifying).is_ok());
+    }
+
     #[test]
     fn from_secret_bytes_round_trip() {
         let setup = setup();
