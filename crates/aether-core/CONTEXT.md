@@ -29,8 +29,12 @@ The permanent keypair â€” an Ed25519 signing key plus X25519 key-agreement key â
 Avoid: master key, root key
 
 **Message** (many per Session):
-A single ciphertext packet exchanged within a Session, addressed by `MessageID`.
+A single encoded packet exchanged within a Session, addressed by `MessageID`. A Message may carry encrypted text, acknowledgment, key-exchange, or Ratchet-header bytes; those inner bytes are payload fields, not standalone domain Messages.
 Avoid: payload, packet
+
+**MessageID** (one per Message):
+The UUID-shaped 16-byte identifier that addresses one Message within a Session.
+Avoid: uuid, packet id
 
 **Session** (between two Identities):
 An ongoing encrypted channel between two Identities, advanced by the Double Ratchet, identified by `SessionID`.
