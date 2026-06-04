@@ -108,6 +108,36 @@ pub struct SignedPreKeyBundle {
     pub created_at: u64,
 }
 
+impl SignedPreKeyBundle {
+    /// Builds a bundle from received wire bytes.
+    ///
+    /// This validates byte lengths only. Call [`verify_signed_prekey_bundle`] with the discovery
+    /// verifying key to authenticate the parsed fields.
+    ///
+    /// # Errors
+    /// - [`CryptoError::InvalidKeyEncoding`] when the public key or signature has the wrong
+    ///   length.
+    pub fn from_bytes(
+        public_key: &[u8],
+        signature: &[u8],
+        epoch: u32,
+        created_at: u64,
+    ) -> Result<Self, CryptoError> {
+        let public_key_bytes: [u8; 32] = public_key
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+        let signature_bytes: [u8; 64] = signature
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+        Ok(Self {
+            public_key: PublicKey::from(public_key_bytes),
+            signature: Signature::from_bytes(&signature_bytes),
+            epoch,
+            created_at,
+        })
+    }
+}
+
 /// Generates a signed pre-key with the supplied Ed25519 signing key.
 #[must_use]
 pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
@@ -299,6 +329,40 @@ mod tests {
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &signing_key.verifying),
             Err(CryptoError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn bundle_from_bytes_round_trip_preserves_fields() {
+        let mut rng = seeded_rng();
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let signed_prekey =
+            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let bundle = signed_prekey.bundle();
+
+        let parsed = SignedPreKeyBundle::from_bytes(
+            bundle.public_key.as_bytes(),
+            &bundle.signature.to_bytes(),
+            bundle.epoch,
+            bundle.created_at,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
+        assert_eq!(parsed.signature.to_bytes(), bundle.signature.to_bytes());
+        assert_eq!(parsed.epoch, bundle.epoch);
+        assert_eq!(parsed.created_at, bundle.created_at);
+    }
+
+    #[test]
+    fn bundle_from_bytes_rejects_wrong_lengths() {
+        assert!(matches!(
+            SignedPreKeyBundle::from_bytes(&[0u8; 31], &[0u8; 64], FIXED_EPOCH, FIXED_CREATED_AT),
+            Err(CryptoError::InvalidKeyEncoding)
+        ));
+        assert!(matches!(
+            SignedPreKeyBundle::from_bytes(&[0u8; 32], &[0u8; 63], FIXED_EPOCH, FIXED_CREATED_AT),
+            Err(CryptoError::InvalidKeyEncoding)
         ));
     }
 
