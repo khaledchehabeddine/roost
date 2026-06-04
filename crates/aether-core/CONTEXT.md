@@ -36,6 +36,18 @@ Avoid: payload, packet
 The UUID-shaped 16-byte identifier that addresses one Message within a Session.
 Avoid: uuid, packet id
 
+**Protocol State Blob** (many per Identity or Session):
+An opaque byte value produced by Core and committed by the consumer's durable store. Core may load
+and advance a Blob during one operation, but the consumer-held Blob is authoritative between
+operations.
+Avoid: cache, in-memory state, decoded state
+
+**Protocol State Kind** (one per Protocol State Blob address):
+The stable category for a Protocol State Blob — ratchet/session state, prekey state, sender
+certificate, deduplication set, or pending acknowledgments. The consumer combines the Kind with a
+key such as a Session or Identity identifier to address one Blob.
+Avoid: table, bucket, namespace
+
 **Session** (between two Identities):
 An ongoing encrypted channel between two Identities, advanced by the Double Ratchet, identified by `SessionID`.
 Avoid: connection, conversation, chat
