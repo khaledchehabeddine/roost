@@ -197,11 +197,11 @@ fn two_instances_alternate_against_latest_consumer_blobs() {
 }
 
 #[test]
-fn wipe_removes_all_v0_5_0_state_kinds_for_key() {
+fn wipe_removes_all_state_kinds_for_key() {
     let engine = ProtocolStateEngine::new();
     let key = key();
     let mut snapshot = ProtocolStateSnapshot::new();
-    for kind in ProtocolStateKind::v0_5_0_kinds() {
+    for kind in ProtocolStateKind::all() {
         snapshot.set(
             ProtocolStateAddress::new(*kind, key.clone()),
             ProtocolStateBlob::from_bytes(vec![*kind as u8, 7]),
@@ -210,7 +210,7 @@ fn wipe_removes_all_v0_5_0_state_kinds_for_key() {
 
     snapshot.apply_all(engine.wipe(key.clone()));
 
-    for kind in ProtocolStateKind::v0_5_0_kinds() {
+    for kind in ProtocolStateKind::all() {
         assert!(
             snapshot
                 .get(&ProtocolStateAddress::new(*kind, key.clone()))
@@ -227,7 +227,7 @@ fn corrupt_ratchet_blob_is_a_decode_fault() {
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.set(
         address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 0xaa]),
+        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
     );
 
     assert!(matches!(
@@ -261,13 +261,13 @@ fn corrupt_ratchet_blob_does_not_silently_reinitialize_state() {
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.set(
         address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 0xaa]),
+        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
     );
 
     let result = engine.encrypt_message(&snapshot, key, outbound(1, b"lost", b"ad"));
 
     assert!(matches!(result, Err(ProtocolStateError::BlobDecode { .. })));
-    assert_eq!(snapshot.get(&address).unwrap().as_bytes(), &[1, 0xaa]);
+    assert_eq!(snapshot.get(&address).unwrap().as_bytes(), &[1, 0, 0xaa]);
 }
 
 #[test]

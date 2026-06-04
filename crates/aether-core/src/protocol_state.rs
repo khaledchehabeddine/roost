@@ -8,7 +8,11 @@ use std::error::Error;
 use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const PROTOCOL_STATE_BLOB_VERSION: u8 = 1;
+const CURRENT_PROTOCOL_STATE_BLOB_MAJOR: u8 = 1;
+const CURRENT_PROTOCOL_STATE_BLOB_MINOR: u8 = 0;
+const SUPPORTED_LEGACY_BLOB_MAJOR: u8 = 0;
+const SUPPORTED_LEGACY_BLOB_MINOR: u8 = 1;
+const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 2;
 const RATCHET_PAYLOAD_VERSION: u8 = 1;
 const RATCHET_PAYLOAD_HEADER_LEN: usize = 1 + 32 + 4 + 4;
 const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
@@ -87,9 +91,9 @@ pub enum ProtocolStateKind {
 }
 
 impl ProtocolStateKind {
-    /// Returns every protocol-state kind exposed by v0.5.0.
+    /// Returns every protocol-state kind known to this build.
     #[must_use]
-    pub fn v0_5_0_kinds() -> &'static [Self] {
+    pub fn all() -> &'static [Self] {
         &[
             Self::RatchetSession,
             Self::PreKey,
@@ -325,13 +329,43 @@ impl ProtocolStateEngine {
         ))
     }
 
-    /// Returns deletion updates for all v0.5.0 state kinds at `key`.
+    /// Returns deletion updates for all protocol-state kinds at `key`.
     #[must_use]
     pub fn wipe(&self, key: ProtocolStateKey) -> Vec<ProtocolStateUpdate> {
-        ProtocolStateKind::v0_5_0_kinds()
+        ProtocolStateKind::all()
             .iter()
             .map(|kind| ProtocolStateUpdate::delete(ProtocolStateAddress::new(*kind, key.clone())))
             .collect()
+    }
+
+    /// Returns a current-format update for an older supported ratchet/session blob.
+    ///
+    /// Returns `Ok(None)` when the stored blob is already in the current format. Apply a returned
+    /// update atomically with the consumer-held blob set before using the migrated state for later
+    /// operations.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the current-format blob or blob envelope fails to
+    ///   decode.
+    /// - [`ProtocolStateError::Crypto`] if migrated state encoding fails.
+    /// - [`ProtocolStateError::MigrationFailed`] if a supported older blob fails migration.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn migrate_session_state(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        key: ProtocolStateKey,
+    ) -> Result<Option<ProtocolStateUpdate>, ProtocolStateError> {
+        let address = ratchet_address(key);
+        let loaded = load_session_state(snapshot, &address)?;
+        if loaded.version.is_current() {
+            return Ok(None);
+        }
+
+        Ok(Some(ProtocolStateUpdate::set(
+            address,
+            encode_session_state(&loaded.state)?,
+        )))
     }
 
     /// Encrypts plaintext using the required ratchet/session blob from `snapshot`.
@@ -339,7 +373,10 @@ impl ProtocolStateEngine {
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session blob fails to decode.
     /// - [`ProtocolStateError::Crypto`] if ratchet encryption or state encoding fails.
+    /// - [`ProtocolStateError::MigrationFailed`] if a supported older blob fails migration.
+    /// - [`ProtocolStateError::MessageEncode`] if the produced Message fails to encode.
     /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn encrypt_message(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -347,7 +384,7 @@ impl ProtocolStateEngine {
         plaintext: OutboundPlaintext<'_>,
     ) -> Result<OutboundMessageResult, ProtocolStateError> {
         let address = ratchet_address(key.clone());
-        let mut state = load_session_state(snapshot, &address)?;
+        let mut state = load_session_state(snapshot, &address)?.state;
         let (header, ciphertext) =
             state.ratchet_encrypt(plaintext.plaintext, plaintext.associated_data)?;
         let message = Message {
@@ -375,7 +412,9 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session blob fails to decode.
     /// - [`ProtocolStateError::Crypto`] if ratchet decryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if the Message does not contain ratcheted text.
+    /// - [`ProtocolStateError::MigrationFailed`] if a supported older blob fails migration.
     /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn decrypt_message<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -385,7 +424,7 @@ impl ProtocolStateEngine {
         associated_data: &[u8],
     ) -> Result<InboundMessageResult, ProtocolStateError> {
         let address = ratchet_address(key.clone());
-        let mut state = load_session_state(snapshot, &address)?;
+        let mut state = load_session_state(snapshot, &address)?.state;
         if message.payload_kind != PayloadKind::EncryptedText {
             return Err(ProtocolStateError::InvalidMessage {
                 reason: "message payload is not ratcheted encrypted text".into(),
@@ -403,6 +442,7 @@ impl ProtocolStateEngine {
 }
 
 /// Errors returned by protocol-state operations.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum ProtocolStateError {
     /// A persisted blob failed structural decoding.
@@ -426,10 +466,26 @@ pub enum ProtocolStateError {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
+    /// A supported older blob failed migration.
+    MigrationFailed {
+        /// Address whose blob failed to migrate.
+        address: ProtocolStateAddress,
+        /// Diagnostic migration context for logs only.
+        reason: String,
+    },
     /// A required protocol-state blob was absent from the consumer snapshot.
     MissingRequiredState {
         /// Address that must be present before the operation.
         address: ProtocolStateAddress,
+    },
+    /// A persisted blob used a version this build does not support.
+    UnsupportedBlobVersion {
+        /// Address whose blob version is unsupported.
+        address: ProtocolStateAddress,
+        /// Major version read from the blob envelope.
+        major: u8,
+        /// Minor version read from the blob envelope.
+        minor: u8,
     },
 }
 
@@ -445,9 +501,25 @@ impl fmt::Display for ProtocolStateError {
             Self::Crypto(e) => write!(f, "protocol-state crypto operation failed: {e}"),
             Self::InvalidMessage { reason } => write!(f, "invalid message: {reason}"),
             Self::InvalidStateKey { reason } => write!(f, "invalid protocol-state key: {reason}"),
+            Self::MigrationFailed { address, reason } => {
+                write!(
+                    f,
+                    "protocol-state blob failed to migrate at {address}: {reason}"
+                )
+            }
             Self::MessageEncode(e) => write!(f, "message failed to encode: {e}"),
             Self::MissingRequiredState { address } => {
                 write!(f, "missing required protocol-state blob at {address}")
+            }
+            Self::UnsupportedBlobVersion {
+                address,
+                major,
+                minor,
+            } => {
+                write!(
+                    f,
+                    "unsupported protocol-state blob version at {address}: {major}.{minor}"
+                )
             }
         }
     }
@@ -461,7 +533,9 @@ impl Error for ProtocolStateError {
             Self::BlobDecode { .. }
             | Self::InvalidMessage { .. }
             | Self::InvalidStateKey { .. }
-            | Self::MissingRequiredState { .. } => None,
+            | Self::MigrationFailed { .. }
+            | Self::MissingRequiredState { .. }
+            | Self::UnsupportedBlobVersion { .. } => None,
         }
     }
 }
@@ -478,16 +552,24 @@ fn ratchet_address(key: ProtocolStateKey) -> ProtocolStateAddress {
 
 fn encode_session_state(state: &RatchetState) -> Result<ProtocolStateBlob, ProtocolStateError> {
     let state_bytes = state.to_bytes()?;
-    let mut bytes = Zeroizing::new(Vec::with_capacity(1 + state_bytes.len()));
-    bytes.push(PROTOCOL_STATE_BLOB_VERSION);
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        PROTOCOL_STATE_BLOB_HEADER_LEN + state_bytes.len(),
+    ));
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MAJOR);
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MINOR);
     bytes.extend_from_slice(&state_bytes);
     Ok(ProtocolStateBlob::from_zeroizing(bytes))
+}
+
+struct LoadedSessionState {
+    state: RatchetState,
+    version: ProtocolStateBlobVersion,
 }
 
 fn load_session_state(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
-) -> Result<RatchetState, ProtocolStateError> {
+) -> Result<LoadedSessionState, ProtocolStateError> {
     let blob = snapshot
         .get(address)
         .ok_or_else(|| ProtocolStateError::MissingRequiredState {
@@ -499,7 +581,7 @@ fn load_session_state(
 fn decode_session_state(
     address: &ProtocolStateAddress,
     blob: &ProtocolStateBlob,
-) -> Result<RatchetState, ProtocolStateError> {
+) -> Result<LoadedSessionState, ProtocolStateError> {
     let bytes = blob.as_bytes();
     if bytes.len() > MAX_PROTOCOL_STATE_BLOB_LEN {
         return Err(ProtocolStateError::BlobDecode {
@@ -507,22 +589,75 @@ fn decode_session_state(
             reason: format!("ratchet/session blob length exceeds limit: {}", bytes.len()),
         });
     }
-    let version = *bytes
-        .first()
-        .ok_or_else(|| ProtocolStateError::BlobDecode {
+    let version =
+        ProtocolStateBlobVersion::read(bytes).ok_or_else(|| ProtocolStateError::BlobDecode {
             address: address.clone(),
-            reason: "empty ratchet/session blob".into(),
+            reason: "ratchet/session blob header is incomplete".into(),
         })?;
-    if version != PROTOCOL_STATE_BLOB_VERSION {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!("unsupported protocol-state blob version: {version}"),
-        });
+    let payload = &bytes[PROTOCOL_STATE_BLOB_HEADER_LEN..];
+
+    if version.is_current() {
+        return decode_current_session_state(address, payload, version);
     }
-    RatchetState::from_bytes(&bytes[1..]).map_err(|e| ProtocolStateError::BlobDecode {
+    if version.is_supported_legacy() {
+        return migrate_legacy_session_state(address, payload, version);
+    }
+
+    Err(ProtocolStateError::UnsupportedBlobVersion {
+        address: address.clone(),
+        major: version.major,
+        minor: version.minor,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct ProtocolStateBlobVersion {
+    major: u8,
+    minor: u8,
+}
+
+impl ProtocolStateBlobVersion {
+    fn read(bytes: &[u8]) -> Option<Self> {
+        let header = bytes.get(..PROTOCOL_STATE_BLOB_HEADER_LEN)?;
+        Some(Self {
+            major: header[0],
+            minor: header[1],
+        })
+    }
+
+    fn is_current(self) -> bool {
+        self.major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR
+            && self.minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR
+    }
+
+    fn is_supported_legacy(self) -> bool {
+        self.major == SUPPORTED_LEGACY_BLOB_MAJOR && self.minor == SUPPORTED_LEGACY_BLOB_MINOR
+    }
+}
+
+fn decode_current_session_state(
+    address: &ProtocolStateAddress,
+    payload: &[u8],
+    version: ProtocolStateBlobVersion,
+) -> Result<LoadedSessionState, ProtocolStateError> {
+    let state = RatchetState::from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
         address: address.clone(),
         reason: e.to_string(),
-    })
+    })?;
+    Ok(LoadedSessionState { state, version })
+}
+
+fn migrate_legacy_session_state(
+    address: &ProtocolStateAddress,
+    payload: &[u8],
+    version: ProtocolStateBlobVersion,
+) -> Result<LoadedSessionState, ProtocolStateError> {
+    let state =
+        RatchetState::from_bytes(payload).map_err(|e| ProtocolStateError::MigrationFailed {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+    Ok(LoadedSessionState { state, version })
 }
 
 fn encode_ratcheted_payload(header: &Header, ciphertext: &[u8]) -> Vec<u8> {

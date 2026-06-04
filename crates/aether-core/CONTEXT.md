@@ -42,6 +42,12 @@ and advance a Blob during one operation, but the consumer-held Blob is authorita
 operations.
 Avoid: cache, in-memory state, decoded state
 
+**Protocol State Blob Version** (one per Protocol State Blob):
+The Core-owned major/minor envelope version read before decoding a Blob's version-specific
+payload. Supported older versions migrate through explicit fixtures only; unknown versions are
+faults, not reset or restore signals.
+Avoid: schema version, ratchet version
+
 **Protocol State Kind** (one per Protocol State Blob address):
 The stable category for a Protocol State Blob — ratchet/session state, prekey state, sender
 certificate, deduplication set, or pending acknowledgments. The consumer combines the Kind with a
