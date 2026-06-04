@@ -36,6 +36,7 @@ mod identity;
 mod key_store;
 mod message;
 mod one_time_prekey;
+mod protocol_state;
 mod signed_prekey;
 mod storage;
 
@@ -44,5 +45,10 @@ pub use identity::{Identity, IdentityError};
 pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;
+pub use protocol_state::{
+    InboundMessageResult, OutboundMessageResult, OutboundPlaintext, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate, SessionId,
+};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
