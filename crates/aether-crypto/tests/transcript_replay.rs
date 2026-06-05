@@ -89,7 +89,7 @@ impl WireHeader {
 #[test]
 fn recorded_session_transcript_reaches_expected_state() {
     let transcript: Transcript =
-        serde_json::from_str(include_str!("fixtures/session_transcript_v2.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/session_transcript_v1.json")).unwrap();
     let mut rng = ChaCha20Rng::from_seed(transcript.rng_seed);
 
     let alice_identity = generate_signing_key_pair(&mut rng);

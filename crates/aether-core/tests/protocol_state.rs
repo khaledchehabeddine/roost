@@ -123,7 +123,7 @@ fn sender_identity(tag: u8) -> SenderIdentityMaterial {
 
 fn message_associated_data(message: &Message) -> Vec<u8> {
     let mut associated_data = Vec::new();
-    associated_data.extend_from_slice(b"AetherMessage-v2:");
+    associated_data.extend_from_slice(b"AetherMessage-v1:");
     associated_data.extend_from_slice(message.id.as_bytes());
     associated_data.extend_from_slice(&message.recipient_public_key);
     associated_data.extend_from_slice(&message.timestamp_millis.to_be_bytes());

@@ -1118,7 +1118,7 @@ fn message_associated_data(
     payload_kind: PayloadKind,
 ) -> Vec<u8> {
     let mut associated_data = Vec::with_capacity(74);
-    associated_data.extend_from_slice(b"AetherMessage-v2:");
+    associated_data.extend_from_slice(b"AetherMessage-v1:");
     associated_data.extend_from_slice(id.as_bytes());
     associated_data.extend_from_slice(recipient_public_key);
     associated_data.extend_from_slice(&timestamp_millis.to_be_bytes());

@@ -17,8 +17,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 // Fixed prefix on the HKDF input. Future incompatible handshake derivations should change these
 // bytes so peers fail during the first decrypt.
 const F_PREFIX: [u8; 32] = [0xFF; 32];
-const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v2:without-opk";
-const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v2:with-opk";
+const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:without-opk";
+const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:with-opk";
 const INPUT_KEYING_MATERIAL_LEN_WITHOUT_ONE_TIME_PREKEY: usize = 32 * 3;
 const INPUT_KEYING_MATERIAL_LEN_WITH_ONE_TIME_PREKEY: usize = 32 * 4;
 const HANDSHAKE_ENVELOPE_MAGIC: [u8; 4] = *b"AX3H";
@@ -522,7 +522,7 @@ struct SenderProofTranscriptInput<'a> {
 fn sender_proof_transcript(input: SenderProofTranscriptInput<'_>) -> Zeroizing<Vec<u8>> {
     let one_time_prekey_len = input.responder_one_time_prekey.map_or(1, |_| 1 + 8 + 32);
     let mut transcript = Zeroizing::new(Vec::with_capacity(
-        b"AetherX3DH-v2:sender-proof:".len()
+        b"AetherX3DH-v1:sender-proof:".len()
             + 32
             + 4
             + 32
@@ -534,7 +534,7 @@ fn sender_proof_transcript(input: SenderProofTranscriptInput<'_>) -> Zeroizing<V
             + 4
             + input.sender_signature.len(),
     ));
-    transcript.extend_from_slice(b"AetherX3DH-v2:sender-proof:");
+    transcript.extend_from_slice(b"AetherX3DH-v1:sender-proof:");
     transcript.extend_from_slice(input.initiator_ephemeral_public_key.as_bytes());
     transcript.extend_from_slice(input.responder_discovery_public_key.as_bytes());
     transcript.extend_from_slice(&input.responder_discovery_epoch.to_be_bytes());
@@ -844,8 +844,8 @@ mod tests {
     #[test]
     fn full_x3dh_root_key_known_answer() {
         const EXPECTED_ROOT_KEY: [u8; 32] = [
-            100, 40, 240, 144, 171, 167, 40, 84, 48, 82, 76, 43, 189, 42, 0, 22, 85, 207, 128, 217,
-            96, 237, 193, 82, 86, 141, 2, 222, 93, 204, 29, 127,
+            224, 68, 187, 200, 252, 68, 85, 129, 217, 17, 0, 81, 177, 53, 151, 109, 85, 234, 81,
+            58, 130, 15, 204, 186, 124, 200, 217, 188, 74, 187, 185, 34,
         ];
 
         let alice_ephemeral_key = KeyPair::from_secret_bytes([0x22u8; 32]);

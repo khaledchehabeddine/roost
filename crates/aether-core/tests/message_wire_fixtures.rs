@@ -28,9 +28,9 @@ struct DecodedFixture {
 #[test]
 fn checked_in_fixtures_decode_and_reencode() {
     let fixture_file: FixtureFile =
-        serde_json::from_str(include_str!("fixtures/message_wire_v2.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/message_wire_v1.json")).unwrap();
 
-    assert_eq!(fixture_file.version, 2);
+    assert_eq!(fixture_file.version, 1);
     assert_eq!(fixture_file.fixtures.len(), 4);
     for fixture in fixture_file.fixtures {
         let encoded = hex::decode(&fixture.encoded_hex).unwrap();
