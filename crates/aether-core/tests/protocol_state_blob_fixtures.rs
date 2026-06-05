@@ -1,4 +1,4 @@
-//! Verifies checked-in Protocol State Blob fixtures across Core migration boundaries.
+//! Verifies checked-in Protocol State Blob fixtures across the public Core API.
 
 use aether_core::{
     MessageId, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
@@ -13,7 +13,6 @@ use aether_crypto::{
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 const CREATED_AT: u64 = 1_700_000_000;
 
@@ -21,9 +20,7 @@ const CREATED_AT: u64 = 1_700_000_000;
 struct FixtureFile {
     provenance: String,
     current_version: Version,
-    supported_migration_versions: Vec<Version>,
     fixtures: Vec<Fixture>,
-    unsupported_pre_release_blobs: Vec<UnsupportedFixture>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
@@ -39,7 +36,6 @@ struct Fixture {
     key_hex: String,
     current_encoded_hex: String,
     decoded: DecodedFixture,
-    migrations: Vec<MigrationFixture>,
 }
 
 #[derive(Deserialize)]
@@ -47,20 +43,11 @@ struct DecodedFixture {
     skipped_key_count: usize,
 }
 
-#[derive(Deserialize)]
-struct MigrationFixture {
-    from_version: Version,
-    encoded_hex: String,
-    migrated_encoded_hex: String,
-}
-
-#[derive(Deserialize)]
-struct UnsupportedFixture {
-    name: String,
-    kind: String,
-    key_hex: String,
-    encoded_hex: String,
-    expected_error: String,
+#[derive(Serialize)]
+struct TestSessionStateWire<'a> {
+    version: u8,
+    ratchet_state: &'a [u8],
+    peer_sender_identity_key: Option<[u8; 32]>,
 }
 
 struct Setup {
@@ -177,12 +164,6 @@ fn current_version_fixture_matches_decoded_state_expectations() {
 
     let mut fixture_snapshot = ProtocolStateSnapshot::new();
     fixture_snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
-    assert!(
-        engine
-            .migrate_session_state(&fixture_snapshot, key.clone())
-            .unwrap()
-            .is_none()
-    );
 
     let mut expected_snapshot = ProtocolStateSnapshot::new();
     expected_snapshot.apply(expected);
@@ -222,7 +203,6 @@ fn bound_peer_identity_fixture_matches_decoded_state_expectations() {
     assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
     assert_eq!(current[..2], [1, 0]);
     assert_eq!(fixture.decoded.skipped_key_count, 0);
-    assert!(fixture.migrations.is_empty());
 
     let expected = engine
         .set_session_state_with_peer_identity(key.clone(), &setup.bob_state, &sender_identity)
@@ -235,71 +215,29 @@ fn bound_peer_identity_fixture_matches_decoded_state_expectations() {
 
     let mut fixture_snapshot = ProtocolStateSnapshot::new();
     fixture_snapshot.set(address, ProtocolStateBlob::from_bytes(current));
-    assert!(
-        engine
-            .migrate_session_state(&fixture_snapshot, key)
-            .unwrap()
-            .is_none()
+    let update = engine
+        .bind_session_state_peer_identity_key(&fixture_snapshot, key, sender_identity.identity_key)
+        .unwrap();
+    assert_eq!(
+        update.blob().unwrap().as_bytes(),
+        expected.blob().unwrap().as_bytes()
     );
 }
 
 #[test]
-fn supported_old_fixture_migrates_to_current_bytes() {
-    let fixture_file = fixture_file();
-    let fixture = &fixture_file.fixtures[0];
-    let engine = ProtocolStateEngine::new();
-
-    assert_eq!(fixture_file.supported_migration_versions.len(), 2);
-    for migration in &fixture.migrations {
-        assert!(
-            fixture_file
-                .supported_migration_versions
-                .contains(&migration.from_version)
-        );
-        assert_eq!(
-            migration.migrated_encoded_hex, fixture.current_encoded_hex,
-            "supported fixture should migrate to the pinned current bytes"
-        );
-
-        let key = session_key();
-        let address = session_address(key.clone());
-        let old_bytes = hex::decode(&migration.encoded_hex).unwrap();
-        let expected_current = hex::decode(&migration.migrated_encoded_hex).unwrap();
-        let mut snapshot = ProtocolStateSnapshot::new();
-        snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(old_bytes));
-
-        let update = engine
-            .migrate_session_state(&snapshot, key)
-            .unwrap()
-            .expect("old fixture should produce a migration update");
-
-        assert_eq!(update.address(), &address);
-        assert_eq!(update.blob().unwrap().as_bytes(), expected_current);
-    }
-}
-
-#[test]
-fn old_pre_release_blob_is_not_implicitly_supported() {
-    let fixture_file = fixture_file();
-    let fixture = &fixture_file.unsupported_pre_release_blobs[0];
+fn flat_ratchet_state_blob_is_rejected_as_malformed_current_blob() {
+    let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = session_key();
     let address = session_address(key.clone());
-    let old_bytes = hex::decode(&fixture.encoded_hex).unwrap();
+    let mut flat_blob = vec![1, 0];
+    flat_blob.extend_from_slice(&setup.alice_state.to_bytes().unwrap());
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(old_bytes));
+    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(flat_blob));
 
-    assert_eq!(fixture.name, "flat_v1_ratchet_session");
-    assert_eq!(fixture.kind, "ratchet_session");
-    assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
-    assert_eq!(fixture.expected_error, "unsupported_blob_version");
     assert!(matches!(
-        engine.migrate_session_state(&snapshot, key),
-        Err(ProtocolStateError::UnsupportedBlobVersion {
-            address: actual,
-            major: 1,
-            minor: 1
-        }) if actual == address
+        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
+        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
     ));
 }
 
@@ -315,11 +253,53 @@ fn unsupported_major_version_is_a_fault() {
     );
 
     assert!(matches!(
-        engine.migrate_session_state(&snapshot, key),
+        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
         Err(ProtocolStateError::UnsupportedBlobVersion {
             address: actual,
             major: 2,
             minor: 0
+        }) if actual == address
+    ));
+}
+
+#[test]
+fn lower_pre_release_version_is_a_fault() {
+    let engine = ProtocolStateEngine::new();
+    let key = session_key();
+    let address = session_address(key.clone());
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(
+        address.clone(),
+        ProtocolStateBlob::from_bytes(vec![0, 1, 0xaa]),
+    );
+
+    assert!(matches!(
+        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
+        Err(ProtocolStateError::UnsupportedBlobVersion {
+            address: actual,
+            major: 0,
+            minor: 1
+        }) if actual == address
+    ));
+}
+
+#[test]
+fn unsupported_minor_version_is_a_fault() {
+    let engine = ProtocolStateEngine::new();
+    let key = session_key();
+    let address = session_address(key.clone());
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(
+        address.clone(),
+        ProtocolStateBlob::from_bytes(vec![1, 1, 0xaa]),
+    );
+
+    assert!(matches!(
+        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
+        Err(ProtocolStateError::UnsupportedBlobVersion {
+            address: actual,
+            major: 1,
+            minor: 1
         }) if actual == address
     ));
 }
@@ -336,75 +316,44 @@ fn malformed_current_blob_is_a_fault() {
     );
 
     assert!(matches!(
-        engine.migrate_session_state(&snapshot, key),
+        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
         Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
     ));
 }
 
 #[test]
-fn migration_invariant_violation_is_a_fault_without_resetting_state() {
+fn nested_ratchet_decode_failure_does_not_echo_state_bytes() {
+    const SECRET_DERIVED_BYTE: u8 = 0x42;
+
     let engine = ProtocolStateEngine::new();
     let key = session_key();
     let address = session_address(key.clone());
-    let bad_blob = invalid_legacy_blob();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(bad_blob.clone()),
-    );
-
-    let result = engine.migrate_session_state(&snapshot, key);
-
-    assert!(matches!(
-        result,
-        Err(ProtocolStateError::MigrationFailed { address: actual, .. }) if actual == address
-    ));
-    assert_eq!(snapshot.get(&address).unwrap().as_bytes(), bad_blob);
-}
-
-fn invalid_legacy_blob() -> Vec<u8> {
-    let wire = RatchetStateWire {
+    let payload = postcard::to_stdvec(&TestSessionStateWire {
         version: 1,
-        dhs_secret: [0; 32],
-        dhr: None,
-        rk: [0; 32],
-        cks: None,
-        ckr: None,
-        ns: 0,
-        nr: 0,
-        pn: 0,
-        mk_skipped: [(
-            ([0; 32], 0),
-            SkippedMessageKeyWire {
-                message_key: [0; 32],
-                sequence: 0,
-            },
-        )]
-        .into(),
-        next_skipped_key_sequence: 0,
+        ratchet_state: &[SECRET_DERIVED_BYTE],
+        peer_sender_identity_key: None,
+    })
+    .unwrap();
+    let mut blob = vec![1, 0];
+    blob.extend_from_slice(&payload);
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(blob));
+
+    let err = match engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]) {
+        Ok(_) => panic!("malformed nested ratchet state decoded"),
+        Err(err) => err,
     };
-    let mut blob = vec![0, 1];
-    blob.extend_from_slice(&postcard::to_stdvec(&wire).unwrap());
-    blob
-}
-
-#[derive(Serialize)]
-struct RatchetStateWire {
-    version: u8,
-    dhs_secret: [u8; 32],
-    dhr: Option<[u8; 32]>,
-    rk: [u8; 32],
-    cks: Option<[u8; 32]>,
-    ckr: Option<[u8; 32]>,
-    ns: u32,
-    nr: u32,
-    pn: u32,
-    mk_skipped: BTreeMap<([u8; 32], u32), SkippedMessageKeyWire>,
-    next_skipped_key_sequence: u64,
-}
-
-#[derive(Serialize)]
-struct SkippedMessageKeyWire {
-    message_key: [u8; 32],
-    sequence: u64,
+    let rendered = err.to_string();
+    match err {
+        ProtocolStateError::BlobDecode {
+            address: actual,
+            reason,
+        } => {
+            assert_eq!(actual, address);
+            assert_eq!(reason, "ratchet/session state failed to decode");
+        }
+        other => panic!("unexpected error: {other}"),
+    }
+    assert!(!rendered.contains("66"));
+    assert!(!rendered.contains("0x42"));
 }

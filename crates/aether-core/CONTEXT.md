@@ -45,8 +45,8 @@ Avoid: cache, in-memory state, decoded state
 
 **Protocol State Blob Version** (one per Protocol State Blob):
 The Core-owned major/minor envelope version read before decoding a Blob's version-specific
-payload. Supported older versions migrate through explicit fixtures only; unknown versions are
-faults, not reset or restore signals.
+payload. Only the current pre-release envelope is accepted; unknown versions are faults, not reset
+or restore signals.
 Avoid: schema version, ratchet version
 
 **Protocol State Kind** (one per Protocol State Blob address):

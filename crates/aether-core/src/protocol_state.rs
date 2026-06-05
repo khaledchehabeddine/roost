@@ -13,8 +13,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const CURRENT_PROTOCOL_STATE_BLOB_MAJOR: u8 = 1;
 const CURRENT_PROTOCOL_STATE_BLOB_MINOR: u8 = 0;
-const SUPPORTED_LEGACY_BLOB_MAJOR: u8 = 0;
-const SUPPORTED_LEGACY_BLOB_MINOR: u8 = 1;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 2;
 const SESSION_STATE_WIRE_VERSION: u8 = 1;
 const RATCHET_PAYLOAD_VERSION: u8 = 1;
@@ -395,8 +393,8 @@ impl ProtocolStateEngine {
     /// Returns an update that binds an existing Ratchet session blob to the expected peer sender
     /// identity key.
     ///
-    /// Use this when restoring or migrating an existing opaque session blob and the peer identity
-    /// key is known without full sender certificate material.
+    /// Use this when restoring an existing opaque session blob and the peer identity key is known
+    /// without full sender certificate material.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the current-format blob or blob envelope fails to
@@ -406,7 +404,6 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::Crypto`] if ratchet-state encoding fails.
     /// - [`ProtocolStateError::InvalidStateBinding`] if the session is already bound to a
     ///   different peer sender identity key.
-    /// - [`ProtocolStateError::MigrationFailed`] if a supported older blob fails migration.
     /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn bind_session_state_peer_identity_key(
@@ -444,48 +441,15 @@ impl ProtocolStateEngine {
             .collect()
     }
 
-    /// Returns a current-format update for an older supported ratchet/session blob.
-    ///
-    /// Returns `Ok(None)` when the stored blob is already in the current format. Apply a returned
-    /// update atomically with the consumer-held blob set before using the migrated state for later
-    /// operations.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the current-format blob or blob envelope fails to
-    ///   decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the current-format writeback fails to encode or
-    ///   exceeds local caps.
-    /// - [`ProtocolStateError::Crypto`] if migrated state encoding fails.
-    /// - [`ProtocolStateError::MigrationFailed`] if a supported older blob fails migration.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
-    pub fn migrate_session_state(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        key: ProtocolStateKey,
-    ) -> Result<Option<ProtocolStateUpdate>, ProtocolStateError> {
-        let address = ratchet_address(key);
-        let loaded = load_session_state(snapshot, &address)?;
-        if loaded.version.is_current() && !loaded.needs_writeback {
-            return Ok(None);
-        }
-
-        Ok(Some(ProtocolStateUpdate::set(
-            address.clone(),
-            encode_session_state(&address, &loaded.state, loaded.peer_sender_identity_key)?,
-        )))
-    }
-
     /// Encrypts plaintext using the required ratchet/session blob from `snapshot`.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the current session-state writeback fails to
-    ///   encode or exceeds local caps.
+    /// - [`ProtocolStateError::BlobEncode`] if the advanced session state fails to encode or
+    ///   exceeds local caps.
     /// - [`ProtocolStateError::Crypto`] if ratchet encryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if sender material or sealed-sender content
     ///   exceeds local caps or fails to encode.
-    /// - [`ProtocolStateError::MigrationFailed`] if a supported older blob fails migration.
     /// - [`ProtocolStateError::MessageEncode`] if the produced Message fails to encode.
     /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
@@ -531,14 +495,13 @@ impl ProtocolStateEngine {
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the current session-state writeback fails to
-    ///   encode or exceeds local caps.
+    /// - [`ProtocolStateError::BlobEncode`] if the advanced session state fails to encode or
+    ///   exceeds local caps.
     /// - [`ProtocolStateError::Crypto`] if ratchet decryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if the Message does not contain ratcheted text,
     ///   the session is not bound to a peer sender identity key, the decrypted sender identity key
     ///   does not match the session binding, or the decrypted sealed-sender envelope is malformed,
     ///   unsupported, or oversized.
-    /// - [`ProtocolStateError::MigrationFailed`] if a supported older blob fails migration.
     /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn decrypt_message<R: RngCore + CryptoRng>(
@@ -639,13 +602,6 @@ pub enum ProtocolStateError {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
-    /// A supported older blob failed migration.
-    MigrationFailed {
-        /// Address whose blob failed to migrate.
-        address: ProtocolStateAddress,
-        /// Diagnostic migration context for logs only.
-        reason: String,
-    },
     /// A required protocol-state blob was absent from the consumer snapshot.
     MissingRequiredState {
         /// Address that must be present before the operation.
@@ -683,12 +639,6 @@ impl fmt::Display for ProtocolStateError {
                 write!(f, "invalid protocol-state binding at {address}: {reason}")
             }
             Self::InvalidStateKey { reason } => write!(f, "invalid protocol-state key: {reason}"),
-            Self::MigrationFailed { address, reason } => {
-                write!(
-                    f,
-                    "protocol-state blob failed to migrate at {address}: {reason}"
-                )
-            }
             Self::MessageEncode(e) => write!(f, "message failed to encode: {e}"),
             Self::MissingRequiredState { address } => {
                 write!(f, "missing required protocol-state blob at {address}")
@@ -717,7 +667,6 @@ impl Error for ProtocolStateError {
             | Self::InvalidMessage { .. }
             | Self::InvalidStateBinding { .. }
             | Self::InvalidStateKey { .. }
-            | Self::MigrationFailed { .. }
             | Self::MissingRequiredState { .. }
             | Self::UnsupportedBlobVersion { .. } => None,
         }
@@ -786,8 +735,6 @@ fn encode_session_state(
 struct LoadedSessionState {
     state: RatchetState,
     peer_sender_identity_key: Option<[u8; 32]>,
-    version: ProtocolStateBlobVersion,
-    needs_writeback: bool,
 }
 
 fn load_session_state(
@@ -813,69 +760,32 @@ fn decode_session_state(
             reason: format!("ratchet/session blob length exceeds limit: {}", bytes.len()),
         });
     }
-    let version =
-        ProtocolStateBlobVersion::read(bytes).ok_or_else(|| ProtocolStateError::BlobDecode {
+    let (major, minor) =
+        read_blob_version(bytes).ok_or_else(|| ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: "ratchet/session blob header is incomplete".into(),
         })?;
     let payload = &bytes[PROTOCOL_STATE_BLOB_HEADER_LEN..];
 
-    if version.is_current() {
-        return decode_current_session_state(address, payload, version);
-    }
-    if version.is_supported_legacy() {
-        return migrate_legacy_session_state(address, payload, version);
+    if major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR && minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR {
+        return decode_session_state_payload(address, payload);
     }
 
     Err(ProtocolStateError::UnsupportedBlobVersion {
         address: address.clone(),
-        major: version.major,
-        minor: version.minor,
+        major,
+        minor,
     })
 }
 
-#[derive(Clone, Copy)]
-struct ProtocolStateBlobVersion {
-    major: u8,
-    minor: u8,
+fn read_blob_version(bytes: &[u8]) -> Option<(u8, u8)> {
+    let header = bytes.get(..PROTOCOL_STATE_BLOB_HEADER_LEN)?;
+    Some((header[0], header[1]))
 }
 
-impl ProtocolStateBlobVersion {
-    fn read(bytes: &[u8]) -> Option<Self> {
-        let header = bytes.get(..PROTOCOL_STATE_BLOB_HEADER_LEN)?;
-        Some(Self {
-            major: header[0],
-            minor: header[1],
-        })
-    }
-
-    fn is_current(self) -> bool {
-        self.major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR
-            && self.minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR
-    }
-
-    fn is_supported_legacy(self) -> bool {
-        self.major == SUPPORTED_LEGACY_BLOB_MAJOR && self.minor == SUPPORTED_LEGACY_BLOB_MINOR
-    }
-}
-
-fn decode_current_session_state(
+fn decode_session_state_payload(
     address: &ProtocolStateAddress,
     payload: &[u8],
-    version: ProtocolStateBlobVersion,
-) -> Result<LoadedSessionState, ProtocolStateError> {
-    match decode_wrapped_session_state(address, payload, version) {
-        Ok(loaded) => Ok(loaded),
-        Err(wrapped_error) => {
-            decode_flat_current_session_state(address, payload, version).map_err(|_| wrapped_error)
-        }
-    }
-}
-
-fn decode_wrapped_session_state(
-    address: &ProtocolStateAddress,
-    payload: &[u8],
-    version: ProtocolStateBlobVersion,
 ) -> Result<LoadedSessionState, ProtocolStateError> {
     let (wire, trailing): (DecodedSessionStateWire, &[u8]) = postcard::take_from_bytes(payload)
         .map_err(|e| ProtocolStateError::BlobDecode {
@@ -892,50 +802,13 @@ fn decode_wrapped_session_state(
         });
     }
     let state =
-        RatchetState::from_bytes(&ratchet_state).map_err(|e| ProtocolStateError::BlobDecode {
+        RatchetState::from_bytes(&ratchet_state).map_err(|_| ProtocolStateError::BlobDecode {
             address: address.clone(),
-            reason: e.to_string(),
+            reason: "ratchet/session state failed to decode".into(),
         })?;
     Ok(LoadedSessionState {
         state,
         peer_sender_identity_key,
-        version,
-        needs_writeback: false,
-    })
-}
-
-fn decode_flat_current_session_state(
-    address: &ProtocolStateAddress,
-    payload: &[u8],
-    version: ProtocolStateBlobVersion,
-) -> Result<LoadedSessionState, ProtocolStateError> {
-    let state = RatchetState::from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
-        address: address.clone(),
-        reason: e.to_string(),
-    })?;
-    Ok(LoadedSessionState {
-        state,
-        peer_sender_identity_key: None,
-        version,
-        needs_writeback: true,
-    })
-}
-
-fn migrate_legacy_session_state(
-    address: &ProtocolStateAddress,
-    payload: &[u8],
-    version: ProtocolStateBlobVersion,
-) -> Result<LoadedSessionState, ProtocolStateError> {
-    let state =
-        RatchetState::from_bytes(payload).map_err(|e| ProtocolStateError::MigrationFailed {
-            address: address.clone(),
-            reason: e.to_string(),
-        })?;
-    Ok(LoadedSessionState {
-        state,
-        peer_sender_identity_key: None,
-        version,
-        needs_writeback: true,
     })
 }
 
