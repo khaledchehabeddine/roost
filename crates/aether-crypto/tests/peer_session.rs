@@ -4,10 +4,10 @@
 //! public API the way a downstream crate would.
 
 use aether_crypto::{
-    CryptoError, DiscoveryKey, HandshakeEnvelope, Header, OneTimePreKey, PreKeyBundle,
-    RatchetState, Signature, SignedPreKey, SigningKeyPair, accept, generate_discovery_key,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initial_associated_data, initiate,
+    CryptoError, DiscoveryKey, HandshakeEnvelope, Header, InitialPlaintext, OneTimePreKey,
+    PreKeyBundle, RatchetState, Signature, SignedPreKey, SigningKeyPair, accept,
+    generate_discovery_key, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initial_associated_data, initiate,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -15,7 +15,6 @@ use rand_chacha::ChaCha20Rng;
 const FIXED_CREATED_AT: u64 = 1_700_000_000;
 
 struct Setup {
-    alice_identity: SigningKeyPair,
     alice_discovery_key: DiscoveryKey,
     bob_identity: SigningKeyPair,
     bob_discovery_key: DiscoveryKey,
@@ -35,7 +34,6 @@ fn setup() -> (Setup, ChaCha20Rng) {
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), FIXED_CREATED_AT);
     let setup = Setup {
-        alice_identity,
         alice_discovery_key,
         bob_identity,
         bob_discovery_key,
@@ -63,15 +61,13 @@ fn bootstrap(
         &setup.alice_discovery_key,
         &setup.bob_identity.verifying,
         &prekey_bundle,
-        plaintext,
+        initial_plaintext(plaintext),
     )
     .unwrap();
     let bob_one_time_prekey = setup.bob_one_time_prekey.take();
     let (bob, _) = accept(
         rng,
         &envelope,
-        &setup.alice_identity.verifying,
-        &setup.alice_discovery_key.bundle(),
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
@@ -80,12 +76,19 @@ fn bootstrap(
     (alice, bob, envelope)
 }
 
-fn associated_data(setup: &Setup) -> [u8; 68] {
+fn associated_data(setup: &Setup) -> [u8; 36] {
     initial_associated_data(
-        setup.alice_discovery_key.public_key(),
         setup.bob_discovery_key.public_key(),
         setup.bob_discovery_key.epoch(),
     )
+}
+
+fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
+    InitialPlaintext {
+        sender_certificate: b"sender certificate",
+        sender_signature: b"sender signature",
+        plaintext,
+    }
 }
 
 #[test]
@@ -130,7 +133,7 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
         &setup.alice_discovery_key,
         &setup.bob_identity.verifying,
         &prekey_bundle,
-        b"hello serialized Bob",
+        initial_plaintext(b"hello serialized Bob"),
     )
     .unwrap();
     let envelope_bytes = envelope.to_bytes().unwrap();
@@ -139,14 +142,12 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
     let (mut bob, decrypted) = accept(
         &mut rng,
         &decoded_envelope,
-        &setup.alice_identity.verifying,
-        &setup.alice_discovery_key.bundle(),
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
     )
     .unwrap();
-    assert_eq!(decrypted.as_slice(), b"hello serialized Bob");
+    assert_eq!(decrypted.plaintext.as_slice(), b"hello serialized Bob");
 
     let associated_data = associated_data(&setup);
     let (reply_header, reply_ciphertext) = bob
@@ -292,7 +293,7 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
         &setup.alice_discovery_key,
         &setup.bob_identity.verifying,
         &prekey_bundle,
-        b"payload",
+        initial_plaintext(b"payload"),
     );
     assert!(matches!(result, Err(CryptoError::SignatureInvalid)));
 }

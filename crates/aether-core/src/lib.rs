@@ -40,6 +40,7 @@ mod protocol_state;
 mod signed_prekey;
 mod storage;
 
+pub use aether_crypto::SenderIdentityMaterial;
 pub use discovery_key::DiscoveryKeyError;
 pub use identity::{Identity, IdentityError};
 pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};

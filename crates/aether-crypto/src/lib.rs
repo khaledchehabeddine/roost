@@ -7,9 +7,10 @@
 //! # Overview
 //!
 //! The identity key signs the discovery-key bundle. The discovery key signs the signed-pre-key
-//! bundle. Peers verify both signatures, use [`initiate`] and [`accept`] to create the first
-//! [`RatchetState`], then use the ratchet to encrypt messages. X3DH includes a one-time pre-key
-//! when one is available.
+//! bundle. Initiators verify both responder signatures, use [`initiate`] and [`accept`] to create
+//! the first [`RatchetState`], then use the ratchet to encrypt messages. X3DH includes a one-time
+//! pre-key when one is available. Sender identity material is revealed only after the sealed first
+//! message decrypts successfully.
 //!
 //! # Examples
 //!
@@ -54,7 +55,10 @@ pub use discovery_key::{
 };
 pub use double_ratchet::{Header, RatchetState};
 pub use error::CryptoError;
-pub use handshake::{HandshakeEnvelope, PreKeyBundle, accept, initial_associated_data, initiate};
+pub use handshake::{
+    AcceptedInitialMessage, HandshakeEnvelope, InitialPlaintext, PreKeyBundle,
+    SenderIdentityMaterial, accept, initial_associated_data, initiate,
+};
 pub use keys::{
     KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,
     generate_signing_key_pair,

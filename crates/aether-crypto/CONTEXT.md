@@ -25,7 +25,12 @@ The Double Ratchet state machine that advances on every Message, providing forwa
 Avoid: chain, state machine
 
 **X3DH** (one execution per Session):
-Signal's X3DH key agreement: four DH operations across the discovery key, ephemeral key, signed pre-key, and one-time pre-key when available. Produces the root key that seeds the Ratchet.
+Signal-derived key agreement across the initiator ephemeral key, responder Discovery Key,
+responder signed pre-key, and responder one-time pre-key when available. Produces the root key that
+seeds the Ratchet; the initiator Discovery Key is sender identity material and is carried inside the
+encrypted first message, not as a clear handshake field. The encrypted first message also carries a
+private sender key-possession proof; sender-certificate trust validation remains a higher-layer
+verdict after decrypt.
 Avoid: handshake, key agreement
 
 ## Example

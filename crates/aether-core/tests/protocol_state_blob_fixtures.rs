@@ -2,11 +2,12 @@
 
 use aether_core::{
     MessageId, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SessionId,
+    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
+    SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
-    PreKeyBundle, RatchetState, accept, generate_discovery_key, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
+    InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
     initiate,
 };
 use rand::SeedableRng;
@@ -25,7 +26,7 @@ struct FixtureFile {
     unsupported_pre_release_blobs: Vec<UnsupportedFixture>,
 }
 
-#[derive(Clone, Copy, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 struct Version {
     major: u8,
     minor: u8,
@@ -63,8 +64,8 @@ struct UnsupportedFixture {
 }
 
 struct Setup {
-    associated_data: Vec<u8>,
     alice_state: RatchetState,
+    bob_state: RatchetState,
 }
 
 fn setup() -> Setup {
@@ -82,33 +83,34 @@ fn setup() -> Setup {
         signed_prekey: bob_signed_prekey.bundle(),
         one_time_prekey: Some(bob_one_time_prekey.bundle()),
     };
-    let associated_data = initial_associated_data(
-        alice_discovery.public_key(),
-        bob_discovery.public_key(),
-        bob_discovery.epoch(),
-    );
     let (alice_state, envelope) = initiate(
         &mut rng,
         &alice_discovery,
         &bob_identity.verifying,
         &prekey_bundle,
-        b"initial",
+        initial_plaintext(b"initial"),
     )
     .unwrap();
-    let (_, plaintext) = accept(
+    let (bob_state, plaintext) = accept(
         &mut rng,
         &envelope,
-        &alice_identity.verifying,
-        &alice_discovery.bundle(),
         &bob_discovery,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
     )
     .unwrap();
-    assert_eq!(plaintext.as_slice(), b"initial");
+    assert_eq!(plaintext.plaintext.as_slice(), b"initial");
     Setup {
-        associated_data: associated_data.to_vec(),
         alice_state,
+        bob_state,
+    }
+}
+
+fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
+    InitialPlaintext {
+        sender_certificate: b"sender certificate",
+        sender_signature: b"sender signature",
+        plaintext,
     }
 }
 
@@ -124,14 +126,24 @@ fn session_address(key: ProtocolStateKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key)
 }
 
-fn outbound<'a>(plaintext: &'a [u8], associated_data: &'a [u8]) -> OutboundPlaintext<'a> {
+fn outbound<'a>(
+    plaintext: &'a [u8],
+    sender_identity: &'a SenderIdentityMaterial,
+) -> OutboundPlaintext<'a> {
     OutboundPlaintext {
         id: MessageId::from_bytes([1u8; 16]),
-        sender_public_key: [1u8; 32],
+        sender_identity,
         recipient_public_key: [2u8; 32],
         timestamp_millis: 1_700_000_000_123,
         plaintext,
-        associated_data,
+    }
+}
+
+fn sender_identity() -> SenderIdentityMaterial {
+    SenderIdentityMaterial {
+        identity_key: [1u8; 32],
+        certificate: vec![2, 3, 4],
+        signature: vec![5; 64],
     }
 }
 
@@ -174,11 +186,12 @@ fn current_version_fixture_matches_decoded_state_expectations() {
 
     let mut expected_snapshot = ProtocolStateSnapshot::new();
     expected_snapshot.apply(expected);
+    let sender_identity = sender_identity();
     let fixture_message = engine
         .encrypt_message(
             &fixture_snapshot,
             key.clone(),
-            outbound(b"fixture", &setup.associated_data),
+            outbound(b"fixture", &sender_identity),
         )
         .unwrap()
         .message;
@@ -186,7 +199,7 @@ fn current_version_fixture_matches_decoded_state_expectations() {
         .encrypt_message(
             &expected_snapshot,
             key,
-            outbound(b"fixture", &setup.associated_data),
+            outbound(b"fixture", &sender_identity),
         )
         .unwrap()
         .message;
@@ -194,29 +207,75 @@ fn current_version_fixture_matches_decoded_state_expectations() {
 }
 
 #[test]
-fn supported_old_fixture_migrates_to_current_bytes() {
+fn bound_peer_identity_fixture_matches_decoded_state_expectations() {
     let fixture_file = fixture_file();
-    let fixture = &fixture_file.fixtures[0];
-    let migration = &fixture.migrations[0];
+    let fixture = &fixture_file.fixtures[1];
+    let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = session_key();
     let address = session_address(key.clone());
-    let old_bytes = hex::decode(&migration.encoded_hex).unwrap();
-    let expected_current = hex::decode(&migration.migrated_encoded_hex).unwrap();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(old_bytes));
+    let current = hex::decode(&fixture.current_encoded_hex).unwrap();
+    let sender_identity = sender_identity();
 
-    assert_eq!(fixture_file.supported_migration_versions.len(), 1);
-    assert_eq!(migration.from_version.major, 0);
-    assert_eq!(migration.from_version.minor, 1);
+    assert_eq!(fixture.name, "ratchet_session_bob_bound");
+    assert_eq!(fixture.kind, "ratchet_session");
+    assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
+    assert_eq!(current[..2], [1, 0]);
+    assert_eq!(fixture.decoded.skipped_key_count, 0);
+    assert!(fixture.migrations.is_empty());
 
-    let update = engine
-        .migrate_session_state(&snapshot, key)
-        .unwrap()
-        .expect("old fixture should produce a migration update");
+    let expected = engine
+        .set_session_state_with_peer_identity(key.clone(), &setup.bob_state, &sender_identity)
+        .unwrap();
+    assert_eq!(
+        expected.blob().unwrap().as_bytes(),
+        current.as_slice(),
+        "fixture pins the canonical encoded bytes for a peer-bound session"
+    );
 
-    assert_eq!(update.address(), &address);
-    assert_eq!(update.blob().unwrap().as_bytes(), expected_current);
+    let mut fixture_snapshot = ProtocolStateSnapshot::new();
+    fixture_snapshot.set(address, ProtocolStateBlob::from_bytes(current));
+    assert!(
+        engine
+            .migrate_session_state(&fixture_snapshot, key)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn supported_old_fixture_migrates_to_current_bytes() {
+    let fixture_file = fixture_file();
+    let fixture = &fixture_file.fixtures[0];
+    let engine = ProtocolStateEngine::new();
+
+    assert_eq!(fixture_file.supported_migration_versions.len(), 2);
+    for migration in &fixture.migrations {
+        assert!(
+            fixture_file
+                .supported_migration_versions
+                .contains(&migration.from_version)
+        );
+        assert_eq!(
+            migration.migrated_encoded_hex, fixture.current_encoded_hex,
+            "supported fixture should migrate to the pinned current bytes"
+        );
+
+        let key = session_key();
+        let address = session_address(key.clone());
+        let old_bytes = hex::decode(&migration.encoded_hex).unwrap();
+        let expected_current = hex::decode(&migration.migrated_encoded_hex).unwrap();
+        let mut snapshot = ProtocolStateSnapshot::new();
+        snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(old_bytes));
+
+        let update = engine
+            .migrate_session_state(&snapshot, key)
+            .unwrap()
+            .expect("old fixture should produce a migration update");
+
+        assert_eq!(update.address(), &address);
+        assert_eq!(update.blob().unwrap().as_bytes(), expected_current);
+    }
 }
 
 #[test]

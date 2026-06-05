@@ -1,8 +1,8 @@
 //! Property tests for handshake and Double Ratchet protocol invariants.
 
 use aether_crypto::{
-    DiscoveryKey, HandshakeEnvelope, OneTimePreKey, PreKeyBundle, RatchetState, SignedPreKey,
-    SigningKeyPair, accept, generate_discovery_key, generate_one_time_prekey,
+    DiscoveryKey, HandshakeEnvelope, InitialPlaintext, OneTimePreKey, PreKeyBundle, RatchetState,
+    SignedPreKey, SigningKeyPair, accept, generate_discovery_key, generate_one_time_prekey,
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
     initiate,
 };
@@ -15,7 +15,6 @@ const CREATED_AT: u64 = 1_700_000_000;
 const SKIPPED_KEY_CAP: usize = 500;
 
 struct Setup {
-    alice_identity: SigningKeyPair,
     alice_discovery_key: DiscoveryKey,
     bob_identity: SigningKeyPair,
     bob_discovery_key: DiscoveryKey,
@@ -35,7 +34,6 @@ fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
         generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT);
     (
         Setup {
-            alice_identity,
             alice_discovery_key,
             bob_identity,
             bob_discovery_key,
@@ -64,7 +62,7 @@ fn bootstrap(
         &setup.alice_discovery_key,
         &setup.bob_identity.verifying,
         &prekey_bundle,
-        plaintext,
+        initial_plaintext(plaintext),
     )
     .unwrap();
     let bob_one_time_prekey =
@@ -72,23 +70,28 @@ fn bootstrap(
     let (bob, decrypted) = accept(
         rng,
         &envelope,
-        &setup.alice_identity.verifying,
-        &setup.alice_discovery_key.bundle(),
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
     )
     .unwrap();
-    assert_eq!(decrypted.as_slice(), plaintext);
+    assert_eq!(decrypted.plaintext.as_slice(), plaintext);
     (alice, bob, envelope)
 }
 
-fn associated_data(setup: &Setup) -> [u8; 68] {
+fn associated_data(setup: &Setup) -> [u8; 36] {
     initial_associated_data(
-        setup.alice_discovery_key.public_key(),
         setup.bob_discovery_key.public_key(),
         setup.bob_discovery_key.epoch(),
     )
+}
+
+fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
+    InitialPlaintext {
+        sender_certificate: b"sender certificate",
+        sender_signature: b"sender signature",
+        plaintext,
+    }
 }
 
 fn runner(seed: [u8; 32], cases: u32) -> TestRunner {

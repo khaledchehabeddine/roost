@@ -1,9 +1,9 @@
 //! Replays a recorded session transcript through handshake and Double Ratchet public APIs.
 
 use aether_crypto::{
-    HandshakeEnvelope, Header, PreKeyBundle, PublicKey, accept, generate_discovery_key,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initial_associated_data, initiate,
+    HandshakeEnvelope, Header, InitialPlaintext, PreKeyBundle, PublicKey, accept,
+    generate_discovery_key, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initial_associated_data, initiate,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -19,6 +19,7 @@ struct Transcript {
     bob_one_time_prekey_id: u64,
     handshake_plaintext: String,
     handshake_envelope: WireHandshakeEnvelope,
+    handshake_envelope_encoded_hex: String,
     messages: Vec<Message>,
     expected_alice_state_sha256: String,
     expected_bob_state_sha256: String,
@@ -41,7 +42,6 @@ enum Sender {
 
 #[derive(Deserialize)]
 struct WireHandshakeEnvelope {
-    initiator_discovery_public_key: [u8; 32],
     initiator_ephemeral_public_key: [u8; 32],
     responder_discovery_epoch: u32,
     responder_signed_prekey_public_key: [u8; 32],
@@ -56,7 +56,6 @@ struct WireHandshakeEnvelope {
 impl WireHandshakeEnvelope {
     fn envelope(&self) -> HandshakeEnvelope {
         HandshakeEnvelope {
-            initiator_discovery_public_key: self.initiator_discovery_public_key,
             initiator_ephemeral_public_key: self.initiator_ephemeral_public_key,
             responder_discovery_epoch: self.responder_discovery_epoch,
             responder_signed_prekey_public_key: self.responder_signed_prekey_public_key,
@@ -90,7 +89,7 @@ impl WireHeader {
 #[test]
 fn recorded_session_transcript_reaches_expected_state() {
     let transcript: Transcript =
-        serde_json::from_str(include_str!("fixtures/session_transcript_v1.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/session_transcript_v2.json")).unwrap();
     let mut rng = ChaCha20Rng::from_seed(transcript.rng_seed);
 
     let alice_identity = generate_signing_key_pair(&mut rng);
@@ -123,11 +122,8 @@ fn recorded_session_transcript_reaches_expected_state() {
         signed_prekey: bob_signed_prekey.bundle(),
         one_time_prekey: Some(bob_one_time_prekey.bundle()),
     };
-    let associated_data = initial_associated_data(
-        alice_discovery_key.public_key(),
-        bob_discovery_key.public_key(),
-        bob_discovery_key.epoch(),
-    );
+    let associated_data =
+        initial_associated_data(bob_discovery_key.public_key(), bob_discovery_key.epoch());
     let expected_envelope = transcript.handshake_envelope.envelope();
 
     let (mut alice, generated_envelope) = initiate(
@@ -135,23 +131,28 @@ fn recorded_session_transcript_reaches_expected_state() {
         &alice_discovery_key,
         &bob_identity.verifying,
         &prekey_bundle,
-        transcript.handshake_plaintext.as_bytes(),
+        initial_plaintext(transcript.handshake_plaintext.as_bytes()),
     )
     .unwrap();
     assert_envelope_eq(&generated_envelope, &expected_envelope);
+    let encoded_envelope = generated_envelope.to_bytes().unwrap();
+    assert_eq!(
+        hex::encode(&encoded_envelope),
+        transcript.handshake_envelope_encoded_hex
+    );
+    let decoded_envelope = HandshakeEnvelope::from_bytes(&encoded_envelope).unwrap();
+    assert_envelope_eq(&decoded_envelope, &expected_envelope);
 
     let (mut bob, handshake_plaintext) = accept(
         &mut rng,
         &expected_envelope,
-        &alice_identity.verifying,
-        &alice_discovery_key.bundle(),
         &bob_discovery_key,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
     )
     .unwrap();
     assert_eq!(
-        handshake_plaintext.as_slice(),
+        handshake_plaintext.plaintext.as_slice(),
         transcript.handshake_plaintext.as_bytes()
     );
 
@@ -203,10 +204,6 @@ fn recorded_session_transcript_reaches_expected_state() {
 
 fn assert_envelope_eq(actual: &HandshakeEnvelope, expected: &HandshakeEnvelope) {
     assert_eq!(
-        actual.initiator_discovery_public_key,
-        expected.initiator_discovery_public_key
-    );
-    assert_eq!(
         actual.initiator_ephemeral_public_key,
         expected.initiator_ephemeral_public_key
     );
@@ -227,6 +224,14 @@ fn assert_envelope_eq(actual: &HandshakeEnvelope, expected: &HandshakeEnvelope) 
     assert_eq!(actual.previous_chain_length, expected.previous_chain_length);
     assert_eq!(actual.message_number, expected.message_number);
     assert_eq!(actual.ciphertext, expected.ciphertext);
+}
+
+fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
+    InitialPlaintext {
+        sender_certificate: b"sender certificate",
+        sender_signature: b"sender signature",
+        plaintext,
+    }
 }
 
 fn assert_header_eq(actual: &Header, expected: &Header) {

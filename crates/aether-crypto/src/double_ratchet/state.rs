@@ -4,7 +4,7 @@
 use super::aead::{decrypt, encrypt};
 use super::header::Header;
 use crate::error::CryptoError;
-use crate::keys::{KeyPair, PublicKey, generate_key_pair};
+use crate::keys::{KeyPair, PublicKey, SharedSecret, generate_key_pair};
 use crate::ratchet::{ChainKey, MessageKey, RootKey, kdf_ck, kdf_rk};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -100,7 +100,7 @@ impl RatchetState {
         dhr: &PublicKey,
     ) -> Result<Self, CryptoError> {
         let dhs = generate_key_pair(rng);
-        let dh_output = dhs.diffie_hellman(dhr);
+        let dh_output = checked_shared_secret(dhs.diffie_hellman(dhr))?;
         let (rk, cks) = kdf_rk(&rk, &dh_output)?;
         Ok(Self {
             dhs,
@@ -187,6 +187,8 @@ impl RatchetState {
     ///   Diffie-Hellman ratchet step (indicates internal invariant violation).
     /// - [`CryptoError::MaxSkipExceeded`] if the header asks to skip more than the per-step
     ///   skip limit.
+    /// - [`CryptoError::NonContributorySharedSecret`] if a ratchet public key produces a
+    ///   non-contributory X25519 shared secret.
     pub fn ratchet_decrypt<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -425,19 +427,26 @@ impl RatchetState {
         self.nr = 0;
         self.dhr = Some(header.public_key);
 
-        let dh_recv = self.dhs.diffie_hellman(&header.public_key);
+        let dh_recv = checked_shared_secret(self.dhs.diffie_hellman(&header.public_key))?;
         let (rk, ckr) = kdf_rk(&self.rk, &dh_recv)?;
         self.rk = rk;
         self.ckr = Some(ckr);
 
         self.dhs = generate_key_pair(rng);
-        let dh_send = self.dhs.diffie_hellman(&header.public_key);
+        let dh_send = checked_shared_secret(self.dhs.diffie_hellman(&header.public_key))?;
         let (rk, cks) = kdf_rk(&self.rk, &dh_send)?;
         self.rk = rk;
         self.cks = Some(cks);
 
         Ok(())
     }
+}
+
+fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, CryptoError> {
+    if !secret.was_contributory() {
+        return Err(CryptoError::NonContributorySharedSecret);
+    }
+    Ok(secret)
 }
 
 impl ZeroizeOnDrop for RatchetStateWire {}
@@ -480,6 +489,21 @@ mod tests {
     }
 
     #[test]
+    fn init_initiator_rejects_non_contributory_peer_key() {
+        let mut rng = ChaCha20Rng::from_seed([0x21u8; 32]);
+        let low_order_public_key = PublicKey::from([0u8; 32]);
+
+        assert!(matches!(
+            RatchetState::init_initiator(
+                &mut rng,
+                RootKey::from_bytes([0x42u8; 32]),
+                &low_order_public_key,
+            ),
+            Err(CryptoError::NonContributorySharedSecret)
+        ));
+    }
+
+    #[test]
     fn init_responder_has_no_chains() {
         let (_, responder, _, _) = setup_pair();
         assert!(responder.dhr.is_none());
@@ -510,6 +534,21 @@ mod tests {
             .ratchet_decrypt(&mut rng, &ciphertext, &header, &associated_data)
             .unwrap();
         assert_eq!(plaintext.as_slice(), message);
+    }
+
+    #[test]
+    fn low_order_ratchet_header_is_rejected_before_decrypt() {
+        let (_, mut responder, associated_data, mut rng) = setup_pair();
+        let header = Header {
+            public_key: PublicKey::from([0u8; 32]),
+            previous_chain_length: 0,
+            message_number: 0,
+        };
+
+        assert!(matches!(
+            responder.ratchet_decrypt(&mut rng, b"ciphertext", &header, &associated_data),
+            Err(CryptoError::NonContributorySharedSecret)
+        ));
     }
 
     #[test]

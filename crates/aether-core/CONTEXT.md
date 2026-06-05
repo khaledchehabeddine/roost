@@ -29,7 +29,7 @@ The permanent keypair — an Ed25519 signing key plus X25519 key-agreement key �
 Avoid: master key, root key
 
 **Message** (many per Session):
-A single encoded packet exchanged within a Session, addressed by `MessageID`. A Message may carry encrypted text, acknowledgment, key-exchange, or Ratchet-header bytes; those inner bytes are payload fields, not standalone domain Messages.
+A single encoded packet exchanged within a Session, addressed by `MessageID`. A Message carries only transport-visible routing metadata and opaque payload bytes; sender identity material belongs inside a Sealed Sender Envelope, not in Message fields.
 Avoid: payload, packet
 
 **MessageID** (one per Message):
@@ -39,7 +39,8 @@ Avoid: uuid, packet id
 **Protocol State Blob** (many per Identity or Session):
 An opaque byte value produced by Core and committed by the consumer's durable store. Core may load
 and advance a Blob during one operation, but the consumer-held Blob is authoritative between
-operations.
+operations. Ratchet/session Blobs may also carry the expected peer Sender Identity Key used to
+reject later sealed-sender swaps after decryption.
 Avoid: cache, in-memory state, decoded state
 
 **Protocol State Blob Version** (one per Protocol State Blob):
@@ -53,6 +54,18 @@ The stable category for a Protocol State Blob — ratchet/session state, prekey 
 certificate, deduplication set, or pending acknowledgments. The consumer combines the Kind with a
 key such as a Session or Identity identifier to address one Blob.
 Avoid: table, bucket, namespace
+
+**Sealed Sender Envelope** (one per encrypted Message payload):
+The encrypted/authenticated inner envelope that carries sender identity material alongside message
+plaintext. It is decoded only after ciphertext authentication succeeds and, for established
+Sessions, must match the peer sender identity bound to ratchet/session state.
+Avoid: sender header, clear sender metadata
+
+**Sender Identity Material** (one per Sealed Sender Envelope):
+The sender's post-decryption identity material needed by later sender-certificate validation:
+identity key, opaque sender certificate, and opaque sender signature. Certificate validation is a
+future verdict over this material, not part of Message decode.
+Avoid: sender IK, sender metadata
 
 **Session** (between two Identities):
 An ongoing encrypted channel between two Identities, advanced by the Double Ratchet, identified by `SessionID`.
