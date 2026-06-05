@@ -1,0 +1,27 @@
+{
+  "provenance": "deterministic test-only bytes generated with ChaCha20Rng seed 7; no production origin",
+  "current_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "fixtures": [
+    {
+      "name": "ratchet_session_alice",
+      "kind": "ratchet_session",
+      "key_hex": "09090909090909090909090909090909",
+      "current_encoded_hex": "010001890101592e44177f9d6783738930091c1c20e7680a7403423bf6bf40fa452ad9cf97ee01fa08b949095ffe72973d27590d9c09aeb569289d7dfcb0ca792f950acbc19106916512409cc9b79ea1f8e999d4eb7ef4d5e16ada271d254e35955b89ba0722f7019570fc9b47258f68625a579dff007362b19a3b157f29d2f6adb697bde9c5bee600010000000000",
+      "decoded": {
+        "skipped_key_count": 0
+      }
+    },
+    {
+      "name": "ratchet_session_bob_bound",
+      "kind": "ratchet_session",
+      "key_hex": "09090909090909090909090909090909",
+      "current_encoded_hex": "010001a90101d7563244c22423af99bcaf188d5090ca025b70b36023cd9bdee33815355c21b801b895e67357d785f1fc758c31bc3ad189ecbafd34d8d39d8eea2e4fe98339486f7fa6b31942955f9791b307868cba86a3a15cf17172414f789223e9cb624ceb8401e3ff8d2be1927a2476d5f04f70b04739c1e5b6a32ae6e8eefe51fe9518bed55c019570fc9b47258f68625a579dff007362b19a3b157f29d2f6adb697bde9c5bee60001000000010101010101010101010101010101010101010101010101010101010101010101",
+      "decoded": {
+        "skipped_key_count": 0
+      }
+    }
+  ]
+}

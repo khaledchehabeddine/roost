@@ -19,7 +19,6 @@ struct Fixture {
 #[derive(Deserialize)]
 struct DecodedFixture {
     id_hex: String,
-    sender_public_key_hex: String,
     recipient_public_key_hex: String,
     timestamp_millis: u64,
     payload_kind: String,
@@ -41,12 +40,6 @@ fn checked_in_fixtures_decode_and_reencode() {
             message.id.as_bytes(),
             &hex_array::<16>(&fixture.decoded.id_hex),
             "{} id",
-            fixture.name
-        );
-        assert_eq!(
-            message.sender_public_key,
-            hex_array::<32>(&fixture.decoded.sender_public_key_hex),
-            "{} sender public key",
             fixture.name
         );
         assert_eq!(

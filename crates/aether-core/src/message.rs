@@ -4,8 +4,9 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 const MESSAGE_WIRE_VERSION: u8 = 1;
+const MESSAGE_WIRE_MAGIC: [u8; 4] = *b"AMSG";
 const MAX_ENCODED_MESSAGE_LEN: usize = MAX_MESSAGE_PAYLOAD_LEN + 128;
-const MAX_MESSAGE_PAYLOAD_LEN: usize = 64 * 1024;
+pub(crate) const MAX_MESSAGE_PAYLOAD_LEN: usize = 64 * 1024;
 const PUBLIC_KEY_LEN: usize = 32;
 
 /// The UUID-shaped identifier for a [`Message`].
@@ -30,8 +31,6 @@ impl MessageId {
 pub struct Message {
     /// Stable identifier for this message.
     pub id: MessageId,
-    /// Sender X25519 public key bytes. Always 32 bytes.
-    pub sender_public_key: [u8; PUBLIC_KEY_LEN],
     /// Recipient X25519 public key bytes. Always 32 bytes.
     pub recipient_public_key: [u8; PUBLIC_KEY_LEN],
     /// Sender-observed Unix timestamp in milliseconds.
@@ -43,10 +42,10 @@ pub struct Message {
 }
 
 impl Message {
-    /// Encodes this message to the Postcard wire format.
+    /// Encodes this message to the Message wire format.
     ///
-    /// The version byte is internal to the encoded message and is independent of any transport
-    /// envelope a consumer may add around the returned bytes.
+    /// The magic and version bytes are internal to the encoded message and are independent of any
+    /// transport envelope a consumer may add around the returned bytes.
     ///
     /// # Errors
     /// - [`MessageError::PayloadTooLarge`] if `payload` exceeds the message payload cap.
@@ -57,16 +56,18 @@ impl Message {
             return Err(MessageError::PayloadTooLarge);
         }
 
-        let bytes = postcard::to_stdvec(&MessageWire {
+        let wire = postcard::to_stdvec(&MessageWire {
             version: MESSAGE_WIRE_VERSION,
             id: *self.id.as_bytes(),
-            sender_public_key: self.sender_public_key.to_vec(),
             recipient_public_key: self.recipient_public_key.to_vec(),
             timestamp_millis: self.timestamp_millis,
             payload_kind: self.payload_kind.tag(),
             payload: self.payload.clone(),
         })
         .map_err(|_| MessageError::Encode)?;
+        let mut bytes = Vec::with_capacity(MESSAGE_WIRE_MAGIC.len() + wire.len());
+        bytes.extend_from_slice(&MESSAGE_WIRE_MAGIC);
+        bytes.extend_from_slice(&wire);
         if bytes.len() > MAX_ENCODED_MESSAGE_LEN {
             return Err(MessageError::Encode);
         }
@@ -75,17 +76,25 @@ impl Message {
 
     /// Decodes a message from bytes produced by [`Self::to_bytes`].
     ///
-    /// Unsupported message versions are rejected before the remaining Postcard payload is decoded.
+    /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
     ///
     /// # Errors
     /// - [`MessageError::Decode`] if the bytes are empty, oversized, malformed, or have trailing
     ///   data.
-    /// - [`MessageError::InvalidPublicKey`] if either public-key field is not exactly 32 bytes.
+    /// - [`MessageError::InvalidPublicKey`] if the recipient public-key field is not exactly 32
+    ///   bytes.
     /// - [`MessageError::PayloadTooLarge`] if the decoded payload exceeds the payload cap.
     /// - [`MessageError::UnsupportedPayloadKind`] if the payload-kind tag is unknown.
     /// - [`MessageError::UnsupportedVersion`] if the message format version is not supported.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MessageError> {
-        let version = *bytes.first().ok_or(MessageError::Decode)?;
+        let magic = bytes
+            .get(..MESSAGE_WIRE_MAGIC.len())
+            .ok_or(MessageError::Decode)?;
+        if magic != MESSAGE_WIRE_MAGIC {
+            return Err(MessageError::Decode);
+        }
+        let wire_bytes = &bytes[MESSAGE_WIRE_MAGIC.len()..];
+        let version = *wire_bytes.first().ok_or(MessageError::Decode)?;
         if version != MESSAGE_WIRE_VERSION {
             return Err(MessageError::UnsupportedVersion(version));
         }
@@ -94,7 +103,7 @@ impl Message {
         }
 
         let (wire, trailing): (MessageWire, &[u8]) =
-            postcard::take_from_bytes(bytes).map_err(|_| MessageError::Decode)?;
+            postcard::take_from_bytes(wire_bytes).map_err(|_| MessageError::Decode)?;
         if !trailing.is_empty() {
             return Err(MessageError::Decode);
         }
@@ -104,7 +113,6 @@ impl Message {
 
         Ok(Self {
             id: MessageId::from_bytes(wire.id),
-            sender_public_key: public_key_bytes(wire.sender_public_key)?,
             recipient_public_key: public_key_bytes(wire.recipient_public_key)?,
             timestamp_millis: wire.timestamp_millis,
             payload_kind: PayloadKind::from_tag(wire.payload_kind)?,
@@ -188,7 +196,6 @@ impl Error for MessageError {}
 struct MessageWire {
     version: u8,
     id: [u8; 16],
-    sender_public_key: Vec<u8>,
     recipient_public_key: Vec<u8>,
     timestamp_millis: u64,
     payload_kind: u8,
@@ -206,7 +213,6 @@ mod tests {
     fn message() -> Message {
         Message {
             id: MessageId::from_bytes([1u8; 16]),
-            sender_public_key: [2u8; PUBLIC_KEY_LEN],
             recipient_public_key: [3u8; PUBLIC_KEY_LEN],
             timestamp_millis: 1_700_000_000_123,
             payload_kind: PayloadKind::EncryptedText,
@@ -218,12 +224,42 @@ mod tests {
         MessageWire {
             version: MESSAGE_WIRE_VERSION,
             id: [1u8; 16],
-            sender_public_key: vec![2u8; PUBLIC_KEY_LEN],
             recipient_public_key: vec![3u8; PUBLIC_KEY_LEN],
             timestamp_millis: 1_700_000_000_123,
             payload_kind: 0,
             payload: vec![0x90, 0x91, 0x92, 0x93, 0x94],
         }
+    }
+
+    fn sender_visible_wire() -> Vec<u8> {
+        #[derive(Serialize)]
+        struct SenderVisibleWireV1 {
+            version: u8,
+            id: [u8; 16],
+            sender_public_key: Vec<u8>,
+            recipient_public_key: Vec<u8>,
+            timestamp_millis: u64,
+            payload_kind: u8,
+            payload: Vec<u8>,
+        }
+
+        postcard::to_stdvec(&SenderVisibleWireV1 {
+            version: MESSAGE_WIRE_VERSION,
+            id: [1u8; 16],
+            sender_public_key: vec![2u8; PUBLIC_KEY_LEN],
+            recipient_public_key: vec![3u8; PUBLIC_KEY_LEN],
+            timestamp_millis: 1_700_000_000_123,
+            payload_kind: 0,
+            payload: vec![0x90, 0x91, 0x92, 0x93, 0x94],
+        })
+        .unwrap()
+    }
+
+    fn wire_bytes(wire: &MessageWire) -> Vec<u8> {
+        let body = postcard::to_stdvec(wire).unwrap();
+        let mut bytes = MESSAGE_WIRE_MAGIC.to_vec();
+        bytes.extend_from_slice(&body);
+        bytes
     }
 
     fn assert_decode_error(bytes: &[u8], expected: MessageError) {
@@ -239,7 +275,6 @@ mod tests {
         let decoded = Message::from_bytes(&message.to_bytes().unwrap()).unwrap();
 
         assert_eq!(decoded.id, message.id);
-        assert_eq!(decoded.sender_public_key, message.sender_public_key);
         assert_eq!(decoded.recipient_public_key, message.recipient_public_key);
         assert_eq!(decoded.timestamp_millis, message.timestamp_millis);
         assert_eq!(decoded.payload_kind, message.payload_kind);
@@ -248,14 +283,21 @@ mod tests {
 
     #[test]
     fn from_bytes_rejects_unsupported_version_before_full_decode() {
-        let bytes = [2u8];
+        let mut bytes = MESSAGE_WIRE_MAGIC.to_vec();
+        bytes.push(2);
 
         assert_decode_error(&bytes, MessageError::UnsupportedVersion(2));
     }
 
     #[test]
+    fn from_bytes_rejects_old_sender_visible_wire_layout() {
+        assert_decode_error(&sender_visible_wire(), MessageError::Decode);
+    }
+
+    #[test]
     fn from_bytes_rejects_malformed_postcard() {
-        let bytes = [MESSAGE_WIRE_VERSION, 0xff];
+        let mut bytes = MESSAGE_WIRE_MAGIC.to_vec();
+        bytes.extend_from_slice(&[MESSAGE_WIRE_VERSION, 0xff]);
 
         assert_decode_error(&bytes, MessageError::Decode);
     }
@@ -269,19 +311,10 @@ mod tests {
     }
 
     #[test]
-    fn from_bytes_rejects_sender_public_key_with_wrong_shape() {
-        let mut wire = wire();
-        wire.sender_public_key.pop();
-        let bytes = postcard::to_stdvec(&wire).unwrap();
-
-        assert_decode_error(&bytes, MessageError::InvalidPublicKey);
-    }
-
-    #[test]
     fn from_bytes_rejects_recipient_public_key_with_wrong_shape() {
         let mut wire = wire();
         wire.recipient_public_key.push(4);
-        let bytes = postcard::to_stdvec(&wire).unwrap();
+        let bytes = wire_bytes(&wire);
 
         assert_decode_error(&bytes, MessageError::InvalidPublicKey);
     }
@@ -290,7 +323,7 @@ mod tests {
     fn from_bytes_rejects_unknown_payload_kind() {
         let mut wire = wire();
         wire.payload_kind = 4;
-        let bytes = postcard::to_stdvec(&wire).unwrap();
+        let bytes = wire_bytes(&wire);
 
         assert_decode_error(&bytes, MessageError::UnsupportedPayloadKind(4));
     }

@@ -11,12 +11,6 @@
   "bob_one_time_prekey_id": 7,
   "handshake_plaintext": "transcript handshake",
   "handshake_envelope": {
-    "initiator_discovery_public_key": [
-      94, 159, 116, 134, 75, 237, 237, 31,
-      88, 131, 48, 208, 14, 152, 119, 134,
-      30, 78, 199, 239, 120, 226, 109, 213,
-      66, 56, 140, 0, 58, 7, 47, 119
-    ],
     "initiator_ephemeral_public_key": [
       94, 147, 137, 108, 148, 119, 10, 179,
       28, 13, 54, 58, 155, 213, 112, 185,
@@ -45,8 +39,9 @@
     ],
     "previous_chain_length": 0,
     "message_number": 0,
-    "ciphertext_hex": "0df21961789f4b68f0285e0e94915a886b21ef8bcd9f8c613eaacbfa42a1e3c257d7428d"
+    "ciphertext_hex": "1a68417d85aa56ac275785ef6a0b06523bca113bc39df27e9ba77a642c02e7e37ffaf58d25103f8d28c60e3cf571ce88a72d0cee50c16a10049af153dd23a91e89a59e81392af3c43374eff68a27e4a2f91e13b53746760139080433263300060318a05b14f5a3824dfd62c93f9d6693b89978be7bada5d9914b8bf305ce8292e8f7ac07a56b0a4f060eb5"
   },
+  "handshake_envelope_encoded_hex": "41583348015e93896c94770ab31c0d363a9bd570b9bafbeeb29b72c28b8a820a6f0716761002fdc11681ae1a7976b2f57ce980dfde7296f5aeb15409528ae08eb372b0bea83a0107013c71f16c80b690e5775bc23217904c857b51e4755cf771ad30820b3e8da9913cc87cefbb72e9365d67a97d43112045ccf55c30509a18adce5e35058086fced0400008b011a68417d85aa56ac275785ef6a0b06523bca113bc39df27e9ba77a642c02e7e37ffaf58d25103f8d28c60e3cf571ce88a72d0cee50c16a10049af153dd23a91e89a59e81392af3c43374eff68a27e4a2f91e13b53746760139080433263300060318a05b14f5a3824dfd62c93f9d6693b89978be7bada5d9914b8bf305ce8292e8f7ac07a56b0a4f060eb5",
   "messages": [
     {
       "sender": "bob",
@@ -61,7 +56,7 @@
         "previous_chain_length": 0,
         "message_number": 0
       },
-      "ciphertext_hex": "f45bc8f8ae76d4cc301f433625cdbea75284b6cb9f5df3d45798e3"
+      "ciphertext_hex": "9c9d17ecfa0d3031cf27dd66060403df2749c7b61e1fafa3c6b50f"
     },
     {
       "sender": "alice",
@@ -76,7 +71,7 @@
         "previous_chain_length": 1,
         "message_number": 0
       },
-      "ciphertext_hex": "aaba960251c93775df154307b0ac7964d689ad1f8efe2d1c609a7bc82cf7e68b04"
+      "ciphertext_hex": "6da0f5adfa2f74ff6ae9367c138ed715c942b853139e4ffa78136605eaecee43f1"
     },
     {
       "sender": "alice",
@@ -91,7 +86,7 @@
         "previous_chain_length": 1,
         "message_number": 1
       },
-      "ciphertext_hex": "b311bf910dd414e440415af99ec6f7c182309f93d292cb96b35a49e9b6c373cadd"
+      "ciphertext_hex": "32092e5e801ee9a8769eb5cfab71dd28b6e80024d14aabfb7ccc9a4b1b3d6918bf"
     },
     {
       "sender": "bob",
@@ -106,7 +101,7 @@
         "previous_chain_length": 1,
         "message_number": 0
       },
-      "ciphertext_hex": "e5002555bf1555bc8a3dc3a7c2bce727f7908f23cdfc0e85f320c0"
+      "ciphertext_hex": "6c5cc4ebceebdd2901752403974946d64e4ed6094c925be1acfccf"
     },
     {
       "sender": "alice",
@@ -121,9 +116,9 @@
         "previous_chain_length": 2,
         "message_number": 0
       },
-      "ciphertext_hex": "b6475b333cd2f87e0f8fd1371a89653f8d01289b564c8f6ed5aaee"
+      "ciphertext_hex": "05c22216f3bedf333dcc00d55804ffb4eb534b0335f79ce2ab4cf5"
     }
   ],
-  "expected_alice_state_sha256": "9c7defab1ba437e2da4536f7187583bfdb89a25e2712d2dcfd65ed8bddf3693c",
-  "expected_bob_state_sha256": "e796821e57a7391da56d691f48821fca7b4127d53bbd0281e51e47ba87dbf1cf"
+  "expected_alice_state_sha256": "71a90e700104b7038bfc03e9ba3998f25fa4e688737968336991035b97758c5e",
+  "expected_bob_state_sha256": "fc02c02fde3a6c8a7c4f20fb0c37cfb0022a5c1908d34db9e93381b3ed3cb435"
 }
