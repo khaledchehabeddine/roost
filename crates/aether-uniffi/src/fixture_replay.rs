@@ -1,0 +1,1202 @@
+//! Feature-gated fixture replay exports for generated Swift and Kotlin bindings.
+
+use crate::error::AetherError;
+use aether_core::{
+    Message, PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
+    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
+    SenderIdentityMaterial, SessionId,
+};
+use aether_crypto::{
+    HandshakeEnvelope, InitialPlaintext, PreKeyBundle, RatchetState, accept,
+    generate_discovery_key, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initiate,
+};
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use serde::Deserialize;
+
+const CREATED_AT: u64 = 1_700_000_000;
+const SESSION_REPLAY_RNG_SEED: [u8; 32] = [11u8; 32];
+const OLD_SENDER_VISIBLE_MESSAGE_HEX: &str = "010000000000000000000000000000000120121212121212121212121212121212121212121212121212121212121212121220525252525252525252525252525252525252525252525252525252525252525281d095ffbc3100059091929394";
+
+/// Transport-visible fields decoded from a Message fixture.
+#[derive(uniffi::Record)]
+pub struct MessageTransportFields {
+    /// Message ID as lowercase hex.
+    pub id_hex: String,
+    /// Recipient public key as lowercase hex.
+    pub recipient_public_key_hex: String,
+    /// Sender-observed Unix timestamp in milliseconds.
+    pub timestamp_millis: u64,
+    /// Payload kind using fixture spelling.
+    pub payload_kind: String,
+    /// Opaque payload bytes as lowercase hex.
+    pub payload_hex: String,
+}
+
+/// Sender identity material that is visible only after decrypt.
+#[derive(uniffi::Record)]
+pub struct SenderIdentityReplay {
+    /// Sender identity key as lowercase hex.
+    pub sender_identity_key_hex: String,
+    /// Sender certificate bytes as lowercase hex.
+    pub sender_certificate_hex: String,
+    /// Sender signature bytes as lowercase hex.
+    pub sender_signature_hex: String,
+}
+
+/// Replay result for a canonical Message wire fixture.
+#[derive(uniffi::Record)]
+pub struct MessageWireReplayCase {
+    /// Fixture name.
+    pub name: String,
+    /// Transport-visible decoded fields.
+    pub transport_visible: MessageTransportFields,
+    /// Canonical re-encoded Message bytes as lowercase hex.
+    pub reencoded_hex: String,
+}
+
+/// Replay result for a sealed-sender session Message fixture.
+#[derive(uniffi::Record)]
+pub struct SealedSenderReplayCase {
+    /// Fixture name.
+    pub name: String,
+    /// Transport-visible decoded fields.
+    pub transport_visible: MessageTransportFields,
+    /// Decrypted plaintext bytes as lowercase hex.
+    pub plaintext_hex: String,
+    /// Sender identity material returned after decrypt.
+    pub post_decryption: SenderIdentityReplay,
+    /// Canonical re-encoded Message bytes as lowercase hex.
+    pub reencoded_hex: String,
+    /// True when sender identity key bytes are absent before decrypt.
+    pub sender_identity_hidden_before_decrypt: bool,
+    /// True when sender certificate bytes are absent before decrypt.
+    pub sender_certificate_hidden_before_decrypt: bool,
+    /// True when sender signature bytes are absent before decrypt.
+    pub sender_signature_hidden_before_decrypt: bool,
+    /// True when tampered ciphertext returns an error and no sender material.
+    pub tampered_ciphertext_rejected: bool,
+}
+
+/// Transport-visible fields decoded from an initial handshake fixture.
+#[derive(uniffi::Record)]
+pub struct InitialHandshakeTransportFields {
+    /// Initiator ephemeral public key as lowercase hex.
+    pub initiator_ephemeral_public_key_hex: String,
+    /// Responder discovery-key epoch targeted by the envelope.
+    pub responder_discovery_epoch: u32,
+    /// Responder signed pre-key public key as lowercase hex.
+    pub responder_signed_prekey_public_key_hex: String,
+    /// Optional one-time pre-key ID.
+    pub one_time_prekey_id: Option<u64>,
+    /// Optional one-time pre-key public key as lowercase hex.
+    pub one_time_prekey_public_key_hex: Option<String>,
+    /// First ratchet public key as lowercase hex.
+    pub ratchet_public_key_hex: String,
+    /// Number of messages sent in the previous chain.
+    pub previous_chain_length: u32,
+    /// First message number in the current chain.
+    pub message_number: u32,
+    /// First-message ciphertext bytes as lowercase hex.
+    pub ciphertext_hex: String,
+}
+
+/// Replay result for the sealed-sender initial handshake fixture.
+#[derive(uniffi::Record)]
+pub struct InitialHandshakeReplayCase {
+    /// Fixture name.
+    pub name: String,
+    /// Transport-visible decoded fields.
+    pub transport_visible: InitialHandshakeTransportFields,
+    /// Decrypted first-message plaintext bytes as lowercase hex.
+    pub plaintext_hex: String,
+    /// Sender identity material returned after decrypt.
+    pub post_decryption: SenderIdentityReplay,
+    /// Canonical re-encoded initial handshake bytes as lowercase hex.
+    pub reencoded_hex: String,
+    /// True when sender identity key bytes are absent before decrypt.
+    pub sender_identity_hidden_before_decrypt: bool,
+    /// True when sender certificate bytes are absent before decrypt.
+    pub sender_certificate_hidden_before_decrypt: bool,
+    /// True when sender signature bytes are absent before decrypt.
+    pub sender_signature_hidden_before_decrypt: bool,
+    /// True when tampered ciphertext returns an error and no sender material.
+    pub tampered_ciphertext_rejected: bool,
+}
+
+/// Replay result for a Protocol State Blob fixture.
+#[derive(uniffi::Record)]
+pub struct BlobReplayCase {
+    /// Fixture name.
+    pub name: String,
+    /// Protocol State Kind using fixture spelling.
+    pub kind: String,
+    /// Protocol State Key as lowercase hex.
+    pub key_hex: String,
+    /// Blob major version.
+    pub major: u8,
+    /// Blob minor version.
+    pub minor: u8,
+    /// Canonical re-encoded Blob bytes as lowercase hex.
+    pub reencoded_hex: String,
+}
+
+/// Full binding fixture replay report.
+#[derive(uniffi::Record)]
+pub struct FixtureReplayReport {
+    /// Message wire replay cases.
+    pub message_wire_cases: Vec<MessageWireReplayCase>,
+    /// Sealed-sender session Message replay cases.
+    pub sealed_sender_session_cases: Vec<SealedSenderReplayCase>,
+    /// Initial handshake replay cases.
+    pub initial_handshake_cases: Vec<InitialHandshakeReplayCase>,
+    /// Protocol State Blob replay cases.
+    pub protocol_state_blob_cases: Vec<BlobReplayCase>,
+    /// True when unsupported Message versions reject.
+    pub unsupported_message_version_rejected: bool,
+    /// True when malformed Message bytes reject.
+    pub malformed_message_rejected: bool,
+    /// True when old sender-visible Message bytes reject.
+    pub old_sender_visible_message_rejected: bool,
+    /// True when unsupported initial handshake versions reject.
+    pub unsupported_initial_handshake_version_rejected: bool,
+    /// True when malformed initial handshake bytes reject.
+    pub malformed_initial_handshake_rejected: bool,
+    /// True when unsupported Protocol State Blob major versions reject.
+    pub unsupported_blob_major_rejected: bool,
+    /// True when malformed Protocol State Blob bytes reject.
+    pub malformed_blob_rejected: bool,
+}
+
+#[derive(Deserialize)]
+struct MessageFixtureFile {
+    version: u8,
+    fixtures: Vec<MessageFixture>,
+}
+
+#[derive(Deserialize)]
+struct MessageFixture {
+    name: String,
+    encoded_hex: String,
+    decoded: MessageDecodedFixture,
+}
+
+#[derive(Deserialize)]
+struct MessageDecodedFixture {
+    id_hex: String,
+    recipient_public_key_hex: String,
+    timestamp_millis: u64,
+    payload_kind: String,
+    payload_hex: String,
+}
+
+#[derive(Deserialize)]
+struct SessionMessageFixtureFile {
+    session_key_hex: String,
+    fixtures: Vec<SessionMessageFixture>,
+}
+
+#[derive(Deserialize)]
+struct SessionMessageFixture {
+    name: String,
+    sender_state_fixture: String,
+    recipient_state_fixture: String,
+    encoded_hex: String,
+    transport_visible: MessageDecodedFixture,
+    plaintext_hex: String,
+    post_decryption: SenderIdentityFixture,
+}
+
+#[derive(Deserialize)]
+struct SenderIdentityFixture {
+    sender_identity_key_hex: String,
+    sender_certificate_hex: String,
+    sender_signature_hex: String,
+}
+
+#[derive(Deserialize)]
+struct BlobFixtureFile {
+    current_version: BlobVersionFixture,
+    fixtures: Vec<BlobFixture>,
+}
+
+#[derive(Deserialize)]
+struct BlobVersionFixture {
+    major: u8,
+    minor: u8,
+}
+
+#[derive(Deserialize)]
+struct BlobFixture {
+    name: String,
+    kind: String,
+    key_hex: String,
+    current_encoded_hex: String,
+}
+
+#[derive(Deserialize)]
+struct TranscriptFixture {
+    rng_seed: [u8; 32],
+    created_at: u64,
+    alice_discovery_epoch: u32,
+    bob_discovery_epoch: u32,
+    bob_one_time_prekey_id: u64,
+    handshake_plaintext: String,
+    handshake_envelope: TranscriptEnvelopeFixture,
+    handshake_envelope_encoded_hex: String,
+}
+
+#[derive(Deserialize)]
+struct TranscriptEnvelopeFixture {
+    initiator_ephemeral_public_key: [u8; 32],
+    responder_discovery_epoch: u32,
+    responder_signed_prekey_public_key: [u8; 32],
+    one_time_prekey_id: Option<u64>,
+    one_time_prekey_public_key: Option<[u8; 32]>,
+    ratchet_public_key: [u8; 32],
+    previous_chain_length: u32,
+    message_number: u32,
+    ciphertext_hex: String,
+}
+
+struct SessionSetup {
+    alice_state: RatchetState,
+    bob_state: RatchetState,
+}
+
+struct PreparedInitialHandshake {
+    rng: ChaCha20Rng,
+    generated_envelope: HandshakeEnvelope,
+    bob_discovery_key: aether_crypto::DiscoveryKey,
+    bob_signed_prekey: aether_crypto::SignedPreKey,
+    bob_one_time_prekey: aether_crypto::OneTimePreKey,
+    sender_identity_key: [u8; 32],
+}
+
+/// Replays every canonical fixture category exposed to binding maintainers.
+///
+/// This test-only API is available only with the `fixture-replay` feature.
+///
+/// # Errors
+/// - [`AetherError::InvalidData`] when a checked-in fixture is malformed.
+/// - [`AetherError::InternalError`] when replay detects a fixture mismatch.
+#[uniffi::export]
+pub fn replay_fixture_harness() -> Result<FixtureReplayReport, AetherError> {
+    Ok(FixtureReplayReport {
+        message_wire_cases: replay_message_wire_fixtures()?,
+        sealed_sender_session_cases: replay_sealed_sender_session_fixtures()?,
+        initial_handshake_cases: replay_initial_handshake_fixtures()?,
+        protocol_state_blob_cases: replay_protocol_state_blob_fixtures()?,
+        unsupported_message_version_rejected: unsupported_message_version_rejected(),
+        malformed_message_rejected: malformed_message_rejected(),
+        old_sender_visible_message_rejected: old_sender_visible_message_rejected()?,
+        unsupported_initial_handshake_version_rejected:
+            unsupported_initial_handshake_version_rejected(),
+        malformed_initial_handshake_rejected: malformed_initial_handshake_rejected(),
+        unsupported_blob_major_rejected: unsupported_blob_major_rejected()?,
+        malformed_blob_rejected: malformed_blob_rejected()?,
+    })
+}
+
+/// Replays canonical Message wire fixtures through generated bindings.
+///
+/// # Errors
+/// - [`AetherError::InvalidData`] when fixture JSON or hex is malformed.
+/// - [`AetherError::InternalError`] when Message decode, encode, or field replay fails.
+#[uniffi::export]
+pub fn replay_message_wire_fixtures() -> Result<Vec<MessageWireReplayCase>, AetherError> {
+    let fixture_file: MessageFixtureFile = fixture_json(include_str!(
+        "../../aether-core/tests/fixtures/message_wire_v1.json"
+    ))?;
+    ensure(
+        fixture_file.version == 1,
+        "message fixture version must be 1",
+    )?;
+
+    fixture_file
+        .fixtures
+        .iter()
+        .map(replay_message_wire_fixture)
+        .collect()
+}
+
+/// Replays canonical sealed-sender session Message fixtures through generated bindings.
+///
+/// # Errors
+/// - [`AetherError::InvalidData`] when fixture JSON, hex, or referenced state is malformed.
+/// - [`AetherError::InternalError`] when decode, re-encode, decrypt, or tamper replay fails.
+#[uniffi::export]
+pub fn replay_sealed_sender_session_fixtures() -> Result<Vec<SealedSenderReplayCase>, AetherError> {
+    let session_file: SessionMessageFixtureFile = fixture_json(include_str!(
+        "../../aether-core/tests/fixtures/sealed_sender_session_messages_v1.json"
+    ))?;
+    let blob_file: BlobFixtureFile = fixture_json(include_str!(
+        "../../aether-core/tests/fixtures/protocol_state_blobs_v1.json"
+    ))?;
+    let key = ProtocolStateKey::from_bytes(decode_hex(
+        &session_file.session_key_hex,
+        "session message fixture key",
+    )?)
+    .map_err(|e| invalid_fixture(format!("invalid session fixture key: {e}")))?;
+
+    session_file
+        .fixtures
+        .iter()
+        .map(|fixture| replay_sealed_sender_session_fixture(fixture, &blob_file, &key))
+        .collect()
+}
+
+/// Replays the canonical sealed-sender initial handshake fixture through generated bindings.
+///
+/// # Errors
+/// - [`AetherError::InvalidData`] when fixture JSON or hex is malformed.
+/// - [`AetherError::InternalError`] when decode, re-encode, decrypt, or tamper replay fails.
+#[uniffi::export]
+pub fn replay_initial_handshake_fixtures() -> Result<Vec<InitialHandshakeReplayCase>, AetherError> {
+    let transcript: TranscriptFixture = fixture_json(include_str!(
+        "../../aether-crypto/tests/fixtures/session_transcript_v1.json"
+    ))?;
+    Ok(vec![replay_initial_handshake_fixture(&transcript)?])
+}
+
+/// Replays canonical Protocol State Blob fixtures through generated bindings.
+///
+/// # Errors
+/// - [`AetherError::InvalidData`] when fixture JSON, hex, kind, or key data is malformed.
+/// - [`AetherError::InternalError`] when blob re-encoding or version replay fails.
+#[uniffi::export]
+pub fn replay_protocol_state_blob_fixtures() -> Result<Vec<BlobReplayCase>, AetherError> {
+    let fixture_file: BlobFixtureFile = fixture_json(include_str!(
+        "../../aether-core/tests/fixtures/protocol_state_blobs_v1.json"
+    ))?;
+    let setup = session_setup()?;
+    let sender_identity = session_sender_identity();
+    ensure(
+        fixture_file.current_version.major == 1 && fixture_file.current_version.minor == 0,
+        "protocol-state blob fixture version must be 1.0",
+    )?;
+
+    fixture_file
+        .fixtures
+        .iter()
+        .map(|fixture| replay_protocol_state_blob_fixture(fixture, &setup, &sender_identity))
+        .collect()
+}
+
+fn replay_message_wire_fixture(
+    fixture: &MessageFixture,
+) -> Result<MessageWireReplayCase, AetherError> {
+    let encoded = decode_hex(&fixture.encoded_hex, &fixture.name)?;
+    let message = Message::from_bytes(&encoded).map_err(|e| {
+        replay_failure(format!(
+            "message fixture {} failed to decode: {e}",
+            fixture.name
+        ))
+    })?;
+    let transport_visible = message_transport_fields(&message);
+    assert_message_transport(&transport_visible, &fixture.decoded, &fixture.name)?;
+    let reencoded = message.to_bytes().map_err(|e| {
+        replay_failure(format!(
+            "message fixture {} failed to re-encode: {e}",
+            fixture.name
+        ))
+    })?;
+    ensure(
+        reencoded == encoded,
+        format!(
+            "message fixture {} did not re-encode canonically",
+            fixture.name
+        ),
+    )?;
+
+    Ok(MessageWireReplayCase {
+        name: fixture.name.clone(),
+        transport_visible,
+        reencoded_hex: hex::encode(reencoded),
+    })
+}
+
+fn replay_sealed_sender_session_fixture(
+    fixture: &SessionMessageFixture,
+    blob_file: &BlobFixtureFile,
+    key: &ProtocolStateKey,
+) -> Result<SealedSenderReplayCase, AetherError> {
+    let encoded = decode_hex(&fixture.encoded_hex, &fixture.name)?;
+    let message = Message::from_bytes(&encoded).map_err(|e| {
+        replay_failure(format!(
+            "sealed session fixture {} failed to decode: {e}",
+            fixture.name
+        ))
+    })?;
+    let transport_visible = message_transport_fields(&message);
+    assert_message_transport(
+        &transport_visible,
+        &fixture.transport_visible,
+        &fixture.name,
+    )?;
+    let reencoded = message.to_bytes().map_err(|e| {
+        replay_failure(format!(
+            "sealed session fixture {} failed to re-encode: {e}",
+            fixture.name
+        ))
+    })?;
+    ensure(
+        reencoded == encoded,
+        format!(
+            "sealed session fixture {} did not re-encode canonically",
+            fixture.name
+        ),
+    )?;
+
+    let sender_identity = sender_identity_from_fixture(&fixture.post_decryption)?;
+    let pre_auth_hidden = pre_auth_sender_material_hidden(&encoded, &sender_identity);
+    let mut recipient_snapshot =
+        snapshot_from_blob_fixture(blob_file, &fixture.recipient_state_fixture, key)?;
+    let decrypted = ProtocolStateEngine::new()
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
+            &recipient_snapshot,
+            key.clone(),
+            &message,
+        )
+        .map_err(|e| {
+            replay_failure(format!(
+                "sealed session fixture {} failed to decrypt: {e}",
+                fixture.name
+            ))
+        })?;
+    recipient_snapshot.apply_all(decrypted.state_updates);
+    assert_decrypted_sender(
+        decrypted.plaintext.as_slice(),
+        &decrypted.sender_identity,
+        &fixture.plaintext_hex,
+        &fixture.post_decryption,
+        &fixture.name,
+    )?;
+    assert_sender_state_fixture_matches(blob_file, &fixture.sender_state_fixture)?;
+    let tampered_ciphertext_rejected = session_tamper_rejects_without_sender(
+        blob_file,
+        &fixture.recipient_state_fixture,
+        key,
+        &message,
+    )?;
+
+    Ok(SealedSenderReplayCase {
+        name: fixture.name.clone(),
+        transport_visible,
+        plaintext_hex: fixture.plaintext_hex.clone(),
+        post_decryption: sender_identity_report(&decrypted.sender_identity),
+        reencoded_hex: hex::encode(reencoded),
+        sender_identity_hidden_before_decrypt: pre_auth_hidden.identity_key,
+        sender_certificate_hidden_before_decrypt: pre_auth_hidden.certificate,
+        sender_signature_hidden_before_decrypt: pre_auth_hidden.signature,
+        tampered_ciphertext_rejected,
+    })
+}
+
+fn replay_initial_handshake_fixture(
+    transcript: &TranscriptFixture,
+) -> Result<InitialHandshakeReplayCase, AetherError> {
+    let mut prepared = prepare_initial_handshake(transcript)?;
+    let encoded = decode_hex(
+        &transcript.handshake_envelope_encoded_hex,
+        "initial handshake encoded fixture",
+    )?;
+    let decoded = HandshakeEnvelope::from_bytes(&encoded)
+        .map_err(|e| replay_failure(format!("initial handshake fixture failed to decode: {e}")))?;
+    assert_envelope_eq(&prepared.generated_envelope, &decoded, "initial handshake")?;
+    assert_transcript_envelope(&decoded, &transcript.handshake_envelope)?;
+    let reencoded = decoded.to_bytes().map_err(|e| {
+        replay_failure(format!(
+            "initial handshake fixture failed to re-encode: {e}"
+        ))
+    })?;
+    ensure(
+        reencoded == encoded,
+        "initial handshake fixture did not re-encode canonically",
+    )?;
+
+    let expected_sender = SenderIdentityMaterial {
+        identity_key: prepared.sender_identity_key,
+        certificate: b"sender certificate".to_vec(),
+        signature: b"sender signature".to_vec(),
+    };
+    let pre_auth_hidden = pre_auth_sender_material_hidden(&encoded, &expected_sender);
+    let (_, accepted) = accept(
+        &mut prepared.rng,
+        &decoded,
+        &prepared.bob_discovery_key,
+        &prepared.bob_signed_prekey,
+        Some(prepared.bob_one_time_prekey),
+    )
+    .map_err(|e| replay_failure(format!("initial handshake fixture failed to decrypt: {e}")))?;
+    assert_sender_identity(
+        &accepted.sender_identity,
+        &expected_sender,
+        "initial handshake sender",
+    )?;
+    ensure(
+        accepted.plaintext.as_slice() == transcript.handshake_plaintext.as_bytes(),
+        "initial handshake plaintext did not match fixture",
+    )?;
+
+    Ok(InitialHandshakeReplayCase {
+        name: "initial_handshake".into(),
+        transport_visible: initial_handshake_transport_fields(&decoded),
+        plaintext_hex: hex::encode(accepted.plaintext.as_slice()),
+        post_decryption: sender_identity_report(&accepted.sender_identity),
+        reencoded_hex: hex::encode(reencoded),
+        sender_identity_hidden_before_decrypt: pre_auth_hidden.identity_key,
+        sender_certificate_hidden_before_decrypt: pre_auth_hidden.certificate,
+        sender_signature_hidden_before_decrypt: pre_auth_hidden.signature,
+        tampered_ciphertext_rejected: initial_handshake_tamper_rejects_without_sender(transcript)?,
+    })
+}
+
+fn replay_protocol_state_blob_fixture(
+    fixture: &BlobFixture,
+    setup: &SessionSetup,
+    sender_identity: &SenderIdentityMaterial,
+) -> Result<BlobReplayCase, AetherError> {
+    let key = ProtocolStateKey::from_bytes(decode_hex(&fixture.key_hex, &fixture.name)?)
+        .map_err(|e| invalid_fixture(format!("invalid blob fixture key: {e}")))?;
+    ensure(
+        protocol_state_kind(&fixture.kind)? == ProtocolStateKind::RatchetSession,
+        format!("unsupported blob fixture kind: {}", fixture.kind),
+    )?;
+    let encoded = decode_hex(&fixture.current_encoded_hex, &fixture.name)?;
+    let major = *encoded
+        .first()
+        .ok_or_else(|| invalid_fixture(format!("blob fixture {} is empty", fixture.name)))?;
+    let minor = *encoded.get(1).ok_or_else(|| {
+        invalid_fixture(format!(
+            "blob fixture {} has no minor version",
+            fixture.name
+        ))
+    })?;
+    let update = match fixture.name.as_str() {
+        "ratchet_session_alice" => {
+            ProtocolStateEngine::new().set_session_state(key, &setup.alice_state)
+        }
+        "ratchet_session_bob_bound" => ProtocolStateEngine::new()
+            .set_session_state_with_peer_identity(key, &setup.bob_state, sender_identity),
+        _ => {
+            return Err(invalid_fixture(format!(
+                "unknown blob fixture: {}",
+                fixture.name
+            )));
+        }
+    }
+    .map_err(|e| {
+        replay_failure(format!(
+            "blob fixture {} failed to re-encode: {e}",
+            fixture.name
+        ))
+    })?;
+    let reencoded = update
+        .blob()
+        .ok_or_else(|| replay_failure(format!("blob fixture {} produced no blob", fixture.name)))?
+        .as_bytes()
+        .to_vec();
+    ensure(
+        reencoded == encoded,
+        format!(
+            "blob fixture {} did not re-encode canonically",
+            fixture.name
+        ),
+    )?;
+
+    Ok(BlobReplayCase {
+        name: fixture.name.clone(),
+        kind: fixture.kind.clone(),
+        key_hex: fixture.key_hex.clone(),
+        major,
+        minor,
+        reencoded_hex: hex::encode(reencoded),
+    })
+}
+
+fn session_setup() -> Result<SessionSetup, AetherError> {
+    let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
+    let alice_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity = generate_signing_key_pair(&mut rng);
+    let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
+    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
+    let bob_signed_prekey =
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, CREATED_AT);
+    let bob_one_time_prekey =
+        generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
+    let prekey_bundle = PreKeyBundle {
+        discovery_key: bob_discovery.bundle(),
+        signed_prekey: bob_signed_prekey.bundle(),
+        one_time_prekey: Some(bob_one_time_prekey.bundle()),
+    };
+    let (alice_state, envelope) = initiate(
+        &mut rng,
+        &alice_discovery,
+        &bob_identity.verifying,
+        &prekey_bundle,
+        initial_plaintext(b"initial"),
+    )
+    .map_err(|e| replay_failure(format!("failed to create deterministic session: {e}")))?;
+    let (bob_state, accepted) = accept(
+        &mut rng,
+        &envelope,
+        &bob_discovery,
+        &bob_signed_prekey,
+        Some(bob_one_time_prekey),
+    )
+    .map_err(|e| replay_failure(format!("failed to accept deterministic session: {e}")))?;
+    ensure(
+        accepted.plaintext.as_slice() == b"initial",
+        "deterministic session plaintext mismatch",
+    )?;
+    Ok(SessionSetup {
+        alice_state,
+        bob_state,
+    })
+}
+
+fn prepare_initial_handshake(
+    transcript: &TranscriptFixture,
+) -> Result<PreparedInitialHandshake, AetherError> {
+    let mut rng = ChaCha20Rng::from_seed(transcript.rng_seed);
+    let alice_identity = generate_signing_key_pair(&mut rng);
+    let alice_discovery_key = generate_discovery_key(
+        &mut rng,
+        &alice_identity,
+        transcript.alice_discovery_epoch,
+        transcript.created_at,
+    );
+    let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_discovery_key = generate_discovery_key(
+        &mut rng,
+        &bob_identity,
+        transcript.bob_discovery_epoch,
+        transcript.created_at,
+    );
+    let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
+        &mut rng,
+        &bob_discovery_key,
+        transcript.created_at,
+    );
+    let bob_one_time_prekey = generate_one_time_prekey(
+        &mut rng,
+        transcript.bob_one_time_prekey_id,
+        bob_discovery_key.epoch(),
+        transcript.created_at,
+    );
+    let prekey_bundle = PreKeyBundle {
+        discovery_key: bob_discovery_key.bundle(),
+        signed_prekey: bob_signed_prekey.bundle(),
+        one_time_prekey: Some(bob_one_time_prekey.bundle()),
+    };
+    let (_, generated_envelope) = initiate(
+        &mut rng,
+        &alice_discovery_key,
+        &bob_identity.verifying,
+        &prekey_bundle,
+        initial_plaintext(transcript.handshake_plaintext.as_bytes()),
+    )
+    .map_err(|e| {
+        replay_failure(format!(
+            "failed to create deterministic initial handshake: {e}"
+        ))
+    })?;
+    Ok(PreparedInitialHandshake {
+        rng,
+        generated_envelope,
+        bob_discovery_key,
+        bob_signed_prekey,
+        bob_one_time_prekey,
+        sender_identity_key: *alice_discovery_key.public_key().as_bytes(),
+    })
+}
+
+fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
+    InitialPlaintext {
+        sender_certificate: b"sender certificate",
+        sender_signature: b"sender signature",
+        plaintext,
+    }
+}
+
+fn session_sender_identity() -> SenderIdentityMaterial {
+    SenderIdentityMaterial {
+        identity_key: [1u8; 32],
+        certificate: vec![2, 3, 4],
+        signature: vec![5; 64],
+    }
+}
+
+fn sender_identity_from_fixture(
+    fixture: &SenderIdentityFixture,
+) -> Result<SenderIdentityMaterial, AetherError> {
+    Ok(SenderIdentityMaterial {
+        identity_key: hex_array(
+            &fixture.sender_identity_key_hex,
+            "sender identity key fixture",
+        )?,
+        certificate: decode_hex(
+            &fixture.sender_certificate_hex,
+            "sender certificate fixture",
+        )?,
+        signature: decode_hex(&fixture.sender_signature_hex, "sender signature fixture")?,
+    })
+}
+
+fn snapshot_from_blob_fixture(
+    blob_file: &BlobFixtureFile,
+    name: &str,
+    key: &ProtocolStateKey,
+) -> Result<ProtocolStateSnapshot, AetherError> {
+    let fixture = blob_file
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.name == name)
+        .ok_or_else(|| invalid_fixture(format!("missing blob fixture: {name}")))?;
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(
+        ProtocolStateAddress::new(protocol_state_kind(&fixture.kind)?, key.clone()),
+        ProtocolStateBlob::from_bytes(decode_hex(&fixture.current_encoded_hex, name)?),
+    );
+    Ok(snapshot)
+}
+
+fn assert_sender_state_fixture_matches(
+    blob_file: &BlobFixtureFile,
+    name: &str,
+) -> Result<(), AetherError> {
+    blob_file
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.name == name)
+        .map(|_| ())
+        .ok_or_else(|| invalid_fixture(format!("missing sender state fixture: {name}")))
+}
+
+fn message_transport_fields(message: &Message) -> MessageTransportFields {
+    MessageTransportFields {
+        id_hex: hex::encode(message.id.as_bytes()),
+        recipient_public_key_hex: hex::encode(message.recipient_public_key),
+        timestamp_millis: message.timestamp_millis,
+        payload_kind: payload_kind_name(message.payload_kind).into(),
+        payload_hex: hex::encode(&message.payload),
+    }
+}
+
+fn initial_handshake_transport_fields(
+    envelope: &HandshakeEnvelope,
+) -> InitialHandshakeTransportFields {
+    InitialHandshakeTransportFields {
+        initiator_ephemeral_public_key_hex: hex::encode(envelope.initiator_ephemeral_public_key),
+        responder_discovery_epoch: envelope.responder_discovery_epoch,
+        responder_signed_prekey_public_key_hex: hex::encode(
+            envelope.responder_signed_prekey_public_key,
+        ),
+        one_time_prekey_id: envelope.one_time_prekey_id,
+        one_time_prekey_public_key_hex: envelope.one_time_prekey_public_key.map(hex::encode),
+        ratchet_public_key_hex: hex::encode(envelope.ratchet_public_key),
+        previous_chain_length: envelope.previous_chain_length,
+        message_number: envelope.message_number,
+        ciphertext_hex: hex::encode(&envelope.ciphertext),
+    }
+}
+
+fn sender_identity_report(identity: &SenderIdentityMaterial) -> SenderIdentityReplay {
+    SenderIdentityReplay {
+        sender_identity_key_hex: hex::encode(identity.identity_key),
+        sender_certificate_hex: hex::encode(&identity.certificate),
+        sender_signature_hex: hex::encode(&identity.signature),
+    }
+}
+
+struct PreAuthHidden {
+    identity_key: bool,
+    certificate: bool,
+    signature: bool,
+}
+
+fn pre_auth_sender_material_hidden(
+    encoded: &[u8],
+    sender_identity: &SenderIdentityMaterial,
+) -> PreAuthHidden {
+    PreAuthHidden {
+        identity_key: !contains_bytes(encoded, &sender_identity.identity_key),
+        certificate: !contains_bytes(encoded, &sender_identity.certificate),
+        signature: !contains_bytes(encoded, &sender_identity.signature),
+    }
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn assert_message_transport(
+    actual: &MessageTransportFields,
+    expected: &MessageDecodedFixture,
+    name: &str,
+) -> Result<(), AetherError> {
+    ensure(
+        actual.id_hex == expected.id_hex,
+        format!("message fixture {name} id mismatch"),
+    )?;
+    ensure(
+        actual.recipient_public_key_hex == expected.recipient_public_key_hex,
+        format!("message fixture {name} recipient mismatch"),
+    )?;
+    ensure(
+        actual.timestamp_millis == expected.timestamp_millis,
+        format!("message fixture {name} timestamp mismatch"),
+    )?;
+    ensure(
+        actual.payload_kind == expected.payload_kind,
+        format!("message fixture {name} payload kind mismatch"),
+    )?;
+    ensure(
+        actual.payload_hex == expected.payload_hex,
+        format!("message fixture {name} payload mismatch"),
+    )
+}
+
+fn assert_decrypted_sender(
+    plaintext: &[u8],
+    sender_identity: &SenderIdentityMaterial,
+    expected_plaintext_hex: &str,
+    expected_sender: &SenderIdentityFixture,
+    name: &str,
+) -> Result<(), AetherError> {
+    ensure(
+        hex::encode(plaintext) == expected_plaintext_hex,
+        format!("sealed sender fixture {name} plaintext mismatch"),
+    )?;
+    assert_sender_identity(
+        sender_identity,
+        &sender_identity_from_fixture(expected_sender)?,
+        name,
+    )
+}
+
+fn assert_sender_identity(
+    actual: &SenderIdentityMaterial,
+    expected: &SenderIdentityMaterial,
+    name: &str,
+) -> Result<(), AetherError> {
+    ensure(
+        actual.identity_key == expected.identity_key,
+        format!("sender identity key mismatch for {name}"),
+    )?;
+    ensure(
+        actual.certificate == expected.certificate,
+        format!("sender certificate mismatch for {name}"),
+    )?;
+    ensure(
+        actual.signature == expected.signature,
+        format!("sender signature mismatch for {name}"),
+    )
+}
+
+fn assert_transcript_envelope(
+    actual: &HandshakeEnvelope,
+    expected: &TranscriptEnvelopeFixture,
+) -> Result<(), AetherError> {
+    ensure(
+        actual.initiator_ephemeral_public_key == expected.initiator_ephemeral_public_key,
+        "initial handshake ephemeral key mismatch",
+    )?;
+    ensure(
+        actual.responder_discovery_epoch == expected.responder_discovery_epoch,
+        "initial handshake responder epoch mismatch",
+    )?;
+    ensure(
+        actual.responder_signed_prekey_public_key == expected.responder_signed_prekey_public_key,
+        "initial handshake signed pre-key mismatch",
+    )?;
+    ensure(
+        actual.one_time_prekey_id == expected.one_time_prekey_id,
+        "initial handshake one-time pre-key id mismatch",
+    )?;
+    ensure(
+        actual.one_time_prekey_public_key == expected.one_time_prekey_public_key,
+        "initial handshake one-time pre-key public mismatch",
+    )?;
+    ensure(
+        actual.ratchet_public_key == expected.ratchet_public_key,
+        "initial handshake ratchet key mismatch",
+    )?;
+    ensure(
+        actual.previous_chain_length == expected.previous_chain_length,
+        "initial handshake previous-chain length mismatch",
+    )?;
+    ensure(
+        actual.message_number == expected.message_number,
+        "initial handshake message number mismatch",
+    )?;
+    ensure(
+        actual.ciphertext
+            == decode_hex(
+                &expected.ciphertext_hex,
+                "initial handshake ciphertext fixture",
+            )?,
+        "initial handshake ciphertext mismatch",
+    )
+}
+
+fn assert_envelope_eq(
+    actual: &HandshakeEnvelope,
+    expected: &HandshakeEnvelope,
+    name: &str,
+) -> Result<(), AetherError> {
+    ensure(
+        actual.initiator_ephemeral_public_key == expected.initiator_ephemeral_public_key,
+        format!("{name} generated ephemeral key mismatch"),
+    )?;
+    ensure(
+        actual.responder_discovery_epoch == expected.responder_discovery_epoch,
+        format!("{name} generated epoch mismatch"),
+    )?;
+    ensure(
+        actual.responder_signed_prekey_public_key == expected.responder_signed_prekey_public_key,
+        format!("{name} generated signed pre-key mismatch"),
+    )?;
+    ensure(
+        actual.one_time_prekey_id == expected.one_time_prekey_id,
+        format!("{name} generated one-time pre-key id mismatch"),
+    )?;
+    ensure(
+        actual.one_time_prekey_public_key == expected.one_time_prekey_public_key,
+        format!("{name} generated one-time pre-key public mismatch"),
+    )?;
+    ensure(
+        actual.ratchet_public_key == expected.ratchet_public_key,
+        format!("{name} generated ratchet key mismatch"),
+    )?;
+    ensure(
+        actual.previous_chain_length == expected.previous_chain_length,
+        format!("{name} generated previous-chain length mismatch"),
+    )?;
+    ensure(
+        actual.message_number == expected.message_number,
+        format!("{name} generated message number mismatch"),
+    )?;
+    ensure(
+        actual.ciphertext == expected.ciphertext,
+        format!("{name} generated ciphertext mismatch"),
+    )
+}
+
+fn session_tamper_rejects_without_sender(
+    blob_file: &BlobFixtureFile,
+    recipient_state_fixture: &str,
+    key: &ProtocolStateKey,
+    message: &Message,
+) -> Result<bool, AetherError> {
+    let mut tampered = copy_message(message);
+    let last = tampered
+        .payload
+        .last_mut()
+        .ok_or_else(|| replay_failure("sealed session fixture payload is empty"))?;
+    *last ^= 0x01;
+    let snapshot = snapshot_from_blob_fixture(blob_file, recipient_state_fixture, key)?;
+    Ok(ProtocolStateEngine::new()
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
+            &snapshot,
+            key.clone(),
+            &tampered,
+        )
+        .is_err())
+}
+
+fn initial_handshake_tamper_rejects_without_sender(
+    transcript: &TranscriptFixture,
+) -> Result<bool, AetherError> {
+    let mut prepared = prepare_initial_handshake(transcript)?;
+    let mut tampered = HandshakeEnvelope::from_bytes(&decode_hex(
+        &transcript.handshake_envelope_encoded_hex,
+        "initial handshake tamper fixture",
+    )?)
+    .map_err(|e| {
+        replay_failure(format!(
+            "initial handshake tamper fixture failed to decode: {e}"
+        ))
+    })?;
+    let last = tampered
+        .ciphertext
+        .last_mut()
+        .ok_or_else(|| replay_failure("initial handshake ciphertext is empty"))?;
+    *last ^= 0x01;
+    Ok(accept(
+        &mut prepared.rng,
+        &tampered,
+        &prepared.bob_discovery_key,
+        &prepared.bob_signed_prekey,
+        Some(prepared.bob_one_time_prekey),
+    )
+    .is_err())
+}
+
+fn copy_message(message: &Message) -> Message {
+    Message {
+        id: message.id,
+        recipient_public_key: message.recipient_public_key,
+        timestamp_millis: message.timestamp_millis,
+        payload_kind: message.payload_kind,
+        payload: message.payload.clone(),
+    }
+}
+
+fn unsupported_message_version_rejected() -> bool {
+    let mut bytes = b"AMSG".to_vec();
+    bytes.push(2);
+    Message::from_bytes(&bytes).is_err()
+}
+
+fn malformed_message_rejected() -> bool {
+    Message::from_bytes(b"AMSG\x01\xff").is_err()
+}
+
+fn old_sender_visible_message_rejected() -> Result<bool, AetherError> {
+    Ok(Message::from_bytes(&decode_hex(
+        OLD_SENDER_VISIBLE_MESSAGE_HEX,
+        "old sender-visible message",
+    )?)
+    .is_err())
+}
+
+fn unsupported_initial_handshake_version_rejected() -> bool {
+    let mut bytes = b"AX3H".to_vec();
+    bytes.push(2);
+    HandshakeEnvelope::from_bytes(&bytes).is_err()
+}
+
+fn malformed_initial_handshake_rejected() -> bool {
+    HandshakeEnvelope::from_bytes(b"not a postcard envelope").is_err()
+}
+
+fn unsupported_blob_major_rejected() -> Result<bool, AetherError> {
+    let engine = ProtocolStateEngine::new();
+    let key = ProtocolStateKey::session(SessionId::from_bytes([9u8; 16]));
+    let address = ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key.clone());
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(
+        address.clone(),
+        ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
+    );
+    Ok(matches!(
+        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
+        Err(ProtocolStateError::UnsupportedBlobVersion {
+            address: actual,
+            major: 2,
+            minor: 0
+        }) if actual == address
+    ))
+}
+
+fn malformed_blob_rejected() -> Result<bool, AetherError> {
+    let engine = ProtocolStateEngine::new();
+    let key = ProtocolStateKey::session(SessionId::from_bytes([9u8; 16]));
+    let address = ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key.clone());
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(
+        address.clone(),
+        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+    );
+    Ok(matches!(
+        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
+        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+    ))
+}
+
+fn protocol_state_kind(kind: &str) -> Result<ProtocolStateKind, AetherError> {
+    match kind {
+        "ratchet_session" => Ok(ProtocolStateKind::RatchetSession),
+        "pre_key" => Ok(ProtocolStateKind::PreKey),
+        "sender_certificate" => Ok(ProtocolStateKind::SenderCertificate),
+        "deduplication_set" => Ok(ProtocolStateKind::DeduplicationSet),
+        "pending_acknowledgments" => Ok(ProtocolStateKind::PendingAcknowledgments),
+        _ => Err(invalid_fixture(format!(
+            "unknown protocol-state kind: {kind}"
+        ))),
+    }
+}
+
+fn payload_kind_name(kind: PayloadKind) -> &'static str {
+    match kind {
+        PayloadKind::EncryptedText => "text",
+        PayloadKind::Acknowledgment => "acknowledgment",
+        PayloadKind::KeyExchange => "key_exchange",
+        PayloadKind::RatchetHeader => "ratchet_header",
+        _ => "unknown",
+    }
+}
+
+fn fixture_json<T: for<'de> Deserialize<'de>>(json: &str) -> Result<T, AetherError> {
+    serde_json::from_str(json).map_err(|e| invalid_fixture(format!("fixture JSON failed: {e}")))
+}
+
+fn decode_hex(value: &str, context: &str) -> Result<Vec<u8>, AetherError> {
+    hex::decode(value).map_err(|e| invalid_fixture(format!("{context} hex failed: {e}")))
+}
+
+fn hex_array<const N: usize>(value: &str, context: &str) -> Result<[u8; N], AetherError> {
+    let bytes = decode_hex(value, context)?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| invalid_fixture(format!("{context} must be {N} bytes")))
+}
+
+fn ensure(condition: bool, reason: impl Into<String>) -> Result<(), AetherError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(replay_failure(reason))
+    }
+}
+
+fn invalid_fixture(reason: impl Into<String>) -> AetherError {
+    AetherError::InvalidData {
+        reason: reason.into(),
+    }
+}
+
+fn replay_failure(reason: impl Into<String>) -> AetherError {
+    AetherError::InternalError {
+        reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replay_fixture_harness;
+
+    #[test]
+    fn fixture_harness_replays_all_categories() {
+        let report = replay_fixture_harness().unwrap();
+
+        assert_eq!(report.message_wire_cases.len(), 4);
+        assert_eq!(report.sealed_sender_session_cases.len(), 1);
+        assert_eq!(report.initial_handshake_cases.len(), 1);
+        assert_eq!(report.protocol_state_blob_cases.len(), 2);
+        assert!(report.unsupported_message_version_rejected);
+        assert!(report.malformed_message_rejected);
+        assert!(report.old_sender_visible_message_rejected);
+        assert!(report.unsupported_initial_handshake_version_rejected);
+        assert!(report.malformed_initial_handshake_rejected);
+        assert!(report.unsupported_blob_major_rejected);
+        assert!(report.malformed_blob_rejected);
+        assert!(report.sealed_sender_session_cases[0].sender_identity_hidden_before_decrypt);
+        assert!(report.sealed_sender_session_cases[0].sender_certificate_hidden_before_decrypt);
+        assert!(report.sealed_sender_session_cases[0].sender_signature_hidden_before_decrypt);
+        assert!(report.sealed_sender_session_cases[0].tampered_ciphertext_rejected);
+        assert!(report.initial_handshake_cases[0].sender_identity_hidden_before_decrypt);
+        assert!(report.initial_handshake_cases[0].sender_certificate_hidden_before_decrypt);
+        assert!(report.initial_handshake_cases[0].sender_signature_hidden_before_decrypt);
+        assert!(report.initial_handshake_cases[0].tampered_ciphertext_rejected);
+    }
+}
