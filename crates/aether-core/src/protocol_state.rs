@@ -1,6 +1,6 @@
 //! Public protocol-state blob addressing and stateless operation results.
 
-use crate::message::MAX_MESSAGE_PAYLOAD_LEN;
+use crate::message::{MAX_ENCODED_MESSAGE_LEN, MAX_MESSAGE_PAYLOAD_LEN};
 use crate::{Message, MessageError, MessageId, PayloadKind};
 use aether_crypto::{Header, PublicKey, RatchetState, SenderIdentityMaterial};
 use rand::{CryptoRng, RngCore};
@@ -16,8 +16,11 @@ const CURRENT_PROTOCOL_STATE_BLOB_MINOR: u8 = 0;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 2;
 const SESSION_STATE_WIRE_VERSION: u8 = 1;
 const DEDUPLICATION_SET_WIRE_VERSION: u8 = 1;
+const PENDING_ACKNOWLEDGMENTS_WIRE_VERSION: u8 = 1;
+const ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION: u8 = 1;
 const DEDUPLICATION_DIGEST_LEN: usize = 16;
 const DEDUPLICATION_KEY_LEN: usize = 32;
+const ACKNOWLEDGMENT_DIGEST_LEN: usize = 16;
 const RATCHET_PAYLOAD_VERSION: u8 = 1;
 const RATCHET_PAYLOAD_HEADER_LEN: usize = 1 + 32 + 4 + 4;
 const RATCHET_AEAD_TAG_LEN: usize = 16;
@@ -31,6 +34,15 @@ const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
 const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 64;
+const MAX_PENDING_ACKNOWLEDGMENTS: usize = 1024;
+const MAX_ACKNOWLEDGMENT_DIGESTS: usize = 1024;
+const PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP: usize = 64;
+const PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP: usize = 64;
+const MAX_PENDING_ACKNOWLEDGMENTS_BLOB_LEN: usize = PROTOCOL_STATE_BLOB_HEADER_LEN
+    + PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP
+    + MAX_PENDING_ACKNOWLEDGMENTS
+        * (MAX_ENCODED_MESSAGE_LEN + PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP)
+    + MAX_ACKNOWLEDGMENT_DIGESTS * ACKNOWLEDGMENT_DIGEST_LEN;
 
 /// Default number of received-message digests retained per local Identity.
 pub const DEFAULT_DEDUPLICATION_CAPACITY: usize = 1024;
@@ -301,6 +313,18 @@ pub struct OutboundPlaintext<'a> {
     pub plaintext: &'a [u8],
 }
 
+/// Metadata used to encrypt an acknowledgment artifact for an accepted inbound Message.
+pub struct OutboundAcknowledgment<'a> {
+    /// Stable identifier for the produced acknowledgment Message.
+    pub id: MessageId,
+    /// Receiver identity material sealed inside the encrypted acknowledgment payload.
+    pub sender_identity: &'a SenderIdentityMaterial,
+    /// Recipient X25519 public key bytes. Always 32 bytes.
+    pub recipient_public_key: [u8; 32],
+    /// Receiver-observed Unix timestamp in milliseconds.
+    pub timestamp_millis: u64,
+}
+
 /// An outbound Message and all advanced protocol-state updates from one operation.
 pub struct OutboundMessageResult {
     /// Message to hand to the consumer transport after state commit.
@@ -317,6 +341,8 @@ pub struct InboundEncryptedMessage<'a> {
     pub deduplication_key: ProtocolStateKey,
     /// Encrypted Message to deduplicate and decrypt.
     pub message: &'a Message,
+    /// Metadata for the encrypted acknowledgment returned when the Message is accepted.
+    pub acknowledgment: OutboundAcknowledgment<'a>,
 }
 
 /// Inbound plaintext and all advanced protocol-state updates from one operation.
@@ -325,6 +351,8 @@ pub struct InboundMessageResult {
     pub plaintext: Zeroizing<Vec<u8>>,
     /// Sender identity material decoded from the sealed-sender envelope.
     pub sender_identity: SenderIdentityMaterial,
+    /// Encrypted acknowledgment artifact to durably queue with the returned state updates.
+    pub acknowledgment: Message,
     /// Protocol-state updates to commit before treating the inbound Message as processed.
     pub state_updates: Vec<ProtocolStateUpdate>,
 }
@@ -332,8 +360,71 @@ pub struct InboundMessageResult {
 /// The result of receiving an inbound encrypted Message.
 pub enum InboundMessageOutcome {
     /// A unique Message decrypted and advanced protocol state.
-    Accepted(InboundMessageResult),
+    Accepted(Box<InboundMessageResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
+    Duplicate,
+}
+
+/// An inbound encrypted acknowledgment Message.
+pub struct InboundAcknowledgmentMessage<'a> {
+    /// Session-scoped key for the ratchet/session and pending-acknowledgment blobs.
+    pub session_key: ProtocolStateKey,
+    /// Encrypted acknowledgment Message to process.
+    pub message: &'a Message,
+}
+
+/// Pending acknowledgment state exposed to the consumer for durable flushing.
+pub struct PendingAcknowledgment {
+    /// Original outbound Message waiting for an acknowledgment.
+    pub message: Message,
+    /// First-send Unix timestamp in milliseconds.
+    pub first_sent_millis: u64,
+    /// Last retry-instruction timestamp in milliseconds, if any.
+    pub last_retry_millis: Option<u64>,
+}
+
+/// A retry instruction for one still-unacknowledged outbound Message.
+pub struct RetryInstruction {
+    /// Message the consumer may retransmit.
+    pub message: Message,
+    /// First-send Unix timestamp in milliseconds.
+    pub first_sent_millis: u64,
+    /// Previous retry-instruction timestamp in milliseconds, if any.
+    pub last_retry_millis: Option<u64>,
+}
+
+/// Retry instructions and any pending-state updates produced by one retry query.
+pub struct RetryInstructionResult {
+    /// Messages whose retry window has elapsed.
+    pub instructions: Vec<RetryInstruction>,
+    /// Protocol-state updates to commit after acting on the retry query.
+    pub state_updates: Vec<ProtocolStateUpdate>,
+}
+
+/// State updates and decrypted metadata for a matched acknowledgment.
+pub struct ClearedAcknowledgment {
+    /// Outbound Message ID cleared from pending state.
+    pub acknowledged_message_id: MessageId,
+    /// Sender identity material decoded from the acknowledgment.
+    pub sender_identity: SenderIdentityMaterial,
+    /// Protocol-state updates to commit before treating the acknowledgment as processed.
+    pub state_updates: Vec<ProtocolStateUpdate>,
+}
+
+/// The result of processing an encrypted acknowledgment.
+pub enum AcknowledgmentOutcome {
+    /// A matching pending acknowledgment was cleared.
+    Cleared(ClearedAcknowledgment),
+    /// The acknowledgment decrypted but did not match current pending state.
+    Missed {
+        /// Acknowledged Message ID carried inside the encrypted acknowledgment.
+        acknowledged_message_id: MessageId,
+        /// Sender identity material decoded from the acknowledgment.
+        sender_identity: SenderIdentityMaterial,
+        /// Protocol-state updates to commit before treating the miss as processed.
+        state_updates: Vec<ProtocolStateUpdate>,
+    },
+    /// The exact acknowledgment Message was already processed.
     Duplicate,
 }
 
@@ -398,6 +489,30 @@ impl ProtocolStateEngine {
         Ok(ProtocolStateUpdate::set(
             address.clone(),
             encode_deduplication_set(&address, &state)?,
+        ))
+    }
+
+    /// Returns an update that initializes empty pending-acknowledgment state for a Session.
+    ///
+    /// The consumer must commit the returned blob before sending encrypted Messages for that
+    /// Session. Core reloads this blob for every send, acknowledgment, pending-list, and retry
+    /// operation.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobEncode`] if the pending-acknowledgment blob fails to encode or
+    ///   exceeds local caps.
+    pub fn initialize_pending_acknowledgments(
+        &self,
+        key: ProtocolStateKey,
+    ) -> Result<ProtocolStateUpdate, ProtocolStateError> {
+        let address = pending_acknowledgment_address(key);
+        let state = LoadedPendingAcknowledgments {
+            pending: BTreeMap::new(),
+            acknowledgment_digests: Vec::new(),
+        };
+        Ok(ProtocolStateUpdate::set(
+            address.clone(),
+            encode_pending_acknowledgments(&address, &state)?,
         ))
     }
 
@@ -517,26 +632,30 @@ impl ProtocolStateEngine {
             .collect()
     }
 
-    /// Encrypts plaintext using the required ratchet/session blob from `snapshot`.
+    /// Encrypts plaintext using the required ratchet/session and pending-acknowledgment blobs.
     ///
     /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the advanced session state fails to encode or
-    ///   exceeds local caps.
+    /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session or pending-acknowledgment blob
+    ///   fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the advanced session or pending-acknowledgment
+    ///   state fails to encode or exceeds local caps.
     /// - [`ProtocolStateError::Crypto`] if ratchet encryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if sender material or sealed-sender content
     ///   exceeds local caps or fails to encode.
     /// - [`ProtocolStateError::MessageEncode`] if the produced Message fails to encode.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session or
+    ///   pending-acknowledgment blob is present.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if either blob version is not supported.
     pub fn encrypt_message(
         &self,
         snapshot: &ProtocolStateSnapshot,
         key: ProtocolStateKey,
         plaintext: OutboundPlaintext<'_>,
     ) -> Result<OutboundMessageResult, ProtocolStateError> {
+        let pending_address = pending_acknowledgment_address(key.clone());
         let address = ratchet_address(key);
         let loaded = load_session_state(snapshot, &address)?;
+        let mut pending = load_pending_acknowledgments(snapshot, &pending_address)?;
         let mut state = loaded.state;
         let sealed = encode_sealed_sender_envelope(plaintext.sender_identity, plaintext.plaintext)?;
         let associated_data = message_associated_data(
@@ -556,18 +675,27 @@ impl ProtocolStateEngine {
         message
             .to_bytes()
             .map_err(ProtocolStateError::MessageEncode)?;
+        record_pending_acknowledgment(&pending_address, &mut pending, &message)?;
         let update = ProtocolStateUpdate::set(
             address.clone(),
             encode_session_state(&address, &state, loaded.peer_sender_identity_key)?,
         );
+        let pending_update = ProtocolStateUpdate::set(
+            pending_address.clone(),
+            encode_pending_acknowledgments(&pending_address, &pending)?,
+        );
 
         Ok(OutboundMessageResult {
             message,
-            state_updates: vec![update],
+            state_updates: vec![update, pending_update],
         })
     }
 
-    /// Receives an inbound Message using the required deduplication and ratchet/session blobs.
+    /// Receives an inbound Message and returns an encrypted acknowledgment artifact on accept.
+    ///
+    /// Consumers should durably queue the returned acknowledgment with `state_updates` before
+    /// treating the inbound Message as processed. Duplicate inbound retries do not regenerate the
+    /// acknowledgment artifact.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the deduplication-set or ratchet/session blob fails
@@ -577,9 +705,10 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::Crypto`] if ratchet decryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if the Message does not contain ratcheted text,
     ///   the session is not bound to a peer sender identity key, the decrypted sender identity key
-    ///   does not match the session binding, or the decrypted sealed-sender envelope is malformed,
-    ///   unsupported, or oversized.
-    /// - [`ProtocolStateError::MessageEncode`] if the inbound Message fails canonical encoding.
+    ///   does not match the session binding, the decrypted sealed-sender envelope is malformed,
+    ///   unsupported, or oversized, or the acknowledgment sender material is invalid.
+    /// - [`ProtocolStateError::MessageEncode`] if the inbound Message or produced acknowledgment
+    ///   fails canonical encoding.
     /// - [`ProtocolStateError::MissingRequiredState`] if a required deduplication-set or
     ///   ratchet/session blob is absent.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if either blob version is not supported.
@@ -641,6 +770,8 @@ impl ProtocolStateEngine {
                 reason: "sealed sender identity key does not match session".into(),
             });
         }
+        let acknowledgment =
+            encrypt_acknowledgment(&mut state, &inbound.acknowledgment, message.id)?;
         record_deduplication_digest(&mut deduplication, digest);
         let session_update = ProtocolStateUpdate::set(
             address.clone(),
@@ -650,11 +781,193 @@ impl ProtocolStateEngine {
             deduplication_address.clone(),
             encode_deduplication_set(&deduplication_address, &deduplication)?,
         );
-        Ok(InboundMessageOutcome::Accepted(InboundMessageResult {
-            plaintext: decoded.plaintext,
-            sender_identity: decoded.sender_identity,
-            state_updates: vec![session_update, deduplication_update],
-        }))
+        Ok(InboundMessageOutcome::Accepted(Box::new(
+            InboundMessageResult {
+                plaintext: decoded.plaintext,
+                sender_identity: decoded.sender_identity,
+                acknowledgment,
+                state_updates: vec![session_update, deduplication_update],
+            },
+        )))
+    }
+
+    /// Returns all pending acknowledgments stored for a Session.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the pending-acknowledgment blob fails to decode.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no pending-acknowledgment blob is
+    ///   present.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn pending_acknowledgments(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        key: ProtocolStateKey,
+    ) -> Result<Vec<PendingAcknowledgment>, ProtocolStateError> {
+        let address = pending_acknowledgment_address(key);
+        let pending = load_pending_acknowledgments(snapshot, &address)?;
+        Ok(pending
+            .pending
+            .values()
+            .map(|entry| PendingAcknowledgment {
+                message: copy_message(&entry.message),
+                first_sent_millis: entry.first_sent_millis,
+                last_retry_millis: entry.last_retry_millis,
+            })
+            .collect())
+    }
+
+    /// Returns retry instructions for pending acknowledgments whose retry window has elapsed.
+    ///
+    /// `now_millis` is caller supplied so retry behavior is deterministic in tests and does not
+    /// read the KeyStore Clock.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the pending-acknowledgment blob fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if updating retry timestamps fails to encode.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no pending-acknowledgment blob is
+    ///   present.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn retry_instructions(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        key: ProtocolStateKey,
+        now_millis: u64,
+        retry_window_millis: u64,
+    ) -> Result<RetryInstructionResult, ProtocolStateError> {
+        let address = pending_acknowledgment_address(key);
+        let mut pending = load_pending_acknowledgments(snapshot, &address)?;
+        let mut instructions = Vec::new();
+        for entry in pending.pending.values_mut() {
+            let reference = entry.last_retry_millis.unwrap_or(entry.first_sent_millis);
+            if now_millis >= reference.saturating_add(retry_window_millis) {
+                instructions.push(RetryInstruction {
+                    message: copy_message(&entry.message),
+                    first_sent_millis: entry.first_sent_millis,
+                    last_retry_millis: entry.last_retry_millis,
+                });
+                entry.last_retry_millis = Some(now_millis);
+            }
+        }
+
+        let state_updates = if instructions.is_empty() {
+            Vec::new()
+        } else {
+            vec![ProtocolStateUpdate::set(
+                address.clone(),
+                encode_pending_acknowledgments(&address, &pending)?,
+            )]
+        };
+        Ok(RetryInstructionResult {
+            instructions,
+            state_updates,
+        })
+    }
+
+    /// Processes an encrypted acknowledgment and advances the relevant protocol-state blobs.
+    ///
+    /// Unknown or already-cleared acknowledgments are non-fatal misses. Exact replayed
+    /// acknowledgment Messages retained in the pending state digest window are duplicates and do
+    /// not touch ratchet/session state.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session or pending-acknowledgment blob
+    ///   fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if advanced state fails to encode.
+    /// - [`ProtocolStateError::Crypto`] if ratchet decryption fails.
+    /// - [`ProtocolStateError::InvalidMessage`] if the Message is not an acknowledgment, the
+    ///   session is not bound to a peer sender identity key, the decrypted sender identity key
+    ///   does not match the session binding, or the encrypted acknowledgment plaintext is
+    ///   malformed.
+    /// - [`ProtocolStateError::MessageEncode`] if the acknowledgment Message fails canonical
+    ///   encoding.
+    /// - [`ProtocolStateError::MissingRequiredState`] if required state is absent.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if either blob version is not supported.
+    pub fn process_acknowledgment<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        snapshot: &ProtocolStateSnapshot,
+        inbound: InboundAcknowledgmentMessage<'_>,
+    ) -> Result<AcknowledgmentOutcome, ProtocolStateError> {
+        let pending_address = pending_acknowledgment_address(inbound.session_key.clone());
+        let mut pending = load_pending_acknowledgments(snapshot, &pending_address)?;
+        let encoded = inbound
+            .message
+            .to_bytes()
+            .map_err(ProtocolStateError::MessageEncode)?;
+        let digest = acknowledgment_digest(&encoded);
+        if contains_acknowledgment_digest(&pending.acknowledgment_digests, &digest) {
+            return Ok(AcknowledgmentOutcome::Duplicate);
+        }
+
+        let address = ratchet_address(inbound.session_key);
+        let loaded = load_session_state(snapshot, &address)?;
+        let message = inbound.message;
+        if message.payload_kind != PayloadKind::Acknowledgment {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: "message payload is not an acknowledgment".into(),
+            });
+        }
+        if message.payload.len() > MAX_MESSAGE_PAYLOAD_LEN {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: format!(
+                    "message payload length exceeds limit: {}",
+                    message.payload.len()
+                ),
+            });
+        }
+        let expected_sender_identity_key =
+            loaded
+                .peer_sender_identity_key
+                .ok_or_else(|| ProtocolStateError::InvalidMessage {
+                    reason: "session sender identity key is not bound".into(),
+                })?;
+
+        let mut state = loaded.state;
+        let (header, ciphertext) = decode_ratcheted_payload(&message.payload)?;
+        let associated_data = message_associated_data(
+            message.id,
+            &message.recipient_public_key,
+            message.timestamp_millis,
+            message.payload_kind,
+        );
+        let sealed = state.ratchet_decrypt(rng, ciphertext, &header, &associated_data)?;
+        let decoded = decode_sealed_sender_envelope(&sealed)?;
+        if !sender_identity_key_matches(
+            &expected_sender_identity_key,
+            &decoded.sender_identity.identity_key,
+        ) {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: "sealed sender identity key does not match session".into(),
+            });
+        }
+        let acknowledged_message_id = decode_acknowledgment_plaintext(&decoded.plaintext)?;
+        record_acknowledgment_digest(&mut pending, digest);
+        let cleared = pending
+            .pending
+            .remove(acknowledged_message_id.as_bytes())
+            .is_some();
+        let session_update = ProtocolStateUpdate::set(
+            address.clone(),
+            encode_session_state(&address, &state, Some(expected_sender_identity_key))?,
+        );
+        let pending_update = ProtocolStateUpdate::set(
+            pending_address.clone(),
+            encode_pending_acknowledgments(&pending_address, &pending)?,
+        );
+        let state_updates = vec![session_update, pending_update];
+        if cleared {
+            Ok(AcknowledgmentOutcome::Cleared(ClearedAcknowledgment {
+                acknowledged_message_id,
+                sender_identity: decoded.sender_identity,
+                state_updates,
+            }))
+        } else {
+            Ok(AcknowledgmentOutcome::Missed {
+                acknowledged_message_id,
+                sender_identity: decoded.sender_identity,
+                state_updates,
+            })
+        }
     }
 }
 
@@ -806,6 +1119,10 @@ fn deduplication_address(key: ProtocolStateKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::DeduplicationSet, key)
 }
 
+fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, key)
+}
+
 fn validate_configured_deduplication_capacity(capacity: usize) -> Result<(), ProtocolStateError> {
     if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
         return Err(ProtocolStateError::InvalidDeduplicationCapacity {
@@ -891,6 +1208,18 @@ struct LoadedDeduplicationSet {
     digests: Vec<[u8; DEDUPLICATION_DIGEST_LEN]>,
 }
 
+struct LoadedPendingAcknowledgments {
+    pending: BTreeMap<[u8; 16], LoadedPendingAcknowledgment>,
+    acknowledgment_digests: Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>,
+}
+
+struct LoadedPendingAcknowledgment {
+    message: Message,
+    encoded_message: Vec<u8>,
+    first_sent_millis: u64,
+    last_retry_millis: Option<u64>,
+}
+
 #[derive(Serialize)]
 struct DeduplicationSetWire<'a> {
     version: u8,
@@ -905,6 +1234,48 @@ struct DecodedDeduplicationSetWire {
     capacity: u16,
     digest_key: [u8; DEDUPLICATION_KEY_LEN],
     digests: Vec<[u8; DEDUPLICATION_DIGEST_LEN]>,
+}
+
+#[derive(Serialize)]
+struct PendingAcknowledgmentsWire<'a> {
+    version: u8,
+    pending: Vec<PendingAcknowledgmentWire<'a>>,
+    acknowledgment_digests: &'a [[u8; ACKNOWLEDGMENT_DIGEST_LEN]],
+}
+
+#[derive(Serialize)]
+struct PendingAcknowledgmentWire<'a> {
+    message_id: [u8; 16],
+    encoded_message: &'a [u8],
+    first_sent_millis: u64,
+    last_retry_millis: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DecodedPendingAcknowledgmentsWire {
+    version: u8,
+    pending: Vec<DecodedPendingAcknowledgmentWire>,
+    acknowledgment_digests: Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>,
+}
+
+#[derive(Deserialize)]
+struct DecodedPendingAcknowledgmentWire {
+    message_id: [u8; 16],
+    encoded_message: Vec<u8>,
+    first_sent_millis: u64,
+    last_retry_millis: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct AcknowledgmentPlaintextWire {
+    version: u8,
+    acknowledged_message_id: [u8; 16],
+}
+
+#[derive(Deserialize)]
+struct DecodedAcknowledgmentPlaintextWire {
+    version: u8,
+    acknowledged_message_id: [u8; 16],
 }
 
 fn load_session_state(
@@ -1106,6 +1477,187 @@ fn decode_deduplication_set_payload(
     })
 }
 
+fn encode_pending_acknowledgments(
+    address: &ProtocolStateAddress,
+    state: &LoadedPendingAcknowledgments,
+) -> Result<ProtocolStateBlob, ProtocolStateError> {
+    if state.pending.len() > MAX_PENDING_ACKNOWLEDGMENTS {
+        return Err(ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: format!(
+                "pending-acknowledgment count exceeds limit: {}",
+                state.pending.len()
+            ),
+        });
+    }
+    if state.acknowledgment_digests.len() > MAX_ACKNOWLEDGMENT_DIGESTS {
+        return Err(ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: format!(
+                "acknowledgment digest count exceeds limit: {}",
+                state.acknowledgment_digests.len()
+            ),
+        });
+    }
+    let pending = state
+        .pending
+        .iter()
+        .map(|(message_id, entry)| PendingAcknowledgmentWire {
+            message_id: *message_id,
+            encoded_message: &entry.encoded_message,
+            first_sent_millis: entry.first_sent_millis,
+            last_retry_millis: entry.last_retry_millis,
+        })
+        .collect();
+    let payload = Zeroizing::new(
+        postcard::to_stdvec(&PendingAcknowledgmentsWire {
+            version: PENDING_ACKNOWLEDGMENTS_WIRE_VERSION,
+            pending,
+            acknowledgment_digests: &state.acknowledgment_digests,
+        })
+        .map_err(|_| ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: "pending acknowledgments failed to encode".into(),
+        })?,
+    );
+    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PENDING_ACKNOWLEDGMENTS_BLOB_LEN {
+        return Err(ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: format!(
+                "pending-acknowledgment blob length exceeds limit: {}",
+                payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN
+            ),
+        });
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        PROTOCOL_STATE_BLOB_HEADER_LEN + payload.len(),
+    ));
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MAJOR);
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MINOR);
+    bytes.extend_from_slice(&payload);
+    Ok(ProtocolStateBlob::from_zeroizing(bytes))
+}
+
+fn load_pending_acknowledgments(
+    snapshot: &ProtocolStateSnapshot,
+    address: &ProtocolStateAddress,
+) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
+    let blob = snapshot
+        .get(address)
+        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
+            address: address.clone(),
+        })?;
+    decode_pending_acknowledgments(address, blob)
+}
+
+fn decode_pending_acknowledgments(
+    address: &ProtocolStateAddress,
+    blob: &ProtocolStateBlob,
+) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
+    let bytes = blob.as_bytes();
+    if bytes.len() > MAX_PENDING_ACKNOWLEDGMENTS_BLOB_LEN {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "pending-acknowledgment blob length exceeds limit: {}",
+                bytes.len()
+            ),
+        });
+    }
+    let (major, minor) =
+        read_blob_version(bytes).ok_or_else(|| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "pending-acknowledgment blob header is incomplete".into(),
+        })?;
+    let payload = &bytes[PROTOCOL_STATE_BLOB_HEADER_LEN..];
+
+    if major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR && minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR {
+        return decode_pending_acknowledgments_payload(address, payload);
+    }
+
+    Err(ProtocolStateError::UnsupportedBlobVersion {
+        address: address.clone(),
+        major,
+        minor,
+    })
+}
+
+fn decode_pending_acknowledgments_payload(
+    address: &ProtocolStateAddress,
+    payload: &[u8],
+) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
+    let (wire, trailing): (DecodedPendingAcknowledgmentsWire, &[u8]) =
+        postcard::take_from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+    if !trailing.is_empty() || wire.version != PENDING_ACKNOWLEDGMENTS_WIRE_VERSION {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "pending-acknowledgment payload version is unsupported".into(),
+        });
+    }
+    if wire.pending.len() > MAX_PENDING_ACKNOWLEDGMENTS {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "pending-acknowledgment count exceeds limit: {}",
+                wire.pending.len()
+            ),
+        });
+    }
+    if wire.acknowledgment_digests.len() > MAX_ACKNOWLEDGMENT_DIGESTS {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "acknowledgment digest count exceeds limit: {}",
+                wire.acknowledgment_digests.len()
+            ),
+        });
+    }
+
+    let mut pending = BTreeMap::new();
+    for entry in wire.pending {
+        let message = Message::from_bytes(&entry.encoded_message).map_err(|e| {
+            ProtocolStateError::BlobDecode {
+                address: address.clone(),
+                reason: format!("pending acknowledgment message failed to decode: {e}"),
+            }
+        })?;
+        if message.id.as_bytes() != &entry.message_id {
+            return Err(ProtocolStateError::BlobDecode {
+                address: address.clone(),
+                reason: "pending acknowledgment message ID mismatch".into(),
+            });
+        }
+        if message.payload_kind != PayloadKind::EncryptedText {
+            return Err(ProtocolStateError::BlobDecode {
+                address: address.clone(),
+                reason: "pending acknowledgment message is not encrypted text".into(),
+            });
+        }
+        let replaced = pending.insert(
+            entry.message_id,
+            LoadedPendingAcknowledgment {
+                message,
+                encoded_message: entry.encoded_message,
+                first_sent_millis: entry.first_sent_millis,
+                last_retry_millis: entry.last_retry_millis,
+            },
+        );
+        if replaced.is_some() {
+            return Err(ProtocolStateError::BlobDecode {
+                address: address.clone(),
+                reason: "pending acknowledgment message ID is duplicated".into(),
+            });
+        }
+    }
+    Ok(LoadedPendingAcknowledgments {
+        pending,
+        acknowledgment_digests: wire.acknowledgment_digests,
+    })
+}
+
 fn deduplication_digest(
     digest_key: &[u8; DEDUPLICATION_KEY_LEN],
     encoded_message: &[u8],
@@ -1135,6 +1687,63 @@ fn record_deduplication_digest(
         state.digests.remove(0);
     }
     state.digests.push(digest);
+}
+
+fn record_pending_acknowledgment(
+    address: &ProtocolStateAddress,
+    state: &mut LoadedPendingAcknowledgments,
+    message: &Message,
+) -> Result<(), ProtocolStateError> {
+    let message_id = *message.id.as_bytes();
+    if !state.pending.contains_key(&message_id)
+        && state.pending.len() == MAX_PENDING_ACKNOWLEDGMENTS
+    {
+        return Err(ProtocolStateError::InvalidStateBinding {
+            address: address.clone(),
+            reason: "pending-acknowledgment count reached limit".into(),
+        });
+    }
+    let encoded_message = message
+        .to_bytes()
+        .map_err(ProtocolStateError::MessageEncode)?;
+    state.pending.insert(
+        message_id,
+        LoadedPendingAcknowledgment {
+            message: copy_message(message),
+            encoded_message,
+            first_sent_millis: message.timestamp_millis,
+            last_retry_millis: None,
+        },
+    );
+    Ok(())
+}
+
+fn acknowledgment_digest(encoded_message: &[u8]) -> [u8; ACKNOWLEDGMENT_DIGEST_LEN] {
+    let hash = blake3::hash(encoded_message);
+    let mut digest = [0u8; ACKNOWLEDGMENT_DIGEST_LEN];
+    digest.copy_from_slice(&hash.as_bytes()[..ACKNOWLEDGMENT_DIGEST_LEN]);
+    digest
+}
+
+fn contains_acknowledgment_digest(
+    digests: &[[u8; ACKNOWLEDGMENT_DIGEST_LEN]],
+    digest: &[u8; ACKNOWLEDGMENT_DIGEST_LEN],
+) -> bool {
+    let mut found = Choice::from(0);
+    for candidate in digests {
+        found |= candidate.ct_eq(digest);
+    }
+    bool::from(found)
+}
+
+fn record_acknowledgment_digest(
+    state: &mut LoadedPendingAcknowledgments,
+    digest: [u8; ACKNOWLEDGMENT_DIGEST_LEN],
+) {
+    if state.acknowledgment_digests.len() == MAX_ACKNOWLEDGMENT_DIGESTS {
+        state.acknowledgment_digests.remove(0);
+    }
+    state.acknowledgment_digests.push(digest);
 }
 
 fn encode_ratcheted_payload(header: &Header, ciphertext: &[u8]) -> Vec<u8> {
@@ -1263,6 +1872,69 @@ fn decode_sealed_sender_envelope(
     })
 }
 
+fn encrypt_acknowledgment(
+    state: &mut RatchetState,
+    acknowledgment: &OutboundAcknowledgment<'_>,
+    acknowledged_message_id: MessageId,
+) -> Result<Message, ProtocolStateError> {
+    let plaintext = encode_acknowledgment_plaintext(acknowledged_message_id)?;
+    let sealed =
+        encode_sealed_sender_envelope(acknowledgment.sender_identity, plaintext.as_slice())?;
+    let associated_data = message_associated_data(
+        acknowledgment.id,
+        &acknowledgment.recipient_public_key,
+        acknowledgment.timestamp_millis,
+        PayloadKind::Acknowledgment,
+    );
+    let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
+    let message = Message {
+        id: acknowledgment.id,
+        recipient_public_key: acknowledgment.recipient_public_key,
+        timestamp_millis: acknowledgment.timestamp_millis,
+        payload_kind: PayloadKind::Acknowledgment,
+        payload: encode_ratcheted_payload(&header, &ciphertext),
+    };
+    message
+        .to_bytes()
+        .map_err(ProtocolStateError::MessageEncode)?;
+    Ok(message)
+}
+
+fn encode_acknowledgment_plaintext(
+    acknowledged_message_id: MessageId,
+) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
+    Ok(Zeroizing::new(
+        postcard::to_stdvec(&AcknowledgmentPlaintextWire {
+            version: ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION,
+            acknowledged_message_id: *acknowledged_message_id.as_bytes(),
+        })
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "acknowledgment plaintext failed to encode".into(),
+        })?,
+    ))
+}
+
+fn decode_acknowledgment_plaintext(bytes: &[u8]) -> Result<MessageId, ProtocolStateError> {
+    let (wire, trailing): (DecodedAcknowledgmentPlaintextWire, &[u8]) =
+        postcard::take_from_bytes(bytes).map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "acknowledgment plaintext failed to decode".into(),
+        })?;
+    if !trailing.is_empty() {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: "acknowledgment plaintext has trailing bytes".into(),
+        });
+    }
+    if wire.version != ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: format!(
+                "unsupported acknowledgment plaintext version: {}",
+                wire.version
+            ),
+        });
+    }
+    Ok(MessageId::from_bytes(wire.acknowledged_message_id))
+}
+
 fn validate_sender_identity(
     sender_identity: &SenderIdentityMaterial,
 ) -> Result<(), ProtocolStateError> {
@@ -1307,6 +1979,16 @@ fn validate_sealed_sender_content_len(
 
 fn sender_identity_key_matches(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
     expected.ct_eq(actual).into()
+}
+
+fn copy_message(message: &Message) -> Message {
+    Message {
+        id: message.id,
+        recipient_public_key: message.recipient_public_key,
+        timestamp_millis: message.timestamp_millis,
+        payload_kind: message.payload_kind,
+        payload: message.payload.clone(),
+    }
 }
 
 fn message_associated_data(

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 const MESSAGE_WIRE_VERSION: u8 = 1;
 const MESSAGE_WIRE_MAGIC: [u8; 4] = *b"AMSG";
-const MAX_ENCODED_MESSAGE_LEN: usize = MAX_MESSAGE_PAYLOAD_LEN + 128;
 pub(crate) const MAX_MESSAGE_PAYLOAD_LEN: usize = 64 * 1024;
+pub(crate) const MAX_ENCODED_MESSAGE_LEN: usize = MAX_MESSAGE_PAYLOAD_LEN + 128;
 const PUBLIC_KEY_LEN: usize = 32;
 
 /// The UUID-shaped identifier for a [`Message`].

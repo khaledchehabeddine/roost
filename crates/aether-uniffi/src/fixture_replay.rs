@@ -2,9 +2,9 @@
 
 use crate::error::AetherError;
 use aether_core::{
-    InboundEncryptedMessage, InboundMessageOutcome, Message, PayloadKind, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    InboundEncryptedMessage, InboundMessageOutcome, Message, MessageId, OutboundAcknowledgment,
+    PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     HandshakeEnvelope, InitialPlaintext, PreKeyBundle, RatchetState, accept,
@@ -455,6 +455,7 @@ fn replay_sealed_sender_session_fixture(
     )?;
 
     let sender_identity = sender_identity_from_fixture(&fixture.post_decryption)?;
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let pre_auth_hidden = pre_auth_sender_material_hidden(&encoded, &sender_identity);
     let mut recipient_snapshot =
         snapshot_from_blob_fixture(blob_file, &fixture.recipient_state_fixture, key)?;
@@ -469,7 +470,12 @@ fn replay_sealed_sender_session_fixture(
             .decrypt_message(
                 &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
                 &recipient_snapshot,
-                inbound(key.clone(), deduplication_key.clone(), &message),
+                inbound(
+                    key.clone(),
+                    deduplication_key.clone(),
+                    &message,
+                    &acknowledgment_sender_identity,
+                ),
             )
             .map_err(|e| {
                 replay_failure(format!(
@@ -484,6 +490,12 @@ fn replay_sealed_sender_session_fixture(
         &decrypted.sender_identity,
         &fixture.plaintext_hex,
         &fixture.post_decryption,
+        &fixture.name,
+    )?;
+    assert_acknowledgment_artifact(
+        &decrypted.acknowledgment,
+        &message,
+        &acknowledgment_sender_identity,
         &fixture.name,
     )?;
     assert_sender_state_fixture_matches(blob_file, &fixture.sender_state_fixture)?;
@@ -613,6 +625,13 @@ fn replay_protocol_state_blob_fixture(
                 &mut ChaCha20Rng::from_seed(DEDUPLICATION_REPLAY_RNG_SEED),
                 key,
             )
+        }
+        "pending_acknowledgments_session" => {
+            ensure(
+                kind == ProtocolStateKind::PendingAcknowledgments,
+                "pending acknowledgment fixture kind mismatch",
+            )?;
+            ProtocolStateEngine::new().initialize_pending_acknowledgments(key)
         }
         _ => {
             return Err(invalid_fixture(format!(
@@ -816,11 +835,30 @@ fn inbound<'a>(
     session_key: ProtocolStateKey,
     deduplication_key: ProtocolStateKey,
     message: &'a Message,
+    acknowledgment_sender_identity: &'a SenderIdentityMaterial,
 ) -> InboundEncryptedMessage<'a> {
     InboundEncryptedMessage {
         session_key,
         deduplication_key,
         message,
+        acknowledgment: acknowledgment(acknowledgment_sender_identity),
+    }
+}
+
+fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
+    SenderIdentityMaterial {
+        identity_key: [0xb1; 32],
+        certificate: vec![0xb2, 0xb3, 0xb4],
+        signature: vec![0xb5; 64],
+    }
+}
+
+fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
+    OutboundAcknowledgment {
+        id: MessageId::from_bytes([0xee; 16]),
+        sender_identity,
+        recipient_public_key: [0xb6; 32],
+        timestamp_millis: 1_700_000_100_000,
     }
 }
 
@@ -828,7 +866,7 @@ fn accepted(
     outcome: InboundMessageOutcome,
 ) -> Result<aether_core::InboundMessageResult, AetherError> {
     match outcome {
-        InboundMessageOutcome::Accepted(result) => Ok(result),
+        InboundMessageOutcome::Accepted(result) => Ok(*result),
         InboundMessageOutcome::Duplicate => {
             Err(replay_failure("sealed session fixture was duplicate"))
         }
@@ -898,6 +936,39 @@ fn pre_auth_sender_material_hidden(
         certificate: !contains_bytes(encoded, &sender_identity.certificate),
         signature: !contains_bytes(encoded, &sender_identity.signature),
     }
+}
+
+fn assert_acknowledgment_artifact(
+    acknowledgment: &Message,
+    acknowledged_message: &Message,
+    sender_identity: &SenderIdentityMaterial,
+    name: &str,
+) -> Result<(), AetherError> {
+    ensure(
+        acknowledgment.payload_kind == PayloadKind::Acknowledgment,
+        format!("sealed session fixture {name} acknowledgment kind mismatch"),
+    )?;
+    let encoded = acknowledgment.to_bytes().map_err(|e| {
+        replay_failure(format!(
+            "sealed session fixture {name} acknowledgment failed to encode: {e}"
+        ))
+    })?;
+    ensure(
+        !contains_bytes(&encoded, acknowledged_message.id.as_bytes()),
+        format!("sealed session fixture {name} exposed acknowledged message id"),
+    )?;
+    ensure(
+        !contains_bytes(&encoded, &sender_identity.identity_key),
+        format!("sealed session fixture {name} exposed acknowledgment sender identity"),
+    )?;
+    ensure(
+        !contains_bytes(&encoded, &sender_identity.certificate),
+        format!("sealed session fixture {name} exposed acknowledgment sender certificate"),
+    )?;
+    ensure(
+        !contains_bytes(&encoded, &sender_identity.signature),
+        format!("sealed session fixture {name} exposed acknowledgment sender signature"),
+    )
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1080,11 +1151,17 @@ fn session_tamper_rejects_without_sender(
         "deduplication_set_identity",
         deduplication_key,
     )?;
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     Ok(ProtocolStateEngine::new()
         .decrypt_message(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
             &snapshot,
-            inbound(key.clone(), deduplication_key.clone(), &tampered),
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &tampered,
+                &acknowledgment_sender_identity,
+            ),
         )
         .is_err())
 }
@@ -1259,7 +1336,7 @@ mod tests {
         assert_eq!(report.message_wire_cases.len(), 4);
         assert_eq!(report.sealed_sender_session_cases.len(), 1);
         assert_eq!(report.initial_handshake_cases.len(), 1);
-        assert_eq!(report.protocol_state_blob_cases.len(), 3);
+        assert_eq!(report.protocol_state_blob_cases.len(), 4);
         assert!(report.unsupported_message_version_rejected);
         assert!(report.malformed_message_rejected);
         assert!(report.old_sender_visible_message_rejected);

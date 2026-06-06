@@ -42,6 +42,8 @@ struct Fixture {
 struct DecodedFixture {
     skipped_key_count: Option<usize>,
     digest_count: Option<usize>,
+    pending_count: Option<usize>,
+    acknowledgment_digest_count: Option<usize>,
     capacity: Option<usize>,
 }
 
@@ -123,6 +125,10 @@ fn deduplication_address(key: ProtocolStateKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::DeduplicationSet, key)
 }
 
+fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, key)
+}
+
 fn outbound<'a>(
     plaintext: &'a [u8],
     sender_identity: &'a SenderIdentityMaterial,
@@ -174,9 +180,15 @@ fn current_version_fixture_matches_decoded_state_expectations() {
 
     let mut fixture_snapshot = ProtocolStateSnapshot::new();
     fixture_snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+    insert_pending_acknowledgment_fixture(&mut fixture_snapshot, &fixture_file, key.clone());
 
     let mut expected_snapshot = ProtocolStateSnapshot::new();
     expected_snapshot.apply(expected);
+    expected_snapshot.apply(
+        engine
+            .initialize_pending_acknowledgments(key.clone())
+            .unwrap(),
+    );
     let sender_identity = sender_identity();
     let fixture_message = engine
         .encrypt_message(
@@ -265,6 +277,52 @@ fn deduplication_set_fixture_matches_decoded_state_expectations() {
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
     assert!(snapshot.get(&address).is_some());
+}
+
+#[test]
+fn pending_acknowledgments_fixture_matches_decoded_state_expectations() {
+    let fixture_file = fixture_file();
+    let fixture = &fixture_file.fixtures[3];
+    let engine = ProtocolStateEngine::new();
+    let key = session_key();
+    let address = pending_acknowledgment_address(key.clone());
+    let current = hex::decode(&fixture.current_encoded_hex).unwrap();
+
+    assert_eq!(fixture.name, "pending_acknowledgments_session");
+    assert_eq!(fixture.kind, "pending_acknowledgments");
+    assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
+    assert_eq!(current[..2], [1, 0]);
+    assert_eq!(fixture.decoded.pending_count, Some(0));
+    assert_eq!(fixture.decoded.acknowledgment_digest_count, Some(0));
+
+    let expected = engine
+        .initialize_pending_acknowledgments(key.clone())
+        .unwrap();
+    assert_eq!(
+        hex::encode(expected.blob().unwrap().as_bytes()),
+        fixture.current_encoded_hex,
+        "fixture pins the canonical encoded bytes for empty pending acknowledgments"
+    );
+
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+    assert!(snapshot.get(&address).is_some());
+}
+
+fn insert_pending_acknowledgment_fixture(
+    snapshot: &mut ProtocolStateSnapshot,
+    fixture_file: &FixtureFile,
+    key: ProtocolStateKey,
+) {
+    let fixture = fixture_file
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.name == "pending_acknowledgments_session")
+        .unwrap();
+    snapshot.set(
+        pending_acknowledgment_address(key),
+        ProtocolStateBlob::from_bytes(hex::decode(&fixture.current_encoded_hex).unwrap()),
+    );
 }
 
 #[test]
