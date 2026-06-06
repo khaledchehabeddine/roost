@@ -8,6 +8,10 @@ The orchestration layer that exposes high-level entities — Sessions, Identitie
 The injected source of wall-clock time for autonomous maintenance scheduling — currently signed-pre-key rotation deciding when a stored key is stale. `SystemClock` in production; a virtual clock in tests makes rotation reproducible.
 Avoid: timer, time source
 
+**Current State Snapshot** (one per Event Stream query):
+A self-contained public view of the producer's current state, tagged with the last Event ID reflected by that view. Lagged Observers use it to replace their local view, then resume after the tagged Event ID without replaying already-reflected Events.
+Avoid: cache, checkpoint
+
 **Device** (exactly one per Identity):
 The app install that holds the private key material for an Identity. A new Device starts a new Identity unless the user restores an Identity backup onto it.
 Avoid: client, installation, instance
@@ -20,6 +24,18 @@ Avoid: prekey, ephemeral key
 The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup creates a new Discovery Key at Epoch 0, so use the signed `created_at` timestamp to compare freshness across restored lineages.
 Avoid: window, generation
 
+**Event** (many per Event Stream):
+An immutable public value describing one committed state change. Each Event carries the complete public snapshot of what changed for its producer; future trust-change Events wait until trust state exists.
+Avoid: notification, callback
+
+**Event ID** (one per Event):
+The monotonic identifier assigned when an Event is committed to an Event Stream. Event ID 0 is reserved for the initial Current State Snapshot; emitted Events start at 1 and form one total order per stream.
+Avoid: sequence number, offset
+
+**Event Stream** (one per library instance state surface):
+The in-process, per-library-instance feed of committed public state changes. It serves Observers in one total order, but it is not a cross-instance delivery channel; changes from another library instance arrive through shared Protocol State Blobs.
+Avoid: bus, broker, transport
+
 **Identity** (exactly one Device):
 A long-lived public-key persona held by a single Device, anchored by a permanent Identity Key and a rotatable Discovery Key. Identifies a participant across Sessions.
 Avoid: user, account, profile
@@ -28,6 +44,14 @@ Avoid: user, account, profile
 The permanent keypair — an Ed25519 signing key plus X25519 key-agreement key — that anchors an Identity. Safety numbers and sender certificates bind to it and its Ed25519 key signs the Discovery Key; it never rotates and takes no part in the X3DH key agreement.
 Avoid: master key, root key
 
+**Lag Signal** (one per Observer overrun):
+An explicit Event Stream item reporting how many Events an Observer missed after its bounded buffer overflowed. Producers do not wait indefinitely for slow Observers; the Observer must recover through a Current State Snapshot.
+Avoid: drop, overflow
+
+**Library Instance** (one in-process Core object graph):
+A live Core object graph in one process, such as one Event Stream and its producers. It is not a Device and does not define durable ownership; durable cross-instance coordination goes through the consumer-held Protocol State Blobs.
+Avoid: Device, client
+
 **Message** (many per Session):
 A single encoded packet exchanged within a Session, addressed by `MessageID`. A Message carries only transport-visible routing metadata and opaque payload bytes; sender identity material belongs inside a Sealed Sender Envelope, not in Message fields.
 Avoid: payload, packet
@@ -35,6 +59,14 @@ Avoid: payload, packet
 **MessageID** (one per Message):
 The UUID-shaped 16-byte identifier that addresses one Message within a Session.
 Avoid: uuid, packet id
+
+**Observer** (many per Event Stream):
+A subscriber with its own bounded Event buffer and Observer Cursor. New Observers receive only Events committed after subscription.
+Avoid: listener, subscriber
+
+**Observer Cursor** (one per Observer):
+The last Event ID reflected by that Observer. It advances when the Observer consumes an Event or resumes after a Current State Snapshot.
+Avoid: bookmark, token
 
 **Protocol State Blob** (many per Identity or Session):
 An opaque byte value produced by Core and committed by the consumer's durable store. Core may load

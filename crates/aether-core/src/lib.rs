@@ -32,6 +32,7 @@
 
 mod clock;
 mod discovery_key;
+mod events;
 mod identity;
 mod key_store;
 mod message;
@@ -42,6 +43,10 @@ mod storage;
 
 pub use aether_crypto::SenderIdentityMaterial;
 pub use discovery_key::DiscoveryKeyError;
+pub use events::{
+    DEFAULT_OBSERVER_CAPACITY, EventEnvelope, EventId, EventObserver, EventStream,
+    EventStreamError, EventStreamItem, EventStreamSnapshot, MAX_OBSERVER_CAPACITY,
+};
 pub use identity::{Identity, IdentityError};
 pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use message::{Message, MessageError, MessageId, PayloadKind};
