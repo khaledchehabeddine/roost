@@ -22,6 +22,16 @@
       "decoded": {
         "skipped_key_count": 0
       }
+    },
+    {
+      "name": "deduplication_set_identity",
+      "kind": "deduplication_set",
+      "key_hex": "dddddddddddddddddddddddddddddddd",
+      "current_encoded_hex": "010001800873a448384bab47d419f527112f794427e10a2bc0c60421c44c1cd249a048609200",
+      "decoded": {
+        "digest_count": 0,
+        "capacity": 1024
+      }
     }
   ]
 }

@@ -52,9 +52,11 @@ pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
-    InboundMessageResult, OutboundMessageResult, OutboundPlaintext, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate, SessionId,
+    DEFAULT_DEDUPLICATION_CAPACITY, InboundEncryptedMessage, InboundMessageOutcome,
+    InboundMessageResult, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
+    OutboundMessageResult, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, ProtocolStateUpdate, SessionId,
 };
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};

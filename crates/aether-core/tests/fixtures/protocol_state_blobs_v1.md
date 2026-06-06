@@ -1,12 +1,19 @@
 # Protocol State Blob v1 Fixtures
 
-These fixtures pin the Core-owned Protocol State Blob envelope for ratchet/session state. Each JSON fixture records the Blob version, Protocol State Kind, Protocol State Key, decoded expectations, and canonical encoded bytes.
+These fixtures pin the Core-owned Protocol State Blob envelope for ratchet/session and
+deduplication-set state. Each JSON fixture records the Blob version, Protocol State Kind, Protocol
+State Key, decoded expectations, and canonical encoded bytes.
 
 Fixture bytes are deterministic test-only material generated from a fixed RNG seed. They have no production origin.
 
 Together with the Message wire fixtures, these blobs lock the sealed-sender session shape: sender identity material stays inside encrypted payloads, while blobs remain opaque consumer storage values.
 
-The current ratchet/session body wraps Double Ratchet bytes and an optional expected peer sender identity key. The unbound fixture leaves that binding empty because it pins outbound state; the bound fixture pins key-only peer identity storage.
+The current ratchet/session body wraps Double Ratchet bytes and an optional expected peer sender
+identity key. The unbound fixture leaves that binding empty because it pins outbound state; the
+bound fixture pins key-only peer identity storage.
+
+The current deduplication-set body wraps the configured capacity, the per-Identity keyed BLAKE3
+secret, and the ordered digest window. The fixture pins an initialized empty window.
 
 Supported version:
 

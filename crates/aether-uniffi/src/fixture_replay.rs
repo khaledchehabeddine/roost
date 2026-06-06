@@ -2,9 +2,9 @@
 
 use crate::error::AetherError;
 use aether_core::{
-    Message, PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    SenderIdentityMaterial, SessionId,
+    InboundEncryptedMessage, InboundMessageOutcome, Message, PayloadKind, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     HandshakeEnvelope, InitialPlaintext, PreKeyBundle, RatchetState, accept,
@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 const CREATED_AT: u64 = 1_700_000_000;
 const SESSION_REPLAY_RNG_SEED: [u8; 32] = [11u8; 32];
+const DEDUPLICATION_REPLAY_RNG_SEED: [u8; 32] = [0x44; 32];
 const OLD_SENDER_VISIBLE_MESSAGE_HEX: &str = "010000000000000000000000000000000120121212121212121212121212121212121212121212121212121212121212121220525252525252525252525252525252525252525252525252525252525252525281d095ffbc3100059091929394";
 
 /// Transport-visible fields decoded from a Message fixture.
@@ -339,11 +340,14 @@ pub fn replay_sealed_sender_session_fixtures() -> Result<Vec<SealedSenderReplayC
         "session message fixture key",
     )?)
     .map_err(|e| invalid_fixture(format!("invalid session fixture key: {e}")))?;
+    let deduplication_key = deduplication_key()?;
 
     session_file
         .fixtures
         .iter()
-        .map(|fixture| replay_sealed_sender_session_fixture(fixture, &blob_file, &key))
+        .map(|fixture| {
+            replay_sealed_sender_session_fixture(fixture, &blob_file, &key, &deduplication_key)
+        })
         .collect()
 }
 
@@ -421,6 +425,7 @@ fn replay_sealed_sender_session_fixture(
     fixture: &SessionMessageFixture,
     blob_file: &BlobFixtureFile,
     key: &ProtocolStateKey,
+    deduplication_key: &ProtocolStateKey,
 ) -> Result<SealedSenderReplayCase, AetherError> {
     let encoded = decode_hex(&fixture.encoded_hex, &fixture.name)?;
     let message = Message::from_bytes(&encoded).map_err(|e| {
@@ -453,19 +458,26 @@ fn replay_sealed_sender_session_fixture(
     let pre_auth_hidden = pre_auth_sender_material_hidden(&encoded, &sender_identity);
     let mut recipient_snapshot =
         snapshot_from_blob_fixture(blob_file, &fixture.recipient_state_fixture, key)?;
-    let decrypted = ProtocolStateEngine::new()
-        .decrypt_message(
-            &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
-            &recipient_snapshot,
-            key.clone(),
-            &message,
-        )
-        .map_err(|e| {
-            replay_failure(format!(
-                "sealed session fixture {} failed to decrypt: {e}",
-                fixture.name
-            ))
-        })?;
+    insert_blob_fixture(
+        &mut recipient_snapshot,
+        blob_file,
+        "deduplication_set_identity",
+        deduplication_key,
+    )?;
+    let decrypted = accepted(
+        ProtocolStateEngine::new()
+            .decrypt_message(
+                &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
+                &recipient_snapshot,
+                inbound(key.clone(), deduplication_key.clone(), &message),
+            )
+            .map_err(|e| {
+                replay_failure(format!(
+                    "sealed session fixture {} failed to decrypt: {e}",
+                    fixture.name
+                ))
+            })?,
+    )?;
     recipient_snapshot.apply_all(decrypted.state_updates);
     assert_decrypted_sender(
         decrypted.plaintext.as_slice(),
@@ -479,6 +491,7 @@ fn replay_sealed_sender_session_fixture(
         blob_file,
         &fixture.recipient_state_fixture,
         key,
+        deduplication_key,
         &message,
     )?;
 
@@ -561,10 +574,7 @@ fn replay_protocol_state_blob_fixture(
 ) -> Result<BlobReplayCase, AetherError> {
     let key = ProtocolStateKey::from_bytes(decode_hex(&fixture.key_hex, &fixture.name)?)
         .map_err(|e| invalid_fixture(format!("invalid blob fixture key: {e}")))?;
-    ensure(
-        protocol_state_kind(&fixture.kind)? == ProtocolStateKind::RatchetSession,
-        format!("unsupported blob fixture kind: {}", fixture.kind),
-    )?;
+    let kind = protocol_state_kind(&fixture.kind)?;
     let encoded = decode_hex(&fixture.current_encoded_hex, &fixture.name)?;
     let major = *encoded
         .first()
@@ -577,10 +587,33 @@ fn replay_protocol_state_blob_fixture(
     })?;
     let update = match fixture.name.as_str() {
         "ratchet_session_alice" => {
+            ensure(
+                kind == ProtocolStateKind::RatchetSession,
+                "ratchet fixture kind mismatch",
+            )?;
             ProtocolStateEngine::new().set_session_state(key, &setup.alice_state)
         }
-        "ratchet_session_bob_bound" => ProtocolStateEngine::new()
-            .set_session_state_with_peer_identity(key, &setup.bob_state, sender_identity),
+        "ratchet_session_bob_bound" => {
+            ensure(
+                kind == ProtocolStateKind::RatchetSession,
+                "ratchet fixture kind mismatch",
+            )?;
+            ProtocolStateEngine::new().set_session_state_with_peer_identity(
+                key,
+                &setup.bob_state,
+                sender_identity,
+            )
+        }
+        "deduplication_set_identity" => {
+            ensure(
+                kind == ProtocolStateKind::DeduplicationSet,
+                "deduplication fixture kind mismatch",
+            )?;
+            ProtocolStateEngine::new().initialize_deduplication_set(
+                &mut ChaCha20Rng::from_seed(DEDUPLICATION_REPLAY_RNG_SEED),
+                key,
+            )
+        }
         _ => {
             return Err(invalid_fixture(format!(
                 "unknown blob fixture: {}",
@@ -751,17 +784,55 @@ fn snapshot_from_blob_fixture(
     name: &str,
     key: &ProtocolStateKey,
 ) -> Result<ProtocolStateSnapshot, AetherError> {
+    let mut snapshot = ProtocolStateSnapshot::new();
+    insert_blob_fixture(&mut snapshot, blob_file, name, key)?;
+    Ok(snapshot)
+}
+
+fn insert_blob_fixture(
+    snapshot: &mut ProtocolStateSnapshot,
+    blob_file: &BlobFixtureFile,
+    name: &str,
+    key: &ProtocolStateKey,
+) -> Result<(), AetherError> {
     let fixture = blob_file
         .fixtures
         .iter()
         .find(|fixture| fixture.name == name)
         .ok_or_else(|| invalid_fixture(format!("missing blob fixture: {name}")))?;
-    let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.set(
         ProtocolStateAddress::new(protocol_state_kind(&fixture.kind)?, key.clone()),
         ProtocolStateBlob::from_bytes(decode_hex(&fixture.current_encoded_hex, name)?),
     );
-    Ok(snapshot)
+    Ok(())
+}
+
+fn deduplication_key() -> Result<ProtocolStateKey, AetherError> {
+    ProtocolStateKey::from_bytes(vec![0xdd; 16])
+        .map_err(|e| invalid_fixture(format!("invalid deduplication fixture key: {e}")))
+}
+
+fn inbound<'a>(
+    session_key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
+    message: &'a Message,
+) -> InboundEncryptedMessage<'a> {
+    InboundEncryptedMessage {
+        session_key,
+        deduplication_key,
+        message,
+    }
+}
+
+fn accepted(
+    outcome: InboundMessageOutcome,
+) -> Result<aether_core::InboundMessageResult, AetherError> {
+    match outcome {
+        InboundMessageOutcome::Accepted(result) => Ok(result),
+        InboundMessageOutcome::Duplicate => {
+            Err(replay_failure("sealed session fixture was duplicate"))
+        }
+    }
 }
 
 fn assert_sender_state_fixture_matches(
@@ -993,6 +1064,7 @@ fn session_tamper_rejects_without_sender(
     blob_file: &BlobFixtureFile,
     recipient_state_fixture: &str,
     key: &ProtocolStateKey,
+    deduplication_key: &ProtocolStateKey,
     message: &Message,
 ) -> Result<bool, AetherError> {
     let mut tampered = copy_message(message);
@@ -1001,13 +1073,18 @@ fn session_tamper_rejects_without_sender(
         .last_mut()
         .ok_or_else(|| replay_failure("sealed session fixture payload is empty"))?;
     *last ^= 0x01;
-    let snapshot = snapshot_from_blob_fixture(blob_file, recipient_state_fixture, key)?;
+    let mut snapshot = snapshot_from_blob_fixture(blob_file, recipient_state_fixture, key)?;
+    insert_blob_fixture(
+        &mut snapshot,
+        blob_file,
+        "deduplication_set_identity",
+        deduplication_key,
+    )?;
     Ok(ProtocolStateEngine::new()
         .decrypt_message(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
             &snapshot,
-            key.clone(),
-            &tampered,
+            inbound(key.clone(), deduplication_key.clone(), &tampered),
         )
         .is_err())
 }
@@ -1182,7 +1259,7 @@ mod tests {
         assert_eq!(report.message_wire_cases.len(), 4);
         assert_eq!(report.sealed_sender_session_cases.len(), 1);
         assert_eq!(report.initial_handshake_cases.len(), 1);
-        assert_eq!(report.protocol_state_blob_cases.len(), 2);
+        assert_eq!(report.protocol_state_blob_cases.len(), 3);
         assert!(report.unsupported_message_version_rejected);
         assert!(report.malformed_message_rejected);
         assert!(report.old_sender_visible_message_rejected);

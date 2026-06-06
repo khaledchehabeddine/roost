@@ -8,13 +8,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use subtle::ConstantTimeEq;
+use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const CURRENT_PROTOCOL_STATE_BLOB_MAJOR: u8 = 1;
 const CURRENT_PROTOCOL_STATE_BLOB_MINOR: u8 = 0;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 2;
 const SESSION_STATE_WIRE_VERSION: u8 = 1;
+const DEDUPLICATION_SET_WIRE_VERSION: u8 = 1;
+const DEDUPLICATION_DIGEST_LEN: usize = 16;
+const DEDUPLICATION_KEY_LEN: usize = 32;
 const RATCHET_PAYLOAD_VERSION: u8 = 1;
 const RATCHET_PAYLOAD_HEADER_LEN: usize = 1 + 32 + 4 + 4;
 const RATCHET_AEAD_TAG_LEN: usize = 16;
@@ -28,6 +31,13 @@ const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
 const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 64;
+
+/// Default number of received-message digests retained per local Identity.
+pub const DEFAULT_DEDUPLICATION_CAPACITY: usize = 1024;
+/// Minimum supported received-message deduplication capacity.
+pub const MIN_DEDUPLICATION_CAPACITY: usize = 64;
+/// Maximum supported received-message deduplication capacity.
+pub const MAX_DEDUPLICATION_CAPACITY: usize = 2048;
 
 /// The UUID-shaped identifier for a cryptographic Session.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -299,6 +309,16 @@ pub struct OutboundMessageResult {
     pub state_updates: Vec<ProtocolStateUpdate>,
 }
 
+/// An inbound encrypted Message plus the protocol-state keys needed to receive it.
+pub struct InboundEncryptedMessage<'a> {
+    /// Session-scoped key for the ratchet/session Protocol State Blob.
+    pub session_key: ProtocolStateKey,
+    /// Identity-scoped key for the deduplication-set Protocol State Blob.
+    pub deduplication_key: ProtocolStateKey,
+    /// Encrypted Message to deduplicate and decrypt.
+    pub message: &'a Message,
+}
+
 /// Inbound plaintext and all advanced protocol-state updates from one operation.
 pub struct InboundMessageResult {
     /// Decrypted plaintext bytes.
@@ -309,20 +329,76 @@ pub struct InboundMessageResult {
     pub state_updates: Vec<ProtocolStateUpdate>,
 }
 
+/// The result of receiving an inbound encrypted Message.
+pub enum InboundMessageOutcome {
+    /// A unique Message decrypted and advanced protocol state.
+    Accepted(InboundMessageResult),
+    /// The Message matched an already-accepted encrypted byte sequence.
+    Duplicate,
+}
+
 /// Stateless protocol-state operations over consumer-held blobs.
 ///
 /// Consumers must read required blobs from an atomic, durable, crash-consistent, and
 /// integrity-preserving store before each operation, then commit returned updates atomically with
 /// any produced Message. At most one library instance may mutate a given Identity's protocol
 /// state at a time.
-#[derive(Clone, Copy, Default)]
-pub struct ProtocolStateEngine;
+///
+/// Received-message deduplication is scoped to one local Identity through the
+/// [`ProtocolStateKind::DeduplicationSet`] blob. It drops byte-identical encrypted Message retries
+/// before decryption; Double Ratchet replay rejection still handles cryptographic replays after
+/// decryption starts.
+#[derive(Clone, Copy)]
+pub struct ProtocolStateEngine {
+    deduplication_capacity: usize,
+}
 
 impl ProtocolStateEngine {
     /// Creates a stateless protocol-state engine.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            deduplication_capacity: DEFAULT_DEDUPLICATION_CAPACITY,
+        }
+    }
+
+    /// Creates a stateless protocol-state engine with a received-message deduplication capacity.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::InvalidDeduplicationCapacity`] if `capacity` is outside the
+    ///   supported range.
+    pub fn with_deduplication_capacity(capacity: usize) -> Result<Self, ProtocolStateError> {
+        validate_configured_deduplication_capacity(capacity)?;
+        Ok(Self {
+            deduplication_capacity: capacity,
+        })
+    }
+
+    /// Returns an update that initializes an empty deduplication set for a local Identity.
+    ///
+    /// The consumer must commit the returned blob before receiving encrypted Messages for that
+    /// Identity and must keep using the same Protocol State Blob across library restarts.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobEncode`] if the deduplication-set blob fails to encode or
+    ///   exceeds local caps.
+    pub fn initialize_deduplication_set<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        key: ProtocolStateKey,
+    ) -> Result<ProtocolStateUpdate, ProtocolStateError> {
+        let address = deduplication_address(key);
+        let mut digest_key = Zeroizing::new([0u8; DEDUPLICATION_KEY_LEN]);
+        rng.fill_bytes(&mut digest_key[..]);
+        let state = LoadedDeduplicationSet {
+            capacity: self.deduplication_capacity,
+            digest_key,
+            digests: Vec::new(),
+        };
+        Ok(ProtocolStateUpdate::set(
+            address.clone(),
+            encode_deduplication_set(&address, &state)?,
+        ))
     }
 
     /// Returns an update that stores the supplied Ratchet session state without peer sender
@@ -491,28 +567,42 @@ impl ProtocolStateEngine {
         })
     }
 
-    /// Decrypts an inbound Message using the required ratchet/session blob from `snapshot`.
+    /// Receives an inbound Message using the required deduplication and ratchet/session blobs.
     ///
     /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the advanced session state fails to encode or
-    ///   exceeds local caps.
+    /// - [`ProtocolStateError::BlobDecode`] if the deduplication-set or ratchet/session blob fails
+    ///   to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the advanced deduplication or session state fails
+    ///   to encode or exceeds local caps.
     /// - [`ProtocolStateError::Crypto`] if ratchet decryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if the Message does not contain ratcheted text,
     ///   the session is not bound to a peer sender identity key, the decrypted sender identity key
     ///   does not match the session binding, or the decrypted sealed-sender envelope is malformed,
     ///   unsupported, or oversized.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    /// - [`ProtocolStateError::MessageEncode`] if the inbound Message fails canonical encoding.
+    /// - [`ProtocolStateError::MissingRequiredState`] if a required deduplication-set or
+    ///   ratchet/session blob is absent.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if either blob version is not supported.
     pub fn decrypt_message<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
         snapshot: &ProtocolStateSnapshot,
-        key: ProtocolStateKey,
-        message: &Message,
-    ) -> Result<InboundMessageResult, ProtocolStateError> {
-        let address = ratchet_address(key);
+        inbound: InboundEncryptedMessage<'_>,
+    ) -> Result<InboundMessageOutcome, ProtocolStateError> {
+        let deduplication_address = deduplication_address(inbound.deduplication_key);
+        let mut deduplication = load_deduplication_set(snapshot, &deduplication_address)?;
+        let encoded = inbound
+            .message
+            .to_bytes()
+            .map_err(ProtocolStateError::MessageEncode)?;
+        let digest = deduplication_digest(&deduplication.digest_key, &encoded);
+        if contains_digest(&deduplication.digests, &digest) {
+            return Ok(InboundMessageOutcome::Duplicate);
+        }
+
+        let address = ratchet_address(inbound.session_key);
         let loaded = load_session_state(snapshot, &address)?;
+        let message = inbound.message;
         if message.payload_kind != PayloadKind::EncryptedText {
             return Err(ProtocolStateError::InvalidMessage {
                 reason: "message payload is not ratcheted encrypted text".into(),
@@ -551,15 +641,26 @@ impl ProtocolStateEngine {
                 reason: "sealed sender identity key does not match session".into(),
             });
         }
-        let update = ProtocolStateUpdate::set(
+        record_deduplication_digest(&mut deduplication, digest);
+        let session_update = ProtocolStateUpdate::set(
             address.clone(),
             encode_session_state(&address, &state, Some(expected_sender_identity_key))?,
         );
-        Ok(InboundMessageResult {
+        let deduplication_update = ProtocolStateUpdate::set(
+            deduplication_address.clone(),
+            encode_deduplication_set(&deduplication_address, &deduplication)?,
+        );
+        Ok(InboundMessageOutcome::Accepted(InboundMessageResult {
             plaintext: decoded.plaintext,
             sender_identity: decoded.sender_identity,
-            state_updates: vec![update],
-        })
+            state_updates: vec![session_update, deduplication_update],
+        }))
+    }
+}
+
+impl Default for ProtocolStateEngine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -588,7 +689,16 @@ pub enum ProtocolStateError {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
-    /// A produced Message failed to encode.
+    /// Received-message deduplication capacity is outside supported bounds.
+    InvalidDeduplicationCapacity {
+        /// Requested capacity.
+        capacity: usize,
+        /// Minimum supported capacity.
+        minimum: usize,
+        /// Maximum supported capacity.
+        maximum: usize,
+    },
+    /// A Message failed canonical encoding.
     MessageEncode(MessageError),
     /// A state binding operation would violate an existing protocol-state invariant.
     InvalidStateBinding {
@@ -635,6 +745,14 @@ impl fmt::Display for ProtocolStateError {
             }
             Self::Crypto(e) => write!(f, "protocol-state crypto operation failed: {e}"),
             Self::InvalidMessage { reason } => write!(f, "invalid message: {reason}"),
+            Self::InvalidDeduplicationCapacity {
+                capacity,
+                minimum,
+                maximum,
+            } => write!(
+                f,
+                "invalid deduplication capacity: {capacity} outside {minimum}..={maximum}"
+            ),
             Self::InvalidStateBinding { address, reason } => {
                 write!(f, "invalid protocol-state binding at {address}: {reason}")
             }
@@ -664,6 +782,7 @@ impl Error for ProtocolStateError {
             Self::MessageEncode(e) => Some(e),
             Self::BlobDecode { .. }
             | Self::BlobEncode { .. }
+            | Self::InvalidDeduplicationCapacity { .. }
             | Self::InvalidMessage { .. }
             | Self::InvalidStateBinding { .. }
             | Self::InvalidStateKey { .. }
@@ -681,6 +800,34 @@ impl From<aether_crypto::CryptoError> for ProtocolStateError {
 
 fn ratchet_address(key: ProtocolStateKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key)
+}
+
+fn deduplication_address(key: ProtocolStateKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(ProtocolStateKind::DeduplicationSet, key)
+}
+
+fn validate_configured_deduplication_capacity(capacity: usize) -> Result<(), ProtocolStateError> {
+    if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
+        return Err(ProtocolStateError::InvalidDeduplicationCapacity {
+            capacity,
+            minimum: MIN_DEDUPLICATION_CAPACITY,
+            maximum: MAX_DEDUPLICATION_CAPACITY,
+        });
+    }
+    Ok(())
+}
+
+fn validate_persisted_deduplication_capacity(
+    address: &ProtocolStateAddress,
+    capacity: usize,
+) -> Result<(), ProtocolStateError> {
+    if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!("deduplication-set capacity is outside supported range: {capacity}"),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -735,6 +882,29 @@ fn encode_session_state(
 struct LoadedSessionState {
     state: RatchetState,
     peer_sender_identity_key: Option<[u8; 32]>,
+}
+
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct LoadedDeduplicationSet {
+    capacity: usize,
+    digest_key: Zeroizing<[u8; DEDUPLICATION_KEY_LEN]>,
+    digests: Vec<[u8; DEDUPLICATION_DIGEST_LEN]>,
+}
+
+#[derive(Serialize)]
+struct DeduplicationSetWire<'a> {
+    version: u8,
+    capacity: u16,
+    digest_key: &'a [u8; DEDUPLICATION_KEY_LEN],
+    digests: &'a [[u8; DEDUPLICATION_DIGEST_LEN]],
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+struct DecodedDeduplicationSetWire {
+    version: u8,
+    capacity: u16,
+    digest_key: [u8; DEDUPLICATION_KEY_LEN],
+    digests: Vec<[u8; DEDUPLICATION_DIGEST_LEN]>,
 }
 
 fn load_session_state(
@@ -810,6 +980,161 @@ fn decode_session_state_payload(
         state,
         peer_sender_identity_key,
     })
+}
+
+fn encode_deduplication_set(
+    address: &ProtocolStateAddress,
+    state: &LoadedDeduplicationSet,
+) -> Result<ProtocolStateBlob, ProtocolStateError> {
+    validate_persisted_deduplication_capacity(address, state.capacity)?;
+    if state.digests.len() > state.capacity {
+        return Err(ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: format!(
+                "deduplication-set digest count exceeds capacity: {}",
+                state.digests.len()
+            ),
+        });
+    }
+    let payload = Zeroizing::new(
+        postcard::to_stdvec(&DeduplicationSetWire {
+            version: DEDUPLICATION_SET_WIRE_VERSION,
+            capacity: state.capacity as u16,
+            digest_key: &state.digest_key,
+            digests: &state.digests,
+        })
+        .map_err(|_| ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: "deduplication set failed to encode".into(),
+        })?,
+    );
+    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PROTOCOL_STATE_BLOB_LEN {
+        return Err(ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: format!(
+                "deduplication-set blob length exceeds limit: {}",
+                payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN
+            ),
+        });
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        PROTOCOL_STATE_BLOB_HEADER_LEN + payload.len(),
+    ));
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MAJOR);
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MINOR);
+    bytes.extend_from_slice(&payload);
+    Ok(ProtocolStateBlob::from_zeroizing(bytes))
+}
+
+fn load_deduplication_set(
+    snapshot: &ProtocolStateSnapshot,
+    address: &ProtocolStateAddress,
+) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
+    let blob = snapshot
+        .get(address)
+        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
+            address: address.clone(),
+        })?;
+    decode_deduplication_set(address, blob)
+}
+
+fn decode_deduplication_set(
+    address: &ProtocolStateAddress,
+    blob: &ProtocolStateBlob,
+) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
+    let bytes = blob.as_bytes();
+    if bytes.len() > MAX_PROTOCOL_STATE_BLOB_LEN {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "deduplication-set blob length exceeds limit: {}",
+                bytes.len()
+            ),
+        });
+    }
+    let (major, minor) =
+        read_blob_version(bytes).ok_or_else(|| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "deduplication-set blob header is incomplete".into(),
+        })?;
+    let payload = &bytes[PROTOCOL_STATE_BLOB_HEADER_LEN..];
+
+    if major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR && minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR {
+        return decode_deduplication_set_payload(address, payload);
+    }
+
+    Err(ProtocolStateError::UnsupportedBlobVersion {
+        address: address.clone(),
+        major,
+        minor,
+    })
+}
+
+fn decode_deduplication_set_payload(
+    address: &ProtocolStateAddress,
+    payload: &[u8],
+) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
+    let (mut wire, trailing): (DecodedDeduplicationSetWire, &[u8]) =
+        postcard::take_from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+    let digest_key = Zeroizing::new(wire.digest_key);
+    let capacity = usize::from(wire.capacity);
+    if !trailing.is_empty() || wire.version != DEDUPLICATION_SET_WIRE_VERSION {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "deduplication-set payload version is unsupported".into(),
+        });
+    }
+    validate_persisted_deduplication_capacity(address, capacity)?;
+    let digest_count = wire.digests.len();
+    if digest_count > capacity {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "deduplication-set digest count exceeds capacity: {}",
+                digest_count
+            ),
+        });
+    }
+    let digests = std::mem::take(&mut wire.digests);
+    Ok(LoadedDeduplicationSet {
+        capacity,
+        digest_key,
+        digests,
+    })
+}
+
+fn deduplication_digest(
+    digest_key: &[u8; DEDUPLICATION_KEY_LEN],
+    encoded_message: &[u8],
+) -> [u8; DEDUPLICATION_DIGEST_LEN] {
+    let hash = blake3::keyed_hash(digest_key, encoded_message);
+    let mut digest = [0u8; DEDUPLICATION_DIGEST_LEN];
+    digest.copy_from_slice(&hash.as_bytes()[..DEDUPLICATION_DIGEST_LEN]);
+    digest
+}
+
+fn contains_digest(
+    digests: &[[u8; DEDUPLICATION_DIGEST_LEN]],
+    digest: &[u8; DEDUPLICATION_DIGEST_LEN],
+) -> bool {
+    let mut found = Choice::from(0);
+    for candidate in digests {
+        found |= candidate.ct_eq(digest);
+    }
+    bool::from(found)
+}
+
+fn record_deduplication_digest(
+    state: &mut LoadedDeduplicationSet,
+    digest: [u8; DEDUPLICATION_DIGEST_LEN],
+) {
+    if state.digests.len() == state.capacity {
+        state.digests.remove(0);
+    }
+    state.digests.push(digest);
 }
 
 fn encode_ratcheted_payload(header: &Header, ciphertext: &[u8]) -> Vec<u8> {
@@ -1013,4 +1338,59 @@ fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
         write!(f, "{byte:02x}")?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
+        MIN_DEDUPLICATION_CAPACITY, contains_digest, deduplication_digest,
+        record_deduplication_digest,
+    };
+    use zeroize::Zeroizing;
+
+    #[test]
+    fn same_encrypted_bytes_under_different_deduplication_keys_have_different_digests() {
+        let encoded_message = b"encoded encrypted message";
+        let first_key = [1u8; DEDUPLICATION_KEY_LEN];
+        let second_key = [2u8; DEDUPLICATION_KEY_LEN];
+
+        let first = deduplication_digest(&first_key, encoded_message);
+        let second = deduplication_digest(&second_key, encoded_message);
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn record_deduplication_digest_evicts_oldest_digest_first() {
+        let mut state = LoadedDeduplicationSet {
+            capacity: MIN_DEDUPLICATION_CAPACITY,
+            digest_key: Zeroizing::new([7u8; DEDUPLICATION_KEY_LEN]),
+            digests: Vec::new(),
+        };
+        let oldest = [0u8; DEDUPLICATION_DIGEST_LEN];
+        record_deduplication_digest(&mut state, oldest);
+        for tag in 1..MIN_DEDUPLICATION_CAPACITY {
+            record_deduplication_digest(&mut state, [tag as u8; DEDUPLICATION_DIGEST_LEN]);
+        }
+        let newest = [0xff; DEDUPLICATION_DIGEST_LEN];
+
+        record_deduplication_digest(&mut state, newest);
+
+        assert_eq!(state.digests.len(), MIN_DEDUPLICATION_CAPACITY);
+        assert!(!contains_digest(&state.digests, &oldest));
+        assert!(contains_digest(&state.digests, &newest));
+    }
+
+    #[test]
+    fn contains_digest_reports_membership_without_short_circuit_result_changes() {
+        let first = [1u8; DEDUPLICATION_DIGEST_LEN];
+        let second = [2u8; DEDUPLICATION_DIGEST_LEN];
+        let missing = [3u8; DEDUPLICATION_DIGEST_LEN];
+        let digests = vec![first, second];
+
+        assert!(contains_digest(&digests, &first));
+        assert!(contains_digest(&digests, &second));
+        assert!(!contains_digest(&digests, &missing));
+    }
 }

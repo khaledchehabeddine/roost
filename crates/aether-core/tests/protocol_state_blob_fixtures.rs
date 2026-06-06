@@ -1,9 +1,9 @@
 //! Verifies checked-in Protocol State Blob fixtures across the public Core API.
 
 use aether_core::{
-    MessageId, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    SenderIdentityMaterial, SessionId,
+    DEFAULT_DEDUPLICATION_CAPACITY, MessageId, OutboundPlaintext, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
@@ -40,7 +40,9 @@ struct Fixture {
 
 #[derive(Deserialize)]
 struct DecodedFixture {
-    skipped_key_count: usize,
+    skipped_key_count: Option<usize>,
+    digest_count: Option<usize>,
+    capacity: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -113,6 +115,14 @@ fn session_address(key: ProtocolStateKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key)
 }
 
+fn deduplication_key() -> ProtocolStateKey {
+    ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap()
+}
+
+fn deduplication_address(key: ProtocolStateKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(ProtocolStateKind::DeduplicationSet, key)
+}
+
 fn outbound<'a>(
     plaintext: &'a [u8],
     sender_identity: &'a SenderIdentityMaterial,
@@ -151,7 +161,7 @@ fn current_version_fixture_matches_decoded_state_expectations() {
     assert_eq!(fixture.kind, "ratchet_session");
     assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
     assert_eq!(current[..2], [1, 0]);
-    assert_eq!(fixture.decoded.skipped_key_count, 0);
+    assert_eq!(fixture.decoded.skipped_key_count, Some(0));
 
     let expected = engine
         .set_session_state(key.clone(), &setup.alice_state)
@@ -202,7 +212,7 @@ fn bound_peer_identity_fixture_matches_decoded_state_expectations() {
     assert_eq!(fixture.kind, "ratchet_session");
     assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
     assert_eq!(current[..2], [1, 0]);
-    assert_eq!(fixture.decoded.skipped_key_count, 0);
+    assert_eq!(fixture.decoded.skipped_key_count, Some(0));
 
     let expected = engine
         .set_session_state_with_peer_identity(key.clone(), &setup.bob_state, &sender_identity)
@@ -222,6 +232,39 @@ fn bound_peer_identity_fixture_matches_decoded_state_expectations() {
         update.blob().unwrap().as_bytes(),
         expected.blob().unwrap().as_bytes()
     );
+}
+
+#[test]
+fn deduplication_set_fixture_matches_decoded_state_expectations() {
+    let fixture_file = fixture_file();
+    let fixture = &fixture_file.fixtures[2];
+    let engine = ProtocolStateEngine::new();
+    let key = deduplication_key();
+    let address = deduplication_address(key.clone());
+    let current = hex::decode(&fixture.current_encoded_hex).unwrap();
+
+    assert_eq!(fixture.name, "deduplication_set_identity");
+    assert_eq!(fixture.kind, "deduplication_set");
+    assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
+    assert_eq!(current[..2], [1, 0]);
+    assert_eq!(fixture.decoded.digest_count, Some(0));
+    assert_eq!(
+        fixture.decoded.capacity,
+        Some(DEFAULT_DEDUPLICATION_CAPACITY)
+    );
+
+    let expected = engine
+        .initialize_deduplication_set(&mut ChaCha20Rng::from_seed([0x44; 32]), key.clone())
+        .unwrap();
+    assert_eq!(
+        hex::encode(expected.blob().unwrap().as_bytes()),
+        fixture.current_encoded_hex,
+        "fixture pins the canonical encoded bytes for an empty deduplication set"
+    );
+
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+    assert!(snapshot.get(&address).is_some());
 }
 
 #[test]

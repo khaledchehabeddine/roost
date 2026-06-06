@@ -1,8 +1,9 @@
 //! Verifies checked-in sealed-sender session Message fixtures across the public Core API.
 
 use aether_core::{
-    Message, PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial,
+    InboundEncryptedMessage, InboundMessageOutcome, Message, PayloadKind, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, SenderIdentityMaterial,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -64,6 +65,7 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
         serde_json::from_str(include_str!("fixtures/protocol_state_blobs_v1.json")).unwrap();
     let key =
         ProtocolStateKey::from_bytes(hex::decode(&fixture_file.session_key_hex).unwrap()).unwrap();
+    let deduplication_key = deduplication_key();
 
     assert_eq!(fixture_file.fixtures.len(), 1);
     for fixture in fixture_file.fixtures {
@@ -80,14 +82,19 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
         );
         assert_sender_material_hidden(&encoded, &sender_identity);
 
-        let snapshot = snapshot(&blob_file, &fixture.recipient_state_fixture, key.clone());
+        let snapshot = snapshot(
+            &blob_file,
+            &fixture.recipient_state_fixture,
+            key.clone(),
+            deduplication_key.clone(),
+        );
         let decrypted = ProtocolStateEngine::new()
             .decrypt_message(
                 &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
                 &snapshot,
-                key.clone(),
-                &message,
+                inbound(key.clone(), deduplication_key.clone(), &message),
             )
+            .map(accepted)
             .unwrap();
         assert_eq!(
             decrypted.plaintext.as_slice(),
@@ -104,8 +111,7 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
                 .decrypt_message(
                     &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
                     &snapshot,
-                    key.clone(),
-                    &tampered,
+                    inbound(key.clone(), deduplication_key.clone(), &tampered),
                 )
                 .is_err(),
             "{} tampered ciphertext",
@@ -118,18 +124,57 @@ fn snapshot(
     blob_file: &BlobFixtureFile,
     fixture_name: &str,
     key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
 ) -> ProtocolStateSnapshot {
+    let mut snapshot = ProtocolStateSnapshot::new();
+    insert_blob(&mut snapshot, blob_file, fixture_name, key);
+    insert_blob(
+        &mut snapshot,
+        blob_file,
+        "deduplication_set_identity",
+        deduplication_key,
+    );
+    snapshot
+}
+
+fn insert_blob(
+    snapshot: &mut ProtocolStateSnapshot,
+    blob_file: &BlobFixtureFile,
+    fixture_name: &str,
+    key: ProtocolStateKey,
+) {
     let fixture = blob_file
         .fixtures
         .iter()
         .find(|fixture| fixture.name == fixture_name)
         .unwrap();
-    let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.set(
         ProtocolStateAddress::new(protocol_state_kind(&fixture.kind), key),
         ProtocolStateBlob::from_bytes(hex::decode(&fixture.current_encoded_hex).unwrap()),
     );
-    snapshot
+}
+
+fn deduplication_key() -> ProtocolStateKey {
+    ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap()
+}
+
+fn inbound<'a>(
+    session_key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
+    message: &'a Message,
+) -> InboundEncryptedMessage<'a> {
+    InboundEncryptedMessage {
+        session_key,
+        deduplication_key,
+        message,
+    }
+}
+
+fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
+    match outcome {
+        InboundMessageOutcome::Accepted(result) => result,
+        InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+    }
 }
 
 fn assert_transport(message: &Message, expected: &TransportFixture, name: &str) {
@@ -203,6 +248,7 @@ fn hex_array<const N: usize>(hex: &str) -> [u8; N] {
 fn protocol_state_kind(kind: &str) -> ProtocolStateKind {
     match kind {
         "ratchet_session" => ProtocolStateKind::RatchetSession,
+        "deduplication_set" => ProtocolStateKind::DeduplicationSet,
         _ => panic!("unknown protocol-state kind in fixture: {kind}"),
     }
 }
