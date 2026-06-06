@@ -6,7 +6,7 @@ Received encrypted Messages are deduplicated before decryption by computing BLAK
 
 The receive path checks the digest set before decryption and before any Ratchet/session-state mutation. A digest hit drops the duplicate at this layer, produces no new acknowledgment, and may only re-expose an already-pending acknowledgment for the same Message; no duplicate user-visible effect is allowed. A digest miss proceeds to normal decryption without recording the digest yet. After successful decryption and acceptance, Core records the digest in the bounded sliding window as part of the same advanced protocol-state update; failed decrypts and Ratchet replay rejections do not advance deduplication state.
 
-The deduplication set capacity is consumer-supplied, defaults to 1024 digests, has a minimum of 64 digests, has a hard maximum of 2048 digests, and rejects capacities outside that range. When recording an accepted miss would exceed capacity, eviction is oldest-first. The set is persisted as protocol state using the v0.5.0 Protocol State Blob versioning behavior, including unsupported major-version rejection before payload decode; corrupt blobs are faults rather than reset signals.
+The deduplication set capacity is consumer-supplied, defaults to 1024 digests, has a minimum of 64 digests, has a hard maximum of 2048 digests, and rejects capacities outside that range. When recording an accepted miss would exceed capacity, eviction is oldest-first. The set is persisted as protocol state using the current pre-release Protocol State Blob versioning behavior, including unsupported major-version rejection before payload decode; corrupt blobs are faults rather than reset signals.
 
 ## Replay Layers
 
