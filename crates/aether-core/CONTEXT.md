@@ -12,6 +12,16 @@ Avoid: timer, time source
 A self-contained public view of the producer's current state, tagged with the last Event ID reflected by that view. Lagged Observers use it to replace their local view, then resume after the tagged Event ID without replaying already-reflected Events.
 Avoid: cache, checkpoint
 
+**Deduplication Digest** (one per received encrypted Message):
+A keyed, truncated digest of the encoded encrypted Message bytes, computed before decryption and
+used only to detect byte-identical receive retries for one local Identity.
+Avoid: message hash, replay token
+
+**Deduplication Set** (one per local Identity):
+The bounded, ordered window of Deduplication Digests persisted as a Protocol State Blob. It is
+loaded at receive start and advanced only after a unique Message decrypts and is accepted.
+Avoid: cache, in-memory set
+
 **Device** (exactly one per Identity):
 The app install that holds the private key material for an Identity. A new Device starts a new Identity unless the user restores an Identity backup onto it.
 Avoid: client, installation, instance

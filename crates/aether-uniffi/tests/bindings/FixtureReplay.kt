@@ -12,7 +12,7 @@ fun main() {
     requireReplay(report.messageWireCases.size == 4, "message fixture count")
     requireReplay(report.sealedSenderSessionCases.size == 1, "sealed-sender session fixture count")
     requireReplay(report.initialHandshakeCases.size == 1, "initial handshake fixture count")
-    requireReplay(report.protocolStateBlobCases.size == 2, "protocol-state blob fixture count")
+    requireReplay(report.protocolStateBlobCases.size == 3, "protocol-state blob fixture count")
     requireReplay(report.unsupportedMessageVersionRejected, "unsupported message version")
     requireReplay(report.malformedMessageRejected, "malformed message")
     requireReplay(report.oldSenderVisibleMessageRejected, "old sender-visible message")

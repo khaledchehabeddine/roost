@@ -8,7 +8,7 @@ struct FixtureReplay {
         require(report.messageWireCases.count == 4, "message fixture count")
         require(report.sealedSenderSessionCases.count == 1, "sealed-sender session fixture count")
         require(report.initialHandshakeCases.count == 1, "initial handshake fixture count")
-        require(report.protocolStateBlobCases.count == 2, "protocol-state blob fixture count")
+        require(report.protocolStateBlobCases.count == 3, "protocol-state blob fixture count")
         require(report.unsupportedMessageVersionRejected, "unsupported message version")
         require(report.malformedMessageRejected, "malformed message")
         require(report.oldSenderVisibleMessageRejected, "old sender-visible message")
