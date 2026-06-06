@@ -32,6 +32,19 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - `aether-core` → `aether-crypto`
 - `aether-uniffi` → `aether-core`, `aether-crypto`
 
+## Protocol State Boundary
+
+Consumers own durable protocol-state blobs and all network IO. `aether-core` returns encrypted
+acknowledgment Messages for accepted inbound Messages; consumers durably queue those artifacts
+atomically with the returned state updates, then flush them through their transport. Outbound
+Messages remain visible through pending-acknowledgment state until a matching encrypted
+acknowledgment clears them.
+
+Retry behavior is exposed as retry instructions over the pending-acknowledgment blob. Callers pass
+a reference timestamp and retry window, then decide whether and how to retransmit returned
+Messages. Unknown and already-cleared acknowledgments are idempotent non-fatal outcomes; exact
+replayed acknowledgments are duplicates while retained in the pending-state digest window.
+
 ## Docs
 
 - [`CONTEXT_MAP.md`](CONTEXT_MAP.md) — workspace context paths and relationships

@@ -1,9 +1,9 @@
 //! Verifies checked-in sealed-sender session Message fixtures across the public Core API.
 
 use aether_core::{
-    InboundEncryptedMessage, InboundMessageOutcome, Message, PayloadKind, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey, ProtocolStateKind,
-    ProtocolStateSnapshot, SenderIdentityMaterial,
+    InboundEncryptedMessage, InboundMessageOutcome, Message, MessageId, OutboundAcknowledgment,
+    PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -72,6 +72,7 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
         let encoded = hex::decode(&fixture.encoded_hex).unwrap();
         let message = Message::from_bytes(&encoded).unwrap();
         let sender_identity = sender_identity(&fixture.post_decryption);
+        let acknowledgment_sender_identity = acknowledgment_sender_identity();
 
         assert_transport(&message, &fixture.transport_visible, &fixture.name);
         assert_eq!(
@@ -92,7 +93,12 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
             .decrypt_message(
                 &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
                 &snapshot,
-                inbound(key.clone(), deduplication_key.clone(), &message),
+                inbound(
+                    key.clone(),
+                    deduplication_key.clone(),
+                    &message,
+                    &acknowledgment_sender_identity,
+                ),
             )
             .map(accepted)
             .unwrap();
@@ -111,7 +117,12 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
                 .decrypt_message(
                     &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
                     &snapshot,
-                    inbound(key.clone(), deduplication_key.clone(), &tampered),
+                    inbound(
+                        key.clone(),
+                        deduplication_key.clone(),
+                        &tampered,
+                        &acknowledgment_sender_identity,
+                    ),
                 )
                 .is_err(),
             "{} tampered ciphertext",
@@ -162,17 +173,36 @@ fn inbound<'a>(
     session_key: ProtocolStateKey,
     deduplication_key: ProtocolStateKey,
     message: &'a Message,
+    acknowledgment_sender_identity: &'a SenderIdentityMaterial,
 ) -> InboundEncryptedMessage<'a> {
     InboundEncryptedMessage {
         session_key,
         deduplication_key,
         message,
+        acknowledgment: acknowledgment(acknowledgment_sender_identity),
+    }
+}
+
+fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
+    SenderIdentityMaterial {
+        identity_key: [0xb1; 32],
+        certificate: vec![0xb2, 0xb3, 0xb4],
+        signature: vec![0xb5; 64],
+    }
+}
+
+fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
+    OutboundAcknowledgment {
+        id: MessageId::from_bytes([0xee; 16]),
+        sender_identity,
+        recipient_public_key: [0xb6; 32],
+        timestamp_millis: 1_700_000_100_000,
     }
 }
 
 fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
     match outcome {
-        InboundMessageOutcome::Accepted(result) => result,
+        InboundMessageOutcome::Accepted(result) => *result,
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
     }
 }

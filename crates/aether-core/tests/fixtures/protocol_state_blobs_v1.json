@@ -32,6 +32,16 @@
         "digest_count": 0,
         "capacity": 1024
       }
+    },
+    {
+      "name": "pending_acknowledgments_session",
+      "kind": "pending_acknowledgments",
+      "key_hex": "09090909090909090909090909090909",
+      "current_encoded_hex": "0100010000",
+      "decoded": {
+        "pending_count": 0,
+        "acknowledgment_digest_count": 0
+      }
     }
   ]
 }

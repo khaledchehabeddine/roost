@@ -1,10 +1,11 @@
 //! Exercises the public protocol-state API over consumer-held opaque blobs.
 
 use aether_core::{
-    InboundEncryptedMessage, InboundMessageOutcome, MAX_DEDUPLICATION_CAPACITY,
-    MIN_DEDUPLICATION_CAPACITY, Message, MessageId, OutboundPlaintext, PayloadKind,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    AcknowledgmentOutcome, InboundAcknowledgmentMessage, InboundEncryptedMessage,
+    InboundMessageOutcome, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message,
+    MessageId, OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     Header, InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
@@ -83,13 +84,18 @@ fn deduplication_address(key: ProtocolStateKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::DeduplicationSet, key)
 }
 
+fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, key)
+}
+
 fn snapshot_with_state(
     engine: &ProtocolStateEngine,
     key: ProtocolStateKey,
     state: &RatchetState,
 ) -> ProtocolStateSnapshot {
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.apply(engine.set_session_state(key, state).unwrap());
+    snapshot.apply(engine.set_session_state(key.clone(), state).unwrap());
+    install_pending_acknowledgments(engine, &mut snapshot, key);
     snapshot
 }
 
@@ -106,6 +112,14 @@ fn install_deduplication_set(
     );
 }
 
+fn install_pending_acknowledgments(
+    engine: &ProtocolStateEngine,
+    snapshot: &mut ProtocolStateSnapshot,
+    key: ProtocolStateKey,
+) {
+    snapshot.apply(engine.initialize_pending_acknowledgments(key).unwrap());
+}
+
 fn snapshot_with_state_and_peer_identity(
     engine: &ProtocolStateEngine,
     key: ProtocolStateKey,
@@ -115,9 +129,10 @@ fn snapshot_with_state_and_peer_identity(
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.apply(
         engine
-            .set_session_state_with_peer_identity(key, state, peer_sender_identity)
+            .set_session_state_with_peer_identity(key.clone(), state, peer_sender_identity)
             .unwrap(),
     );
+    install_pending_acknowledgments(engine, &mut snapshot, key);
     snapshot
 }
 
@@ -156,21 +171,49 @@ fn sender_identity(tag: u8) -> SenderIdentityMaterial {
     }
 }
 
+fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
+    sender_identity(0xb1)
+}
+
+fn acknowledgment<'a>(
+    id: u8,
+    sender_identity: &'a SenderIdentityMaterial,
+) -> OutboundAcknowledgment<'a> {
+    OutboundAcknowledgment {
+        id: MessageId::from_bytes([id; 16]),
+        sender_identity,
+        recipient_public_key: [3u8; 32],
+        timestamp_millis: 1_700_000_100_000 + u64::from(id),
+    }
+}
+
 fn inbound<'a>(
     session_key: ProtocolStateKey,
     deduplication_key: ProtocolStateKey,
     message: &'a Message,
+    acknowledgment_sender_identity: &'a SenderIdentityMaterial,
 ) -> InboundEncryptedMessage<'a> {
     InboundEncryptedMessage {
         session_key,
         deduplication_key,
+        message,
+        acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
+    }
+}
+
+fn inbound_acknowledgment<'a>(
+    session_key: ProtocolStateKey,
+    message: &'a Message,
+) -> InboundAcknowledgmentMessage<'a> {
+    InboundAcknowledgmentMessage {
+        session_key,
         message,
     }
 }
 
 fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
     match outcome {
-        InboundMessageOutcome::Accepted(result) => result,
+        InboundMessageOutcome::Accepted(result) => *result,
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
     }
 }
@@ -212,7 +255,9 @@ fn outbound_message_and_advanced_state_return_together() {
     let key = key();
     let snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let address = ratchet_address(key.clone());
+    let pending_address = pending_acknowledgment_address(key.clone());
     let prior_blob = snapshot.get(&address).unwrap().as_bytes().to_vec();
+    let prior_pending_blob = snapshot.get(&pending_address).unwrap().as_bytes().to_vec();
     let sender_identity = sender_identity(1);
 
     let result = engine
@@ -224,10 +269,13 @@ fn outbound_message_and_advanced_state_return_together() {
         .unwrap();
 
     assert_eq!(result.message.payload_kind, PayloadKind::EncryptedText);
-    assert_eq!(result.state_updates.len(), 1);
+    assert_eq!(result.state_updates.len(), 2);
     assert_eq!(result.state_updates[0].address(), &address);
+    assert_eq!(result.state_updates[1].address(), &pending_address);
     let advanced_blob = result.state_updates[0].blob().unwrap().as_bytes();
     assert_ne!(advanced_blob, prior_blob.as_slice());
+    let advanced_pending_blob = result.state_updates[1].blob().unwrap().as_bytes();
+    assert_ne!(advanced_pending_blob, prior_pending_blob.as_slice());
 }
 
 #[test]
@@ -237,6 +285,7 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
@@ -272,7 +321,12 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([12u8; 32]),
             &bob_snapshot,
-            inbound(key, deduplication_key, &encrypted.message),
+            inbound(
+                key,
+                deduplication_key,
+                &encrypted.message,
+                &acknowledgment_sender_identity,
+            ),
         )
         .map(accepted)
         .unwrap();
@@ -294,12 +348,256 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
 }
 
 #[test]
+fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let alice_sender = sender_identity(0xa1);
+    let bob_sender = sender_identity(0xb1);
+    let mut alice_snapshot = snapshot_with_state_and_peer_identity(
+        &engine,
+        key.clone(),
+        &setup.alice_state,
+        &bob_sender,
+    );
+    install_pending_acknowledgments(&engine, &mut alice_snapshot, key.clone());
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &alice_sender,
+        deduplication_key.clone(),
+    );
+
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x31, b"ack me", &alice_sender),
+        )
+        .unwrap();
+    alice_snapshot.apply_all(encrypted.state_updates);
+    let pending = engine
+        .pending_acknowledgments(&alice_snapshot, key.clone())
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message.id, encrypted.message.id);
+
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x31; 32]),
+            &bob_snapshot,
+            InboundEncryptedMessage {
+                session_key: key.clone(),
+                deduplication_key: deduplication_key.clone(),
+                message: &encrypted.message,
+                acknowledgment: acknowledgment(0x41, &bob_sender),
+            },
+        )
+        .map(accepted)
+        .unwrap();
+    bob_snapshot.apply_all(decrypted.state_updates);
+
+    assert_eq!(decrypted.plaintext.as_slice(), b"ack me");
+    assert_eq!(
+        decrypted.acknowledgment.payload_kind,
+        PayloadKind::Acknowledgment
+    );
+    let encoded_ack = decrypted.acknowledgment.to_bytes().unwrap();
+    assert!(
+        !encoded_ack
+            .windows(encrypted.message.id.as_bytes().len())
+            .any(|window| window == encrypted.message.id.as_bytes())
+    );
+
+    let cleared = engine
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x41; 32]),
+            &alice_snapshot,
+            inbound_acknowledgment(key.clone(), &decrypted.acknowledgment),
+        )
+        .unwrap();
+    let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
+        panic!("acknowledgment did not clear pending state");
+    };
+    assert_eq!(cleared.acknowledged_message_id, encrypted.message.id);
+    assert_eq!(
+        cleared.sender_identity.identity_key,
+        bob_sender.identity_key
+    );
+    alice_snapshot.apply_all(cleared.state_updates);
+
+    assert!(
+        engine
+            .pending_acknowledgments(&alice_snapshot, key.clone())
+            .unwrap()
+            .is_empty()
+    );
+    let duplicate = engine
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x42; 32]),
+            &alice_snapshot,
+            inbound_acknowledgment(key, &decrypted.acknowledgment),
+        )
+        .unwrap();
+    assert!(matches!(duplicate, AcknowledgmentOutcome::Duplicate));
+}
+
+#[test]
+fn unknown_acknowledgment_is_non_fatal_miss() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let alice_sender = sender_identity(0xa1);
+    let bob_sender = sender_identity(0xb1);
+    let mut alice_snapshot = snapshot_with_state_and_peer_identity(
+        &engine,
+        key.clone(),
+        &setup.alice_state,
+        &bob_sender,
+    );
+    install_pending_acknowledgments(&engine, &mut alice_snapshot, key.clone());
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &alice_sender,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x32, b"ack missing pending", &alice_sender),
+        )
+        .unwrap();
+    for update in encrypted.state_updates {
+        if update.address().kind() == ProtocolStateKind::RatchetSession {
+            alice_snapshot.apply(update);
+        }
+    }
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x32; 32]),
+            &bob_snapshot,
+            InboundEncryptedMessage {
+                session_key: key.clone(),
+                deduplication_key,
+                message: &encrypted.message,
+                acknowledgment: acknowledgment(0x42, &bob_sender),
+            },
+        )
+        .map(accepted)
+        .unwrap();
+
+    let miss = engine
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x43; 32]),
+            &alice_snapshot,
+            inbound_acknowledgment(key, &decrypted.acknowledgment),
+        )
+        .unwrap();
+
+    assert!(matches!(miss, AcknowledgmentOutcome::Missed { .. }));
+}
+
+#[test]
+fn retry_instructions_are_windowed_and_persisted() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let sender_identity = sender_identity(0xa1);
+    let sent_at = 1_700_000_000_200;
+    let mut snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    install_pending_acknowledgments(&engine, &mut snapshot, key.clone());
+
+    let encrypted = engine
+        .encrypt_message(
+            &snapshot,
+            key.clone(),
+            OutboundPlaintext {
+                id: MessageId::from_bytes([0x33; 16]),
+                sender_identity: &sender_identity,
+                recipient_public_key: [2u8; 32],
+                timestamp_millis: sent_at,
+                plaintext: b"retry later",
+            },
+        )
+        .unwrap();
+    snapshot.apply_all(encrypted.state_updates);
+
+    let early = engine
+        .retry_instructions(&snapshot, key.clone(), sent_at + 999, 1_000)
+        .unwrap();
+    assert!(early.instructions.is_empty());
+    assert!(early.state_updates.is_empty());
+
+    let due = engine
+        .retry_instructions(&snapshot, key.clone(), sent_at + 1_000, 1_000)
+        .unwrap();
+    assert_eq!(due.instructions.len(), 1);
+    assert_eq!(due.instructions[0].message.id, encrypted.message.id);
+    snapshot.apply_all(due.state_updates);
+
+    let repeated = ProtocolStateEngine::new()
+        .retry_instructions(&snapshot, key.clone(), sent_at + 1_000, 1_000)
+        .unwrap();
+    assert!(repeated.instructions.is_empty());
+    assert_eq!(
+        ProtocolStateEngine::new()
+            .pending_acknowledgments(&snapshot, key)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn pending_acknowledgment_state_faults_on_bad_blobs() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let address = pending_acknowledgment_address(key.clone());
+    let sender_identity = sender_identity(0xa1);
+    let mut corrupt_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    corrupt_snapshot.set(
+        address.clone(),
+        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+    );
+    assert!(matches!(
+        engine.encrypt_message(
+            &corrupt_snapshot,
+            key.clone(),
+            outbound(0x34, b"corrupt pending", &sender_identity),
+        ),
+        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+    ));
+
+    let mut unsupported_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    unsupported_snapshot.set(
+        address.clone(),
+        ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
+    );
+    assert!(matches!(
+        engine.pending_acknowledgments(&unsupported_snapshot, key),
+        Err(ProtocolStateError::UnsupportedBlobVersion {
+            address: actual,
+            major: 2,
+            minor: 0
+        }) if actual == address
+    ));
+}
+
+#[test]
 fn unique_received_message_is_accepted_recorded_and_emitted_once() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
@@ -333,7 +631,12 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([19u8; 32]),
             &bob_snapshot,
-            inbound(key.clone(), deduplication_key.clone(), &encrypted),
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         )
         .map(accepted)
         .unwrap();
@@ -356,7 +659,12 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([20u8; 32]),
             &bob_snapshot,
-            inbound(key, deduplication_key, &encrypted),
+            inbound(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         )
         .unwrap();
     assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
@@ -369,6 +677,7 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
@@ -389,7 +698,12 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([21u8; 32]),
             &bob_snapshot,
-            inbound(key.clone(), deduplication_key.clone(), &encrypted),
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         )
         .map(accepted)
         .unwrap();
@@ -404,7 +718,12 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([22u8; 32]),
             &bob_snapshot,
-            inbound(key, deduplication_key, &encrypted),
+            inbound(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         )
         .unwrap();
 
@@ -419,6 +738,7 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
     let deduplication_key = deduplication_key();
     let deduplication_address = deduplication_address(deduplication_key.clone());
     let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let encrypted = engine
         .encrypt_message(
@@ -439,7 +759,12 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
         engine.decrypt_message(
             &mut ChaCha20Rng::from_seed([23u8; 32]),
             &missing_snapshot,
-            inbound(key.clone(), deduplication_key.clone(), &encrypted),
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         ),
         Err(ProtocolStateError::MissingRequiredState { address }) if address == deduplication_address
     ));
@@ -458,7 +783,12 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
         engine.decrypt_message(
             &mut ChaCha20Rng::from_seed([24u8; 32]),
             &corrupt_snapshot,
-            inbound(key.clone(), deduplication_key.clone(), &encrypted),
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         ),
         Err(ProtocolStateError::BlobDecode { address, .. }) if address == deduplication_address
     ));
@@ -477,7 +807,7 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
         engine.decrypt_message(
             &mut ChaCha20Rng::from_seed([25u8; 32]),
             &unsupported_snapshot,
-            inbound(key, deduplication_key, &encrypted),
+            inbound(key, deduplication_key, &encrypted, &acknowledgment_sender_identity),
         ),
         Err(ProtocolStateError::UnsupportedBlobVersion {
             address,
@@ -506,6 +836,7 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
@@ -533,7 +864,12 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
             .decrypt_message(
                 &mut ChaCha20Rng::from_seed([26u8; 32]),
                 &bob_snapshot,
-                inbound(key.clone(), deduplication_key.clone(), &message),
+                inbound(
+                    key.clone(),
+                    deduplication_key.clone(),
+                    &message,
+                    &acknowledgment_sender_identity,
+                ),
             )
             .map(accepted)
             .unwrap();
@@ -543,7 +879,12 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
     let result = engine.decrypt_message(
         &mut ChaCha20Rng::from_seed([27u8; 32]),
         &bob_snapshot,
-        inbound(key, deduplication_key, &first_message.unwrap()),
+        inbound(
+            key,
+            deduplication_key,
+            &first_message.unwrap(),
+            &acknowledgment_sender_identity,
+        ),
     );
 
     assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
@@ -556,6 +897,7 @@ fn set_session_state_with_peer_identity_key_allows_key_only_install() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = ProtocolStateSnapshot::new();
     bob_snapshot.apply(
@@ -582,7 +924,12 @@ fn set_session_state_with_peer_identity_key_allows_key_only_install() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([18u8; 32]),
             &bob_snapshot,
-            inbound(key, deduplication_key, &encrypted),
+            inbound(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         )
         .map(accepted)
         .unwrap();
@@ -601,6 +948,7 @@ fn bind_session_state_peer_identity_key_allows_existing_blob_to_decrypt() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = snapshot_with_state(&engine, key.clone(), &setup.bob_state);
     let address = ratchet_address(key.clone());
@@ -631,7 +979,12 @@ fn bind_session_state_peer_identity_key_allows_existing_blob_to_decrypt() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([17u8; 32]),
             &bob_snapshot,
-            inbound(key, deduplication_key, &encrypted),
+            inbound(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+            ),
         )
         .map(accepted)
         .unwrap();
@@ -686,6 +1039,7 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
     let deduplication_key = deduplication_key();
     let expected_sender_identity = sender_identity(0xa1);
     let actual_sender_identity = sender_identity(0xb1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = ProtocolStateSnapshot::new();
     bob_snapshot.apply(
@@ -716,7 +1070,12 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
     let result = engine.decrypt_message(
         &mut ChaCha20Rng::from_seed([15u8; 32]),
         &bob_snapshot,
-        inbound(key, deduplication_key, &encrypted.message),
+        inbound(
+            key,
+            deduplication_key,
+            &encrypted.message,
+            &acknowledgment_sender_identity,
+        ),
     );
 
     assert!(matches!(
@@ -732,6 +1091,7 @@ fn tampered_ciphertext_exposes_no_sender_identity() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
@@ -754,7 +1114,12 @@ fn tampered_ciphertext_exposes_no_sender_identity() {
     let result = engine.decrypt_message(
         &mut ChaCha20Rng::from_seed([13u8; 32]),
         &bob_snapshot,
-        inbound(key, deduplication_key, &encrypted),
+        inbound(
+            key,
+            deduplication_key,
+            &encrypted,
+            &acknowledgment_sender_identity,
+        ),
     );
 
     assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
@@ -767,6 +1132,7 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
@@ -795,7 +1161,12 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
         let result = engine.decrypt_message(
             &mut ChaCha20Rng::from_seed([16u8; 32]),
             &bob_snapshot,
-            inbound(key.clone(), deduplication_key.clone(), &message),
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &message,
+                &acknowledgment_sender_identity,
+            ),
         );
         assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
     }
@@ -809,6 +1180,7 @@ fn malformed_sealed_sender_envelope_is_rejected() {
     let deduplication_key = deduplication_key();
     let mut alice_state = setup.alice_state;
     let sender_identity = sender_identity(1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
         key.clone(),
@@ -832,13 +1204,44 @@ fn malformed_sealed_sender_envelope_is_rejected() {
     let result = engine.decrypt_message(
         &mut ChaCha20Rng::from_seed([14u8; 32]),
         &bob_snapshot,
-        inbound(key, deduplication_key, &message),
+        inbound(
+            key,
+            deduplication_key,
+            &message,
+            &acknowledgment_sender_identity,
+        ),
     );
 
     assert!(matches!(
         result,
         Err(ProtocolStateError::InvalidMessage { .. })
     ));
+}
+
+#[test]
+fn large_valid_outbound_message_persists_pending_acknowledgment() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let mut snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let sender_identity = sender_identity(1);
+    let large_plaintext = vec![0u8; 65_316];
+
+    let result = engine
+        .encrypt_message(
+            &snapshot,
+            key.clone(),
+            outbound(1, &large_plaintext, &sender_identity),
+        )
+        .unwrap();
+    assert!(result.message.to_bytes().unwrap().len() > 64 * 1024);
+    let message_id = result.message.id;
+    snapshot.apply_all(result.state_updates);
+
+    let pending = engine.pending_acknowledgments(&snapshot, key).unwrap();
+
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message.id, message_id);
 }
 
 #[test]
@@ -873,6 +1276,7 @@ fn two_instances_alternate_against_latest_consumer_blobs() {
     let key = key();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let mut alice_snapshot = snapshot_with_state(&first_instance, key.clone(), &setup.alice_state);
     let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &first_instance,
@@ -906,7 +1310,12 @@ fn two_instances_alternate_against_latest_consumer_blobs() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([10u8; 32]),
             &bob_snapshot,
-            inbound(key.clone(), deduplication_key.clone(), &first_message),
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &first_message,
+                &acknowledgment_sender_identity,
+            ),
         )
         .map(accepted)
         .unwrap();
@@ -916,7 +1325,12 @@ fn two_instances_alternate_against_latest_consumer_blobs() {
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([11u8; 32]),
             &bob_snapshot,
-            inbound(key, deduplication_key, &second_message),
+            inbound(
+                key,
+                deduplication_key,
+                &second_message,
+                &acknowledgment_sender_identity,
+            ),
         )
         .map(accepted)
         .unwrap();
@@ -1041,6 +1455,7 @@ fn after_wipe_session_operation_requires_explicit_restore() {
             .set_session_state(key.clone(), &setup.alice_state)
             .unwrap(),
     );
+    install_pending_acknowledgments(&engine, &mut snapshot, key.clone());
     let result = engine
         .encrypt_message(&snapshot, key, outbound(2, b"restored", &sender_identity))
         .unwrap();

@@ -4,6 +4,11 @@ The orchestration layer that exposes high-level entities — Sessions, Identitie
 
 ## Language
 
+**Acknowledgment Artifact** (one per accepted inbound Message):
+An encrypted Message with `PayloadKind::Acknowledgment` that proves the receiver accepted a prior
+Message. Core returns it to the consumer for transport; Core never transmits it.
+Avoid: receipt, delivery callback, network ack
+
 **Clock** (one per KeyStore):
 The injected source of wall-clock time for autonomous maintenance scheduling — currently signed-pre-key rotation deciding when a stored key is stale. `SystemClock` in production; a virtual clock in tests makes rotation reproducible.
 Avoid: timer, time source
@@ -78,6 +83,12 @@ Avoid: listener, subscriber
 The last Event ID reflected by that Observer. It advances when the Observer consumes an Event or resumes after a Current State Snapshot.
 Avoid: bookmark, token
 
+**Pending Acknowledgment** (one per unacknowledged outbound Message):
+The persisted record of an outbound Message waiting for an Acknowledgment Artifact. It is stored in
+the pending-acknowledgment Protocol State Blob with the original encoded Message bytes and retry
+timestamps, then removed when a matching acknowledgment is processed.
+Avoid: retry cache, outbox, in-memory pending state
+
 **Protocol State Blob** (many per Identity or Session):
 An opaque byte value produced by Core and committed by the consumer's durable store. Core may load
 and advance a Blob during one operation, but the consumer-held Blob is authoritative between
@@ -96,6 +107,17 @@ The stable category for a Protocol State Blob — ratchet/session state, prekey 
 certificate, deduplication set, or pending acknowledgments. The consumer combines the Kind with a
 key such as a Session or Identity identifier to address one Blob.
 Avoid: table, bucket, namespace
+
+**Retry Instruction** (many per pending-acknowledgment query):
+A consumer-visible instruction to retransmit a still-unacknowledged Message after the configured
+retry window elapses. Core returns the instruction and updated pending-acknowledgment state; the
+consumer decides whether and how to transmit.
+Avoid: automatic retry, resend job, network task
+
+**Retry Reference Time** (one per retry query):
+The caller-supplied Unix timestamp in milliseconds used to evaluate retry windows. Retry checks do
+not read the KeyStore Clock because retry scheduling is a consumer-visible transport boundary.
+Avoid: Clock, timer, wall-clock read
 
 **Sealed Sender Envelope** (one per encrypted Message payload):
 The encrypted/authenticated inner envelope that carries sender identity material alongside message
