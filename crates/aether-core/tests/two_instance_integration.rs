@@ -1,0 +1,551 @@
+//! Exercises the v0.6.0 public Core API across two library instances and consumer-held blobs.
+
+use std::collections::BTreeMap;
+
+use aether_core::{
+    AcknowledgmentOutcome, EventStream, EventStreamItem, InboundAcknowledgmentMessage,
+    InboundEncryptedMessage, InboundMessageOutcome, Message, MessageId, OutboundAcknowledgment,
+    OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+};
+use aether_crypto::{
+    InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initiate,
+};
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use zeroize::Zeroizing;
+
+const CREATED_AT: u64 = 1_700_000_000;
+const RETRY_WINDOW_MILLIS: u64 = 1_000;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum InstanceEvent {
+    Accepted { plaintext: Vec<u8> },
+    AcknowledgmentCleared { id: MessageId },
+}
+
+type InstanceEventStream = EventStream<InstanceEvent, Vec<InstanceEvent>>;
+
+struct Setup {
+    alice_state: RatchetState,
+    bob_state: RatchetState,
+}
+
+#[derive(Clone, Default)]
+struct ConsumerStore {
+    blobs: BTreeMap<ProtocolStateAddress, Zeroizing<Vec<u8>>>,
+}
+
+impl ConsumerStore {
+    fn snapshot(&self) -> ProtocolStateSnapshot {
+        let mut snapshot = ProtocolStateSnapshot::new();
+        for (address, blob) in &self.blobs {
+            snapshot.set(
+                address.clone(),
+                ProtocolStateBlob::from_bytes(blob.as_slice().to_vec()),
+            );
+        }
+        snapshot
+    }
+
+    fn apply(&mut self, update: aether_core::ProtocolStateUpdate) {
+        let address = update.address().clone();
+        match update.blob() {
+            Some(blob) => {
+                self.blobs
+                    .insert(address, Zeroizing::new(blob.as_bytes().to_vec()));
+            }
+            None => {
+                self.blobs.remove(&address);
+            }
+        }
+    }
+
+    fn apply_all<I>(&mut self, updates: I)
+    where
+        I: IntoIterator<Item = aether_core::ProtocolStateUpdate>,
+    {
+        for update in updates {
+            self.apply(update);
+        }
+    }
+
+    fn set_raw(&mut self, address: ProtocolStateAddress, blob: Vec<u8>) {
+        self.blobs.insert(address, Zeroizing::new(blob));
+    }
+}
+
+fn setup() -> Setup {
+    let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
+    let alice_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity = generate_signing_key_pair(&mut rng);
+    let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
+    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
+    let bob_signed_prekey =
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, CREATED_AT);
+    let bob_one_time_prekey =
+        generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
+    let prekey_bundle = PreKeyBundle {
+        discovery_key: bob_discovery.bundle(),
+        signed_prekey: bob_signed_prekey.bundle(),
+        one_time_prekey: Some(bob_one_time_prekey.bundle()),
+    };
+    let (alice_state, envelope) = initiate(
+        &mut rng,
+        &alice_discovery,
+        &bob_identity.verifying,
+        &prekey_bundle,
+        initial_plaintext(b"initial"),
+    )
+    .unwrap();
+    let (bob_state, plaintext) = accept(
+        &mut rng,
+        &envelope,
+        &bob_discovery,
+        &bob_signed_prekey,
+        Some(bob_one_time_prekey),
+    )
+    .unwrap();
+    assert_eq!(plaintext.plaintext.as_slice(), b"initial");
+    Setup {
+        alice_state,
+        bob_state,
+    }
+}
+
+fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
+    InitialPlaintext {
+        sender_certificate: b"sender certificate",
+        sender_signature: b"sender signature",
+        plaintext,
+    }
+}
+
+fn session_key() -> ProtocolStateKey {
+    ProtocolStateKey::session(SessionId::from_bytes([9u8; 16]))
+}
+
+fn deduplication_key() -> ProtocolStateKey {
+    ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap()
+}
+
+fn ratchet_address(key: ProtocolStateKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key)
+}
+
+fn sender_identity(tag: u8) -> SenderIdentityMaterial {
+    SenderIdentityMaterial {
+        identity_key: [tag; 32],
+        certificate: vec![tag, tag.wrapping_add(1), tag.wrapping_add(2)],
+        signature: vec![tag.wrapping_add(3); 64],
+    }
+}
+
+fn outbound<'a>(
+    id: u8,
+    plaintext: &'a [u8],
+    sender_identity: &'a SenderIdentityMaterial,
+) -> OutboundPlaintext<'a> {
+    OutboundPlaintext {
+        id: MessageId::from_bytes([id; 16]),
+        sender_identity,
+        recipient_public_key: [2u8; 32],
+        timestamp_millis: 1_700_000_000_000 + u64::from(id),
+        plaintext,
+    }
+}
+
+fn acknowledgment<'a>(
+    id: u8,
+    sender_identity: &'a SenderIdentityMaterial,
+) -> OutboundAcknowledgment<'a> {
+    OutboundAcknowledgment {
+        id: MessageId::from_bytes([id; 16]),
+        sender_identity,
+        recipient_public_key: [3u8; 32],
+        timestamp_millis: 1_700_000_100_000 + u64::from(id),
+    }
+}
+
+fn inbound<'a>(
+    session_key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
+    message: &'a Message,
+    acknowledgment_sender_identity: &'a SenderIdentityMaterial,
+    acknowledgment_id: u8,
+) -> InboundEncryptedMessage<'a> {
+    InboundEncryptedMessage {
+        session_key,
+        deduplication_key,
+        message,
+        acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
+    }
+}
+
+fn inbound_acknowledgment<'a>(
+    session_key: ProtocolStateKey,
+    message: &'a Message,
+) -> InboundAcknowledgmentMessage<'a> {
+    InboundAcknowledgmentMessage {
+        session_key,
+        message,
+    }
+}
+
+fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
+    match outcome {
+        InboundMessageOutcome::Accepted(result) => *result,
+        InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+    }
+}
+
+fn emit_event(stream: &InstanceEventStream, event: InstanceEvent) {
+    let mut state = stream.current_state().unwrap().into_state();
+    state.push(event.clone());
+    stream.emit(event, state).unwrap();
+}
+
+fn initialize_stores(
+    engine: &ProtocolStateEngine,
+    session_key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
+    alice_sender: &SenderIdentityMaterial,
+    bob_sender: &SenderIdentityMaterial,
+) -> (ConsumerStore, ConsumerStore) {
+    let setup = setup();
+    let mut alice = ConsumerStore::default();
+    let mut bob = ConsumerStore::default();
+
+    alice.apply(
+        engine
+            .set_session_state_with_peer_identity(
+                session_key.clone(),
+                &setup.alice_state,
+                bob_sender,
+            )
+            .unwrap(),
+    );
+    alice.apply(
+        engine
+            .initialize_pending_acknowledgments(session_key.clone())
+            .unwrap(),
+    );
+    bob.apply(
+        engine
+            .set_session_state_with_peer_identity(
+                session_key.clone(),
+                &setup.bob_state,
+                alice_sender,
+            )
+            .unwrap(),
+    );
+    bob.apply(
+        engine
+            .initialize_deduplication_set(
+                &mut ChaCha20Rng::from_seed([0x44; 32]),
+                deduplication_key,
+            )
+            .unwrap(),
+    );
+    (alice, bob)
+}
+
+#[test]
+fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_order() {
+    let first_instance = ProtocolStateEngine::new();
+    let second_instance = ProtocolStateEngine::new();
+    let session_key = session_key();
+    let deduplication_key = deduplication_key();
+    let alice_sender = sender_identity(0xa1);
+    let bob_sender = sender_identity(0xb1);
+    let (mut alice_store, mut bob_store) = initialize_stores(
+        &first_instance,
+        session_key.clone(),
+        deduplication_key.clone(),
+        &alice_sender,
+        &bob_sender,
+    );
+    let events = InstanceEventStream::with_observer_capacity(Vec::new(), 1).unwrap();
+    let ordered_observer = events.subscribe().unwrap();
+    let lagged_observer = events.subscribe().unwrap();
+
+    let first = first_instance
+        .encrypt_message(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            outbound(0x01, b"first", &alice_sender),
+        )
+        .unwrap();
+    let first_message = first.message;
+    alice_store.apply_all(first.state_updates);
+    let second = second_instance
+        .encrypt_message(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            outbound(0x02, b"second", &alice_sender),
+        )
+        .unwrap();
+    let second_message = second.message;
+    alice_store.apply_all(second.state_updates);
+
+    let pending = second_instance
+        .pending_acknowledgments(&alice_store.snapshot(), session_key.clone())
+        .unwrap();
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].message.id, first_message.id);
+    assert_eq!(pending[1].message.id, second_message.id);
+
+    let early_retry = first_instance
+        .retry_instructions(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            1_700_000_000_001 + RETRY_WINDOW_MILLIS - 1,
+            RETRY_WINDOW_MILLIS,
+        )
+        .unwrap();
+    assert!(early_retry.instructions.is_empty());
+    assert!(early_retry.state_updates.is_empty());
+    let due_retry = second_instance
+        .retry_instructions(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            1_700_000_000_002 + RETRY_WINDOW_MILLIS,
+            RETRY_WINDOW_MILLIS,
+        )
+        .unwrap();
+    assert_eq!(due_retry.instructions.len(), 2);
+    assert_eq!(due_retry.instructions[0].message.id, first_message.id);
+    assert_eq!(due_retry.instructions[1].message.id, second_message.id);
+    alice_store.apply_all(due_retry.state_updates);
+
+    let second_received = first_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x12; 32]),
+            &bob_store.snapshot(),
+            inbound(
+                session_key.clone(),
+                deduplication_key.clone(),
+                &second_message,
+                &bob_sender,
+                0x12,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    assert_eq!(second_received.plaintext.as_slice(), b"second");
+    let second_ack = second_received.acknowledgment;
+    bob_store.apply_all(second_received.state_updates);
+    emit_event(
+        &events,
+        InstanceEvent::Accepted {
+            plaintext: b"second".to_vec(),
+        },
+    );
+    let Some(EventStreamItem::Event(second_event)) = ordered_observer.poll_next().unwrap() else {
+        panic!("expected second receive event")
+    };
+    assert_eq!(second_event.id().as_u64(), 1);
+    assert_eq!(
+        second_event.event(),
+        &InstanceEvent::Accepted {
+            plaintext: b"second".to_vec()
+        }
+    );
+
+    let first_received = second_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x13; 32]),
+            &bob_store.snapshot(),
+            inbound(
+                session_key.clone(),
+                deduplication_key.clone(),
+                &first_message,
+                &bob_sender,
+                0x13,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    assert_eq!(first_received.plaintext.as_slice(), b"first");
+    bob_store.apply_all(first_received.state_updates);
+    emit_event(
+        &events,
+        InstanceEvent::Accepted {
+            plaintext: b"first".to_vec(),
+        },
+    );
+    let Some(EventStreamItem::Event(first_event)) = ordered_observer.poll_next().unwrap() else {
+        panic!("expected first receive event")
+    };
+    assert_eq!(first_event.id().as_u64(), 2);
+    assert_eq!(
+        first_event.event(),
+        &InstanceEvent::Accepted {
+            plaintext: b"first".to_vec()
+        }
+    );
+
+    assert_eq!(
+        lagged_observer.poll_next().unwrap(),
+        Some(EventStreamItem::Lagged { missed: 1 })
+    );
+    let resync = events.current_state().unwrap();
+    assert_eq!(resync.event_id().as_u64(), 2);
+    assert_eq!(resync.state().len(), 2);
+
+    let cleared = first_instance
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x14; 32]),
+            &alice_store.snapshot(),
+            inbound_acknowledgment(session_key.clone(), &second_ack),
+        )
+        .unwrap();
+    let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
+        panic!("acknowledgment did not clear pending state")
+    };
+    assert_eq!(cleared.acknowledged_message_id, second_message.id);
+    alice_store.apply_all(cleared.state_updates);
+    emit_event(
+        &events,
+        InstanceEvent::AcknowledgmentCleared {
+            id: second_message.id,
+        },
+    );
+    let Some(EventStreamItem::Event(cleared_event)) = ordered_observer.poll_next().unwrap() else {
+        panic!("expected acknowledgment-cleared event")
+    };
+    assert_eq!(cleared_event.id().as_u64(), 3);
+
+    lagged_observer.resume_after(&resync).unwrap();
+    let Some(EventStreamItem::Event(resumed_event)) = lagged_observer.poll_next().unwrap() else {
+        panic!("expected post-resync event")
+    };
+    assert_eq!(resumed_event.id().as_u64(), 3);
+    assert_eq!(
+        resumed_event.event(),
+        &InstanceEvent::AcknowledgmentCleared {
+            id: second_message.id
+        }
+    );
+    assert_eq!(lagged_observer.poll_next().unwrap(), None);
+
+    let remaining = first_instance
+        .pending_acknowledgments(&alice_store.snapshot(), session_key)
+        .unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].message.id, first_message.id);
+    assert_eq!(remaining[0].last_retry_millis, Some(1_700_000_001_002));
+}
+
+#[test]
+fn duplicate_messages_and_ack_replays_are_idempotent_across_instance_recreation() {
+    let first_instance = ProtocolStateEngine::new();
+    let second_instance = ProtocolStateEngine::new();
+    let session_key = session_key();
+    let deduplication_key = deduplication_key();
+    let alice_sender = sender_identity(0xa1);
+    let bob_sender = sender_identity(0xb1);
+    let (mut alice_store, mut bob_store) = initialize_stores(
+        &first_instance,
+        session_key.clone(),
+        deduplication_key.clone(),
+        &alice_sender,
+        &bob_sender,
+    );
+    let events = InstanceEventStream::new(Vec::new());
+
+    let encrypted = first_instance
+        .encrypt_message(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            outbound(0x31, b"deliver once", &alice_sender),
+        )
+        .unwrap();
+    let message = encrypted.message;
+    alice_store.apply_all(encrypted.state_updates);
+    let received = second_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x31; 32]),
+            &bob_store.snapshot(),
+            inbound(
+                session_key.clone(),
+                deduplication_key.clone(),
+                &message,
+                &bob_sender,
+                0x41,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    let acknowledgment = received.acknowledgment;
+    bob_store.apply_all(received.state_updates);
+    emit_event(
+        &events,
+        InstanceEvent::Accepted {
+            plaintext: b"deliver once".to_vec(),
+        },
+    );
+    assert_eq!(events.current_state().unwrap().event_id().as_u64(), 1);
+
+    let mut corrupt_duplicate_store = bob_store.clone();
+    corrupt_duplicate_store.set_raw(ratchet_address(session_key.clone()), vec![1, 0, 0xaa]);
+    let duplicate = first_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x32; 32]),
+            &corrupt_duplicate_store.snapshot(),
+            inbound(
+                session_key.clone(),
+                deduplication_key.clone(),
+                &message,
+                &bob_sender,
+                0x42,
+            ),
+        )
+        .unwrap();
+    assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+    assert_eq!(events.current_state().unwrap().event_id().as_u64(), 1);
+
+    let restarted_instance = ProtocolStateEngine::new();
+    let duplicate_after_restart = restarted_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x33; 32]),
+            &bob_store.snapshot(),
+            inbound(
+                session_key.clone(),
+                deduplication_key,
+                &message,
+                &bob_sender,
+                0x43,
+            ),
+        )
+        .unwrap();
+    assert!(matches!(
+        duplicate_after_restart,
+        InboundMessageOutcome::Duplicate
+    ));
+
+    let cleared = second_instance
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x34; 32]),
+            &alice_store.snapshot(),
+            inbound_acknowledgment(session_key.clone(), &acknowledgment),
+        )
+        .unwrap();
+    let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
+        panic!("acknowledgment did not clear pending state")
+    };
+    alice_store.apply_all(cleared.state_updates);
+
+    let mut corrupt_ack_store = alice_store.clone();
+    corrupt_ack_store.set_raw(ratchet_address(session_key.clone()), vec![1, 0, 0xaa]);
+    let replay = ProtocolStateEngine::new()
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x35; 32]),
+            &corrupt_ack_store.snapshot(),
+            inbound_acknowledgment(session_key, &acknowledgment),
+        )
+        .unwrap();
+    assert!(matches!(replay, AcknowledgmentOutcome::Duplicate));
+}
