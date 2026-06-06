@@ -29,7 +29,12 @@
 
 uniffi::setup_scaffolding!("aether");
 
+#[cfg(all(feature = "fixture-replay", not(debug_assertions)))]
+compile_error!("fixture-replay is test-only and must not be enabled for release builds");
+
 mod error;
+#[cfg(feature = "fixture-replay")]
+mod fixture_replay;
 mod key_store;
 mod records;
 mod storage;
