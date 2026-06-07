@@ -1,0 +1,178 @@
+{
+  "fixtures": [
+    {
+      "certificate_hex": "41657468657253656e64657243657274696669636174652d76313a01077072696d61727911111111111111111111111111111111111111111111111111111111111111115eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba3131313131313131313131313131313131313131313131313131313131313131a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df200000007000000006553f22c",
+      "decoded": {
+        "discovery_ed25519_verifying_key_hex": "a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df2",
+        "discovery_epoch": 7,
+        "discovery_x25519_public_key_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+        "expires_at_secs": 1700000300,
+        "identity_ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+        "identity_x25519_public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signing_key_identifier_hex": "7072696d617279"
+      },
+      "domain_signing_keys": [
+        {
+          "identifier_hex": "7072696d617279",
+          "status": "trusted",
+          "verifying_key_hex": "4d4b18062f8502598de045ca7b69f067f59f93b16e3af8733a988adc2341f5c8"
+        }
+      ],
+      "expected": "valid",
+      "name": "valid-primary",
+      "revoked_identity_keys": [],
+      "signature_hex": "2b660fcc0c05ebfba07be8d9eff10dd91e970e3b57e491262ece16386eebc0984b1deceeba44c87664f0d9111e62e65f53c339c8f161d1a5d42e4599d80d4001"
+    },
+    {
+      "certificate_hex": "41657468657253656e64657243657274696669636174652d76313a01097365636f6e6461727911111111111111111111111111111111111111111111111111111111111111115eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba3131313131313131313131313131313131313131313131313131313131313131a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df200000007000000006553f22c",
+      "decoded": {
+        "discovery_ed25519_verifying_key_hex": "a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df2",
+        "discovery_epoch": 7,
+        "discovery_x25519_public_key_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+        "expires_at_secs": 1700000300,
+        "identity_ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+        "identity_x25519_public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signing_key_identifier_hex": "7365636f6e64617279"
+      },
+      "domain_signing_keys": [
+        {
+          "identifier_hex": "7072696d617279",
+          "status": "trusted",
+          "verifying_key_hex": "4d4b18062f8502598de045ca7b69f067f59f93b16e3af8733a988adc2341f5c8"
+        },
+        {
+          "identifier_hex": "7365636f6e64617279",
+          "status": "trusted",
+          "verifying_key_hex": "7d177f1e71b490ad0ce380f9578ab12bb0fc00a98de8f6a555c81d48c2039249"
+        }
+      ],
+      "expected": "valid",
+      "name": "rotation-overlap-secondary",
+      "revoked_identity_keys": [],
+      "signature_hex": "ded05c1110725dbc880a8017340c280b1336b82d3b2fdfa90873cf181ff612e80d2bfff861fed640ca08b488801b5aaaeac72c3a7eaf63d04b9ca7fc8ed7c407"
+    },
+    {
+      "certificate_hex": "41657468657253656e64657243657274696669636174652d76313a01077072696d61727911111111111111111111111111111111111111111111111111111111111111115eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba3131313131313131313131313131313131313131313131313131313131313131a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df200000007000000006553f22c",
+      "decoded": {
+        "discovery_ed25519_verifying_key_hex": "a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df2",
+        "discovery_epoch": 7,
+        "discovery_x25519_public_key_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+        "expires_at_secs": 1700000300,
+        "identity_ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+        "identity_x25519_public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signing_key_identifier_hex": "7072696d617279"
+      },
+      "domain_signing_keys": [
+        {
+          "identifier_hex": "7072696d617279",
+          "status": "untrusted",
+          "verifying_key_hex": "4d4b18062f8502598de045ca7b69f067f59f93b16e3af8733a988adc2341f5c8"
+        }
+      ],
+      "expected": "untrusted_signing_key_identifier",
+      "name": "untrusted-key",
+      "revoked_identity_keys": [],
+      "signature_hex": "2b660fcc0c05ebfba07be8d9eff10dd91e970e3b57e491262ece16386eebc0984b1deceeba44c87664f0d9111e62e65f53c339c8f161d1a5d42e4599d80d4001"
+    },
+    {
+      "certificate_hex": "41657468657253656e64657243657274696669636174652d76313a01077072696d61727911111111111111111111111111111111111111111111111111111111111111115eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba3131313131313131313131313131313131313131313131313131313131313131a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df200000007000000006553f22c",
+      "decoded": {
+        "discovery_ed25519_verifying_key_hex": "a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df2",
+        "discovery_epoch": 7,
+        "discovery_x25519_public_key_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+        "expires_at_secs": 1700000300,
+        "identity_ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+        "identity_x25519_public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signing_key_identifier_hex": "7072696d617279"
+      },
+      "domain_signing_keys": [
+        {
+          "identifier_hex": "7072696d617279",
+          "status": "trusted",
+          "verifying_key_hex": "4d4b18062f8502598de045ca7b69f067f59f93b16e3af8733a988adc2341f5c8"
+        }
+      ],
+      "expected": "revoked_identity_key",
+      "name": "revoked-identity-key",
+      "revoked_identity_keys": [
+        {
+          "ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+          "x25519_public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111"
+        }
+      ],
+      "signature_hex": "2b660fcc0c05ebfba07be8d9eff10dd91e970e3b57e491262ece16386eebc0984b1deceeba44c87664f0d9111e62e65f53c339c8f161d1a5d42e4599d80d4001"
+    },
+    {
+      "certificate_hex": "41657468657253656e64657243657274696669636174652d76313a01077072696d61727911111111111111111111111111111111111111111111111111111111111111115eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba3131313131313131313131313131313131313131313131313131313131313131a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df200000007000000006553f0e1",
+      "decoded": {
+        "discovery_ed25519_verifying_key_hex": "a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df2",
+        "discovery_epoch": 7,
+        "discovery_x25519_public_key_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+        "expires_at_secs": 1699999969,
+        "identity_ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+        "identity_x25519_public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signing_key_identifier_hex": "7072696d617279"
+      },
+      "domain_signing_keys": [
+        {
+          "identifier_hex": "7072696d617279",
+          "status": "trusted",
+          "verifying_key_hex": "4d4b18062f8502598de045ca7b69f067f59f93b16e3af8733a988adc2341f5c8"
+        }
+      ],
+      "expected": "expired_certificate",
+      "name": "expired-outside-grace",
+      "revoked_identity_keys": [],
+      "signature_hex": "bbce00f8d1dcf8d52ab00c248905a1ac507a893694622ba315f3c289548836aa8010572eba1bbb163df0d13d005b4c8e2681447c7f3dcfb3b80aae9ce618b50e"
+    },
+    {
+      "certificate_hex": "41657468657253656e64657243657274696669636174652d76313a01077072696d61727911111111111111111111111111111111111111111111111111111111111111115eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba3131313131313131313131313131313131313131313131313131313131313131a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df200000007000000006553f2",
+      "decoded": {
+        "discovery_ed25519_verifying_key_hex": "a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df2",
+        "discovery_epoch": 7,
+        "discovery_x25519_public_key_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+        "expires_at_secs": 1700000300,
+        "identity_ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+        "identity_x25519_public_key_hex": "1111111111111111111111111111111111111111111111111111111111111111",
+        "signing_key_identifier_hex": "7072696d617279"
+      },
+      "domain_signing_keys": [
+        {
+          "identifier_hex": "7072696d617279",
+          "status": "trusted",
+          "verifying_key_hex": "4d4b18062f8502598de045ca7b69f067f59f93b16e3af8733a988adc2341f5c8"
+        }
+      ],
+      "expected": "malformed_certificate",
+      "name": "malformed-truncated",
+      "revoked_identity_keys": [],
+      "signature_hex": "2b660fcc0c05ebfba07be8d9eff10dd91e970e3b57e491262ece16386eebc0984b1deceeba44c87664f0d9111e62e65f53c339c8f161d1a5d42e4599d80d4001"
+    },
+    {
+      "certificate_hex": "41657468657253656e64657243657274696669636174652d76313a01077072696d617279edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba3131313131313131313131313131313131313131313131313131313131313131a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df200000007000000006553f22c",
+      "decoded": {
+        "discovery_ed25519_verifying_key_hex": "a453b253d906d90d67b80eee93998d7ba78dbc9eb128256b7e8e925a39c64df2",
+        "discovery_epoch": 7,
+        "discovery_x25519_public_key_hex": "3131313131313131313131313131313131313131313131313131313131313131",
+        "expires_at_secs": 1700000300,
+        "identity_ed25519_verifying_key_hex": "5eada01f8d1a4bb23139b31a2ef3fc4294868d9b27c864287411b53c1e24baba",
+        "identity_x25519_public_key_hex": "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+        "signing_key_identifier_hex": "7072696d617279"
+      },
+      "domain_signing_keys": [
+        {
+          "identifier_hex": "7072696d617279",
+          "status": "trusted",
+          "verifying_key_hex": "4d4b18062f8502598de045ca7b69f067f59f93b16e3af8733a988adc2341f5c8"
+        }
+      ],
+      "expected": "invalid_key_encoding",
+      "name": "non-canonical-identity-x25519",
+      "revoked_identity_keys": [],
+      "signature_hex": "036bd243ce83c13f55f916237a318fff4d995b6df0bbd7573df86739890616aa13ede7395cd6d745997f179bc6c2d5a786db41af87e01879c42e007f38164201"
+    }
+  ],
+  "grace_window_secs": 30,
+  "reference_timestamp_secs": 1700000000,
+  "version": 1
+}
