@@ -2,9 +2,9 @@
 
 use aether_core::{
     AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
-    InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
-    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message, MessageId,
-    OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
+    ContactTrustState, InboundAcknowledgmentMessage, InboundEncryptedMessage,
+    InboundMessageOutcome, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message,
+    MessageId, OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
@@ -757,6 +757,92 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
         .unwrap();
 
     assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+}
+
+#[test]
+fn in_band_messages_and_acknowledgments_do_not_verify_contact() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let contact = accepted_contact_identity();
+    let mut alice_snapshot = snapshot_with_state_and_peer_identity(
+        &engine,
+        key.clone(),
+        &setup.alice_state,
+        &acknowledgment_sender_identity,
+    );
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender_identity,
+        deduplication_key.clone(),
+    );
+
+    assert_eq!(
+        engine
+            .contact_state(&alice_snapshot, contact.identity_key)
+            .unwrap()
+            .unwrap()
+            .trust_state,
+        ContactTrustState::Unverified
+    );
+
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(12, b"in band is not verification", &sender_identity),
+        )
+        .unwrap();
+    alice_snapshot.apply_all(encrypted.state_updates);
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([23u8; 32]),
+            &bob_snapshot,
+            inbound(
+                key.clone(),
+                deduplication_key,
+                &encrypted.message,
+                &acknowledgment_sender_identity,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    bob_snapshot.apply_all(decrypted.state_updates);
+
+    assert_eq!(
+        engine
+            .contact_state(&bob_snapshot, contact.identity_key)
+            .unwrap()
+            .unwrap()
+            .trust_state,
+        ContactTrustState::Unverified
+    );
+
+    let cleared = engine
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([24u8; 32]),
+            &alice_snapshot,
+            inbound_acknowledgment(key, &decrypted.acknowledgment),
+        )
+        .unwrap();
+    let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
+        panic!("acknowledgment did not clear pending state");
+    };
+    alice_snapshot.apply_all(cleared.state_updates);
+
+    assert_eq!(
+        engine
+            .contact_state(&alice_snapshot, contact.identity_key)
+            .unwrap()
+            .unwrap()
+            .trust_state,
+        ContactTrustState::Unverified
+    );
 }
 
 #[test]

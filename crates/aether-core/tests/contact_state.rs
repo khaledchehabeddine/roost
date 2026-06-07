@@ -2,9 +2,9 @@
 
 use aether_core::{
     ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey, ContactTrustState,
-    MessageId, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    SenderIdentityMaterial, SessionId,
+    IdentityKey, MessageId, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, SenderIdentityMaterial, SessionId, derive_safety_number,
 };
 use aether_crypto::{
     InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
@@ -18,6 +18,7 @@ const CREATED_AT: u64 = 1_700_000_000;
 
 struct Setup {
     alice_state: RatchetState,
+    alice_identity: IdentityKey,
     bob_identity: ContactIdentityKey,
     bob_discovery: ContactDiscoveryKey,
     bob_rotated_discovery: ContactDiscoveryKey,
@@ -63,9 +64,14 @@ fn setup() -> Setup {
     let bob_rotated_discovery = generate_discovery_key(&mut rng, &bob_identity, 1, CREATED_AT + 60);
     let bob_restored_discovery =
         generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT + 120);
+    let alice_identity_key_pair = generate_key_pair(&mut rng);
 
     Setup {
         alice_state,
+        alice_identity: IdentityKey {
+            x25519_public_key: *alice_identity_key_pair.public.as_bytes(),
+            ed25519_verifying_key: alice_identity.verifying.to_bytes(),
+        },
         bob_identity: ContactIdentityKey {
             x25519_public_key: *bob_identity_key_pair.public.as_bytes(),
             ed25519_verifying_key: bob_identity.verifying.to_bytes(),
@@ -294,7 +300,7 @@ fn acceptance_transitions_pending_to_unverified() {
 }
 
 #[test]
-fn pending_contact_cannot_be_verified_directly() {
+fn pending_contact_cannot_be_verified_by_safety_number() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let mut snapshot = ProtocolStateSnapshot::new();
@@ -304,9 +310,15 @@ fn pending_contact_cannot_be_verified_directly() {
             .unwrap()
             .state_updates,
     );
+    let safety_number = derive_safety_number(setup.alice_identity, setup.bob_identity).unwrap();
 
     assert!(matches!(
-        engine.verify_contact(&snapshot, setup.bob_identity),
+        engine.confirm_contact_safety_number(
+            &snapshot,
+            setup.alice_identity,
+            setup.bob_identity,
+            &safety_number.grouped_decimal,
+        ),
         Err(ProtocolStateError::InvalidStateBinding { .. })
     ));
 }
@@ -366,8 +378,7 @@ fn discovery_key_update_preserves_verified_state() {
             .state_updates,
     );
     snapshot.apply_all(
-        engine
-            .verify_contact(&snapshot, setup.bob_identity)
+        confirm_safety_number(&engine, &snapshot, &setup)
             .unwrap()
             .state_updates,
     );
@@ -389,6 +400,26 @@ fn discovery_key_update_preserves_verified_state() {
         .unwrap();
     assert_eq!(contact.trust_state, ContactTrustState::Verified);
     assert_eq!(contact.identity.discovery_key, setup.bob_rotated_discovery);
+}
+
+fn confirm_safety_number(
+    engine: &ProtocolStateEngine,
+    snapshot: &ProtocolStateSnapshot,
+    setup: &Setup,
+) -> Result<aether_core::ContactStateChange, ProtocolStateError> {
+    let safety_number = derive_safety_number(setup.alice_identity, setup.bob_identity).unwrap();
+    let confirmation = engine.confirm_contact_safety_number(
+        snapshot,
+        setup.alice_identity,
+        setup.bob_identity,
+        &safety_number.grouped_decimal,
+    )?;
+    match confirmation {
+        aether_core::ContactSafetyNumberConfirmation::Matched(change) => Ok(change),
+        aether_core::ContactSafetyNumberConfirmation::Mismatched(_) => {
+            panic!("safety number did not match")
+        }
+    }
 }
 
 #[test]

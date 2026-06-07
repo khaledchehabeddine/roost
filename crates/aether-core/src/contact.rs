@@ -1,39 +1,15 @@
 //! Contact identity and trust-state records.
 
 use crate::events::EventStream;
+use crate::key_encoding::PUBLIC_KEY_LEN;
+use crate::safety_number::IdentityKey;
 use aether_crypto::DiscoveryKeyBundle;
 use serde::{Deserialize, Serialize};
 
-const CONTACT_IDENTITY_KEY_DOMAIN_TAG: &[u8] = b"AetherIK-v1:";
-const PUBLIC_KEY_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
-const CONTACT_IDENTITY_KEY_ENCODING_LEN: usize =
-    CONTACT_IDENTITY_KEY_DOMAIN_TAG.len() + PUBLIC_KEY_LEN * 2;
 
 /// A peer Identity Key that owns contact, trust, and blocking state.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ContactIdentityKey {
-    /// Canonical X25519 public key bytes.
-    pub x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    /// Canonical Ed25519 verifying-key bytes.
-    pub ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-}
-
-impl ContactIdentityKey {
-    /// Returns the canonical Identity Key encoding used as the contact Protocol State Key.
-    #[must_use]
-    pub fn canonical_encoding(&self) -> [u8; CONTACT_IDENTITY_KEY_ENCODING_LEN] {
-        let mut encoding = [0u8; CONTACT_IDENTITY_KEY_ENCODING_LEN];
-        let mut offset = 0;
-        encoding[offset..offset + CONTACT_IDENTITY_KEY_DOMAIN_TAG.len()]
-            .copy_from_slice(CONTACT_IDENTITY_KEY_DOMAIN_TAG);
-        offset += CONTACT_IDENTITY_KEY_DOMAIN_TAG.len();
-        encoding[offset..offset + PUBLIC_KEY_LEN].copy_from_slice(&self.x25519_public_key);
-        offset += PUBLIC_KEY_LEN;
-        encoding[offset..offset + PUBLIC_KEY_LEN].copy_from_slice(&self.ed25519_verifying_key);
-        encoding
-    }
-}
+pub type ContactIdentityKey = IdentityKey;
 
 /// Current Discovery Key material for a Contact Identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +93,14 @@ pub struct ContactStateChange {
     pub state_updates: Vec<crate::protocol_state::ProtocolStateUpdate>,
     /// Event to emit after durable commit, if this operation changed state.
     pub event: Option<ContactEvent>,
+}
+
+/// Result of out-of-band Safety Number confirmation.
+pub enum ContactSafetyNumberConfirmation {
+    /// The presented Safety Number matched.
+    Matched(ContactStateChange),
+    /// The presented Safety Number did not match and no state update or event was produced.
+    Mismatched(ContactStateChange),
 }
 
 /// Per-instance Contact Event Stream.
