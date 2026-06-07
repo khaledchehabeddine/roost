@@ -1629,20 +1629,21 @@ fn decode_session_state_payload(
     address: &ProtocolStateAddress,
     payload: &[u8],
 ) -> Result<LoadedSessionState, ProtocolStateError> {
-    if let Ok((wire, trailing)) = postcard::take_from_bytes::<DecodedSessionStateWireV2>(payload) {
-        if trailing.is_empty() && wire.version == SESSION_STATE_WITH_CONTACT_WIRE_VERSION {
-            let contact_identity_key = wire
-                .contact_identity_key
-                .map(ContactIdentityKey::from)
-                .map(|identity_key| validate_session_contact_identity_key(address, identity_key))
-                .transpose()?;
-            return decoded_session_state(
-                address,
-                wire.ratchet_state,
-                wire.peer_sender_identity_key,
-                contact_identity_key,
-            );
-        }
+    if let Ok((wire, trailing)) = postcard::take_from_bytes::<DecodedSessionStateWireV2>(payload)
+        && trailing.is_empty()
+        && wire.version == SESSION_STATE_WITH_CONTACT_WIRE_VERSION
+    {
+        let contact_identity_key = wire
+            .contact_identity_key
+            .map(ContactIdentityKey::from)
+            .map(|identity_key| validate_session_contact_identity_key(address, identity_key))
+            .transpose()?;
+        return decoded_session_state(
+            address,
+            wire.ratchet_state,
+            wire.peer_sender_identity_key,
+            contact_identity_key,
+        );
     }
 
     let (wire, trailing): (DecodedSessionStateWireV1, &[u8]) =
