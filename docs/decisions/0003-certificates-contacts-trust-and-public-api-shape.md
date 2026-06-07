@@ -1,0 +1,89 @@
+# Certificates, Contacts, Trust, and Public API Shape
+
+**Status:** Accepted
+
+Sender-certificate validation is a pure verdict over caller inputs: certificate bytes, sender
+signature bytes, a trusted domain-signing-key set, a revoked-IK set, a caller-supplied reference
+Unix timestamp in seconds, and a consumer-supplied grace window in seconds. The library does not
+read the device clock for this verdict. A valid certificate proves only that one trusted domain
+signing key signed the sender IK and current DK binding; local Trust State and Blocking remain
+separate local decisions.
+
+The canonical sender-certificate signed content is fixed bytes, not Postcard or JSON: ASCII domain
+tag `AetherSenderCertificate-v1:`, one-byte version `1`, one-byte signing-key identifier length
+`1..=64`, signing-key identifier bytes, IK X25519 public key, IK Ed25519 verifying key, DK X25519
+public key, DK Ed25519 verifying key, DK epoch, and certificate expiry Unix timestamp in seconds.
+The DK epoch is a `u32` and expiry is a `u64`; both are big-endian. The sender signature is a
+separate 64-byte Ed25519 signature over exactly those certificate bytes, matching existing
+`SenderIdentityMaterial` separation of opaque certificate and signature fields. Certificate bytes
+and signature bytes reject malformed lengths and trailing bytes. Validation matches the
+signing-key identifier to exactly one currently trusted Ed25519 domain signing key. Trusted-key
+rotation overlap is represented by passing multiple trusted key identifiers. Unknown identifiers
+reject without fallback probing across other trusted keys.
+
+Revocation is evaluated against the current revoked-IK input on every validation call, using the
+canonical IK encoding as the revocation key. A prior positive certificate result is not reused
+after that IK appears in the revocation input. Expiry is computed only from certificate expiry,
+reference timestamp, and grace window: a certificate is accepted when `reference_timestamp <=
+expiry || reference_timestamp - expiry <= grace_window`. This avoids overflow in `expiry +
+grace_window`. The grace window is consumer policy for clock skew and delivery delay, not a
+library default.
+
+Contact Identity is the peer IK plus its current DK. Trust State is keyed to the IK and survives DK
+rotation. Contact updates must verify the IK signature over the DK bundle and reject stale DK
+rollback by preferring the highest Epoch within one storage lineage, then the signed `created_at`
+timestamp across restored lineages. New contacts begin Pending; consumer-recorded acceptance moves
+Pending to Unverified. Only consumer-recorded out-of-band Safety Number confirmation moves
+Unverified to Verified. In-band confirmation carried by protocol messages never raises trust to
+Verified.
+
+Safety Numbers are derived from both parties' canonical IK encodings. Each canonical IK encoding
+is ASCII domain tag `AetherIK-v1:`, IK X25519 public key, and IK Ed25519 verifying key. The two
+encodings are sorted lexicographically, then hashed with BLAKE3 over
+`AetherSafetyNumber-v1:` plus both sorted encodings. Interpret the 32-byte hash as a big-endian
+integer, reduce it modulo `10^60`, left-pad to 60 decimal digits, and display 12 groups of five
+digits. Sorting makes both parties display the same value while still binding the number to both
+permanent identity keys.
+
+Blocking is IK-keyed, local, independent of Trust State, and distinct from certificate revocation.
+For a unique inbound Message from a blocked IK, Core still performs normal protocol acceptance:
+deduplicate, decrypt, validate sender identity binding, validate the sender certificate, generate
+an Acknowledgment Artifact, and advance ratchet/session and deduplication Protocol State Blobs.
+The certificate DK X25519 key, DK Ed25519 verifying key, and DK epoch must match the decrypted
+sender identity/session binding before Core derives IK-keyed trust or blocking outcomes; revoked
+IKs reject before blocking is consulted. The result is not surfaced to the consumer as plaintext.
+Duplicate blocked Messages follow normal duplicate behavior and do not regenerate
+acknowledgments.
+
+Contact, trust, and blocking state persists as one IK-keyed Contact State Protocol State Blob per
+local Identity and peer IK. Contact state is a Protocol State Kind alongside ratchet/session state,
+prekey state, sender-certificate state, deduplication set, and pending acknowledgments. The blob
+stores the current DK material, Trust State, and blocking flag so contact updates, trust
+transitions, and block/unblock operations return one atomic ProtocolStateUpdate. Events follow the
+existing per-instance Event Stream model, but are emitted only after the consumer confirms durable
+commit of the returned ProtocolStateUpdate. Each committed contact, trust, or blocking change emits
+a self-contained public snapshot, observers recover from lag through Current State Snapshots, and
+cross-instance visibility still comes from the shared Protocol State Blob store rather than the
+in-process Event Stream.
+
+The public Rust API review resolves to five future surfaces: certificate validation takes the full
+input set above and returns a typed verdict; contact APIs create/update IK-keyed Contact Identity
+records from certificate validation and DK rotation; trust APIs expose only the Pending to
+Unverified and Unverified to Verified transitions; Safety Number APIs expose both raw derivation
+bytes and grouped decimal display; blocking APIs expose block/unblock and receive outcomes that
+distinguish surfaced plaintext from blocked protocol acceptance. Fixture coverage must lock the
+fixed-byte certificate and Safety Number encodings before those APIs release.
+
+## Scope Boundary
+
+This record fixes the v0.7.0 behavioral and API shape before code lands. It does not require Rust
+implementation in the decision-record change.
+
+## Considered Options
+
+- Postcard certificate signed content. Rejected. It would be terse for Rust but would couple
+  domain signers and auditors to an internal Rust serialization choice.
+- Canonical JSON certificate signed content. Rejected. It is readable but adds cryptographic
+  canonicalization risk.
+- Separate contact, trust, and blocking blobs. Rejected for v0.7.0 because one IK-keyed blob keeps
+  local contact state transitions atomic under the existing Protocol State Blob model.

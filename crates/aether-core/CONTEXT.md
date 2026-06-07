@@ -9,9 +9,20 @@ An encrypted Message with `PayloadKind::Acknowledgment` that proves the receiver
 Message. Core returns it to the consumer for transport; Core never transmits it.
 Avoid: receipt, delivery callback, network ack
 
+**Blocking** (one local verdict per Contact Identity):
+An IK-keyed local suppression rule. Blocking is independent of Trust State and distinct from
+sender-certificate revocation; it controls consumer-visible surfacing, not protocol acceptance.
+Avoid: revocation, distrust, remote blocklist
+
 **Clock** (one per KeyStore):
 The injected source of wall-clock time for autonomous maintenance scheduling — currently signed-pre-key rotation deciding when a stored key is stale. `SystemClock` in production; a virtual clock in tests makes rotation reproducible.
 Avoid: timer, time source
+
+**Contact Identity** (one peer IK plus current DK):
+The peer identity Core knows about for local contact, trust, and blocking state. The IK is
+permanent and owns Trust State; the DK is current routing/discovery material and may rotate
+without changing trust.
+Avoid: account, profile, sender metadata
 
 **Current State Snapshot** (one per Event Stream query):
 A self-contained public view of the producer's current state, tagged with the last Event ID reflected by that view. Lagged Observers use it to replace their local view, then resume after the tagged Event ID without replaying already-reflected Events.
@@ -104,8 +115,8 @@ Avoid: schema version, ratchet version
 
 **Protocol State Kind** (one per Protocol State Blob address):
 The stable category for a Protocol State Blob — ratchet/session state, prekey state, sender
-certificate, deduplication set, or pending acknowledgments. The consumer combines the Kind with a
-key such as a Session or Identity identifier to address one Blob.
+certificate, deduplication set, pending acknowledgments, or contact state. The consumer combines
+the Kind with a key such as a Session or Identity identifier to address one Blob.
 Avoid: table, bucket, namespace
 
 **Retry Instruction** (many per pending-acknowledgment query):
@@ -119,11 +130,22 @@ The caller-supplied Unix timestamp in milliseconds used to evaluate retry window
 not read the KeyStore Clock because retry scheduling is a consumer-visible transport boundary.
 Avoid: Clock, timer, wall-clock read
 
+**Safety Number** (one display value for two Identity Keys):
+A deterministic grouped-decimal value derived from both parties' canonical IK encodings. Consumers
+compare it out of band before recording a Verified Trust State.
+Avoid: fingerprint, verification code, in-band confirmation
+
 **Sealed Sender Envelope** (one per encrypted Message payload):
 The encrypted/authenticated inner envelope that carries sender identity material alongside message
 plaintext. It is decoded only after ciphertext authentication succeeds and, for established
 Sessions, must match the peer sender identity bound to ratchet/session state.
 Avoid: sender header, clear sender metadata
+
+**Sender Certificate** (one domain-signed binding for sender IK and DK):
+A signed public statement from a trusted domain signing key binding a sender's IK, current DK,
+signing-key identifier, and expiry. Validation is a caller-timed verdict over the current
+trusted-key and revocation inputs.
+Avoid: trust state, sender profile, discovery key signature
 
 **Sender Identity Material** (one per Sealed Sender Envelope):
 The sender's post-decryption identity material needed by later sender-certificate validation:
@@ -134,6 +156,11 @@ Avoid: sender IK, sender metadata
 **Session** (between two Identities):
 An ongoing encrypted channel between two Identities, advanced by the Double Ratchet, identified by `SessionID`.
 Avoid: connection, conversation, chat
+
+**Trust State** (one local state per peer IK):
+The consumer-recorded local trust verdict for a Contact Identity: Pending until accepted,
+Unverified after acceptance, and Verified only after out-of-band Safety Number confirmation.
+Avoid: certificate validity, blocking, remote reputation
 
 ## Example
 
