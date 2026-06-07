@@ -38,6 +38,7 @@ mod key_store;
 mod message;
 mod one_time_prekey;
 mod protocol_state;
+mod sender_certificate;
 mod signed_prekey;
 mod storage;
 
@@ -59,6 +60,11 @@ pub use protocol_state::{
     ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
     RetryInstruction, RetryInstructionResult, SessionId,
+};
+pub use sender_certificate::{
+    DomainSigningKey, DomainSigningKeyStatus, SenderCertificateDiscoveryKey,
+    SenderCertificateIdentityKey, SenderCertificateValidationError,
+    SenderCertificateValidationInput, ValidatedSenderCertificate, validate_sender_certificate,
 };
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
