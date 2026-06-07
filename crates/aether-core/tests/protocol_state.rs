@@ -2,11 +2,13 @@
 
 use aether_core::{
     AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
-    ContactTrustState, InboundAcknowledgmentMessage, InboundEncryptedMessage,
-    InboundMessageOutcome, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message,
-    MessageId, OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
+    ContactTrustState, DomainSigningKey, DomainSigningKeyStatus, InboundAcknowledgmentMessage,
+    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation,
+    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message, MessageId,
+    OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    ProtocolStateKind, ProtocolStateSnapshot, SenderCertificateIdentityKey,
+    SenderCertificateValidationError, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     Header, InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
@@ -17,6 +19,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 const CREATED_AT: u64 = 1_700_000_000;
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
+const CERTIFICATE_VERSION: u8 = 1;
+const CERTIFICATE_EXPIRES_AT: u64 = 1_700_100_000;
+const CERTIFICATE_REFERENCE_TIME: u64 = 1_700_000_000;
 
 struct Setup {
     alice_state: RatchetState,
@@ -89,18 +95,160 @@ fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, key)
 }
 
-fn accepted_contact_identity() -> ContactIdentity {
+fn contact_identities() -> (ContactIdentity, ContactIdentity) {
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
     let identity = generate_signing_key_pair(&mut rng);
     let identity_key_pair = generate_key_pair(&mut rng);
     let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    let rotated_discovery_key = generate_discovery_key(&mut rng, &identity, 1, CREATED_AT + 60);
+    let identity_key = ContactIdentityKey {
+        x25519_public_key: *identity_key_pair.public.as_bytes(),
+        ed25519_verifying_key: identity.verifying.to_bytes(),
+    };
+    (
+        ContactIdentity {
+            identity_key,
+            discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+        },
+        ContactIdentity {
+            identity_key,
+            discovery_key: ContactDiscoveryKey::from(&rotated_discovery_key.bundle()),
+        },
+    )
+}
+
+fn accepted_contact_identity() -> ContactIdentity {
+    contact_identities().0
+}
+
+fn rotated_contact_identity() -> ContactIdentity {
+    contact_identities().1
+}
+
+struct ValidatedSender {
+    contact: ContactIdentity,
+    sender_identity: SenderIdentityMaterial,
+    domain_identifier: Vec<u8>,
+    domain_verifying_key: Vec<u8>,
+}
+
+impl ValidatedSender {
+    fn domain_signing_key(&self) -> DomainSigningKey<'_> {
+        DomainSigningKey {
+            identifier: &self.domain_identifier,
+            verifying_key: &self.domain_verifying_key,
+            status: DomainSigningKeyStatus::Trusted,
+        }
+    }
+
+    fn revoked_identity_key(&self) -> SenderCertificateIdentityKey {
+        SenderCertificateIdentityKey {
+            x25519_public_key: self.contact.identity_key.x25519_public_key,
+            ed25519_verifying_key: self.contact.identity_key.ed25519_verifying_key,
+        }
+    }
+}
+
+fn validated_sender() -> ValidatedSender {
+    validated_sender_for_contact(accepted_contact_identity())
+}
+
+fn validated_sender_for_contact(contact: ContactIdentity) -> ValidatedSender {
+    let mut rng = ChaCha20Rng::from_seed([0x90; 32]);
+    let domain_signing_key = generate_signing_key_pair(&mut rng);
+    let domain_identifier = b"test-domain".to_vec();
+    let certificate = sender_certificate_bytes(&domain_identifier, contact, CERTIFICATE_EXPIRES_AT);
+    let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
+    ValidatedSender {
+        contact,
+        sender_identity: SenderIdentityMaterial {
+            identity_key: contact.discovery_key.prekey_bundle_lookup_key(),
+            certificate,
+            signature,
+        },
+        domain_identifier,
+        domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
+    }
+}
+
+fn contact_with_unrelated_identity_key_and_sender_discovery() -> ContactIdentity {
+    let mut rng = ChaCha20Rng::from_seed([0x91; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    let contact = accepted_contact_identity();
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
             ed25519_verifying_key: identity.verifying.to_bytes(),
         },
-        discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+        discovery_key: contact.discovery_key,
     }
+}
+
+fn sender_certificate_bytes(
+    signing_key_identifier: &[u8],
+    contact: ContactIdentity,
+    expires_at_secs: u64,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(CERTIFICATE_DOMAIN_TAG);
+    bytes.push(CERTIFICATE_VERSION);
+    bytes.push(signing_key_identifier.len() as u8);
+    bytes.extend_from_slice(signing_key_identifier);
+    bytes.extend_from_slice(&contact.identity_key.x25519_public_key);
+    bytes.extend_from_slice(&contact.identity_key.ed25519_verifying_key);
+    bytes.extend_from_slice(&contact.discovery_key.x25519_public_key);
+    bytes.extend_from_slice(&contact.discovery_key.ed25519_verifying_key);
+    bytes.extend_from_slice(&contact.discovery_key.epoch.to_be_bytes());
+    bytes.extend_from_slice(&expires_at_secs.to_be_bytes());
+    bytes
+}
+
+fn sender_certificate_validation<'a>(
+    domain_signing_keys: &'a [DomainSigningKey<'a>],
+    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+) -> InboundSenderCertificateValidation<'a> {
+    InboundSenderCertificateValidation {
+        domain_signing_keys,
+        revoked_identity_keys,
+        reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
+        grace_window_secs: 0,
+    }
+}
+
+fn inbound_with_certificate_validation<'a>(
+    session_key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
+    message: &'a Message,
+    acknowledgment_sender_identity: &'a SenderIdentityMaterial,
+    domain_signing_keys: &'a [DomainSigningKey<'a>],
+    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+) -> InboundEncryptedMessage<'a> {
+    InboundEncryptedMessage {
+        session_key,
+        deduplication_key,
+        message,
+        acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
+        sender_certificate_validation: Some(sender_certificate_validation(
+            domain_signing_keys,
+            revoked_identity_keys,
+        )),
+    }
+}
+
+fn block_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
+    let contact = accepted_contact_identity();
+    let blocked = engine
+        .block_contact(snapshot, contact.identity_key)
+        .unwrap();
+    snapshot.apply_all(blocked.state_updates);
+}
+
+fn rotate_blocked_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
+    let rotated = engine
+        .record_contact(snapshot, rotated_contact_identity())
+        .unwrap();
+    snapshot.apply_all(rotated.state_updates);
 }
 
 fn install_accepted_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
@@ -227,6 +375,7 @@ fn inbound<'a>(
         deduplication_key,
         message,
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
+        sender_certificate_validation: None,
     }
 }
 
@@ -243,6 +392,15 @@ fn inbound_acknowledgment<'a>(
 fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
     match outcome {
         InboundMessageOutcome::Accepted(result) => *result,
+        InboundMessageOutcome::Blocked(_) => panic!("message was unexpectedly blocked"),
+        InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+    }
+}
+
+fn blocked(outcome: InboundMessageOutcome) -> aether_core::BlockedInboundMessageResult {
+    match outcome {
+        InboundMessageOutcome::Blocked(result) => *result,
+        InboundMessageOutcome::Accepted(_) => panic!("message was unexpectedly accepted"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
     }
 }
@@ -422,6 +580,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
                 deduplication_key: deduplication_key.clone(),
                 message: &encrypted.message,
                 acknowledgment: acknowledgment(0x41, &bob_sender),
+                sender_certificate_validation: None,
             },
         )
         .map(accepted)
@@ -516,6 +675,7 @@ fn unknown_acknowledgment_is_non_fatal_miss() {
                 deduplication_key,
                 message: &encrypted.message,
                 acknowledgment: acknowledgment(0x42, &bob_sender),
+                sender_certificate_validation: None,
             },
         )
         .map(accepted)
@@ -757,6 +917,390 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
         .unwrap();
 
     assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+}
+
+#[test]
+fn blocked_inbound_message_advances_state_and_returns_acknowledgment_without_plaintext() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    let ratchet_address = ratchet_address(key.clone());
+    let deduplication_address = deduplication_address(deduplication_key.clone());
+    let prior_ratchet = bob_snapshot
+        .get(&ratchet_address)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let prior_deduplication = bob_snapshot
+        .get(&deduplication_address)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x51, b"blocked text", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+
+    let blocked = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x51; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+
+    assert_eq!(
+        blocked.acknowledgment.payload_kind,
+        PayloadKind::Acknowledgment
+    );
+    assert_eq!(blocked.state_updates.len(), 2);
+    assert_eq!(blocked.state_updates[0].address(), &ratchet_address);
+    assert_eq!(blocked.state_updates[1].address(), &deduplication_address);
+    assert_ne!(
+        blocked.state_updates[0].blob().unwrap().as_bytes(),
+        prior_ratchet
+    );
+    assert_ne!(
+        blocked.state_updates[1].blob().unwrap().as_bytes(),
+        prior_deduplication
+    );
+}
+
+#[test]
+fn duplicate_blocked_inbound_message_does_not_load_or_advance_ratchet_state() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x52, b"blocked once", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let first = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x52; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key.clone(),
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+    bob_snapshot.apply_all(first.state_updates);
+    bob_snapshot.set(
+        ratchet_address(key.clone()),
+        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+    );
+
+    let duplicate = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x53; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .unwrap();
+
+    assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+}
+
+#[test]
+fn discovery_key_rotation_does_not_bypass_blocked_inbound_message() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    rotate_blocked_contact(&engine, &mut bob_snapshot);
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x54, b"rotated blocked", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+
+    let outcome = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x54; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .unwrap();
+
+    assert!(matches!(outcome, InboundMessageOutcome::Blocked(_)));
+}
+
+#[test]
+fn revoked_certificate_rejects_before_local_block_handling() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [sender.revoked_identity_key()];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x55, b"revoked blocked", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x55; 32]),
+        &bob_snapshot,
+        inbound_with_certificate_validation(
+            key,
+            deduplication_key,
+            &encrypted,
+            &acknowledgment_sender_identity,
+            &domain_keys,
+            &revoked,
+        ),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::SenderCertificateValidation(
+            SenderCertificateValidationError::RevokedIdentityKey
+        ))
+    ));
+}
+
+#[test]
+fn certificate_identity_key_must_match_bound_session_contact() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender =
+        validated_sender_for_contact(contact_with_unrelated_identity_key_and_sender_discovery());
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let alice_sender_identity = sender_identity(0xa1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let mut alice_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.alice_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &alice_sender_identity,
+        deduplication_key.clone(),
+    );
+    let first = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x57, b"bind alice contact session", &alice_sender_identity),
+        )
+        .unwrap();
+    alice_snapshot.apply_all(first.state_updates);
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x57; 32]),
+            &bob_snapshot,
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &first.message,
+                &acknowledgment_sender_identity,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    bob_snapshot.apply_all(decrypted.state_updates);
+    let reply = engine
+        .encrypt_message(
+            &bob_snapshot,
+            key.clone(),
+            outbound(0x58, b"mismatched certificate", &sender.sender_identity),
+        )
+        .unwrap();
+    bob_snapshot.apply_all(reply.state_updates);
+
+    assert!(matches!(
+        engine.decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x58; 32]),
+            &alice_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &reply.message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        ),
+        Err(ProtocolStateError::InvalidMessage { reason })
+            if reason == "sender certificate identity key does not match session contact"
+    ));
+}
+
+#[test]
+fn unblocked_contact_resumes_existing_session_without_new_handshake() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    let first = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x56, b"blocked before unblock", &sender.sender_identity),
+        )
+        .unwrap();
+    alice_snapshot.apply_all(first.state_updates);
+    let blocked = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x56; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key.clone(),
+                &first.message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+    bob_snapshot.apply_all(blocked.state_updates);
+    let unblocked = engine
+        .unblock_contact(&bob_snapshot, sender.contact.identity_key)
+        .unwrap();
+    bob_snapshot.apply_all(unblocked.state_updates);
+    let second = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x57, b"after unblock", &sender.sender_identity),
+        )
+        .unwrap();
+
+    let accepted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x57; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &second.message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+
+    assert_eq!(accepted.plaintext.as_slice(), b"after unblock");
 }
 
 #[test]

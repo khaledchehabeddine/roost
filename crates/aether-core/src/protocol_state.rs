@@ -9,6 +9,10 @@ use crate::key_encoding::{
 };
 use crate::message::{MAX_ENCODED_MESSAGE_LEN, MAX_MESSAGE_PAYLOAD_LEN};
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
+use crate::sender_certificate::{
+    DomainSigningKey, SenderCertificateIdentityKey, SenderCertificateValidationError,
+    SenderCertificateValidationInput, validate_sender_certificate,
+};
 use crate::{Message, MessageError, MessageId, PayloadKind};
 use aether_crypto::{
     DiscoveryKeyBundle, Header, PublicKey, RatchetState, SenderIdentityMaterial, Signature,
@@ -29,7 +33,8 @@ const SESSION_STATE_WIRE_VERSION: u8 = 1;
 const SESSION_STATE_WITH_CONTACT_WIRE_VERSION: u8 = 2;
 const DEDUPLICATION_SET_WIRE_VERSION: u8 = 1;
 const PENDING_ACKNOWLEDGMENTS_WIRE_VERSION: u8 = 1;
-const CONTACT_STATE_WIRE_VERSION: u8 = 1;
+const CONTACT_STATE_WIRE_VERSION: u8 = 2;
+const CONTACT_STATE_WIRE_VERSION_V1: u8 = 1;
 const ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION: u8 = 1;
 const DEDUPLICATION_DIGEST_LEN: usize = 16;
 const DEDUPLICATION_KEY_LEN: usize = 32;
@@ -368,6 +373,25 @@ pub struct InboundEncryptedMessage<'a> {
     pub message: &'a Message,
     /// Metadata for the encrypted acknowledgment returned when the Message is accepted.
     pub acknowledgment: OutboundAcknowledgment<'a>,
+    /// Sender-certificate validation inputs used to derive Identity-keyed receive decisions, if any.
+    pub sender_certificate_validation: Option<InboundSenderCertificateValidation<'a>>,
+}
+
+/// Sender-certificate validation inputs for receive-time Identity-keyed decisions.
+///
+/// When supplied, Core validates the sealed sender certificate after decrypting the Message,
+/// rejects revoked Identity Keys before local blocking, and uses the validated sender Identity Key
+/// to suppress blocked inbound plaintext.
+#[derive(Clone, Copy)]
+pub struct InboundSenderCertificateValidation<'a> {
+    /// Known domain-signing keys indexed by certificate signing-key identifier.
+    pub domain_signing_keys: &'a [DomainSigningKey<'a>],
+    /// Caller-supplied revoked sender Identity Keys.
+    pub revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+    /// Caller-supplied Unix timestamp in seconds used for expiry evaluation.
+    pub reference_timestamp_secs: u64,
+    /// Caller-supplied grace window in seconds.
+    pub grace_window_secs: u64,
 }
 
 /// Inbound plaintext and all advanced protocol-state updates from one operation.
@@ -382,10 +406,20 @@ pub struct InboundMessageResult {
     pub state_updates: Vec<ProtocolStateUpdate>,
 }
 
+/// Accepted blocked inbound Message result without consumer-visible plaintext.
+pub struct BlockedInboundMessageResult {
+    /// Encrypted acknowledgment artifact to durably queue with the returned state updates.
+    pub acknowledgment: Message,
+    /// Protocol-state updates to commit before treating the blocked inbound Message as processed.
+    pub state_updates: Vec<ProtocolStateUpdate>,
+}
+
 /// The result of receiving an inbound encrypted Message.
 pub enum InboundMessageOutcome {
     /// A unique Message decrypted and advanced protocol state.
     Accepted(Box<InboundMessageResult>),
+    /// A unique blocked Message decrypted, acknowledged, and advanced protocol state.
+    Blocked(Box<BlockedInboundMessageResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
     Duplicate,
 }
@@ -685,6 +719,7 @@ impl ProtocolStateEngine {
                     ContactState {
                         identity: contact_identity,
                         trust_state: current.trust_state,
+                        blocked: current.blocked,
                     }
                 } else {
                     return Ok(ContactStateChange {
@@ -697,6 +732,7 @@ impl ProtocolStateEngine {
             None => ContactState {
                 identity: contact_identity,
                 trust_state: ContactTrustState::Pending,
+                blocked: false,
             },
         };
         changed_contact_state(address, contact)
@@ -768,6 +804,48 @@ impl ProtocolStateEngine {
         changed_contact_state(address, contact)
     }
 
+    /// Locally blocks a contact without changing its Trust State.
+    ///
+    /// Blocking is keyed by the contact Identity Key. It refuses new outgoing user Messages and
+    /// suppresses consumer-visible inbound plaintext when receive has either a validated sender
+    /// certificate Identity Key or an existing session contact Identity Key binding, while still
+    /// accepting the protocol Message.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for
+    ///   `identity_key`.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn block_contact(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<ContactStateChange, ProtocolStateError> {
+        self.set_contact_blocked(snapshot, identity_key, true)
+    }
+
+    /// Locally unblocks a contact without changing its Trust State.
+    ///
+    /// Existing Sessions remain usable after unblock; no handshake is required solely because of
+    /// the block/unblock cycle.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for
+    ///   `identity_key`.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn unblock_contact(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<ContactStateChange, ProtocolStateError> {
+        self.set_contact_blocked(snapshot, identity_key, false)
+    }
+
     /// Records out-of-band Safety Number confirmation for an accepted contact.
     ///
     /// The presented value must match the Safety Number derived from `local_identity_key` and
@@ -830,6 +908,26 @@ impl ProtocolStateEngine {
         changed_contact_state(address, contact).map(ContactSafetyNumberConfirmation::Matched)
     }
 
+    fn set_contact_blocked(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+        blocked: bool,
+    ) -> Result<ContactStateChange, ProtocolStateError> {
+        let address = contact_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        let mut contact = load_contact_state(snapshot, &address)?;
+        if contact.blocked == blocked {
+            return Ok(ContactStateChange {
+                contact,
+                state_updates: Vec::new(),
+                event: None,
+            });
+        }
+        contact.blocked = blocked;
+        changed_contact_state(address, contact)
+    }
+
     /// Returns deletion updates for all protocol-state kinds at `key`.
     #[must_use]
     pub fn wipe(&self, key: ProtocolStateKey) -> Vec<ProtocolStateUpdate> {
@@ -844,8 +942,8 @@ impl ProtocolStateEngine {
     /// User messages require an existing accepted Contact State for
     /// [`OutboundPlaintext::contact_identity_key`]. On first send, the session blob is bound to that
     /// contact Identity Key; later sends on the same session must name the same contact. Pending
-    /// contacts and messages addressed to a key other than the contact's current Discovery Key are
-    /// rejected before ratchet state advances.
+    /// contacts, blocked contacts, and messages addressed to a key other than the contact's
+    /// current Discovery Key are rejected before ratchet state advances.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session or pending-acknowledgment blob
@@ -855,8 +953,8 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::Crypto`] if ratchet encryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if sender material or sealed-sender content
     ///   exceeds local caps or fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if the contact is Pending, malformed, or does
-    ///   not own the outbound recipient public key.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if the contact is Pending, malformed, blocked,
+    ///   or does not own the outbound recipient public key.
     /// - [`ProtocolStateError::MessageEncode`] if the produced Message fails to encode.
     /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session or
     ///   pending-acknowledgment blob is present.
@@ -922,7 +1020,10 @@ impl ProtocolStateEngine {
     ///
     /// Consumers should durably queue the returned acknowledgment with `state_updates` before
     /// treating the inbound Message as processed. Duplicate inbound retries do not regenerate the
-    /// acknowledgment artifact.
+    /// acknowledgment artifact. When sender-certificate validation inputs are supplied, receive
+    /// validates the sealed certificate after decrypting; blocked plaintext is suppressed when the
+    /// sender Identity Key comes from that validated certificate or from an existing session
+    /// contact Identity Key binding, while still returning acknowledgment and state updates.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the deduplication-set or ratchet/session blob fails
@@ -933,11 +1034,14 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::InvalidMessage`] if the Message does not contain ratcheted text,
     ///   the session is not bound to a peer sender identity key, the decrypted sender identity key
     ///   does not match the session binding, the decrypted sealed-sender envelope is malformed,
-    ///   unsupported, or oversized, or the acknowledgment sender material is invalid.
+    ///   unsupported, or oversized, the validated sender certificate does not match the session
+    ///   sender, or the acknowledgment sender material is invalid.
     /// - [`ProtocolStateError::MessageEncode`] if the inbound Message or produced acknowledgment
     ///   fails canonical encoding.
     /// - [`ProtocolStateError::MissingRequiredState`] if a required deduplication-set or
     ///   ratchet/session blob is absent.
+    /// - [`ProtocolStateError::SenderCertificateValidation`] if supplied sender-certificate
+    ///   validation inputs reject the sealed sender certificate.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if either blob version is not supported.
     pub fn decrypt_message<R: RngCore + CryptoRng>(
         &self,
@@ -997,6 +1101,11 @@ impl ProtocolStateEngine {
                 reason: "sealed sender identity key does not match session".into(),
             });
         }
+        let inbound_contact_identity_key = inbound_contact_identity_key(
+            inbound.sender_certificate_validation,
+            &decoded.sender_identity,
+            loaded.contact_identity_key,
+        )?;
         let acknowledgment =
             encrypt_acknowledgment(&mut state, &inbound.acknowledgment, message.id)?;
         record_deduplication_digest(&mut deduplication, digest);
@@ -1013,12 +1122,23 @@ impl ProtocolStateEngine {
             deduplication_address.clone(),
             encode_deduplication_set(&deduplication_address, &deduplication)?,
         );
+        let state_updates = vec![session_update, deduplication_update];
+        if let Some(contact_identity_key) = inbound_contact_identity_key
+            && contact_is_blocked(snapshot, contact_identity_key)?
+        {
+            return Ok(InboundMessageOutcome::Blocked(Box::new(
+                BlockedInboundMessageResult {
+                    acknowledgment,
+                    state_updates,
+                },
+            )));
+        }
         Ok(InboundMessageOutcome::Accepted(Box::new(
             InboundMessageResult {
                 plaintext: decoded.plaintext,
                 sender_identity: decoded.sender_identity,
                 acknowledgment,
-                state_updates: vec![session_update, deduplication_update],
+                state_updates,
             },
         )))
     }
@@ -1234,6 +1354,8 @@ pub enum ProtocolStateError {
     },
     /// A cryptographic operation failed.
     Crypto(aether_crypto::CryptoError),
+    /// Sender-certificate validation failed during receive.
+    SenderCertificateValidation(SenderCertificateValidationError),
     /// A Message did not carry the expected ratcheted payload.
     InvalidMessage {
         /// Diagnostic failure context for logs only.
@@ -1294,6 +1416,9 @@ impl fmt::Display for ProtocolStateError {
                 )
             }
             Self::Crypto(e) => write!(f, "protocol-state crypto operation failed: {e}"),
+            Self::SenderCertificateValidation(e) => {
+                write!(f, "sender certificate validation failed: {e}")
+            }
             Self::InvalidMessage { reason } => write!(f, "invalid message: {reason}"),
             Self::InvalidDeduplicationCapacity {
                 capacity,
@@ -1329,6 +1454,7 @@ impl Error for ProtocolStateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Crypto(e) => Some(e),
+            Self::SenderCertificateValidation(e) => Some(e),
             Self::MessageEncode(e) => Some(e),
             Self::BlobDecode { .. }
             | Self::BlobEncode { .. }
@@ -1575,10 +1701,25 @@ struct ContactStateWire<'a> {
     discovery_created_at: u64,
     discovery_identity_signature: &'a [u8],
     trust_state: ContactTrustState,
+    blocked: bool,
 }
 
 #[derive(Deserialize)]
-struct DecodedContactStateWire {
+struct DecodedContactStateWireV2 {
+    version: u8,
+    identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_epoch: u32,
+    discovery_created_at: u64,
+    discovery_identity_signature: Vec<u8>,
+    trust_state: ContactTrustState,
+    blocked: bool,
+}
+
+#[derive(Deserialize)]
+struct DecodedContactStateWireV1 {
     version: u8,
     identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
@@ -2052,6 +2193,7 @@ fn encode_contact_state(
         discovery_created_at: contact.identity.discovery_key.created_at,
         discovery_identity_signature: &contact.identity.discovery_key.identity_signature,
         trust_state: contact.trust_state,
+        blocked: contact.blocked,
     };
     let payload =
         Zeroizing::new(
@@ -2111,37 +2253,92 @@ fn decode_contact_state_payload(
     address: &ProtocolStateAddress,
     payload: &[u8],
 ) -> Result<ContactState, ProtocolStateError> {
-    let (wire, trailing): (DecodedContactStateWire, &[u8]) = postcard::take_from_bytes(payload)
-        .map_err(|e| ProtocolStateError::BlobDecode {
+    if let Ok((wire, trailing)) = postcard::take_from_bytes::<DecodedContactStateWireV2>(payload)
+        && trailing.is_empty()
+        && wire.version == CONTACT_STATE_WIRE_VERSION
+    {
+        return decoded_contact_state(address, decoded_contact_state_parts_v2(wire));
+    }
+
+    let (wire, trailing): (DecodedContactStateWireV1, &[u8]) =
+        postcard::take_from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: e.to_string(),
         })?;
-    if !trailing.is_empty() || wire.version != CONTACT_STATE_WIRE_VERSION {
+    if !trailing.is_empty() || wire.version != CONTACT_STATE_WIRE_VERSION_V1 {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: "contact-state payload version is unsupported".into(),
         });
     }
+    decoded_contact_state(address, decoded_contact_state_parts_v1(wire))
+}
+
+struct DecodedContactStateParts {
+    identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_epoch: u32,
+    discovery_created_at: u64,
+    discovery_identity_signature: Vec<u8>,
+    trust_state: ContactTrustState,
+    blocked: bool,
+}
+
+fn decoded_contact_state_parts_v2(wire: DecodedContactStateWireV2) -> DecodedContactStateParts {
+    DecodedContactStateParts {
+        identity_x25519_public_key: wire.identity_x25519_public_key,
+        identity_ed25519_verifying_key: wire.identity_ed25519_verifying_key,
+        discovery_x25519_public_key: wire.discovery_x25519_public_key,
+        discovery_ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
+        discovery_epoch: wire.discovery_epoch,
+        discovery_created_at: wire.discovery_created_at,
+        discovery_identity_signature: wire.discovery_identity_signature,
+        trust_state: wire.trust_state,
+        blocked: wire.blocked,
+    }
+}
+
+fn decoded_contact_state_parts_v1(wire: DecodedContactStateWireV1) -> DecodedContactStateParts {
+    DecodedContactStateParts {
+        identity_x25519_public_key: wire.identity_x25519_public_key,
+        identity_ed25519_verifying_key: wire.identity_ed25519_verifying_key,
+        discovery_x25519_public_key: wire.discovery_x25519_public_key,
+        discovery_ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
+        discovery_epoch: wire.discovery_epoch,
+        discovery_created_at: wire.discovery_created_at,
+        discovery_identity_signature: wire.discovery_identity_signature,
+        trust_state: wire.trust_state,
+        blocked: false,
+    }
+}
+
+fn decoded_contact_state(
+    address: &ProtocolStateAddress,
+    parts: DecodedContactStateParts,
+) -> Result<ContactState, ProtocolStateError> {
     let contact = ContactState {
         identity: ContactIdentity {
             identity_key: ContactIdentityKey {
-                x25519_public_key: wire.identity_x25519_public_key,
-                ed25519_verifying_key: wire.identity_ed25519_verifying_key,
+                x25519_public_key: parts.identity_x25519_public_key,
+                ed25519_verifying_key: parts.identity_ed25519_verifying_key,
             },
             discovery_key: ContactDiscoveryKey {
-                x25519_public_key: wire.discovery_x25519_public_key,
-                ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
-                epoch: wire.discovery_epoch,
-                created_at: wire.discovery_created_at,
-                identity_signature: wire.discovery_identity_signature.try_into().map_err(|_| {
-                    ProtocolStateError::BlobDecode {
+                x25519_public_key: parts.discovery_x25519_public_key,
+                ed25519_verifying_key: parts.discovery_ed25519_verifying_key,
+                epoch: parts.discovery_epoch,
+                created_at: parts.discovery_created_at,
+                identity_signature: parts.discovery_identity_signature.try_into().map_err(
+                    |_| ProtocolStateError::BlobDecode {
                         address: address.clone(),
                         reason: "contact discovery key signature length is invalid".into(),
-                    }
-                })?,
+                    },
+                )?,
             },
         },
-        trust_state: wire.trust_state,
+        trust_state: parts.trust_state,
+        blocked: parts.blocked,
     };
     validate_decoded_contact_state(address, &contact)?;
     Ok(contact)
@@ -2225,10 +2422,12 @@ fn session_contact_identity_key(
     requested: ContactIdentityKey,
 ) -> Result<ContactIdentityKey, ProtocolStateError> {
     match session.contact_identity_key {
-        Some(existing) if existing != requested => Err(ProtocolStateError::InvalidStateBinding {
-            address: address.clone(),
-            reason: "session contact identity key is already bound".into(),
-        }),
+        Some(existing) if !contact_identity_keys_match(&existing, &requested) => {
+            Err(ProtocolStateError::InvalidStateBinding {
+                address: address.clone(),
+                reason: "session contact identity key is already bound".into(),
+            })
+        }
         Some(existing) => Ok(existing),
         None => Ok(requested),
     }
@@ -2291,6 +2490,12 @@ fn ensure_contact_allows_outbound(
     let address = contact_address(identity_key);
     validate_contact_identity_key(&address, &identity_key)?;
     let contact = load_contact_state(snapshot, &address)?;
+    if contact.blocked {
+        return Err(ProtocolStateError::InvalidStateBinding {
+            address,
+            reason: "blocked contact cannot send user messages".into(),
+        });
+    }
     if contact.trust_state == ContactTrustState::Pending {
         return Err(ProtocolStateError::InvalidStateBinding {
             address,
@@ -2308,6 +2513,73 @@ fn ensure_contact_allows_outbound(
         });
     }
     Ok(())
+}
+
+fn inbound_contact_identity_key(
+    validation: Option<InboundSenderCertificateValidation<'_>>,
+    sender_identity: &SenderIdentityMaterial,
+    session_contact_identity_key: Option<ContactIdentityKey>,
+) -> Result<Option<ContactIdentityKey>, ProtocolStateError> {
+    let Some(validation) = validation else {
+        return Ok(session_contact_identity_key);
+    };
+    let validated = validate_sender_certificate(SenderCertificateValidationInput {
+        certificate: &sender_identity.certificate,
+        signature: &sender_identity.signature,
+        domain_signing_keys: validation.domain_signing_keys,
+        revoked_identity_keys: validation.revoked_identity_keys,
+        reference_timestamp_secs: validation.reference_timestamp_secs,
+        grace_window_secs: validation.grace_window_secs,
+    })
+    .map_err(ProtocolStateError::SenderCertificateValidation)?;
+    if validated
+        .discovery_key
+        .x25519_public_key
+        .ct_eq(&sender_identity.identity_key)
+        .unwrap_u8()
+        != 1
+    {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: "sender certificate discovery key does not match session sender".into(),
+        });
+    }
+    let identity_key = ContactIdentityKey {
+        x25519_public_key: validated.identity_key.x25519_public_key,
+        ed25519_verifying_key: validated.identity_key.ed25519_verifying_key,
+    };
+    if let Some(bound_identity_key) = session_contact_identity_key
+        && !contact_identity_keys_match(&bound_identity_key, &identity_key)
+    {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: "sender certificate identity key does not match session contact".into(),
+        });
+    }
+    Ok(Some(identity_key))
+}
+
+fn contact_is_blocked(
+    snapshot: &ProtocolStateSnapshot,
+    identity_key: ContactIdentityKey,
+) -> Result<bool, ProtocolStateError> {
+    let address = contact_address(identity_key);
+    validate_contact_identity_key(&address, &identity_key)?;
+    snapshot
+        .get(&address)
+        .map(|blob| decode_contact_state(&address, blob).map(|contact| contact.blocked))
+        .transpose()
+        .map(|blocked| blocked.unwrap_or(false))
+}
+
+fn contact_identity_keys_match(left: &ContactIdentityKey, right: &ContactIdentityKey) -> bool {
+    left.x25519_public_key
+        .ct_eq(&right.x25519_public_key)
+        .unwrap_u8()
+        == 1
+        && left
+            .ed25519_verifying_key
+            .ct_eq(&right.ed25519_verifying_key)
+            .unwrap_u8()
+            == 1
 }
 
 fn deduplication_digest(

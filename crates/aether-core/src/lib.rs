@@ -60,13 +60,14 @@ pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
-    AcknowledgmentOutcome, ClearedAcknowledgment, DEFAULT_DEDUPLICATION_CAPACITY,
-    InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
-    InboundMessageResult, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
-    OutboundAcknowledgment, OutboundMessageResult, OutboundPlaintext, PendingAcknowledgment,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
-    RetryInstruction, RetryInstructionResult, SessionId,
+    AcknowledgmentOutcome, BlockedInboundMessageResult, ClearedAcknowledgment,
+    DEFAULT_DEDUPLICATION_CAPACITY, InboundAcknowledgmentMessage, InboundEncryptedMessage,
+    InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
+    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, OutboundAcknowledgment,
+    OutboundMessageResult, OutboundPlaintext, PendingAcknowledgment, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate, RetryInstruction,
+    RetryInstructionResult, SessionId,
 };
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use sender_certificate::{

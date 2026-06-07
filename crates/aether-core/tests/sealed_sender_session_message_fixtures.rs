@@ -180,6 +180,7 @@ fn inbound<'a>(
         deduplication_key,
         message,
         acknowledgment: acknowledgment(acknowledgment_sender_identity),
+        sender_certificate_validation: None,
     }
 }
 
@@ -203,6 +204,7 @@ fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAc
 fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
     match outcome {
         InboundMessageOutcome::Accepted(result) => *result,
+        InboundMessageOutcome::Blocked(_) => panic!("message was unexpectedly blocked"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
     }
 }

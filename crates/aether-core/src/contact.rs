@@ -73,12 +73,14 @@ pub struct ContactState {
     pub identity: ContactIdentity,
     /// Identity-key-bound trust state.
     pub trust_state: ContactTrustState,
+    /// Local-only block flag for this Contact Identity Key.
+    pub blocked: bool,
 }
 
 /// Contact state-change event emitted after the consumer durably commits returned updates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ContactEvent {
-    /// A contact was created, accepted, verified, or had its Discovery Key updated.
+    /// A contact was created, accepted, verified, blocked, unblocked, or had its Discovery Key updated.
     Changed {
         /// Complete public snapshot of the changed contact.
         contact: ContactState,

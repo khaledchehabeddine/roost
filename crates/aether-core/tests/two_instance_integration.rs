@@ -3,11 +3,13 @@
 use std::collections::BTreeMap;
 
 use aether_core::{
-    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, EventStream,
-    EventStreamItem, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
-    Message, MessageId, OutboundAcknowledgment, OutboundPlaintext, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey, ProtocolStateKind,
-    ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
+    DomainSigningKey, DomainSigningKeyStatus, EventStream, EventStreamItem,
+    InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment,
+    OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderCertificateIdentityKey,
+    SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
@@ -20,6 +22,10 @@ use zeroize::Zeroizing;
 
 const CREATED_AT: u64 = 1_700_000_000;
 const RETRY_WINDOW_MILLIS: u64 = 1_000;
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
+const CERTIFICATE_VERSION: u8 = 1;
+const CERTIFICATE_EXPIRES_AT: u64 = 1_700_100_000;
+const CERTIFICATE_REFERENCE_TIME: u64 = 1_700_000_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum InstanceEvent {
@@ -158,6 +164,59 @@ fn accepted_contact_identity() -> ContactIdentity {
     }
 }
 
+struct ValidatedSender {
+    sender_identity: SenderIdentityMaterial,
+    domain_identifier: Vec<u8>,
+    domain_verifying_key: Vec<u8>,
+}
+
+impl ValidatedSender {
+    fn domain_signing_key(&self) -> DomainSigningKey<'_> {
+        DomainSigningKey {
+            identifier: &self.domain_identifier,
+            verifying_key: &self.domain_verifying_key,
+            status: DomainSigningKeyStatus::Trusted,
+        }
+    }
+}
+
+fn validated_sender() -> ValidatedSender {
+    let mut rng = ChaCha20Rng::from_seed([0x90; 32]);
+    let domain_signing_key = generate_signing_key_pair(&mut rng);
+    let contact = accepted_contact_identity();
+    let domain_identifier = b"test-domain".to_vec();
+    let certificate = sender_certificate_bytes(&domain_identifier, contact, CERTIFICATE_EXPIRES_AT);
+    let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
+    ValidatedSender {
+        sender_identity: SenderIdentityMaterial {
+            identity_key: contact.discovery_key.prekey_bundle_lookup_key(),
+            certificate,
+            signature,
+        },
+        domain_identifier,
+        domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
+    }
+}
+
+fn sender_certificate_bytes(
+    signing_key_identifier: &[u8],
+    contact: ContactIdentity,
+    expires_at_secs: u64,
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(CERTIFICATE_DOMAIN_TAG);
+    bytes.push(CERTIFICATE_VERSION);
+    bytes.push(signing_key_identifier.len() as u8);
+    bytes.extend_from_slice(signing_key_identifier);
+    bytes.extend_from_slice(&contact.identity_key.x25519_public_key);
+    bytes.extend_from_slice(&contact.identity_key.ed25519_verifying_key);
+    bytes.extend_from_slice(&contact.discovery_key.x25519_public_key);
+    bytes.extend_from_slice(&contact.discovery_key.ed25519_verifying_key);
+    bytes.extend_from_slice(&contact.discovery_key.epoch.to_be_bytes());
+    bytes.extend_from_slice(&expires_at_secs.to_be_bytes());
+    bytes
+}
+
 fn outbound<'a>(
     id: u8,
     plaintext: &'a [u8],
@@ -198,6 +257,30 @@ fn inbound<'a>(
         deduplication_key,
         message,
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
+        sender_certificate_validation: None,
+    }
+}
+
+fn inbound_with_certificate_validation<'a>(
+    session_key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
+    message: &'a Message,
+    acknowledgment_sender_identity: &'a SenderIdentityMaterial,
+    acknowledgment_id: u8,
+    domain_signing_keys: &'a [DomainSigningKey<'a>],
+    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+) -> InboundEncryptedMessage<'a> {
+    InboundEncryptedMessage {
+        session_key,
+        deduplication_key,
+        message,
+        acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
+        sender_certificate_validation: Some(InboundSenderCertificateValidation {
+            domain_signing_keys,
+            revoked_identity_keys,
+            reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
+            grace_window_secs: 0,
+        }),
     }
 }
 
@@ -214,6 +297,15 @@ fn inbound_acknowledgment<'a>(
 fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
     match outcome {
         InboundMessageOutcome::Accepted(result) => *result,
+        InboundMessageOutcome::Blocked(_) => panic!("message was unexpectedly blocked"),
+        InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+    }
+}
+
+fn blocked(outcome: InboundMessageOutcome) -> aether_core::BlockedInboundMessageResult {
+    match outcome {
+        InboundMessageOutcome::Blocked(result) => *result,
+        InboundMessageOutcome::Accepted(_) => panic!("message was unexpectedly accepted"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
     }
 }
@@ -232,6 +324,14 @@ fn install_accepted_contact(engine: &ProtocolStateEngine, store: &mut ConsumerSt
         .accept_contact(&store.snapshot(), contact.identity_key)
         .unwrap();
     store.apply_all(accepted.state_updates);
+}
+
+fn block_accepted_contact(engine: &ProtocolStateEngine, store: &mut ConsumerStore) {
+    let contact = accepted_contact_identity();
+    let blocked = engine
+        .block_contact(&store.snapshot(), contact.identity_key)
+        .unwrap();
+    store.apply_all(blocked.state_updates);
 }
 
 fn initialize_stores(
@@ -466,6 +566,122 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
     assert_eq!(remaining.len(), 1);
     assert_eq!(remaining[0].message.id, first_message.id);
     assert_eq!(remaining[0].last_retry_millis, Some(1_700_000_001_002));
+}
+
+#[test]
+fn blocked_out_of_order_and_duplicate_messages_ack_without_visible_events() {
+    let first_instance = ProtocolStateEngine::new();
+    let second_instance = ProtocolStateEngine::new();
+    let session_key = session_key();
+    let deduplication_key = deduplication_key();
+    let alice = validated_sender();
+    let alice_domain_keys = [alice.domain_signing_key()];
+    let revoked = [];
+    let bob_sender = sender_identity(0xb1);
+    let (mut alice_store, mut bob_store) = initialize_stores(
+        &first_instance,
+        session_key.clone(),
+        deduplication_key.clone(),
+        &alice.sender_identity,
+        &bob_sender,
+    );
+    block_accepted_contact(&first_instance, &mut bob_store);
+    let events = InstanceEventStream::new(Vec::new());
+
+    let first = first_instance
+        .encrypt_message(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            outbound(0x61, b"blocked first", &alice.sender_identity),
+        )
+        .unwrap();
+    let first_message = first.message;
+    alice_store.apply_all(first.state_updates);
+    let second = second_instance
+        .encrypt_message(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            outbound(0x62, b"blocked second", &alice.sender_identity),
+        )
+        .unwrap();
+    let second_message = second.message;
+    alice_store.apply_all(second.state_updates);
+
+    let second_blocked = first_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x61; 32]),
+            &bob_store.snapshot(),
+            inbound_with_certificate_validation(
+                session_key.clone(),
+                deduplication_key.clone(),
+                &second_message,
+                &bob_sender,
+                0x71,
+                &alice_domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+    let second_ack = second_blocked.acknowledgment;
+    bob_store.apply_all(second_blocked.state_updates);
+    assert!(events.current_state().unwrap().state().is_empty());
+
+    let first_blocked = second_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x62; 32]),
+            &bob_store.snapshot(),
+            inbound_with_certificate_validation(
+                session_key.clone(),
+                deduplication_key.clone(),
+                &first_message,
+                &bob_sender,
+                0x72,
+                &alice_domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+    bob_store.apply_all(first_blocked.state_updates);
+    assert!(events.current_state().unwrap().state().is_empty());
+
+    let duplicate = first_instance
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x63; 32]),
+            &bob_store.snapshot(),
+            inbound_with_certificate_validation(
+                session_key.clone(),
+                deduplication_key.clone(),
+                &second_message,
+                &bob_sender,
+                0x73,
+                &alice_domain_keys,
+                &revoked,
+            ),
+        )
+        .unwrap();
+    assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+    assert!(events.current_state().unwrap().state().is_empty());
+
+    let cleared = second_instance
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x64; 32]),
+            &alice_store.snapshot(),
+            inbound_acknowledgment(session_key.clone(), &second_ack),
+        )
+        .unwrap();
+    let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
+        panic!("acknowledgment did not clear pending state")
+    };
+    assert_eq!(cleared.acknowledged_message_id, second_message.id);
+    alice_store.apply_all(cleared.state_updates);
+
+    let pending = first_instance
+        .pending_acknowledgments(&alice_store.snapshot(), session_key)
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message.id, first_message.id);
 }
 
 #[test]
