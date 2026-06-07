@@ -3,15 +3,16 @@
 use std::collections::BTreeMap;
 
 use aether_core::{
-    AcknowledgmentOutcome, EventStream, EventStreamItem, InboundAcknowledgmentMessage,
-    InboundEncryptedMessage, InboundMessageOutcome, Message, MessageId, OutboundAcknowledgment,
-    OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, EventStream,
+    EventStreamItem, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    Message, MessageId, OutboundAcknowledgment, OutboundPlaintext, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initiate,
+    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initiate,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -143,15 +144,31 @@ fn sender_identity(tag: u8) -> SenderIdentityMaterial {
     }
 }
 
+fn accepted_contact_identity() -> ContactIdentity {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    ContactIdentity {
+        identity_key: ContactIdentityKey {
+            x25519_public_key: *identity_key_pair.public.as_bytes(),
+            ed25519_verifying_key: identity.verifying.to_bytes(),
+        },
+        discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+    }
+}
+
 fn outbound<'a>(
     id: u8,
     plaintext: &'a [u8],
     sender_identity: &'a SenderIdentityMaterial,
 ) -> OutboundPlaintext<'a> {
+    let contact = accepted_contact_identity();
     OutboundPlaintext {
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
-        recipient_public_key: [2u8; 32],
+        contact_identity_key: contact.identity_key,
+        recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_000 + u64::from(id),
         plaintext,
     }
@@ -207,6 +224,16 @@ fn emit_event(stream: &InstanceEventStream, event: InstanceEvent) {
     stream.emit(event, state).unwrap();
 }
 
+fn install_accepted_contact(engine: &ProtocolStateEngine, store: &mut ConsumerStore) {
+    let contact = accepted_contact_identity();
+    let created = engine.record_contact(&store.snapshot(), contact).unwrap();
+    store.apply_all(created.state_updates);
+    let accepted = engine
+        .accept_contact(&store.snapshot(), contact.identity_key)
+        .unwrap();
+    store.apply_all(accepted.state_updates);
+}
+
 fn initialize_stores(
     engine: &ProtocolStateEngine,
     session_key: ProtocolStateKey,
@@ -232,6 +259,7 @@ fn initialize_stores(
             .initialize_pending_acknowledgments(session_key.clone())
             .unwrap(),
     );
+    install_accepted_contact(engine, &mut alice);
     bob.apply(
         engine
             .set_session_state_with_peer_identity(
@@ -249,6 +277,7 @@ fn initialize_stores(
             )
             .unwrap(),
     );
+    install_accepted_contact(engine, &mut bob);
     (alice, bob)
 }
 

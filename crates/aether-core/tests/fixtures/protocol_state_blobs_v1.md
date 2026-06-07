@@ -1,8 +1,9 @@
 # Protocol State Blob v1 Fixtures
 
-These fixtures pin the Core-owned Protocol State Blob envelope for ratchet/session and
-deduplication-set state. Each JSON fixture records the Blob version, Protocol State Kind, Protocol
-State Key, decoded expectations, and canonical encoded bytes.
+These fixtures pin the Core-owned Protocol State Blob envelope for ratchet/session,
+deduplication-set, pending-acknowledgment, and contact state. Each JSON fixture records the Blob
+version, Protocol State Kind, Protocol State Key, decoded expectations, and canonical encoded
+bytes.
 
 Fixture bytes are deterministic test-only material generated from a fixed RNG seed. They have no production origin.
 
@@ -14,6 +15,11 @@ bound fixture pins key-only peer identity storage.
 
 The current deduplication-set body wraps the configured capacity, the per-Identity keyed BLAKE3
 secret, and the ordered digest window. The fixture pins an initialized empty window.
+
+The current contact-state body wraps one Contact Identity — peer IK plus current DK — and the
+IK-bound Trust State. Contact fixtures pin Pending, Unverified, Verified, and DK-rotated accepted
+states. The contact Protocol State Key is the canonical IK encoding; the DK X25519 public key is
+the lookup key consumers use for the contact's prekey bundle.
 
 Supported version:
 

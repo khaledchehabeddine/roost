@@ -2,14 +2,16 @@
 
 use crate::error::AetherError;
 use aether_core::{
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactStateChange,
     InboundEncryptedMessage, InboundMessageOutcome, Message, MessageId, OutboundAcknowledgment,
     PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
+    SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     HandshakeEnvelope, InitialPlaintext, PreKeyBundle, RatchetState, accept,
-    generate_discovery_key, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-    generate_signing_key_pair, initiate,
+    generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -633,6 +635,21 @@ fn replay_protocol_state_blob_fixture(
             )?;
             ProtocolStateEngine::new().initialize_pending_acknowledgments(key)
         }
+        "contact_pending"
+        | "contact_unverified"
+        | "contact_verified"
+        | "contact_dk_rotated_unverified"
+        | "contact_dk_rotated_verified" => {
+            ensure(
+                kind == ProtocolStateKind::ContactState,
+                "contact fixture kind mismatch",
+            )?;
+            ensure(
+                key.as_bytes() == contact_fixture_identity().identity_key.canonical_encoding(),
+                "contact fixture key mismatch",
+            )?;
+            contact_fixture_update(&fixture.name)
+        }
         _ => {
             return Err(invalid_fixture(format!(
                 "unknown blob fixture: {}",
@@ -667,6 +684,87 @@ fn replay_protocol_state_blob_fixture(
         minor,
         reencoded_hex: hex::encode(reencoded),
     })
+}
+
+fn contact_fixture_identity() -> ContactIdentity {
+    contact_fixture_identities().0
+}
+
+fn contact_fixture_identities() -> (ContactIdentity, ContactIdentity) {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    let rotated_discovery_key = generate_discovery_key(&mut rng, &identity, 1, CREATED_AT + 60);
+    let identity_key = ContactIdentityKey {
+        x25519_public_key: *identity_key_pair.public.as_bytes(),
+        ed25519_verifying_key: identity.verifying.to_bytes(),
+    };
+    (
+        ContactIdentity {
+            identity_key,
+            discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+        },
+        ContactIdentity {
+            identity_key,
+            discovery_key: ContactDiscoveryKey::from(&rotated_discovery_key.bundle()),
+        },
+    )
+}
+
+fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolStateError> {
+    let engine = ProtocolStateEngine::new();
+    let (contact, rotated_contact) = contact_fixture_identities();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    let pending = engine.record_contact(&snapshot, contact)?;
+    if name == "contact_pending" {
+        return contact_fixture_state_update(pending, contact.identity_key);
+    }
+    snapshot.apply_all(pending.state_updates);
+
+    let unverified = engine.accept_contact(&snapshot, contact.identity_key)?;
+    if name == "contact_unverified" {
+        return contact_fixture_state_update(unverified, contact.identity_key);
+    }
+    snapshot.apply_all(unverified.state_updates);
+
+    if name == "contact_dk_rotated_unverified" {
+        let update = engine.record_contact(&snapshot, rotated_contact)?;
+        return contact_fixture_state_update(update, contact.identity_key);
+    }
+
+    let verified = engine.verify_contact(&snapshot, contact.identity_key)?;
+    if name == "contact_verified" {
+        return contact_fixture_state_update(verified, contact.identity_key);
+    }
+    snapshot.apply_all(verified.state_updates);
+
+    let update = engine.record_contact(&snapshot, rotated_contact)?;
+    contact_fixture_state_update(update, contact.identity_key)
+}
+
+fn contact_fixture_state_update(
+    change: ContactStateChange,
+    identity_key: ContactIdentityKey,
+) -> Result<ProtocolStateUpdate, ProtocolStateError> {
+    let address = ProtocolStateAddress::new(
+        ProtocolStateKind::ContactState,
+        ProtocolStateKey::from(identity_key),
+    );
+    let mut updates = change.state_updates.into_iter();
+    let update = updates
+        .next()
+        .ok_or_else(|| ProtocolStateError::InvalidStateBinding {
+            address: address.clone(),
+            reason: "contact fixture produced no state update".into(),
+        })?;
+    if updates.next().is_some() {
+        return Err(ProtocolStateError::InvalidStateBinding {
+            address,
+            reason: "contact fixture produced multiple state updates".into(),
+        });
+    }
+    Ok(update)
 }
 
 fn session_setup() -> Result<SessionSetup, AetherError> {
@@ -1273,6 +1371,7 @@ fn protocol_state_kind(kind: &str) -> Result<ProtocolStateKind, AetherError> {
         "sender_certificate" => Ok(ProtocolStateKind::SenderCertificate),
         "deduplication_set" => Ok(ProtocolStateKind::DeduplicationSet),
         "pending_acknowledgments" => Ok(ProtocolStateKind::PendingAcknowledgments),
+        "contact_state" => Ok(ProtocolStateKind::ContactState),
         _ => Err(invalid_fixture(format!(
             "unknown protocol-state kind: {kind}"
         ))),
@@ -1336,7 +1435,7 @@ mod tests {
         assert_eq!(report.message_wire_cases.len(), 4);
         assert_eq!(report.sealed_sender_session_cases.len(), 1);
         assert_eq!(report.initial_handshake_cases.len(), 1);
-        assert_eq!(report.protocol_state_blob_cases.len(), 4);
+        assert_eq!(report.protocol_state_blob_cases.len(), 9);
         assert!(report.unsupported_message_version_rejected);
         assert!(report.malformed_message_rejected);
         assert!(report.old_sender_visible_message_rejected);
