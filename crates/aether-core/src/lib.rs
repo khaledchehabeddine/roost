@@ -40,6 +40,7 @@ mod key_store;
 mod message;
 mod one_time_prekey;
 mod protocol_state;
+mod safety_number;
 mod sender_certificate;
 mod signed_prekey;
 mod storage;
@@ -47,7 +48,7 @@ mod storage;
 pub use aether_crypto::SenderIdentityMaterial;
 pub use contact::{
     ContactDiscoveryKey, ContactEvent, ContactEventStream, ContactIdentity, ContactIdentityKey,
-    ContactState, ContactStateChange, ContactTrustState,
+    ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
 };
 pub use discovery_key::DiscoveryKeyError;
 pub use events::{
@@ -67,6 +68,7 @@ pub use protocol_state::{
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
     RetryInstruction, RetryInstructionResult, SessionId,
 };
+pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use sender_certificate::{
     DomainSigningKey, DomainSigningKeyStatus, SenderCertificateDiscoveryKey,
     SenderCertificateIdentityKey, SenderCertificateValidationError,

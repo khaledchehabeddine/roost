@@ -2,11 +2,12 @@
 
 use crate::error::AetherError;
 use aether_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactStateChange,
-    InboundEncryptedMessage, InboundMessageOutcome, Message, MessageId, OutboundAcknowledgment,
-    PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
-    SenderIdentityMaterial, SessionId,
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactSafetyNumberConfirmation,
+    ContactStateChange, IdentityKey, InboundEncryptedMessage, InboundMessageOutcome, Message,
+    MessageId, OutboundAcknowledgment, PayloadKind, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, ProtocolStateUpdate, SenderIdentityMaterial, SessionId,
+    derive_safety_number,
 };
 use aether_crypto::{
     HandshakeEnvelope, InitialPlaintext, PreKeyBundle, RatchetState, accept,
@@ -690,6 +691,16 @@ fn contact_fixture_identity() -> ContactIdentity {
     contact_fixture_identities().0
 }
 
+fn contact_fixture_local_identity() -> IdentityKey {
+    let mut rng = ChaCha20Rng::from_seed([0x72; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    IdentityKey {
+        x25519_public_key: *identity_key_pair.public.as_bytes(),
+        ed25519_verifying_key: identity.verifying.to_bytes(),
+    }
+}
+
 fn contact_fixture_identities() -> (ContactIdentity, ContactIdentity) {
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
     let identity = generate_signing_key_pair(&mut rng);
@@ -733,7 +744,32 @@ fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolSta
         return contact_fixture_state_update(update, contact.identity_key);
     }
 
-    let verified = engine.verify_contact(&snapshot, contact.identity_key)?;
+    let local_identity_key = contact_fixture_local_identity();
+    let safety_number =
+        derive_safety_number(local_identity_key, contact.identity_key).map_err(|_| {
+            ProtocolStateError::InvalidStateBinding {
+                address: ProtocolStateAddress::new(
+                    ProtocolStateKind::ContactState,
+                    ProtocolStateKey::from(contact.identity_key),
+                ),
+                reason: "contact fixture safety number failed".into(),
+            }
+        })?;
+    let verified = engine.confirm_contact_safety_number(
+        &snapshot,
+        local_identity_key,
+        contact.identity_key,
+        &safety_number.grouped_decimal,
+    )?;
+    let ContactSafetyNumberConfirmation::Matched(verified) = verified else {
+        return Err(ProtocolStateError::InvalidStateBinding {
+            address: ProtocolStateAddress::new(
+                ProtocolStateKind::ContactState,
+                ProtocolStateKey::from(contact.identity_key),
+            ),
+            reason: "contact fixture safety number mismatched".into(),
+        });
+    };
     if name == "contact_verified" {
         return contact_fixture_state_update(verified, contact.identity_key);
     }

@@ -1,0 +1,52 @@
+{
+  "provenance": "deterministic test-only bytes generated with ChaCha20Rng seed 0x91; no production origin",
+  "fixtures": [
+    {
+      "name": "pair_alpha",
+      "first_identity": {
+        "x25519_public_key_hex": "cea8522b478dd6836e54235f6e425a69fd8a07e0113a6393390235298aa76207",
+        "ed25519_verifying_key_hex": "734cce51a84fbd45336303ce2a3cb6d7cdcb6703d5eb80f1eacf42613487a8f0"
+      },
+      "second_identity": {
+        "x25519_public_key_hex": "3d4dafeef11bf354d5038ed7987cfcaa441845be52f1b8d14c4b4a4e2389f56b",
+        "ed25519_verifying_key_hex": "b12661824d74f494a38a1dda9d0594e1f4cdd049af4f283d42145c82d9819142"
+      },
+      "expected": {
+        "raw_hex": "349f7fdde676ae10533bd755edcfebb10a8513ff988597e9c4979ddd9fad1cdd",
+        "grouped_decimal": "32361 23425 39384 52205 48501 64357 11666 54322 91485 22401 21720 41437"
+      }
+    },
+    {
+      "name": "pair_beta",
+      "first_identity": {
+        "x25519_public_key_hex": "52a69b3f7cebb5805ce811f8727e3ac3feaaf9c1f95591e7d4588c7df808bc33",
+        "ed25519_verifying_key_hex": "4730c41f06c36fbf9a422fc866c3c39a86618f4334aaccd999438303d1bdc860"
+      },
+      "second_identity": {
+        "x25519_public_key_hex": "acd720a8ef66a0c858ebcaf6a44715113059775c8646e7230d08e437199efd6a",
+        "ed25519_verifying_key_hex": "d52416578280c475132aa9dc83c00d49d72057140928d5417e8dfa26b7482500"
+      },
+      "expected": {
+        "raw_hex": "7ece43f7f0a0ccf81910dab7e48b450e2a358222da093faa8f05c6e312ea5aa6",
+        "grouped_decimal": "41635 82356 83741 83825 99568 94506 38615 21559 21191 98533 08814 52710"
+      }
+    },
+    {
+      "name": "dk_rotation_alpha",
+      "first_identity": {
+        "x25519_public_key_hex": "cea8522b478dd6836e54235f6e425a69fd8a07e0113a6393390235298aa76207",
+        "ed25519_verifying_key_hex": "734cce51a84fbd45336303ce2a3cb6d7cdcb6703d5eb80f1eacf42613487a8f0"
+      },
+      "second_identity": {
+        "x25519_public_key_hex": "3d4dafeef11bf354d5038ed7987cfcaa441845be52f1b8d14c4b4a4e2389f56b",
+        "ed25519_verifying_key_hex": "b12661824d74f494a38a1dda9d0594e1f4cdd049af4f283d42145c82d9819142"
+      },
+      "initial_discovery_x25519_public_key_hex": "c159083b610bb9ee2a19d32af1ad1e077e9e438f2e932d495ad1d3ba612d886e",
+      "rotated_discovery_x25519_public_key_hex": "67692a259d650d45904ee2770e896ae08884748ba8f6ae364bc6a7e1e16f8877",
+      "expected": {
+        "raw_hex": "349f7fdde676ae10533bd755edcfebb10a8513ff988597e9c4979ddd9fad1cdd",
+        "grouped_decimal": "32361 23425 39384 52205 48501 64357 11666 54322 91485 22401 21720 41437"
+      }
+    }
+  ]
+}

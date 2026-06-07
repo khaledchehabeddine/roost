@@ -1,10 +1,11 @@
 //! Verifies checked-in Protocol State Blob fixtures across the public Core API.
 
 use aether_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactTrustState,
-    DEFAULT_DEDUPLICATION_CAPACITY, MessageId, OutboundPlaintext, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactSafetyNumberConfirmation,
+    ContactTrustState, DEFAULT_DEDUPLICATION_CAPACITY, IdentityKey, MessageId, OutboundPlaintext,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    derive_safety_number,
 };
 use aether_crypto::{
     InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
@@ -137,6 +138,16 @@ fn accepted_contact_identity() -> ContactIdentity {
     contact_fixture_identities().0
 }
 
+fn local_identity_key() -> IdentityKey {
+    let mut rng = ChaCha20Rng::from_seed([0x72; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    IdentityKey {
+        x25519_public_key: *identity_key_pair.public.as_bytes(),
+        ed25519_verifying_key: identity.verifying.to_bytes(),
+    }
+}
+
 fn contact_fixture_identities() -> (ContactIdentity, ContactIdentity) {
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
     let identity = generate_signing_key_pair(&mut rng);
@@ -197,9 +208,19 @@ fn expected_contact_fixture(
             .unwrap();
     }
 
+    let local_identity_key = local_identity_key();
+    let safety_number = derive_safety_number(local_identity_key, contact.identity_key).unwrap();
     let verified = engine
-        .verify_contact(&snapshot, contact.identity_key)
+        .confirm_contact_safety_number(
+            &snapshot,
+            local_identity_key,
+            contact.identity_key,
+            &safety_number.grouped_decimal,
+        )
         .unwrap();
+    let ContactSafetyNumberConfirmation::Matched(verified) = verified else {
+        panic!("fixture safety number did not match");
+    };
     if name == "contact_verified" {
         return verified.state_updates.into_iter().next().unwrap();
     }

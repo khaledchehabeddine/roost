@@ -1,13 +1,14 @@
 //! Public protocol-state blob addressing and stateless operation results.
 
 use crate::contact::{
-    ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey, ContactState,
-    ContactStateChange, ContactTrustState,
+    ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey,
+    ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
 };
 use crate::key_encoding::{
     PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes, validate_x25519_public_key,
 };
 use crate::message::{MAX_ENCODED_MESSAGE_LEN, MAX_MESSAGE_PAYLOAD_LEN};
+use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
 use crate::{Message, MessageError, MessageId, PayloadKind};
 use aether_crypto::{
     DiscoveryKeyBundle, Header, PublicKey, RatchetState, SenderIdentityMaterial, Signature,
@@ -767,25 +768,35 @@ impl ProtocolStateEngine {
         changed_contact_state(address, contact)
     }
 
-    /// Records out-of-band verification for an accepted contact.
+    /// Records out-of-band Safety Number confirmation for an accepted contact.
     ///
-    /// This minimal transition hook is for callers that already performed Safety Number checks.
-    /// Safety Number derivation and mismatch handling live outside this issue.
+    /// The presented value must match the Safety Number derived from `local_identity_key` and
+    /// `contact_identity_key`. A mismatch is reported explicitly, leaves the stored Trust State
+    /// unchanged, and returns no update or event. In-band Messages and acknowledgments never call
+    /// this transition.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
     /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical or the
-    ///   contact is still Pending.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for `identity_key`.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if either Identity Key is not canonical or
+    ///   the contact is still Pending.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for
+    ///   `contact_identity_key`.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
-    pub fn verify_contact(
+    pub fn confirm_contact_safety_number(
         &self,
         snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-    ) -> Result<ContactStateChange, ProtocolStateError> {
-        let address = contact_address(identity_key);
-        validate_contact_identity_key(&address, &identity_key)?;
+        local_identity_key: IdentityKey,
+        contact_identity_key: ContactIdentityKey,
+        presented_grouped_decimal: &str,
+    ) -> Result<ContactSafetyNumberConfirmation, ProtocolStateError> {
+        let address = contact_address(contact_identity_key);
+        validate_contact_identity_key(&address, &contact_identity_key)?;
+        let safety_number = derive_safety_number(local_identity_key, contact_identity_key)
+            .map_err(|_| ProtocolStateError::InvalidStateBinding {
+                address: address.clone(),
+                reason: "identity key is invalid".into(),
+            })?;
         let mut contact = load_contact_state(snapshot, &address)?;
         match contact.trust_state {
             ContactTrustState::Pending => {
@@ -794,17 +805,29 @@ impl ProtocolStateEngine {
                     reason: "pending contact cannot be verified".into(),
                 });
             }
-            ContactTrustState::Verified => {
-                return Ok(ContactStateChange {
+            ContactTrustState::Verified => {}
+            ContactTrustState::Unverified => {}
+        }
+        if safety_number.grouped_decimal != presented_grouped_decimal {
+            return Ok(ContactSafetyNumberConfirmation::Mismatched(
+                ContactStateChange {
                     contact,
                     state_updates: Vec::new(),
                     event: None,
-                });
-            }
-            ContactTrustState::Unverified => {}
+                },
+            ));
+        }
+        if contact.trust_state == ContactTrustState::Verified {
+            return Ok(ContactSafetyNumberConfirmation::Matched(
+                ContactStateChange {
+                    contact,
+                    state_updates: Vec::new(),
+                    event: None,
+                },
+            ));
         }
         contact.trust_state = ContactTrustState::Verified;
-        changed_contact_state(address, contact)
+        changed_contact_state(address, contact).map(ContactSafetyNumberConfirmation::Matched)
     }
 
     /// Returns deletion updates for all protocol-state kinds at `key`.
@@ -2237,8 +2260,7 @@ fn validate_contact_identity(
 }
 
 fn contact_identity_key_is_valid(identity_key: &ContactIdentityKey) -> bool {
-    validate_x25519_public_key(&identity_key.x25519_public_key)
-        && parse_ed25519_verifying_key_bytes(&identity_key.ed25519_verifying_key).is_some()
+    identity_key_is_valid(identity_key)
 }
 
 fn contact_discovery_key_bundle(discovery_key: &ContactDiscoveryKey) -> Option<DiscoveryKeyBundle> {
