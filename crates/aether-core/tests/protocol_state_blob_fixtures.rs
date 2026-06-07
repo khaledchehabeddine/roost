@@ -1,14 +1,15 @@
 //! Verifies checked-in Protocol State Blob fixtures across the public Core API.
 
 use aether_core::{
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactTrustState,
     DEFAULT_DEDUPLICATION_CAPACITY, MessageId, OutboundPlaintext, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initiate,
+    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initiate,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -45,6 +46,9 @@ struct DecodedFixture {
     pending_count: Option<usize>,
     acknowledgment_digest_count: Option<usize>,
     capacity: Option<usize>,
+    trust_state: Option<String>,
+    discovery_epoch: Option<u32>,
+    discovery_created_at: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -129,14 +133,156 @@ fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, key)
 }
 
+fn accepted_contact_identity() -> ContactIdentity {
+    contact_fixture_identities().0
+}
+
+fn contact_fixture_identities() -> (ContactIdentity, ContactIdentity) {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    let rotated_discovery_key = generate_discovery_key(&mut rng, &identity, 1, CREATED_AT + 60);
+    let identity_key = ContactIdentityKey {
+        x25519_public_key: *identity_key_pair.public.as_bytes(),
+        ed25519_verifying_key: identity.verifying.to_bytes(),
+    };
+    (
+        ContactIdentity {
+            identity_key,
+            discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+        },
+        ContactIdentity {
+            identity_key,
+            discovery_key: ContactDiscoveryKey::from(&rotated_discovery_key.bundle()),
+        },
+    )
+}
+
+fn contact_key_hex() -> String {
+    hex::encode(
+        accepted_contact_identity()
+            .identity_key
+            .canonical_encoding(),
+    )
+}
+
+fn expected_contact_fixture(
+    engine: &ProtocolStateEngine,
+    name: &str,
+) -> aether_core::ProtocolStateUpdate {
+    let (contact, rotated_contact) = contact_fixture_identities();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    let pending = engine.record_contact(&snapshot, contact).unwrap();
+    if name == "contact_pending" {
+        return pending.state_updates.into_iter().next().unwrap();
+    }
+    snapshot.apply_all(pending.state_updates);
+
+    let unverified = engine
+        .accept_contact(&snapshot, contact.identity_key)
+        .unwrap();
+    if name == "contact_unverified" {
+        return unverified.state_updates.into_iter().next().unwrap();
+    }
+    snapshot.apply_all(unverified.state_updates);
+
+    if name == "contact_dk_rotated_unverified" {
+        return engine
+            .record_contact(&snapshot, rotated_contact)
+            .unwrap()
+            .state_updates
+            .into_iter()
+            .next()
+            .unwrap();
+    }
+
+    let verified = engine
+        .verify_contact(&snapshot, contact.identity_key)
+        .unwrap();
+    if name == "contact_verified" {
+        return verified.state_updates.into_iter().next().unwrap();
+    }
+    snapshot.apply_all(verified.state_updates);
+
+    engine
+        .record_contact(&snapshot, rotated_contact)
+        .unwrap()
+        .state_updates
+        .into_iter()
+        .next()
+        .unwrap()
+}
+
+fn expected_contact_trust_state(fixture: &Fixture) -> ContactTrustState {
+    match fixture.name.as_str() {
+        "contact_pending" => ContactTrustState::Pending,
+        "contact_unverified" | "contact_dk_rotated_unverified" => ContactTrustState::Unverified,
+        "contact_verified" | "contact_dk_rotated_verified" => ContactTrustState::Verified,
+        _ => panic!("not a contact fixture: {}", fixture.name),
+    }
+}
+
+fn expected_contact_epoch(fixture: &Fixture) -> u32 {
+    match fixture.name.as_str() {
+        "contact_dk_rotated_unverified" | "contact_dk_rotated_verified" => 1,
+        _ => 0,
+    }
+}
+
+fn expected_contact_created_at(fixture: &Fixture) -> u64 {
+    match fixture.name.as_str() {
+        "contact_dk_rotated_unverified" | "contact_dk_rotated_verified" => CREATED_AT + 60,
+        _ => CREATED_AT,
+    }
+}
+
+fn contact_state_name(state: ContactTrustState) -> &'static str {
+    match state {
+        ContactTrustState::Pending => "pending",
+        ContactTrustState::Unverified => "unverified",
+        ContactTrustState::Verified => "verified",
+    }
+}
+
+fn contact_fixture<'a>(fixture_file: &'a FixtureFile, name: &str) -> &'a Fixture {
+    fixture_file
+        .fixtures
+        .iter()
+        .find(|fixture| fixture.name == name)
+        .unwrap()
+}
+
+fn contact_fixture_names() -> &'static [&'static str] {
+    &[
+        "contact_pending",
+        "contact_unverified",
+        "contact_verified",
+        "contact_dk_rotated_unverified",
+        "contact_dk_rotated_verified",
+    ]
+}
+
+fn install_accepted_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
+    let contact = accepted_contact_identity();
+    let created = engine.record_contact(snapshot, contact).unwrap();
+    snapshot.apply_all(created.state_updates);
+    let accepted = engine
+        .accept_contact(snapshot, contact.identity_key)
+        .unwrap();
+    snapshot.apply_all(accepted.state_updates);
+}
+
 fn outbound<'a>(
     plaintext: &'a [u8],
     sender_identity: &'a SenderIdentityMaterial,
 ) -> OutboundPlaintext<'a> {
+    let contact = accepted_contact_identity();
     OutboundPlaintext {
         id: MessageId::from_bytes([1u8; 16]),
         sender_identity,
-        recipient_public_key: [2u8; 32],
+        contact_identity_key: contact.identity_key,
+        recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_123,
         plaintext,
     }
@@ -181,6 +327,7 @@ fn current_version_fixture_matches_decoded_state_expectations() {
     let mut fixture_snapshot = ProtocolStateSnapshot::new();
     fixture_snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
     insert_pending_acknowledgment_fixture(&mut fixture_snapshot, &fixture_file, key.clone());
+    install_accepted_contact(&engine, &mut fixture_snapshot);
 
     let mut expected_snapshot = ProtocolStateSnapshot::new();
     expected_snapshot.apply(expected);
@@ -189,6 +336,7 @@ fn current_version_fixture_matches_decoded_state_expectations() {
             .initialize_pending_acknowledgments(key.clone())
             .unwrap(),
     );
+    install_accepted_contact(&engine, &mut expected_snapshot);
     let sender_identity = sender_identity();
     let fixture_message = engine
         .encrypt_message(
@@ -307,6 +455,64 @@ fn pending_acknowledgments_fixture_matches_decoded_state_expectations() {
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
     assert!(snapshot.get(&address).is_some());
+}
+
+#[test]
+fn contact_state_fixtures_match_decoded_state_expectations() {
+    let fixture_file = fixture_file();
+    let engine = ProtocolStateEngine::new();
+    let contact_key = ProtocolStateKey::from_bytes(
+        accepted_contact_identity()
+            .identity_key
+            .canonical_encoding()
+            .to_vec(),
+    )
+    .unwrap();
+    let address = ProtocolStateAddress::new(ProtocolStateKind::ContactState, contact_key);
+
+    for name in contact_fixture_names() {
+        let fixture = contact_fixture(&fixture_file, name);
+        let current = hex::decode(&fixture.current_encoded_hex).unwrap();
+        let expected = expected_contact_fixture(&engine, name);
+        let expected_trust = expected_contact_trust_state(fixture);
+
+        assert_eq!(fixture.kind, "contact_state");
+        assert_eq!(fixture.key_hex, contact_key_hex());
+        assert_eq!(current[..2], [1, 0]);
+        assert_eq!(
+            fixture.decoded.trust_state.as_deref(),
+            Some(contact_state_name(expected_trust))
+        );
+        assert_eq!(
+            fixture.decoded.discovery_epoch,
+            Some(expected_contact_epoch(fixture))
+        );
+        assert_eq!(
+            fixture.decoded.discovery_created_at,
+            Some(expected_contact_created_at(fixture))
+        );
+        assert_eq!(
+            hex::encode(expected.blob().unwrap().as_bytes()),
+            fixture.current_encoded_hex,
+            "fixture pins the canonical encoded bytes for {name}"
+        );
+
+        let mut snapshot = ProtocolStateSnapshot::new();
+        snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+        let contact = engine
+            .contact_state(&snapshot, accepted_contact_identity().identity_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(contact.trust_state, expected_trust);
+        assert_eq!(
+            contact.identity.discovery_key.epoch,
+            expected_contact_epoch(fixture)
+        );
+        assert_eq!(
+            contact.identity.discovery_key.created_at,
+            expected_contact_created_at(fixture)
+        );
+    }
 }
 
 fn insert_pending_acknowledgment_fixture(

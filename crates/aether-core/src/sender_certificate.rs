@@ -1,7 +1,11 @@
 //! Sender certificate validation against caller-supplied trust policy.
 
+use crate::key_encoding::{
+    PUBLIC_KEY_LEN, parse_ed25519_verifying_key as parse_key_encoding_ed25519_verifying_key,
+    parse_ed25519_verifying_key_bytes as parse_key_encoding_ed25519_verifying_key_bytes,
+    validate_x25519_public_key as validate_key_encoding_x25519_public_key,
+};
 use aether_crypto::{Signature, VerifyingKey};
-use curve25519_dalek::{montgomery::MontgomeryPoint, traits::Identity};
 use std::error::Error;
 use std::fmt;
 use subtle::{Choice, ConstantTimeEq};
@@ -9,7 +13,6 @@ use subtle::{Choice, ConstantTimeEq};
 const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
 const CERTIFICATE_VERSION: u8 = 1;
 const IDENTITY_KEY_DOMAIN_TAG: &[u8] = b"AetherIK-v1:";
-const PUBLIC_KEY_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
 const MAX_SIGNING_KEY_IDENTIFIER_LEN: usize = 64;
 const IDENTITY_KEY_ENCODING_LEN: usize = IDENTITY_KEY_DOMAIN_TAG.len() + PUBLIC_KEY_LEN * 2;
@@ -344,58 +347,25 @@ fn validate_discovery_key(
 fn validate_x25519_public_key(
     bytes: &[u8; PUBLIC_KEY_LEN],
 ) -> Result<(), SenderCertificateValidationError> {
-    if is_canonical_x25519_public_key(bytes) && !is_low_order_x25519_public_key(bytes) {
+    if validate_key_encoding_x25519_public_key(bytes) {
         Ok(())
     } else {
         Err(SenderCertificateValidationError::InvalidKeyEncoding)
     }
 }
 
-fn is_canonical_x25519_public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
-    let modulus = x25519_field_modulus();
-    for i in (0..PUBLIC_KEY_LEN).rev() {
-        if bytes[i] < modulus[i] {
-            return true;
-        }
-        if bytes[i] > modulus[i] {
-            return false;
-        }
-    }
-    false
-}
-
-fn is_low_order_x25519_public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
-    let shared = MontgomeryPoint(*bytes).mul_clamped([0xff; PUBLIC_KEY_LEN]);
-    shared.ct_eq(&MontgomeryPoint::identity()).into()
-}
-
-fn x25519_field_modulus() -> [u8; PUBLIC_KEY_LEN] {
-    let mut modulus = [0xff; PUBLIC_KEY_LEN];
-    modulus[0] = 0xed;
-    modulus[PUBLIC_KEY_LEN - 1] = 0x7f;
-    modulus
-}
-
 fn parse_ed25519_verifying_key(
     bytes: &[u8],
 ) -> Result<VerifyingKey, SenderCertificateValidationError> {
-    let bytes: [u8; PUBLIC_KEY_LEN] = bytes
-        .try_into()
-        .map_err(|_| SenderCertificateValidationError::InvalidKeyEncoding)?;
-    parse_ed25519_verifying_key_bytes(&bytes)
+    parse_key_encoding_ed25519_verifying_key(bytes)
+        .ok_or(SenderCertificateValidationError::InvalidKeyEncoding)
 }
 
 fn parse_ed25519_verifying_key_bytes(
     bytes: &[u8; PUBLIC_KEY_LEN],
 ) -> Result<VerifyingKey, SenderCertificateValidationError> {
-    let verifying_key = VerifyingKey::from_bytes(bytes)
-        .map_err(|_| SenderCertificateValidationError::InvalidKeyEncoding)?;
-    let recompressed = verifying_key.to_edwards().compress().to_bytes();
-    let canonical: bool = recompressed.ct_eq(bytes).into();
-    if !canonical || verifying_key.is_weak() {
-        return Err(SenderCertificateValidationError::InvalidKeyEncoding);
-    }
-    Ok(verifying_key)
+    parse_key_encoding_ed25519_verifying_key_bytes(bytes)
+        .ok_or(SenderCertificateValidationError::InvalidKeyEncoding)
 }
 
 fn parse_signature(bytes: &[u8]) -> Result<Signature, SenderCertificateValidationError> {
@@ -407,6 +377,14 @@ fn parse_signature(bytes: &[u8]) -> Result<Signature, SenderCertificateValidatio
 
 fn certificate_is_expired(expires_at_secs: u64, reference_secs: u64, grace_secs: u64) -> bool {
     reference_secs > expires_at_secs && reference_secs - expires_at_secs > grace_secs
+}
+
+#[cfg(test)]
+fn x25519_field_modulus() -> [u8; PUBLIC_KEY_LEN] {
+    let mut modulus = [0xff; PUBLIC_KEY_LEN];
+    modulus[0] = 0xed;
+    modulus[PUBLIC_KEY_LEN - 1] = 0x7f;
+    modulus
 }
 
 #[cfg(test)]

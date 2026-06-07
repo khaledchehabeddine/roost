@@ -1,16 +1,17 @@
 //! Exercises the public protocol-state API over consumer-held opaque blobs.
 
 use aether_core::{
-    AcknowledgmentOutcome, InboundAcknowledgmentMessage, InboundEncryptedMessage,
-    InboundMessageOutcome, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message,
-    MessageId, OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
+    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
+    InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message, MessageId,
+    OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     Header, InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initiate,
+    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initiate,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -88,6 +89,30 @@ fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, key)
 }
 
+fn accepted_contact_identity() -> ContactIdentity {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    ContactIdentity {
+        identity_key: ContactIdentityKey {
+            x25519_public_key: *identity_key_pair.public.as_bytes(),
+            ed25519_verifying_key: identity.verifying.to_bytes(),
+        },
+        discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+    }
+}
+
+fn install_accepted_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
+    let contact = accepted_contact_identity();
+    let created = engine.record_contact(snapshot, contact).unwrap();
+    snapshot.apply_all(created.state_updates);
+    let accepted = engine
+        .accept_contact(snapshot, contact.identity_key)
+        .unwrap();
+    snapshot.apply_all(accepted.state_updates);
+}
+
 fn snapshot_with_state(
     engine: &ProtocolStateEngine,
     key: ProtocolStateKey,
@@ -96,6 +121,7 @@ fn snapshot_with_state(
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.apply(engine.set_session_state(key.clone(), state).unwrap());
     install_pending_acknowledgments(engine, &mut snapshot, key);
+    install_accepted_contact(engine, &mut snapshot);
     snapshot
 }
 
@@ -133,6 +159,7 @@ fn snapshot_with_state_and_peer_identity(
             .unwrap(),
     );
     install_pending_acknowledgments(engine, &mut snapshot, key);
+    install_accepted_contact(engine, &mut snapshot);
     snapshot
 }
 
@@ -154,10 +181,12 @@ fn outbound<'a>(
     plaintext: &'a [u8],
     sender_identity: &'a SenderIdentityMaterial,
 ) -> OutboundPlaintext<'a> {
+    let contact = accepted_contact_identity();
     OutboundPlaintext {
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
-        recipient_public_key: [2u8; 32],
+        contact_identity_key: contact.identity_key,
+        recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_123 + u64::from(id),
         plaintext,
     }
@@ -296,17 +325,17 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
     );
 
     let encrypted = engine
-        .encrypt_message(
-            &alice_snapshot,
-            key.clone(),
+        .encrypt_message(&alice_snapshot, key.clone(), {
+            let contact = accepted_contact_identity();
             OutboundPlaintext {
                 id: MessageId::from_bytes([8; 16]),
                 sender_identity: &sender_identity,
-                recipient_public_key: [2u8; 32],
+                contact_identity_key: contact.identity_key,
+                recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
                 timestamp_millis: 1_700_000_000_888,
                 plaintext: b"sealed sender",
-            },
-        )
+            }
+        })
         .unwrap();
     alice_snapshot.apply_all(encrypted.state_updates);
 
@@ -514,17 +543,17 @@ fn retry_instructions_are_windowed_and_persisted() {
     install_pending_acknowledgments(&engine, &mut snapshot, key.clone());
 
     let encrypted = engine
-        .encrypt_message(
-            &snapshot,
-            key.clone(),
+        .encrypt_message(&snapshot, key.clone(), {
+            let contact = accepted_contact_identity();
             OutboundPlaintext {
                 id: MessageId::from_bytes([0x33; 16]),
                 sender_identity: &sender_identity,
-                recipient_public_key: [2u8; 32],
+                contact_identity_key: contact.identity_key,
+                recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
                 timestamp_millis: sent_at,
                 plaintext: b"retry later",
-            },
-        )
+            }
+        })
         .unwrap();
     snapshot.apply_all(encrypted.state_updates);
 
@@ -1054,17 +1083,17 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
     install_deduplication_set(&engine, &mut bob_snapshot, deduplication_key.clone(), 0x44);
 
     let encrypted = engine
-        .encrypt_message(
-            &alice_snapshot,
-            key.clone(),
+        .encrypt_message(&alice_snapshot, key.clone(), {
+            let contact = accepted_contact_identity();
             OutboundPlaintext {
                 id: MessageId::from_bytes([9; 16]),
                 sender_identity: &actual_sender_identity,
-                recipient_public_key: [2u8; 32],
+                contact_identity_key: contact.identity_key,
+                recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
                 timestamp_millis: 1_700_000_000_999,
                 plaintext: b"wrong sender",
-            },
-        )
+            }
+        })
         .unwrap();
 
     let result = engine.decrypt_message(
@@ -1375,6 +1404,7 @@ fn corrupt_ratchet_blob_is_a_decode_fault() {
         address.clone(),
         ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
     );
+    install_accepted_contact(&engine, &mut snapshot);
 
     assert!(matches!(
         engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity)),
@@ -1393,6 +1423,7 @@ fn oversized_ratchet_blob_is_a_decode_fault_before_restore() {
         address.clone(),
         ProtocolStateBlob::from_bytes(vec![1; 128 * 1024]),
     );
+    install_accepted_contact(&engine, &mut snapshot);
 
     assert!(matches!(
         engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity)),
@@ -1411,6 +1442,7 @@ fn corrupt_ratchet_blob_does_not_silently_reinitialize_state() {
         address.clone(),
         ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
     );
+    install_accepted_contact(&engine, &mut snapshot);
 
     let result = engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity));
 
@@ -1424,7 +1456,8 @@ fn missing_required_state_is_an_explicit_failure() {
     let key = key();
     let address = ratchet_address(key.clone());
     let sender_identity = sender_identity(1);
-    let snapshot = ProtocolStateSnapshot::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    install_accepted_contact(&engine, &mut snapshot);
 
     assert!(matches!(
         engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity)),

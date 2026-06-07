@@ -31,9 +31,11 @@
 //! ```
 
 mod clock;
+mod contact;
 mod discovery_key;
 mod events;
 mod identity;
+mod key_encoding;
 mod key_store;
 mod message;
 mod one_time_prekey;
@@ -43,6 +45,10 @@ mod signed_prekey;
 mod storage;
 
 pub use aether_crypto::SenderIdentityMaterial;
+pub use contact::{
+    ContactDiscoveryKey, ContactEvent, ContactEventStream, ContactIdentity, ContactIdentityKey,
+    ContactState, ContactStateChange, ContactTrustState,
+};
 pub use discovery_key::DiscoveryKeyError;
 pub use events::{
     DEFAULT_OBSERVER_CAPACITY, EventEnvelope, EventId, EventObserver, EventStream,

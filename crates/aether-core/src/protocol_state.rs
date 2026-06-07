@@ -1,8 +1,18 @@
 //! Public protocol-state blob addressing and stateless operation results.
 
+use crate::contact::{
+    ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey, ContactState,
+    ContactStateChange, ContactTrustState,
+};
+use crate::key_encoding::{
+    PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes, validate_x25519_public_key,
+};
 use crate::message::{MAX_ENCODED_MESSAGE_LEN, MAX_MESSAGE_PAYLOAD_LEN};
 use crate::{Message, MessageError, MessageId, PayloadKind};
-use aether_crypto::{Header, PublicKey, RatchetState, SenderIdentityMaterial};
+use aether_crypto::{
+    DiscoveryKeyBundle, Header, PublicKey, RatchetState, SenderIdentityMaterial, Signature,
+    verify_discovery_key_bundle,
+};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -15,8 +25,10 @@ const CURRENT_PROTOCOL_STATE_BLOB_MAJOR: u8 = 1;
 const CURRENT_PROTOCOL_STATE_BLOB_MINOR: u8 = 0;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 2;
 const SESSION_STATE_WIRE_VERSION: u8 = 1;
+const SESSION_STATE_WITH_CONTACT_WIRE_VERSION: u8 = 2;
 const DEDUPLICATION_SET_WIRE_VERSION: u8 = 1;
 const PENDING_ACKNOWLEDGMENTS_WIRE_VERSION: u8 = 1;
+const CONTACT_STATE_WIRE_VERSION: u8 = 1;
 const ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION: u8 = 1;
 const DEDUPLICATION_DIGEST_LEN: usize = 16;
 const DEDUPLICATION_KEY_LEN: usize = 32;
@@ -33,7 +45,7 @@ const MAX_SEALED_SENDER_CONTENT_LEN: usize =
 const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
 const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
-const MAX_PROTOCOL_STATE_KEY_LEN: usize = 64;
+const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
 const MAX_PENDING_ACKNOWLEDGMENTS: usize = 1024;
 const MAX_ACKNOWLEDGMENT_DIGESTS: usize = 1024;
 const PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP: usize = 64;
@@ -106,6 +118,12 @@ impl ProtocolStateKey {
     }
 }
 
+impl From<ContactIdentityKey> for ProtocolStateKey {
+    fn from(value: ContactIdentityKey) -> Self {
+        Self(value.canonical_encoding().to_vec())
+    }
+}
+
 /// The stable category for an opaque protocol-state blob.
 #[non_exhaustive]
 #[repr(u8)]
@@ -121,6 +139,8 @@ pub enum ProtocolStateKind {
     DeduplicationSet = 3,
     /// Pending-acknowledgment state.
     PendingAcknowledgments = 4,
+    /// Identity-key-addressed contact state.
+    ContactState = 5,
 }
 
 impl ProtocolStateKind {
@@ -133,6 +153,7 @@ impl ProtocolStateKind {
             Self::SenderCertificate,
             Self::DeduplicationSet,
             Self::PendingAcknowledgments,
+            Self::ContactState,
         ]
     }
 }
@@ -145,6 +166,7 @@ impl fmt::Display for ProtocolStateKind {
             Self::SenderCertificate => write!(f, "sender-certificate state"),
             Self::DeduplicationSet => write!(f, "deduplication-set state"),
             Self::PendingAcknowledgments => write!(f, "pending-acknowledgment state"),
+            Self::ContactState => write!(f, "contact state"),
         }
     }
 }
@@ -305,6 +327,8 @@ pub struct OutboundPlaintext<'a> {
     pub id: MessageId,
     /// Sender identity material sealed inside the encrypted payload.
     pub sender_identity: &'a SenderIdentityMaterial,
+    /// Recipient contact Identity Key used to enforce local trust-state gates.
+    pub contact_identity_key: ContactIdentityKey,
     /// Recipient X25519 public key bytes. Always 32 bytes.
     pub recipient_public_key: [u8; 32],
     /// Sender-observed Unix timestamp in milliseconds.
@@ -535,7 +559,7 @@ impl ProtocolStateEngine {
         let address = ratchet_address(key);
         Ok(ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, state, None)?,
+            encode_session_state(&address, state, None, None)?,
         ))
     }
 
@@ -577,7 +601,7 @@ impl ProtocolStateEngine {
         let address = ratchet_address(key);
         Ok(ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, state, Some(peer_sender_identity_key))?,
+            encode_session_state(&address, state, Some(peer_sender_identity_key), None)?,
         ))
     }
 
@@ -619,8 +643,168 @@ impl ProtocolStateEngine {
         };
         Ok(ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, &loaded.state, Some(peer_sender_identity_key))?,
+            encode_session_state(
+                &address,
+                &loaded.state,
+                Some(peer_sender_identity_key),
+                loaded.contact_identity_key,
+            )?,
         ))
+    }
+
+    /// Creates or updates an Identity-key-addressed Contact State blob.
+    ///
+    /// New contacts start [`ContactTrustState::Pending`]. Updating an existing contact may replace
+    /// the current Discovery Key, but never resets the Identity-key-bound trust state.
+    /// Consumers must build `contact_identity` from authenticated identity material; this method
+    /// validates canonical key encodings and the Discovery Key signature, but it cannot prove where
+    /// the Identity Key bytes came from.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if an existing contact blob fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if the Identity Key or Discovery Key encodings
+    ///   are invalid, or the Discovery Key bundle signature does not verify under the contact
+    ///   Identity Key.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn record_contact(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        contact_identity: ContactIdentity,
+    ) -> Result<ContactStateChange, ProtocolStateError> {
+        let address = contact_address(contact_identity.identity_key);
+        validate_contact_identity(&address, &contact_identity)?;
+        let contact = match snapshot.get(&address) {
+            Some(blob) => {
+                let current = decode_contact_state(&address, blob)?;
+                if contact_discovery_key_is_newer(
+                    &current.identity.discovery_key,
+                    &contact_identity.discovery_key,
+                ) {
+                    ContactState {
+                        identity: contact_identity,
+                        trust_state: current.trust_state,
+                    }
+                } else {
+                    return Ok(ContactStateChange {
+                        contact: current,
+                        state_updates: Vec::new(),
+                        event: None,
+                    });
+                }
+            }
+            None => ContactState {
+                identity: contact_identity,
+                trust_state: ContactTrustState::Pending,
+            },
+        };
+        changed_contact_state(address, contact)
+    }
+
+    /// Returns the Contact State for one peer Identity Key, if present.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn contact_state(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<Option<ContactState>, ProtocolStateError> {
+        let address = contact_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        snapshot
+            .get(&address)
+            .map(|blob| decode_contact_state(&address, blob))
+            .transpose()
+    }
+
+    /// Returns all current Contact State snapshots in address order.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if any contact blob fails to decode.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if any blob version is not supported.
+    pub fn contact_states(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+    ) -> Result<Vec<ContactState>, ProtocolStateError> {
+        snapshot
+            .blobs
+            .iter()
+            .filter(|(address, _)| address.kind == ProtocolStateKind::ContactState)
+            .map(|(address, blob)| decode_contact_state(address, blob))
+            .collect()
+    }
+
+    /// Records consumer acceptance for a Pending contact.
+    ///
+    /// Acceptance moves Pending to Unverified. Calling this for an already accepted contact is an
+    /// idempotent no-op.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for `identity_key`.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn accept_contact(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<ContactStateChange, ProtocolStateError> {
+        let address = contact_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        let mut contact = load_contact_state(snapshot, &address)?;
+        if contact.trust_state != ContactTrustState::Pending {
+            return Ok(ContactStateChange {
+                contact,
+                state_updates: Vec::new(),
+                event: None,
+            });
+        }
+        contact.trust_state = ContactTrustState::Unverified;
+        changed_contact_state(address, contact)
+    }
+
+    /// Records out-of-band verification for an accepted contact.
+    ///
+    /// This minimal transition hook is for callers that already performed Safety Number checks.
+    /// Safety Number derivation and mismatch handling live outside this issue.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical or the
+    ///   contact is still Pending.
+    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for `identity_key`.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn verify_contact(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<ContactStateChange, ProtocolStateError> {
+        let address = contact_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        let mut contact = load_contact_state(snapshot, &address)?;
+        match contact.trust_state {
+            ContactTrustState::Pending => {
+                return Err(ProtocolStateError::InvalidStateBinding {
+                    address,
+                    reason: "pending contact cannot be verified".into(),
+                });
+            }
+            ContactTrustState::Verified => {
+                return Ok(ContactStateChange {
+                    contact,
+                    state_updates: Vec::new(),
+                    event: None,
+                });
+            }
+            ContactTrustState::Unverified => {}
+        }
+        contact.trust_state = ContactTrustState::Verified;
+        changed_contact_state(address, contact)
     }
 
     /// Returns deletion updates for all protocol-state kinds at `key`.
@@ -634,6 +818,12 @@ impl ProtocolStateEngine {
 
     /// Encrypts plaintext using the required ratchet/session and pending-acknowledgment blobs.
     ///
+    /// User messages require an existing accepted Contact State for
+    /// [`OutboundPlaintext::contact_identity_key`]. On first send, the session blob is bound to that
+    /// contact Identity Key; later sends on the same session must name the same contact. Pending
+    /// contacts and messages addressed to a key other than the contact's current Discovery Key are
+    /// rejected before ratchet state advances.
+    ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session or pending-acknowledgment blob
     ///   fails to decode.
@@ -642,6 +832,8 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::Crypto`] if ratchet encryption or state encoding fails.
     /// - [`ProtocolStateError::InvalidMessage`] if sender material or sealed-sender content
     ///   exceeds local caps or fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if the contact is Pending, malformed, or does
+    ///   not own the outbound recipient public key.
     /// - [`ProtocolStateError::MessageEncode`] if the produced Message fails to encode.
     /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session or
     ///   pending-acknowledgment blob is present.
@@ -655,6 +847,13 @@ impl ProtocolStateEngine {
         let pending_address = pending_acknowledgment_address(key.clone());
         let address = ratchet_address(key);
         let loaded = load_session_state(snapshot, &address)?;
+        let contact_identity_key =
+            session_contact_identity_key(&address, &loaded, plaintext.contact_identity_key)?;
+        ensure_contact_allows_outbound(
+            snapshot,
+            contact_identity_key,
+            &plaintext.recipient_public_key,
+        )?;
         let mut pending = load_pending_acknowledgments(snapshot, &pending_address)?;
         let mut state = loaded.state;
         let sealed = encode_sealed_sender_envelope(plaintext.sender_identity, plaintext.plaintext)?;
@@ -678,7 +877,12 @@ impl ProtocolStateEngine {
         record_pending_acknowledgment(&pending_address, &mut pending, &message)?;
         let update = ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, &state, loaded.peer_sender_identity_key)?,
+            encode_session_state(
+                &address,
+                &state,
+                loaded.peer_sender_identity_key,
+                Some(contact_identity_key),
+            )?,
         );
         let pending_update = ProtocolStateUpdate::set(
             pending_address.clone(),
@@ -775,7 +979,12 @@ impl ProtocolStateEngine {
         record_deduplication_digest(&mut deduplication, digest);
         let session_update = ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, &state, Some(expected_sender_identity_key))?,
+            encode_session_state(
+                &address,
+                &state,
+                Some(expected_sender_identity_key),
+                loaded.contact_identity_key,
+            )?,
         );
         let deduplication_update = ProtocolStateUpdate::set(
             deduplication_address.clone(),
@@ -948,7 +1157,12 @@ impl ProtocolStateEngine {
             .is_some();
         let session_update = ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, &state, Some(expected_sender_identity_key))?,
+            encode_session_state(
+                &address,
+                &state,
+                Some(expected_sender_identity_key),
+                loaded.contact_identity_key,
+            )?,
         );
         let pending_update = ProtocolStateUpdate::set(
             pending_address.clone(),
@@ -1123,6 +1337,10 @@ fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, key)
 }
 
+fn contact_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(ProtocolStateKind::ContactState, identity_key.into())
+}
+
 fn validate_configured_deduplication_capacity(capacity: usize) -> Result<(), ProtocolStateError> {
     if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
         return Err(ProtocolStateError::InvalidDeduplicationCapacity {
@@ -1148,36 +1366,92 @@ fn validate_persisted_deduplication_capacity(
 }
 
 #[derive(Serialize)]
-struct SessionStateWire<'a> {
+struct SessionStateWireV1<'a> {
     version: u8,
     ratchet_state: &'a [u8],
     peer_sender_identity_key: Option<[u8; 32]>,
 }
 
 #[derive(Deserialize)]
-struct DecodedSessionStateWire {
+struct DecodedSessionStateWireV1 {
     version: u8,
     ratchet_state: Vec<u8>,
     peer_sender_identity_key: Option<[u8; 32]>,
+}
+
+#[derive(Serialize)]
+struct SessionStateWireV2<'a> {
+    version: u8,
+    ratchet_state: &'a [u8],
+    peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKeyWire>,
+}
+
+#[derive(Deserialize)]
+struct DecodedSessionStateWireV2 {
+    version: u8,
+    ratchet_state: Vec<u8>,
+    peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKeyWire>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct ContactIdentityKeyWire {
+    x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+}
+
+impl From<ContactIdentityKey> for ContactIdentityKeyWire {
+    fn from(value: ContactIdentityKey) -> Self {
+        Self {
+            x25519_public_key: value.x25519_public_key,
+            ed25519_verifying_key: value.ed25519_verifying_key,
+        }
+    }
+}
+
+impl From<ContactIdentityKeyWire> for ContactIdentityKey {
+    fn from(value: ContactIdentityKeyWire) -> Self {
+        Self {
+            x25519_public_key: value.x25519_public_key,
+            ed25519_verifying_key: value.ed25519_verifying_key,
+        }
+    }
 }
 
 fn encode_session_state(
     address: &ProtocolStateAddress,
     state: &RatchetState,
     peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKey>,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
     let state_bytes = state.to_bytes()?;
-    let payload = Zeroizing::new(
-        postcard::to_stdvec(&SessionStateWire {
+    let payload = if let Some(contact_identity_key) = contact_identity_key {
+        let wire = SessionStateWireV2 {
+            version: SESSION_STATE_WITH_CONTACT_WIRE_VERSION,
+            ratchet_state: &state_bytes,
+            peer_sender_identity_key,
+            contact_identity_key: Some(ContactIdentityKeyWire::from(contact_identity_key)),
+        };
+        Zeroizing::new(
+            postcard::to_stdvec(&wire).map_err(|_| ProtocolStateError::BlobEncode {
+                address: address.clone(),
+                reason: "ratchet/session state failed to encode".into(),
+            })?,
+        )
+    } else {
+        let wire = SessionStateWireV1 {
             version: SESSION_STATE_WIRE_VERSION,
             ratchet_state: &state_bytes,
             peer_sender_identity_key,
-        })
-        .map_err(|_| ProtocolStateError::BlobEncode {
-            address: address.clone(),
-            reason: "ratchet/session state failed to encode".into(),
-        })?,
-    );
+        };
+        Zeroizing::new(
+            postcard::to_stdvec(&wire).map_err(|_| ProtocolStateError::BlobEncode {
+                address: address.clone(),
+                reason: "ratchet/session state failed to encode".into(),
+            })?,
+        )
+    };
     if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PROTOCOL_STATE_BLOB_LEN {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
@@ -1199,6 +1473,7 @@ fn encode_session_state(
 struct LoadedSessionState {
     state: RatchetState,
     peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKey>,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -1267,6 +1542,32 @@ struct DecodedPendingAcknowledgmentWire {
 }
 
 #[derive(Serialize)]
+struct ContactStateWire<'a> {
+    version: u8,
+    identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_epoch: u32,
+    discovery_created_at: u64,
+    discovery_identity_signature: &'a [u8],
+    trust_state: ContactTrustState,
+}
+
+#[derive(Deserialize)]
+struct DecodedContactStateWire {
+    version: u8,
+    identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    discovery_epoch: u32,
+    discovery_created_at: u64,
+    discovery_identity_signature: Vec<u8>,
+    trust_state: ContactTrustState,
+}
+
+#[derive(Serialize)]
 struct AcknowledgmentPlaintextWire {
     version: u8,
     acknowledged_message_id: [u8; 16],
@@ -1328,20 +1629,49 @@ fn decode_session_state_payload(
     address: &ProtocolStateAddress,
     payload: &[u8],
 ) -> Result<LoadedSessionState, ProtocolStateError> {
-    let (wire, trailing): (DecodedSessionStateWire, &[u8]) = postcard::take_from_bytes(payload)
-        .map_err(|e| ProtocolStateError::BlobDecode {
+    if let Ok((wire, trailing)) = postcard::take_from_bytes::<DecodedSessionStateWireV2>(payload)
+        && trailing.is_empty()
+        && wire.version == SESSION_STATE_WITH_CONTACT_WIRE_VERSION
+    {
+        let contact_identity_key = wire
+            .contact_identity_key
+            .map(ContactIdentityKey::from)
+            .map(|identity_key| validate_session_contact_identity_key(address, identity_key))
+            .transpose()?;
+        return decoded_session_state(
+            address,
+            wire.ratchet_state,
+            wire.peer_sender_identity_key,
+            contact_identity_key,
+        );
+    }
+
+    let (wire, trailing): (DecodedSessionStateWireV1, &[u8]) =
+        postcard::take_from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: e.to_string(),
         })?;
-    let wire_version = wire.version;
-    let peer_sender_identity_key = wire.peer_sender_identity_key;
-    let ratchet_state = Zeroizing::new(wire.ratchet_state);
-    if !trailing.is_empty() || wire_version != SESSION_STATE_WIRE_VERSION {
+    if !trailing.is_empty() || wire.version != SESSION_STATE_WIRE_VERSION {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: "ratchet/session payload version is unsupported".into(),
         });
     }
+    decoded_session_state(
+        address,
+        wire.ratchet_state,
+        wire.peer_sender_identity_key,
+        None,
+    )
+}
+
+fn decoded_session_state(
+    address: &ProtocolStateAddress,
+    ratchet_state: Vec<u8>,
+    peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKey>,
+) -> Result<LoadedSessionState, ProtocolStateError> {
+    let ratchet_state = Zeroizing::new(ratchet_state);
     let state =
         RatchetState::from_bytes(&ratchet_state).map_err(|_| ProtocolStateError::BlobDecode {
             address: address.clone(),
@@ -1350,6 +1680,7 @@ fn decode_session_state_payload(
     Ok(LoadedSessionState {
         state,
         peer_sender_identity_key,
+        contact_identity_key,
     })
 }
 
@@ -1656,6 +1987,305 @@ fn decode_pending_acknowledgments_payload(
         pending,
         acknowledgment_digests: wire.acknowledgment_digests,
     })
+}
+
+fn changed_contact_state(
+    address: ProtocolStateAddress,
+    contact: ContactState,
+) -> Result<ContactStateChange, ProtocolStateError> {
+    Ok(ContactStateChange {
+        contact: contact.clone(),
+        state_updates: vec![ProtocolStateUpdate::set(
+            address.clone(),
+            encode_contact_state(&address, &contact)?,
+        )],
+        event: Some(ContactEvent::Changed { contact }),
+    })
+}
+
+fn load_contact_state(
+    snapshot: &ProtocolStateSnapshot,
+    address: &ProtocolStateAddress,
+) -> Result<ContactState, ProtocolStateError> {
+    let blob = snapshot
+        .get(address)
+        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
+            address: address.clone(),
+        })?;
+    decode_contact_state(address, blob)
+}
+
+fn encode_contact_state(
+    address: &ProtocolStateAddress,
+    contact: &ContactState,
+) -> Result<ProtocolStateBlob, ProtocolStateError> {
+    let wire = ContactStateWire {
+        version: CONTACT_STATE_WIRE_VERSION,
+        identity_x25519_public_key: contact.identity.identity_key.x25519_public_key,
+        identity_ed25519_verifying_key: contact.identity.identity_key.ed25519_verifying_key,
+        discovery_x25519_public_key: contact.identity.discovery_key.x25519_public_key,
+        discovery_ed25519_verifying_key: contact.identity.discovery_key.ed25519_verifying_key,
+        discovery_epoch: contact.identity.discovery_key.epoch,
+        discovery_created_at: contact.identity.discovery_key.created_at,
+        discovery_identity_signature: &contact.identity.discovery_key.identity_signature,
+        trust_state: contact.trust_state,
+    };
+    let payload =
+        Zeroizing::new(
+            postcard::to_stdvec(&wire).map_err(|_| ProtocolStateError::BlobEncode {
+                address: address.clone(),
+                reason: "contact state failed to encode".into(),
+            })?,
+        );
+    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PROTOCOL_STATE_BLOB_LEN {
+        return Err(ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: format!(
+                "contact-state blob length exceeds limit: {}",
+                payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN
+            ),
+        });
+    }
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        PROTOCOL_STATE_BLOB_HEADER_LEN + payload.len(),
+    ));
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MAJOR);
+    bytes.push(CURRENT_PROTOCOL_STATE_BLOB_MINOR);
+    bytes.extend_from_slice(&payload);
+    Ok(ProtocolStateBlob::from_zeroizing(bytes))
+}
+
+fn decode_contact_state(
+    address: &ProtocolStateAddress,
+    blob: &ProtocolStateBlob,
+) -> Result<ContactState, ProtocolStateError> {
+    let bytes = blob.as_bytes();
+    if bytes.len() > MAX_PROTOCOL_STATE_BLOB_LEN {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!("contact-state blob length exceeds limit: {}", bytes.len()),
+        });
+    }
+    let (major, minor) =
+        read_blob_version(bytes).ok_or_else(|| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "contact-state blob header is incomplete".into(),
+        })?;
+    let payload = &bytes[PROTOCOL_STATE_BLOB_HEADER_LEN..];
+
+    if major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR && minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR {
+        return decode_contact_state_payload(address, payload);
+    }
+
+    Err(ProtocolStateError::UnsupportedBlobVersion {
+        address: address.clone(),
+        major,
+        minor,
+    })
+}
+
+fn decode_contact_state_payload(
+    address: &ProtocolStateAddress,
+    payload: &[u8],
+) -> Result<ContactState, ProtocolStateError> {
+    let (wire, trailing): (DecodedContactStateWire, &[u8]) = postcard::take_from_bytes(payload)
+        .map_err(|e| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+    if !trailing.is_empty() || wire.version != CONTACT_STATE_WIRE_VERSION {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "contact-state payload version is unsupported".into(),
+        });
+    }
+    let contact = ContactState {
+        identity: ContactIdentity {
+            identity_key: ContactIdentityKey {
+                x25519_public_key: wire.identity_x25519_public_key,
+                ed25519_verifying_key: wire.identity_ed25519_verifying_key,
+            },
+            discovery_key: ContactDiscoveryKey {
+                x25519_public_key: wire.discovery_x25519_public_key,
+                ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
+                epoch: wire.discovery_epoch,
+                created_at: wire.discovery_created_at,
+                identity_signature: wire.discovery_identity_signature.try_into().map_err(|_| {
+                    ProtocolStateError::BlobDecode {
+                        address: address.clone(),
+                        reason: "contact discovery key signature length is invalid".into(),
+                    }
+                })?,
+            },
+        },
+        trust_state: wire.trust_state,
+    };
+    validate_decoded_contact_state(address, &contact)?;
+    Ok(contact)
+}
+
+fn validate_decoded_contact_state(
+    address: &ProtocolStateAddress,
+    contact: &ContactState,
+) -> Result<(), ProtocolStateError> {
+    let expected_key = contact.identity.identity_key.canonical_encoding();
+    if address.key().as_bytes().ct_eq(&expected_key).unwrap_u8() != 1 {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "contact identity key does not match address".into(),
+        });
+    }
+    validate_contact_identity_for_decode(address, &contact.identity)
+}
+
+fn validate_contact_identity_for_decode(
+    address: &ProtocolStateAddress,
+    contact_identity: &ContactIdentity,
+) -> Result<(), ProtocolStateError> {
+    if !contact_identity_key_is_valid(&contact_identity.identity_key) {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "contact identity key is invalid".into(),
+        });
+    }
+    let Some(bundle) = contact_discovery_key_bundle(&contact_identity.discovery_key) else {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "contact discovery key is invalid".into(),
+        });
+    };
+    let identity_verifying_key =
+        parse_ed25519_verifying_key_bytes(&contact_identity.identity_key.ed25519_verifying_key)
+            .ok_or_else(|| ProtocolStateError::BlobDecode {
+                address: address.clone(),
+                reason: "contact identity key is invalid".into(),
+            })?;
+    verify_discovery_key_bundle(&bundle, &identity_verifying_key).map_err(|_| {
+        ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "contact discovery key signature failed".into(),
+        }
+    })
+}
+
+fn validate_contact_identity_key(
+    address: &ProtocolStateAddress,
+    identity_key: &ContactIdentityKey,
+) -> Result<(), ProtocolStateError> {
+    if contact_identity_key_is_valid(identity_key) {
+        Ok(())
+    } else {
+        Err(ProtocolStateError::InvalidStateBinding {
+            address: address.clone(),
+            reason: "contact identity key is invalid".into(),
+        })
+    }
+}
+
+fn validate_session_contact_identity_key(
+    address: &ProtocolStateAddress,
+    identity_key: ContactIdentityKey,
+) -> Result<ContactIdentityKey, ProtocolStateError> {
+    if contact_identity_key_is_valid(&identity_key) {
+        Ok(identity_key)
+    } else {
+        Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "session contact identity key is invalid".into(),
+        })
+    }
+}
+
+fn session_contact_identity_key(
+    address: &ProtocolStateAddress,
+    session: &LoadedSessionState,
+    requested: ContactIdentityKey,
+) -> Result<ContactIdentityKey, ProtocolStateError> {
+    match session.contact_identity_key {
+        Some(existing) if existing != requested => Err(ProtocolStateError::InvalidStateBinding {
+            address: address.clone(),
+            reason: "session contact identity key is already bound".into(),
+        }),
+        Some(existing) => Ok(existing),
+        None => Ok(requested),
+    }
+}
+
+fn validate_contact_identity(
+    address: &ProtocolStateAddress,
+    contact_identity: &ContactIdentity,
+) -> Result<(), ProtocolStateError> {
+    validate_contact_identity_key(address, &contact_identity.identity_key)?;
+    let Some(bundle) = contact_discovery_key_bundle(&contact_identity.discovery_key) else {
+        return Err(ProtocolStateError::InvalidStateBinding {
+            address: address.clone(),
+            reason: "contact discovery key is invalid".into(),
+        });
+    };
+    let identity_verifying_key =
+        parse_ed25519_verifying_key_bytes(&contact_identity.identity_key.ed25519_verifying_key)
+            .ok_or_else(|| ProtocolStateError::InvalidStateBinding {
+                address: address.clone(),
+                reason: "contact identity key is invalid".into(),
+            })?;
+    verify_discovery_key_bundle(&bundle, &identity_verifying_key).map_err(|_| {
+        ProtocolStateError::InvalidStateBinding {
+            address: address.clone(),
+            reason: "contact discovery key signature failed".into(),
+        }
+    })
+}
+
+fn contact_identity_key_is_valid(identity_key: &ContactIdentityKey) -> bool {
+    validate_x25519_public_key(&identity_key.x25519_public_key)
+        && parse_ed25519_verifying_key_bytes(&identity_key.ed25519_verifying_key).is_some()
+}
+
+fn contact_discovery_key_bundle(discovery_key: &ContactDiscoveryKey) -> Option<DiscoveryKeyBundle> {
+    if !validate_x25519_public_key(&discovery_key.x25519_public_key) {
+        return None;
+    }
+    Some(DiscoveryKeyBundle {
+        public_key: PublicKey::from(discovery_key.x25519_public_key),
+        verifying_key: parse_ed25519_verifying_key_bytes(&discovery_key.ed25519_verifying_key)?,
+        epoch: discovery_key.epoch,
+        created_at: discovery_key.created_at,
+        signature: Signature::from_bytes(&discovery_key.identity_signature),
+    })
+}
+
+fn contact_discovery_key_is_newer(
+    current: &ContactDiscoveryKey,
+    candidate: &ContactDiscoveryKey,
+) -> bool {
+    (candidate.created_at, candidate.epoch) > (current.created_at, current.epoch)
+}
+
+fn ensure_contact_allows_outbound(
+    snapshot: &ProtocolStateSnapshot,
+    identity_key: ContactIdentityKey,
+    recipient_public_key: &[u8; PUBLIC_KEY_LEN],
+) -> Result<(), ProtocolStateError> {
+    let address = contact_address(identity_key);
+    validate_contact_identity_key(&address, &identity_key)?;
+    let contact = load_contact_state(snapshot, &address)?;
+    if contact.trust_state == ContactTrustState::Pending {
+        return Err(ProtocolStateError::InvalidStateBinding {
+            address,
+            reason: "pending contact cannot send user messages".into(),
+        });
+    }
+    if recipient_public_key
+        .ct_eq(&contact.identity.discovery_key.prekey_bundle_lookup_key())
+        .unwrap_u8()
+        != 1
+    {
+        return Err(ProtocolStateError::InvalidStateBinding {
+            address,
+            reason: "contact discovery key does not match outbound recipient".into(),
+        });
+    }
+    Ok(())
 }
 
 fn deduplication_digest(
