@@ -640,7 +640,12 @@ fn replay_protocol_state_blob_fixture(
         | "contact_unverified"
         | "contact_verified"
         | "contact_dk_rotated_unverified"
-        | "contact_dk_rotated_verified" => {
+        | "contact_dk_rotated_verified"
+        | "contact_blocked_pending"
+        | "contact_blocked_unverified"
+        | "contact_blocked_verified"
+        | "contact_dk_rotated_blocked"
+        | "contact_unblocked_restored_state" => {
             ensure(
                 kind == ProtocolStateKind::ContactState,
                 "contact fixture kind mismatch",
@@ -732,14 +737,28 @@ fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolSta
         return contact_fixture_state_update(pending, contact.identity_key);
     }
     snapshot.apply_all(pending.state_updates);
+    if name == "contact_blocked_pending" {
+        let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
+        return contact_fixture_state_update(blocked, contact.identity_key);
+    }
 
     let unverified = engine.accept_contact(&snapshot, contact.identity_key)?;
     if name == "contact_unverified" {
         return contact_fixture_state_update(unverified, contact.identity_key);
     }
     snapshot.apply_all(unverified.state_updates);
+    if name == "contact_blocked_unverified" {
+        let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
+        return contact_fixture_state_update(blocked, contact.identity_key);
+    }
 
     if name == "contact_dk_rotated_unverified" {
+        let update = engine.record_contact(&snapshot, rotated_contact)?;
+        return contact_fixture_state_update(update, contact.identity_key);
+    }
+    if name == "contact_dk_rotated_blocked" {
+        let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
+        snapshot.apply_all(blocked.state_updates);
         let update = engine.record_contact(&snapshot, rotated_contact)?;
         return contact_fixture_state_update(update, contact.identity_key);
     }
@@ -774,6 +793,16 @@ fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolSta
         return contact_fixture_state_update(verified, contact.identity_key);
     }
     snapshot.apply_all(verified.state_updates);
+    if name == "contact_blocked_verified" {
+        let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
+        return contact_fixture_state_update(blocked, contact.identity_key);
+    }
+    if name == "contact_unblocked_restored_state" {
+        let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
+        snapshot.apply_all(blocked.state_updates);
+        let unblocked = engine.unblock_contact(&snapshot, contact.identity_key)?;
+        return contact_fixture_state_update(unblocked, contact.identity_key);
+    }
 
     let update = engine.record_contact(&snapshot, rotated_contact)?;
     contact_fixture_state_update(update, contact.identity_key)
@@ -976,6 +1005,7 @@ fn inbound<'a>(
         deduplication_key,
         message,
         acknowledgment: acknowledgment(acknowledgment_sender_identity),
+        sender_certificate_validation: None,
     }
 }
 
@@ -1001,6 +1031,9 @@ fn accepted(
 ) -> Result<aether_core::InboundMessageResult, AetherError> {
     match outcome {
         InboundMessageOutcome::Accepted(result) => Ok(*result),
+        InboundMessageOutcome::Blocked(_) => {
+            Err(replay_failure("sealed session fixture was blocked"))
+        }
         InboundMessageOutcome::Duplicate => {
             Err(replay_failure("sealed session fixture was duplicate"))
         }
@@ -1471,7 +1504,7 @@ mod tests {
         assert_eq!(report.message_wire_cases.len(), 4);
         assert_eq!(report.sealed_sender_session_cases.len(), 1);
         assert_eq!(report.initial_handshake_cases.len(), 1);
-        assert_eq!(report.protocol_state_blob_cases.len(), 9);
+        assert_eq!(report.protocol_state_blob_cases.len(), 14);
         assert!(report.unsupported_message_version_rejected);
         assert!(report.malformed_message_rejected);
         assert!(report.old_sender_visible_message_rejected);

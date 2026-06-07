@@ -200,6 +200,165 @@ fn pending_contact_refuses_outgoing_user_message_until_accepted() {
 }
 
 #[test]
+fn contact_can_be_blocked_and_unblocked_without_changing_pending_trust() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+
+    let blocked = engine.block_contact(&snapshot, setup.bob_identity).unwrap();
+    snapshot.apply_all(blocked.state_updates);
+    let contact = engine
+        .contact_state(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contact.trust_state, ContactTrustState::Pending);
+    assert!(contact.blocked);
+
+    let unblocked = engine
+        .unblock_contact(&snapshot, setup.bob_identity)
+        .unwrap();
+    snapshot.apply_all(unblocked.state_updates);
+    let contact = engine
+        .contact_state(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contact.trust_state, ContactTrustState::Pending);
+    assert!(!contact.blocked);
+}
+
+#[test]
+fn contact_can_be_blocked_and_unblocked_without_changing_unverified_trust() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+    snapshot.apply_all(
+        engine
+            .accept_contact(&snapshot, setup.bob_identity)
+            .unwrap()
+            .state_updates,
+    );
+
+    let blocked = engine.block_contact(&snapshot, setup.bob_identity).unwrap();
+    snapshot.apply_all(blocked.state_updates);
+    let contact = engine
+        .contact_state(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
+    assert!(contact.blocked);
+
+    let unblocked = engine
+        .unblock_contact(&snapshot, setup.bob_identity)
+        .unwrap();
+    snapshot.apply_all(unblocked.state_updates);
+    let contact = engine
+        .contact_state(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
+    assert!(!contact.blocked);
+}
+
+#[test]
+fn contact_can_be_blocked_and_unblocked_without_changing_verified_trust() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+    snapshot.apply_all(
+        engine
+            .accept_contact(&snapshot, setup.bob_identity)
+            .unwrap()
+            .state_updates,
+    );
+    snapshot.apply_all(
+        confirm_safety_number(&engine, &snapshot, &setup)
+            .unwrap()
+            .state_updates,
+    );
+
+    let blocked = engine.block_contact(&snapshot, setup.bob_identity).unwrap();
+    snapshot.apply_all(blocked.state_updates);
+    let contact = engine
+        .contact_state(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contact.trust_state, ContactTrustState::Verified);
+    assert!(contact.blocked);
+
+    let unblocked = engine
+        .unblock_contact(&snapshot, setup.bob_identity)
+        .unwrap();
+    snapshot.apply_all(unblocked.state_updates);
+    let contact = engine
+        .contact_state(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contact.trust_state, ContactTrustState::Verified);
+    assert!(!contact.blocked);
+}
+
+#[test]
+fn blocked_accepted_contact_refuses_outgoing_user_message() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let sender = sender_identity();
+    let mut snapshot = snapshot_with_session(&engine, &setup);
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+    snapshot.apply_all(
+        engine
+            .accept_contact(&snapshot, setup.bob_identity)
+            .unwrap()
+            .state_updates,
+    );
+    snapshot.apply_all(
+        engine
+            .block_contact(&snapshot, setup.bob_identity)
+            .unwrap()
+            .state_updates,
+    );
+
+    assert!(matches!(
+        engine.encrypt_message(&snapshot, session_key(), outbound(&setup, &sender)),
+        Err(ProtocolStateError::InvalidStateBinding { .. })
+    ));
+
+    snapshot.apply_all(
+        engine
+            .unblock_contact(&snapshot, setup.bob_identity)
+            .unwrap()
+            .state_updates,
+    );
+    assert!(
+        engine
+            .encrypt_message(&snapshot, session_key(), outbound(&setup, &sender))
+            .is_ok()
+    );
+}
+
+#[test]
 fn accepted_contact_refuses_outgoing_message_for_stale_recipient_key() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
@@ -358,6 +517,50 @@ fn discovery_key_update_preserves_unverified_state() {
         .unwrap();
     assert_eq!(contact.trust_state, ContactTrustState::Unverified);
     assert_eq!(contact.identity.discovery_key, setup.bob_rotated_discovery);
+}
+
+#[test]
+fn discovery_key_update_preserves_blocking_state() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+    snapshot.apply_all(
+        engine
+            .accept_contact(&snapshot, setup.bob_identity)
+            .unwrap()
+            .state_updates,
+    );
+    snapshot.apply_all(
+        engine
+            .block_contact(&snapshot, setup.bob_identity)
+            .unwrap()
+            .state_updates,
+    );
+
+    let change = engine
+        .record_contact(
+            &snapshot,
+            ContactIdentity {
+                identity_key: setup.bob_identity,
+                discovery_key: setup.bob_rotated_discovery,
+            },
+        )
+        .unwrap();
+    snapshot.apply_all(change.state_updates);
+
+    let contact = engine
+        .contact_state(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
+    assert_eq!(contact.identity.discovery_key, setup.bob_rotated_discovery);
+    assert!(contact.blocked);
 }
 
 #[test]

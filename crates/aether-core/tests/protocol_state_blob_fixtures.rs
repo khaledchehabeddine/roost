@@ -48,6 +48,7 @@ struct DecodedFixture {
     acknowledgment_digest_count: Option<usize>,
     capacity: Option<usize>,
     trust_state: Option<String>,
+    blocked: Option<bool>,
     discovery_epoch: Option<u32>,
     discovery_created_at: Option<u64>,
 }
@@ -189,6 +190,15 @@ fn expected_contact_fixture(
         return pending.state_updates.into_iter().next().unwrap();
     }
     snapshot.apply_all(pending.state_updates);
+    if name == "contact_blocked_pending" {
+        return engine
+            .block_contact(&snapshot, contact.identity_key)
+            .unwrap()
+            .state_updates
+            .into_iter()
+            .next()
+            .unwrap();
+    }
 
     let unverified = engine
         .accept_contact(&snapshot, contact.identity_key)
@@ -197,8 +207,30 @@ fn expected_contact_fixture(
         return unverified.state_updates.into_iter().next().unwrap();
     }
     snapshot.apply_all(unverified.state_updates);
+    if name == "contact_blocked_unverified" {
+        return engine
+            .block_contact(&snapshot, contact.identity_key)
+            .unwrap()
+            .state_updates
+            .into_iter()
+            .next()
+            .unwrap();
+    }
 
     if name == "contact_dk_rotated_unverified" {
+        return engine
+            .record_contact(&snapshot, rotated_contact)
+            .unwrap()
+            .state_updates
+            .into_iter()
+            .next()
+            .unwrap();
+    }
+    if name == "contact_dk_rotated_blocked" {
+        let blocked = engine
+            .block_contact(&snapshot, contact.identity_key)
+            .unwrap();
+        snapshot.apply_all(blocked.state_updates);
         return engine
             .record_contact(&snapshot, rotated_contact)
             .unwrap()
@@ -225,6 +257,28 @@ fn expected_contact_fixture(
         return verified.state_updates.into_iter().next().unwrap();
     }
     snapshot.apply_all(verified.state_updates);
+    if name == "contact_blocked_verified" {
+        return engine
+            .block_contact(&snapshot, contact.identity_key)
+            .unwrap()
+            .state_updates
+            .into_iter()
+            .next()
+            .unwrap();
+    }
+    if name == "contact_unblocked_restored_state" {
+        let blocked = engine
+            .block_contact(&snapshot, contact.identity_key)
+            .unwrap();
+        snapshot.apply_all(blocked.state_updates);
+        return engine
+            .unblock_contact(&snapshot, contact.identity_key)
+            .unwrap()
+            .state_updates
+            .into_iter()
+            .next()
+            .unwrap();
+    }
 
     engine
         .record_contact(&snapshot, rotated_contact)
@@ -237,25 +291,45 @@ fn expected_contact_fixture(
 
 fn expected_contact_trust_state(fixture: &Fixture) -> ContactTrustState {
     match fixture.name.as_str() {
-        "contact_pending" => ContactTrustState::Pending,
-        "contact_unverified" | "contact_dk_rotated_unverified" => ContactTrustState::Unverified,
-        "contact_verified" | "contact_dk_rotated_verified" => ContactTrustState::Verified,
+        "contact_pending" | "contact_blocked_pending" => ContactTrustState::Pending,
+        "contact_unverified"
+        | "contact_blocked_unverified"
+        | "contact_dk_rotated_unverified"
+        | "contact_dk_rotated_blocked" => ContactTrustState::Unverified,
+        "contact_verified"
+        | "contact_blocked_verified"
+        | "contact_dk_rotated_verified"
+        | "contact_unblocked_restored_state" => ContactTrustState::Verified,
         _ => panic!("not a contact fixture: {}", fixture.name),
     }
 }
 
 fn expected_contact_epoch(fixture: &Fixture) -> u32 {
     match fixture.name.as_str() {
-        "contact_dk_rotated_unverified" | "contact_dk_rotated_verified" => 1,
+        "contact_dk_rotated_unverified"
+        | "contact_dk_rotated_verified"
+        | "contact_dk_rotated_blocked" => 1,
         _ => 0,
     }
 }
 
 fn expected_contact_created_at(fixture: &Fixture) -> u64 {
     match fixture.name.as_str() {
-        "contact_dk_rotated_unverified" | "contact_dk_rotated_verified" => CREATED_AT + 60,
+        "contact_dk_rotated_unverified"
+        | "contact_dk_rotated_verified"
+        | "contact_dk_rotated_blocked" => CREATED_AT + 60,
         _ => CREATED_AT,
     }
+}
+
+fn expected_contact_blocked(fixture: &Fixture) -> bool {
+    matches!(
+        fixture.name.as_str(),
+        "contact_blocked_pending"
+            | "contact_blocked_unverified"
+            | "contact_blocked_verified"
+            | "contact_dk_rotated_blocked"
+    )
 }
 
 fn contact_state_name(state: ContactTrustState) -> &'static str {
@@ -281,6 +355,11 @@ fn contact_fixture_names() -> &'static [&'static str] {
         "contact_verified",
         "contact_dk_rotated_unverified",
         "contact_dk_rotated_verified",
+        "contact_blocked_pending",
+        "contact_blocked_unverified",
+        "contact_blocked_verified",
+        "contact_dk_rotated_blocked",
+        "contact_unblocked_restored_state",
     ]
 }
 
@@ -505,6 +584,10 @@ fn contact_state_fixtures_match_decoded_state_expectations() {
             Some(contact_state_name(expected_trust))
         );
         assert_eq!(
+            fixture.decoded.blocked,
+            Some(expected_contact_blocked(fixture))
+        );
+        assert_eq!(
             fixture.decoded.discovery_epoch,
             Some(expected_contact_epoch(fixture))
         );
@@ -525,6 +608,7 @@ fn contact_state_fixtures_match_decoded_state_expectations() {
             .unwrap()
             .unwrap();
         assert_eq!(contact.trust_state, expected_trust);
+        assert_eq!(contact.blocked, expected_contact_blocked(fixture));
         assert_eq!(
             contact.identity.discovery_key.epoch,
             expected_contact_epoch(fixture)
@@ -534,6 +618,42 @@ fn contact_state_fixtures_match_decoded_state_expectations() {
             expected_contact_created_at(fixture)
         );
     }
+}
+
+#[test]
+fn legacy_contact_state_v1_decodes_unblocked_and_rewrites_to_current_body_version() {
+    let fixture_file = fixture_file();
+    let pending = contact_fixture(&fixture_file, "contact_pending");
+    let unverified = contact_fixture(&fixture_file, "contact_unverified");
+    let engine = ProtocolStateEngine::new();
+    let contact = accepted_contact_identity();
+    let contact_key =
+        ProtocolStateKey::from_bytes(contact.identity_key.canonical_encoding().to_vec()).unwrap();
+    let address = ProtocolStateAddress::new(ProtocolStateKind::ContactState, contact_key);
+    let mut legacy_bytes = hex::decode(&pending.current_encoded_hex).unwrap();
+    legacy_bytes[2] = 1;
+    legacy_bytes.pop();
+
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(address, ProtocolStateBlob::from_bytes(legacy_bytes));
+    let decoded = engine
+        .contact_state(&snapshot, contact.identity_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(decoded.trust_state, ContactTrustState::Pending);
+    assert!(!decoded.blocked);
+
+    let accepted = engine
+        .accept_contact(&snapshot, contact.identity_key)
+        .unwrap()
+        .state_updates
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        hex::encode(accepted.blob().unwrap().as_bytes()),
+        unverified.current_encoded_hex
+    );
 }
 
 fn insert_pending_acknowledgment_fixture(

@@ -16,15 +16,17 @@ bound fixture pins key-only peer identity storage.
 The current deduplication-set body wraps the configured capacity, the per-Identity keyed BLAKE3
 secret, and the ordered digest window. The fixture pins an initialized empty window.
 
-The current contact-state body wraps one Contact Identity — peer IK plus current DK — and the
-IK-bound Trust State. Contact fixtures pin Pending, Unverified, Verified, and DK-rotated accepted
-states. The contact Protocol State Key is the canonical IK encoding; the DK X25519 public key is
-the lookup key consumers use for the contact's prekey bundle.
+The current contact-state body wraps one Contact Identity — peer IK plus current DK — the IK-bound
+Trust State, and the local blocking flag. Contact fixtures pin Pending, Unverified, Verified,
+blocked Pending, blocked Unverified, blocked Verified, DK-rotated accepted, DK-rotated blocked,
+and unblocked restored-state contacts. The contact Protocol State Key is the canonical IK
+encoding; the DK X25519 public key is the lookup key consumers use for the contact's prekey
+bundle.
 
 Supported version:
 
 - `1.0` is the current Core envelope. Wrapped session-state bodies are current.
 
-Old pre-release blobs are not supported. Current-version blobs with stale body shapes fail as malformed current blobs; non-current envelope versions fail as unsupported versions.
+Old pre-release blobs are not supported. Current-version blobs with stale body shapes fail as malformed current blobs, except contact-state body v1, which decodes as unblocked and rewrites to body v2 on the next contact update. Non-current envelope versions fail as unsupported versions.
 
 The bytes are opaque consumer storage values. Fixture tests may decode them to verify current-format invariants, but consumers must persist and return them by kind/key without inspecting their contents.
