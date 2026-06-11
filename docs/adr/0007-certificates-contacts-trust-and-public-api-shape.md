@@ -31,8 +31,14 @@ library default.
 
 Contact Identity is the peer IK plus its current DK. Trust State is keyed to the IK and survives DK
 rotation. Contact updates must verify the IK signature over the DK bundle and reject stale DK
-rollback by preferring the highest Epoch within one storage lineage, then the signed `created_at`
-timestamp across restored lineages. New contacts begin Pending; consumer-recorded acceptance moves
+rollback by accepting a candidate DK only when its `(created_at, epoch)` pair is lexicographically
+greater than the stored pair (implemented by `contact_discovery_key_is_newer`, locked by the
+`contact_state` update tests). The signed `created_at` leads the comparison because the DK bundle
+carries no storage-lineage discriminator and a restored device legitimately resets its epoch, so
+only the IK-signed timestamp can order DKs across lineages; the epoch breaks ties within one
+timestamp. The accepted trade-off is that a same-lineage rotation to a higher epoch is rejected
+when the peer's clock has moved backward past its previous rotation, and stays rejected until a
+later rotation carries a `created_at` past the stored one. New contacts begin Pending; consumer-recorded acceptance moves
 Pending to Unverified. Only consumer-recorded out-of-band Safety Number confirmation moves
 Unverified to Verified. In-band confirmation carried by protocol messages never raises trust to
 Verified.
