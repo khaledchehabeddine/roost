@@ -6,6 +6,8 @@ Messages cross the public Rust API as Core-owned structs encoded as a short Core
 
 The current Message wire shape excludes sender identity material from transport-visible fields. Sender identity key, sender certificate, and sender signature live inside the encrypted/authenticated sealed-sender payload, because transports can route by recipient-facing metadata without learning who sent the Message. Established Sessions bind the expected peer sender identity key in opaque ratchet/session state and compare it only after decrypt. Old sender-visible pre-release layouts are rejected by the Core magic prefix instead of decoded as the current Message format.
 
+**Divergence (in flight):** two `SealedSenderEnvelopeWire` schemas currently share envelope version `1` — the X3DH first-message envelope carries a sender-proof field that the session-message envelope does not, where the specification describes one sealed-sender shape. The schema boundary is tracked in [#156](https://github.com/RelayNet/aether/issues/156).
+
 ## Considered Options
 
 - Put the codec in `aether-crypto`. Rejected because the encoded Message is an application-level packet around ciphertext and protocol payload bytes, not a primitive.
