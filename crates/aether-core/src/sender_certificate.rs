@@ -20,8 +20,8 @@ const IDENTITY_KEY_ENCODING_LEN: usize = IDENTITY_KEY_DOMAIN_TAG.len() + PUBLIC_
 /// Inputs for one sender certificate validation verdict.
 ///
 /// Validation is a pure function of these inputs. It does not read the device clock, does not
-/// cache successful results, and evaluates revocation against the current `revoked_identity_keys`
-/// slice on every call.
+/// cache successful results, and evaluates revocation against the current `revocation_state`
+/// input on every call.
 pub struct SenderCertificateValidationInput<'a> {
     /// Fixed-byte sender certificate bytes.
     pub certificate: &'a [u8],
@@ -29,14 +29,16 @@ pub struct SenderCertificateValidationInput<'a> {
     pub signature: &'a [u8],
     /// Known domain-signing keys indexed by certificate signing-key identifier.
     pub domain_signing_keys: &'a [DomainSigningKey<'a>],
-    /// Caller-supplied revoked identity keys.
-    pub revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+    /// Caller-supplied revocation input for the sender Identity Key check.
+    pub revocation_state: RevocationState<'a>,
     /// Caller-supplied Unix timestamp in seconds used for expiry evaluation.
     pub reference_timestamp_secs: u64,
     /// Caller-supplied grace window in seconds, with no library-imposed ceiling.
     ///
-    /// Larger values tolerate more sender/receiver clock skew and delivery delay, but keep expired
-    /// certificates acceptable for longer.
+    /// Callers own all grace-window bounds. Larger values tolerate more sender/receiver clock
+    /// skew and delivery delay but keep expired certificates acceptable for longer; `u64::MAX`
+    /// keeps every expired certificate acceptable forever. The consumer sets this from its own
+    /// product requirements with that trade-off in view.
     pub grace_window_secs: u64,
 }
 
@@ -58,6 +60,19 @@ pub enum DomainSigningKeyStatus {
     Trusted,
     /// Certificates naming this key must fail with an untrusted-key verdict.
     Untrusted,
+}
+
+/// Caller-supplied revocation input for one validation verdict.
+///
+/// Distinguishes a loaded revocation set from a revocation source that failed to load, so an
+/// empty set always means "nothing revoked" and never "feed missing". Validation fails closed on
+/// [`RevocationState::Unavailable`] instead of trusting every caller to fail closed on its own.
+#[derive(Clone, Copy, Debug)]
+pub enum RevocationState<'a> {
+    /// The revocation set loaded; an empty slice revokes no Identity Key.
+    Available(&'a [SenderCertificateIdentityKey]),
+    /// The revocation source failed to load; validation fails closed.
+    Unavailable,
 }
 
 /// A sender Identity Key carried by a sender certificate.
@@ -125,6 +140,8 @@ pub enum SenderCertificateValidationError {
     DuplicateSigningKeyIdentifier,
     /// The certificate signature does not verify under the matching trusted signing key.
     SignatureFailure,
+    /// The revocation source is unavailable, so no revocation verdict is possible.
+    RevocationStateUnavailable,
     /// The certificate Identity Key is currently revoked.
     RevokedIdentityKey,
     /// The certificate is expired outside the supplied grace window.
@@ -146,6 +163,9 @@ impl fmt::Display for SenderCertificateValidationError {
                 write!(f, "sender certificate signing-key identifier is duplicated")
             }
             Self::SignatureFailure => write!(f, "sender certificate signature failed"),
+            Self::RevocationStateUnavailable => {
+                write!(f, "sender certificate revocation state is unavailable")
+            }
             Self::RevokedIdentityKey => write!(f, "sender certificate identity key is revoked"),
             Self::ExpiredCertificate => write!(f, "sender certificate is expired"),
         }
@@ -167,7 +187,8 @@ struct ParsedSenderCertificate<'a> {
 /// identifier exactly matches the identifier embedded in `input.certificate`. Expiry is evaluated
 /// against `reference_timestamp_secs` and `grace_window_secs`; this function never reads the
 /// device clock and never caps the supplied grace window. Revocation is evaluated from the current
-/// `revoked_identity_keys` input on every call after signature verification.
+/// `revocation_state` input on every call after signature verification, and an unavailable
+/// revocation source fails validation closed rather than validating against an empty set.
 ///
 /// # Errors
 /// - [`SenderCertificateValidationError::MalformedCertificate`] when certificate bytes fail the
@@ -182,8 +203,10 @@ struct ParsedSenderCertificate<'a> {
 ///   domain key has the certificate signing-key identifier.
 /// - [`SenderCertificateValidationError::SignatureFailure`] when the signature bytes are malformed
 ///   or do not verify under the matching trusted signing key.
+/// - [`SenderCertificateValidationError::RevocationStateUnavailable`] when `revocation_state` is
+///   [`RevocationState::Unavailable`] and no revocation verdict is possible.
 /// - [`SenderCertificateValidationError::RevokedIdentityKey`] when the certificate Identity Key is
-///   present in `revoked_identity_keys`.
+///   present in the available revocation set.
 /// - [`SenderCertificateValidationError::ExpiredCertificate`] when the certificate expiry is
 ///   outside the supplied grace window.
 pub fn validate_sender_certificate(
@@ -208,7 +231,10 @@ pub fn validate_sender_certificate(
     {
         return Err(SenderCertificateValidationError::SignatureFailure);
     }
-    if identity_key_is_revoked(&certificate.identity_key, input.revoked_identity_keys)? {
+    let RevocationState::Available(revoked_identity_keys) = input.revocation_state else {
+        return Err(SenderCertificateValidationError::RevocationStateUnavailable);
+    };
+    if identity_key_is_revoked(&certificate.identity_key, revoked_identity_keys)? {
         return Err(SenderCertificateValidationError::RevokedIdentityKey);
     }
     if certificate_is_expired(
@@ -474,7 +500,7 @@ mod tests {
             certificate: &signed.certificate,
             signature: &signed.signature,
             domain_signing_keys,
-            revoked_identity_keys,
+            revocation_state: RevocationState::Available(revoked_identity_keys),
             reference_timestamp_secs: NOW_SECS,
             grace_window_secs: GRACE_SECS,
         }
@@ -610,6 +636,47 @@ mod tests {
     }
 
     #[test]
+    fn rejects_validation_when_revocation_state_unavailable() {
+        let signing_key = signing_key(0x01);
+        let verifying_key = signing_key.verifying.to_bytes();
+        let signed = signed_certificate(PRIMARY_IDENTIFIER, &signing_key, NOW_SECS + 300);
+        let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
+        let mut input = validation_input(&signed, &domain_keys, &[]);
+        input.revocation_state = RevocationState::Unavailable;
+
+        assert_validation_error(
+            input,
+            SenderCertificateValidationError::RevocationStateUnavailable,
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_signature_before_unavailable_revocation_state() {
+        let signing_key = signing_key(0x01);
+        let verifying_key = signing_key.verifying.to_bytes();
+        let mut signed = signed_certificate(PRIMARY_IDENTIFIER, &signing_key, NOW_SECS + 300);
+        signed.signature[0] ^= 0x01;
+        let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
+        let mut input = validation_input(&signed, &domain_keys, &[]);
+        input.revocation_state = RevocationState::Unavailable;
+
+        assert_validation_error(input, SenderCertificateValidationError::SignatureFailure);
+    }
+
+    #[test]
+    fn accepts_certificate_with_empty_available_revocation_set() {
+        let signing_key = signing_key(0x01);
+        let verifying_key = signing_key.verifying.to_bytes();
+        let signed = signed_certificate(PRIMARY_IDENTIFIER, &signing_key, NOW_SECS + 300);
+        let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
+
+        let mut input = validation_input(&signed, &domain_keys, &[]);
+        input.revocation_state = RevocationState::Available(&[]);
+
+        validate_sender_certificate(input).unwrap();
+    }
+
+    #[test]
     fn rejects_revoked_identity_key() {
         let signing_key = signing_key(0x01);
         let verifying_key = signing_key.verifying.to_bytes();
@@ -651,6 +718,16 @@ mod tests {
             validation_input(&signed, &domain_keys, &[]),
             SenderCertificateValidationError::ExpiredCertificate,
         );
+    }
+
+    #[test]
+    fn accepts_expired_certificate_at_grace_window_boundary() {
+        let signing_key = signing_key(0x01);
+        let verifying_key = signing_key.verifying.to_bytes();
+        let signed = signed_certificate(PRIMARY_IDENTIFIER, &signing_key, NOW_SECS - GRACE_SECS);
+        let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
+
+        validate_sender_certificate(validation_input(&signed, &domain_keys, &[])).unwrap();
     }
 
     #[test]

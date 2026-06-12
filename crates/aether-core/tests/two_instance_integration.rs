@@ -8,8 +8,8 @@ use aether_core::{
     InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
     InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment,
     OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderCertificateIdentityKey,
-    SenderIdentityMaterial, SessionId,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RevocationState,
+    SenderCertificateIdentityKey, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
@@ -277,7 +277,7 @@ fn inbound_with_certificate_validation<'a>(
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             domain_signing_keys,
-            revoked_identity_keys,
+            revocation_state: RevocationState::Available(revoked_identity_keys),
             reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
             grace_window_secs: 0,
         }),
