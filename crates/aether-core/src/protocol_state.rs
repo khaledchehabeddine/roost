@@ -10,7 +10,7 @@ use crate::key_encoding::{
 use crate::message::{MAX_ENCODED_MESSAGE_LEN, MAX_MESSAGE_PAYLOAD_LEN};
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
 use crate::sender_certificate::{
-    DomainSigningKey, SenderCertificateIdentityKey, SenderCertificateValidationError,
+    DomainSigningKey, RevocationState, SenderCertificateValidationError,
     SenderCertificateValidationInput, validate_sender_certificate,
 };
 use crate::{Message, MessageError, MessageId, PayloadKind};
@@ -381,16 +381,18 @@ pub struct InboundEncryptedMessage<'a> {
 ///
 /// When supplied, Core validates the sealed sender certificate after decrypting the Message,
 /// rejects revoked Identity Keys before local blocking, and uses the validated sender Identity Key
-/// to suppress blocked inbound plaintext.
+/// to suppress blocked inbound plaintext. An unavailable revocation source fails validation
+/// closed, so no plaintext is surfaced without a revocation verdict.
 #[derive(Clone, Copy)]
 pub struct InboundSenderCertificateValidation<'a> {
     /// Known domain-signing keys indexed by certificate signing-key identifier.
     pub domain_signing_keys: &'a [DomainSigningKey<'a>],
-    /// Caller-supplied revoked sender Identity Keys.
-    pub revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+    /// Caller-supplied revocation input for the sender Identity Key check.
+    pub revocation_state: RevocationState<'a>,
     /// Caller-supplied Unix timestamp in seconds used for expiry evaluation.
     pub reference_timestamp_secs: u64,
-    /// Caller-supplied grace window in seconds.
+    /// Caller-supplied grace window in seconds, with no library-imposed ceiling; for the
+    /// trade-off, see [`SenderCertificateValidationInput::grace_window_secs`].
     pub grace_window_secs: u64,
 }
 
@@ -2527,7 +2529,7 @@ fn inbound_contact_identity_key(
         certificate: &sender_identity.certificate,
         signature: &sender_identity.signature,
         domain_signing_keys: validation.domain_signing_keys,
-        revoked_identity_keys: validation.revoked_identity_keys,
+        revocation_state: validation.revocation_state,
         reference_timestamp_secs: validation.reference_timestamp_secs,
         grace_window_secs: validation.grace_window_secs,
     })

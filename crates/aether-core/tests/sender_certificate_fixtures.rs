@@ -1,7 +1,7 @@
 //! Replays checked-in sender certificate fixtures across the public Core validation API.
 
 use aether_core::{
-    DomainSigningKey, DomainSigningKeyStatus, SenderCertificateDiscoveryKey,
+    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
     SenderCertificateIdentityKey, SenderCertificateValidationError,
     SenderCertificateValidationInput, validate_sender_certificate,
 };
@@ -94,7 +94,7 @@ fn replay_fixture(fixture_file: &FixtureFile, fixture: &Fixture) {
         certificate: &certificate,
         signature: &signature,
         domain_signing_keys: &domain_signing_keys,
-        revoked_identity_keys: &revoked_identity_keys,
+        revocation_state: RevocationState::Available(&revoked_identity_keys),
         reference_timestamp_secs: fixture_file.reference_timestamp_secs,
         grace_window_secs: fixture_file.grace_window_secs,
     };

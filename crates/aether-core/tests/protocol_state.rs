@@ -7,7 +7,7 @@ use aether_core::{
     MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message, MessageId,
     OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, SenderCertificateIdentityKey,
+    ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
     SenderCertificateValidationError, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
@@ -206,11 +206,11 @@ fn sender_certificate_bytes(
 
 fn sender_certificate_validation<'a>(
     domain_signing_keys: &'a [DomainSigningKey<'a>],
-    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+    revocation_state: RevocationState<'a>,
 ) -> InboundSenderCertificateValidation<'a> {
     InboundSenderCertificateValidation {
         domain_signing_keys,
-        revoked_identity_keys,
+        revocation_state,
         reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
         grace_window_secs: 0,
     }
@@ -231,7 +231,7 @@ fn inbound_with_certificate_validation<'a>(
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: Some(sender_certificate_validation(
             domain_signing_keys,
-            revoked_identity_keys,
+            RevocationState::Available(revoked_identity_keys),
         )),
     }
 }
@@ -1150,6 +1150,55 @@ fn revoked_certificate_rejects_before_local_block_handling() {
         result,
         Err(ProtocolStateError::SenderCertificateValidation(
             SenderCertificateValidationError::RevokedIdentityKey
+        ))
+    ));
+}
+
+#[test]
+fn unavailable_revocation_state_rejects_before_plaintext_is_surfaced() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x56, b"revocation unavailable", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x56; 32]),
+        &bob_snapshot,
+        InboundEncryptedMessage {
+            session_key: key,
+            deduplication_key,
+            message: &encrypted,
+            acknowledgment: acknowledgment(0xee, &acknowledgment_sender_identity),
+            sender_certificate_validation: Some(sender_certificate_validation(
+                &domain_keys,
+                RevocationState::Unavailable,
+            )),
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::SenderCertificateValidation(
+            SenderCertificateValidationError::RevocationStateUnavailable
         ))
     ));
 }

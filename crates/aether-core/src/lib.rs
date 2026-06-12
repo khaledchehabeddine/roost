@@ -71,7 +71,7 @@ pub use protocol_state::{
 };
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use sender_certificate::{
-    DomainSigningKey, DomainSigningKeyStatus, SenderCertificateDiscoveryKey,
+    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
     SenderCertificateIdentityKey, SenderCertificateValidationError,
     SenderCertificateValidationInput, ValidatedSenderCertificate, validate_sender_certificate,
 };

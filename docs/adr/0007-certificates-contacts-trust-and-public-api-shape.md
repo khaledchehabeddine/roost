@@ -3,8 +3,8 @@
 **Status:** Accepted
 
 Sender-certificate validation is a pure verdict over caller inputs: certificate bytes, sender
-signature bytes, a trusted domain-signing-key set, a revoked-IK set, a caller-supplied reference
-Unix timestamp in seconds, and a consumer-supplied grace window in seconds. The library does not
+signature bytes, a trusted domain-signing-key set, a typed revocation input, a caller-supplied
+reference Unix timestamp in seconds, and a consumer-supplied grace window in seconds. The library does not
 read the device clock for this verdict. A valid certificate proves only that one trusted domain
 signing key signed the sender IK and current DK binding; local Trust State and Blocking remain
 separate local decisions.
@@ -21,13 +21,18 @@ signing-key identifier to exactly one currently trusted Ed25519 domain signing k
 rotation overlap is represented by passing multiple trusted key identifiers. Unknown identifiers
 reject without fallback probing across other trusted keys.
 
-Revocation is evaluated against the current revoked-IK input on every validation call, using the
-canonical IK encoding as the revocation key. A prior positive certificate result is not reused
-after that IK appears in the revocation input. Expiry is computed only from certificate expiry,
-reference timestamp, and grace window: a certificate is accepted when `reference_timestamp <=
-expiry || reference_timestamp - expiry <= grace_window`. This avoids overflow in `expiry +
-grace_window`. The grace window is consumer policy for clock skew and delivery delay, not a
-library default.
+Revocation is evaluated against the current revocation input on every validation call, using the
+canonical IK encoding as the revocation key. The input is typed as available-or-unavailable rather
+than a bare list, so an empty set always means no IK is revoked and never stands in for a
+revocation source that failed to load; an unavailable revocation source fails validation closed
+before any verdict, after signature verification. A prior positive certificate result is not
+reused after that IK appears in the revocation input. Expiry is computed only from certificate
+expiry, reference timestamp, and grace window: a certificate is accepted when
+`reference_timestamp <= expiry || reference_timestamp - expiry <= grace_window`. This avoids
+overflow in `expiry + grace_window`. The grace window is consumer policy for clock skew and
+delivery delay, not a library default. Grace bounds are wholly consumer-owned: the library imposes
+no ceiling, and `u64::MAX` keeps every expired certificate acceptable forever, a trade-off the
+consumer sets from its own product requirements.
 
 Contact Identity is the peer IK plus its current DK. Trust State is keyed to the IK and survives DK
 rotation. Contact updates must verify the IK signature over the DK bundle and reject stale DK
