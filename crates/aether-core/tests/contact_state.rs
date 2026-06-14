@@ -7,9 +7,10 @@ use aether_core::{
     ProtocolStateSnapshot, SenderIdentityMaterial, SessionId, derive_safety_number,
 };
 use aether_crypto::{
-    InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
-    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-    generate_signing_key_pair, initiate,
+    IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState, SigningKeyPair,
+    accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
+    sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -30,6 +31,8 @@ fn setup() -> Setup {
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key_pair = generate_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
     let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
     let bob_signed_prekey =
@@ -44,7 +47,8 @@ fn setup() -> Setup {
     let (alice_state, envelope) = initiate(
         &mut rng,
         &alice_discovery,
-        &bob_identity.verifying,
+        &alice_identity_key,
+        &bob_identity_key,
         &prekey_bundle,
         InitialPlaintext {
             sender_certificate: b"sender certificate",
@@ -56,6 +60,8 @@ fn setup() -> Setup {
     let _ = accept(
         &mut rng,
         &envelope,
+        &alice_identity_key,
+        &bob_identity_key,
         &bob_discovery,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
@@ -87,10 +93,30 @@ fn session_key() -> ProtocolStateKey {
 }
 
 fn sender_identity() -> SenderIdentityMaterial {
+    let signing_key = sender_identity_signing_key();
+    let identity_key_pair = KeyPair::from_secret_bytes([0x34; 32]);
+    let binding_signature =
+        sign_identity_key_binding(signing_key, &identity_key_pair.public).unwrap();
     SenderIdentityMaterial {
-        identity_key: [1u8; 32],
+        identity_key: *identity_key_pair.public.as_bytes(),
+        identity_verifying_key: signing_key.verifying.to_bytes(),
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
         certificate: vec![2, 3, 4],
         signature: vec![5; 64],
+    }
+}
+
+fn sender_identity_signing_key() -> &'static SigningKeyPair {
+    Box::leak(Box::new(SigningKeyPair::from_signing_bytes([1u8; 32])))
+}
+
+fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+    let agreement_key = generate_key_pair(rng);
+    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
+    IdentityKeyBundle {
+        public_key: agreement_key.public,
+        verifying_key: signing_key.verifying,
+        binding_signature,
     }
 }
 
@@ -134,6 +160,7 @@ fn outbound<'a>(
     OutboundPlaintext {
         id: MessageId::from_bytes([1u8; 16]),
         sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key(),
         contact_identity_key: setup.bob_identity,
         recipient_public_key: setup.bob_discovery.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_123,

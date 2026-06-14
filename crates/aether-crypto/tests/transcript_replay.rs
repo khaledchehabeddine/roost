@@ -1,9 +1,10 @@
 //! Replays a recorded session transcript through handshake and Double Ratchet public APIs.
 
 use aether_crypto::{
-    HandshakeEnvelope, Header, InitialPlaintext, PreKeyBundle, PublicKey, accept,
-    generate_discovery_key, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-    generate_signing_key_pair, initial_associated_data, initiate,
+    HandshakeEnvelope, Header, IdentityKeyBundle, InitialPlaintext, PreKeyBundle, PublicKey,
+    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
+    initiate, sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -93,6 +94,7 @@ fn recorded_session_transcript_reaches_expected_state() {
     let mut rng = ChaCha20Rng::from_seed(transcript.rng_seed);
 
     let alice_identity = generate_signing_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
     let alice_discovery_key = generate_discovery_key(
         &mut rng,
         &alice_identity,
@@ -100,6 +102,7 @@ fn recorded_session_transcript_reaches_expected_state() {
         transcript.created_at,
     );
     let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
     let bob_discovery_key = generate_discovery_key(
         &mut rng,
         &bob_identity,
@@ -129,7 +132,8 @@ fn recorded_session_transcript_reaches_expected_state() {
     let (mut alice, generated_envelope) = initiate(
         &mut rng,
         &alice_discovery_key,
-        &bob_identity.verifying,
+        &alice_identity_key,
+        &bob_identity_key,
         &prekey_bundle,
         initial_plaintext(transcript.handshake_plaintext.as_bytes()),
     )
@@ -146,6 +150,8 @@ fn recorded_session_transcript_reaches_expected_state() {
     let (mut bob, handshake_plaintext) = accept(
         &mut rng,
         &expected_envelope,
+        &alice_identity_key,
+        &bob_identity_key,
         &bob_discovery_key,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
@@ -231,6 +237,16 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
         sender_certificate: b"sender certificate",
         sender_signature: b"sender signature",
         plaintext,
+    }
+}
+
+fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+    let agreement_key = generate_key_pair(rng);
+    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
+    IdentityKeyBundle {
+        public_key: agreement_key.public,
+        verifying_key: signing_key.verifying,
+        binding_signature,
     }
 }
 

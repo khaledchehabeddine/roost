@@ -61,7 +61,7 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if stored discovery-key or identity bytes are malformed.
     /// - [`AetherError::Storage`] if platform storage returns an error.
     pub fn generate_identity(&self) -> Result<Identity, AetherError> {
-        Ok(self.inner.generate_identity()?.into())
+        Ok(Identity::from_core(self.inner.generate_identity()?)?)
     }
 
     /// Loads the stored identity's public material.
@@ -84,7 +84,7 @@ impl KeyStore {
     /// - [`AetherError::NotFound`] if no identity is stored.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn load_identity(&self) -> Result<Identity, AetherError> {
-        Ok(self.inner.load_identity()?.into())
+        Ok(Identity::from_core(self.inner.load_identity()?)?)
     }
 
     /// Returns `true` when this keystore has identity data in storage.
@@ -432,9 +432,10 @@ mod tests {
         },
     };
     use aether_crypto::{
-        DiscoveryKeyBundle as CryptoDiscoveryKeyBundle, PublicKey, Signature,
+        DiscoveryKeyBundle as CryptoDiscoveryKeyBundle,
+        IdentityKeyBundle as CryptoIdentityKeyBundle, PublicKey, Signature,
         SignedPreKeyBundle as CryptoSignedPreKeyBundle, VerifyingKey, verify_discovery_key_bundle,
-        verify_signed_prekey_bundle,
+        verify_identity_key_bundle, verify_signed_prekey_bundle,
     };
     use std::sync::Arc;
 
@@ -444,8 +445,19 @@ mod tests {
     }
 
     fn verifying_key(identity: &FfiIdentity) -> VerifyingKey {
-        VerifyingKey::from_bytes(&<[u8; 32]>::try_from(identity.verifying_key.as_slice()).unwrap())
-            .unwrap()
+        VerifyingKey::from_bytes(
+            &<[u8; 32]>::try_from(identity.ed25519_verifying_key.as_slice()).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn identity_bundle(identity: &FfiIdentity) -> CryptoIdentityKeyBundle {
+        CryptoIdentityKeyBundle::from_bytes(
+            &identity.x25519_public_key,
+            &identity.ed25519_verifying_key,
+            &identity.identity_binding_signature,
+        )
+        .unwrap()
     }
 
     fn discovery_bundle(bundle: &FfiDiscoveryKeyBundle) -> CryptoDiscoveryKeyBundle {
@@ -498,8 +510,11 @@ mod tests {
     fn generate_identity_returns_ffi_safe_public_keys() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        assert_eq!(identity.public_key.len(), 32);
+        assert_eq!(identity.x25519_public_key.len(), 32);
+        assert_eq!(identity.ed25519_verifying_key.len(), 32);
+        assert_eq!(identity.identity_binding_signature.len(), 64);
         verifying_key(&identity);
+        assert!(verify_identity_key_bundle(&identity_bundle(&identity)).is_ok());
     }
 
     #[test]

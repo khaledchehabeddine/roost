@@ -1,6 +1,8 @@
 //! UniFFI public identity and publication records.
 
-use aether_core::{Identity as CoreIdentity, PublicationBundle as CorePublicationBundle};
+use aether_core::{
+    Identity as CoreIdentity, IdentityError, PublicationBundle as CorePublicationBundle,
+};
 use aether_crypto::{
     DiscoveryKeyBundle as CoreDiscoveryKeyBundle, SignedPreKeyBundle as CoreSignedPreKeyBundle,
 };
@@ -11,17 +13,21 @@ use aether_crypto::{
 #[derive(uniffi::Record)]
 pub struct Identity {
     /// X25519 public key bytes. Always 32 bytes.
-    pub public_key: Vec<u8>,
+    pub x25519_public_key: Vec<u8>,
     /// Ed25519 verifying key bytes. Always 32 bytes.
-    pub verifying_key: Vec<u8>,
+    pub ed25519_verifying_key: Vec<u8>,
+    /// Ed25519 signature binding the X25519 and Ed25519 identity halves. Always 64 bytes.
+    pub identity_binding_signature: Vec<u8>,
 }
 
-impl From<CoreIdentity> for Identity {
-    fn from(id: CoreIdentity) -> Self {
-        Identity {
-            public_key: id.public_key().as_bytes().to_vec(),
-            verifying_key: id.verifying_key().as_bytes().to_vec(),
-        }
+impl Identity {
+    pub(crate) fn from_core(id: CoreIdentity) -> Result<Self, IdentityError> {
+        let bundle = id.identity_key_bundle()?;
+        Ok(Identity {
+            x25519_public_key: bundle.public_key.as_bytes().to_vec(),
+            ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
+            identity_binding_signature: bundle.binding_signature.to_bytes().to_vec(),
+        })
     }
 }
 

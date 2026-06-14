@@ -136,7 +136,7 @@ pub enum PayloadKind {
 }
 
 impl PayloadKind {
-    fn tag(self) -> u8 {
+    pub(crate) fn tag(self) -> u8 {
         match self {
             PayloadKind::EncryptedText => 0,
             PayloadKind::Acknowledgment => 1,

@@ -11,9 +11,10 @@ use aether_core::{
     SenderCertificateValidationError, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
-    Header, InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
-    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-    generate_signing_key_pair, initiate,
+    Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey, RatchetState,
+    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
+    sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -33,6 +34,8 @@ fn setup() -> Setup {
     let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
     let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
     let bob_signed_prekey =
@@ -47,7 +50,8 @@ fn setup() -> Setup {
     let (alice_state, envelope) = initiate(
         &mut rng,
         &alice_discovery,
-        &bob_identity.verifying,
+        &alice_identity_key,
+        &bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"initial"),
     )
@@ -55,6 +59,8 @@ fn setup() -> Setup {
     let (bob_state, plaintext) = accept(
         &mut rng,
         &envelope,
+        &alice_identity_key,
+        &bob_identity_key,
         &bob_discovery,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
@@ -73,6 +79,65 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
         sender_signature: b"sender signature",
         plaintext,
     }
+}
+
+fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+    let agreement_key = generate_key_pair(rng);
+    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
+    IdentityKeyBundle {
+        public_key: agreement_key.public,
+        verifying_key: signing_key.verifying,
+        binding_signature,
+    }
+}
+
+fn test_identity_key_pair(tag: u8) -> KeyPair {
+    KeyPair::from_secret_bytes([tag.wrapping_add(0x33); 32])
+}
+
+fn test_sender_identity_signing_key(tag: u8) -> &'static SigningKeyPair {
+    Box::leak(Box::new(SigningKeyPair::from_signing_bytes([tag; 32])))
+}
+
+fn sender_identity_signing_key(
+    sender_identity: &SenderIdentityMaterial,
+) -> &'static SigningKeyPair {
+    for tag in 0..=u8::MAX {
+        let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+        if signing_key.verifying.to_bytes() == sender_identity.identity_verifying_key {
+            return Box::leak(Box::new(signing_key));
+        }
+    }
+    panic!("test sender identity uses an unknown signing key")
+}
+
+fn sender_identity_for_contact(
+    contact: ContactIdentity,
+    certificate: Vec<u8>,
+    signature: Vec<u8>,
+) -> SenderIdentityMaterial {
+    let signing_key = sender_identity_signing_key_for_contact(contact.identity_key);
+    let public_key = PublicKey::from(contact.identity_key.x25519_public_key);
+    let binding_signature = sign_identity_key_binding(signing_key, &public_key).unwrap();
+    SenderIdentityMaterial {
+        identity_key: contact.identity_key.x25519_public_key,
+        identity_verifying_key: contact.identity_key.ed25519_verifying_key,
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
+        certificate,
+        signature,
+    }
+}
+
+fn sender_identity_signing_key_for_contact(
+    identity_key: ContactIdentityKey,
+) -> &'static SigningKeyPair {
+    for tag in 0..=u8::MAX {
+        let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+        if signing_key.verifying.to_bytes() == identity_key.ed25519_verifying_key {
+            return Box::leak(Box::new(signing_key));
+        }
+    }
+    panic!("test contact identity uses an unknown signing key")
 }
 
 fn key() -> ProtocolStateKey {
@@ -96,9 +161,9 @@ fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress
 }
 
 fn contact_identities() -> (ContactIdentity, ContactIdentity) {
+    let identity = test_sender_identity_signing_key(0xa1);
+    let identity_key_pair = test_identity_key_pair(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    let identity = generate_signing_key_pair(&mut rng);
-    let identity_key_pair = generate_key_pair(&mut rng);
     let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
     let rotated_discovery_key = generate_discovery_key(&mut rng, &identity, 1, CREATED_AT + 60);
     let identity_key = ContactIdentityKey {
@@ -175,21 +240,21 @@ fn validated_sender_for_contact_expires_at(
     let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
     ValidatedSender {
         contact,
-        sender_identity: SenderIdentityMaterial {
-            identity_key: contact.discovery_key.prekey_bundle_lookup_key(),
-            certificate,
-            signature,
-        },
+        sender_identity: sender_identity_for_contact(
+            contact,
+            certificate.clone(),
+            signature.clone(),
+        ),
         domain_identifier,
         domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
     }
 }
 
 fn alternate_contact_identity() -> ContactIdentity {
+    let identity = test_sender_identity_signing_key(0x77);
+    let identity_key_pair = test_identity_key_pair(0x77);
     let mut rng = ChaCha20Rng::from_seed([0x73; 32]);
-    let identity = generate_signing_key_pair(&mut rng);
-    let identity_key_pair = generate_key_pair(&mut rng);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    let discovery_key = generate_discovery_key(&mut rng, identity, 0, CREATED_AT);
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
@@ -200,9 +265,8 @@ fn alternate_contact_identity() -> ContactIdentity {
 }
 
 fn contact_with_unrelated_identity_key_and_sender_discovery() -> ContactIdentity {
-    let mut rng = ChaCha20Rng::from_seed([0x91; 32]);
-    let identity = generate_signing_key_pair(&mut rng);
-    let identity_key_pair = generate_key_pair(&mut rng);
+    let identity = test_sender_identity_signing_key(0xc1);
+    let identity_key_pair = test_identity_key_pair(0xc1);
     let contact = accepted_contact_identity();
     ContactIdentity {
         identity_key: ContactIdentityKey {
@@ -369,6 +433,7 @@ fn outbound<'a>(
     OutboundPlaintext {
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key(sender_identity),
         contact_identity_key: contact.identity_key,
         recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_123 + u64::from(id),
@@ -377,8 +442,14 @@ fn outbound<'a>(
 }
 
 fn sender_identity(tag: u8) -> SenderIdentityMaterial {
+    let signing_key = test_sender_identity_signing_key(tag);
+    let identity_key_pair = test_identity_key_pair(tag);
+    let binding_signature =
+        sign_identity_key_binding(signing_key, &identity_key_pair.public).unwrap();
     SenderIdentityMaterial {
-        identity_key: [tag; 32],
+        identity_key: *identity_key_pair.public.as_bytes(),
+        identity_verifying_key: signing_key.verifying.to_bytes(),
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
         certificate: vec![tag, tag.wrapping_add(1), tag.wrapping_add(2)],
         signature: vec![tag.wrapping_add(3); 64],
     }
@@ -395,6 +466,7 @@ fn acknowledgment<'a>(
     OutboundAcknowledgment {
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key(sender_identity),
         recipient_public_key: [3u8; 32],
         timestamp_millis: 1_700_000_100_000 + u64::from(id),
     }
@@ -413,6 +485,31 @@ fn inbound<'a>(
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: None,
     }
+}
+
+fn remap_session_updates(
+    updates: Vec<aether_core::ProtocolStateUpdate>,
+    key: ProtocolStateKey,
+) -> Vec<aether_core::ProtocolStateUpdate> {
+    updates
+        .into_iter()
+        .map(|update| {
+            let kind = update.address().kind();
+            let address = match kind {
+                ProtocolStateKind::RatchetSession | ProtocolStateKind::PendingAcknowledgments => {
+                    ProtocolStateAddress::new(kind, key.clone())
+                }
+                _ => update.address().clone(),
+            };
+            match update.blob() {
+                Some(blob) => aether_core::ProtocolStateUpdate::set(
+                    address,
+                    ProtocolStateBlob::from_bytes(blob.as_bytes().to_vec()),
+                ),
+                None => aether_core::ProtocolStateUpdate::delete(address),
+            }
+        })
+        .collect()
 }
 
 fn inbound_acknowledgment<'a>(
@@ -526,6 +623,7 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
             OutboundPlaintext {
                 id: MessageId::from_bytes([8; 16]),
                 sender_identity: &sender.sender_identity,
+                sender_identity_signing_key: sender_identity_signing_key(&sender.sender_identity),
                 contact_identity_key: contact.identity_key,
                 recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
                 timestamp_millis: 1_700_000_000_888,
@@ -754,6 +852,7 @@ fn retry_instructions_are_windowed_and_persisted() {
             OutboundPlaintext {
                 id: MessageId::from_bytes([0x33; 16]),
                 sender_identity: &sender_identity,
+                sender_identity_signing_key: sender_identity_signing_key(&sender_identity),
                 contact_identity_key: contact.identity_key,
                 recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
                 timestamp_millis: sent_at,
@@ -1002,6 +1101,9 @@ fn validated_receive_persists_contact_identity_key_into_session_update() {
         OutboundPlaintext {
             id: MessageId::from_bytes([0x50; 16]),
             sender_identity: &acknowledgment_sender_identity,
+            sender_identity_signing_key: sender_identity_signing_key(
+                &acknowledgment_sender_identity,
+            ),
             contact_identity_key: other_contact.identity_key,
             recipient_public_key: other_contact.discovery_key.prekey_bundle_lookup_key(),
             timestamp_millis: 1_700_000_000_500,
@@ -2114,6 +2216,7 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
             OutboundPlaintext {
                 id: MessageId::from_bytes([9; 16]),
                 sender_identity: &actual_sender_identity,
+                sender_identity_signing_key: sender_identity_signing_key(&actual_sender_identity),
                 contact_identity_key: contact.identity_key,
                 recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
                 timestamp_millis: 1_700_000_000_999,
@@ -2228,6 +2331,114 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
 }
 
 #[test]
+fn message_transcript_signature_rejects_session_key_transplant() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let other_key = ProtocolStateKey::session(SessionId::from_bytes([0x19; 16]));
+    let deduplication_key = deduplication_key();
+    let sender_identity = sender_identity(1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        other_key.clone(),
+        &setup.bob_state,
+        &sender_identity,
+        deduplication_key.clone(),
+    );
+
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key,
+            outbound(0x19, b"wrong session key", &sender_identity),
+        )
+        .unwrap()
+        .message;
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x19; 32]),
+        &bob_snapshot,
+        inbound(
+            other_key,
+            deduplication_key,
+            &encrypted,
+            &acknowledgment_sender_identity,
+        ),
+    );
+
+    assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+}
+
+#[test]
+fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let other_key = ProtocolStateKey::session(SessionId::from_bytes([0x1a; 16]));
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact(accepted_contact_identity());
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x1a, b"ack wrong session key", &sender.sender_identity),
+        )
+        .unwrap();
+    alice_snapshot.apply_all(remap_session_updates(
+        encrypted.state_updates,
+        other_key.clone(),
+    ));
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x1a; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted.message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    let bound = engine
+        .bind_session_state_peer_identity_key(
+            &alice_snapshot,
+            other_key.clone(),
+            acknowledgment_sender_identity.identity_key,
+        )
+        .unwrap();
+    alice_snapshot.apply(bound);
+
+    let result = engine.process_acknowledgment(
+        &mut ChaCha20Rng::from_seed([0x1b; 32]),
+        &alice_snapshot,
+        InboundAcknowledgmentMessage {
+            session_key: other_key,
+            message: &decrypted.acknowledgment,
+        },
+    );
+
+    assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+}
+
+#[test]
 fn malformed_sealed_sender_envelope_is_rejected() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
@@ -2280,7 +2491,7 @@ fn large_valid_outbound_message_persists_pending_acknowledgment() {
     let key = key();
     let mut snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let sender_identity = sender_identity(1);
-    let large_plaintext = vec![0u8; 65_316];
+    let large_plaintext = vec![0u8; 65_180];
 
     let result = engine
         .encrypt_message(

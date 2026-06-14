@@ -5,15 +5,18 @@
 //! signed pre-key public keys.
 
 use crate::error::CryptoError;
-use crate::keys::{SigningKeyPair, generate_signing_key_pair};
+use crate::keys::{
+    SigningKeyPair, generate_signing_key_pair, parse_ed25519_verifying_key_bytes,
+    validate_x25519_public_key, verify_with_context,
+};
 use crate::signed_prekey::{SignedPreKey, generate_signed_prekey};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 // Domain separator for identity-key signatures over discovery keys.
-const DISCOVERY_KEY_DOMAIN: &[u8] = b"aether-dk-v1:";
+const DISCOVERY_KEY_CONTEXT: &[u8] = b"AetherDK-v1:";
 
 /// A rotatable discovery key signed by the identity key.
 ///
@@ -148,11 +151,14 @@ impl DiscoveryKeyBundle {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
             .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+        if !validate_x25519_public_key(&public_key_bytes) {
+            return Err(CryptoError::InvalidKeyEncoding);
+        }
         let verifying_key_bytes: [u8; 32] = verifying_key
             .try_into()
             .map_err(|_| CryptoError::InvalidKeyEncoding)?;
-        let verifying_key = VerifyingKey::from_bytes(&verifying_key_bytes)
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+        let verifying_key = parse_ed25519_verifying_key_bytes(&verifying_key_bytes)
+            .ok_or(CryptoError::InvalidKeyEncoding)?;
         let signature_bytes: [u8; 64] = signature
             .try_into()
             .map_err(|_| CryptoError::InvalidKeyEncoding)?;
@@ -181,7 +187,9 @@ pub fn generate_discovery_key<R: RngCore + CryptoRng>(
     let signing = generate_signing_key_pair(rng);
     let payload =
         discovery_key_payload(&key_agreement_public, &signing.verifying, epoch, created_at);
-    let identity_signature = identity.sign(&payload);
+    let identity_signature = identity
+        .sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)
+        .expect("non-empty discovery-key signature context");
     DiscoveryKey {
         key_agreement_secret,
         signing,
@@ -206,9 +214,12 @@ pub fn verify_discovery_key_bundle(
         bundle.epoch,
         bundle.created_at,
     );
-    identity_verifying_key
-        .verify(&payload, &bundle.signature)
-        .map_err(|_| CryptoError::SignatureInvalid)
+    verify_with_context(
+        identity_verifying_key,
+        DISCOVERY_KEY_CONTEXT,
+        &payload,
+        &bundle.signature,
+    )
 }
 
 fn discovery_key_payload(
@@ -217,8 +228,7 @@ fn discovery_key_payload(
     epoch: u32,
     created_at: u64,
 ) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(DISCOVERY_KEY_DOMAIN.len() + 32 + 32 + 4 + 8);
-    payload.extend_from_slice(DISCOVERY_KEY_DOMAIN);
+    let mut payload = Vec::with_capacity(32 + 32 + 4 + 8);
     payload.extend_from_slice(key_agreement_public.as_bytes());
     payload.extend_from_slice(verifying_key.as_bytes());
     payload.extend_from_slice(&epoch.to_be_bytes());
@@ -282,14 +292,14 @@ mod tests {
     /// - `epoch = 7`
     /// - `created_at = 1_700_000_000`
     ///
-    /// Output: Ed25519 signature over `discovery_key_payload(...)`.
+    /// Output: Ed25519 signature over the discovery-key context and `discovery_key_payload(...)`.
     #[test]
     fn discovery_key_signing_known_answer() {
         const EXPECTED_SIGNATURE: [u8; 64] = [
-            138, 144, 255, 185, 240, 201, 37, 47, 182, 74, 87, 59, 138, 253, 51, 108, 212, 61, 85,
-            148, 141, 220, 141, 178, 4, 229, 90, 193, 0, 193, 102, 140, 7, 98, 14, 162, 243, 109,
-            98, 116, 136, 251, 101, 71, 253, 167, 217, 251, 254, 111, 161, 139, 102, 57, 26, 32,
-            92, 6, 251, 235, 49, 140, 66, 8,
+            67, 158, 45, 81, 11, 177, 43, 77, 47, 139, 131, 89, 231, 198, 1, 58, 231, 166, 7, 129,
+            23, 186, 228, 177, 203, 106, 251, 154, 65, 113, 162, 13, 33, 192, 211, 49, 84, 201, 98,
+            20, 158, 158, 92, 95, 178, 62, 23, 31, 131, 248, 20, 64, 2, 98, 216, 182, 191, 123, 23,
+            241, 175, 11, 234, 7,
         ];
 
         let identity = SigningKeyPair::from_signing_bytes([0x11u8; 32]);
@@ -302,7 +312,9 @@ mod tests {
             FIXED_CREATED_AT,
         );
 
-        let signature = identity.sign(&payload);
+        let signature = identity
+            .sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)
+            .unwrap();
         let bundle = DiscoveryKeyBundle {
             public_key: key_agreement_public,
             verifying_key: discovery_signing.verifying,
@@ -417,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn from_bytes_accepts_any_32_byte_x25519_public() {
+    fn from_bytes_rejects_non_canonical_x25519_public() {
         let setup = setup();
         let result = DiscoveryKeyBundle::from_bytes(
             &[0xFFu8; 32],
@@ -426,7 +438,7 @@ mod tests {
             FIXED_CREATED_AT,
             &[0u8; 64],
         );
-        assert!(result.is_ok());
+        assert!(matches!(result, Err(CryptoError::InvalidKeyEncoding)));
     }
 
     #[test]

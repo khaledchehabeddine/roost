@@ -16,6 +16,8 @@ pub enum CryptoError {
     HkdfExpand,
     /// HMAC-SHA256 rejected a chain-key input.
     InvalidHmacKey,
+    /// A signature domain context was empty or too large to encode.
+    InvalidSignatureContext,
     /// A public key or signature failed length or canonical-encoding validation.
     InvalidKeyEncoding,
     /// An X25519 exchange produced a non-contributory shared secret.
@@ -30,6 +32,8 @@ pub enum CryptoError {
     MissingOneTimePreKey,
     /// Handshake envelope one-time pre-key reference does not match the local one.
     OneTimePreKeyMismatch,
+    /// Sealed sender identity does not match the identity bound into the X3DH root key.
+    SenderIdentityMismatch,
     /// Persisted ratchet state bytes failed to decode.
     RatchetStateDecode,
     /// Ratchet state failed to encode for persistence.
@@ -54,6 +58,7 @@ impl fmt::Display for CryptoError {
             ),
             Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
             Self::InvalidHmacKey => write!(f, "hmac-sha256 rejected the provided key"),
+            Self::InvalidSignatureContext => write!(f, "signature context is invalid"),
             Self::InvalidKeyEncoding => write!(f, "public key or signature encoding is invalid"),
             Self::InvalidState(context) => {
                 write!(f, "ratchet state invariant violated: {context}")
@@ -69,6 +74,10 @@ impl fmt::Display for CryptoError {
             Self::OneTimePreKeyMismatch => write!(
                 f,
                 "handshake envelope one-time pre-key reference does not match local one-time pre-key"
+            ),
+            Self::SenderIdentityMismatch => write!(
+                f,
+                "sealed sender identity does not match the x3dh root-bound identity key"
             ),
             Self::RatchetStateDecode => write!(f, "ratchet state bytes failed to decode"),
             Self::RatchetStateEncode => write!(f, "ratchet state failed to encode"),

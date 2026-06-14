@@ -1,5 +1,11 @@
 mod dh;
+mod encoding;
+mod identity;
 mod signing;
 
 pub use dh::{KeyPair, PublicKey, SharedSecret, generate_key_pair};
-pub use signing::{Signature, SigningKeyPair, VerifyingKey, generate_signing_key_pair};
+pub(crate) use encoding::{parse_ed25519_verifying_key_bytes, validate_x25519_public_key};
+pub use identity::{IdentityKeyBundle, sign_identity_key_binding, verify_identity_key_bundle};
+pub use signing::{
+    Signature, SigningKeyPair, VerifyingKey, generate_signing_key_pair, verify_with_context,
+};

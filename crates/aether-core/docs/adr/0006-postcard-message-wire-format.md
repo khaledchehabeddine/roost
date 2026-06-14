@@ -8,6 +8,8 @@ The current Message wire shape excludes sender identity material from transport-
 
 **Divergence (in flight):** two `SealedSenderEnvelopeWire` schemas currently share envelope version `1` — the X3DH first-message envelope carries a sender-proof field that the session-message envelope does not, where the specification describes one sealed-sender shape. The schema boundary is tracked in [#156](https://github.com/RelayNet/aether/issues/156).
 
+**Identity-binding update:** workspace ADR 0008 adds a sealed IK Ed25519 Message transcript signature and X3DH identity binding. These signatures remain inside the encrypted sealed-sender payload; no sender IK, certificate, or signature becomes a transport-visible Message field.
+
 ## Considered Options
 
 - Put the codec in `aether-crypto`. Rejected because the encoded Message is an application-level packet around ciphertext and protocol payload bytes, not a primitive.
