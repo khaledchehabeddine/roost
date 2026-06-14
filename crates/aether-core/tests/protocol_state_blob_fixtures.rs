@@ -89,6 +89,7 @@ fn setup() -> Setup {
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: bob_discovery.bundle(),
         signed_prekey: bob_signed_prekey.bundle(),
         one_time_prekey: Some(bob_one_time_prekey.bundle()),

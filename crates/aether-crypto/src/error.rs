@@ -44,6 +44,8 @@ pub enum CryptoError {
     StalePreKey,
     /// Persisted ratchet state uses a format version this build does not understand.
     UnsupportedRatchetVersion(u8),
+    /// Pre-key bundle uses a format version this build does not understand.
+    UnsupportedPreKeyBundleVersion(u8),
 }
 
 impl fmt::Display for CryptoError {
@@ -87,6 +89,9 @@ impl fmt::Display for CryptoError {
             Self::StalePreKey => write!(f, "pre-key belongs to a superseded discovery-key epoch"),
             Self::UnsupportedRatchetVersion(v) => {
                 write!(f, "unsupported ratchet state format version: {v}")
+            }
+            Self::UnsupportedPreKeyBundleVersion(v) => {
+                write!(f, "unsupported pre-key bundle format version: {v}")
             }
         }
     }

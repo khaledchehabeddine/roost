@@ -15,7 +15,9 @@ sender-certificate revocation; it controls consumer-visible surfacing, not proto
 Avoid: revocation, distrust, remote blocklist
 
 **Clock** (one per KeyStore):
-The injected source of wall-clock time for autonomous maintenance scheduling — currently signed-pre-key rotation deciding when a stored key is stale. `SystemClock` in production; a virtual clock in tests makes rotation reproducible.
+The injected source of wall-clock time for caller-invoked prekey lifecycle checks, such as deciding
+whether a superseded signed pre-key remains inside its grace window. `SystemClock` in production; a
+virtual clock in tests makes lifecycle decisions reproducible.
 Avoid: timer, time source
 
 **Contact Identity** (one peer IK plus current DK):
@@ -37,6 +39,13 @@ Avoid: message hash, replay token
 The bounded, ordered window of Deduplication Digests persisted as a Protocol State Blob. It is
 loaded at receive start and advanced only after a unique Message decrypts and is accepted.
 Avoid: cache, in-memory set
+
+**Dead Session** (one terminal state per Session generation):
+A Session persisted as unrecoverable after Core records an authenticated terminal condition. Core
+does not attempt further decrypts under that Session and never surfaces plaintext from it; recovery
+requires a fresh prekey bundle, a new X3DH exchange, and replacement Session state. Skipped-key cap
+rejections from incoming ratchet headers are unauthenticated and do not create Dead Sessions.
+Avoid: reset session, closed conversation, transient failure
 
 **Device** (exactly one per Identity):
 The app install that holds the private key material for an Identity. A new Device starts a new Identity unless the user restores an Identity backup onto it.
@@ -111,6 +120,13 @@ the pending-acknowledgment Protocol State Blob with the original encoded Message
 timestamps, then removed when a matching acknowledgment is processed.
 Avoid: retry cache, outbox, in-memory pending state
 
+**PreKey State** (one persisted lifecycle surface per local Identity):
+The `prekey/*` secure-storage records managed by KeyStore: the current Discovery Key, current and
+immediately superseded signed pre-key, and one-time pre-key pool for the current Epoch. Publication
+uses caller-created material; rotating the Discovery Key advances the Epoch and immediately destroys
+prior-Epoch signed and one-time prekey secrets.
+Avoid: protocol state blob, in-memory prekey cache, automatic publication rotation
+
 **Protocol State Blob** (many per Identity or Session):
 An opaque byte value produced by Core and committed by the consumer's durable store. Core may load
 and advance a Blob during one operation, but the consumer-held Blob is authoritative between
@@ -167,6 +183,13 @@ Avoid: sender IK, sender metadata
 **Session** (between two Identities):
 An ongoing encrypted channel between two Identities, advanced by the Double Ratchet, identified by `SessionID`.
 Avoid: connection, conversation, chat
+
+**Session-Unrecoverable Event** (at most one per Dead Session):
+The public Event emitted when Core observes a persisted Dead Session marker that has not yet emitted
+its event. Later Messages under the same dead Session return an unrecoverable outcome with no
+plaintext and do not re-emit the Event; replacing the Session via X3DH allows a new Event if that
+new Session later dies.
+Avoid: warning, retry hint, decrypt error
 
 **Trust State** (one local state per peer IK):
 The consumer-recorded local trust verdict for a Contact Identity: Pending until accepted,

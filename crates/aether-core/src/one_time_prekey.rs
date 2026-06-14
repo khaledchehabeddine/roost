@@ -128,33 +128,29 @@ impl OneTimePreKeyManager {
         let epoch = discovery_key.epoch();
         let now = self.now_secs()?;
         let mut storage = self.lock_storage()?;
-        let mut pool = match storage.load(ONE_TIME_PREKEY_POOL_KEY)? {
-            Some(raw) => decode_pool(&raw)?,
-            None => empty_pool(epoch),
-        };
-        if pool.epoch != epoch {
-            pool = empty_pool(epoch);
-        }
+        let mut pool = current_epoch_pool(storage.as_mut(), epoch)?;
         if pool.entries.len() > ONE_TIME_PREKEY_REPLENISH_THRESHOLD {
             return Ok(Vec::new());
         }
 
         let needed = ONE_TIME_PREKEY_POOL_TARGET - pool.entries.len();
-        let mut bundles = Vec::with_capacity(needed);
-        for _ in 0..needed {
-            let id = pool.next_id;
-            // A corrupt stored counter can still overflow.
-            pool.next_id = pool.next_id.checked_add(1).ok_or_else(|| {
-                OneTimePreKeyError::InvalidData("one-time pre-key id overflow".into())
-            })?;
-            let one_time_prekey = generate_one_time_prekey(rng, id, epoch, now);
-            pool.entries.push(OneTimePreKeyEntry {
-                id,
-                secret: *one_time_prekey.to_secret_bytes(),
-                created_at: now,
-            });
-            bundles.push(one_time_prekey.bundle());
-        }
+        let bundles = append_batch(rng, &mut pool, needed, epoch, now)?;
+        let blob = encode_pool(&pool);
+        storage.store(ONE_TIME_PREKEY_POOL_KEY, &blob)?;
+        Ok(bundles)
+    }
+
+    pub(crate) fn generate_batch<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        batch_size: usize,
+    ) -> Result<Vec<OneTimePreKeyBundle>, OneTimePreKeyError> {
+        let discovery_key = self.discovery.current()?;
+        let epoch = discovery_key.epoch();
+        let now = self.now_secs()?;
+        let mut storage = self.lock_storage()?;
+        let mut pool = current_epoch_pool(storage.as_mut(), epoch)?;
+        let bundles = append_batch(rng, &mut pool, batch_size, epoch, now)?;
         let blob = encode_pool(&pool);
         storage.store(ONE_TIME_PREKEY_POOL_KEY, &blob)?;
         Ok(bundles)
@@ -211,6 +207,53 @@ fn empty_pool(epoch: u32) -> OneTimePreKeyPool {
         next_id: 0,
         entries: Vec::new(),
     }
+}
+
+fn current_epoch_pool(
+    storage: &mut dyn SecureStorage,
+    epoch: u32,
+) -> Result<OneTimePreKeyPool, OneTimePreKeyError> {
+    let pool = match storage.load(ONE_TIME_PREKEY_POOL_KEY)? {
+        Some(raw) => decode_pool(&raw)?,
+        None => empty_pool(epoch),
+    };
+    if pool.epoch == epoch {
+        Ok(pool)
+    } else {
+        Ok(empty_pool(epoch))
+    }
+}
+
+fn append_batch<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    pool: &mut OneTimePreKeyPool,
+    batch_size: usize,
+    epoch: u32,
+    now: u64,
+) -> Result<Vec<OneTimePreKeyBundle>, OneTimePreKeyError> {
+    let available = MAX_ONE_TIME_PREKEYS - pool.entries.len();
+    if batch_size > available {
+        return Err(OneTimePreKeyError::InvalidData(format!(
+            "one-time pre-key batch exceeds capacity: requested {batch_size}, available {available}"
+        )));
+    }
+
+    let mut bundles = Vec::with_capacity(batch_size);
+    for _ in 0..batch_size {
+        let id = pool.next_id;
+        // A corrupt stored counter can still overflow.
+        pool.next_id = pool.next_id.checked_add(1).ok_or_else(|| {
+            OneTimePreKeyError::InvalidData("one-time pre-key id overflow".into())
+        })?;
+        let one_time_prekey = generate_one_time_prekey(rng, id, epoch, now);
+        pool.entries.push(OneTimePreKeyEntry {
+            id,
+            secret: *one_time_prekey.to_secret_bytes(),
+            created_at: now,
+        });
+        bundles.push(one_time_prekey.bundle());
+    }
+    Ok(bundles)
 }
 
 fn encode_pool(pool: &OneTimePreKeyPool) -> Zeroizing<Vec<u8>> {
@@ -383,6 +426,52 @@ mod tests {
             manager.consume_one_time_prekey(discovery.current().unwrap().epoch(), bundle.id),
             Err(OneTimePreKeyError::NotFound)
         ));
+    }
+
+    #[test]
+    fn generate_batch_creates_exact_caller_size_under_current_epoch() {
+        let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
+        let first = manager.generate_batch(&mut OsRng, 3).unwrap();
+        let second = manager.generate_batch(&mut OsRng, 2).unwrap();
+        let epoch = discovery.current().unwrap().epoch();
+
+        assert_eq!(first.len(), 3);
+        assert_eq!(second.len(), 2);
+        assert!(
+            first
+                .iter()
+                .chain(&second)
+                .all(|bundle| bundle.epoch == epoch)
+        );
+        assert_eq!(
+            first
+                .iter()
+                .chain(&second)
+                .map(|bundle| bundle.id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn generate_batch_rejects_capacity_overflow_without_mutating_pool() {
+        let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
+        let full_batch = manager
+            .generate_batch(&mut OsRng, ONE_TIME_PREKEY_POOL_TARGET)
+            .unwrap();
+        let epoch = discovery.current().unwrap().epoch();
+
+        assert!(matches!(
+            manager.generate_batch(&mut OsRng, 1),
+            Err(OneTimePreKeyError::InvalidData(reason)) if reason.contains("capacity")
+        ));
+        assert_eq!(
+            manager
+                .consume_one_time_prekey(epoch, full_batch[0].id)
+                .unwrap()
+                .id(),
+            0
+        );
     }
 
     #[test]

@@ -21,7 +21,9 @@ The 24-byte XChaCha20 IV paired with each message key. Derived alongside the key
 Avoid: IV, salt
 
 **Ratchet** (one per Session):
-The Double Ratchet state machine that advances on every Message, providing forward secrecy and post-compromise recovery.
+The Double Ratchet state machine that advances on every Message, providing forward secrecy and
+post-compromise recovery. Per-chain and total skipped-key caps reject messages that would exceed
+retention bounds; they never silently evict retained skipped keys.
 Avoid: chain, state machine
 
 **X3DH** (one execution per Session):
@@ -31,7 +33,8 @@ seeds the Ratchet and binds both parties' canonical Identity Key encodings so th
 re-labeled under another verified IK. Sender material is carried inside the encrypted first message,
 not as a clear handshake field. The encrypted first message also carries a private sender
 key-possession proof; sender-certificate trust validation remains a higher-layer verdict after
-decrypt.
+decrypt. The published prekey bundle is versioned, and v1 reserves additive KDF-input headroom for
+future hybrid material without changing the existing HKDF info strings or transcript vectors.
 Avoid: handshake, key agreement
 
 **Identity misbinding** (rejected per Session):

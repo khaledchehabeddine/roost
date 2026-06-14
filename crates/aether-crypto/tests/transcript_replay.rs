@@ -121,6 +121,7 @@ fn recorded_session_transcript_reaches_expected_state() {
         transcript.created_at,
     );
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: bob_discovery_key.bundle(),
         signed_prekey: bob_signed_prekey.bundle(),
         one_time_prekey: Some(bob_one_time_prekey.bundle()),

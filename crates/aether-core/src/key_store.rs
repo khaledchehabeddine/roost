@@ -5,8 +5,8 @@ use crate::one_time_prekey::{OneTimePreKeyError, OneTimePreKeyManager};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
 use aether_crypto::{
-    DiscoveryKeyBundle, OneTimePreKey, OneTimePreKeyBundle, SignedPreKeyBundle,
-    verify_signed_prekey_bundle,
+    DiscoveryKeyBundle, OneTimePreKey, OneTimePreKeyBundle, PREKEY_BUNDLE_VERSION,
+    SignedPreKeyBundle, verify_signed_prekey_bundle,
 };
 use rand::rngs::OsRng;
 use std::error::Error;
@@ -78,6 +78,8 @@ impl From<SignedPreKeyError> for KeyStoreError {
 /// [`Self::signed_prekey`] with the discovery key's verifying key.
 #[derive(Clone, Debug)]
 pub struct PublicationBundle {
+    /// Version of the public pre-key bundle format.
+    pub version: u8,
     /// The discovery key for this publication.
     pub discovery_key: DiscoveryKeyBundle,
     /// The signed pre-key for this publication.
@@ -221,10 +223,9 @@ impl KeyStore {
 
     /// Returns a publishable key pair.
     ///
-    /// Refreshes a missing or stale signed pre-key, then returns a [`PublicationBundle`] whose
-    /// keys verify together. Prefer this for identity publication over reading the two bundles
-    /// separately. One-time pre-key bundles are managed by
-    /// [`Self::replenish_one_time_prekeys`].
+    /// Returns a [`PublicationBundle`] whose caller-created keys verify together. Prefer this for
+    /// identity publication over reading the two bundles separately. One-time pre-key bundles are
+    /// managed by [`Self::generate_one_time_prekeys`] and [`Self::replenish_one_time_prekeys`].
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `NotFound`) if the discovery
@@ -234,22 +235,44 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
     /// - [`KeyStoreError::SignedPreKey`] (`Corrupt`) if the stored signed pre-key does not verify
     ///   against the current discovery key.
-    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) if signed-pre-key rotation cannot load or
-    ///   verify the discovery key.
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
     ///   malformed.
+    /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key has been created.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        self.0.signed_prekey.rotate_if_stale(&mut OsRng)?;
         let discovery_key = self.0.discovery.current_bundle()?;
         let signed_prekey = self.0.signed_prekey.current_bundle()?;
         // Reject storage rollback/desync before publishing a mismatched pair.
         verify_signed_prekey_bundle(&signed_prekey, &discovery_key.verifying_key)
             .map_err(|_| SignedPreKeyError::Corrupt)?;
         Ok(PublicationBundle {
+            version: PREKEY_BUNDLE_VERSION,
             discovery_key,
             signed_prekey,
         })
+    }
+
+    /// Generates exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
+    ///
+    /// The new secrets are persisted in the existing one-time-pre-key pool and no discovery-key
+    /// rotation is required. The call fails if the requested batch would exceed the pool cap.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
+    /// - [`KeyStoreError::OneTimePreKey`] (`Discovery`) if the discovery key is malformed,
+    ///   unverifiable, or absent.
+    /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
+    ///   malformed or the requested batch exceeds capacity.
+    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
+    pub fn generate_one_time_prekeys(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        Ok(self
+            .0
+            .one_time_prekey
+            .generate_batch(&mut OsRng, batch_size)?)
     }
 
     /// Replenishes the stored one-time pre-key pool.
@@ -300,6 +323,7 @@ impl KeyStore {
         let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
         let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
         Ok(PublicationBundle {
+            version: PREKEY_BUNDLE_VERSION,
             discovery_key: discovery_key.bundle(),
             signed_prekey: signed_prekey.bundle(),
         })
@@ -534,7 +558,13 @@ mod tests {
     fn current_publication_bundle_returns_verifiable_chain() {
         let key_store = store();
         let identity = key_store.generate_identity().unwrap();
+        assert!(matches!(
+            key_store.current_publication_bundle(),
+            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
+        ));
+        key_store.rotate_signed_prekey_now().unwrap();
         let publication = key_store.current_publication_bundle().unwrap();
+        assert_eq!(publication.version, aether_crypto::PREKEY_BUNDLE_VERSION);
         assert!(
             verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
                 .is_ok()
@@ -556,6 +586,75 @@ mod tests {
         let bundles = key_store.replenish_one_time_prekeys().unwrap();
         assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
         assert!(bundles.iter().all(|bundle| bundle.epoch == discovery.epoch));
+    }
+
+    #[test]
+    fn generate_one_time_prekeys_creates_exact_caller_size() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let discovery = key_store.current_discovery_key_bundle().unwrap();
+        let first = key_store.generate_one_time_prekeys(3).unwrap();
+        let second = key_store.generate_one_time_prekeys(2).unwrap();
+
+        assert_eq!(first.len(), 3);
+        assert_eq!(second.len(), 2);
+        assert!(
+            first
+                .iter()
+                .chain(&second)
+                .all(|bundle| bundle.epoch == discovery.epoch)
+        );
+        assert_eq!(
+            first
+                .iter()
+                .chain(&second)
+                .map(|bundle| bundle.id)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn generate_one_time_prekeys_rejects_over_cap_batch() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store
+            .generate_one_time_prekeys(ONE_TIME_PREKEY_POOL_TARGET)
+            .unwrap();
+
+        assert!(matches!(
+            key_store.generate_one_time_prekeys(1),
+            Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::InvalidData(reason)))
+                if reason.contains("capacity")
+        ));
+    }
+
+    #[test]
+    fn generated_one_time_prekeys_persist_until_consumed() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let epoch = key_store.current_discovery_key_bundle().unwrap().epoch;
+        let bundle = key_store.generate_one_time_prekeys(1).unwrap().remove(0);
+
+        let prekey = key_store.consume_one_time_prekey(epoch, bundle.id).unwrap();
+        assert_eq!(prekey.id(), bundle.id);
+        assert!(matches!(
+            key_store.consume_one_time_prekey(epoch, bundle.id),
+            Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::NotFound))
+        ));
+    }
+
+    #[test]
+    fn consume_one_time_prekey_rejects_stale_epoch() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let epoch = key_store.current_discovery_key_bundle().unwrap().epoch;
+        let bundle = key_store.generate_one_time_prekeys(1).unwrap().remove(0);
+
+        assert!(matches!(
+            key_store.consume_one_time_prekey(epoch + 1, bundle.id),
+            Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::StaleEpoch))
+        ));
     }
 
     #[test]
@@ -695,6 +794,7 @@ mod tests {
     fn current_publication_bundle_rejects_prekey_signed_by_superseded_discovery_key() {
         let (key_store, storage) = store_with_storage();
         key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
         key_store.current_publication_bundle().unwrap();
         let stale_prekey = storage
             .lock()
@@ -723,6 +823,7 @@ mod tests {
         assert_eq!(first_dk.epoch, 0);
 
         let rotation = key_store.rotate_discovery_key_now().unwrap();
+        assert_eq!(rotation.version, aether_crypto::PREKEY_BUNDLE_VERSION);
         assert_eq!(rotation.discovery_key.epoch, 1);
         assert_ne!(
             rotation.discovery_key.public_key.as_bytes(),
@@ -735,6 +836,24 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn rotate_discovery_key_now_clears_prior_epoch_signed_prekey_secret() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        let first_epoch = key_store.current_discovery_key_bundle().unwrap().epoch;
+        let first_prekey = key_store.rotate_signed_prekey_now().unwrap();
+
+        key_store.rotate_discovery_key_now().unwrap();
+
+        assert!(matches!(
+            key_store
+                .0
+                .signed_prekey
+                .prekey_for_public_key(first_epoch, first_prekey.public_key.as_bytes()),
+            Err(SignedPreKeyError::NotFound)
+        ));
     }
 
     #[test]
@@ -811,6 +930,7 @@ mod tests {
     fn concurrent_publication_and_rotation_stays_consistent() {
         let key_store = store();
         key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
 
         let publisher = key_store.clone();
         let rotator = key_store.clone();

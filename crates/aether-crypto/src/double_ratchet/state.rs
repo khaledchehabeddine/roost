@@ -41,7 +41,7 @@ pub struct RatchetState {
     // Cached keys for out-of-order messages, keyed by sender public key bytes and message number.
     // `BTreeMap` keeps lookup and serialized snapshots deterministic.
     mk_skipped: BTreeMap<([u8; 32], u32), SkippedMessageKey>,
-    // Next order number for skipped-key eviction.
+    // Next order number for persisted skipped-key ordering checks.
     next_skipped_key_sequence: u64,
 }
 
@@ -387,6 +387,9 @@ impl RatchetState {
         key: ([u8; 32], u32),
         message_key: MessageKey,
     ) -> Result<(), CryptoError> {
+        if !self.mk_skipped.contains_key(&key) && self.mk_skipped.len() >= MAX_SKIPPED_KEYS_TOTAL {
+            return Err(CryptoError::MaxSkippedKeysExceeded);
+        }
         let sequence = self.next_skipped_key_sequence;
         self.next_skipped_key_sequence = self
             .next_skipped_key_sequence
@@ -399,21 +402,7 @@ impl RatchetState {
                 sequence,
             },
         );
-        while self.mk_skipped.len() > MAX_SKIPPED_KEYS_TOTAL {
-            self.evict_oldest_skipped_message_key();
-        }
         Ok(())
-    }
-
-    fn evict_oldest_skipped_message_key(&mut self) {
-        let oldest_key = self
-            .mk_skipped
-            .iter()
-            .min_by_key(|(key, skipped)| (skipped.sequence, *key))
-            .map(|(key, _)| *key);
-        if let Some(oldest_key) = oldest_key {
-            self.mk_skipped.remove(&oldest_key);
-        }
     }
 
     // Performs a DH ratchet step and derives new receiving and sending chains.
@@ -707,13 +696,12 @@ mod tests {
     }
 
     #[test]
-    fn max_skipped_keys_evicts_oldest_entries() {
+    fn max_skipped_keys_total_rejects_without_evicting_retained_keys() {
         let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
-        let overflow_step = MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP;
+        let fill_steps = MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP;
         let mut oldest_skipped = None;
-        let mut newest_skipped = None;
-        for step in 0..=overflow_step {
+        for step in 0..fill_steps {
             let mut messages: Vec<_> = (0..=MAX_SKIP)
                 .map(|message_number| {
                     initiator
@@ -727,8 +715,6 @@ mod tests {
             let first_message = messages.remove(0);
             if step == 0 {
                 oldest_skipped = Some(first_message);
-            } else if step == overflow_step {
-                newest_skipped = Some(first_message);
             }
             let (last_header, last_ciphertext) = messages.last().unwrap();
             responder
@@ -738,31 +724,42 @@ mod tests {
 
         assert_eq!(responder.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
 
-        let (oldest_header, oldest_ciphertext) = oldest_skipped.unwrap();
+        let overflow_messages: Vec<_> = (0..=MAX_SKIP)
+            .map(|message_number| {
+                initiator
+                    .ratchet_encrypt(
+                        format!("overflow msg {message_number}").as_bytes(),
+                        &associated_data,
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let (overflow_header, overflow_ciphertext) = overflow_messages.last().unwrap();
         assert!(matches!(
             responder.ratchet_decrypt(
                 &mut rng,
-                &oldest_ciphertext,
-                &oldest_header,
+                overflow_ciphertext,
+                overflow_header,
                 &associated_data
             ),
-            Err(CryptoError::Aead)
+            Err(CryptoError::MaxSkippedKeysExceeded)
         ));
+        assert_eq!(responder.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
 
-        let (newest_header, newest_ciphertext) = newest_skipped.unwrap();
+        let (oldest_header, oldest_ciphertext) = oldest_skipped.unwrap();
         let plaintext = responder
             .ratchet_decrypt(
                 &mut rng,
-                &newest_ciphertext,
-                &newest_header,
+                &oldest_ciphertext,
+                &oldest_header,
                 &associated_data,
             )
             .unwrap();
-        assert_eq!(plaintext.as_slice(), b"step 5 msg 0");
+        assert_eq!(plaintext.as_slice(), b"step 0 msg 0");
     }
 
     #[test]
-    fn restored_skipped_key_sequence_evicts_oldest_survivor() {
+    fn restored_skipped_key_cache_at_capacity_rejects_new_skips() {
         let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let fill_steps = MAX_SKIPPED_KEYS_TOTAL as u32 / MAX_SKIP;
@@ -792,7 +789,7 @@ mod tests {
         let bytes = responder.to_bytes().unwrap();
         let mut restored = RatchetState::from_bytes(&bytes).unwrap();
 
-        let mut messages: Vec<_> = (0..=MAX_SKIP)
+        let messages: Vec<_> = (0..=MAX_SKIP)
             .map(|message_number| {
                 initiator
                     .ratchet_encrypt(
@@ -802,33 +799,23 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        let newest_survivor = messages.remove(0);
         let (last_header, last_ciphertext) = messages.last().unwrap();
-        restored
-            .ratchet_decrypt(&mut rng, last_ciphertext, last_header, &associated_data)
-            .unwrap();
+        assert!(matches!(
+            restored.ratchet_decrypt(&mut rng, last_ciphertext, last_header, &associated_data),
+            Err(CryptoError::MaxSkippedKeysExceeded)
+        ));
+        assert_eq!(restored.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
 
         let (oldest_header, oldest_ciphertext) = oldest_survivor.unwrap();
-        assert!(matches!(
-            restored.ratchet_decrypt(
-                &mut rng,
-                &oldest_ciphertext,
-                &oldest_header,
-                &associated_data
-            ),
-            Err(CryptoError::Aead)
-        ));
-
-        let (newest_header, newest_ciphertext) = newest_survivor;
         let plaintext = restored
             .ratchet_decrypt(
                 &mut rng,
-                &newest_ciphertext,
-                &newest_header,
+                &oldest_ciphertext,
+                &oldest_header,
                 &associated_data,
             )
             .unwrap();
-        assert_eq!(plaintext.as_slice(), b"after restore msg 0");
+        assert_eq!(plaintext.as_slice(), b"fill 0 msg 0");
     }
 
     #[test]

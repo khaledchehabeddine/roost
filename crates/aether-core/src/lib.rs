@@ -25,6 +25,7 @@
 //! let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
 //! let identity = store.generate_identity()?;
 //! // Publish the identity with a matching discovery-key + signed-pre-key pair.
+//! store.rotate_signed_prekey_now()?;
 //! let publication = store.current_publication_bundle()?;
 //! publish_identity_bundle(&identity, &publication.discovery_key, &publication.signed_prekey)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -67,7 +68,8 @@ pub use protocol_state::{
     OutboundMessageResult, OutboundPlaintext, PendingAcknowledgment, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate, RetryInstruction,
-    RetryInstructionResult, SessionId,
+    RetryInstructionResult, SessionEvent, SessionId, SessionUnrecoverableReason,
+    SessionUnrecoverableResult,
 };
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use sender_certificate::{

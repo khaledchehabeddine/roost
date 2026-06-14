@@ -231,6 +231,7 @@ fn deduplication_key() -> ProtocolStateKey {
     ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inbound<'a>(
     session_key: ProtocolStateKey,
     deduplication_key: ProtocolStateKey,
@@ -274,6 +275,9 @@ fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult
         InboundMessageOutcome::Accepted(result) => *result,
         InboundMessageOutcome::Blocked(_) => panic!("message was unexpectedly blocked"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+        InboundMessageOutcome::SessionUnrecoverable(_) => {
+            panic!("message was unexpectedly unrecoverable")
+        }
     }
 }
 

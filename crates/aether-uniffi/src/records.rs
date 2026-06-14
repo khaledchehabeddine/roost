@@ -4,7 +4,8 @@ use aether_core::{
     Identity as CoreIdentity, IdentityError, PublicationBundle as CorePublicationBundle,
 };
 use aether_crypto::{
-    DiscoveryKeyBundle as CoreDiscoveryKeyBundle, SignedPreKeyBundle as CoreSignedPreKeyBundle,
+    DiscoveryKeyBundle as CoreDiscoveryKeyBundle, OneTimePreKeyBundle as CoreOneTimePreKeyBundle,
+    SignedPreKeyBundle as CoreSignedPreKeyBundle,
 };
 
 /// Public identity material exposed through UniFFI.
@@ -57,6 +58,32 @@ impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
     }
 }
 
+/// Public one-time pre-key material used to start a session.
+///
+/// The secret half stays in Rust-managed secure storage and is consumed at most once.
+#[derive(uniffi::Record)]
+pub struct OneTimePreKeyBundle {
+    /// One-time pre-key identifier within the current discovery-key epoch.
+    pub id: u64,
+    /// X25519 public key bytes. Always 32 bytes.
+    pub public_key: Vec<u8>,
+    /// Discovery-key epoch this one-time pre-key is bound to.
+    pub epoch: u32,
+    /// Generated timestamp in Unix seconds.
+    pub created_at: u64,
+}
+
+impl From<CoreOneTimePreKeyBundle> for OneTimePreKeyBundle {
+    fn from(b: CoreOneTimePreKeyBundle) -> Self {
+        OneTimePreKeyBundle {
+            id: b.id,
+            public_key: b.public_key.as_bytes().to_vec(),
+            epoch: b.epoch,
+            created_at: b.created_at,
+        }
+    }
+}
+
 /// Public discovery-key material a peer uses to verify this identity's signed pre-keys.
 ///
 /// Verify this bundle with the identity verifying key before trusting [`Self::verifying_key`].
@@ -91,6 +118,8 @@ impl From<CoreDiscoveryKeyBundle> for DiscoveryKeyBundle {
 /// The signed pre-key verifies with the included discovery key.
 #[derive(uniffi::Record)]
 pub struct PublicationBundle {
+    /// Version of the public pre-key bundle format.
+    pub version: u8,
     /// Discovery-key bundle for this publication.
     pub discovery_key: DiscoveryKeyBundle,
     /// Signed pre-key bundle for this publication.
@@ -100,6 +129,7 @@ pub struct PublicationBundle {
 impl From<CorePublicationBundle> for PublicationBundle {
     fn from(b: CorePublicationBundle) -> Self {
         PublicationBundle {
+            version: b.version,
             discovery_key: b.discovery_key.into(),
             signed_prekey: b.signed_prekey.into(),
         }

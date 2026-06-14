@@ -22,6 +22,12 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 const F_PREFIX: [u8; 32] = [0xFF; 32];
 const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:with-opk";
+/// Current public pre-key bundle format version.
+pub const PREKEY_BUNDLE_VERSION: u8 = 1;
+/// Additive public-key headroom reserved in a future versioned pre-key bundle.
+pub const PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM: usize = 1184;
+/// Additive shared-secret headroom reserved in future X3DH KDF input.
+pub const X3DH_ADDITIVE_SHARED_SECRET_HEADROOM: usize = 32;
 const HANDSHAKE_ENVELOPE_MAGIC: [u8; 4] = *b"AX3H";
 const HANDSHAKE_ENVELOPE_VERSION: u8 = 1;
 const MAX_HANDSHAKE_ENVELOPE_LEN: usize = 16 * 1024;
@@ -42,6 +48,8 @@ const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
 /// Public pre-key material used by the initiator to start an X3DH session.
 #[derive(Clone, Debug)]
 pub struct PreKeyBundle {
+    /// Version of the public pre-key bundle format.
+    pub version: u8,
     /// Responder discovery key verified by the responder's identity key.
     pub discovery_key: DiscoveryKeyBundle,
     /// Responder signed pre-key verified by the discovery key.
@@ -219,6 +227,8 @@ impl HandshakeEnvelope {
 /// - [`CryptoError::SignatureInvalid`] when the responder discovery key or signed pre-key
 ///   signature does not verify.
 /// - [`CryptoError::StalePreKey`] when bundled pre-keys do not match the discovery-key epoch.
+/// - [`CryptoError::UnsupportedPreKeyBundleVersion`] when the bundle format version is not
+///   supported by this implementation.
 pub fn initiate<R: RngCore + CryptoRng>(
     rng: &mut R,
     initiator_discovery_key: &DiscoveryKey,
@@ -229,6 +239,11 @@ pub fn initiate<R: RngCore + CryptoRng>(
 ) -> Result<(RatchetState, HandshakeEnvelope), CryptoError> {
     verify_identity_key_bundle(initiator_identity_key)?;
     verify_identity_key_bundle(responder_identity_key)?;
+    if responder_prekey_bundle.version != PREKEY_BUNDLE_VERSION {
+        return Err(CryptoError::UnsupportedPreKeyBundleVersion(
+            responder_prekey_bundle.version,
+        ));
+    }
     verify_discovery_key_bundle(
         &responder_prekey_bundle.discovery_key,
         &responder_identity_key.verifying_key,
@@ -955,6 +970,7 @@ mod tests {
 
     fn full_prekey_bundle(setup: &FullX3dhSetup, include_one_time: bool) -> PreKeyBundle {
         PreKeyBundle {
+            version: PREKEY_BUNDLE_VERSION,
             discovery_key: setup.bob_discovery_key.bundle(),
             signed_prekey: setup.bob_signed_prekey.bundle(),
             one_time_prekey: include_one_time.then(|| setup.bob_one_time_prekey.bundle()),
@@ -1052,6 +1068,22 @@ mod tests {
 
         assert_eq!(initiator_root_key.as_bytes(), responder_root_key.as_bytes());
         assert_eq!(initiator_root_key.as_bytes(), &EXPECTED_ROOT_KEY);
+    }
+
+    #[test]
+    fn versioned_prekey_bundle_reserves_ml_kem_768_headroom() {
+        // Source: NIST FIPS 203, Table 3.
+        const ML_KEM_768_ENCAPSULATION_KEY_LEN: usize = 1184;
+        const ML_KEM_768_SHARED_SECRET_LEN: usize = 32;
+
+        let (setup, _) = full_x3dh_setup();
+        let bundle = full_prekey_bundle(&setup, true);
+
+        assert_eq!(bundle.version, PREKEY_BUNDLE_VERSION);
+        const {
+            assert!(ML_KEM_768_ENCAPSULATION_KEY_LEN <= PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM);
+            assert!(ML_KEM_768_SHARED_SECRET_LEN <= X3DH_ADDITIVE_SHARED_SECRET_HEADROOM);
+        }
     }
 
     #[test]
@@ -1251,6 +1283,7 @@ mod tests {
         let stale_one_time_prekey =
             generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch() + 1, FIXED_TS);
         let bundle = PreKeyBundle {
+            version: PREKEY_BUNDLE_VERSION,
             discovery_key: setup.bob_discovery_key.bundle(),
             signed_prekey: setup.bob_signed_prekey.bundle(),
             one_time_prekey: Some(stale_one_time_prekey.bundle()),
@@ -1265,6 +1298,30 @@ mod tests {
                 initial_plaintext(b"payload"),
             ),
             Err(CryptoError::StalePreKey)
+        ));
+    }
+
+    #[test]
+    fn initiate_rejects_unsupported_prekey_bundle_version() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let bundle = PreKeyBundle {
+            version: PREKEY_BUNDLE_VERSION + 1,
+            discovery_key: setup.bob_discovery_key.bundle(),
+            signed_prekey: setup.bob_signed_prekey.bundle(),
+            one_time_prekey: Some(setup.bob_one_time_prekey.bundle()),
+        };
+
+        assert!(matches!(
+            initiate(
+                &mut rng,
+                &setup.alice_discovery_key,
+                &setup.alice_identity_key,
+                &setup.bob_identity_key,
+                &bundle,
+                initial_plaintext(b"payload"),
+            ),
+            Err(CryptoError::UnsupportedPreKeyBundleVersion(version))
+                if version == PREKEY_BUNDLE_VERSION + 1
         ));
     }
 
