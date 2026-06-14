@@ -70,6 +70,10 @@ Avoid: user, account, profile
 The permanent keypair — an Ed25519 signing key plus X25519 key-agreement key — that anchors an Identity. Safety numbers and sender certificates bind to it and its Ed25519 key signs the Discovery Key; it never rotates and takes no part in the X3DH key agreement.
 Avoid: master key, root key
 
+**Identity Secret Blob** (one secure-storage entry per Identity):
+The versioned local secure-storage payload that commits both permanent Identity Key secret halves together. It is the durable private form of the Identity Key and replaces the pre-release two-entry `identity/x25519` plus `identity/ed25519` encoding.
+Avoid: key pair cache, backup blob
+
 **Lag Signal** (one per Observer overrun):
 An explicit Event Stream item reporting how many Events an Observer missed after its bounded buffer overflowed. Producers do not wait indefinitely for slow Observers; the Observer must recover through a Current State Snapshot.
 Avoid: drop, overflow

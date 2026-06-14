@@ -1,6 +1,6 @@
 //! Passphrase-encrypted identity backup using Argon2id and XChaCha20-Poly1305.
 
-use super::{IDENTITY_ED25519_KEY, IDENTITY_X25519_KEY, IdentityError, IdentityManager};
+use super::{IDENTITY_CURRENT_KEY, IdentityError, IdentityManager, encode_identity_key_blob};
 use argon2::{Argon2, Params};
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
@@ -87,12 +87,16 @@ impl IdentityManager {
         &self,
         plaintext: &[u8; 64],
     ) -> Result<(), IdentityError> {
+        let x25519 = plaintext[..32]
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
+        let ed25519 = plaintext[32..]
+            .try_into()
+            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
+        let blob = encode_identity_key_blob(x25519, ed25519);
         let mut storage = self.lock_storage()?;
         storage
-            .store(IDENTITY_X25519_KEY, &plaintext[..32])
-            .map_err(super::map_storage_err)?;
-        storage
-            .store(IDENTITY_ED25519_KEY, &plaintext[32..])
+            .store(IDENTITY_CURRENT_KEY, &*blob)
             .map_err(super::map_storage_err)?;
         Ok(())
     }
