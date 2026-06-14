@@ -5,6 +5,7 @@
 
 pub use ed25519_dalek::{Signature, VerifyingKey};
 
+use crate::CryptoError;
 use ed25519_dalek::SigningKey;
 use rand::{CryptoRng, RngCore};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -30,6 +31,20 @@ impl SigningKeyPair {
         self.signing.sign(message)
     }
 
+    /// Signs `context || message` with this key pair.
+    ///
+    /// `context` must be a non-empty domain separator naming the signature purpose.
+    pub fn sign_with_context(
+        &self,
+        context: &[u8],
+        message: &[u8],
+    ) -> Result<Signature, CryptoError> {
+        if context.is_empty() {
+            return Err(CryptoError::InvalidSignatureContext);
+        }
+        Ok(self.sign(&contextual_message(context, message)?))
+    }
+
     /// Returns this key pair's signing bytes for secure storage.
     ///
     /// The returned bytes are wrapped in [`Zeroizing`] so they are scrubbed when dropped.
@@ -53,9 +68,41 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
     SigningKeyPair { signing, verifying }
 }
 
+/// Verifies a signature over `context || message`.
+pub fn verify_with_context(
+    verifying_key: &VerifyingKey,
+    context: &[u8],
+    message: &[u8],
+    signature: &Signature,
+) -> Result<(), CryptoError> {
+    use ed25519_dalek::Verifier;
+
+    if context.is_empty() {
+        return Err(CryptoError::InvalidSignatureContext);
+    }
+    verifying_key
+        .verify(&contextual_message(context, message)?, signature)
+        .map_err(|_| CryptoError::SignatureInvalid)
+}
+
+fn contextual_message(context: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    let mut signed = Vec::with_capacity(
+        context
+            .len()
+            .checked_add(message.len())
+            .ok_or(CryptoError::InvalidSignatureContext)?,
+    );
+    signed.extend_from_slice(context);
+    signed.extend_from_slice(message);
+    Ok(signed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        IdentityKeyBundle, KeyPair, sign_identity_key_binding, verify_identity_key_bundle,
+    };
     use ed25519_dalek::Verifier;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -200,5 +247,64 @@ mod tests {
                 .verify(b"message two", &signature)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn context_signature_rejects_wrong_context() {
+        let key_pair = generated_key_pair();
+        let message = b"context-bound message";
+        let signature = key_pair
+            .sign_with_context(b"AetherTest-v1:first", message)
+            .unwrap();
+
+        assert!(
+            verify_with_context(
+                &key_pair.verifying,
+                b"AetherTest-v1:second",
+                message,
+                &signature,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn identity_key_binding_rejects_swapped_x25519_half() {
+        let mut rng = ChaCha20Rng::from_seed([0x15; 32]);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let agreement_key = KeyPair::from_secret_bytes([0x44; 32]);
+        let other_agreement_key = KeyPair::from_secret_bytes([0x45; 32]);
+        let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
+
+        let tampered = IdentityKeyBundle {
+            public_key: other_agreement_key.public,
+            verifying_key: signing_key.verifying,
+            binding_signature: signature,
+        };
+
+        assert!(matches!(
+            verify_identity_key_bundle(&tampered),
+            Err(CryptoError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn identity_key_binding_rejects_swapped_ed25519_half() {
+        let mut rng = ChaCha20Rng::from_seed([0x16; 32]);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let other_signing_key = generate_signing_key_pair(&mut rng);
+        let agreement_key = KeyPair::from_secret_bytes([0x46; 32]);
+        let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
+
+        let tampered = IdentityKeyBundle {
+            public_key: agreement_key.public,
+            verifying_key: other_signing_key.verifying,
+            binding_signature: signature,
+        };
+
+        assert!(matches!(
+            verify_identity_key_bundle(&tampered),
+            Err(CryptoError::SignatureInvalid)
+        ));
     }
 }

@@ -1,14 +1,14 @@
 //! Provides signed X25519 pre-keys for the X3DH handshake.
 
 use crate::error::CryptoError;
-use crate::keys::SigningKeyPair;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use crate::keys::{SigningKeyPair, validate_x25519_public_key, verify_with_context};
+use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // Domain separator for signatures over signed pre-key public keys and epoch metadata.
-const SIGNED_PREKEY_DOMAIN: &[u8] = b"aether-spk-v1:";
+const SIGNED_PREKEY_CONTEXT: &[u8] = b"AetherSPK-v1:";
 
 /// An X25519 pre-key signed by an Ed25519 signing key.
 ///
@@ -34,7 +34,8 @@ impl SignedPreKey {
     }
 
     /// Returns the Ed25519 signature over
-    /// `b"aether-spk-v1:" || public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()`.
+    /// `public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()` under the signed
+    /// pre-key signature context.
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
@@ -100,7 +101,8 @@ pub struct SignedPreKeyBundle {
     /// X25519 public key used by the peer during handshake root-key derivation.
     pub public_key: PublicKey,
     /// Ed25519 signature over
-    /// `b"aether-spk-v1:" || public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()`.
+    /// `public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()` under the signed
+    /// pre-key signature context.
     pub signature: Signature,
     /// Discovery-key epoch this signed pre-key was produced under.
     pub epoch: u32,
@@ -126,6 +128,9 @@ impl SignedPreKeyBundle {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
             .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+        if !validate_x25519_public_key(&public_key_bytes) {
+            return Err(CryptoError::InvalidKeyEncoding);
+        }
         let signature_bytes: [u8; 64] = signature
             .try_into()
             .map_err(|_| CryptoError::InvalidKeyEncoding)?;
@@ -149,7 +154,9 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
     let payload = signed_prekey_payload(&public_key, epoch, created_at);
-    let signature = signing_key.sign(&payload);
+    let signature = signing_key
+        .sign_with_context(SIGNED_PREKEY_CONTEXT, &payload)
+        .expect("non-empty signed-pre-key signature context");
     SignedPreKey {
         secret_key,
         public_key,
@@ -168,14 +175,16 @@ pub fn verify_signed_prekey_bundle(
     signer_verifying_key: &VerifyingKey,
 ) -> Result<(), CryptoError> {
     let payload = signed_prekey_payload(&bundle.public_key, bundle.epoch, bundle.created_at);
-    signer_verifying_key
-        .verify(&payload, &bundle.signature)
-        .map_err(|_| CryptoError::SignatureInvalid)
+    verify_with_context(
+        signer_verifying_key,
+        SIGNED_PREKEY_CONTEXT,
+        &payload,
+        &bundle.signature,
+    )
 }
 
 fn signed_prekey_payload(public_key: &PublicKey, epoch: u32, created_at: u64) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(SIGNED_PREKEY_DOMAIN.len() + 32 + 4 + 8);
-    payload.extend_from_slice(SIGNED_PREKEY_DOMAIN);
+    let mut payload = Vec::with_capacity(32 + 4 + 8);
     payload.extend_from_slice(public_key.as_bytes());
     payload.extend_from_slice(&epoch.to_be_bytes());
     payload.extend_from_slice(&created_at.to_be_bytes());

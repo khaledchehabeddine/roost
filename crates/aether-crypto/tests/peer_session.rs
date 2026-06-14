@@ -4,10 +4,11 @@
 //! public API the way a downstream crate would.
 
 use aether_crypto::{
-    CryptoError, DiscoveryKey, HandshakeEnvelope, Header, InitialPlaintext, OneTimePreKey,
-    PreKeyBundle, RatchetState, Signature, SignedPreKey, SigningKeyPair, accept,
-    generate_discovery_key, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-    generate_signing_key_pair, initial_associated_data, initiate,
+    CryptoError, DiscoveryKey, HandshakeEnvelope, Header, IdentityKeyBundle, InitialPlaintext,
+    OneTimePreKey, PreKeyBundle, RatchetState, Signature, SignedPreKey, SigningKeyPair, accept,
+    generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
+    initiate, sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -15,8 +16,9 @@ use rand_chacha::ChaCha20Rng;
 const FIXED_CREATED_AT: u64 = 1_700_000_000;
 
 struct Setup {
+    alice_identity_key: IdentityKeyBundle,
     alice_discovery_key: DiscoveryKey,
-    bob_identity: SigningKeyPair,
+    bob_identity_key: IdentityKeyBundle,
     bob_discovery_key: DiscoveryKey,
     bob_signed_prekey: SignedPreKey,
     bob_one_time_prekey: Option<OneTimePreKey>,
@@ -25,17 +27,20 @@ struct Setup {
 fn setup() -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed([0x33u8; 32]);
     let alice_identity = generate_signing_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
     let alice_discovery_key =
         generate_discovery_key(&mut rng, &alice_identity, 1, FIXED_CREATED_AT);
     let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
     let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, FIXED_CREATED_AT);
     let bob_signed_prekey =
         generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, FIXED_CREATED_AT);
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), FIXED_CREATED_AT);
     let setup = Setup {
+        alice_identity_key,
         alice_discovery_key,
-        bob_identity,
+        bob_identity_key,
         bob_discovery_key,
         bob_signed_prekey,
         bob_one_time_prekey: Some(bob_one_time_prekey),
@@ -59,7 +64,8 @@ fn bootstrap(
     let (alice, envelope) = initiate(
         rng,
         &setup.alice_discovery_key,
-        &setup.bob_identity.verifying,
+        &setup.alice_identity_key,
+        &setup.bob_identity_key,
         &prekey_bundle,
         initial_plaintext(plaintext),
     )
@@ -68,6 +74,8 @@ fn bootstrap(
     let (bob, _) = accept(
         rng,
         &envelope,
+        &setup.alice_identity_key,
+        &setup.bob_identity_key,
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
@@ -88,6 +96,16 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
         sender_certificate: b"sender certificate",
         sender_signature: b"sender signature",
         plaintext,
+    }
+}
+
+fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+    let agreement_key = generate_key_pair(rng);
+    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
+    IdentityKeyBundle {
+        public_key: agreement_key.public,
+        verifying_key: signing_key.verifying,
+        binding_signature,
     }
 }
 
@@ -131,7 +149,8 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
     let (mut alice, envelope) = initiate(
         &mut rng,
         &setup.alice_discovery_key,
-        &setup.bob_identity.verifying,
+        &setup.alice_identity_key,
+        &setup.bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"hello serialized Bob"),
     )
@@ -142,6 +161,8 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
     let (mut bob, decrypted) = accept(
         &mut rng,
         &decoded_envelope,
+        &setup.alice_identity_key,
+        &setup.bob_identity_key,
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
@@ -291,7 +312,8 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
     let result = initiate(
         &mut rng,
         &setup.alice_discovery_key,
-        &setup.bob_identity.verifying,
+        &setup.alice_identity_key,
+        &setup.bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"payload"),
     );

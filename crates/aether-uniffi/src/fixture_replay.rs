@@ -11,9 +11,10 @@ use aether_core::{
     SenderIdentityMaterial, SessionId, derive_safety_number,
 };
 use aether_crypto::{
-    HandshakeEnvelope, InitialPlaintext, PreKeyBundle, RatchetState, accept,
-    generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState,
+    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
+    sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -44,6 +45,10 @@ pub struct MessageTransportFields {
 pub struct SenderIdentityReplay {
     /// Sender identity key as lowercase hex.
     pub sender_identity_key_hex: String,
+    /// Sender identity Ed25519 verifying key as lowercase hex.
+    pub sender_identity_verifying_key_hex: String,
+    /// Sender identity binding signature as lowercase hex.
+    pub sender_identity_binding_signature_hex: String,
     /// Sender certificate bytes as lowercase hex.
     pub sender_certificate_hex: String,
     /// Sender signature bytes as lowercase hex.
@@ -76,6 +81,10 @@ pub struct SealedSenderReplayCase {
     pub reencoded_hex: String,
     /// True when sender identity key bytes are absent before decrypt.
     pub sender_identity_hidden_before_decrypt: bool,
+    /// True when sender identity verifying-key bytes are absent before decrypt.
+    pub sender_identity_verifying_key_hidden_before_decrypt: bool,
+    /// True when sender identity binding signature bytes are absent before decrypt.
+    pub sender_identity_binding_signature_hidden_before_decrypt: bool,
     /// True when sender certificate bytes are absent before decrypt.
     pub sender_certificate_hidden_before_decrypt: bool,
     /// True when sender signature bytes are absent before decrypt.
@@ -122,6 +131,10 @@ pub struct InitialHandshakeReplayCase {
     pub reencoded_hex: String,
     /// True when sender identity key bytes are absent before decrypt.
     pub sender_identity_hidden_before_decrypt: bool,
+    /// True when sender identity verifying-key bytes are absent before decrypt.
+    pub sender_identity_verifying_key_hidden_before_decrypt: bool,
+    /// True when sender identity binding signature bytes are absent before decrypt.
+    pub sender_identity_binding_signature_hidden_before_decrypt: bool,
     /// True when sender certificate bytes are absent before decrypt.
     pub sender_certificate_hidden_before_decrypt: bool,
     /// True when sender signature bytes are absent before decrypt.
@@ -264,6 +277,8 @@ struct SessionMessageFixture {
 #[derive(Deserialize)]
 struct SenderIdentityFixture {
     sender_identity_key_hex: String,
+    sender_identity_verifying_key_hex: String,
+    sender_identity_binding_signature_hex: String,
     sender_certificate_hex: String,
     sender_signature_hex: String,
 }
@@ -321,10 +336,12 @@ struct SessionSetup {
 struct PreparedInitialHandshake {
     rng: ChaCha20Rng,
     generated_envelope: HandshakeEnvelope,
+    initiator_identity_key: IdentityKeyBundle,
+    responder_identity_key: IdentityKeyBundle,
     bob_discovery_key: aether_crypto::DiscoveryKey,
     bob_signed_prekey: aether_crypto::SignedPreKey,
     bob_one_time_prekey: aether_crypto::OneTimePreKey,
-    sender_identity_key: [u8; 32],
+    sender_identity: SenderIdentityMaterial,
 }
 
 /// Replays every canonical fixture category exposed to binding maintainers.
@@ -436,7 +453,7 @@ pub fn replay_protocol_state_blob_fixtures() -> Result<Vec<BlobReplayCase>, Aeth
         "../../aether-core/tests/fixtures/protocol_state_blobs_v1.json"
     ))?;
     let setup = session_setup()?;
-    let sender_identity = session_sender_identity();
+    let sender_identity = session_sender_identity()?;
     ensure(
         fixture_file.current_version.major == 1 && fixture_file.current_version.minor == 0,
         "protocol-state blob fixture version must be 1.0",
@@ -518,7 +535,9 @@ fn replay_sealed_sender_session_fixture(
     )?;
 
     let sender_identity = sender_identity_from_fixture(&fixture.post_decryption)?;
-    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let acknowledgment_sender_identity = acknowledgment_sender_identity()?;
+    let acknowledgment_sender_signing_key =
+        sender_identity_signing_key(&acknowledgment_sender_identity)?;
     let pre_auth_hidden = pre_auth_sender_material_hidden(&encoded, &sender_identity);
     let mut recipient_snapshot =
         snapshot_from_blob_fixture(blob_file, &fixture.recipient_state_fixture, key)?;
@@ -538,6 +557,7 @@ fn replay_sealed_sender_session_fixture(
                     deduplication_key.clone(),
                     &message,
                     &acknowledgment_sender_identity,
+                    &acknowledgment_sender_signing_key,
                     domain_signing_keys,
                     &validation.revoked_identity_keys,
                     validation.reference_timestamp_secs,
@@ -583,6 +603,8 @@ fn replay_sealed_sender_session_fixture(
         post_decryption: sender_identity_report(&decrypted.sender_identity),
         reencoded_hex: hex::encode(reencoded),
         sender_identity_hidden_before_decrypt: pre_auth_hidden.identity_key,
+        sender_identity_verifying_key_hidden_before_decrypt: pre_auth_hidden.verifying_key,
+        sender_identity_binding_signature_hidden_before_decrypt: pre_auth_hidden.binding_signature,
         sender_certificate_hidden_before_decrypt: pre_auth_hidden.certificate,
         sender_signature_hidden_before_decrypt: pre_auth_hidden.signature,
         tampered_ciphertext_rejected,
@@ -611,15 +633,13 @@ fn replay_initial_handshake_fixture(
         "initial handshake fixture did not re-encode canonically",
     )?;
 
-    let expected_sender = SenderIdentityMaterial {
-        identity_key: prepared.sender_identity_key,
-        certificate: b"sender certificate".to_vec(),
-        signature: b"sender signature".to_vec(),
-    };
-    let pre_auth_hidden = pre_auth_sender_material_hidden(&encoded, &expected_sender);
+    let expected_sender = &prepared.sender_identity;
+    let pre_auth_hidden = pre_auth_sender_material_hidden(&encoded, expected_sender);
     let (_, accepted) = accept(
         &mut prepared.rng,
         &decoded,
+        &prepared.initiator_identity_key,
+        &prepared.responder_identity_key,
         &prepared.bob_discovery_key,
         &prepared.bob_signed_prekey,
         Some(prepared.bob_one_time_prekey),
@@ -627,7 +647,7 @@ fn replay_initial_handshake_fixture(
     .map_err(|e| replay_failure(format!("initial handshake fixture failed to decrypt: {e}")))?;
     assert_sender_identity(
         &accepted.sender_identity,
-        &expected_sender,
+        expected_sender,
         "initial handshake sender",
     )?;
     ensure(
@@ -642,6 +662,8 @@ fn replay_initial_handshake_fixture(
         post_decryption: sender_identity_report(&accepted.sender_identity),
         reencoded_hex: hex::encode(reencoded),
         sender_identity_hidden_before_decrypt: pre_auth_hidden.identity_key,
+        sender_identity_verifying_key_hidden_before_decrypt: pre_auth_hidden.verifying_key,
+        sender_identity_binding_signature_hidden_before_decrypt: pre_auth_hidden.binding_signature,
         sender_certificate_hidden_before_decrypt: pre_auth_hidden.certificate,
         sender_signature_hidden_before_decrypt: pre_auth_hidden.signature,
         tampered_ciphertext_rejected: initial_handshake_tamper_rejects_without_sender(transcript)?,
@@ -902,6 +924,8 @@ fn session_setup() -> Result<SessionSetup, AetherError> {
     let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity)?;
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity)?;
     let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
     let bob_signed_prekey =
@@ -916,7 +940,8 @@ fn session_setup() -> Result<SessionSetup, AetherError> {
     let (alice_state, envelope) = initiate(
         &mut rng,
         &alice_discovery,
-        &bob_identity.verifying,
+        &alice_identity_key,
+        &bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"initial"),
     )
@@ -924,6 +949,8 @@ fn session_setup() -> Result<SessionSetup, AetherError> {
     let (bob_state, accepted) = accept(
         &mut rng,
         &envelope,
+        &alice_identity_key,
+        &bob_identity_key,
         &bob_discovery,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
@@ -944,6 +971,7 @@ fn prepare_initial_handshake(
 ) -> Result<PreparedInitialHandshake, AetherError> {
     let mut rng = ChaCha20Rng::from_seed(transcript.rng_seed);
     let alice_identity = generate_signing_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity)?;
     let alice_discovery_key = generate_discovery_key(
         &mut rng,
         &alice_identity,
@@ -951,6 +979,7 @@ fn prepare_initial_handshake(
         transcript.created_at,
     );
     let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity)?;
     let bob_discovery_key = generate_discovery_key(
         &mut rng,
         &bob_identity,
@@ -976,7 +1005,8 @@ fn prepare_initial_handshake(
     let (_, generated_envelope) = initiate(
         &mut rng,
         &alice_discovery_key,
-        &bob_identity.verifying,
+        &alice_identity_key,
+        &bob_identity_key,
         &prekey_bundle,
         initial_plaintext(transcript.handshake_plaintext.as_bytes()),
     )
@@ -988,10 +1018,32 @@ fn prepare_initial_handshake(
     Ok(PreparedInitialHandshake {
         rng,
         generated_envelope,
+        sender_identity: SenderIdentityMaterial {
+            identity_key: *alice_identity_key.public_key.as_bytes(),
+            identity_verifying_key: alice_identity_key.verifying_key.to_bytes(),
+            identity_binding_signature: alice_identity_key.binding_signature.to_bytes().to_vec(),
+            certificate: b"sender certificate".to_vec(),
+            signature: b"sender signature".to_vec(),
+        },
+        initiator_identity_key: alice_identity_key,
+        responder_identity_key: bob_identity_key,
         bob_discovery_key,
         bob_signed_prekey,
         bob_one_time_prekey,
-        sender_identity_key: *alice_discovery_key.public_key().as_bytes(),
+    })
+}
+
+fn identity_key_bundle(
+    rng: &mut ChaCha20Rng,
+    signing_key: &SigningKeyPair,
+) -> Result<IdentityKeyBundle, AetherError> {
+    let agreement_key = generate_key_pair(rng);
+    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public)
+        .map_err(|e| replay_failure(format!("failed to sign identity key binding: {e}")))?;
+    Ok(IdentityKeyBundle {
+        public_key: agreement_key.public,
+        verifying_key: signing_key.verifying,
+        binding_signature,
     })
 }
 
@@ -1003,12 +1055,8 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
     }
 }
 
-fn session_sender_identity() -> SenderIdentityMaterial {
-    SenderIdentityMaterial {
-        identity_key: [1u8; 32],
-        certificate: vec![2, 3, 4],
-        signature: vec![5; 64],
-    }
+fn session_sender_identity() -> Result<SenderIdentityMaterial, AetherError> {
+    sender_identity_with_material(1, vec![2, 3, 4], vec![5; 64])
 }
 
 fn sender_identity_from_fixture(
@@ -1019,6 +1067,15 @@ fn sender_identity_from_fixture(
             &fixture.sender_identity_key_hex,
             "sender identity key fixture",
         )?,
+        identity_verifying_key: hex_array(
+            &fixture.sender_identity_verifying_key_hex,
+            "sender identity verifying key fixture",
+        )?,
+        identity_binding_signature: hex_array::<64>(
+            &fixture.sender_identity_binding_signature_hex,
+            "sender identity binding signature fixture",
+        )?
+        .to_vec(),
         certificate: decode_hex(
             &fixture.sender_certificate_hex,
             "sender certificate fixture",
@@ -1113,6 +1170,7 @@ fn inbound<'a>(
     deduplication_key: ProtocolStateKey,
     message: &'a Message,
     acknowledgment_sender_identity: &'a SenderIdentityMaterial,
+    acknowledgment_sender_signing_key: &'a SigningKeyPair,
     domain_signing_keys: &'a [DomainSigningKey<'a>],
     revoked_identity_keys: &'a [SenderCertificateIdentityKey],
     reference_timestamp_secs: u64,
@@ -1122,7 +1180,10 @@ fn inbound<'a>(
         session_key,
         deduplication_key,
         message,
-        acknowledgment: acknowledgment(acknowledgment_sender_identity),
+        acknowledgment: acknowledgment(
+            acknowledgment_sender_identity,
+            acknowledgment_sender_signing_key,
+        ),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             domain_signing_keys,
             revocation_state: RevocationState::Available(revoked_identity_keys),
@@ -1132,21 +1193,53 @@ fn inbound<'a>(
     }
 }
 
-fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
-    SenderIdentityMaterial {
-        identity_key: [0xb1; 32],
-        certificate: vec![0xb2, 0xb3, 0xb4],
-        signature: vec![0xb5; 64],
-    }
+fn acknowledgment_sender_identity() -> Result<SenderIdentityMaterial, AetherError> {
+    sender_identity_with_material(0xb1, vec![0xb2, 0xb3, 0xb4], vec![0xb5; 64])
 }
 
-fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
+fn acknowledgment<'a>(
+    sender_identity: &'a SenderIdentityMaterial,
+    sender_identity_signing_key: &'a SigningKeyPair,
+) -> OutboundAcknowledgment<'a> {
     OutboundAcknowledgment {
         id: MessageId::from_bytes([0xee; 16]),
         sender_identity,
+        sender_identity_signing_key,
         recipient_public_key: [0xb6; 32],
         timestamp_millis: 1_700_000_100_000,
     }
+}
+
+fn sender_identity_with_material(
+    tag: u8,
+    certificate: Vec<u8>,
+    signature: Vec<u8>,
+) -> Result<SenderIdentityMaterial, AetherError> {
+    let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+    let identity_key_pair = KeyPair::from_secret_bytes([tag.wrapping_add(0x33); 32]);
+    let binding_signature = sign_identity_key_binding(&signing_key, &identity_key_pair.public)
+        .map_err(|e| replay_failure(format!("failed to sign sender identity binding: {e}")))?;
+    Ok(SenderIdentityMaterial {
+        identity_key: *identity_key_pair.public.as_bytes(),
+        identity_verifying_key: signing_key.verifying.to_bytes(),
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
+        certificate,
+        signature,
+    })
+}
+
+fn sender_identity_signing_key(
+    sender_identity: &SenderIdentityMaterial,
+) -> Result<SigningKeyPair, AetherError> {
+    for tag in 0..=u8::MAX {
+        let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+        if signing_key.verifying.to_bytes() == sender_identity.identity_verifying_key {
+            return Ok(signing_key);
+        }
+    }
+    Err(replay_failure(
+        "fixture sender identity uses an unknown signing key",
+    ))
 }
 
 fn accepted(
@@ -1206,6 +1299,8 @@ fn initial_handshake_transport_fields(
 fn sender_identity_report(identity: &SenderIdentityMaterial) -> SenderIdentityReplay {
     SenderIdentityReplay {
         sender_identity_key_hex: hex::encode(identity.identity_key),
+        sender_identity_verifying_key_hex: hex::encode(identity.identity_verifying_key),
+        sender_identity_binding_signature_hex: hex::encode(&identity.identity_binding_signature),
         sender_certificate_hex: hex::encode(&identity.certificate),
         sender_signature_hex: hex::encode(&identity.signature),
     }
@@ -1213,6 +1308,8 @@ fn sender_identity_report(identity: &SenderIdentityMaterial) -> SenderIdentityRe
 
 struct PreAuthHidden {
     identity_key: bool,
+    verifying_key: bool,
+    binding_signature: bool,
     certificate: bool,
     signature: bool,
 }
@@ -1223,6 +1320,8 @@ fn pre_auth_sender_material_hidden(
 ) -> PreAuthHidden {
     PreAuthHidden {
         identity_key: !contains_bytes(encoded, &sender_identity.identity_key),
+        verifying_key: !contains_bytes(encoded, &sender_identity.identity_verifying_key),
+        binding_signature: !contains_bytes(encoded, &sender_identity.identity_binding_signature),
         certificate: !contains_bytes(encoded, &sender_identity.certificate),
         signature: !contains_bytes(encoded, &sender_identity.signature),
     }
@@ -1250,6 +1349,14 @@ fn assert_acknowledgment_artifact(
     ensure(
         !contains_bytes(&encoded, &sender_identity.identity_key),
         format!("sealed session fixture {name} exposed acknowledgment sender identity"),
+    )?;
+    ensure(
+        !contains_bytes(&encoded, &sender_identity.identity_verifying_key),
+        format!("sealed session fixture {name} exposed acknowledgment sender verifying key"),
+    )?;
+    ensure(
+        !contains_bytes(&encoded, &sender_identity.identity_binding_signature),
+        format!("sealed session fixture {name} exposed acknowledgment sender binding signature"),
     )?;
     ensure(
         !contains_bytes(&encoded, &sender_identity.certificate),
@@ -1321,6 +1428,14 @@ fn assert_sender_identity(
     ensure(
         actual.identity_key == expected.identity_key,
         format!("sender identity key mismatch for {name}"),
+    )?;
+    ensure(
+        actual.identity_verifying_key == expected.identity_verifying_key,
+        format!("sender identity verifying key mismatch for {name}"),
+    )?;
+    ensure(
+        actual.identity_binding_signature == expected.identity_binding_signature,
+        format!("sender identity binding signature mismatch for {name}"),
     )?;
     ensure(
         actual.certificate == expected.certificate,
@@ -1443,7 +1558,9 @@ fn session_tamper_rejects_without_sender(
         "deduplication_set_identity",
         deduplication_key,
     )?;
-    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let acknowledgment_sender_identity = acknowledgment_sender_identity()?;
+    let acknowledgment_sender_signing_key =
+        sender_identity_signing_key(&acknowledgment_sender_identity)?;
     Ok(ProtocolStateEngine::new()
         .decrypt_message(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
@@ -1453,6 +1570,7 @@ fn session_tamper_rejects_without_sender(
                 deduplication_key.clone(),
                 &tampered,
                 &acknowledgment_sender_identity,
+                &acknowledgment_sender_signing_key,
                 domain_signing_keys,
                 &validation.revoked_identity_keys,
                 validation.reference_timestamp_secs,
@@ -1483,6 +1601,8 @@ fn initial_handshake_tamper_rejects_without_sender(
     Ok(accept(
         &mut prepared.rng,
         &tampered,
+        &prepared.initiator_identity_key,
+        &prepared.responder_identity_key,
         &prepared.bob_discovery_key,
         &prepared.bob_signed_prekey,
         Some(prepared.bob_one_time_prekey),
@@ -1652,10 +1772,25 @@ mod tests {
         assert!(report.unsupported_blob_major_rejected);
         assert!(report.malformed_blob_rejected);
         assert!(report.sealed_sender_session_cases[0].sender_identity_hidden_before_decrypt);
+        assert!(
+            report.sealed_sender_session_cases[0]
+                .sender_identity_verifying_key_hidden_before_decrypt
+        );
+        assert!(
+            report.sealed_sender_session_cases[0]
+                .sender_identity_binding_signature_hidden_before_decrypt
+        );
         assert!(report.sealed_sender_session_cases[0].sender_certificate_hidden_before_decrypt);
         assert!(report.sealed_sender_session_cases[0].sender_signature_hidden_before_decrypt);
         assert!(report.sealed_sender_session_cases[0].tampered_ciphertext_rejected);
         assert!(report.initial_handshake_cases[0].sender_identity_hidden_before_decrypt);
+        assert!(
+            report.initial_handshake_cases[0].sender_identity_verifying_key_hidden_before_decrypt
+        );
+        assert!(
+            report.initial_handshake_cases[0]
+                .sender_identity_binding_signature_hidden_before_decrypt
+        );
         assert!(report.initial_handshake_cases[0].sender_certificate_hidden_before_decrypt);
         assert!(report.initial_handshake_cases[0].sender_signature_hidden_before_decrypt);
         assert!(report.initial_handshake_cases[0].tampered_ciphertext_rejected);

@@ -4,7 +4,7 @@ These fixtures pin a sealed-sender session Message together with the recipient s
 
 Fixture bytes are deterministic test-only material generated from the same setup as the Protocol State Blob fixtures. They have no production origin.
 
-Transport-visible expectations contain only Message fields available before decrypt: ID, recipient public key, timestamp, payload kind, and opaque payload bytes. Sender identity key, sender certificate, and sender signature appear only under `post_decryption`.
+Transport-visible expectations contain only Message fields available before decrypt: ID, recipient public key, timestamp, payload kind, and opaque payload bytes. Sender IK X25519 bytes, sender IK Ed25519 bytes, the IK binding signature, sender certificate, and sender signature appear only under `post_decryption`.
 
 Binding replay should:
 

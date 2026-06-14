@@ -7,6 +7,7 @@ use aether_core::{
     ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
     SenderIdentityMaterial,
 };
+use aether_crypto::{KeyPair, SigningKeyPair, sign_identity_key_binding};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Deserialize;
@@ -89,6 +90,8 @@ struct TransportFixture {
 #[derive(Deserialize)]
 struct SenderIdentityFixture {
     sender_identity_key_hex: String,
+    sender_identity_verifying_key_hex: String,
+    sender_identity_binding_signature_hex: String,
     sender_certificate_hex: String,
     sender_signature_hex: String,
 }
@@ -254,17 +257,14 @@ fn inbound<'a>(
 }
 
 fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
-    SenderIdentityMaterial {
-        identity_key: [0xb1; 32],
-        certificate: vec![0xb2, 0xb3, 0xb4],
-        signature: vec![0xb5; 64],
-    }
+    sender_identity_with_material(0xb1, vec![0xb2, 0xb3, 0xb4], vec![0xb5; 64])
 }
 
 fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
     OutboundAcknowledgment {
         id: MessageId::from_bytes([0xee; 16]),
         sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key(sender_identity),
         recipient_public_key: [0xb6; 32],
         timestamp_millis: 1_700_000_100_000,
     }
@@ -307,19 +307,38 @@ fn assert_transport(message: &Message, expected: &TransportFixture, name: &str) 
 
 fn assert_sender_material_hidden(encoded: &[u8], sender_identity: &SenderIdentityMaterial) {
     assert!(!contains_bytes(encoded, &sender_identity.identity_key));
+    assert!(!contains_bytes(
+        encoded,
+        &sender_identity.identity_verifying_key
+    ));
+    assert!(!contains_bytes(
+        encoded,
+        &sender_identity.identity_binding_signature
+    ));
     assert!(!contains_bytes(encoded, &sender_identity.certificate));
     assert!(!contains_bytes(encoded, &sender_identity.signature));
 }
 
 fn assert_sender_identity(actual: &SenderIdentityMaterial, expected: &SenderIdentityMaterial) {
     assert_eq!(actual.identity_key, expected.identity_key);
+    assert_eq!(
+        actual.identity_verifying_key,
+        expected.identity_verifying_key
+    );
+    assert_eq!(
+        actual.identity_binding_signature,
+        expected.identity_binding_signature
+    );
     assert_eq!(actual.certificate, expected.certificate);
     assert_eq!(actual.signature, expected.signature);
 }
 
 fn sender_identity(fixture: &SenderIdentityFixture) -> SenderIdentityMaterial {
     SenderIdentityMaterial {
-        identity_key: hex_array(&fixture.sender_identity_key_hex),
+        identity_key: hex_array::<32>(&fixture.sender_identity_key_hex),
+        identity_verifying_key: hex_array::<32>(&fixture.sender_identity_verifying_key_hex),
+        identity_binding_signature: hex::decode(&fixture.sender_identity_binding_signature_hex)
+            .unwrap(),
         certificate: hex::decode(&fixture.sender_certificate_hex).unwrap(),
         signature: hex::decode(&fixture.sender_signature_hex).unwrap(),
     }
@@ -357,6 +376,36 @@ fn identity_key(fixture: &IdentityKeyFixture) -> SenderCertificateIdentityKey {
     }
 }
 
+fn sender_identity_with_material(
+    tag: u8,
+    certificate: Vec<u8>,
+    signature: Vec<u8>,
+) -> SenderIdentityMaterial {
+    let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+    let identity_key_pair = KeyPair::from_secret_bytes([tag.wrapping_add(0x33); 32]);
+    let binding_signature =
+        sign_identity_key_binding(&signing_key, &identity_key_pair.public).unwrap();
+    SenderIdentityMaterial {
+        identity_key: *identity_key_pair.public.as_bytes(),
+        identity_verifying_key: signing_key.verifying.to_bytes(),
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
+        certificate,
+        signature,
+    }
+}
+
+fn sender_identity_signing_key(
+    sender_identity: &SenderIdentityMaterial,
+) -> &'static SigningKeyPair {
+    for tag in 0..=u8::MAX {
+        let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+        if signing_key.verifying.to_bytes() == sender_identity.identity_verifying_key {
+            return Box::leak(Box::new(signing_key));
+        }
+    }
+    panic!("test sender identity uses an unknown signing key")
+}
+
 fn copy_message(message: &Message) -> Message {
     Message {
         id: message.id,
@@ -382,6 +431,7 @@ fn protocol_state_kind(kind: &str) -> ProtocolStateKind {
     match kind {
         "ratchet_session" => ProtocolStateKind::RatchetSession,
         "deduplication_set" => ProtocolStateKind::DeduplicationSet,
+        "pending_acknowledgments" => ProtocolStateKind::PendingAcknowledgments,
         _ => panic!("unknown protocol-state kind in fixture: {kind}"),
     }
 }

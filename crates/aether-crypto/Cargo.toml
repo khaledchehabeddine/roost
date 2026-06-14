@@ -8,6 +8,7 @@ version.workspace = true
 # Dalek and KDF/MAC share digest 0.10 — bump together
 # Dalek and rand share rand_core 0.6 — bump together
 # Dalek
+curve25519-dalek.workspace = true
 ed25519-dalek = { version = "2.2.0", features = ["fast", "rand_core", "zeroize"] }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "zeroize"] }
 # KDF/MAC

@@ -12,9 +12,10 @@ use aether_core::{
     SenderCertificateIdentityKey, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
-    InitialPlaintext, PreKeyBundle, RatchetState, accept, generate_discovery_key,
-    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-    generate_signing_key_pair, initiate,
+    IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey, RatchetState,
+    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
+    sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -88,6 +89,8 @@ fn setup() -> Setup {
     let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
     let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
     let bob_signed_prekey =
@@ -102,7 +105,8 @@ fn setup() -> Setup {
     let (alice_state, envelope) = initiate(
         &mut rng,
         &alice_discovery,
-        &bob_identity.verifying,
+        &alice_identity_key,
+        &bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"initial"),
     )
@@ -110,6 +114,8 @@ fn setup() -> Setup {
     let (bob_state, plaintext) = accept(
         &mut rng,
         &envelope,
+        &alice_identity_key,
+        &bob_identity_key,
         &bob_discovery,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
@@ -130,6 +136,65 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
     }
 }
 
+fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+    let agreement_key = generate_key_pair(rng);
+    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
+    IdentityKeyBundle {
+        public_key: agreement_key.public,
+        verifying_key: signing_key.verifying,
+        binding_signature,
+    }
+}
+
+fn test_identity_key_pair(tag: u8) -> KeyPair {
+    KeyPair::from_secret_bytes([tag.wrapping_add(0x33); 32])
+}
+
+fn sender_identity_signing_key(tag: u8) -> &'static SigningKeyPair {
+    Box::leak(Box::new(SigningKeyPair::from_signing_bytes([tag; 32])))
+}
+
+fn sender_identity_signing_key_for_material(
+    sender_identity: &SenderIdentityMaterial,
+) -> &'static SigningKeyPair {
+    for tag in 0..=u8::MAX {
+        let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+        if signing_key.verifying.to_bytes() == sender_identity.identity_verifying_key {
+            return Box::leak(Box::new(signing_key));
+        }
+    }
+    panic!("test sender identity uses an unknown signing key")
+}
+
+fn sender_identity_for_contact(
+    contact: ContactIdentity,
+    certificate: Vec<u8>,
+    signature: Vec<u8>,
+) -> SenderIdentityMaterial {
+    let signing_key = sender_identity_signing_key_for_contact(contact.identity_key);
+    let public_key = PublicKey::from(contact.identity_key.x25519_public_key);
+    let binding_signature = sign_identity_key_binding(signing_key, &public_key).unwrap();
+    SenderIdentityMaterial {
+        identity_key: contact.identity_key.x25519_public_key,
+        identity_verifying_key: contact.identity_key.ed25519_verifying_key,
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
+        certificate,
+        signature,
+    }
+}
+
+fn sender_identity_signing_key_for_contact(
+    identity_key: ContactIdentityKey,
+) -> &'static SigningKeyPair {
+    for tag in 0..=u8::MAX {
+        let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+        if signing_key.verifying.to_bytes() == identity_key.ed25519_verifying_key {
+            return Box::leak(Box::new(signing_key));
+        }
+    }
+    panic!("test contact identity uses an unknown signing key")
+}
+
 fn session_key() -> ProtocolStateKey {
     ProtocolStateKey::session(SessionId::from_bytes([9u8; 16]))
 }
@@ -143,17 +208,23 @@ fn ratchet_address(key: ProtocolStateKey) -> ProtocolStateAddress {
 }
 
 fn sender_identity(tag: u8) -> SenderIdentityMaterial {
+    let signing_key = sender_identity_signing_key(tag);
+    let identity_key_pair = test_identity_key_pair(tag);
+    let binding_signature =
+        sign_identity_key_binding(signing_key, &identity_key_pair.public).unwrap();
     SenderIdentityMaterial {
-        identity_key: [tag; 32],
+        identity_key: *identity_key_pair.public.as_bytes(),
+        identity_verifying_key: signing_key.verifying.to_bytes(),
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
         certificate: vec![tag, tag.wrapping_add(1), tag.wrapping_add(2)],
         signature: vec![tag.wrapping_add(3); 64],
     }
 }
 
 fn accepted_contact_identity() -> ContactIdentity {
+    let identity = sender_identity_signing_key(0xa1);
+    let identity_key_pair = test_identity_key_pair(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    let identity = generate_signing_key_pair(&mut rng);
-    let identity_key_pair = generate_key_pair(&mut rng);
     let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
     ContactIdentity {
         identity_key: ContactIdentityKey {
@@ -188,11 +259,11 @@ fn validated_sender() -> ValidatedSender {
     let certificate = sender_certificate_bytes(&domain_identifier, contact, CERTIFICATE_EXPIRES_AT);
     let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
     ValidatedSender {
-        sender_identity: SenderIdentityMaterial {
-            identity_key: contact.discovery_key.prekey_bundle_lookup_key(),
-            certificate,
-            signature,
-        },
+        sender_identity: sender_identity_for_contact(
+            contact,
+            certificate.clone(),
+            signature.clone(),
+        ),
         domain_identifier,
         domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
     }
@@ -226,6 +297,7 @@ fn outbound<'a>(
     OutboundPlaintext {
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key_for_material(sender_identity),
         contact_identity_key: contact.identity_key,
         recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_000 + u64::from(id),
@@ -240,6 +312,7 @@ fn acknowledgment<'a>(
     OutboundAcknowledgment {
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key_for_material(sender_identity),
         recipient_public_key: [3u8; 32],
         timestamp_millis: 1_700_000_100_000 + u64::from(id),
     }

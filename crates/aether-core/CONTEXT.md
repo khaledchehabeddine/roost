@@ -86,6 +86,13 @@ Avoid: Device, client
 A single encoded packet exchanged within a Session, addressed by `MessageID`. A Message carries only transport-visible routing metadata and opaque payload bytes; sender identity material belongs inside a Sealed Sender Envelope, not in Message fields.
 Avoid: payload, packet
 
+**Message Transcript** (one per encrypted Message):
+The canonical bytes signed by the sender IK and verified after decrypt before surfacing plaintext.
+It binds the recipient IK, Session identifier, MessageID, timestamp, payload kind, and encrypted
+payload input so a sealed signature cannot be transplanted to another recipient, Message, or
+Session.
+Avoid: associated data, transport metadata
+
 **MessageID** (one per Message):
 The UUID-shaped 16-byte identifier that addresses one Message within a Session.
 Avoid: uuid, packet id

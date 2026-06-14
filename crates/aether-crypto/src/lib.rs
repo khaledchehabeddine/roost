@@ -60,8 +60,9 @@ pub use handshake::{
     SenderIdentityMaterial, accept, initial_associated_data, initiate,
 };
 pub use keys::{
-    KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey, generate_key_pair,
-    generate_signing_key_pair,
+    IdentityKeyBundle, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
+    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
+    verify_identity_key_bundle, verify_with_context,
 };
 pub use one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
 pub use signed_prekey::{
