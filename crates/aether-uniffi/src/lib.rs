@@ -22,6 +22,7 @@
 //!     store.generate_identity()?;
 //! }
 //!
+//! store.rotate_signed_prekey_now()?;
 //! let publication = store.current_publication_bundle()?;
 //! publish(&publication)?;
 //! # Ok::<(), AetherError>(())
@@ -41,5 +42,7 @@ mod storage;
 
 pub use error::AetherError;
 pub use key_store::KeyStore;
-pub use records::{DiscoveryKeyBundle, Identity, PublicationBundle, SignedPreKeyBundle};
+pub use records::{
+    DiscoveryKeyBundle, Identity, OneTimePreKeyBundle, PublicationBundle, SignedPreKeyBundle,
+};
 pub use storage::{InMemorySecureStorage, SecureStorage};

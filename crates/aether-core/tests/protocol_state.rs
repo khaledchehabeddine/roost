@@ -8,16 +8,18 @@ use aether_core::{
     OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
-    SenderCertificateValidationError, SenderIdentityMaterial, SessionId,
+    SenderCertificateValidationError, SenderIdentityMaterial, SessionEvent, SessionId,
+    SessionUnrecoverableReason, SessionUnrecoverableResult,
 };
 use aether_crypto::{
-    Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey, RatchetState,
-    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
-    sign_identity_key_binding,
+    CryptoError, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey,
+    RatchetState, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initiate, sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
+use serde::Serialize;
 
 const CREATED_AT: u64 = 1_700_000_000;
 const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
@@ -43,6 +45,7 @@ fn setup() -> Setup {
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: bob_discovery.bundle(),
         signed_prekey: bob_signed_prekey.bundle(),
         one_time_prekey: Some(bob_one_time_prekey.bundle()),
@@ -164,8 +167,8 @@ fn contact_identities() -> (ContactIdentity, ContactIdentity) {
     let identity = test_sender_identity_signing_key(0xa1);
     let identity_key_pair = test_identity_key_pair(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
-    let rotated_discovery_key = generate_discovery_key(&mut rng, &identity, 1, CREATED_AT + 60);
+    let discovery_key = generate_discovery_key(&mut rng, identity, 0, CREATED_AT);
+    let rotated_discovery_key = generate_discovery_key(&mut rng, identity, 1, CREATED_AT + 60);
     let identity_key = ContactIdentityKey {
         x25519_public_key: *identity_key_pair.public.as_bytes(),
         ed25519_verifying_key: identity.verifying.to_bytes(),
@@ -441,6 +444,25 @@ fn outbound<'a>(
     }
 }
 
+fn sequenced_outbound<'a>(
+    sequence: u16,
+    plaintext: &'a [u8],
+    sender_identity: &'a SenderIdentityMaterial,
+) -> OutboundPlaintext<'a> {
+    let contact = accepted_contact_identity();
+    let mut id = [0u8; 16];
+    id[..2].copy_from_slice(&sequence.to_be_bytes());
+    OutboundPlaintext {
+        id: MessageId::from_bytes(id),
+        sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key(sender_identity),
+        contact_identity_key: contact.identity_key,
+        recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
+        timestamp_millis: 1_700_000_300_000 + u64::from(sequence),
+        plaintext,
+    }
+}
+
 fn sender_identity(tag: u8) -> SenderIdentityMaterial {
     let signing_key = test_sender_identity_signing_key(tag);
     let identity_key_pair = test_identity_key_pair(tag);
@@ -527,6 +549,9 @@ fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult
         InboundMessageOutcome::Accepted(result) => *result,
         InboundMessageOutcome::Blocked(_) => panic!("message was unexpectedly blocked"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+        InboundMessageOutcome::SessionUnrecoverable(_) => {
+            panic!("message was unexpectedly unrecoverable")
+        }
     }
 }
 
@@ -534,6 +559,18 @@ fn blocked(outcome: InboundMessageOutcome) -> aether_core::BlockedInboundMessage
     match outcome {
         InboundMessageOutcome::Blocked(result) => *result,
         InboundMessageOutcome::Accepted(_) => panic!("message was unexpectedly accepted"),
+        InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+        InboundMessageOutcome::SessionUnrecoverable(_) => {
+            panic!("message was unexpectedly unrecoverable")
+        }
+    }
+}
+
+fn session_unrecoverable(outcome: InboundMessageOutcome) -> SessionUnrecoverableResult {
+    match outcome {
+        InboundMessageOutcome::SessionUnrecoverable(result) => *result,
+        InboundMessageOutcome::Accepted(_) => panic!("message was unexpectedly accepted"),
+        InboundMessageOutcome::Blocked(_) => panic!("message was unexpectedly blocked"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
     }
 }
@@ -556,6 +593,28 @@ fn ratcheted_payload(header: &Header, ciphertext: &[u8]) -> Vec<u8> {
     payload.extend_from_slice(&header.message_number.to_be_bytes());
     payload.extend_from_slice(ciphertext);
     payload
+}
+
+#[derive(Serialize)]
+struct DeadSessionWire {
+    version: u8,
+    reason: SessionUnrecoverableReason,
+    event_emitted: bool,
+    peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<()>,
+}
+
+fn dead_session_blob(event_emitted: bool, peer_sender_identity_key: [u8; 32]) -> ProtocolStateBlob {
+    let wire = DeadSessionWire {
+        version: 3,
+        reason: SessionUnrecoverableReason::SkippedKeyLimitExceeded,
+        event_emitted,
+        peer_sender_identity_key: Some(peer_sender_identity_key),
+        contact_identity_key: None,
+    };
+    let mut bytes = vec![1, 0];
+    bytes.extend_from_slice(&postcard::to_stdvec(&wire).unwrap());
+    ProtocolStateBlob::from_bytes(bytes)
 }
 
 fn copy_message(message: &Message) -> Message {
@@ -1006,6 +1065,295 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
         )
         .unwrap();
     assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+}
+
+#[test]
+fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let mut sequence = 0u16;
+
+    for batch in 0..5 {
+        let mut last = None;
+        for _ in 0..=100 {
+            let encrypted = engine
+                .encrypt_message(
+                    &alice_snapshot,
+                    key.clone(),
+                    sequenced_outbound(sequence, b"skipped fill", &sender.sender_identity),
+                )
+                .unwrap();
+            alice_snapshot.apply_all(encrypted.state_updates);
+            last = Some(encrypted.message);
+            sequence += 1;
+        }
+        let decrypted = engine
+            .decrypt_message(
+                &mut ChaCha20Rng::from_seed([batch as u8; 32]),
+                &bob_snapshot,
+                inbound_with_certificate_validation(
+                    key.clone(),
+                    deduplication_key.clone(),
+                    last.as_ref().unwrap(),
+                    &acknowledgment_sender_identity,
+                    &domain_keys,
+                    &revoked,
+                ),
+            )
+            .map(accepted)
+            .unwrap();
+        bob_snapshot.apply_all(decrypted.state_updates);
+    }
+
+    let mut terminal = None;
+    for _ in 0..=100 {
+        let encrypted = engine
+            .encrypt_message(
+                &alice_snapshot,
+                key.clone(),
+                sequenced_outbound(sequence, b"terminal overflow", &sender.sender_identity),
+            )
+            .unwrap();
+        alice_snapshot.apply_all(encrypted.state_updates);
+        terminal = Some(encrypted.message);
+        sequence += 1;
+    }
+    let terminal = terminal.unwrap();
+
+    let overflow = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0xf0; 32]),
+        &bob_snapshot,
+        inbound_with_certificate_validation(
+            key.clone(),
+            deduplication_key.clone(),
+            &terminal,
+            &acknowledgment_sender_identity,
+            &domain_keys,
+            &revoked,
+        ),
+    );
+    assert!(matches!(
+        overflow,
+        Err(ProtocolStateError::Crypto(
+            CryptoError::MaxSkippedKeysExceeded
+        ))
+    ));
+
+    let repeated = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0xf1; 32]),
+        &bob_snapshot,
+        inbound_with_certificate_validation(
+            key.clone(),
+            deduplication_key.clone(),
+            &terminal,
+            &acknowledgment_sender_identity,
+            &domain_keys,
+            &revoked,
+        ),
+    );
+    assert!(matches!(
+        repeated,
+        Err(ProtocolStateError::Crypto(
+            CryptoError::MaxSkippedKeysExceeded
+        ))
+    ));
+}
+
+#[test]
+fn dead_session_marker_reports_once_and_replacement_allows_messages() {
+    let initial_setup = setup();
+    let replacement = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &initial_setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &initial_setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let address = ratchet_address(key.clone());
+    let dead_message = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            sequenced_outbound(0x80, b"dead marker probe", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    bob_snapshot.apply(aether_core::ProtocolStateUpdate::set(
+        address.clone(),
+        dead_session_blob(false, sender.sender_identity.identity_key),
+    ));
+
+    let unrecoverable = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0xe0; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key.clone(),
+                &dead_message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(session_unrecoverable)
+        .unwrap();
+    assert_eq!(unrecoverable.session_key, key);
+    assert_eq!(
+        unrecoverable.reason,
+        SessionUnrecoverableReason::SkippedKeyLimitExceeded
+    );
+    assert_eq!(unrecoverable.state_updates.len(), 1);
+    assert_eq!(unrecoverable.state_updates[0].address(), &address);
+    assert!(matches!(
+        unrecoverable.event,
+        Some(SessionEvent::Unrecoverable {
+            reason: SessionUnrecoverableReason::SkippedKeyLimitExceeded,
+            ..
+        })
+    ));
+    bob_snapshot.apply_all(unrecoverable.state_updates);
+
+    let repeated = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0xe1; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key.clone(),
+                &dead_message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(session_unrecoverable)
+        .unwrap();
+    assert!(repeated.event.is_none());
+    assert!(repeated.state_updates.is_empty());
+
+    bob_snapshot.apply(
+        engine
+            .set_session_state_with_peer_identity(
+                key.clone(),
+                &replacement.bob_state,
+                &sender.sender_identity,
+            )
+            .unwrap(),
+    );
+    alice_snapshot = snapshot_with_state(&engine, key.clone(), &replacement.alice_state);
+
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            sequenced_outbound(9_000, b"after replacement", &sender.sender_identity),
+        )
+        .unwrap();
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0xf2; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted.message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+
+    assert_eq!(decrypted.plaintext.as_slice(), b"after replacement");
+}
+
+#[test]
+fn transient_aead_failure_does_not_mark_session_unrecoverable() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            sequenced_outbound(0x70, b"valid after tamper", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut tampered = copy_message(&encrypted);
+    *tampered.payload.last_mut().unwrap() ^= 0x01;
+
+    assert!(matches!(
+        engine.decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x70; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key.clone(),
+                &tampered,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        ),
+        Err(ProtocolStateError::Crypto(aether_crypto::CryptoError::Aead))
+    ));
+
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x71; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+
+    assert_eq!(decrypted.plaintext.as_slice(), b"valid after tamper");
 }
 
 #[test]

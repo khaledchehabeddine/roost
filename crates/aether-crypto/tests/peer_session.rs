@@ -54,6 +54,7 @@ fn bootstrap(
     plaintext: &[u8],
 ) -> (RatchetState, RatchetState, HandshakeEnvelope) {
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: setup.bob_discovery_key.bundle(),
         signed_prekey: setup.bob_signed_prekey.bundle(),
         one_time_prekey: setup
@@ -139,6 +140,7 @@ fn round_trip_advances_diffie_hellman_ratchet() {
 fn serialized_handshake_envelope_establishes_session_and_reply() {
     let (mut setup, mut rng) = setup();
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: setup.bob_discovery_key.bundle(),
         signed_prekey: setup.bob_signed_prekey.bundle(),
         one_time_prekey: setup
@@ -302,6 +304,7 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
     signature_bytes[0] ^= 0x01;
     bundle.signature = Signature::from_bytes(&signature_bytes);
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: setup.bob_discovery_key.bundle(),
         signed_prekey: bundle,
         one_time_prekey: setup

@@ -32,6 +32,7 @@ const CURRENT_PROTOCOL_STATE_BLOB_MINOR: u8 = 0;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 2;
 const SESSION_STATE_WIRE_VERSION: u8 = 1;
 const SESSION_STATE_WITH_CONTACT_WIRE_VERSION: u8 = 2;
+const SESSION_STATE_UNRECOVERABLE_WIRE_VERSION: u8 = 3;
 const DEDUPLICATION_SET_WIRE_VERSION: u8 = 1;
 const PENDING_ACKNOWLEDGMENTS_WIRE_VERSION: u8 = 1;
 const CONTACT_STATE_WIRE_VERSION: u8 = 2;
@@ -426,6 +427,37 @@ pub struct BlockedInboundMessageResult {
     pub state_updates: Vec<ProtocolStateUpdate>,
 }
 
+/// Reason a Session was marked permanently unrecoverable.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum SessionUnrecoverableReason {
+    /// The skipped-message-key retention cap was exceeded.
+    SkippedKeyLimitExceeded,
+}
+
+/// Public event produced when a Session becomes unrecoverable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SessionEvent {
+    /// A Session is now dead and must be replaced through a fresh X3DH exchange.
+    Unrecoverable {
+        /// Session-scoped protocol-state key.
+        session_key: ProtocolStateKey,
+        /// Terminal reason.
+        reason: SessionUnrecoverableReason,
+    },
+}
+
+/// Outcome returned for Messages addressed to a Dead Session.
+pub struct SessionUnrecoverableResult {
+    /// Session-scoped protocol-state key.
+    pub session_key: ProtocolStateKey,
+    /// Terminal reason.
+    pub reason: SessionUnrecoverableReason,
+    /// Event to emit after committing `state_updates`, present at most once per Dead Session.
+    pub event: Option<SessionEvent>,
+    /// Protocol-state updates to commit before surfacing the event.
+    pub state_updates: Vec<ProtocolStateUpdate>,
+}
+
 /// The result of receiving an inbound encrypted Message.
 pub enum InboundMessageOutcome {
     /// A unique Message decrypted and advanced protocol state.
@@ -434,6 +466,8 @@ pub enum InboundMessageOutcome {
     Blocked(Box<BlockedInboundMessageResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
     Duplicate,
+    /// The Session is permanently unrecoverable and no plaintext was produced.
+    SessionUnrecoverable(Box<SessionUnrecoverableResult>),
 }
 
 /// An inbound encrypted acknowledgment Message.
@@ -497,6 +531,8 @@ pub enum AcknowledgmentOutcome {
     },
     /// The exact acknowledgment Message was already processed.
     Duplicate,
+    /// The Session is permanently unrecoverable and the acknowledgment was not decrypted.
+    SessionUnrecoverable(Box<SessionUnrecoverableResult>),
 }
 
 /// Stateless protocol-state operations over consumer-held blobs.
@@ -676,6 +712,7 @@ impl ProtocolStateEngine {
     ) -> Result<ProtocolStateUpdate, ProtocolStateError> {
         let address = ratchet_address(key);
         let loaded = load_session_state(snapshot, &address)?;
+        let state = active_session_state(&address, loaded.status)?;
         let peer_sender_identity_key = match loaded.peer_sender_identity_key {
             Some(existing)
                 if !sender_identity_key_matches(&existing, &peer_sender_identity_key) =>
@@ -692,7 +729,7 @@ impl ProtocolStateEngine {
             address.clone(),
             encode_session_state(
                 &address,
-                &loaded.state,
+                &state,
                 Some(peer_sender_identity_key),
                 loaded.contact_identity_key,
             )?,
@@ -988,7 +1025,7 @@ impl ProtocolStateEngine {
         )?;
         let session_key_bytes = address.key().as_bytes().to_vec();
         let mut pending = load_pending_acknowledgments(snapshot, &pending_address)?;
-        let mut state = loaded.state;
+        let mut state = active_session_state(&address, loaded.status)?;
         let transcript_signature = sign_message_transcript(
             plaintext.sender_identity_signing_key,
             MessageTranscriptInput {
@@ -1094,6 +1131,28 @@ impl ProtocolStateEngine {
         let address = ratchet_address(inbound.session_key);
         let session_key_bytes = address.key().as_bytes().to_vec();
         let loaded = load_session_state(snapshot, &address)?;
+        let LoadedSessionState {
+            status,
+            peer_sender_identity_key,
+            contact_identity_key,
+        } = loaded;
+        let mut state = match status {
+            LoadedSessionStatus::Active(state) => *state,
+            LoadedSessionStatus::Unrecoverable {
+                reason,
+                event_emitted,
+            } => {
+                return Ok(InboundMessageOutcome::SessionUnrecoverable(Box::new(
+                    session_unrecoverable_result(
+                        &address,
+                        reason,
+                        event_emitted,
+                        peer_sender_identity_key,
+                        contact_identity_key,
+                    )?,
+                )));
+            }
+        };
         let message = inbound.message;
         if message.payload_kind != PayloadKind::EncryptedText {
             return Err(ProtocolStateError::InvalidMessage {
@@ -1109,13 +1168,10 @@ impl ProtocolStateEngine {
             });
         }
         let expected_sender_identity_key =
-            loaded
-                .peer_sender_identity_key
-                .ok_or_else(|| ProtocolStateError::InvalidMessage {
-                    reason: "session sender identity key is not bound".into(),
-                })?;
+            peer_sender_identity_key.ok_or_else(|| ProtocolStateError::InvalidMessage {
+                reason: "session sender identity key is not bound".into(),
+            })?;
 
-        let mut state = loaded.state;
         let (header, ciphertext) = decode_ratcheted_payload(&message.payload)?;
         let associated_data = message_associated_data(
             message.id,
@@ -1123,7 +1179,9 @@ impl ProtocolStateEngine {
             message.timestamp_millis,
             message.payload_kind,
         );
-        let sealed = state.ratchet_decrypt(rng, ciphertext, &header, &associated_data)?;
+        let sealed = state
+            .ratchet_decrypt(rng, ciphertext, &header, &associated_data)
+            .map_err(ProtocolStateError::Crypto)?;
         let decoded = decode_sealed_sender_envelope(&sealed)?;
         if !sender_identity_key_matches(
             &expected_sender_identity_key,
@@ -1151,7 +1209,7 @@ impl ProtocolStateEngine {
         let inbound_contact_identity_key = inbound_contact_identity_key(
             validation,
             &decoded.sender_identity,
-            loaded.contact_identity_key,
+            contact_identity_key,
         )?;
         let acknowledgment = encrypt_acknowledgment(
             &mut state,
@@ -1303,6 +1361,28 @@ impl ProtocolStateEngine {
         let address = ratchet_address(inbound.session_key);
         let session_key_bytes = address.key().as_bytes().to_vec();
         let loaded = load_session_state(snapshot, &address)?;
+        let LoadedSessionState {
+            status,
+            peer_sender_identity_key,
+            contact_identity_key,
+        } = loaded;
+        let mut state = match status {
+            LoadedSessionStatus::Active(state) => *state,
+            LoadedSessionStatus::Unrecoverable {
+                reason,
+                event_emitted,
+            } => {
+                return Ok(AcknowledgmentOutcome::SessionUnrecoverable(Box::new(
+                    session_unrecoverable_result(
+                        &address,
+                        reason,
+                        event_emitted,
+                        peer_sender_identity_key,
+                        contact_identity_key,
+                    )?,
+                )));
+            }
+        };
         let message = inbound.message;
         if message.payload_kind != PayloadKind::Acknowledgment {
             return Err(ProtocolStateError::InvalidMessage {
@@ -1318,13 +1398,10 @@ impl ProtocolStateEngine {
             });
         }
         let expected_sender_identity_key =
-            loaded
-                .peer_sender_identity_key
-                .ok_or_else(|| ProtocolStateError::InvalidMessage {
-                    reason: "session sender identity key is not bound".into(),
-                })?;
+            peer_sender_identity_key.ok_or_else(|| ProtocolStateError::InvalidMessage {
+                reason: "session sender identity key is not bound".into(),
+            })?;
 
-        let mut state = loaded.state;
         let (header, ciphertext) = decode_ratcheted_payload(&message.payload)?;
         let associated_data = message_associated_data(
             message.id,
@@ -1332,7 +1409,9 @@ impl ProtocolStateEngine {
             message.timestamp_millis,
             message.payload_kind,
         );
-        let sealed = state.ratchet_decrypt(rng, ciphertext, &header, &associated_data)?;
+        let sealed = state
+            .ratchet_decrypt(rng, ciphertext, &header, &associated_data)
+            .map_err(ProtocolStateError::Crypto)?;
         let decoded = decode_sealed_sender_envelope(&sealed)?;
         if !sender_identity_key_matches(
             &expected_sender_identity_key,
@@ -1366,7 +1445,7 @@ impl ProtocolStateEngine {
                 &address,
                 &state,
                 Some(expected_sender_identity_key),
-                loaded.contact_identity_key,
+                contact_identity_key,
             )?,
         );
         let pending_update = ProtocolStateUpdate::set(
@@ -1612,6 +1691,15 @@ struct DecodedSessionStateWireV2 {
     contact_identity_key: Option<ContactIdentityKeyWire>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct SessionStateUnrecoverableWire {
+    version: u8,
+    reason: SessionUnrecoverableReason,
+    event_emitted: bool,
+    peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKeyWire>,
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize)]
 struct ContactIdentityKeyWire {
     x25519_public_key: [u8; PUBLIC_KEY_LEN],
@@ -1669,6 +1757,37 @@ fn encode_session_state(
             })?,
         )
     };
+    encode_session_payload(address, payload)
+}
+
+fn encode_unrecoverable_session_state(
+    address: &ProtocolStateAddress,
+    reason: SessionUnrecoverableReason,
+    event_emitted: bool,
+    peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKey>,
+) -> Result<ProtocolStateBlob, ProtocolStateError> {
+    let wire = SessionStateUnrecoverableWire {
+        version: SESSION_STATE_UNRECOVERABLE_WIRE_VERSION,
+        reason,
+        event_emitted,
+        peer_sender_identity_key,
+        contact_identity_key: contact_identity_key.map(ContactIdentityKeyWire::from),
+    };
+    let payload =
+        Zeroizing::new(
+            postcard::to_stdvec(&wire).map_err(|_| ProtocolStateError::BlobEncode {
+                address: address.clone(),
+                reason: "ratchet/session state failed to encode".into(),
+            })?,
+        );
+    encode_session_payload(address, payload)
+}
+
+fn encode_session_payload(
+    address: &ProtocolStateAddress,
+    payload: Zeroizing<Vec<u8>>,
+) -> Result<ProtocolStateBlob, ProtocolStateError> {
     if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PROTOCOL_STATE_BLOB_LEN {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
@@ -1688,9 +1807,17 @@ fn encode_session_state(
 }
 
 struct LoadedSessionState {
-    state: RatchetState,
+    status: LoadedSessionStatus,
     peer_sender_identity_key: Option<[u8; 32]>,
     contact_identity_key: Option<ContactIdentityKey>,
+}
+
+enum LoadedSessionStatus {
+    Active(Box<RatchetState>),
+    Unrecoverable {
+        reason: SessionUnrecoverableReason,
+        event_emitted: bool,
+    },
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -1861,6 +1988,26 @@ fn decode_session_state_payload(
     address: &ProtocolStateAddress,
     payload: &[u8],
 ) -> Result<LoadedSessionState, ProtocolStateError> {
+    if let Ok((wire, trailing)) =
+        postcard::take_from_bytes::<SessionStateUnrecoverableWire>(payload)
+        && trailing.is_empty()
+        && wire.version == SESSION_STATE_UNRECOVERABLE_WIRE_VERSION
+    {
+        let contact_identity_key = wire
+            .contact_identity_key
+            .map(ContactIdentityKey::from)
+            .map(|identity_key| validate_session_contact_identity_key(address, identity_key))
+            .transpose()?;
+        return Ok(LoadedSessionState {
+            status: LoadedSessionStatus::Unrecoverable {
+                reason: wire.reason,
+                event_emitted: wire.event_emitted,
+            },
+            peer_sender_identity_key: wire.peer_sender_identity_key,
+            contact_identity_key,
+        });
+    }
+
     if let Ok((wire, trailing)) = postcard::take_from_bytes::<DecodedSessionStateWireV2>(payload)
         && trailing.is_empty()
         && wire.version == SESSION_STATE_WITH_CONTACT_WIRE_VERSION
@@ -1910,9 +2057,57 @@ fn decoded_session_state(
             reason: "ratchet/session state failed to decode".into(),
         })?;
     Ok(LoadedSessionState {
-        state,
+        status: LoadedSessionStatus::Active(Box::new(state)),
         peer_sender_identity_key,
         contact_identity_key,
+    })
+}
+
+fn active_session_state(
+    address: &ProtocolStateAddress,
+    status: LoadedSessionStatus,
+) -> Result<RatchetState, ProtocolStateError> {
+    match status {
+        LoadedSessionStatus::Active(state) => Ok(*state),
+        LoadedSessionStatus::Unrecoverable { .. } => Err(ProtocolStateError::InvalidStateBinding {
+            address: address.clone(),
+            reason: "session is unrecoverable".into(),
+        }),
+    }
+}
+
+fn session_unrecoverable_result(
+    address: &ProtocolStateAddress,
+    reason: SessionUnrecoverableReason,
+    event_emitted: bool,
+    peer_sender_identity_key: Option<[u8; 32]>,
+    contact_identity_key: Option<ContactIdentityKey>,
+) -> Result<SessionUnrecoverableResult, ProtocolStateError> {
+    let session_key = address.key().clone();
+    let (event, state_updates) = if event_emitted {
+        (None, Vec::new())
+    } else {
+        let event = SessionEvent::Unrecoverable {
+            session_key: session_key.clone(),
+            reason,
+        };
+        let update = ProtocolStateUpdate::set(
+            address.clone(),
+            encode_unrecoverable_session_state(
+                address,
+                reason,
+                true,
+                peer_sender_identity_key,
+                contact_identity_key,
+            )?,
+        );
+        (Some(event), vec![update])
+    };
+    Ok(SessionUnrecoverableResult {
+        session_key,
+        reason,
+        event,
+        state_updates,
     })
 }
 

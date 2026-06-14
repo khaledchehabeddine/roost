@@ -2,7 +2,9 @@
 
 use crate::SecureStorage;
 use crate::error::AetherError;
-use crate::records::{DiscoveryKeyBundle, Identity, PublicationBundle, SignedPreKeyBundle};
+use crate::records::{
+    DiscoveryKeyBundle, Identity, OneTimePreKeyBundle, PublicationBundle, SignedPreKeyBundle,
+};
 use crate::storage::SecureStorageAdapter;
 use aether_core::KeyStore as CoreKeyStore;
 use std::sync::Arc;
@@ -177,9 +179,9 @@ impl KeyStore {
 
     /// Returns the current publishable pair (discovery-key bundle + signed pre-key), atomically.
     ///
-    /// Rotates the signed pre-key if stale, then returns bundles that verify as a chain. Prefer
-    /// this over reading the discovery-key and signed-pre-key bundles separately, which can race a
-    /// concurrent rotation into a pair the peer rejects. Publish both bundles together.
+    /// Returns caller-created bundles that verify as a chain. Prefer this over reading the
+    /// discovery-key and signed-pre-key bundles separately, which can race a concurrent rotation
+    /// into a pair the peer rejects. Publish both bundles together.
     ///
     /// # Examples
     /// ```
@@ -193,6 +195,7 @@ impl KeyStore {
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
     /// # store.generate_identity()?;
+    /// # store.rotate_signed_prekey_now()?;
     /// let publication = store.current_publication_bundle()?;
     /// publish(&publication)?;
     /// # Ok::<(), AetherError>(())
@@ -203,10 +206,33 @@ impl KeyStore {
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored discovery-key, signed-pre-key, or identity bytes
     ///   are malformed.
-    /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::NotFound`] if no identity, discovery key, or signed pre-key is stored.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, AetherError> {
         Ok(self.inner.current_publication_bundle()?.into())
+    }
+
+    /// Generates exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
+    ///
+    /// The returned records contain only public material. The secret halves remain in secure
+    /// storage and are consumed by Rust when accepting a matching X3DH first message.
+    ///
+    /// # Errors
+    /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
+    /// - [`AetherError::InvalidData`] if stored one-time-pre-key data is malformed or the batch
+    ///   exceeds capacity.
+    /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn generate_one_time_prekeys(
+        &self,
+        batch_size: u32,
+    ) -> Result<Vec<OneTimePreKeyBundle>, AetherError> {
+        Ok(self
+            .inner
+            .generate_one_time_prekeys(batch_size as usize)?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     /// Rotates the discovery key and signed pre-key together, returning both bundles.
@@ -428,6 +454,7 @@ mod tests {
         InMemorySecureStorage, SecureStorage,
         records::{
             DiscoveryKeyBundle as FfiDiscoveryKeyBundle, Identity as FfiIdentity,
+            OneTimePreKeyBundle as FfiOneTimePreKeyBundle,
             PublicationBundle as FfiPublicationBundle, SignedPreKeyBundle as FfiSignedPreKeyBundle,
         },
     };
@@ -502,8 +529,14 @@ mod tests {
     }
 
     fn assert_publication_verifies(identity: &FfiIdentity, publication: &FfiPublicationBundle) {
+        assert_eq!(publication.version, aether_crypto::PREKEY_BUNDLE_VERSION);
         let discovery = assert_discovery_key_verifies(identity, &publication.discovery_key);
         assert_signed_prekey_verifies(&publication.signed_prekey, &discovery);
+    }
+
+    fn assert_one_time_prekey_record(bundle: &FfiOneTimePreKeyBundle, epoch: u32) {
+        assert_eq!(bundle.public_key.len(), 32);
+        assert_eq!(bundle.epoch, epoch);
     }
 
     #[test]
@@ -534,8 +567,26 @@ mod tests {
     fn current_publication_bundle_returns_verifiable_records() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
+        store.rotate_signed_prekey_now().unwrap();
         let publication = store.current_publication_bundle().unwrap();
         assert_publication_verifies(&identity, &publication);
+    }
+
+    #[test]
+    fn generate_one_time_prekeys_returns_public_records() {
+        let store = key_store();
+        store.generate_identity().unwrap();
+        let discovery = store.current_discovery_key_bundle().unwrap();
+        let bundles = store.generate_one_time_prekeys(3).unwrap();
+
+        assert_eq!(bundles.len(), 3);
+        assert_eq!(
+            bundles.iter().map(|bundle| bundle.id).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        for bundle in &bundles {
+            assert_one_time_prekey_record(bundle, discovery.epoch);
+        }
     }
 
     #[test]

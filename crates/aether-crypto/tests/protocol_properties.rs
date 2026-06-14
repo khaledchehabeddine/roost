@@ -1,10 +1,11 @@
 //! Property tests for handshake and Double Ratchet protocol invariants.
 
 use aether_crypto::{
-    DiscoveryKey, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, OneTimePreKey,
-    PreKeyBundle, RatchetState, SignedPreKey, SigningKeyPair, accept, generate_discovery_key,
-    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-    generate_signing_key_pair, initial_associated_data, initiate, sign_identity_key_binding,
+    CryptoError, DiscoveryKey, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext,
+    OneTimePreKey, PreKeyBundle, RatchetState, SignedPreKey, SigningKeyPair, accept,
+    generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
+    initiate, sign_identity_key_binding,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
@@ -57,6 +58,7 @@ fn bootstrap(
     let one_time_prekey_bundle =
         include_one_time_prekey.then(|| setup.bob_one_time_prekey.as_ref().unwrap().bundle());
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: setup.bob_discovery_key.bundle(),
         signed_prekey: setup.bob_signed_prekey.bundle(),
         one_time_prekey: one_time_prekey_bundle,
@@ -200,6 +202,7 @@ fn skipped_key_bound_enforcement_property() {
             let (mut setup, mut rng) = setup(seed);
             let associated_data = associated_data(&setup);
             let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, true, b"start");
+            let mut rejected = false;
 
             for batch in 0..batches {
                 let messages: Vec<_> = (0..=gap)
@@ -213,11 +216,19 @@ fn skipped_key_bound_enforcement_property() {
                     })
                     .collect();
                 let (header, ciphertext) = messages.last().unwrap();
-                bob.ratchet_decrypt(&mut rng, ciphertext, header, &associated_data)
-                    .unwrap();
+                let before = bob.skipped_key_count();
+                let result = bob.ratchet_decrypt(&mut rng, ciphertext, header, &associated_data);
+                if before + gap > SKIPPED_KEY_CAP {
+                    prop_assert!(matches!(result, Err(CryptoError::MaxSkippedKeysExceeded)));
+                    prop_assert_eq!(bob.skipped_key_count(), before);
+                    rejected = true;
+                    break;
+                }
+                result.unwrap();
+                prop_assert_eq!(bob.skipped_key_count(), before + gap);
                 prop_assert!(bob.skipped_key_count() <= SKIPPED_KEY_CAP);
             }
-            prop_assert_eq!(bob.skipped_key_count(), SKIPPED_KEY_CAP);
+            prop_assert!(rejected);
             Ok(())
         })
         .unwrap();

@@ -98,6 +98,7 @@ fn setup() -> Setup {
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
     let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: bob_discovery.bundle(),
         signed_prekey: bob_signed_prekey.bundle(),
         one_time_prekey: Some(bob_one_time_prekey.bundle()),
@@ -225,7 +226,7 @@ fn accepted_contact_identity() -> ContactIdentity {
     let identity = sender_identity_signing_key(0xa1);
     let identity_key_pair = test_identity_key_pair(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    let discovery_key = generate_discovery_key(&mut rng, identity, 0, CREATED_AT);
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
@@ -372,6 +373,9 @@ fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult
         InboundMessageOutcome::Accepted(result) => *result,
         InboundMessageOutcome::Blocked(_) => panic!("message was unexpectedly blocked"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+        InboundMessageOutcome::SessionUnrecoverable(_) => {
+            panic!("message was unexpectedly unrecoverable")
+        }
     }
 }
 
@@ -380,6 +384,9 @@ fn blocked(outcome: InboundMessageOutcome) -> aether_core::BlockedInboundMessage
         InboundMessageOutcome::Blocked(result) => *result,
         InboundMessageOutcome::Accepted(_) => panic!("message was unexpectedly accepted"),
         InboundMessageOutcome::Duplicate => panic!("message was unexpectedly duplicate"),
+        InboundMessageOutcome::SessionUnrecoverable(_) => {
+            panic!("message was unexpectedly unrecoverable")
+        }
     }
 }
 
