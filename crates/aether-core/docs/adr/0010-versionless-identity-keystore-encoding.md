@@ -1,6 +1,6 @@
 # Versionless Identity Keystore Encoding
 
-**Status:** Accepted
+**Status:** Superseded by [0011: Versioned Identity Secret Blob](0011-versioned-identity-secret-blob.md)
 
 Identity secrets persist to platform secure storage as raw fixed-length 32-byte values, one entry per key role, with no version byte or envelope. Secure-storage entries sit outside the versioned-artifact set (message encoding, Protocol State Blobs, identity backup) because each entry is a single primitive whose length is fixed by the algorithm choice: a version byte buys nothing until the primitive itself changes, and a primitive change forces re-keying through code that must know both layouts anyway. Raw entries also keep the unlock path free of any parser and keep keychain payloads minimal.
 

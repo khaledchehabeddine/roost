@@ -13,6 +13,9 @@ use zeroize::Zeroizing;
 
 type IdentityKeyBytes = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 
+const IDENTITY_CURRENT_KEY: &str = "identity/current";
+const IDENTITY_KEY_BLOB_VERSION: u8 = 1;
+const IDENTITY_KEY_BLOB_LEN: usize = 1 + 32 + 32;
 const IDENTITY_X25519_KEY: &str = "identity/x25519";
 const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 
@@ -115,23 +118,19 @@ impl IdentityManager {
         rng: &mut R,
     ) -> Result<Identity, IdentityError> {
         let mut storage = self.lock_storage()?;
-        let identity_exists = storage
-            .load(IDENTITY_X25519_KEY)
-            .map_err(map_storage_err)?
-            .is_some();
+        let identity_exists = has_identity_entry(&**storage)?;
         if identity_exists {
             return Err(IdentityError::AlreadyExists);
         }
 
         let key_pair = generate_key_pair(rng);
         let signing_key_pair = generate_signing_key_pair(rng);
-        // A failed Ed25519 store after a successful X25519 store can leave the storage partially
-        // updated.
+        let blob = encode_identity_key_blob(
+            &key_pair.to_secret_bytes(),
+            &signing_key_pair.to_signing_bytes(),
+        );
         storage
-            .store(IDENTITY_X25519_KEY, &*key_pair.to_secret_bytes())
-            .map_err(map_storage_err)?;
-        storage
-            .store(IDENTITY_ED25519_KEY, &*signing_key_pair.to_signing_bytes())
+            .store(IDENTITY_CURRENT_KEY, &*blob)
             .map_err(map_storage_err)?;
         Ok(Identity {
             key_pair,
@@ -149,10 +148,7 @@ impl IdentityManager {
 
     pub(crate) fn has_identity(&self) -> Result<bool, IdentityError> {
         let storage = self.lock_storage()?;
-        Ok(storage
-            .load(IDENTITY_X25519_KEY)
-            .map_err(map_storage_err)?
-            .is_some())
+        has_identity_entry(&**storage)
     }
 
     // Use `KeyStore::reset` to clear dependent key material before identity.
@@ -164,11 +160,21 @@ impl IdentityManager {
         storage
             .delete(IDENTITY_ED25519_KEY)
             .map_err(map_storage_err)?;
+        storage
+            .delete(IDENTITY_CURRENT_KEY)
+            .map_err(map_storage_err)?;
         Ok(())
     }
 
     fn load_identity_key_bytes(&self) -> Result<IdentityKeyBytes, IdentityError> {
         let storage = self.lock_storage()?;
+        if let Some(blob) = storage
+            .load(IDENTITY_CURRENT_KEY)
+            .map_err(map_storage_err)?
+        {
+            return decode_identity_key_blob(&blob);
+        }
+
         let (x25519_vec, ed25519_vec) = match (
             storage.load(IDENTITY_X25519_KEY).map_err(map_storage_err)?,
             storage
@@ -189,6 +195,56 @@ impl IdentityManager {
             .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
         Ok((Zeroizing::new(x25519_bytes), Zeroizing::new(ed25519_bytes)))
     }
+}
+
+fn has_identity_entry(storage: &dyn SecureStorage) -> Result<bool, IdentityError> {
+    if storage
+        .load(IDENTITY_CURRENT_KEY)
+        .map_err(map_storage_err)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    Ok(storage
+        .load(IDENTITY_X25519_KEY)
+        .map_err(map_storage_err)?
+        .is_some()
+        || storage
+            .load(IDENTITY_ED25519_KEY)
+            .map_err(map_storage_err)?
+            .is_some())
+}
+
+fn encode_identity_key_blob(
+    x25519: &[u8; 32],
+    ed25519: &[u8; 32],
+) -> Zeroizing<[u8; IDENTITY_KEY_BLOB_LEN]> {
+    let mut blob = Zeroizing::new([0u8; IDENTITY_KEY_BLOB_LEN]);
+    blob[0] = IDENTITY_KEY_BLOB_VERSION;
+    blob[1..33].copy_from_slice(x25519);
+    blob[33..IDENTITY_KEY_BLOB_LEN].copy_from_slice(ed25519);
+    blob
+}
+
+fn decode_identity_key_blob(raw: &[u8]) -> Result<IdentityKeyBytes, IdentityError> {
+    let blob: &[u8; IDENTITY_KEY_BLOB_LEN] = raw.try_into().map_err(|_| {
+        IdentityError::InvalidData(format!(
+            "expected {IDENTITY_KEY_BLOB_LEN} bytes, got {}",
+            raw.len()
+        ))
+    })?;
+    if blob[0] != IDENTITY_KEY_BLOB_VERSION {
+        return Err(IdentityError::InvalidData(format!(
+            "unsupported identity key format version: {}",
+            blob[0]
+        )));
+    }
+
+    let mut x25519 = [0u8; 32];
+    x25519.copy_from_slice(&blob[1..33]);
+    let mut ed25519 = [0u8; 32];
+    ed25519.copy_from_slice(&blob[33..IDENTITY_KEY_BLOB_LEN]);
+    Ok((Zeroizing::new(x25519), Zeroizing::new(ed25519)))
 }
 
 fn map_storage_err(e: StorageError) -> IdentityError {
@@ -216,7 +272,7 @@ mod tests {
     ///
     /// Output: `identity/x25519 secret || identity/ed25519 secret`.
     #[test]
-    fn generate_identity_known_answer_and_canonical_storage_encoding() {
+    fn generate_identity_known_answer_and_canonical_blob_encoding() {
         const EXPECTED_CANONICAL_IDENTITY_SECRET: [u8; 64] = [
             38, 66, 93, 82, 83, 101, 158, 207, 181, 252, 75, 95, 72, 220, 75, 134, 99, 244, 117,
             171, 95, 230, 17, 124, 185, 206, 38, 77, 69, 114, 38, 71, 70, 17, 62, 74, 208, 54, 58,
@@ -230,13 +286,12 @@ mod tests {
         manager.generate_identity(&mut rng).unwrap();
 
         let storage = manager.storage.lock().unwrap();
-        let x25519 = storage.load(IDENTITY_X25519_KEY).unwrap().unwrap();
-        let ed25519 = storage.load(IDENTITY_ED25519_KEY).unwrap().unwrap();
-        let mut canonical = [0u8; 64];
-        canonical[..32].copy_from_slice(&x25519);
-        canonical[32..].copy_from_slice(&ed25519);
+        let blob = storage.load(IDENTITY_CURRENT_KEY).unwrap().unwrap();
 
-        assert_eq!(canonical, EXPECTED_CANONICAL_IDENTITY_SECRET);
+        assert_eq!(blob[0], 1);
+        assert_eq!(&blob[1..], EXPECTED_CANONICAL_IDENTITY_SECRET);
+        assert!(storage.load(IDENTITY_X25519_KEY).unwrap().is_none());
+        assert!(storage.load(IDENTITY_ED25519_KEY).unwrap().is_none());
     }
 
     #[test]
@@ -274,14 +329,38 @@ mod tests {
     }
 
     #[test]
+    fn load_identity_reads_legacy_two_entry_identity() {
+        let manager = manager();
+        let mut rng = ChaCha20Rng::from_seed([0x49u8; 32]);
+        let key_pair = generate_key_pair(&mut rng);
+        let signing_key_pair = generate_signing_key_pair(&mut rng);
+        {
+            let mut storage = manager.storage.lock().unwrap();
+            storage
+                .store(IDENTITY_X25519_KEY, &*key_pair.to_secret_bytes())
+                .unwrap();
+            storage
+                .store(IDENTITY_ED25519_KEY, &*signing_key_pair.to_signing_bytes())
+                .unwrap();
+        }
+
+        let loaded_identity = manager.load_identity().unwrap();
+
+        assert_eq!(key_pair.public, *loaded_identity.public_key());
+        assert_eq!(
+            signing_key_pair.verifying.as_bytes(),
+            loaded_identity.verifying_key().as_bytes()
+        );
+    }
+
+    #[test]
     fn load_identity_returns_corrupt_when_only_one_key_present() {
         let manager = manager();
-        manager.generate_identity(&mut OsRng).unwrap();
         manager
             .storage
             .lock()
             .unwrap()
-            .delete(IDENTITY_ED25519_KEY)
+            .store(IDENTITY_X25519_KEY, &[0u8; 32])
             .unwrap();
         assert!(matches!(
             manager.load_identity(),

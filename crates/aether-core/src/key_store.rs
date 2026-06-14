@@ -368,6 +368,8 @@ impl KeyStore {
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Clock` | `LockPoisoned` | `Storage`) on discovery-key
     ///   reset or generation failure.
+    /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on identity delete failure while
+    ///   clearing old identity material before commit.
     /// - [`KeyStoreError::Identity`] (`BackupFailed`) on Argon2id parameter or derivation failure.
     /// - [`KeyStoreError::Identity`] (`DecryptionFailed`) on wrong passphrase or tampered blob.
     /// - [`KeyStoreError::Identity`] (`InvalidData`) on wrong blob length.
@@ -387,6 +389,7 @@ impl KeyStore {
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
         self.0.discovery.reset()?;
+        self.0.identity.reset()?;
         self.0.identity.store_decrypted_identity(&plaintext)?;
         self.0.discovery.rotate_now(&mut OsRng)?;
         Ok(())
@@ -434,11 +437,14 @@ mod tests {
     use aether_crypto::verify_discovery_key_bundle;
     use std::collections::HashSet;
     use std::sync::Barrier;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use zeroize::Zeroizing;
 
     // Storage keys are duplicated from the manager modules so tests can inspect and tamper.
     const DISCOVERY_KEY: &str = "discovery/current";
+    const IDENTITY_CURRENT_KEY: &str = "identity/current";
+    const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
+    const IDENTITY_X25519_KEY: &str = "identity/x25519";
     const SIGNED_PREKEY: &str = "prekey/signed";
 
     type SharedStorage = Arc<Mutex<Box<dyn SecureStorage>>>;
@@ -859,6 +865,113 @@ mod tests {
             original_signed_prekey.as_bytes(),
             current_signed_prekey.as_bytes()
         );
+    }
+
+    #[test]
+    fn import_encrypted_backup_commits_identity_with_single_store() {
+        struct CountingIdentityWriteStorage {
+            inner: InMemorySecureStorage,
+            fail_enabled: Arc<AtomicBool>,
+            writes: Arc<AtomicUsize>,
+        }
+
+        impl SecureStorage for CountingIdentityWriteStorage {
+            fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
+                if self.fail_enabled.load(Ordering::SeqCst)
+                    && matches!(
+                        key,
+                        IDENTITY_CURRENT_KEY | IDENTITY_ED25519_KEY | IDENTITY_X25519_KEY
+                    )
+                {
+                    let writes = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
+                    if writes == 2 {
+                        return Err(StorageError::IO("injected identity store failure".into()));
+                    }
+                }
+                self.inner.store(key, value)
+            }
+
+            fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
+                self.inner.load(key)
+            }
+
+            fn delete(&mut self, key: &str) -> Result<(), StorageError> {
+                self.inner.delete(key)
+            }
+        }
+
+        let fail_enabled = Arc::new(AtomicBool::new(false));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let destination_store = KeyStore::new(Box::new(CountingIdentityWriteStorage {
+            inner: InMemorySecureStorage::new(),
+            fail_enabled: Arc::clone(&fail_enabled),
+            writes: Arc::clone(&writes),
+        }));
+        destination_store.generate_identity().unwrap();
+
+        let source_store = store();
+        let source_identity = source_store.generate_identity().unwrap();
+        let backup = source_store.export_encrypted_backup("pass").unwrap();
+
+        fail_enabled.store(true, Ordering::SeqCst);
+        destination_store
+            .import_encrypted_backup(&backup, "pass")
+            .unwrap();
+
+        let imported_identity = destination_store.load_identity().unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        assert_eq!(source_identity.public_key(), imported_identity.public_key());
+        assert_eq!(
+            source_identity.verifying_key().as_bytes(),
+            imported_identity.verifying_key().as_bytes()
+        );
+    }
+
+    #[test]
+    fn import_encrypted_backup_blob_store_failure_leaves_no_identity() {
+        struct FailingBlobStorage {
+            inner: InMemorySecureStorage,
+            fail_blob_store: Arc<AtomicBool>,
+        }
+
+        impl SecureStorage for FailingBlobStorage {
+            fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
+                if self.fail_blob_store.load(Ordering::SeqCst) && key == IDENTITY_CURRENT_KEY {
+                    return Err(StorageError::IO("injected identity blob failure".into()));
+                }
+                self.inner.store(key, value)
+            }
+
+            fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
+                self.inner.load(key)
+            }
+
+            fn delete(&mut self, key: &str) -> Result<(), StorageError> {
+                self.inner.delete(key)
+            }
+        }
+
+        let fail_blob_store = Arc::new(AtomicBool::new(false));
+        let destination_store = KeyStore::new(Box::new(FailingBlobStorage {
+            inner: InMemorySecureStorage::new(),
+            fail_blob_store: Arc::clone(&fail_blob_store),
+        }));
+        destination_store.generate_identity().unwrap();
+
+        let source_store = store();
+        source_store.generate_identity().unwrap();
+        let backup = source_store.export_encrypted_backup("pass").unwrap();
+
+        fail_blob_store.store(true, Ordering::SeqCst);
+        assert!(
+            destination_store
+                .import_encrypted_backup(&backup, "pass")
+                .is_err()
+        );
+        assert!(matches!(
+            destination_store.load_identity(),
+            Err(KeyStoreError::Identity(IdentityError::NotFound))
+        ));
     }
 
     #[test]
