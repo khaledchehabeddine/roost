@@ -2,9 +2,9 @@
 
 use aether_crypto::{
     HandshakeEnvelope, Header, IdentityKeyBundle, InitialPlaintext, PreKeyBundle, PublicKey,
-    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
-    initiate, sign_identity_key_binding,
+    SealedFramePreKeyReference, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initial_associated_data, initiate, sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -43,28 +43,35 @@ enum Sender {
 
 #[derive(Deserialize)]
 struct WireHandshakeEnvelope {
-    initiator_ephemeral_public_key: [u8; 32],
-    responder_discovery_epoch: u32,
-    responder_signed_prekey_public_key: [u8; 32],
+    version: u8,
+    recipient_public_key: [u8; 32],
+    prekey_reference: Option<WirePreKeyReference>,
+    ephemeral_public_key: [u8; 32],
+    ciphertext_hex: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct WirePreKeyReference {
+    discovery_epoch: u32,
+    signed_prekey_public_key: [u8; 32],
     one_time_prekey_id: Option<u64>,
     one_time_prekey_public_key: Option<[u8; 32]>,
-    ratchet_public_key: [u8; 32],
-    previous_chain_length: u32,
-    message_number: u32,
-    ciphertext_hex: String,
 }
 
 impl WireHandshakeEnvelope {
     fn envelope(&self) -> HandshakeEnvelope {
         HandshakeEnvelope {
-            initiator_ephemeral_public_key: self.initiator_ephemeral_public_key,
-            responder_discovery_epoch: self.responder_discovery_epoch,
-            responder_signed_prekey_public_key: self.responder_signed_prekey_public_key,
-            one_time_prekey_id: self.one_time_prekey_id,
-            one_time_prekey_public_key: self.one_time_prekey_public_key,
-            ratchet_public_key: self.ratchet_public_key,
-            previous_chain_length: self.previous_chain_length,
-            message_number: self.message_number,
+            version: self.version,
+            recipient_public_key: self.recipient_public_key,
+            prekey_reference: self
+                .prekey_reference
+                .map(|reference| SealedFramePreKeyReference {
+                    discovery_epoch: reference.discovery_epoch,
+                    signed_prekey_public_key: reference.signed_prekey_public_key,
+                    one_time_prekey_id: reference.one_time_prekey_id,
+                    one_time_prekey_public_key: reference.one_time_prekey_public_key,
+                }),
+            ephemeral_public_key: self.ephemeral_public_key,
             ciphertext: hex::decode(&self.ciphertext_hex).unwrap(),
         }
     }
@@ -210,26 +217,10 @@ fn recorded_session_transcript_reaches_expected_state() {
 }
 
 fn assert_envelope_eq(actual: &HandshakeEnvelope, expected: &HandshakeEnvelope) {
-    assert_eq!(
-        actual.initiator_ephemeral_public_key,
-        expected.initiator_ephemeral_public_key
-    );
-    assert_eq!(
-        actual.responder_discovery_epoch,
-        expected.responder_discovery_epoch
-    );
-    assert_eq!(
-        actual.responder_signed_prekey_public_key,
-        expected.responder_signed_prekey_public_key
-    );
-    assert_eq!(actual.one_time_prekey_id, expected.one_time_prekey_id);
-    assert_eq!(
-        actual.one_time_prekey_public_key,
-        expected.one_time_prekey_public_key
-    );
-    assert_eq!(actual.ratchet_public_key, expected.ratchet_public_key);
-    assert_eq!(actual.previous_chain_length, expected.previous_chain_length);
-    assert_eq!(actual.message_number, expected.message_number);
+    assert_eq!(actual.version, expected.version);
+    assert_eq!(actual.recipient_public_key, expected.recipient_public_key);
+    assert_eq!(actual.prekey_reference, expected.prekey_reference);
+    assert_eq!(actual.ephemeral_public_key, expected.ephemeral_public_key);
     assert_eq!(actual.ciphertext, expected.ciphertext);
 }
 

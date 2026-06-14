@@ -113,9 +113,8 @@ fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> I
 #[test]
 fn round_trip_advances_diffie_hellman_ratchet() {
     let (mut setup, mut rng) = setup();
-    let (mut alice, mut bob, envelope) = bootstrap(&mut setup, &mut rng, b"hello");
+    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"hello");
     let associated_data = associated_data(&setup);
-    let initial_alice_ratchet_public_key = envelope.ratchet_public_key;
 
     let (bob_header, bob_ciphertext) = bob.ratchet_encrypt(b"hi back", &associated_data).unwrap();
     let decrypted = alice
@@ -125,11 +124,6 @@ fn round_trip_advances_diffie_hellman_ratchet() {
 
     let (alice_header, alice_ciphertext) =
         alice.ratchet_encrypt(b"round 2", &associated_data).unwrap();
-    assert_ne!(
-        alice_header.public_key.as_bytes(),
-        &initial_alice_ratchet_public_key,
-        "Diffie-Hellman ratchet did not advance on Alice after receiving Bob's reply",
-    );
     let decrypted = bob
         .ratchet_decrypt(&mut rng, &alice_ciphertext, &alice_header, &associated_data)
         .unwrap();
@@ -185,9 +179,8 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
 #[test]
 fn consecutive_sends_use_symmetric_ratchet_only() {
     let (mut setup, mut rng) = setup();
-    let (mut alice, mut bob, envelope) = bootstrap(&mut setup, &mut rng, b"msg-0");
+    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"msg-0");
     let associated_data = associated_data(&setup);
-    let alice_ratchet_public_key = envelope.ratchet_public_key;
 
     let mut messages = Vec::new();
     for i in 1..=5 {
@@ -198,6 +191,7 @@ fn consecutive_sends_use_symmetric_ratchet_only() {
         messages.push((plaintext, header, ciphertext));
     }
 
+    let alice_ratchet_public_key = *messages[0].1.public_key.as_bytes();
     for (_, header, _) in &messages {
         assert_eq!(header.public_key.as_bytes(), &alice_ratchet_public_key);
     }

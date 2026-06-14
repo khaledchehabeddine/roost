@@ -31,8 +31,9 @@ A self-contained public view of the producer's current state, tagged with the la
 Avoid: cache, checkpoint
 
 **Deduplication Digest** (one per received encrypted Message):
-A keyed, truncated digest of the encoded encrypted Message bytes, computed before decryption and
-used only to detect byte-identical receive retries for one local Identity.
+A keyed, truncated digest of the encoded sealed-sender frame bytes, computed before decryption and
+used only to detect byte-identical receive retries for one local Identity. Decrypted Message IDs are
+not part of the digest input.
 Avoid: message hash, replay token
 
 **Deduplication Set** (one per local Identity):
@@ -92,7 +93,10 @@ A live Core object graph in one process, such as one Event Stream and its produc
 Avoid: Device, client
 
 **Message** (many per Session):
-A single encoded packet exchanged within a Session, addressed by `MessageID`. A Message carries only transport-visible routing metadata and opaque payload bytes; sender identity material belongs inside a Sealed Sender Envelope, not in Message fields.
+A single sealed-sender frame exchanged within a Session. Before decrypt, a Message exposes only the
+frame fields needed for recipient routing and authentication; MessageID, timestamp, payload kind,
+ratchet header, sender identity material, and plaintext are recovered only after the frame and
+ratchet ciphertext authenticate.
 Avoid: payload, packet
 
 **Message Transcript** (one per encrypted Message):
@@ -167,6 +171,18 @@ The encrypted/authenticated inner envelope that carries sender identity material
 plaintext. It is decoded only after ciphertext authentication succeeds and, for established
 Sessions, must match the peer sender identity bound to ratchet/session state.
 Avoid: sender header, clear sender metadata
+
+**Sealed Sender Frame** (one per Message or X3DH initial):
+The transport-visible, versioned frame that wraps sealed-sender ciphertext. It carries the recipient
+Discovery Key X25519 public key, an optional X3DH prekey reference, a per-message ephemeral public
+key, and ciphertext; all sender and message metadata stays encrypted.
+Avoid: transport envelope, sender-visible message
+
+**Sealed Payload Padding** (one per sealed plaintext):
+A 4-byte big-endian original length followed by plaintext and zero fill to a fixed Aether bucket.
+Buckets are powers of two from 32 through 65536 bytes, and malformed zero fill is rejected after
+decrypt.
+Avoid: compression, random padding
 
 **Sender Certificate** (one domain-signed binding for sender IK and DK):
 A signed public statement from a trusted domain signing key binding a sender's IK, current DK,

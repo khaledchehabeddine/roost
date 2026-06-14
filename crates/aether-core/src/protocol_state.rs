@@ -15,10 +15,11 @@ use crate::sender_certificate::{
 };
 use crate::{Message, MessageError, MessageId, PayloadKind};
 use aether_crypto::{
-    DiscoveryKeyBundle, Header, IdentityKeyBundle, PublicKey, RatchetState, SenderIdentityMaterial,
-    Signature, SigningKeyPair, verify_discovery_key_bundle, verify_identity_key_bundle,
-    verify_with_context,
+    DiscoveryKey, DiscoveryKeyBundle, Header, IdentityKeyBundle, PublicKey, RatchetState,
+    SenderIdentityMaterial, Signature, SigningKeyPair, open_frame_for_discovery_key, seal_frame,
+    verify_discovery_key_bundle, verify_identity_key_bundle, verify_with_context,
 };
+use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -38,6 +39,11 @@ const PENDING_ACKNOWLEDGMENTS_WIRE_VERSION: u8 = 1;
 const CONTACT_STATE_WIRE_VERSION: u8 = 2;
 const CONTACT_STATE_WIRE_VERSION_V1: u8 = 1;
 const ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION: u8 = 1;
+const MESSAGE_FRAME_PLAINTEXT_WIRE_VERSION: u8 = 1;
+const SEALED_PAYLOAD_LEN_PREFIX_LEN: usize = 4;
+const SEALED_PAYLOAD_BUCKETS: [usize; 12] = [
+    32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536,
+];
 const DEDUPLICATION_DIGEST_LEN: usize = 16;
 const DEDUPLICATION_KEY_LEN: usize = 32;
 const ACKNOWLEDGMENT_DIGEST_LEN: usize = 16;
@@ -365,6 +371,12 @@ pub struct OutboundAcknowledgment<'a> {
 
 /// An outbound Message and all advanced protocol-state updates from one operation.
 pub struct OutboundMessageResult {
+    /// Stable identifier sealed inside the produced Message.
+    pub message_id: MessageId,
+    /// Sender-observed Unix timestamp sealed inside the produced Message.
+    pub timestamp_millis: u64,
+    /// Payload kind sealed inside the produced Message.
+    pub payload_kind: PayloadKind,
     /// Message to hand to the consumer transport after state commit.
     pub message: Message,
     /// Protocol-state updates to commit atomically with the outbound Message.
@@ -379,6 +391,8 @@ pub struct InboundEncryptedMessage<'a> {
     pub deduplication_key: ProtocolStateKey,
     /// Encrypted Message to deduplicate and decrypt.
     pub message: &'a Message,
+    /// Local recipient Discovery Key used to open the sealed-sender frame.
+    pub recipient_discovery_key: &'a DiscoveryKey,
     /// Metadata for the encrypted acknowledgment returned when the Message is accepted.
     pub acknowledgment: OutboundAcknowledgment<'a>,
     /// Sender-certificate validation inputs required for unique encrypted receives.
@@ -409,6 +423,12 @@ pub struct InboundSenderCertificateValidation<'a> {
 
 /// Inbound plaintext and all advanced protocol-state updates from one operation.
 pub struct InboundMessageResult {
+    /// Message ID recovered after decrypt.
+    pub message_id: MessageId,
+    /// Sender-observed Unix timestamp recovered after decrypt.
+    pub timestamp_millis: u64,
+    /// Payload kind recovered after decrypt.
+    pub payload_kind: PayloadKind,
     /// Decrypted plaintext bytes.
     pub plaintext: Zeroizing<Vec<u8>>,
     /// Sender identity material decoded from the sealed-sender envelope.
@@ -476,10 +496,14 @@ pub struct InboundAcknowledgmentMessage<'a> {
     pub session_key: ProtocolStateKey,
     /// Encrypted acknowledgment Message to process.
     pub message: &'a Message,
+    /// Local recipient Discovery Key used to open the sealed-sender frame.
+    pub recipient_discovery_key: &'a DiscoveryKey,
 }
 
 /// Pending acknowledgment state exposed to the consumer for durable flushing.
 pub struct PendingAcknowledgment {
+    /// Original outbound Message ID.
+    pub message_id: MessageId,
     /// Original outbound Message waiting for an acknowledgment.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
@@ -490,6 +514,8 @@ pub struct PendingAcknowledgment {
 
 /// A retry instruction for one still-unacknowledged outbound Message.
 pub struct RetryInstruction {
+    /// Original outbound Message ID.
+    pub message_id: MessageId,
     /// Message the consumer may retransmit.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
@@ -508,6 +534,10 @@ pub struct RetryInstructionResult {
 
 /// State updates and decrypted metadata for a matched acknowledgment.
 pub struct ClearedAcknowledgment {
+    /// Acknowledgment Message ID recovered after decrypt.
+    pub message_id: MessageId,
+    /// Acknowledgment timestamp recovered after decrypt.
+    pub timestamp_millis: u64,
     /// Outbound Message ID cleared from pending state.
     pub acknowledged_message_id: MessageId,
     /// Sender identity material decoded from the acknowledgment.
@@ -522,6 +552,10 @@ pub enum AcknowledgmentOutcome {
     Cleared(ClearedAcknowledgment),
     /// The acknowledgment decrypted but did not match current pending state.
     Missed {
+        /// Acknowledgment Message ID recovered after decrypt.
+        message_id: MessageId,
+        /// Acknowledgment timestamp recovered after decrypt.
+        timestamp_millis: u64,
         /// Acknowledged Message ID carried inside the encrypted acknowledgment.
         acknowledged_message_id: MessageId,
         /// Sender identity material decoded from the acknowledgment.
@@ -1042,24 +1076,35 @@ impl ProtocolStateEngine {
             &transcript_signature.to_bytes(),
             plaintext.plaintext,
         )?;
-        let associated_data = message_associated_data(
+        let associated_data =
+            ratchet_associated_data(&session_key_bytes, &plaintext.recipient_public_key);
+        let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
+        let ratcheted_payload = encode_ratcheted_payload(&header, &ciphertext);
+        let frame_plaintext = encode_message_frame_plaintext(
             plaintext.id,
-            &plaintext.recipient_public_key,
             plaintext.timestamp_millis,
             PayloadKind::EncryptedText,
-        );
-        let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
-        let message = Message {
-            id: plaintext.id,
-            recipient_public_key: plaintext.recipient_public_key,
-            timestamp_millis: plaintext.timestamp_millis,
-            payload_kind: PayloadKind::EncryptedText,
-            payload: encode_ratcheted_payload(&header, &ciphertext),
-        };
+            &ratcheted_payload,
+        )?;
+        let recipient_public_key = PublicKey::from(plaintext.recipient_public_key);
+        let mut frame_rng = OsRng;
+        let frame = seal_frame(
+            &mut frame_rng,
+            &recipient_public_key,
+            None,
+            &frame_plaintext,
+        )?;
+        let message = Message::from_frame(frame);
         message
             .to_bytes()
             .map_err(ProtocolStateError::MessageEncode)?;
-        record_pending_acknowledgment(&pending_address, &mut pending, &message)?;
+        record_pending_acknowledgment(
+            &pending_address,
+            &mut pending,
+            plaintext.id,
+            plaintext.timestamp_millis,
+            &message,
+        )?;
         let update = ProtocolStateUpdate::set(
             address.clone(),
             encode_session_state(
@@ -1075,6 +1120,9 @@ impl ProtocolStateEngine {
         );
 
         Ok(OutboundMessageResult {
+            message_id: plaintext.id,
+            timestamp_millis: plaintext.timestamp_millis,
+            payload_kind: PayloadKind::EncryptedText,
             message,
             state_updates: vec![update, pending_update],
         })
@@ -1154,17 +1202,9 @@ impl ProtocolStateEngine {
             }
         };
         let message = inbound.message;
-        if message.payload_kind != PayloadKind::EncryptedText {
+        if message.prekey_reference.is_some() {
             return Err(ProtocolStateError::InvalidMessage {
-                reason: "message payload is not ratcheted encrypted text".into(),
-            });
-        }
-        if message.payload.len() > MAX_MESSAGE_PAYLOAD_LEN {
-            return Err(ProtocolStateError::InvalidMessage {
-                reason: format!(
-                    "message payload length exceeds limit: {}",
-                    message.payload.len()
-                ),
+                reason: "session message carries an x3dh prekey reference".into(),
             });
         }
         let expected_sender_identity_key =
@@ -1172,16 +1212,18 @@ impl ProtocolStateEngine {
                 reason: "session sender identity key is not bound".into(),
             })?;
 
-        let (header, ciphertext) = decode_ratcheted_payload(&message.payload)?;
-        let associated_data = message_associated_data(
-            message.id,
-            &message.recipient_public_key,
-            message.timestamp_millis,
-            message.payload_kind,
-        );
-        let sealed = state
-            .ratchet_decrypt(rng, ciphertext, &header, &associated_data)
-            .map_err(ProtocolStateError::Crypto)?;
+        let frame_plaintext =
+            open_frame_for_discovery_key(inbound.recipient_discovery_key, &message.to_frame())?;
+        let frame_plaintext = decode_message_frame_plaintext(&frame_plaintext)?;
+        if frame_plaintext.payload_kind != PayloadKind::EncryptedText {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: "message payload is not ratcheted encrypted text".into(),
+            });
+        }
+        let (header, ciphertext) = decode_ratcheted_payload(&frame_plaintext.ratcheted_payload)?;
+        let associated_data =
+            ratchet_associated_data(&session_key_bytes, &message.recipient_public_key);
+        let sealed = state.ratchet_decrypt(rng, ciphertext, &header, &associated_data)?;
         let decoded = decode_sealed_sender_envelope(&sealed)?;
         if !sender_identity_key_matches(
             &expected_sender_identity_key,
@@ -1196,9 +1238,9 @@ impl ProtocolStateEngine {
             MessageTranscriptInput {
                 session_key: &session_key_bytes,
                 recipient_identity_key: &message.recipient_public_key,
-                id: message.id,
-                timestamp_millis: message.timestamp_millis,
-                payload_kind: message.payload_kind,
+                id: frame_plaintext.id,
+                timestamp_millis: frame_plaintext.timestamp_millis,
+                payload_kind: frame_plaintext.payload_kind,
                 payload: &decoded.plaintext,
             },
             &decoded.transcript_signature,
@@ -1215,7 +1257,8 @@ impl ProtocolStateEngine {
             &mut state,
             &session_key_bytes,
             &inbound.acknowledgment,
-            message.id,
+            frame_plaintext.id,
+            rng,
         )?;
         record_deduplication_digest(&mut deduplication, digest);
         let session_update = ProtocolStateUpdate::set(
@@ -1242,6 +1285,9 @@ impl ProtocolStateEngine {
         }
         Ok(InboundMessageOutcome::Accepted(Box::new(
             InboundMessageResult {
+                message_id: frame_plaintext.id,
+                timestamp_millis: frame_plaintext.timestamp_millis,
+                payload_kind: frame_plaintext.payload_kind,
                 plaintext: decoded.plaintext,
                 sender_identity: decoded.sender_identity,
                 acknowledgment,
@@ -1266,8 +1312,9 @@ impl ProtocolStateEngine {
         let pending = load_pending_acknowledgments(snapshot, &address)?;
         Ok(pending
             .pending
-            .values()
-            .map(|entry| PendingAcknowledgment {
+            .iter()
+            .map(|(message_id, entry)| PendingAcknowledgment {
+                message_id: MessageId::from_bytes(*message_id),
                 message: copy_message(&entry.message),
                 first_sent_millis: entry.first_sent_millis,
                 last_retry_millis: entry.last_retry_millis,
@@ -1296,10 +1343,11 @@ impl ProtocolStateEngine {
         let address = pending_acknowledgment_address(key);
         let mut pending = load_pending_acknowledgments(snapshot, &address)?;
         let mut instructions = Vec::new();
-        for entry in pending.pending.values_mut() {
+        for (message_id, entry) in pending.pending.iter_mut() {
             let reference = entry.last_retry_millis.unwrap_or(entry.first_sent_millis);
             if now_millis >= reference.saturating_add(retry_window_millis) {
                 instructions.push(RetryInstruction {
+                    message_id: MessageId::from_bytes(*message_id),
                     message: copy_message(&entry.message),
                     first_sent_millis: entry.first_sent_millis,
                     last_retry_millis: entry.last_retry_millis,
@@ -1384,17 +1432,9 @@ impl ProtocolStateEngine {
             }
         };
         let message = inbound.message;
-        if message.payload_kind != PayloadKind::Acknowledgment {
+        if message.prekey_reference.is_some() {
             return Err(ProtocolStateError::InvalidMessage {
-                reason: "message payload is not an acknowledgment".into(),
-            });
-        }
-        if message.payload.len() > MAX_MESSAGE_PAYLOAD_LEN {
-            return Err(ProtocolStateError::InvalidMessage {
-                reason: format!(
-                    "message payload length exceeds limit: {}",
-                    message.payload.len()
-                ),
+                reason: "acknowledgment carries an x3dh prekey reference".into(),
             });
         }
         let expected_sender_identity_key =
@@ -1402,16 +1442,18 @@ impl ProtocolStateEngine {
                 reason: "session sender identity key is not bound".into(),
             })?;
 
-        let (header, ciphertext) = decode_ratcheted_payload(&message.payload)?;
-        let associated_data = message_associated_data(
-            message.id,
-            &message.recipient_public_key,
-            message.timestamp_millis,
-            message.payload_kind,
-        );
-        let sealed = state
-            .ratchet_decrypt(rng, ciphertext, &header, &associated_data)
-            .map_err(ProtocolStateError::Crypto)?;
+        let frame_plaintext =
+            open_frame_for_discovery_key(inbound.recipient_discovery_key, &message.to_frame())?;
+        let frame_plaintext = decode_message_frame_plaintext(&frame_plaintext)?;
+        if frame_plaintext.payload_kind != PayloadKind::Acknowledgment {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: "message payload is not an acknowledgment".into(),
+            });
+        }
+        let (header, ciphertext) = decode_ratcheted_payload(&frame_plaintext.ratcheted_payload)?;
+        let associated_data =
+            ratchet_associated_data(&session_key_bytes, &message.recipient_public_key);
+        let sealed = state.ratchet_decrypt(rng, ciphertext, &header, &associated_data)?;
         let decoded = decode_sealed_sender_envelope(&sealed)?;
         if !sender_identity_key_matches(
             &expected_sender_identity_key,
@@ -1426,9 +1468,9 @@ impl ProtocolStateEngine {
             MessageTranscriptInput {
                 session_key: &session_key_bytes,
                 recipient_identity_key: &message.recipient_public_key,
-                id: message.id,
-                timestamp_millis: message.timestamp_millis,
-                payload_kind: message.payload_kind,
+                id: frame_plaintext.id,
+                timestamp_millis: frame_plaintext.timestamp_millis,
+                payload_kind: frame_plaintext.payload_kind,
                 payload: &decoded.plaintext,
             },
             &decoded.transcript_signature,
@@ -1455,12 +1497,16 @@ impl ProtocolStateEngine {
         let state_updates = vec![session_update, pending_update];
         if cleared {
             Ok(AcknowledgmentOutcome::Cleared(ClearedAcknowledgment {
+                message_id: frame_plaintext.id,
+                timestamp_millis: frame_plaintext.timestamp_millis,
                 acknowledged_message_id,
                 sender_identity: decoded.sender_identity,
                 state_updates,
             }))
         } else {
             Ok(AcknowledgmentOutcome::Missed {
+                message_id: frame_plaintext.id,
+                timestamp_millis: frame_plaintext.timestamp_millis,
                 acknowledged_message_id,
                 sender_identity: decoded.sender_identity,
                 state_updates,
@@ -1938,6 +1984,31 @@ struct DecodedAcknowledgmentPlaintextWire {
     acknowledged_message_id: [u8; 16],
 }
 
+#[derive(Serialize)]
+struct MessageFramePlaintextWire<'a> {
+    version: u8,
+    id: [u8; 16],
+    timestamp_millis: u64,
+    payload_kind: u8,
+    ratcheted_payload: &'a [u8],
+}
+
+#[derive(Deserialize)]
+struct DecodedMessageFramePlaintextWire {
+    version: u8,
+    id: [u8; 16],
+    timestamp_millis: u64,
+    payload_kind: u8,
+    ratcheted_payload: Vec<u8>,
+}
+
+struct DecodedMessageFramePlaintext {
+    id: MessageId,
+    timestamp_millis: u64,
+    payload_kind: PayloadKind,
+    ratcheted_payload: Vec<u8>,
+}
+
 fn load_session_state(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -2382,16 +2453,10 @@ fn decode_pending_acknowledgments_payload(
                 reason: format!("pending acknowledgment message failed to decode: {e}"),
             }
         })?;
-        if message.id.as_bytes() != &entry.message_id {
+        if message.prekey_reference.is_some() {
             return Err(ProtocolStateError::BlobDecode {
                 address: address.clone(),
-                reason: "pending acknowledgment message ID mismatch".into(),
-            });
-        }
-        if message.payload_kind != PayloadKind::EncryptedText {
-            return Err(ProtocolStateError::BlobDecode {
-                address: address.clone(),
-                reason: "pending acknowledgment message is not encrypted text".into(),
+                reason: "pending acknowledgment message carries x3dh prekey reference".into(),
             });
         }
         let replaced = pending.insert(
@@ -2882,10 +2947,12 @@ fn record_deduplication_digest(
 fn record_pending_acknowledgment(
     address: &ProtocolStateAddress,
     state: &mut LoadedPendingAcknowledgments,
+    message_id: MessageId,
+    first_sent_millis: u64,
     message: &Message,
 ) -> Result<(), ProtocolStateError> {
-    let message_id = *message.id.as_bytes();
-    if !state.pending.contains_key(&message_id)
+    let message_id_bytes = *message_id.as_bytes();
+    if !state.pending.contains_key(&message_id_bytes)
         && state.pending.len() == MAX_PENDING_ACKNOWLEDGMENTS
     {
         return Err(ProtocolStateError::InvalidStateBinding {
@@ -2897,11 +2964,11 @@ fn record_pending_acknowledgment(
         .to_bytes()
         .map_err(ProtocolStateError::MessageEncode)?;
     state.pending.insert(
-        message_id,
+        message_id_bytes,
         LoadedPendingAcknowledgment {
             message: copy_message(message),
             encoded_message,
-            first_sent_millis: message.timestamp_millis,
+            first_sent_millis,
             last_retry_millis: None,
         },
     );
@@ -2976,6 +3043,59 @@ fn decode_ratcheted_payload(payload: &[u8]) -> Result<(Header, &[u8]), ProtocolS
     ))
 }
 
+fn encode_message_frame_plaintext(
+    id: MessageId,
+    timestamp_millis: u64,
+    payload_kind: PayloadKind,
+    ratcheted_payload: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
+    Ok(Zeroizing::new(
+        postcard::to_stdvec(&MessageFramePlaintextWire {
+            version: MESSAGE_FRAME_PLAINTEXT_WIRE_VERSION,
+            id: *id.as_bytes(),
+            timestamp_millis,
+            payload_kind: payload_kind.tag(),
+            ratcheted_payload,
+        })
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "message frame plaintext failed to encode".into(),
+        })?,
+    ))
+}
+
+fn decode_message_frame_plaintext(
+    bytes: &[u8],
+) -> Result<DecodedMessageFramePlaintext, ProtocolStateError> {
+    let (wire, trailing): (DecodedMessageFramePlaintextWire, &[u8]) =
+        postcard::take_from_bytes(bytes).map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "message frame plaintext failed to decode".into(),
+        })?;
+    if !trailing.is_empty() {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: "message frame plaintext has trailing bytes".into(),
+        });
+    }
+    if wire.version != MESSAGE_FRAME_PLAINTEXT_WIRE_VERSION {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: format!(
+                "unsupported message frame plaintext version: {}",
+                wire.version
+            ),
+        });
+    }
+    let payload_kind = PayloadKind::from_tag(wire.payload_kind).map_err(|_| {
+        ProtocolStateError::InvalidMessage {
+            reason: format!("unsupported message payload kind: {}", wire.payload_kind),
+        }
+    })?;
+    Ok(DecodedMessageFramePlaintext {
+        id: MessageId::from_bytes(wire.id),
+        timestamp_millis: wire.timestamp_millis,
+        payload_kind,
+        ratcheted_payload: wire.ratcheted_payload,
+    })
+}
+
 #[derive(Serialize)]
 struct SealedSenderEnvelopeWire<'a> {
     version: u8,
@@ -2985,7 +3105,7 @@ struct SealedSenderEnvelopeWire<'a> {
     sender_certificate: &'a [u8],
     sender_signature: &'a [u8],
     transcript_signature: &'a [u8],
-    plaintext: &'a [u8],
+    padded_plaintext: &'a [u8],
 }
 
 #[derive(Deserialize)]
@@ -2997,7 +3117,7 @@ struct DecodedSealedSenderEnvelopeWire {
     sender_certificate: Vec<u8>,
     sender_signature: Vec<u8>,
     transcript_signature: Vec<u8>,
-    plaintext: Vec<u8>,
+    padded_plaintext: Vec<u8>,
 }
 
 struct DecodedSealedSenderEnvelope {
@@ -3082,7 +3202,8 @@ fn encode_sealed_sender_envelope(
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
     validate_sender_identity(sender_identity)?;
     validate_transcript_signature(transcript_signature)?;
-    validate_sealed_sender_content_len(sender_identity, transcript_signature, plaintext)?;
+    let padded_plaintext = pad_sealed_payload(plaintext)?;
+    validate_sealed_sender_content_len(sender_identity, transcript_signature, &padded_plaintext)?;
     let sealed = Zeroizing::new(
         postcard::to_stdvec(&SealedSenderEnvelopeWire {
             version: SEALED_SENDER_ENVELOPE_VERSION,
@@ -3092,7 +3213,7 @@ fn encode_sealed_sender_envelope(
             sender_certificate: &sender_identity.certificate,
             sender_signature: &sender_identity.signature,
             transcript_signature,
-            plaintext,
+            padded_plaintext: &padded_plaintext,
         })
         .map_err(|_| ProtocolStateError::InvalidMessage {
             reason: "sealed-sender envelope failed to encode".into(),
@@ -3116,7 +3237,7 @@ fn decode_sealed_sender_envelope(
         postcard::take_from_bytes(bytes).map_err(|_| ProtocolStateError::InvalidMessage {
             reason: "sealed-sender envelope failed to decode".into(),
         })?;
-    let plaintext = Zeroizing::new(wire.plaintext);
+    let padded_plaintext = Zeroizing::new(wire.padded_plaintext);
     let sender_identity = SenderIdentityMaterial {
         identity_key: wire.sender_identity_key,
         identity_verifying_key: wire.sender_identity_verifying_key,
@@ -3139,7 +3260,12 @@ fn decode_sealed_sender_envelope(
     }
     validate_sender_identity(&sender_identity)?;
     validate_transcript_signature(&wire.transcript_signature)?;
-    validate_sealed_sender_content_len(&sender_identity, &wire.transcript_signature, &plaintext)?;
+    validate_sealed_sender_content_len(
+        &sender_identity,
+        &wire.transcript_signature,
+        &padded_plaintext,
+    )?;
+    let plaintext = unpad_sealed_payload(&padded_plaintext)?;
     Ok(DecodedSealedSenderEnvelope {
         sender_identity,
         transcript_signature: wire.transcript_signature,
@@ -3152,6 +3278,7 @@ fn encrypt_acknowledgment(
     session_key: &[u8],
     acknowledgment: &OutboundAcknowledgment<'_>,
     acknowledged_message_id: MessageId,
+    rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<Message, ProtocolStateError> {
     let plaintext = encode_acknowledgment_plaintext(acknowledged_message_id)?;
     let transcript_signature = sign_message_transcript(
@@ -3170,20 +3297,19 @@ fn encrypt_acknowledgment(
         &transcript_signature.to_bytes(),
         plaintext.as_slice(),
     )?;
-    let associated_data = message_associated_data(
+    let associated_data =
+        ratchet_associated_data(session_key, &acknowledgment.recipient_public_key);
+    let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
+    let ratcheted_payload = encode_ratcheted_payload(&header, &ciphertext);
+    let frame_plaintext = encode_message_frame_plaintext(
         acknowledgment.id,
-        &acknowledgment.recipient_public_key,
         acknowledgment.timestamp_millis,
         PayloadKind::Acknowledgment,
-    );
-    let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
-    let message = Message {
-        id: acknowledgment.id,
-        recipient_public_key: acknowledgment.recipient_public_key,
-        timestamp_millis: acknowledgment.timestamp_millis,
-        payload_kind: PayloadKind::Acknowledgment,
-        payload: encode_ratcheted_payload(&header, &ciphertext),
-    };
+        &ratcheted_payload,
+    )?;
+    let recipient_public_key = PublicKey::from(acknowledgment.recipient_public_key);
+    let frame = seal_frame(rng, &recipient_public_key, None, &frame_plaintext)?;
+    let message = Message::from_frame(frame);
     message
         .to_bytes()
         .map_err(ProtocolStateError::MessageEncode)?;
@@ -3270,7 +3396,7 @@ fn validate_transcript_signature(signature: &[u8]) -> Result<(), ProtocolStateEr
 fn validate_sealed_sender_content_len(
     sender_identity: &SenderIdentityMaterial,
     transcript_signature: &[u8],
-    plaintext: &[u8],
+    padded_plaintext: &[u8],
 ) -> Result<(), ProtocolStateError> {
     let len = sender_identity
         .certificate
@@ -3278,7 +3404,7 @@ fn validate_sealed_sender_content_len(
         .checked_add(sender_identity.identity_binding_signature.len())
         .and_then(|len| len.checked_add(sender_identity.signature.len()))
         .and_then(|len| len.checked_add(transcript_signature.len()))
-        .and_then(|len| len.checked_add(plaintext.len()))
+        .and_then(|len| len.checked_add(padded_plaintext.len()))
         .ok_or_else(|| ProtocolStateError::InvalidMessage {
             reason: "sealed-sender content length overflowed".into(),
         })?;
@@ -3290,42 +3416,91 @@ fn validate_sealed_sender_content_len(
     Ok(())
 }
 
+fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
+    let required_len = plaintext
+        .len()
+        .checked_add(SEALED_PAYLOAD_LEN_PREFIX_LEN)
+        .ok_or_else(|| ProtocolStateError::InvalidMessage {
+            reason: "sealed payload length overflowed".into(),
+        })?;
+    let bucket = SEALED_PAYLOAD_BUCKETS
+        .iter()
+        .copied()
+        .find(|bucket| required_len <= *bucket)
+        .ok_or_else(|| ProtocolStateError::InvalidMessage {
+            reason: format!("sealed payload length exceeds limit: {}", plaintext.len()),
+        })?;
+    let plaintext_len =
+        u32::try_from(plaintext.len()).map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "sealed payload length exceeds u32".into(),
+        })?;
+    let mut padded = Zeroizing::new(vec![0u8; bucket]);
+    padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
+    padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..required_len].copy_from_slice(plaintext);
+    Ok(padded)
+}
+
+fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
+    if !SEALED_PAYLOAD_BUCKETS.contains(&padded.len()) {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: format!("sealed payload padding bucket is invalid: {}", padded.len()),
+        });
+    }
+    let len_bytes: [u8; SEALED_PAYLOAD_LEN_PREFIX_LEN] = padded
+        .get(..SEALED_PAYLOAD_LEN_PREFIX_LEN)
+        .ok_or_else(|| ProtocolStateError::InvalidMessage {
+            reason: "sealed payload padding is too short".into(),
+        })?
+        .try_into()
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "sealed payload length prefix is invalid".into(),
+        })?;
+    let plaintext_len = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| {
+        ProtocolStateError::InvalidMessage {
+            reason: "sealed payload length prefix exceeds platform limit".into(),
+        }
+    })?;
+    let plaintext_end = SEALED_PAYLOAD_LEN_PREFIX_LEN
+        .checked_add(plaintext_len)
+        .ok_or_else(|| ProtocolStateError::InvalidMessage {
+            reason: "sealed payload length overflowed".into(),
+        })?;
+    if plaintext_end > padded.len() {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: "sealed payload length exceeds padding bucket".into(),
+        });
+    }
+    if padded[plaintext_end..].iter().any(|byte| *byte != 0) {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: "sealed payload padding is malformed".into(),
+        });
+    }
+    Ok(Zeroizing::new(
+        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..plaintext_end].to_vec(),
+    ))
+}
+
 fn sender_identity_key_matches(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
     expected.ct_eq(actual).into()
 }
 
 fn copy_message(message: &Message) -> Message {
     Message {
-        id: message.id,
+        version: message.version,
         recipient_public_key: message.recipient_public_key,
-        timestamp_millis: message.timestamp_millis,
-        payload_kind: message.payload_kind,
-        payload: message.payload.clone(),
+        prekey_reference: message.prekey_reference,
+        ephemeral_public_key: message.ephemeral_public_key,
+        ciphertext: message.ciphertext.clone(),
     }
 }
 
-fn message_associated_data(
-    id: MessageId,
-    recipient_public_key: &[u8; 32],
-    timestamp_millis: u64,
-    payload_kind: PayloadKind,
-) -> Vec<u8> {
-    let mut associated_data = Vec::with_capacity(74);
-    associated_data.extend_from_slice(b"AetherMessage-v1:");
-    associated_data.extend_from_slice(id.as_bytes());
+fn ratchet_associated_data(session_key: &[u8], recipient_public_key: &[u8; 32]) -> Vec<u8> {
+    let mut associated_data = Vec::with_capacity(32 + session_key.len());
+    associated_data.extend_from_slice(b"AetherRatchetedPayload-v1:");
+    associated_data.extend_from_slice(&(session_key.len() as u32).to_be_bytes());
+    associated_data.extend_from_slice(session_key);
     associated_data.extend_from_slice(recipient_public_key);
-    associated_data.extend_from_slice(&timestamp_millis.to_be_bytes());
-    associated_data.push(payload_kind_tag(payload_kind));
     associated_data
-}
-
-fn payload_kind_tag(kind: PayloadKind) -> u8 {
-    match kind {
-        PayloadKind::EncryptedText => 0,
-        PayloadKind::Acknowledgment => 1,
-        PayloadKind::KeyExchange => 2,
-        PayloadKind::RatchetHeader => 3,
-    }
 }
 
 fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {

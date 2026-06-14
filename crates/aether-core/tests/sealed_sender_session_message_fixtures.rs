@@ -7,7 +7,10 @@ use aether_core::{
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RevocationState,
     SenderCertificateIdentityKey, SenderIdentityMaterial,
 };
-use aether_crypto::{KeyPair, SigningKeyPair, sign_identity_key_binding};
+use aether_crypto::{
+    DiscoveryKey, KeyPair, SealedFramePreKeyReference, SigningKeyPair, generate_discovery_key,
+    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
+};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Deserialize;
@@ -74,17 +77,33 @@ struct Fixture {
     recipient_state_fixture: String,
     encoded_hex: String,
     transport_visible: TransportFixture,
+    decrypted_metadata: DecryptedMetadataFixture,
     plaintext_hex: String,
     post_decryption: SenderIdentityFixture,
 }
 
 #[derive(Deserialize)]
 struct TransportFixture {
-    id_hex: String,
+    version: u8,
     recipient_public_key_hex: String,
+    prekey_reference: Option<PreKeyReferenceFixture>,
+    ephemeral_public_key_hex: String,
+    ciphertext_hex: String,
+}
+
+#[derive(Deserialize)]
+struct PreKeyReferenceFixture {
+    discovery_epoch: u32,
+    signed_prekey_public_key_hex: String,
+    one_time_prekey_id: Option<u64>,
+    one_time_prekey_public_key_hex: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DecryptedMetadataFixture {
+    id_hex: String,
     timestamp_millis: u64,
     payload_kind: String,
-    payload_hex: String,
 }
 
 #[derive(Deserialize)]
@@ -167,10 +186,11 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
             "{} plaintext",
             fixture.name
         );
+        assert_decrypted_metadata(&decrypted, &fixture.decrypted_metadata, &fixture.name);
         assert_sender_identity(&decrypted.sender_identity, &sender_identity);
 
         let mut tampered = copy_message(&message);
-        *tampered.payload.last_mut().unwrap() ^= 0x01;
+        *tampered.ciphertext.last_mut().unwrap() ^= 0x01;
         let tampered_result = ProtocolStateEngine::new().decrypt_message(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
             &snapshot,
@@ -231,6 +251,21 @@ fn deduplication_key() -> ProtocolStateKey {
     ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap()
 }
 
+fn accepted_contact_discovery_key() -> DiscoveryKey {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let _identity_key_pair = generate_key_pair(&mut rng);
+    generate_discovery_key(&mut rng, &identity, 0, 1_700_000_000)
+}
+
+fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
+    Box::leak(Box::new(accepted_contact_discovery_key()))
+}
+
+fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
+    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, 1_700_000_000, [0u8; 64])
+}
+
 #[allow(clippy::too_many_arguments)]
 fn inbound<'a>(
     session_key: ProtocolStateKey,
@@ -246,6 +281,7 @@ fn inbound<'a>(
         session_key,
         deduplication_key,
         message,
+        recipient_discovery_key: accepted_contact_discovery_key_ref(),
         acknowledgment: acknowledgment(acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             domain_signing_keys,
@@ -261,11 +297,12 @@ fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
 }
 
 fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
+    let recipient = acknowledgment_recipient_discovery_key();
     OutboundAcknowledgment {
         id: MessageId::from_bytes([0xee; 16]),
         sender_identity,
         sender_identity_signing_key: sender_identity_signing_key(sender_identity),
-        recipient_public_key: [0xb6; 32],
+        recipient_public_key: *recipient.public_key().as_bytes(),
         timestamp_millis: 1_700_000_100_000,
     }
 }
@@ -282,29 +319,81 @@ fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult
 }
 
 fn assert_transport(message: &Message, expected: &TransportFixture, name: &str) {
-    assert_eq!(
-        message.id.as_bytes(),
-        &hex_array::<16>(&expected.id_hex),
-        "{name} id"
-    );
+    assert_eq!(message.version, expected.version, "{name} version");
     assert_eq!(
         message.recipient_public_key,
         hex_array::<32>(&expected.recipient_public_key_hex),
         "{name} recipient public key"
     );
-    assert_eq!(
-        message.timestamp_millis, expected.timestamp_millis,
-        "{name} timestamp"
+    assert_prekey_reference(
+        message.prekey_reference,
+        expected.prekey_reference.as_ref(),
+        name,
     );
     assert_eq!(
-        message.payload_kind,
+        message.ephemeral_public_key,
+        hex_array::<32>(&expected.ephemeral_public_key_hex),
+        "{name} ephemeral public key"
+    );
+    assert_eq!(
+        message.ciphertext,
+        hex::decode(&expected.ciphertext_hex).unwrap(),
+        "{name} ciphertext"
+    );
+}
+
+fn assert_prekey_reference(
+    actual: Option<SealedFramePreKeyReference>,
+    expected: Option<&PreKeyReferenceFixture>,
+    name: &str,
+) {
+    match (actual, expected) {
+        (None, None) => {}
+        (Some(actual), Some(expected)) => {
+            assert_eq!(
+                actual.discovery_epoch, expected.discovery_epoch,
+                "{name} discovery epoch"
+            );
+            assert_eq!(
+                actual.signed_prekey_public_key,
+                hex_array::<32>(&expected.signed_prekey_public_key_hex),
+                "{name} signed prekey"
+            );
+            assert_eq!(
+                actual.one_time_prekey_id, expected.one_time_prekey_id,
+                "{name} one-time prekey id"
+            );
+            assert_eq!(
+                actual.one_time_prekey_public_key,
+                expected
+                    .one_time_prekey_public_key_hex
+                    .as_deref()
+                    .map(hex_array::<32>),
+                "{name} one-time prekey public key"
+            );
+        }
+        _ => panic!("{name} prekey reference mismatch"),
+    }
+}
+
+fn assert_decrypted_metadata(
+    actual: &aether_core::InboundMessageResult,
+    expected: &DecryptedMetadataFixture,
+    name: &str,
+) {
+    assert_eq!(
+        actual.message_id.as_bytes(),
+        &hex_array::<16>(&expected.id_hex),
+        "{name} decrypted id"
+    );
+    assert_eq!(
+        actual.timestamp_millis, expected.timestamp_millis,
+        "{name} decrypted timestamp"
+    );
+    assert_eq!(
+        actual.payload_kind,
         payload_kind(&expected.payload_kind),
-        "{name} payload kind"
-    );
-    assert_eq!(
-        message.payload,
-        hex::decode(&expected.payload_hex).unwrap(),
-        "{name} payload"
+        "{name} decrypted payload kind"
     );
 }
 
@@ -411,11 +500,11 @@ fn sender_identity_signing_key(
 
 fn copy_message(message: &Message) -> Message {
     Message {
-        id: message.id,
+        version: message.version,
         recipient_public_key: message.recipient_public_key,
-        timestamp_millis: message.timestamp_millis,
-        payload_kind: message.payload_kind,
-        payload: message.payload.clone(),
+        prekey_reference: message.prekey_reference,
+        ephemeral_public_key: message.ephemeral_public_key,
+        ciphertext: message.ciphertext.clone(),
     }
 }
 

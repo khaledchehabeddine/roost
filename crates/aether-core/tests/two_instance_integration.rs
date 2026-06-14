@@ -12,10 +12,10 @@ use aether_core::{
     SenderCertificateIdentityKey, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
-    IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey, RatchetState,
-    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
-    sign_identity_key_binding,
+    DiscoveryKey, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey,
+    RatchetState, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initiate, sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -236,6 +236,24 @@ fn accepted_contact_identity() -> ContactIdentity {
     }
 }
 
+fn accepted_contact_discovery_key() -> DiscoveryKey {
+    let identity = sender_identity_signing_key(0xa1);
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    generate_discovery_key(&mut rng, identity, 0, CREATED_AT)
+}
+
+fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
+    Box::leak(Box::new(accepted_contact_discovery_key()))
+}
+
+fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
+    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
+}
+
+fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
+    Box::leak(Box::new(acknowledgment_recipient_discovery_key()))
+}
+
 struct ValidatedSender {
     sender_identity: SenderIdentityMaterial,
     domain_identifier: Vec<u8>,
@@ -314,7 +332,9 @@ fn acknowledgment<'a>(
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
         sender_identity_signing_key: sender_identity_signing_key_for_material(sender_identity),
-        recipient_public_key: [3u8; 32],
+        recipient_public_key: *acknowledgment_recipient_discovery_key()
+            .public_key()
+            .as_bytes(),
         timestamp_millis: 1_700_000_100_000 + u64::from(id),
     }
 }
@@ -330,6 +350,7 @@ fn inbound<'a>(
         session_key,
         deduplication_key,
         message,
+        recipient_discovery_key: accepted_contact_discovery_key_ref(),
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: None,
     }
@@ -348,6 +369,7 @@ fn inbound_with_certificate_validation<'a>(
         session_key,
         deduplication_key,
         message,
+        recipient_discovery_key: accepted_contact_discovery_key_ref(),
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             domain_signing_keys,
@@ -365,6 +387,7 @@ fn inbound_acknowledgment<'a>(
     InboundAcknowledgmentMessage {
         session_key,
         message,
+        recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
     }
 }
 
@@ -489,6 +512,7 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
             outbound(0x01, b"first", &alice.sender_identity),
         )
         .unwrap();
+    let first_message_id = first.message_id;
     let first_message = first.message;
     alice_store.apply_all(first.state_updates);
     let second = second_instance
@@ -498,6 +522,7 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
             outbound(0x02, b"second", &alice.sender_identity),
         )
         .unwrap();
+    let second_message_id = second.message_id;
     let second_message = second.message;
     alice_store.apply_all(second.state_updates);
 
@@ -505,8 +530,8 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
         .pending_acknowledgments(&alice_store.snapshot(), session_key.clone())
         .unwrap();
     assert_eq!(pending.len(), 2);
-    assert_eq!(pending[0].message.id, first_message.id);
-    assert_eq!(pending[1].message.id, second_message.id);
+    assert_eq!(pending[0].message_id, first_message_id);
+    assert_eq!(pending[1].message_id, second_message_id);
 
     let early_retry = first_instance
         .retry_instructions(
@@ -527,8 +552,8 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
         )
         .unwrap();
     assert_eq!(due_retry.instructions.len(), 2);
-    assert_eq!(due_retry.instructions[0].message.id, first_message.id);
-    assert_eq!(due_retry.instructions[1].message.id, second_message.id);
+    assert_eq!(due_retry.instructions[0].message_id, first_message_id);
+    assert_eq!(due_retry.instructions[1].message_id, second_message_id);
     alice_store.apply_all(due_retry.state_updates);
 
     let second_received = first_instance
@@ -620,12 +645,12 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
     let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
         panic!("acknowledgment did not clear pending state")
     };
-    assert_eq!(cleared.acknowledged_message_id, second_message.id);
+    assert_eq!(cleared.acknowledged_message_id, second_message_id);
     alice_store.apply_all(cleared.state_updates);
     emit_event(
         &events,
         InstanceEvent::AcknowledgmentCleared {
-            id: second_message.id,
+            id: second_message_id,
         },
     );
     let Some(EventStreamItem::Event(cleared_event)) = ordered_observer.poll_next().unwrap() else {
@@ -641,7 +666,7 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
     assert_eq!(
         resumed_event.event(),
         &InstanceEvent::AcknowledgmentCleared {
-            id: second_message.id
+            id: second_message_id
         }
     );
     assert_eq!(lagged_observer.poll_next().unwrap(), None);
@@ -650,7 +675,7 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
         .pending_acknowledgments(&alice_store.snapshot(), session_key)
         .unwrap();
     assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].message.id, first_message.id);
+    assert_eq!(remaining[0].message_id, first_message_id);
     assert_eq!(remaining[0].last_retry_millis, Some(1_700_000_001_002));
 }
 
@@ -681,6 +706,7 @@ fn blocked_out_of_order_and_duplicate_messages_ack_without_visible_events() {
             outbound(0x61, b"blocked first", &alice.sender_identity),
         )
         .unwrap();
+    let first_message_id = first.message_id;
     let first_message = first.message;
     alice_store.apply_all(first.state_updates);
     let second = second_instance
@@ -690,6 +716,7 @@ fn blocked_out_of_order_and_duplicate_messages_ack_without_visible_events() {
             outbound(0x62, b"blocked second", &alice.sender_identity),
         )
         .unwrap();
+    let second_message_id = second.message_id;
     let second_message = second.message;
     alice_store.apply_all(second.state_updates);
 
@@ -760,14 +787,14 @@ fn blocked_out_of_order_and_duplicate_messages_ack_without_visible_events() {
     let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
         panic!("acknowledgment did not clear pending state")
     };
-    assert_eq!(cleared.acknowledged_message_id, second_message.id);
+    assert_eq!(cleared.acknowledged_message_id, second_message_id);
     alice_store.apply_all(cleared.state_updates);
 
     let pending = first_instance
         .pending_acknowledgments(&alice_store.snapshot(), session_key)
         .unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].message.id, first_message.id);
+    assert_eq!(pending[0].message_id, first_message_id);
 }
 
 #[test]
