@@ -1,10 +1,9 @@
 use std::error::Error;
 use std::fmt;
 
+use crate::hardening::ProtocolHardeningLimits;
 use aether_crypto::{SealedFrame, SealedFramePreKeyReference};
 
-pub(crate) const MAX_MESSAGE_PAYLOAD_LEN: usize = 128 * 1024;
-pub(crate) const MAX_ENCODED_MESSAGE_LEN: usize = SealedFrame::MAX_ENCODED_LEN;
 const PUBLIC_KEY_LEN: usize = 32;
 
 /// The UUID-shaped identifier for a [`Message`].
@@ -47,13 +46,35 @@ impl Message {
     ///
     /// # Errors
     /// - [`MessageError::PayloadTooLarge`] if `ciphertext` exceeds the message payload cap.
-    /// - [`MessageError::Encode`] if Postcard rejects the wire form or the encoded output exceeds
-    ///   the message size cap.
+    /// - [`MessageError::EncodedTooLarge`] if the encoded output exceeds the encoded-message cap.
+    /// - [`MessageError::Encode`] if Postcard rejects the wire form.
     pub fn to_bytes(&self) -> Result<Vec<u8>, MessageError> {
-        if self.ciphertext.len() > MAX_MESSAGE_PAYLOAD_LEN {
+        self.to_bytes_with_hardening_limits(ProtocolHardeningLimits::default())
+    }
+
+    /// Encodes this message with caller-selected hardening limits.
+    ///
+    /// # Errors
+    /// - [`MessageError::PayloadTooLarge`] if `ciphertext` exceeds the configured payload cap.
+    /// - [`MessageError::EncodedTooLarge`] if the encoded output exceeds the configured
+    ///   encoded-message cap.
+    /// - [`MessageError::Encode`] if Postcard rejects the wire form.
+    pub fn to_bytes_with_hardening_limits(
+        &self,
+        limits: ProtocolHardeningLimits,
+    ) -> Result<Vec<u8>, MessageError> {
+        let limits = limits.bounded();
+        if self.ciphertext.len() > limits.max_message_payload_len {
             return Err(MessageError::PayloadTooLarge);
         }
-        self.to_frame().to_bytes().map_err(|_| MessageError::Encode)
+        let bytes = self
+            .to_frame()
+            .to_bytes()
+            .map_err(|_| MessageError::Encode)?;
+        if bytes.len() > limits.max_encoded_message_len {
+            return Err(MessageError::EncodedTooLarge);
+        }
+        Ok(bytes)
     }
 
     /// Decodes a sealed-frame message from bytes produced by [`Self::to_bytes`].
@@ -61,15 +82,34 @@ impl Message {
     /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
     ///
     /// # Errors
-    /// - [`MessageError::Decode`] if the bytes are empty, oversized, malformed, unsupported, or
-    ///   have trailing data.
+    /// - [`MessageError::EncodedTooLarge`] if `bytes` exceeds the encoded-message cap.
+    /// - [`MessageError::Decode`] if the bytes are empty, malformed, unsupported, or have trailing
+    ///   data.
     /// - [`MessageError::PayloadTooLarge`] if the decoded ciphertext exceeds the payload cap.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MessageError> {
-        if bytes.len() > MAX_ENCODED_MESSAGE_LEN {
-            return Err(MessageError::Decode);
+        Self::from_bytes_with_hardening_limits(bytes, ProtocolHardeningLimits::default())
+    }
+
+    /// Decodes a sealed-frame message with caller-selected hardening limits.
+    ///
+    /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
+    ///
+    /// # Errors
+    /// - [`MessageError::EncodedTooLarge`] if `bytes` exceeds the configured encoded-message cap.
+    /// - [`MessageError::Decode`] if the bytes are empty, malformed, unsupported, or have trailing
+    ///   data.
+    /// - [`MessageError::PayloadTooLarge`] if the decoded ciphertext exceeds the configured
+    ///   payload cap.
+    pub fn from_bytes_with_hardening_limits(
+        bytes: &[u8],
+        limits: ProtocolHardeningLimits,
+    ) -> Result<Self, MessageError> {
+        let limits = limits.bounded();
+        if bytes.len() > limits.max_encoded_message_len {
+            return Err(MessageError::EncodedTooLarge);
         }
         let frame = SealedFrame::from_bytes(bytes).map_err(|_| MessageError::Decode)?;
-        if frame.ciphertext.len() > MAX_MESSAGE_PAYLOAD_LEN {
+        if frame.ciphertext.len() > limits.max_message_payload_len {
             return Err(MessageError::PayloadTooLarge);
         }
         Ok(Self::from_frame(frame))
@@ -136,6 +176,8 @@ impl PayloadKind {
 pub enum MessageError {
     /// Message bytes failed structural decoding.
     Decode,
+    /// Encoded message bytes exceed the configured size cap.
+    EncodedTooLarge,
     /// Message bytes failed to encode.
     Encode,
     /// A public-key field did not contain exactly 32 bytes.
@@ -152,6 +194,7 @@ impl fmt::Display for MessageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MessageError::Decode => write!(f, "message bytes failed to decode"),
+            MessageError::EncodedTooLarge => write!(f, "message bytes exceed size limit"),
             MessageError::Encode => write!(f, "message failed to encode"),
             MessageError::InvalidPublicKey => write!(f, "message public key field is invalid"),
             MessageError::PayloadTooLarge => write!(f, "message payload exceeds size limit"),
@@ -275,7 +318,8 @@ mod tests {
     #[test]
     fn to_bytes_rejects_oversized_payload() {
         let mut message = message();
-        message.ciphertext = vec![0; MAX_MESSAGE_PAYLOAD_LEN + 1];
+        message.ciphertext =
+            vec![0; ProtocolHardeningLimits::default().max_message_payload_len + 1];
 
         match message.to_bytes() {
             Ok(_) => panic!("message encoded unexpectedly"),

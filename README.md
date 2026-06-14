@@ -38,3 +38,4 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - [`docs/adr/`](docs/adr/) — workspace-wide architectural decisions (per-crate decisions under `crates/<crate>/docs/adr/`)
 - [`docs/building-mobile.md`](docs/building-mobile.md) — Android, iOS, and manual UniFFI bindings
 - [`docs/security/secret-handling.md`](docs/security/secret-handling.md) — secret-handling audit notes and limits
+- [`docs/security.md`](docs/security.md) — DoS limits, caller responsibilities, and constrained-host trade-offs

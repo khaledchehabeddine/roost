@@ -4,10 +4,14 @@ use crate::contact::{
     ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
 };
+use crate::hardening::{
+    DEFAULT_MAX_ACKNOWLEDGMENT_DIGESTS, DEFAULT_MAX_PENDING_ACKNOWLEDGMENTS,
+    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits,
+    validate_hardening_limits,
+};
 use crate::key_encoding::{
     PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes, validate_x25519_public_key,
 };
-use crate::message::{MAX_ENCODED_MESSAGE_LEN, MAX_MESSAGE_PAYLOAD_LEN};
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
 use crate::sender_certificate::{
     DomainSigningKey, RevocationState, SenderCertificateValidationError,
@@ -21,7 +25,8 @@ use aether_crypto::{
 };
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as DeError, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -53,31 +58,10 @@ const RATCHET_AEAD_TAG_LEN: usize = 16;
 const SEALED_SENDER_ENVELOPE_VERSION: u8 = 1;
 const MESSAGE_TRANSCRIPT_CONTEXT: &[u8] = b"AetherMessageTranscript-v1:";
 const SEALED_SENDER_ENCODING_OVERHEAD_CAP: usize = 64;
-const MAX_SEALED_SENDER_ENVELOPE_LEN: usize =
-    MAX_MESSAGE_PAYLOAD_LEN - RATCHET_PAYLOAD_HEADER_LEN - RATCHET_AEAD_TAG_LEN;
-const MAX_SEALED_SENDER_CONTENT_LEN: usize =
-    MAX_SEALED_SENDER_ENVELOPE_LEN - 32 - SEALED_SENDER_ENCODING_OVERHEAD_CAP;
-const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
-const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
 const TRANSCRIPT_SIGNATURE_LEN: usize = 64;
-const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
-const MAX_PENDING_ACKNOWLEDGMENTS: usize = 1024;
-const MAX_ACKNOWLEDGMENT_DIGESTS: usize = 1024;
 const PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP: usize = 64;
 const PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP: usize = 64;
-const MAX_PENDING_ACKNOWLEDGMENTS_BLOB_LEN: usize = PROTOCOL_STATE_BLOB_HEADER_LEN
-    + PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP
-    + MAX_PENDING_ACKNOWLEDGMENTS
-        * (MAX_ENCODED_MESSAGE_LEN + PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP)
-    + MAX_ACKNOWLEDGMENT_DIGESTS * ACKNOWLEDGMENT_DIGEST_LEN;
-
-/// Default number of received-message digests retained per local Identity.
-pub const DEFAULT_DEDUPLICATION_CAPACITY: usize = 1024;
-/// Minimum supported received-message deduplication capacity.
-pub const MIN_DEDUPLICATION_CAPACITY: usize = 64;
-/// Maximum supported received-message deduplication capacity.
-pub const MAX_DEDUPLICATION_CAPACITY: usize = 2048;
 
 /// The UUID-shaped identifier for a cryptographic Session.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -597,7 +581,7 @@ pub enum BlockedContactAcknowledgmentPolicy {
 /// decryption starts.
 #[derive(Clone, Copy)]
 pub struct ProtocolStateEngine {
-    deduplication_capacity: usize,
+    limits: ProtocolHardeningLimits,
     blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy,
 }
 
@@ -605,10 +589,34 @@ impl ProtocolStateEngine {
     /// Creates a stateless protocol-state engine.
     #[must_use]
     pub fn new() -> Self {
+        let limits = ProtocolHardeningLimits::default();
         Self {
-            deduplication_capacity: DEFAULT_DEDUPLICATION_CAPACITY,
+            limits,
             blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::default(),
         }
+    }
+
+    /// Creates a stateless protocol-state engine with caller-selected hardening limits.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::InvalidDeduplicationCapacity`] if the deduplication capacity is
+    ///   outside the supported range.
+    /// - [`ProtocolStateError::InvalidHardeningLimit`] if any other limit is zero or above the
+    ///   supported ceiling.
+    pub fn with_hardening_limits(
+        limits: ProtocolHardeningLimits,
+    ) -> Result<Self, ProtocolStateError> {
+        validate_hardening_limits(limits)?;
+        Ok(Self {
+            limits,
+            blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::default(),
+        })
+    }
+
+    /// Returns the hardening limits used by this engine.
+    #[must_use]
+    pub fn hardening_limits(&self) -> ProtocolHardeningLimits {
+        self.limits
     }
 
     /// Creates a stateless protocol-state engine with a received-message deduplication capacity.
@@ -617,11 +625,9 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::InvalidDeduplicationCapacity`] if `capacity` is outside the
     ///   supported range.
     pub fn with_deduplication_capacity(capacity: usize) -> Result<Self, ProtocolStateError> {
-        validate_configured_deduplication_capacity(capacity)?;
-        Ok(Self {
-            deduplication_capacity: capacity,
-            blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::default(),
-        })
+        let mut limits = ProtocolHardeningLimits::default();
+        limits.deduplication_capacity = capacity;
+        Self::with_hardening_limits(limits)
     }
 
     /// Sets the acknowledgment policy applied to Messages from blocked senders.
@@ -651,13 +657,13 @@ impl ProtocolStateEngine {
         let mut digest_key = Zeroizing::new([0u8; DEDUPLICATION_KEY_LEN]);
         rng.fill_bytes(&mut digest_key[..]);
         let state = LoadedDeduplicationSet {
-            capacity: self.deduplication_capacity,
+            capacity: self.limits.deduplication_capacity,
             digest_key,
             digests: Vec::new(),
         };
         Ok(ProtocolStateUpdate::set(
             address.clone(),
-            encode_deduplication_set(&address, &state)?,
+            encode_deduplication_set(&address, &state, self.limits)?,
         ))
     }
 
@@ -681,7 +687,7 @@ impl ProtocolStateEngine {
         };
         Ok(ProtocolStateUpdate::set(
             address.clone(),
-            encode_pending_acknowledgments(&address, &state)?,
+            encode_pending_acknowledgments(&address, &state, self.limits)?,
         ))
     }
 
@@ -704,7 +710,7 @@ impl ProtocolStateEngine {
         let address = ratchet_address(key);
         Ok(ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, state, None, None)?,
+            encode_session_state(&address, state, None, None, self.limits)?,
         ))
     }
 
@@ -746,7 +752,13 @@ impl ProtocolStateEngine {
         let address = ratchet_address(key);
         Ok(ProtocolStateUpdate::set(
             address.clone(),
-            encode_session_state(&address, state, Some(peer_sender_identity_key), None)?,
+            encode_session_state(
+                &address,
+                state,
+                Some(peer_sender_identity_key),
+                None,
+                self.limits,
+            )?,
         ))
     }
 
@@ -773,7 +785,7 @@ impl ProtocolStateEngine {
         peer_sender_identity_key: [u8; 32],
     ) -> Result<ProtocolStateUpdate, ProtocolStateError> {
         let address = ratchet_address(key);
-        let loaded = load_session_state(snapshot, &address)?;
+        let loaded = load_session_state(snapshot, &address, self.limits)?;
         let state = active_session_state(&address, loaded.status)?;
         let peer_sender_identity_key = match loaded.peer_sender_identity_key {
             Some(existing)
@@ -794,6 +806,7 @@ impl ProtocolStateEngine {
                 &state,
                 Some(peer_sender_identity_key),
                 loaded.contact_identity_key,
+                self.limits,
             )?,
         ))
     }
@@ -822,7 +835,7 @@ impl ProtocolStateEngine {
         validate_contact_identity(&address, &contact_identity)?;
         let contact = match snapshot.get(&address) {
             Some(blob) => {
-                let current = decode_contact_state(&address, blob)?;
+                let current = decode_contact_state(&address, blob, self.limits)?;
                 if contact_discovery_key_is_newer(
                     &current.identity.discovery_key,
                     &contact_identity.discovery_key,
@@ -846,7 +859,7 @@ impl ProtocolStateEngine {
                 blocked: false,
             },
         };
-        changed_contact_state(address, contact)
+        changed_contact_state(address, contact, self.limits)
     }
 
     /// Returns the Contact State for one peer Identity Key, if present.
@@ -864,7 +877,7 @@ impl ProtocolStateEngine {
         validate_contact_identity_key(&address, &identity_key)?;
         snapshot
             .get(&address)
-            .map(|blob| decode_contact_state(&address, blob))
+            .map(|blob| decode_contact_state(&address, blob, self.limits))
             .transpose()
     }
 
@@ -881,7 +894,7 @@ impl ProtocolStateEngine {
             .blobs
             .iter()
             .filter(|(address, _)| address.kind == ProtocolStateKind::ContactState)
-            .map(|(address, blob)| decode_contact_state(address, blob))
+            .map(|(address, blob)| decode_contact_state(address, blob, self.limits))
             .collect()
     }
 
@@ -903,7 +916,7 @@ impl ProtocolStateEngine {
     ) -> Result<ContactStateChange, ProtocolStateError> {
         let address = contact_address(identity_key);
         validate_contact_identity_key(&address, &identity_key)?;
-        let mut contact = load_contact_state(snapshot, &address)?;
+        let mut contact = load_contact_state(snapshot, &address, self.limits)?;
         if contact.trust_state != ContactTrustState::Pending {
             return Ok(ContactStateChange {
                 contact,
@@ -912,7 +925,7 @@ impl ProtocolStateEngine {
             });
         }
         contact.trust_state = ContactTrustState::Unverified;
-        changed_contact_state(address, contact)
+        changed_contact_state(address, contact, self.limits)
     }
 
     /// Locally blocks a contact without changing its Trust State.
@@ -985,7 +998,7 @@ impl ProtocolStateEngine {
                 address: address.clone(),
                 reason: "identity key is invalid".into(),
             })?;
-        let mut contact = load_contact_state(snapshot, &address)?;
+        let mut contact = load_contact_state(snapshot, &address, self.limits)?;
         match contact.trust_state {
             ContactTrustState::Pending => {
                 return Err(ProtocolStateError::InvalidStateBinding {
@@ -1015,7 +1028,8 @@ impl ProtocolStateEngine {
             ));
         }
         contact.trust_state = ContactTrustState::Verified;
-        changed_contact_state(address, contact).map(ContactSafetyNumberConfirmation::Matched)
+        changed_contact_state(address, contact, self.limits)
+            .map(ContactSafetyNumberConfirmation::Matched)
     }
 
     fn set_contact_blocked(
@@ -1026,7 +1040,7 @@ impl ProtocolStateEngine {
     ) -> Result<ContactStateChange, ProtocolStateError> {
         let address = contact_address(identity_key);
         validate_contact_identity_key(&address, &identity_key)?;
-        let mut contact = load_contact_state(snapshot, &address)?;
+        let mut contact = load_contact_state(snapshot, &address, self.limits)?;
         if contact.blocked == blocked {
             return Ok(ContactStateChange {
                 contact,
@@ -1035,7 +1049,7 @@ impl ProtocolStateEngine {
             });
         }
         contact.blocked = blocked;
-        changed_contact_state(address, contact)
+        changed_contact_state(address, contact, self.limits)
     }
 
     /// Returns deletion updates for all protocol-state kinds at `key`.
@@ -1077,16 +1091,17 @@ impl ProtocolStateEngine {
     ) -> Result<OutboundMessageResult, ProtocolStateError> {
         let pending_address = pending_acknowledgment_address(key.clone());
         let address = ratchet_address(key);
-        let loaded = load_session_state(snapshot, &address)?;
+        let loaded = load_session_state(snapshot, &address, self.limits)?;
         let contact_identity_key =
             session_contact_identity_key(&address, &loaded, plaintext.contact_identity_key)?;
         ensure_contact_allows_outbound(
             snapshot,
             contact_identity_key,
             &plaintext.recipient_public_key,
+            self.limits,
         )?;
         let session_key_bytes = address.key().as_bytes().to_vec();
-        let mut pending = load_pending_acknowledgments(snapshot, &pending_address)?;
+        let mut pending = load_pending_acknowledgments(snapshot, &pending_address, self.limits)?;
         let mut state = active_session_state(&address, loaded.status)?;
         let transcript_signature = sign_message_transcript(
             plaintext.sender_identity_signing_key,
@@ -1103,6 +1118,7 @@ impl ProtocolStateEngine {
             plaintext.sender_identity,
             &transcript_signature.to_bytes(),
             plaintext.plaintext,
+            self.limits,
         )?;
         let associated_data =
             ratchet_associated_data(&session_key_bytes, &plaintext.recipient_public_key);
@@ -1124,7 +1140,7 @@ impl ProtocolStateEngine {
         )?;
         let message = Message::from_frame(frame);
         message
-            .to_bytes()
+            .to_bytes_with_hardening_limits(self.limits)
             .map_err(ProtocolStateError::MessageEncode)?;
         record_pending_acknowledgment(
             &pending_address,
@@ -1132,6 +1148,7 @@ impl ProtocolStateEngine {
             plaintext.id,
             plaintext.timestamp_millis,
             &message,
+            self.limits,
         )?;
         let update = ProtocolStateUpdate::set(
             address.clone(),
@@ -1140,11 +1157,12 @@ impl ProtocolStateEngine {
                 &state,
                 loaded.peer_sender_identity_key,
                 Some(contact_identity_key),
+                self.limits,
             )?,
         );
         let pending_update = ProtocolStateUpdate::set(
             pending_address.clone(),
-            encode_pending_acknowledgments(&pending_address, &pending)?,
+            encode_pending_acknowledgments(&pending_address, &pending, self.limits)?,
         );
 
         Ok(OutboundMessageResult {
@@ -1196,11 +1214,12 @@ impl ProtocolStateEngine {
         inbound: InboundEncryptedMessage<'_>,
     ) -> Result<InboundMessageOutcome, ProtocolStateError> {
         let deduplication_address = deduplication_address(inbound.deduplication_key);
-        let mut deduplication = load_deduplication_set(snapshot, &deduplication_address)?;
         let encoded = inbound
             .message
-            .to_bytes()
+            .to_bytes_with_hardening_limits(self.limits)
             .map_err(ProtocolStateError::MessageEncode)?;
+        let mut deduplication =
+            load_deduplication_set(snapshot, &deduplication_address, self.limits)?;
         let digest = deduplication_digest(&deduplication.digest_key, &encoded);
         if contains_digest(&deduplication.digests, &digest) {
             return Ok(InboundMessageOutcome::Duplicate);
@@ -1208,7 +1227,7 @@ impl ProtocolStateEngine {
 
         let address = ratchet_address(inbound.session_key);
         let session_key_bytes = address.key().as_bytes().to_vec();
-        let loaded = load_session_state(snapshot, &address)?;
+        let loaded = load_session_state(snapshot, &address, self.limits)?;
         let LoadedSessionState {
             status,
             peer_sender_identity_key,
@@ -1227,6 +1246,7 @@ impl ProtocolStateEngine {
                         event_emitted,
                         peer_sender_identity_key,
                         contact_identity_key,
+                        self.limits,
                     )?,
                 )));
             }
@@ -1254,7 +1274,7 @@ impl ProtocolStateEngine {
         let associated_data =
             ratchet_associated_data(&session_key_bytes, &message.recipient_public_key);
         let sealed = state.ratchet_decrypt(rng, ciphertext, &header, &associated_data)?;
-        let decoded = decode_sealed_sender_envelope(&sealed)?;
+        let decoded = decode_sealed_sender_envelope(&sealed, self.limits)?;
         if !sender_identity_key_matches(
             &expected_sender_identity_key,
             &decoded.sender_identity.identity_key,
@@ -1282,9 +1302,10 @@ impl ProtocolStateEngine {
             validation,
             &decoded.sender_identity,
             contact_identity_key,
+            self.limits,
         )?;
         record_deduplication_digest(&mut deduplication, digest);
-        let blocked = contact_is_blocked(snapshot, inbound_contact_identity_key)?;
+        let blocked = contact_is_blocked(snapshot, inbound_contact_identity_key, self.limits)?;
         // Unreachable policy suppresses the acknowledgment and leaves the sending chain unadvanced;
         // the receiving-chain advance and recorded digest are still committed below.
         if blocked
@@ -1298,6 +1319,7 @@ impl ProtocolStateEngine {
                 inbound_contact_identity_key,
                 &deduplication_address,
                 &deduplication,
+                self.limits,
             )?;
             return Ok(InboundMessageOutcome::Blocked(Box::new(
                 BlockedInboundMessageResult {
@@ -1312,6 +1334,7 @@ impl ProtocolStateEngine {
             &inbound.acknowledgment,
             frame_plaintext.id,
             rng,
+            self.limits,
         )?;
         let state_updates = receive_state_updates(
             &address,
@@ -1320,6 +1343,7 @@ impl ProtocolStateEngine {
             inbound_contact_identity_key,
             &deduplication_address,
             &deduplication,
+            self.limits,
         )?;
         if blocked {
             return Ok(InboundMessageOutcome::Blocked(Box::new(
@@ -1355,7 +1379,7 @@ impl ProtocolStateEngine {
         key: ProtocolStateKey,
     ) -> Result<Vec<PendingAcknowledgment>, ProtocolStateError> {
         let address = pending_acknowledgment_address(key);
-        let pending = load_pending_acknowledgments(snapshot, &address)?;
+        let pending = load_pending_acknowledgments(snapshot, &address, self.limits)?;
         Ok(pending
             .pending
             .iter()
@@ -1387,7 +1411,7 @@ impl ProtocolStateEngine {
         retry_window_millis: u64,
     ) -> Result<RetryInstructionResult, ProtocolStateError> {
         let address = pending_acknowledgment_address(key);
-        let mut pending = load_pending_acknowledgments(snapshot, &address)?;
+        let mut pending = load_pending_acknowledgments(snapshot, &address, self.limits)?;
         let mut instructions = Vec::new();
         for (message_id, entry) in pending.pending.iter_mut() {
             let reference = entry.last_retry_millis.unwrap_or(entry.first_sent_millis);
@@ -1407,7 +1431,7 @@ impl ProtocolStateEngine {
         } else {
             vec![ProtocolStateUpdate::set(
                 address.clone(),
-                encode_pending_acknowledgments(&address, &pending)?,
+                encode_pending_acknowledgments(&address, &pending, self.limits)?,
             )]
         };
         Ok(RetryInstructionResult {
@@ -1442,19 +1466,19 @@ impl ProtocolStateEngine {
         inbound: InboundAcknowledgmentMessage<'_>,
     ) -> Result<AcknowledgmentOutcome, ProtocolStateError> {
         let pending_address = pending_acknowledgment_address(inbound.session_key.clone());
-        let mut pending = load_pending_acknowledgments(snapshot, &pending_address)?;
         let encoded = inbound
             .message
-            .to_bytes()
+            .to_bytes_with_hardening_limits(self.limits)
             .map_err(ProtocolStateError::MessageEncode)?;
         let digest = acknowledgment_digest(&encoded);
-        if contains_acknowledgment_digest(&pending.acknowledgment_digests, &digest) {
+        if pending_acknowledgment_digest_seen(snapshot, &pending_address, digest, self.limits)? {
             return Ok(AcknowledgmentOutcome::Duplicate);
         }
+        let mut pending = load_pending_acknowledgments(snapshot, &pending_address, self.limits)?;
 
         let address = ratchet_address(inbound.session_key);
         let session_key_bytes = address.key().as_bytes().to_vec();
-        let loaded = load_session_state(snapshot, &address)?;
+        let loaded = load_session_state(snapshot, &address, self.limits)?;
         let LoadedSessionState {
             status,
             peer_sender_identity_key,
@@ -1473,6 +1497,7 @@ impl ProtocolStateEngine {
                         event_emitted,
                         peer_sender_identity_key,
                         contact_identity_key,
+                        self.limits,
                     )?,
                 )));
             }
@@ -1500,7 +1525,7 @@ impl ProtocolStateEngine {
         let associated_data =
             ratchet_associated_data(&session_key_bytes, &message.recipient_public_key);
         let sealed = state.ratchet_decrypt(rng, ciphertext, &header, &associated_data)?;
-        let decoded = decode_sealed_sender_envelope(&sealed)?;
+        let decoded = decode_sealed_sender_envelope(&sealed, self.limits)?;
         if !sender_identity_key_matches(
             &expected_sender_identity_key,
             &decoded.sender_identity.identity_key,
@@ -1522,7 +1547,7 @@ impl ProtocolStateEngine {
             &decoded.transcript_signature,
         )?;
         let acknowledged_message_id = decode_acknowledgment_plaintext(&decoded.plaintext)?;
-        record_acknowledgment_digest(&mut pending, digest);
+        record_acknowledgment_digest(&mut pending, digest, self.limits);
         let cleared = pending
             .pending
             .remove(acknowledged_message_id.as_bytes())
@@ -1534,11 +1559,12 @@ impl ProtocolStateEngine {
                 &state,
                 Some(expected_sender_identity_key),
                 contact_identity_key,
+                self.limits,
             )?,
         );
         let pending_update = ProtocolStateUpdate::set(
             pending_address.clone(),
-            encode_pending_acknowledgments(&pending_address, &pending)?,
+            encode_pending_acknowledgments(&pending_address, &pending, self.limits)?,
         );
         let state_updates = vec![session_update, pending_update];
         if cleared {
@@ -1605,6 +1631,17 @@ pub enum ProtocolStateError {
         /// Maximum supported capacity.
         maximum: usize,
     },
+    /// A configured hardening limit is outside supported bounds.
+    InvalidHardeningLimit {
+        /// Name of the rejected limit.
+        name: &'static str,
+        /// Requested limit.
+        value: usize,
+        /// Minimum supported value.
+        minimum: usize,
+        /// Maximum supported value.
+        maximum: usize,
+    },
     /// A Message failed canonical encoding.
     MessageEncode(MessageError),
     /// A state binding operation would violate an existing protocol-state invariant.
@@ -1666,6 +1703,15 @@ impl fmt::Display for ProtocolStateError {
                 f,
                 "invalid deduplication capacity: {capacity} outside {minimum}..={maximum}"
             ),
+            Self::InvalidHardeningLimit {
+                name,
+                value,
+                minimum,
+                maximum,
+            } => write!(
+                f,
+                "invalid hardening limit for {name}: {value} outside {minimum}..={maximum}"
+            ),
             Self::InvalidStateBinding { address, reason } => {
                 write!(f, "invalid protocol-state binding at {address}: {reason}")
             }
@@ -1697,6 +1743,7 @@ impl Error for ProtocolStateError {
             Self::BlobDecode { .. }
             | Self::BlobEncode { .. }
             | Self::InvalidDeduplicationCapacity { .. }
+            | Self::InvalidHardeningLimit { .. }
             | Self::InvalidMessage { .. }
             | Self::InvalidStateBinding { .. }
             | Self::InvalidStateKey { .. }
@@ -1727,17 +1774,6 @@ fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress
 
 fn contact_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::ContactState, identity_key.into())
-}
-
-fn validate_configured_deduplication_capacity(capacity: usize) -> Result<(), ProtocolStateError> {
-    if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
-        return Err(ProtocolStateError::InvalidDeduplicationCapacity {
-            capacity,
-            minimum: MIN_DEDUPLICATION_CAPACITY,
-            maximum: MAX_DEDUPLICATION_CAPACITY,
-        });
-    }
-    Ok(())
 }
 
 fn validate_persisted_deduplication_capacity(
@@ -1821,6 +1857,7 @@ fn encode_session_state(
     state: &RatchetState,
     peer_sender_identity_key: Option<[u8; 32]>,
     contact_identity_key: Option<ContactIdentityKey>,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
     let state_bytes = state.to_bytes()?;
     let payload = if let Some(contact_identity_key) = contact_identity_key {
@@ -1849,7 +1886,7 @@ fn encode_session_state(
             })?,
         )
     };
-    encode_session_payload(address, payload)
+    encode_session_payload(address, payload, limits)
 }
 
 fn encode_unrecoverable_session_state(
@@ -1858,6 +1895,7 @@ fn encode_unrecoverable_session_state(
     event_emitted: bool,
     peer_sender_identity_key: Option<[u8; 32]>,
     contact_identity_key: Option<ContactIdentityKey>,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
     let wire = SessionStateUnrecoverableWire {
         version: SESSION_STATE_UNRECOVERABLE_WIRE_VERSION,
@@ -1873,14 +1911,15 @@ fn encode_unrecoverable_session_state(
                 reason: "ratchet/session state failed to encode".into(),
             })?,
         );
-    encode_session_payload(address, payload)
+    encode_session_payload(address, payload, limits)
 }
 
 fn encode_session_payload(
     address: &ProtocolStateAddress,
     payload: Zeroizing<Vec<u8>>,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PROTOCOL_STATE_BLOB_LEN {
+    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > limits.max_protocol_state_blob_len {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
             reason: format!(
@@ -1965,7 +2004,9 @@ struct PendingAcknowledgmentWire<'a> {
 #[derive(Deserialize)]
 struct DecodedPendingAcknowledgmentsWire {
     version: u8,
+    #[serde(deserialize_with = "deserialize_pending_acknowledgment_list")]
     pending: Vec<DecodedPendingAcknowledgmentWire>,
+    #[serde(deserialize_with = "deserialize_acknowledgment_digest_list")]
     acknowledgment_digests: Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>,
 }
 
@@ -1975,6 +2016,100 @@ struct DecodedPendingAcknowledgmentWire {
     encoded_message: Vec<u8>,
     first_sent_millis: u64,
     last_retry_millis: Option<u64>,
+}
+
+fn deserialize_pending_acknowledgment_list<'de, D>(
+    deserializer: D,
+) -> Result<Vec<DecodedPendingAcknowledgmentWire>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct PendingAcknowledgmentListVisitor;
+
+    impl<'de> Visitor<'de> for PendingAcknowledgmentListVisitor {
+        type Value = Vec<DecodedPendingAcknowledgmentWire>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a bounded pending acknowledgment list")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if seq
+                .size_hint()
+                .is_some_and(|len| len > DEFAULT_MAX_PENDING_ACKNOWLEDGMENTS)
+            {
+                return Err(A::Error::custom(
+                    "pending acknowledgment count exceeds limit",
+                ));
+            }
+            let capacity = seq
+                .size_hint()
+                .unwrap_or(0)
+                .min(DEFAULT_MAX_PENDING_ACKNOWLEDGMENTS);
+            let mut pending = Vec::with_capacity(capacity);
+            while let Some(entry) = seq.next_element()? {
+                if pending.len() == DEFAULT_MAX_PENDING_ACKNOWLEDGMENTS {
+                    return Err(A::Error::custom(
+                        "pending acknowledgment count exceeds limit",
+                    ));
+                }
+                pending.push(entry);
+            }
+            Ok(pending)
+        }
+    }
+
+    deserializer.deserialize_seq(PendingAcknowledgmentListVisitor)
+}
+
+fn deserialize_acknowledgment_digest_list<'de, D>(
+    deserializer: D,
+) -> Result<Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct AcknowledgmentDigestListVisitor;
+
+    impl<'de> Visitor<'de> for AcknowledgmentDigestListVisitor {
+        type Value = Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a bounded acknowledgment digest list")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            if seq
+                .size_hint()
+                .is_some_and(|len| len > DEFAULT_MAX_ACKNOWLEDGMENT_DIGESTS)
+            {
+                return Err(A::Error::custom(
+                    "acknowledgment digest count exceeds limit",
+                ));
+            }
+            let capacity = seq
+                .size_hint()
+                .unwrap_or(0)
+                .min(DEFAULT_MAX_ACKNOWLEDGMENT_DIGESTS);
+            let mut digests = Vec::with_capacity(capacity);
+            while let Some(digest) = seq.next_element()? {
+                if digests.len() == DEFAULT_MAX_ACKNOWLEDGMENT_DIGESTS {
+                    return Err(A::Error::custom(
+                        "acknowledgment digest count exceeds limit",
+                    ));
+                }
+                digests.push(digest);
+            }
+            Ok(digests)
+        }
+    }
+
+    deserializer.deserialize_seq(AcknowledgmentDigestListVisitor)
 }
 
 #[derive(Serialize)]
@@ -2058,21 +2193,23 @@ struct DecodedMessageFramePlaintext {
 fn load_session_state(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
+    limits: ProtocolHardeningLimits,
 ) -> Result<LoadedSessionState, ProtocolStateError> {
     let blob = snapshot
         .get(address)
         .ok_or_else(|| ProtocolStateError::MissingRequiredState {
             address: address.clone(),
         })?;
-    decode_session_state(address, blob)
+    decode_session_state(address, blob, limits)
 }
 
 fn decode_session_state(
     address: &ProtocolStateAddress,
     blob: &ProtocolStateBlob,
+    limits: ProtocolHardeningLimits,
 ) -> Result<LoadedSessionState, ProtocolStateError> {
     let bytes = blob.as_bytes();
-    if bytes.len() > MAX_PROTOCOL_STATE_BLOB_LEN {
+    if bytes.len() > limits.max_protocol_state_blob_len {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: format!("ratchet/session blob length exceeds limit: {}", bytes.len()),
@@ -2199,6 +2336,7 @@ fn session_unrecoverable_result(
     event_emitted: bool,
     peer_sender_identity_key: Option<[u8; 32]>,
     contact_identity_key: Option<ContactIdentityKey>,
+    limits: ProtocolHardeningLimits,
 ) -> Result<SessionUnrecoverableResult, ProtocolStateError> {
     let session_key = address.key().clone();
     let (event, state_updates) = if event_emitted {
@@ -2216,6 +2354,7 @@ fn session_unrecoverable_result(
                 true,
                 peer_sender_identity_key,
                 contact_identity_key,
+                limits,
             )?,
         );
         (Some(event), vec![update])
@@ -2231,6 +2370,7 @@ fn session_unrecoverable_result(
 fn encode_deduplication_set(
     address: &ProtocolStateAddress,
     state: &LoadedDeduplicationSet,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
     validate_persisted_deduplication_capacity(address, state.capacity)?;
     if state.digests.len() > state.capacity {
@@ -2254,7 +2394,7 @@ fn encode_deduplication_set(
             reason: "deduplication set failed to encode".into(),
         })?,
     );
-    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PROTOCOL_STATE_BLOB_LEN {
+    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > limits.max_protocol_state_blob_len {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
             reason: format!(
@@ -2275,21 +2415,23 @@ fn encode_deduplication_set(
 fn load_deduplication_set(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
+    limits: ProtocolHardeningLimits,
 ) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
     let blob = snapshot
         .get(address)
         .ok_or_else(|| ProtocolStateError::MissingRequiredState {
             address: address.clone(),
         })?;
-    decode_deduplication_set(address, blob)
+    decode_deduplication_set(address, blob, limits)
 }
 
 fn decode_deduplication_set(
     address: &ProtocolStateAddress,
     blob: &ProtocolStateBlob,
+    limits: ProtocolHardeningLimits,
 ) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
     let bytes = blob.as_bytes();
-    if bytes.len() > MAX_PROTOCOL_STATE_BLOB_LEN {
+    if bytes.len() > limits.max_protocol_state_blob_len {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: format!(
@@ -2355,8 +2497,9 @@ fn decode_deduplication_set_payload(
 fn encode_pending_acknowledgments(
     address: &ProtocolStateAddress,
     state: &LoadedPendingAcknowledgments,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    if state.pending.len() > MAX_PENDING_ACKNOWLEDGMENTS {
+    if state.pending.len() > limits.max_pending_acknowledgments {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
             reason: format!(
@@ -2365,7 +2508,7 @@ fn encode_pending_acknowledgments(
             ),
         });
     }
-    if state.acknowledgment_digests.len() > MAX_ACKNOWLEDGMENT_DIGESTS {
+    if state.acknowledgment_digests.len() > limits.max_acknowledgment_digests {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
             reason: format!(
@@ -2395,7 +2538,8 @@ fn encode_pending_acknowledgments(
             reason: "pending acknowledgments failed to encode".into(),
         })?,
     );
-    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PENDING_ACKNOWLEDGMENTS_BLOB_LEN {
+    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > max_pending_acknowledgments_blob_len(limits)
+    {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
             reason: format!(
@@ -2416,21 +2560,38 @@ fn encode_pending_acknowledgments(
 fn load_pending_acknowledgments(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
+    limits: ProtocolHardeningLimits,
 ) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
     let blob = snapshot
         .get(address)
         .ok_or_else(|| ProtocolStateError::MissingRequiredState {
             address: address.clone(),
         })?;
-    decode_pending_acknowledgments(address, blob)
+    decode_pending_acknowledgments(address, blob, limits)
+}
+
+fn pending_acknowledgment_digest_seen(
+    snapshot: &ProtocolStateSnapshot,
+    address: &ProtocolStateAddress,
+    digest: [u8; ACKNOWLEDGMENT_DIGEST_LEN],
+    limits: ProtocolHardeningLimits,
+) -> Result<bool, ProtocolStateError> {
+    let blob = snapshot
+        .get(address)
+        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
+            address: address.clone(),
+        })?;
+    let digests = decode_pending_acknowledgment_digests(address, blob, limits)?;
+    Ok(contains_acknowledgment_digest(&digests, &digest))
 }
 
 fn decode_pending_acknowledgments(
     address: &ProtocolStateAddress,
     blob: &ProtocolStateBlob,
+    limits: ProtocolHardeningLimits,
 ) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
     let bytes = blob.as_bytes();
-    if bytes.len() > MAX_PENDING_ACKNOWLEDGMENTS_BLOB_LEN {
+    if bytes.len() > max_pending_acknowledgments_blob_len(limits) {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: format!(
@@ -2447,7 +2608,40 @@ fn decode_pending_acknowledgments(
     let payload = &bytes[PROTOCOL_STATE_BLOB_HEADER_LEN..];
 
     if major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR && minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR {
-        return decode_pending_acknowledgments_payload(address, payload);
+        return decode_pending_acknowledgments_payload(address, payload, limits);
+    }
+
+    Err(ProtocolStateError::UnsupportedBlobVersion {
+        address: address.clone(),
+        major,
+        minor,
+    })
+}
+
+fn decode_pending_acknowledgment_digests(
+    address: &ProtocolStateAddress,
+    blob: &ProtocolStateBlob,
+    limits: ProtocolHardeningLimits,
+) -> Result<Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>, ProtocolStateError> {
+    let bytes = blob.as_bytes();
+    if bytes.len() > max_pending_acknowledgments_blob_len(limits) {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "pending-acknowledgment blob length exceeds limit: {}",
+                bytes.len()
+            ),
+        });
+    }
+    let (major, minor) =
+        read_blob_version(bytes).ok_or_else(|| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "pending-acknowledgment blob header is incomplete".into(),
+        })?;
+    let payload = &bytes[PROTOCOL_STATE_BLOB_HEADER_LEN..];
+
+    if major == CURRENT_PROTOCOL_STATE_BLOB_MAJOR && minor == CURRENT_PROTOCOL_STATE_BLOB_MINOR {
+        return decode_pending_acknowledgment_digests_payload(address, payload, limits);
     }
 
     Err(ProtocolStateError::UnsupportedBlobVersion {
@@ -2460,6 +2654,7 @@ fn decode_pending_acknowledgments(
 fn decode_pending_acknowledgments_payload(
     address: &ProtocolStateAddress,
     payload: &[u8],
+    limits: ProtocolHardeningLimits,
 ) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
     let (wire, trailing): (DecodedPendingAcknowledgmentsWire, &[u8]) =
         postcard::take_from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
@@ -2472,7 +2667,7 @@ fn decode_pending_acknowledgments_payload(
             reason: "pending-acknowledgment payload version is unsupported".into(),
         });
     }
-    if wire.pending.len() > MAX_PENDING_ACKNOWLEDGMENTS {
+    if wire.pending.len() > limits.max_pending_acknowledgments {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: format!(
@@ -2481,7 +2676,7 @@ fn decode_pending_acknowledgments_payload(
             ),
         });
     }
-    if wire.acknowledgment_digests.len() > MAX_ACKNOWLEDGMENT_DIGESTS {
+    if wire.acknowledgment_digests.len() > limits.max_acknowledgment_digests {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: format!(
@@ -2493,12 +2688,11 @@ fn decode_pending_acknowledgments_payload(
 
     let mut pending = BTreeMap::new();
     for entry in wire.pending {
-        let message = Message::from_bytes(&entry.encoded_message).map_err(|e| {
-            ProtocolStateError::BlobDecode {
+        let message = Message::from_bytes_with_hardening_limits(&entry.encoded_message, limits)
+            .map_err(|e| ProtocolStateError::BlobDecode {
                 address: address.clone(),
                 reason: format!("pending acknowledgment message failed to decode: {e}"),
-            }
-        })?;
+            })?;
         if message.prekey_reference.is_some() {
             return Err(ProtocolStateError::BlobDecode {
                 address: address.clone(),
@@ -2527,15 +2721,156 @@ fn decode_pending_acknowledgments_payload(
     })
 }
 
+fn decode_pending_acknowledgment_digests_payload(
+    address: &ProtocolStateAddress,
+    payload: &[u8],
+    limits: ProtocolHardeningLimits,
+) -> Result<Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>, ProtocolStateError> {
+    let mut offset = 0;
+    let version = read_postcard_u8(payload, &mut offset).ok_or_else(|| {
+        pending_acknowledgment_decode_error(address, "pending-acknowledgment version is missing")
+    })?;
+    if version != PENDING_ACKNOWLEDGMENTS_WIRE_VERSION {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: "pending-acknowledgment payload version is unsupported".into(),
+        });
+    }
+    let pending_len = read_postcard_varint_usize(payload, &mut offset).ok_or_else(|| {
+        pending_acknowledgment_decode_error(address, "pending-acknowledgment count is malformed")
+    })?;
+    if pending_len > limits.max_pending_acknowledgments {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "pending-acknowledgment count exceeds limit: {}",
+                pending_len
+            ),
+        });
+    }
+    for _ in 0..pending_len {
+        skip_postcard_bytes(payload, &mut offset, 16).ok_or_else(|| {
+            pending_acknowledgment_decode_error(address, "pending message ID is malformed")
+        })?;
+        let encoded_len = read_postcard_varint_usize(payload, &mut offset).ok_or_else(|| {
+            pending_acknowledgment_decode_error(address, "pending message length is malformed")
+        })?;
+        skip_postcard_bytes(payload, &mut offset, encoded_len).ok_or_else(|| {
+            pending_acknowledgment_decode_error(address, "pending message bytes are malformed")
+        })?;
+        skip_postcard_varint_u64(payload, &mut offset).ok_or_else(|| {
+            pending_acknowledgment_decode_error(address, "pending first-sent time is malformed")
+        })?;
+        match read_postcard_u8(payload, &mut offset).ok_or_else(|| {
+            pending_acknowledgment_decode_error(address, "pending retry time option is malformed")
+        })? {
+            0 => {}
+            1 => skip_postcard_varint_u64(payload, &mut offset).ok_or_else(|| {
+                pending_acknowledgment_decode_error(address, "pending retry time is malformed")
+            })?,
+            _ => {
+                return Err(pending_acknowledgment_decode_error(
+                    address,
+                    "pending retry time option is invalid",
+                ));
+            }
+        }
+    }
+    let digest_len = read_postcard_varint_usize(payload, &mut offset).ok_or_else(|| {
+        pending_acknowledgment_decode_error(address, "acknowledgment digest count is malformed")
+    })?;
+    if digest_len > limits.max_acknowledgment_digests {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!("acknowledgment digest count exceeds limit: {digest_len}"),
+        });
+    }
+    let mut digests = Vec::with_capacity(digest_len);
+    for _ in 0..digest_len {
+        let bytes = read_postcard_array::<ACKNOWLEDGMENT_DIGEST_LEN>(payload, &mut offset)
+            .ok_or_else(|| {
+                pending_acknowledgment_decode_error(address, "acknowledgment digest is malformed")
+            })?;
+        digests.push(bytes);
+    }
+    if offset != payload.len() {
+        return Err(pending_acknowledgment_decode_error(
+            address,
+            "pending-acknowledgment payload has trailing bytes",
+        ));
+    }
+    Ok(digests)
+}
+
+fn read_postcard_u8(bytes: &[u8], offset: &mut usize) -> Option<u8> {
+    let byte = *bytes.get(*offset)?;
+    *offset += 1;
+    Some(byte)
+}
+
+fn read_postcard_array<const N: usize>(bytes: &[u8], offset: &mut usize) -> Option<[u8; N]> {
+    let range = *offset..(*offset).checked_add(N)?;
+    let slice = bytes.get(range)?;
+    *offset += N;
+    slice.try_into().ok()
+}
+
+fn read_postcard_varint_usize(bytes: &[u8], offset: &mut usize) -> Option<usize> {
+    let mut value = 0u128;
+    for shift in (0..64).step_by(7) {
+        let byte = read_postcard_u8(bytes, offset)?;
+        value |= u128::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return usize::try_from(value).ok();
+        }
+    }
+    None
+}
+
+fn skip_postcard_varint_u64(bytes: &[u8], offset: &mut usize) -> Option<()> {
+    for _ in 0..10 {
+        let byte = read_postcard_u8(bytes, offset)?;
+        if byte & 0x80 == 0 {
+            return Some(());
+        }
+    }
+    None
+}
+
+fn skip_postcard_bytes(bytes: &[u8], offset: &mut usize, len: usize) -> Option<()> {
+    bytes.get(*offset..offset.checked_add(len)?)?;
+    *offset += len;
+    Some(())
+}
+
+fn pending_acknowledgment_decode_error(
+    address: &ProtocolStateAddress,
+    reason: &str,
+) -> ProtocolStateError {
+    ProtocolStateError::BlobDecode {
+        address: address.clone(),
+        reason: reason.into(),
+    }
+}
+
+fn max_pending_acknowledgments_blob_len(limits: ProtocolHardeningLimits) -> usize {
+    PROTOCOL_STATE_BLOB_HEADER_LEN
+        + PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP
+        + limits.max_pending_acknowledgments
+            * (limits.max_encoded_message_len + PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP)
+        + limits.max_acknowledgment_digests * ACKNOWLEDGMENT_DIGEST_LEN
+}
+
 fn changed_contact_state(
     address: ProtocolStateAddress,
     contact: ContactState,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ContactStateChange, ProtocolStateError> {
     Ok(ContactStateChange {
         contact: contact.clone(),
         state_updates: vec![ProtocolStateUpdate::set(
             address.clone(),
-            encode_contact_state(&address, &contact)?,
+            encode_contact_state(&address, &contact, limits)?,
         )],
         event: Some(ContactEvent::Changed { contact }),
     })
@@ -2544,18 +2879,20 @@ fn changed_contact_state(
 fn load_contact_state(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ContactState, ProtocolStateError> {
     let blob = snapshot
         .get(address)
         .ok_or_else(|| ProtocolStateError::MissingRequiredState {
             address: address.clone(),
         })?;
-    decode_contact_state(address, blob)
+    decode_contact_state(address, blob, limits)
 }
 
 fn encode_contact_state(
     address: &ProtocolStateAddress,
     contact: &ContactState,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
     let wire = ContactStateWire {
         version: CONTACT_STATE_WIRE_VERSION,
@@ -2576,7 +2913,7 @@ fn encode_contact_state(
                 reason: "contact state failed to encode".into(),
             })?,
         );
-    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > MAX_PROTOCOL_STATE_BLOB_LEN {
+    if payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN > limits.max_protocol_state_blob_len {
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
             reason: format!(
@@ -2597,9 +2934,10 @@ fn encode_contact_state(
 fn decode_contact_state(
     address: &ProtocolStateAddress,
     blob: &ProtocolStateBlob,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ContactState, ProtocolStateError> {
     let bytes = blob.as_bytes();
-    if bytes.len() > MAX_PROTOCOL_STATE_BLOB_LEN {
+    if bytes.len() > limits.max_protocol_state_blob_len {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: format!("contact-state blob length exceeds limit: {}", bytes.len()),
@@ -2860,10 +3198,11 @@ fn ensure_contact_allows_outbound(
     snapshot: &ProtocolStateSnapshot,
     identity_key: ContactIdentityKey,
     recipient_public_key: &[u8; PUBLIC_KEY_LEN],
+    limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
     let address = contact_address(identity_key);
     validate_contact_identity_key(&address, &identity_key)?;
-    let contact = load_contact_state(snapshot, &address)?;
+    let contact = load_contact_state(snapshot, &address, limits)?;
     if contact.blocked {
         return Err(ProtocolStateError::InvalidStateBinding {
             address,
@@ -2893,7 +3232,24 @@ fn inbound_contact_identity_key(
     validation: InboundSenderCertificateValidation<'_>,
     sender_identity: &SenderIdentityMaterial,
     session_contact_identity_key: Option<ContactIdentityKey>,
+    limits: ProtocolHardeningLimits,
 ) -> Result<ContactIdentityKey, ProtocolStateError> {
+    if sender_identity.certificate.len() > limits.max_sender_certificate_len {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: format!(
+                "sender certificate length exceeds limit: {}",
+                sender_identity.certificate.len()
+            ),
+        });
+    }
+    if sender_identity.signature.len() > limits.max_sender_signature_len {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: format!(
+                "sender signature length exceeds limit: {}",
+                sender_identity.signature.len()
+            ),
+        });
+    }
     let validated = validate_sender_certificate(SenderCertificateValidationInput {
         certificate: &sender_identity.certificate,
         signature: &sender_identity.signature,
@@ -2937,12 +3293,13 @@ fn inbound_contact_identity_key(
 fn contact_is_blocked(
     snapshot: &ProtocolStateSnapshot,
     identity_key: ContactIdentityKey,
+    limits: ProtocolHardeningLimits,
 ) -> Result<bool, ProtocolStateError> {
     let address = contact_address(identity_key);
     validate_contact_identity_key(&address, &identity_key)?;
     snapshot
         .get(&address)
-        .map(|blob| decode_contact_state(&address, blob).map(|contact| contact.blocked))
+        .map(|blob| decode_contact_state(&address, blob, limits).map(|contact| contact.blocked))
         .transpose()
         .map(|blocked| blocked.unwrap_or(false))
 }
@@ -2996,10 +3353,11 @@ fn record_pending_acknowledgment(
     message_id: MessageId,
     first_sent_millis: u64,
     message: &Message,
+    limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
     let message_id_bytes = *message_id.as_bytes();
     if !state.pending.contains_key(&message_id_bytes)
-        && state.pending.len() == MAX_PENDING_ACKNOWLEDGMENTS
+        && state.pending.len() == limits.max_pending_acknowledgments
     {
         return Err(ProtocolStateError::InvalidStateBinding {
             address: address.clone(),
@@ -3007,7 +3365,7 @@ fn record_pending_acknowledgment(
         });
     }
     let encoded_message = message
-        .to_bytes()
+        .to_bytes_with_hardening_limits(limits)
         .map_err(ProtocolStateError::MessageEncode)?;
     state.pending.insert(
         message_id_bytes,
@@ -3042,8 +3400,9 @@ fn contains_acknowledgment_digest(
 fn record_acknowledgment_digest(
     state: &mut LoadedPendingAcknowledgments,
     digest: [u8; ACKNOWLEDGMENT_DIGEST_LEN],
+    limits: ProtocolHardeningLimits,
 ) {
-    if state.acknowledgment_digests.len() == MAX_ACKNOWLEDGMENT_DIGESTS {
+    if state.acknowledgment_digests.len() == limits.max_acknowledgment_digests {
         state.acknowledgment_digests.remove(0);
     }
     state.acknowledgment_digests.push(digest);
@@ -3245,11 +3604,17 @@ fn encode_sealed_sender_envelope(
     sender_identity: &SenderIdentityMaterial,
     transcript_signature: &[u8],
     plaintext: &[u8],
+    limits: ProtocolHardeningLimits,
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    validate_sender_identity(sender_identity)?;
+    validate_sender_identity(sender_identity, limits)?;
     validate_transcript_signature(transcript_signature)?;
     let padded_plaintext = pad_sealed_payload(plaintext)?;
-    validate_sealed_sender_content_len(sender_identity, transcript_signature, &padded_plaintext)?;
+    validate_sealed_sender_content_len(
+        sender_identity,
+        transcript_signature,
+        &padded_plaintext,
+        limits,
+    )?;
     let sealed = Zeroizing::new(
         postcard::to_stdvec(&SealedSenderEnvelopeWire {
             version: SEALED_SENDER_ENVELOPE_VERSION,
@@ -3265,7 +3630,7 @@ fn encode_sealed_sender_envelope(
             reason: "sealed-sender envelope failed to encode".into(),
         })?,
     );
-    if sealed.len() > MAX_SEALED_SENDER_ENVELOPE_LEN {
+    if sealed.len() > max_sealed_sender_envelope_len(limits) {
         return Err(ProtocolStateError::InvalidMessage {
             reason: format!(
                 "sealed-sender envelope length exceeds limit: {}",
@@ -3278,6 +3643,7 @@ fn encode_sealed_sender_envelope(
 
 fn decode_sealed_sender_envelope(
     bytes: &[u8],
+    limits: ProtocolHardeningLimits,
 ) -> Result<DecodedSealedSenderEnvelope, ProtocolStateError> {
     let (wire, trailing): (DecodedSealedSenderEnvelopeWire, &[u8]) =
         postcard::take_from_bytes(bytes).map_err(|_| ProtocolStateError::InvalidMessage {
@@ -3304,12 +3670,13 @@ fn decode_sealed_sender_envelope(
             ),
         });
     }
-    validate_sender_identity(&sender_identity)?;
+    validate_sender_identity(&sender_identity, limits)?;
     validate_transcript_signature(&wire.transcript_signature)?;
     validate_sealed_sender_content_len(
         &sender_identity,
         &wire.transcript_signature,
         &padded_plaintext,
+        limits,
     )?;
     let plaintext = unpad_sealed_payload(&padded_plaintext)?;
     Ok(DecodedSealedSenderEnvelope {
@@ -3326,6 +3693,7 @@ fn receive_state_updates(
     contact_identity_key: ContactIdentityKey,
     deduplication_address: &ProtocolStateAddress,
     deduplication: &LoadedDeduplicationSet,
+    limits: ProtocolHardeningLimits,
 ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
     let session_update = ProtocolStateUpdate::set(
         address.clone(),
@@ -3334,11 +3702,12 @@ fn receive_state_updates(
             state,
             Some(peer_sender_identity_key),
             Some(contact_identity_key),
+            limits,
         )?,
     );
     let deduplication_update = ProtocolStateUpdate::set(
         deduplication_address.clone(),
-        encode_deduplication_set(deduplication_address, deduplication)?,
+        encode_deduplication_set(deduplication_address, deduplication, limits)?,
     );
     Ok(vec![session_update, deduplication_update])
 }
@@ -3349,6 +3718,7 @@ fn encrypt_acknowledgment(
     acknowledgment: &OutboundAcknowledgment<'_>,
     acknowledged_message_id: MessageId,
     rng: &mut (impl RngCore + CryptoRng),
+    limits: ProtocolHardeningLimits,
 ) -> Result<Message, ProtocolStateError> {
     let plaintext = encode_acknowledgment_plaintext(acknowledged_message_id)?;
     let transcript_signature = sign_message_transcript(
@@ -3366,6 +3736,7 @@ fn encrypt_acknowledgment(
         acknowledgment.sender_identity,
         &transcript_signature.to_bytes(),
         plaintext.as_slice(),
+        limits,
     )?;
     let associated_data =
         ratchet_associated_data(session_key, &acknowledgment.recipient_public_key);
@@ -3381,7 +3752,7 @@ fn encrypt_acknowledgment(
     let frame = seal_frame(rng, &recipient_public_key, None, &frame_plaintext)?;
     let message = Message::from_frame(frame);
     message
-        .to_bytes()
+        .to_bytes_with_hardening_limits(limits)
         .map_err(ProtocolStateError::MessageEncode)?;
     Ok(message)
 }
@@ -3423,6 +3794,7 @@ fn decode_acknowledgment_plaintext(bytes: &[u8]) -> Result<MessageId, ProtocolSt
 
 fn validate_sender_identity(
     sender_identity: &SenderIdentityMaterial,
+    limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
     let bundle = IdentityKeyBundle::from_bytes(
         &sender_identity.identity_key,
@@ -3435,7 +3807,7 @@ fn validate_sender_identity(
     verify_identity_key_bundle(&bundle).map_err(|_| ProtocolStateError::InvalidMessage {
         reason: "sender identity key binding signature failed".into(),
     })?;
-    if sender_identity.certificate.len() > MAX_SENDER_CERTIFICATE_LEN {
+    if sender_identity.certificate.len() > limits.max_sender_certificate_len {
         return Err(ProtocolStateError::InvalidMessage {
             reason: format!(
                 "sender certificate length exceeds limit: {}",
@@ -3443,7 +3815,7 @@ fn validate_sender_identity(
             ),
         });
     }
-    if sender_identity.signature.len() > MAX_SENDER_SIGNATURE_LEN {
+    if sender_identity.signature.len() > limits.max_sender_signature_len {
         return Err(ProtocolStateError::InvalidMessage {
             reason: format!(
                 "sender signature length exceeds limit: {}",
@@ -3467,6 +3839,7 @@ fn validate_sealed_sender_content_len(
     sender_identity: &SenderIdentityMaterial,
     transcript_signature: &[u8],
     padded_plaintext: &[u8],
+    limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
     let len = sender_identity
         .certificate
@@ -3478,12 +3851,22 @@ fn validate_sealed_sender_content_len(
         .ok_or_else(|| ProtocolStateError::InvalidMessage {
             reason: "sealed-sender content length overflowed".into(),
         })?;
-    if len > MAX_SEALED_SENDER_CONTENT_LEN {
+    if len > max_sealed_sender_content_len(limits) {
         return Err(ProtocolStateError::InvalidMessage {
             reason: format!("sealed-sender content length exceeds limit: {len}"),
         });
     }
     Ok(())
+}
+
+fn max_sealed_sender_envelope_len(limits: ProtocolHardeningLimits) -> usize {
+    limits
+        .max_message_payload_len
+        .saturating_sub(RATCHET_PAYLOAD_HEADER_LEN + RATCHET_AEAD_TAG_LEN)
+}
+
+fn max_sealed_sender_content_len(limits: ProtocolHardeningLimits) -> usize {
+    max_sealed_sender_envelope_len(limits).saturating_sub(32 + SEALED_SENDER_ENCODING_OVERHEAD_CAP)
 }
 
 fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
@@ -3584,8 +3967,9 @@ fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
 mod tests {
     use super::{
         DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
-        MIN_DEDUPLICATION_CAPACITY, MessageTranscriptInput, PayloadKind, contains_digest,
-        deduplication_digest, record_deduplication_digest, sign_message_transcript,
+        MIN_DEDUPLICATION_CAPACITY, MessageTranscriptInput, PayloadKind, SEALED_PAYLOAD_BUCKETS,
+        SEALED_PAYLOAD_LEN_PREFIX_LEN, contains_digest, deduplication_digest, pad_sealed_payload,
+        record_deduplication_digest, sign_message_transcript, unpad_sealed_payload,
         verify_message_transcript,
     };
     use crate::{MessageId, SenderIdentityMaterial};
@@ -3635,6 +4019,46 @@ mod tests {
         assert!(contains_digest(&digests, &first));
         assert!(contains_digest(&digests, &second));
         assert!(!contains_digest(&digests, &missing));
+    }
+
+    #[test]
+    fn sealed_payload_padding_unpads_each_bucket() {
+        for bucket in SEALED_PAYLOAD_BUCKETS {
+            let plaintext = vec![0x42; bucket - SEALED_PAYLOAD_LEN_PREFIX_LEN];
+
+            let padded = pad_sealed_payload(&plaintext).unwrap();
+            let unpadded = unpad_sealed_payload(&padded).unwrap();
+
+            assert_eq!(padded.len(), bucket);
+            assert_eq!(unpadded.as_slice(), plaintext.as_slice());
+        }
+    }
+
+    #[test]
+    fn sealed_payload_padding_rejects_invalid_bucket_length() {
+        let padded = vec![0u8; SEALED_PAYLOAD_BUCKETS[0] + 1];
+
+        assert!(unpad_sealed_payload(&padded).is_err());
+    }
+
+    #[test]
+    fn sealed_payload_padding_rejects_overlarge_length_prefix() {
+        let mut padded = vec![0u8; SEALED_PAYLOAD_BUCKETS[0]];
+        let plaintext_len = (SEALED_PAYLOAD_BUCKETS[0] + 1) as u32;
+        padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
+
+        assert!(unpad_sealed_payload(&padded).is_err());
+    }
+
+    #[test]
+    fn sealed_payload_padding_rejects_nonzero_fill() {
+        let mut padded = vec![0u8; SEALED_PAYLOAD_BUCKETS[0]];
+        let plaintext_len = 1u32;
+        padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
+        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN] = 0xaa;
+        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN + 1] = 0x01;
+
+        assert!(unpad_sealed_payload(&padded).is_err());
     }
 
     #[test]
