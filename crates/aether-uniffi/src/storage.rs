@@ -74,6 +74,7 @@ impl InMemorySecureStorage {
 #[uniffi::export]
 impl SecureStorage for InMemorySecureStorage {
     fn store(&self, key: String, value: Vec<u8>) -> Result<(), AetherError> {
+        let value = Zeroizing::new(value);
         Ok(self.lock_inner()?.store(&key, &value)?)
     }
 

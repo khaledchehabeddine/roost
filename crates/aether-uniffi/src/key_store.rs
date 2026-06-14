@@ -8,6 +8,7 @@ use crate::records::{
 use crate::storage::SecureStorageAdapter;
 use aether_core::KeyStore as CoreKeyStore;
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 /// Entry point for local identity, discovery-key, and signed-pre-key state.
 ///
@@ -378,6 +379,7 @@ impl KeyStore {
     /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
     /// hashing step using 64 MiB memory and 3 iterations.
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, AetherError> {
+        let passphrase = Zeroizing::new(passphrase);
         Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
 
@@ -426,8 +428,10 @@ impl KeyStore {
         data: Vec<u8>,
         passphrase: String,
     ) -> Result<(), AetherError> {
+        let data = Zeroizing::new(data);
+        let passphrase = Zeroizing::new(passphrase);
         self.inner
-            .import_encrypted_backup(&data, &passphrase)
+            .import_encrypted_backup(data.as_slice(), passphrase.as_str())
             .map_err(Into::into)
     }
 

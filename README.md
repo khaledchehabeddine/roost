@@ -37,3 +37,4 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - [`CONTEXT_MAP.md`](CONTEXT_MAP.md) — workspace context paths and relationships
 - [`docs/adr/`](docs/adr/) — workspace-wide architectural decisions (per-crate decisions under `crates/<crate>/docs/adr/`)
 - [`docs/building-mobile.md`](docs/building-mobile.md) — Android, iOS, and manual UniFFI bindings
+- [`docs/security/secret-handling.md`](docs/security/secret-handling.md) — secret-handling audit notes and limits

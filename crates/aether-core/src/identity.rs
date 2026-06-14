@@ -9,7 +9,7 @@ use rand::{CryptoRng, RngCore};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
-use zeroize::Zeroizing;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 type IdentityKeyBytes = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 
@@ -67,6 +67,7 @@ impl Error for IdentityError {
 }
 
 /// A local identity containing X25519 and Ed25519 key pairs.
+#[derive(ZeroizeOnDrop)]
 pub struct Identity {
     key_pair: KeyPair,
     signing_key_pair: SigningKeyPair,
@@ -304,8 +305,16 @@ mod tests {
 
         assert_eq!(blob[0], 1);
         assert_eq!(&blob[1..], EXPECTED_CANONICAL_IDENTITY_SECRET);
+        assert_ne!(&blob[1..33], &blob[33..IDENTITY_KEY_BLOB_LEN]);
         assert!(storage.load(IDENTITY_X25519_KEY).unwrap().is_none());
         assert!(storage.load(IDENTITY_ED25519_KEY).unwrap().is_none());
+    }
+
+    #[test]
+    fn identity_zeroizes_on_drop() {
+        fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroizes_on_drop::<Identity>();
     }
 
     #[test]

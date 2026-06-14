@@ -9,6 +9,7 @@ const MESSAGE_KEY_INPUT: &[u8] = &[0x01];
 const NEXT_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
 // Root key for the Double Ratchet root chain.
+// Clone stays crate-private for ratchet rollback and chain advancement snapshots.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct RootKey(pub(crate) [u8; 32]);
 
@@ -23,6 +24,7 @@ impl RootKey {
 }
 
 // Chain key for the Double Ratchet sending/receiving chain.
+// Clone stays crate-private for ratchet rollback and chain advancement snapshots.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct ChainKey(pub(crate) [u8; 32]);
 
@@ -37,6 +39,7 @@ impl ChainKey {
 }
 
 // Single-use message encryption key derived from a chain key.
+// Clone stays crate-private for skipped-key rollback after failed authentication.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub(crate) struct MessageKey(pub(crate) [u8; 32]);
 

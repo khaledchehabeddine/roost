@@ -62,6 +62,8 @@ pub struct PreKeyBundle {
 }
 
 /// Sender identity material decoded only after first-message ciphertext authentication succeeds.
+///
+/// `Clone` is intentional for post-decryption metadata handoff; owned opaque bytes zeroize on drop.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SenderIdentityMaterial {
     /// Sender Identity Key X25519 public bytes. Always 32 bytes.

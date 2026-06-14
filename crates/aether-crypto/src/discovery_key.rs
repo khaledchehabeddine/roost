@@ -375,6 +375,13 @@ mod tests {
     }
 
     #[test]
+    fn discovery_key_zeroizes_on_drop() {
+        fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroizes_on_drop::<DiscoveryKey>();
+    }
+
+    #[test]
     fn from_bytes_round_trip_preserves_bundle_fields() {
         let setup = setup();
         let bundle = setup.discovery_key.bundle();
