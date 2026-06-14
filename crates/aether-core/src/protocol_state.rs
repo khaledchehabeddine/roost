@@ -441,8 +441,9 @@ pub struct InboundMessageResult {
 
 /// Accepted blocked inbound Message result without consumer-visible plaintext.
 pub struct BlockedInboundMessageResult {
-    /// Encrypted acknowledgment artifact to durably queue with the returned state updates.
-    pub acknowledgment: Message,
+    /// Encrypted acknowledgment artifact to durably queue with the returned state updates, or
+    /// `None` when the blocked-contact acknowledgment policy suppresses it.
+    pub acknowledgment: Option<Message>,
     /// Protocol-state updates to commit before treating the blocked inbound Message as processed.
     pub state_updates: Vec<ProtocolStateUpdate>,
 }
@@ -569,6 +570,20 @@ pub enum AcknowledgmentOutcome {
     SessionUnrecoverable(Box<SessionUnrecoverableResult>),
 }
 
+/// Whether a blocked sender receives an acknowledgment for an accepted-but-hidden Message.
+///
+/// The default preserves privacy: a blocked sender cannot distinguish a block from an unreachable
+/// recipient. Opting in to [`Self::SilentReceipt`] trades that away for delivery confirmation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BlockedContactAcknowledgmentPolicy {
+    /// Return no acknowledgment and do not advance the sending chain, so a blocked sender keeps
+    /// retrying as if the recipient were offline.
+    #[default]
+    Unreachable,
+    /// Return a normal acknowledgment, revealing delivery; local plaintext is still hidden.
+    SilentReceipt,
+}
+
 /// Stateless protocol-state operations over consumer-held blobs.
 ///
 /// Consumers must read required blobs from an atomic, durable, crash-consistent, and
@@ -583,6 +598,7 @@ pub enum AcknowledgmentOutcome {
 #[derive(Clone, Copy)]
 pub struct ProtocolStateEngine {
     deduplication_capacity: usize,
+    blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy,
 }
 
 impl ProtocolStateEngine {
@@ -591,6 +607,7 @@ impl ProtocolStateEngine {
     pub fn new() -> Self {
         Self {
             deduplication_capacity: DEFAULT_DEDUPLICATION_CAPACITY,
+            blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::default(),
         }
     }
 
@@ -603,7 +620,18 @@ impl ProtocolStateEngine {
         validate_configured_deduplication_capacity(capacity)?;
         Ok(Self {
             deduplication_capacity: capacity,
+            blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::default(),
         })
+    }
+
+    /// Sets the acknowledgment policy applied to Messages from blocked senders.
+    #[must_use]
+    pub fn with_blocked_contact_acknowledgment_policy(
+        mut self,
+        policy: BlockedContactAcknowledgmentPolicy,
+    ) -> Self {
+        self.blocked_contact_acknowledgment_policy = policy;
+        self
     }
 
     /// Returns an update that initializes an empty deduplication set for a local Identity.
@@ -1134,10 +1162,12 @@ impl ProtocolStateEngine {
     /// treating the inbound Message as processed. Duplicate inbound retries do not regenerate the
     /// acknowledgment artifact. Unique inbound Messages require sender-certificate validation
     /// inputs; receive validates the sealed certificate after decrypting and before surfacing
-    /// plaintext or sender identity. Blocked plaintext is suppressed after validation while still
-    /// returning acknowledgment and state updates. Duplicate byte-identical receives may return
-    /// [`InboundMessageOutcome::Duplicate`] before validation because they surface no plaintext and
-    /// do not advance ratchet/session state.
+    /// plaintext or sender identity. Blocked plaintext is suppressed after validation while state
+    /// updates still advance; the blocked acknowledgment follows the engine's
+    /// [`BlockedContactAcknowledgmentPolicy`], whose default [`BlockedContactAcknowledgmentPolicy::Unreachable`] returns
+    /// none so a block is indistinguishable from an unreachable recipient. Duplicate byte-identical
+    /// receives may return [`InboundMessageOutcome::Duplicate`] before validation because they
+    /// surface no plaintext and do not advance ratchet/session state.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the deduplication-set or ratchet/session blob fails
@@ -1253,6 +1283,29 @@ impl ProtocolStateEngine {
             &decoded.sender_identity,
             contact_identity_key,
         )?;
+        record_deduplication_digest(&mut deduplication, digest);
+        let blocked = contact_is_blocked(snapshot, inbound_contact_identity_key)?;
+        // Unreachable policy suppresses the acknowledgment and leaves the sending chain unadvanced;
+        // the receiving-chain advance and recorded digest are still committed below.
+        if blocked
+            && self.blocked_contact_acknowledgment_policy
+                == BlockedContactAcknowledgmentPolicy::Unreachable
+        {
+            let state_updates = receive_state_updates(
+                &address,
+                &state,
+                expected_sender_identity_key,
+                inbound_contact_identity_key,
+                &deduplication_address,
+                &deduplication,
+            )?;
+            return Ok(InboundMessageOutcome::Blocked(Box::new(
+                BlockedInboundMessageResult {
+                    acknowledgment: None,
+                    state_updates,
+                },
+            )));
+        }
         let acknowledgment = encrypt_acknowledgment(
             &mut state,
             &session_key_bytes,
@@ -1260,25 +1313,18 @@ impl ProtocolStateEngine {
             frame_plaintext.id,
             rng,
         )?;
-        record_deduplication_digest(&mut deduplication, digest);
-        let session_update = ProtocolStateUpdate::set(
-            address.clone(),
-            encode_session_state(
-                &address,
-                &state,
-                Some(expected_sender_identity_key),
-                Some(inbound_contact_identity_key),
-            )?,
-        );
-        let deduplication_update = ProtocolStateUpdate::set(
-            deduplication_address.clone(),
-            encode_deduplication_set(&deduplication_address, &deduplication)?,
-        );
-        let state_updates = vec![session_update, deduplication_update];
-        if contact_is_blocked(snapshot, inbound_contact_identity_key)? {
+        let state_updates = receive_state_updates(
+            &address,
+            &state,
+            expected_sender_identity_key,
+            inbound_contact_identity_key,
+            &deduplication_address,
+            &deduplication,
+        )?;
+        if blocked {
             return Ok(InboundMessageOutcome::Blocked(Box::new(
                 BlockedInboundMessageResult {
-                    acknowledgment,
+                    acknowledgment: Some(acknowledgment),
                     state_updates,
                 },
             )));
@@ -3271,6 +3317,30 @@ fn decode_sealed_sender_envelope(
         transcript_signature: wire.transcript_signature,
         plaintext,
     })
+}
+
+fn receive_state_updates(
+    address: &ProtocolStateAddress,
+    state: &RatchetState,
+    peer_sender_identity_key: [u8; 32],
+    contact_identity_key: ContactIdentityKey,
+    deduplication_address: &ProtocolStateAddress,
+    deduplication: &LoadedDeduplicationSet,
+) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
+    let session_update = ProtocolStateUpdate::set(
+        address.clone(),
+        encode_session_state(
+            address,
+            state,
+            Some(peer_sender_identity_key),
+            Some(contact_identity_key),
+        )?,
+    );
+    let deduplication_update = ProtocolStateUpdate::set(
+        deduplication_address.clone(),
+        encode_deduplication_set(deduplication_address, deduplication)?,
+    );
+    Ok(vec![session_update, deduplication_update])
 }
 
 fn encrypt_acknowledgment(

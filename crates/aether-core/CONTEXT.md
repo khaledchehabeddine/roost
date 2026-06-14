@@ -11,7 +11,10 @@ Avoid: receipt, delivery callback, network ack
 
 **Blocking** (one local verdict per Contact Identity):
 An IK-keyed local suppression rule. Blocking is independent of Trust State and distinct from
-sender-certificate revocation; it controls consumer-visible surfacing, not protocol acceptance.
+sender-certificate revocation; it controls consumer-visible surfacing, not protocol acceptance. A
+blocked Message's Acknowledgment Artifact follows the consumer-configured blocked-contact
+acknowledgment policy: the default suppresses it, so a block is indistinguishable from an unreachable
+recipient; an opt-in mode returns it while still hiding plaintext.
 Avoid: revocation, distrust, remote blocklist
 
 **Clock** (one per KeyStore):

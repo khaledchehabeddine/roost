@@ -58,12 +58,17 @@ permanent identity keys.
 
 Blocking is IK-keyed, local, independent of Trust State, and distinct from certificate revocation.
 For a unique inbound Message from a blocked IK, Core still performs normal protocol acceptance:
-deduplicate, decrypt, validate sender identity binding, validate the sender certificate, generate
-an Acknowledgment Artifact, and advance ratchet/session and deduplication Protocol State Blobs.
-The certificate DK X25519 key, DK Ed25519 verifying key, and DK epoch must match the decrypted
-sender identity/session binding before Core derives IK-keyed trust or blocking outcomes; revoked
-IKs reject before blocking is consulted. The result is not surfaced to the consumer as plaintext.
-Duplicate blocked Messages follow normal duplicate behavior and do not regenerate
+deduplicate, decrypt, validate sender identity binding, validate the sender certificate, advance
+ratchet/session and deduplication Protocol State Blobs, and generate an Acknowledgment Artifact
+subject to the consumer-configured blocked-contact acknowledgment policy. The certificate DK X25519
+key, DK Ed25519 verifying key, and DK epoch must match the decrypted sender identity/session binding
+before Core derives IK-keyed trust or blocking outcomes; revoked IKs reject before blocking is
+consulted. The result is not surfaced to the consumer as plaintext. The acknowledgment policy is
+consumer-configurable with a privacy trade-off: the default Unreachable mode suppresses the
+Acknowledgment Artifact and does not advance the sending chain, so a blocked sender cannot
+distinguish a block from an unreachable recipient and keeps retrying as if offline; the opt-in
+SilentReceipt mode returns the Acknowledgment Artifact, revealing delivery, while still hiding
+plaintext. Duplicate blocked Messages follow normal duplicate behavior and do not regenerate
 acknowledgments.
 
 Contact, trust, and blocking state persists as one IK-keyed Contact State Protocol State Blob per

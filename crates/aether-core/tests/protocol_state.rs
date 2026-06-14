@@ -1,15 +1,15 @@
 //! Exercises the public protocol-state API over consumer-held opaque blobs.
 
 use aether_core::{
-    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
-    ContactTrustState, DomainSigningKey, DomainSigningKeyStatus, InboundAcknowledgmentMessage,
-    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation,
-    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message, MessageId,
-    OutboundAcknowledgment, OutboundPlaintext, PayloadKind, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
-    SenderCertificateValidationError, SenderIdentityMaterial, SessionEvent, SessionId,
-    SessionUnrecoverableReason, SessionUnrecoverableResult,
+    AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, ContactDiscoveryKey,
+    ContactIdentity, ContactIdentityKey, ContactTrustState, DomainSigningKey,
+    DomainSigningKeyStatus, InboundAcknowledgmentMessage, InboundEncryptedMessage,
+    InboundMessageOutcome, InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY,
+    MIN_DEDUPLICATION_CAPACITY, Message, MessageId, OutboundAcknowledgment, OutboundPlaintext,
+    PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RevocationState,
+    SenderCertificateIdentityKey, SenderCertificateValidationError, SenderIdentityMaterial,
+    SessionEvent, SessionId, SessionUnrecoverableReason, SessionUnrecoverableResult,
 };
 use aether_crypto::{
     CryptoError, DiscoveryKey, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle,
@@ -1708,7 +1708,7 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
 }
 
 #[test]
-fn blocked_inbound_message_advances_state_and_returns_acknowledgment_without_plaintext() {
+fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_without_plaintext() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
@@ -1763,7 +1763,7 @@ fn blocked_inbound_message_advances_state_and_returns_acknowledgment_without_pla
         .map(blocked)
         .unwrap();
 
-    assert!(blocked.acknowledgment.prekey_reference.is_none());
+    assert!(blocked.acknowledgment.is_none());
     assert_eq!(blocked.state_updates.len(), 2);
     assert_eq!(blocked.state_updates[0].address(), &ratchet_address);
     assert_eq!(blocked.state_updates[1].address(), &deduplication_address);
@@ -1774,6 +1774,137 @@ fn blocked_inbound_message_advances_state_and_returns_acknowledgment_without_pla
     assert_ne!(
         blocked.state_updates[1].blob().unwrap().as_bytes(),
         prior_deduplication
+    );
+}
+
+#[test]
+fn blocked_inbound_message_under_silent_receipt_policy_returns_acknowledgment_without_plaintext() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new().with_blocked_contact_acknowledgment_policy(
+        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+    );
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    let ratchet_address = ratchet_address(key.clone());
+    let deduplication_address = deduplication_address(deduplication_key.clone());
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x54, b"blocked but receipted", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+
+    let blocked = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x54; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+
+    let acknowledgment = blocked
+        .acknowledgment
+        .expect("silent-receipt returns an acknowledgment");
+    assert!(acknowledgment.prekey_reference.is_none());
+    assert_eq!(blocked.state_updates.len(), 2);
+    assert_eq!(blocked.state_updates[0].address(), &ratchet_address);
+    assert_eq!(blocked.state_updates[1].address(), &deduplication_address);
+}
+
+#[test]
+fn blocked_acknowledgment_policy_controls_sending_chain_advance() {
+    let setup = setup();
+    let unreachable = ProtocolStateEngine::new();
+    let silent_receipt = ProtocolStateEngine::new().with_blocked_contact_acknowledgment_policy(
+        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+    );
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&unreachable, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &unreachable,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&unreachable, &mut bob_snapshot);
+    let ratchet_address = ratchet_address(key.clone());
+    let encrypted = unreachable
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x55, b"chain advance", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+
+    let suppressed = unreachable
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x55; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key.clone(),
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+    let receipted = silent_receipt
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x55; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(blocked)
+        .unwrap();
+
+    assert!(suppressed.acknowledgment.is_none());
+    assert!(receipted.acknowledgment.is_some());
+    assert_eq!(suppressed.state_updates[0].address(), &ratchet_address);
+    assert_eq!(receipted.state_updates[0].address(), &ratchet_address);
+    // The acknowledgment advances the sending chain, so only silent-receipt mutates it further.
+    assert_ne!(
+        suppressed.state_updates[0].blob().unwrap().as_bytes(),
+        receipted.state_updates[0].blob().unwrap().as_bytes(),
     );
 }
 

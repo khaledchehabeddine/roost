@@ -3,9 +3,9 @@
 use std::collections::BTreeMap;
 
 use aether_core::{
-    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
-    DomainSigningKey, DomainSigningKeyStatus, EventStream, EventStreamItem,
-    InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, ContactDiscoveryKey,
+    ContactIdentity, ContactIdentityKey, DomainSigningKey, DomainSigningKeyStatus, EventStream,
+    EventStreamItem, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
     InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment,
     OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RevocationState,
@@ -681,8 +681,12 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
 
 #[test]
 fn blocked_out_of_order_and_duplicate_messages_ack_without_visible_events() {
-    let first_instance = ProtocolStateEngine::new();
-    let second_instance = ProtocolStateEngine::new();
+    let first_instance = ProtocolStateEngine::new().with_blocked_contact_acknowledgment_policy(
+        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+    );
+    let second_instance = ProtocolStateEngine::new().with_blocked_contact_acknowledgment_policy(
+        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+    );
     let session_key = session_key();
     let deduplication_key = deduplication_key();
     let alice = validated_sender();
@@ -736,7 +740,9 @@ fn blocked_out_of_order_and_duplicate_messages_ack_without_visible_events() {
         )
         .map(blocked)
         .unwrap();
-    let second_ack = second_blocked.acknowledgment;
+    let second_ack = second_blocked
+        .acknowledgment
+        .expect("silent-receipt returns an acknowledgment");
     bob_store.apply_all(second_blocked.state_updates);
     assert!(events.current_state().unwrap().state().is_empty());
 
