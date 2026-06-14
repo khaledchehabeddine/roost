@@ -161,6 +161,27 @@ impl DiscoveryKeyManager {
         Ok(storage.delete(DISCOVERY_KEY)?)
     }
 
+    // Returns the verbatim stored discovery-key blob for inclusion in an encrypted backup.
+    pub(crate) fn export_blob(&self) -> Result<Zeroizing<Vec<u8>>, DiscoveryKeyError> {
+        let raw = self.load_raw()?.ok_or(DiscoveryKeyError::NotFound)?;
+        checked_blob(&raw)?;
+        Ok(raw)
+    }
+
+    // Validates a discovery-key blob's structure without storing it, so a malformed backup aborts
+    // an import before any existing key material is cleared.
+    pub(crate) fn validate_blob(blob: &[u8]) -> Result<(), DiscoveryKeyError> {
+        checked_blob(blob).map(|_| ())
+    }
+
+    // Restores a discovery-key blob verbatim with a single store, preserving its epoch lineage and
+    // identity signature. The signature is re-verified against the identity key on the next read.
+    pub(crate) fn restore_from_blob(&self, blob: &[u8]) -> Result<(), DiscoveryKeyError> {
+        checked_blob(blob)?;
+        let mut storage = self.lock_storage()?;
+        Ok(storage.store(DISCOVERY_KEY, blob)?)
+    }
+
     fn load_stored(&self) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let raw = self.load_raw()?.ok_or(DiscoveryKeyError::NotFound)?;
         Ok(decode_discovery_key(checked_blob(&raw)?))
@@ -457,5 +478,54 @@ mod tests {
         );
         assert_eq!(restored.epoch(), 9);
         assert_eq!(restored.created_at(), FIXED_NOW);
+    }
+
+    #[test]
+    fn export_blob_without_stored_key_returns_not_found() {
+        let discovery = setup_with_identity().manager;
+        assert!(matches!(
+            discovery.export_blob(),
+            Err(DiscoveryKeyError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn export_then_restore_blob_preserves_epoch_and_verifies() {
+        let discovery = setup_with_identity().manager;
+        discovery.rotate_now(&mut OsRng).unwrap();
+        let exported = discovery.rotate_now(&mut OsRng).unwrap();
+        assert_eq!(exported.epoch(), 1);
+        let blob = discovery.export_blob().unwrap();
+
+        discovery.reset().unwrap();
+        discovery.restore_from_blob(&blob).unwrap();
+
+        let restored = discovery.current().unwrap();
+        assert_eq!(restored.epoch(), 1);
+        assert_eq!(
+            restored.public_key().as_bytes(),
+            exported.public_key().as_bytes()
+        );
+    }
+
+    #[test]
+    fn validate_blob_accepts_stored_blob_and_rejects_malformed() {
+        let discovery = setup_with_identity().manager;
+        discovery.rotate_now(&mut OsRng).unwrap();
+        let blob = discovery.export_blob().unwrap();
+        assert!(DiscoveryKeyManager::validate_blob(&blob).is_ok());
+        assert!(matches!(
+            DiscoveryKeyManager::validate_blob(&[0xAAu8; 50]),
+            Err(DiscoveryKeyError::InvalidData(_))
+        ));
+    }
+
+    #[test]
+    fn restore_from_blob_rejects_malformed_blob() {
+        let discovery = setup_with_identity().manager;
+        assert!(matches!(
+            discovery.restore_from_blob(&[0xAAu8; 50]),
+            Err(DiscoveryKeyError::InvalidData(_))
+        ));
     }
 }
