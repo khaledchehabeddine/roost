@@ -373,16 +373,19 @@ pub struct InboundEncryptedMessage<'a> {
     pub message: &'a Message,
     /// Metadata for the encrypted acknowledgment returned when the Message is accepted.
     pub acknowledgment: OutboundAcknowledgment<'a>,
-    /// Sender-certificate validation inputs used to derive Identity-keyed receive decisions, if any.
+    /// Sender-certificate validation inputs required for unique encrypted receives.
+    ///
+    /// Duplicate receives may return [`InboundMessageOutcome::Duplicate`] before validation because
+    /// no plaintext or sender identity is surfaced.
     pub sender_certificate_validation: Option<InboundSenderCertificateValidation<'a>>,
 }
 
 /// Sender-certificate validation inputs for receive-time Identity-keyed decisions.
 ///
-/// When supplied, Core validates the sealed sender certificate after decrypting the Message,
-/// rejects revoked Identity Keys before local blocking, and uses the validated sender Identity Key
-/// to suppress blocked inbound plaintext. An unavailable revocation source fails validation
-/// closed, so no plaintext is surfaced without a revocation verdict.
+/// Core validates the sealed sender certificate after decrypting a unique Message, rejects revoked
+/// Identity Keys before local blocking, and uses the validated sender Identity Key to suppress
+/// blocked inbound plaintext. An unavailable revocation source fails validation closed, so no
+/// plaintext is surfaced without a revocation verdict.
 #[derive(Clone, Copy)]
 pub struct InboundSenderCertificateValidation<'a> {
     /// Known domain-signing keys indexed by certificate signing-key identifier.
@@ -809,9 +812,8 @@ impl ProtocolStateEngine {
     /// Locally blocks a contact without changing its Trust State.
     ///
     /// Blocking is keyed by the contact Identity Key. It refuses new outgoing user Messages and
-    /// suppresses consumer-visible inbound plaintext when receive has either a validated sender
-    /// certificate Identity Key or an existing session contact Identity Key binding, while still
-    /// accepting the protocol Message.
+    /// suppresses consumer-visible inbound plaintext after mandatory sender-certificate validation,
+    /// while still accepting the protocol Message.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
@@ -1022,10 +1024,12 @@ impl ProtocolStateEngine {
     ///
     /// Consumers should durably queue the returned acknowledgment with `state_updates` before
     /// treating the inbound Message as processed. Duplicate inbound retries do not regenerate the
-    /// acknowledgment artifact. When sender-certificate validation inputs are supplied, receive
-    /// validates the sealed certificate after decrypting; blocked plaintext is suppressed when the
-    /// sender Identity Key comes from that validated certificate or from an existing session
-    /// contact Identity Key binding, while still returning acknowledgment and state updates.
+    /// acknowledgment artifact. Unique inbound Messages require sender-certificate validation
+    /// inputs; receive validates the sealed certificate after decrypting and before surfacing
+    /// plaintext or sender identity. Blocked plaintext is suppressed after validation while still
+    /// returning acknowledgment and state updates. Duplicate byte-identical receives may return
+    /// [`InboundMessageOutcome::Duplicate`] before validation because they surface no plaintext and
+    /// do not advance ratchet/session state.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the deduplication-set or ratchet/session blob fails
@@ -1040,10 +1044,12 @@ impl ProtocolStateEngine {
     ///   sender, or the acknowledgment sender material is invalid.
     /// - [`ProtocolStateError::MessageEncode`] if the inbound Message or produced acknowledgment
     ///   fails canonical encoding.
+    /// - [`ProtocolStateError::MissingSenderCertificateValidation`] if a unique encrypted Message
+    ///   is received without validation inputs.
     /// - [`ProtocolStateError::MissingRequiredState`] if a required deduplication-set or
     ///   ratchet/session blob is absent.
-    /// - [`ProtocolStateError::SenderCertificateValidation`] if supplied sender-certificate
-    ///   validation inputs reject the sealed sender certificate.
+    /// - [`ProtocolStateError::SenderCertificateValidation`] if sender-certificate validation
+    ///   rejects the sealed sender certificate.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if either blob version is not supported.
     pub fn decrypt_message<R: RngCore + CryptoRng>(
         &self,
@@ -1103,8 +1109,11 @@ impl ProtocolStateEngine {
                 reason: "sealed sender identity key does not match session".into(),
             });
         }
+        let validation = inbound
+            .sender_certificate_validation
+            .ok_or(ProtocolStateError::MissingSenderCertificateValidation)?;
         let inbound_contact_identity_key = inbound_contact_identity_key(
-            inbound.sender_certificate_validation,
+            validation,
             &decoded.sender_identity,
             loaded.contact_identity_key,
         )?;
@@ -1117,7 +1126,7 @@ impl ProtocolStateEngine {
                 &address,
                 &state,
                 Some(expected_sender_identity_key),
-                loaded.contact_identity_key,
+                Some(inbound_contact_identity_key),
             )?,
         );
         let deduplication_update = ProtocolStateUpdate::set(
@@ -1125,9 +1134,7 @@ impl ProtocolStateEngine {
             encode_deduplication_set(&deduplication_address, &deduplication)?,
         );
         let state_updates = vec![session_update, deduplication_update];
-        if let Some(contact_identity_key) = inbound_contact_identity_key
-            && contact_is_blocked(snapshot, contact_identity_key)?
-        {
+        if contact_is_blocked(snapshot, inbound_contact_identity_key)? {
             return Ok(InboundMessageOutcome::Blocked(Box::new(
                 BlockedInboundMessageResult {
                     acknowledgment,
@@ -1358,6 +1365,8 @@ pub enum ProtocolStateError {
     Crypto(aether_crypto::CryptoError),
     /// Sender-certificate validation failed during receive.
     SenderCertificateValidation(SenderCertificateValidationError),
+    /// A unique encrypted receive was attempted without sender-certificate validation inputs.
+    MissingSenderCertificateValidation,
     /// A Message did not carry the expected ratcheted payload.
     InvalidMessage {
         /// Diagnostic failure context for logs only.
@@ -1421,6 +1430,9 @@ impl fmt::Display for ProtocolStateError {
             Self::SenderCertificateValidation(e) => {
                 write!(f, "sender certificate validation failed: {e}")
             }
+            Self::MissingSenderCertificateValidation => {
+                write!(f, "missing sender certificate validation input")
+            }
             Self::InvalidMessage { reason } => write!(f, "invalid message: {reason}"),
             Self::InvalidDeduplicationCapacity {
                 capacity,
@@ -1464,6 +1476,7 @@ impl Error for ProtocolStateError {
             | Self::InvalidMessage { .. }
             | Self::InvalidStateBinding { .. }
             | Self::InvalidStateKey { .. }
+            | Self::MissingSenderCertificateValidation
             | Self::MissingRequiredState { .. }
             | Self::UnsupportedBlobVersion { .. } => None,
         }
@@ -2518,13 +2531,10 @@ fn ensure_contact_allows_outbound(
 }
 
 fn inbound_contact_identity_key(
-    validation: Option<InboundSenderCertificateValidation<'_>>,
+    validation: InboundSenderCertificateValidation<'_>,
     sender_identity: &SenderIdentityMaterial,
     session_contact_identity_key: Option<ContactIdentityKey>,
-) -> Result<Option<ContactIdentityKey>, ProtocolStateError> {
-    let Some(validation) = validation else {
-        return Ok(session_contact_identity_key);
-    };
+) -> Result<ContactIdentityKey, ProtocolStateError> {
     let validated = validate_sender_certificate(SenderCertificateValidationInput {
         certificate: &sender_identity.certificate,
         signature: &sender_identity.signature,
@@ -2556,7 +2566,7 @@ fn inbound_contact_identity_key(
             reason: "sender certificate identity key does not match session contact".into(),
         });
     }
-    Ok(Some(identity_key))
+    Ok(identity_key)
 }
 
 fn contact_is_blocked(

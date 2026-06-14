@@ -1,9 +1,11 @@
 //! Verifies checked-in sealed-sender session Message fixtures across the public Core API.
 
 use aether_core::{
-    InboundEncryptedMessage, InboundMessageOutcome, Message, MessageId, OutboundAcknowledgment,
-    PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial,
+    DomainSigningKey, DomainSigningKeyStatus, InboundEncryptedMessage, InboundMessageOutcome,
+    InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment, PayloadKind,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
+    SenderIdentityMaterial,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -14,7 +16,55 @@ const SESSION_REPLAY_RNG_SEED: [u8; 32] = [11u8; 32];
 #[derive(Deserialize)]
 struct FixtureFile {
     session_key_hex: String,
+    sender_certificate_validation: CertificateValidationFixture,
     fixtures: Vec<Fixture>,
+}
+
+#[derive(Deserialize)]
+struct CertificateValidationFixture {
+    domain_signing_keys: Vec<DomainSigningKeyFixture>,
+    revoked_identity_keys: Vec<IdentityKeyFixture>,
+    reference_timestamp_secs: u64,
+    grace_window_secs: u64,
+}
+
+#[derive(Deserialize)]
+struct DomainSigningKeyFixture {
+    identifier_hex: String,
+    verifying_key_hex: String,
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct IdentityKeyFixture {
+    x25519_public_key_hex: String,
+    ed25519_verifying_key_hex: String,
+}
+
+struct OwnedCertificateValidation {
+    domain_signing_keys: Vec<OwnedDomainSigningKey>,
+    revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
+    reference_timestamp_secs: u64,
+    grace_window_secs: u64,
+}
+
+struct OwnedDomainSigningKey {
+    identifier: Vec<u8>,
+    verifying_key: Vec<u8>,
+    status: DomainSigningKeyStatus,
+}
+
+impl OwnedCertificateValidation {
+    fn domain_signing_keys(&self) -> Vec<DomainSigningKey<'_>> {
+        self.domain_signing_keys
+            .iter()
+            .map(|key| DomainSigningKey {
+                identifier: &key.identifier,
+                verifying_key: &key.verifying_key,
+                status: key.status,
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -66,6 +116,8 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
     let key =
         ProtocolStateKey::from_bytes(hex::decode(&fixture_file.session_key_hex).unwrap()).unwrap();
     let deduplication_key = deduplication_key();
+    let validation = certificate_validation(&fixture_file.sender_certificate_validation);
+    let domain_signing_keys = validation.domain_signing_keys();
 
     assert_eq!(fixture_file.fixtures.len(), 1);
     for fixture in fixture_file.fixtures {
@@ -98,6 +150,10 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
                     deduplication_key.clone(),
                     &message,
                     &acknowledgment_sender_identity,
+                    &domain_signing_keys,
+                    &validation.revoked_identity_keys,
+                    validation.reference_timestamp_secs,
+                    validation.grace_window_secs,
                 ),
             )
             .map(accepted)
@@ -122,6 +178,10 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
                         deduplication_key.clone(),
                         &tampered,
                         &acknowledgment_sender_identity,
+                        &domain_signing_keys,
+                        &validation.revoked_identity_keys,
+                        validation.reference_timestamp_secs,
+                        validation.grace_window_secs,
                     ),
                 )
                 .is_err(),
@@ -174,13 +234,22 @@ fn inbound<'a>(
     deduplication_key: ProtocolStateKey,
     message: &'a Message,
     acknowledgment_sender_identity: &'a SenderIdentityMaterial,
+    domain_signing_keys: &'a [DomainSigningKey<'a>],
+    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+    reference_timestamp_secs: u64,
+    grace_window_secs: u64,
 ) -> InboundEncryptedMessage<'a> {
     InboundEncryptedMessage {
         session_key,
         deduplication_key,
         message,
         acknowledgment: acknowledgment(acknowledgment_sender_identity),
-        sender_certificate_validation: None,
+        sender_certificate_validation: Some(InboundSenderCertificateValidation {
+            domain_signing_keys,
+            revocation_state: RevocationState::Available(revoked_identity_keys),
+            reference_timestamp_secs,
+            grace_window_secs,
+        }),
     }
 }
 
@@ -256,6 +325,38 @@ fn sender_identity(fixture: &SenderIdentityFixture) -> SenderIdentityMaterial {
     }
 }
 
+fn certificate_validation(fixture: &CertificateValidationFixture) -> OwnedCertificateValidation {
+    OwnedCertificateValidation {
+        domain_signing_keys: fixture
+            .domain_signing_keys
+            .iter()
+            .map(domain_signing_key)
+            .collect(),
+        revoked_identity_keys: fixture
+            .revoked_identity_keys
+            .iter()
+            .map(identity_key)
+            .collect(),
+        reference_timestamp_secs: fixture.reference_timestamp_secs,
+        grace_window_secs: fixture.grace_window_secs,
+    }
+}
+
+fn domain_signing_key(fixture: &DomainSigningKeyFixture) -> OwnedDomainSigningKey {
+    OwnedDomainSigningKey {
+        identifier: hex::decode(&fixture.identifier_hex).unwrap(),
+        verifying_key: hex::decode(&fixture.verifying_key_hex).unwrap(),
+        status: domain_signing_key_status(&fixture.status),
+    }
+}
+
+fn identity_key(fixture: &IdentityKeyFixture) -> SenderCertificateIdentityKey {
+    SenderCertificateIdentityKey {
+        x25519_public_key: hex_array(&fixture.x25519_public_key_hex),
+        ed25519_verifying_key: hex_array(&fixture.ed25519_verifying_key_hex),
+    }
+}
+
 fn copy_message(message: &Message) -> Message {
     Message {
         id: message.id,
@@ -289,5 +390,13 @@ fn payload_kind(kind: &str) -> PayloadKind {
     match kind {
         "text" => PayloadKind::EncryptedText,
         _ => panic!("unknown payload kind in fixture: {kind}"),
+    }
+}
+
+fn domain_signing_key_status(status: &str) -> DomainSigningKeyStatus {
+    match status {
+        "trusted" => DomainSigningKeyStatus::Trusted,
+        "untrusted" => DomainSigningKeyStatus::Untrusted,
+        _ => panic!("unknown domain-signing-key status in fixture: {status}"),
     }
 }

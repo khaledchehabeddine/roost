@@ -3,11 +3,12 @@
 use crate::error::AetherError;
 use aether_core::{
     ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactSafetyNumberConfirmation,
-    ContactStateChange, IdentityKey, InboundEncryptedMessage, InboundMessageOutcome, Message,
+    ContactStateChange, DomainSigningKey, DomainSigningKeyStatus, IdentityKey,
+    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation, Message,
     MessageId, OutboundAcknowledgment, PayloadKind, ProtocolStateAddress, ProtocolStateBlob,
     ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
-    ProtocolStateSnapshot, ProtocolStateUpdate, SenderIdentityMaterial, SessionId,
-    derive_safety_number,
+    ProtocolStateSnapshot, ProtocolStateUpdate, RevocationState, SenderCertificateIdentityKey,
+    SenderIdentityMaterial, SessionId, derive_safety_number,
 };
 use aether_crypto::{
     HandshakeEnvelope, InitialPlaintext, PreKeyBundle, RatchetState, accept,
@@ -198,7 +199,55 @@ struct MessageDecodedFixture {
 #[derive(Deserialize)]
 struct SessionMessageFixtureFile {
     session_key_hex: String,
+    sender_certificate_validation: CertificateValidationFixture,
     fixtures: Vec<SessionMessageFixture>,
+}
+
+#[derive(Deserialize)]
+struct CertificateValidationFixture {
+    domain_signing_keys: Vec<DomainSigningKeyFixture>,
+    revoked_identity_keys: Vec<IdentityKeyFixture>,
+    reference_timestamp_secs: u64,
+    grace_window_secs: u64,
+}
+
+#[derive(Deserialize)]
+struct DomainSigningKeyFixture {
+    identifier_hex: String,
+    verifying_key_hex: String,
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct IdentityKeyFixture {
+    x25519_public_key_hex: String,
+    ed25519_verifying_key_hex: String,
+}
+
+struct OwnedCertificateValidation {
+    domain_signing_keys: Vec<OwnedDomainSigningKey>,
+    revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
+    reference_timestamp_secs: u64,
+    grace_window_secs: u64,
+}
+
+struct OwnedDomainSigningKey {
+    identifier: Vec<u8>,
+    verifying_key: Vec<u8>,
+    status: DomainSigningKeyStatus,
+}
+
+impl OwnedCertificateValidation {
+    fn domain_signing_keys(&self) -> Vec<DomainSigningKey<'_>> {
+        self.domain_signing_keys
+            .iter()
+            .map(|key| DomainSigningKey {
+                identifier: &key.identifier,
+                verifying_key: &key.verifying_key,
+                status: key.status,
+            })
+            .collect()
+    }
 }
 
 #[derive(Deserialize)]
@@ -344,12 +393,21 @@ pub fn replay_sealed_sender_session_fixtures() -> Result<Vec<SealedSenderReplayC
     )?)
     .map_err(|e| invalid_fixture(format!("invalid session fixture key: {e}")))?;
     let deduplication_key = deduplication_key()?;
+    let validation = certificate_validation(&session_file.sender_certificate_validation)?;
+    let domain_signing_keys = validation.domain_signing_keys();
 
     session_file
         .fixtures
         .iter()
         .map(|fixture| {
-            replay_sealed_sender_session_fixture(fixture, &blob_file, &key, &deduplication_key)
+            replay_sealed_sender_session_fixture(
+                fixture,
+                &blob_file,
+                &key,
+                &deduplication_key,
+                &domain_signing_keys,
+                &validation,
+            )
         })
         .collect()
 }
@@ -429,6 +487,8 @@ fn replay_sealed_sender_session_fixture(
     blob_file: &BlobFixtureFile,
     key: &ProtocolStateKey,
     deduplication_key: &ProtocolStateKey,
+    domain_signing_keys: &[DomainSigningKey<'_>],
+    validation: &OwnedCertificateValidation,
 ) -> Result<SealedSenderReplayCase, AetherError> {
     let encoded = decode_hex(&fixture.encoded_hex, &fixture.name)?;
     let message = Message::from_bytes(&encoded).map_err(|e| {
@@ -478,6 +538,10 @@ fn replay_sealed_sender_session_fixture(
                     deduplication_key.clone(),
                     &message,
                     &acknowledgment_sender_identity,
+                    domain_signing_keys,
+                    &validation.revoked_identity_keys,
+                    validation.reference_timestamp_secs,
+                    validation.grace_window_secs,
                 ),
             )
             .map_err(|e| {
@@ -508,6 +572,8 @@ fn replay_sealed_sender_session_fixture(
         key,
         deduplication_key,
         &message,
+        domain_signing_keys,
+        validation,
     )?;
 
     Ok(SealedSenderReplayCase {
@@ -961,6 +1027,54 @@ fn sender_identity_from_fixture(
     })
 }
 
+fn certificate_validation(
+    fixture: &CertificateValidationFixture,
+) -> Result<OwnedCertificateValidation, AetherError> {
+    Ok(OwnedCertificateValidation {
+        domain_signing_keys: fixture
+            .domain_signing_keys
+            .iter()
+            .map(domain_signing_key)
+            .collect::<Result<Vec<_>, _>>()?,
+        revoked_identity_keys: fixture
+            .revoked_identity_keys
+            .iter()
+            .map(identity_key)
+            .collect::<Result<Vec<_>, _>>()?,
+        reference_timestamp_secs: fixture.reference_timestamp_secs,
+        grace_window_secs: fixture.grace_window_secs,
+    })
+}
+
+fn domain_signing_key(
+    fixture: &DomainSigningKeyFixture,
+) -> Result<OwnedDomainSigningKey, AetherError> {
+    Ok(OwnedDomainSigningKey {
+        identifier: decode_hex(
+            &fixture.identifier_hex,
+            "sender certificate domain key identifier",
+        )?,
+        verifying_key: decode_hex(
+            &fixture.verifying_key_hex,
+            "sender certificate domain verifying key",
+        )?,
+        status: domain_signing_key_status(&fixture.status)?,
+    })
+}
+
+fn identity_key(fixture: &IdentityKeyFixture) -> Result<SenderCertificateIdentityKey, AetherError> {
+    Ok(SenderCertificateIdentityKey {
+        x25519_public_key: hex_array(
+            &fixture.x25519_public_key_hex,
+            "sender certificate revoked identity x25519 key",
+        )?,
+        ed25519_verifying_key: hex_array(
+            &fixture.ed25519_verifying_key_hex,
+            "sender certificate revoked identity ed25519 key",
+        )?,
+    })
+}
+
 fn snapshot_from_blob_fixture(
     blob_file: &BlobFixtureFile,
     name: &str,
@@ -999,13 +1113,22 @@ fn inbound<'a>(
     deduplication_key: ProtocolStateKey,
     message: &'a Message,
     acknowledgment_sender_identity: &'a SenderIdentityMaterial,
+    domain_signing_keys: &'a [DomainSigningKey<'a>],
+    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+    reference_timestamp_secs: u64,
+    grace_window_secs: u64,
 ) -> InboundEncryptedMessage<'a> {
     InboundEncryptedMessage {
         session_key,
         deduplication_key,
         message,
         acknowledgment: acknowledgment(acknowledgment_sender_identity),
-        sender_certificate_validation: None,
+        sender_certificate_validation: Some(InboundSenderCertificateValidation {
+            domain_signing_keys,
+            revocation_state: RevocationState::Available(revoked_identity_keys),
+            reference_timestamp_secs,
+            grace_window_secs,
+        }),
     }
 }
 
@@ -1304,6 +1427,8 @@ fn session_tamper_rejects_without_sender(
     key: &ProtocolStateKey,
     deduplication_key: &ProtocolStateKey,
     message: &Message,
+    domain_signing_keys: &[DomainSigningKey<'_>],
+    validation: &OwnedCertificateValidation,
 ) -> Result<bool, AetherError> {
     let mut tampered = copy_message(message);
     let last = tampered
@@ -1328,6 +1453,10 @@ fn session_tamper_rejects_without_sender(
                 deduplication_key.clone(),
                 &tampered,
                 &acknowledgment_sender_identity,
+                domain_signing_keys,
+                &validation.revoked_identity_keys,
+                validation.reference_timestamp_secs,
+                validation.grace_window_secs,
             ),
         )
         .is_err())
@@ -1454,6 +1583,16 @@ fn payload_kind_name(kind: PayloadKind) -> &'static str {
         PayloadKind::KeyExchange => "key_exchange",
         PayloadKind::RatchetHeader => "ratchet_header",
         _ => "unknown",
+    }
+}
+
+fn domain_signing_key_status(status: &str) -> Result<DomainSigningKeyStatus, AetherError> {
+    match status {
+        "trusted" => Ok(DomainSigningKeyStatus::Trusted),
+        "untrusted" => Ok(DomainSigningKeyStatus::Untrusted),
+        _ => Err(invalid_fixture(format!(
+            "unknown domain-signing-key status: {status}"
+        ))),
     }
 }
 

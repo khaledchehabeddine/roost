@@ -6,4 +6,7 @@ Sender certificate validation runs three checks — signature against a consumer
 
 Validation consumes sender certificate material only after Message or X3DH first-message ciphertext authentication/decryption exposes the sealed-sender envelope. The current wire format deliberately does not carry sender identity key, sender certificate, or sender signature in clear transport-visible fields. X3DH still verifies a private sender key-possession proof before returning first-message sender material; that proof is not certificate trust, revocation, or expiry validation.
 
-**Divergence (in flight):** the shipped receive path makes validation caller-optional — passing `sender_certificate_validation: None` surfaces plaintext without certificate checks, where the specification requires validation before sender identity or plaintext surfaces. The mandatory-validation contract is tracked in [#151](https://github.com/RelayNet/aether/issues/151); the three-check design above is unaffected.
+Receive paths must not surface plaintext or sender identity until the sealed sender certificate
+validates against caller-supplied trusted signing keys, revocation input, reference time, and grace
+window. A duplicate receive may return a duplicate outcome before validation because it exposes no
+plaintext or sender identity and does not advance ratchet/session state.
