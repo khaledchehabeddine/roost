@@ -5,11 +5,12 @@ use aether_core::{
     ContactIdentity, ContactIdentityKey, ContactTrustState, DomainSigningKey,
     DomainSigningKeyStatus, InboundAcknowledgmentMessage, InboundEncryptedMessage,
     InboundMessageOutcome, InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY,
-    MIN_DEDUPLICATION_CAPACITY, Message, MessageId, OutboundAcknowledgment, OutboundPlaintext,
-    PayloadKind, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RevocationState,
-    SenderCertificateIdentityKey, SenderCertificateValidationError, SenderIdentityMaterial,
-    SessionEvent, SessionId, SessionUnrecoverableReason, SessionUnrecoverableResult,
+    MIN_DEDUPLICATION_CAPACITY, Message, MessageError, MessageId, OutboundAcknowledgment,
+    OutboundPlaintext, PayloadKind, ProtocolHardeningLimits, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
+    SenderCertificateValidationError, SenderIdentityMaterial, SessionEvent, SessionId,
+    SessionUnrecoverableReason, SessionUnrecoverableResult,
 };
 use aether_crypto::{
     CryptoError, DiscoveryKey, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle,
@@ -956,6 +957,46 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
         .process_acknowledgment(
             &mut ChaCha20Rng::from_seed([0x42; 32]),
             &alice_snapshot,
+            inbound_acknowledgment(key.clone(), &decrypted.acknowledgment),
+        )
+        .unwrap();
+    assert!(matches!(duplicate, AcknowledgmentOutcome::Duplicate));
+    for seed in 0x43..0x47 {
+        let repeated = engine
+            .process_acknowledgment(
+                &mut ChaCha20Rng::from_seed([seed; 32]),
+                &alice_snapshot,
+                inbound_acknowledgment(key.clone(), &decrypted.acknowledgment),
+            )
+            .unwrap();
+        assert!(matches!(repeated, AcknowledgmentOutcome::Duplicate));
+    }
+
+    let pending_address = pending_acknowledgment_address(key.clone());
+    let pending_blob = alice_snapshot.get(&pending_address).unwrap().as_bytes();
+    let (mut wire, trailing): (TestPendingAcknowledgmentsWire, &[u8]) =
+        postcard::take_from_bytes(&pending_blob[2..]).unwrap();
+    assert!(trailing.is_empty());
+    assert_eq!(wire.pending.len(), 0);
+    assert_eq!(wire.acknowledgment_digests.len(), 1);
+    wire.pending.push(TestPendingAcknowledgmentWire {
+        message_id: [0x44; 16],
+        encoded_message: vec![0xaa],
+        first_sent_millis: 1_700_000_100_123,
+        last_retry_millis: None,
+    });
+    let mut malformed_pending_blob = pending_blob[..2].to_vec();
+    malformed_pending_blob.extend(postcard::to_stdvec(&wire).unwrap());
+    let mut duplicate_snapshot = ProtocolStateSnapshot::new();
+    duplicate_snapshot.set(
+        pending_address,
+        ProtocolStateBlob::from_bytes(malformed_pending_blob),
+    );
+
+    let duplicate = engine
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x47; 32]),
+            &duplicate_snapshot,
             inbound_acknowledgment(key, &decrypted.acknowledgment),
         )
         .unwrap();
@@ -1068,6 +1109,7 @@ fn retry_instructions_are_windowed_and_persisted() {
         .retry_instructions(&snapshot, key.clone(), sent_at + 1_000, 1_000)
         .unwrap();
     assert!(repeated.instructions.is_empty());
+    assert!(repeated.state_updates.is_empty());
     assert_eq!(
         ProtocolStateEngine::new()
             .pending_acknowledgments(&snapshot, key)
@@ -1161,6 +1203,348 @@ fn pending_acknowledgment_state_rejects_x3dh_frame_retries() {
 }
 
 #[test]
+fn hardening_limits_round_trip_on_engine() {
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.deduplication_capacity = MIN_DEDUPLICATION_CAPACITY;
+
+    let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+
+    assert_eq!(engine.hardening_limits(), limits);
+}
+
+#[test]
+fn hardening_limits_reject_unsupported_ceilings() {
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_message_payload_len += 1;
+
+    let result = ProtocolStateEngine::with_hardening_limits(limits);
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::InvalidHardeningLimit {
+            name: "message payload",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn oversized_inbound_message_rejects_before_state_load() {
+    let setup = setup();
+    let default_engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &default_engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = default_engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x36, b"oversized before state", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let encoded_len = encrypted.to_bytes().unwrap().len();
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_encoded_message_len = encoded_len - 1;
+    let rejecting_engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+    let ratchet_address = ratchet_address(key.clone());
+    let deduplication_address = deduplication_address(deduplication_key.clone());
+    let corrupt = vec![1, 0, 0xaa];
+    bob_snapshot.set(
+        ratchet_address.clone(),
+        ProtocolStateBlob::from_bytes(corrupt.clone()),
+    );
+    bob_snapshot.set(
+        deduplication_address.clone(),
+        ProtocolStateBlob::from_bytes(corrupt.clone()),
+    );
+
+    let result = rejecting_engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x36; 32]),
+        &bob_snapshot,
+        inbound_with_certificate_validation(
+            key.clone(),
+            deduplication_key.clone(),
+            &encrypted,
+            &acknowledgment_sender_identity,
+            &domain_keys,
+            &revoked,
+        ),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::MessageEncode(
+            MessageError::EncodedTooLarge
+        ))
+    ));
+    assert_eq!(
+        bob_snapshot.get(&ratchet_address).unwrap().as_bytes(),
+        corrupt
+    );
+    assert_eq!(
+        bob_snapshot.get(&deduplication_address).unwrap().as_bytes(),
+        corrupt
+    );
+}
+
+#[test]
+fn configured_blob_limit_rejects_decode_before_restore() {
+    let setup = setup();
+    let default_engine = ProtocolStateEngine::new();
+    let key = key();
+    let sender_identity = sender_identity(0xa1);
+    let snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
+    let address = ratchet_address(key.clone());
+    let blob_len = snapshot.get(&address).unwrap().as_bytes().len();
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_protocol_state_blob_len = blob_len - 1;
+    let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+
+    let result = engine.encrypt_message(
+        &snapshot,
+        key,
+        outbound(0x37, b"blob limit", &sender_identity),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+    ));
+}
+
+#[test]
+fn configured_blob_limit_accepts_exact_size() {
+    let setup = setup();
+    let default_engine = ProtocolStateEngine::new();
+    let key = key();
+    let snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
+    let address = pending_acknowledgment_address(key.clone());
+    let blob_len = snapshot.get(&address).unwrap().as_bytes().len();
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_protocol_state_blob_len = blob_len;
+    let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+
+    let pending = engine.pending_acknowledgments(&snapshot, key).unwrap();
+
+    assert!(pending.is_empty());
+}
+
+#[test]
+fn configured_payload_limit_rejects_before_state_load() {
+    let setup = setup();
+    let default_engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &default_engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = default_engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x38, b"payload limit", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_message_payload_len = encrypted.ciphertext.len() - 1;
+    let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+    let deduplication_address = deduplication_address(deduplication_key.clone());
+    let corrupt = vec![1, 0, 0xaa];
+    bob_snapshot.set(
+        deduplication_address.clone(),
+        ProtocolStateBlob::from_bytes(corrupt.clone()),
+    );
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x38; 32]),
+        &bob_snapshot,
+        inbound_with_certificate_validation(
+            key.clone(),
+            deduplication_key.clone(),
+            &encrypted,
+            &acknowledgment_sender_identity,
+            &domain_keys,
+            &revoked,
+        ),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::MessageEncode(
+            MessageError::PayloadTooLarge
+        ))
+    ));
+    assert_eq!(
+        bob_snapshot.get(&deduplication_address).unwrap().as_bytes(),
+        corrupt
+    );
+}
+
+#[test]
+fn configured_sender_material_limits_reject_without_state_updates() {
+    let setup = setup();
+    let default_engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &default_engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = default_engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x39, b"certificate limit", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let ratchet_address = ratchet_address(key.clone());
+    let deduplication_address = deduplication_address(deduplication_key.clone());
+    let ratchet_before = bob_snapshot
+        .get(&ratchet_address)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let dedup_before = bob_snapshot
+        .get(&deduplication_address)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_sender_certificate_len = sender.sender_identity.certificate.len() - 1;
+    let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x39; 32]),
+        &bob_snapshot,
+        inbound_with_certificate_validation(
+            key.clone(),
+            deduplication_key.clone(),
+            &encrypted,
+            &acknowledgment_sender_identity,
+            &domain_keys,
+            &revoked,
+        ),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::InvalidMessage { .. })
+    ));
+    assert_eq!(
+        bob_snapshot.get(&ratchet_address).unwrap().as_bytes(),
+        ratchet_before
+    );
+    assert_eq!(
+        bob_snapshot.get(&deduplication_address).unwrap().as_bytes(),
+        dedup_before
+    );
+
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_sender_signature_len = sender.sender_identity.signature.len() - 1;
+    let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x3b; 32]),
+        &bob_snapshot,
+        inbound_with_certificate_validation(
+            key,
+            deduplication_key,
+            &encrypted,
+            &acknowledgment_sender_identity,
+            &domain_keys,
+            &revoked,
+        ),
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::InvalidMessage { .. })
+    ));
+}
+
+#[test]
+fn configured_boundary_limits_accept_exact_sizes() {
+    let setup = setup();
+    let default_engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &default_engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = default_engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x3a, b"exact limits", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut limits = ProtocolHardeningLimits::default();
+    limits.max_encoded_message_len = encrypted.to_bytes().unwrap().len();
+    limits.max_message_payload_len = encrypted.ciphertext.len();
+    limits.max_sender_certificate_len = sender.sender_identity.certificate.len();
+    limits.max_sender_signature_len = sender.sender_identity.signature.len();
+    let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
+
+    let result = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x3a; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+
+    assert_eq!(result.plaintext.as_slice(), b"exact limits");
+}
+
+#[test]
 fn unique_received_message_is_accepted_recorded_and_emitted_once() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
@@ -1242,6 +1626,86 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
         )
         .unwrap();
     assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+}
+
+#[test]
+fn replay_storm_returns_duplicate_without_state_churn() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x3c, b"replay storm", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x3c; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key.clone(),
+                &encrypted,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    bob_snapshot.apply_all(decrypted.state_updates);
+    let ratchet_address = ratchet_address(key.clone());
+    let deduplication_address = deduplication_address(deduplication_key.clone());
+    let ratchet_after_accept = bob_snapshot
+        .get(&ratchet_address)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+    let dedup_after_accept = bob_snapshot
+        .get(&deduplication_address)
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+
+    for seed in 0x3d..0x45 {
+        let duplicate = engine
+            .decrypt_message(
+                &mut ChaCha20Rng::from_seed([seed; 32]),
+                &bob_snapshot,
+                inbound(
+                    key.clone(),
+                    deduplication_key.clone(),
+                    &encrypted,
+                    &acknowledgment_sender_identity,
+                ),
+            )
+            .unwrap();
+        assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
+        assert_eq!(
+            bob_snapshot.get(&ratchet_address).unwrap().as_bytes(),
+            ratchet_after_accept
+        );
+        assert_eq!(
+            bob_snapshot.get(&deduplication_address).unwrap().as_bytes(),
+            dedup_after_accept
+        );
+    }
 }
 
 #[test]

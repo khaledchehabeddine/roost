@@ -67,6 +67,7 @@ mod clock;
 mod contact;
 mod discovery_key;
 mod events;
+mod hardening;
 mod identity;
 mod key_encoding;
 mod key_store;
@@ -88,15 +89,18 @@ pub use events::{
     DEFAULT_OBSERVER_CAPACITY, EventEnvelope, EventId, EventObserver, EventStream,
     EventStreamError, EventStreamItem, EventStreamSnapshot, MAX_OBSERVER_CAPACITY,
 };
+pub use hardening::{
+    DEFAULT_DEDUPLICATION_CAPACITY, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
+    ProtocolHardeningLimits,
+};
 pub use identity::{Identity, IdentityError};
 pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
     AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
-    ClearedAcknowledgment, DEFAULT_DEDUPLICATION_CAPACITY, InboundAcknowledgmentMessage,
-    InboundEncryptedMessage, InboundMessageOutcome, InboundMessageResult,
-    InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
+    ClearedAcknowledgment, InboundAcknowledgmentMessage, InboundEncryptedMessage,
+    InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
     OutboundAcknowledgment, OutboundMessageResult, OutboundPlaintext, PendingAcknowledgment,
     ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,

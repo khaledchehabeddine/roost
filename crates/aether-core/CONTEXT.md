@@ -75,6 +75,13 @@ Avoid: sequence number, offset
 The in-process, per-library-instance feed of committed public state changes. It serves Observers in one total order, but it is not a cross-instance delivery channel; changes from another library instance arrive through shared Protocol State Blobs.
 Avoid: bus, broker, transport
 
+**Hardening Limits** (one configured set per Protocol State Engine):
+Consumer-selected ceilings that bound externally influenced Message, Sealed Sender Envelope,
+Sender Certificate, Protocol State Blob, deduplication, and acknowledgment state work before
+expensive cryptographic or state-mutating operations. Defaults target general mobile clients;
+constrained hosts may lower them but cannot raise them beyond supported ceilings.
+Avoid: rate limits, transport policy
+
 **Identity** (exactly one Device):
 A long-lived public-key persona held by a single Device, anchored by a permanent Identity Key and a rotatable Discovery Key. Identifies a participant across Sessions.
 Avoid: user, account, profile
