@@ -9,6 +9,10 @@ use crate::keys::{
 };
 use crate::one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle};
 use crate::ratchet::RootKey;
+use crate::sealed_frame::{
+    SealedFrame, SealedFramePreKeyReference, open_frame_for_discovery_key,
+    seal_frame_with_ephemeral_key,
+};
 use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_signed_prekey_bundle};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
@@ -28,7 +32,6 @@ pub const PREKEY_BUNDLE_VERSION: u8 = 1;
 pub const PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM: usize = 1184;
 /// Additive shared-secret headroom reserved in future X3DH KDF input.
 pub const X3DH_ADDITIVE_SHARED_SECRET_HEADROOM: usize = 32;
-const HANDSHAKE_ENVELOPE_MAGIC: [u8; 4] = *b"AX3H";
 const HANDSHAKE_ENVELOPE_VERSION: u8 = 1;
 const MAX_HANDSHAKE_ENVELOPE_LEN: usize = 16 * 1024;
 const MAX_HANDSHAKE_CIPHERTEXT_LEN: usize = 8 * 1024;
@@ -94,42 +97,40 @@ pub struct AcceptedInitialMessage {
 }
 
 /// A serialized handshake request from an initiator to a responder.
-///
-/// Holds public handshake material, the first ratchet header fields, and the first ciphertext.
 #[derive(Clone, Debug)]
 pub struct HandshakeEnvelope {
-    /// Initiator's X25519 ephemeral public key (fresh per handshake).
-    pub initiator_ephemeral_public_key: [u8; 32],
-    /// Responder discovery-key epoch the initiator targeted.
-    pub responder_discovery_epoch: u32,
-    /// X25519 public key of the responder's signed pre-key the initiator targeted.
-    pub responder_signed_prekey_public_key: [u8; 32],
-    /// Identifier of the responder one-time pre-key the initiator targeted, when present.
-    pub one_time_prekey_id: Option<u64>,
-    /// X25519 public key of the responder one-time pre-key the initiator targeted, when present.
-    pub one_time_prekey_public_key: Option<[u8; 32]>,
-    /// Ratchet public key for the first message.
-    pub ratchet_public_key: [u8; 32],
-    /// Number of messages sent in the previous chain.
-    pub previous_chain_length: u32,
-    /// Sequence number of this message in the current chain.
-    pub message_number: u32,
-    /// Ciphertext for the first handshake message.
+    /// Sealed-frame wire version.
+    pub version: u8,
+    /// Recipient Discovery Key X25519 public key.
+    pub recipient_public_key: [u8; 32],
+    /// X3DH prekey reference targeted by the initiator.
+    pub prekey_reference: Option<SealedFramePreKeyReference>,
+    /// Initiator's X25519 ephemeral public key.
+    pub ephemeral_public_key: [u8; 32],
+    /// AEAD ciphertext for the sealed initial ratchet payload.
     pub ciphertext: Vec<u8>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct HandshakeEnvelopeWire {
-    magic: [u8; 4],
+#[derive(Serialize)]
+struct HandshakeFramePlaintextWire<'a> {
     version: u8,
-    initiator_ephemeral_public_key: [u8; 32],
-    responder_discovery_epoch: u32,
-    responder_signed_prekey_public_key: [u8; 32],
-    one_time_prekey_id: Option<u64>,
-    one_time_prekey_public_key: Option<[u8; 32]>,
     ratchet_public_key: [u8; 32],
     previous_chain_length: u32,
     message_number: u32,
+    ciphertext: &'a [u8],
+}
+
+#[derive(Deserialize)]
+struct DecodedHandshakeFramePlaintextWire {
+    version: u8,
+    ratchet_public_key: [u8; 32],
+    previous_chain_length: u32,
+    message_number: u32,
+    ciphertext: Vec<u8>,
+}
+
+struct DecodedHandshakeFramePlaintext {
+    header: Header,
     ciphertext: Vec<u8>,
 }
 
@@ -142,21 +143,13 @@ impl HandshakeEnvelope {
         if self.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
             return Err(CryptoError::HandshakeEnvelopeEncode);
         }
-
-        let bytes = postcard::to_stdvec(&HandshakeEnvelopeWire {
-            magic: HANDSHAKE_ENVELOPE_MAGIC,
-            version: HANDSHAKE_ENVELOPE_VERSION,
-            initiator_ephemeral_public_key: self.initiator_ephemeral_public_key,
-            responder_discovery_epoch: self.responder_discovery_epoch,
-            responder_signed_prekey_public_key: self.responder_signed_prekey_public_key,
-            one_time_prekey_id: self.one_time_prekey_id,
-            one_time_prekey_public_key: self.one_time_prekey_public_key,
-            ratchet_public_key: self.ratchet_public_key,
-            previous_chain_length: self.previous_chain_length,
-            message_number: self.message_number,
-            ciphertext: self.ciphertext.clone(),
-        })
-        .map_err(|_| CryptoError::HandshakeEnvelopeEncode)?;
+        let frame = self.to_frame();
+        if frame.prekey_reference.is_none() {
+            return Err(CryptoError::HandshakeEnvelopeEncode);
+        }
+        let bytes = frame
+            .to_bytes()
+            .map_err(|_| CryptoError::HandshakeEnvelopeEncode)?;
         if bytes.len() > MAX_HANDSHAKE_ENVELOPE_LEN {
             return Err(CryptoError::HandshakeEnvelopeEncode);
         }
@@ -171,41 +164,37 @@ impl HandshakeEnvelope {
     /// # Errors
     /// - [`CryptoError::HandshakeEnvelopeDecode`] when the bytes are malformed or oversized.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
-        let magic = bytes
-            .get(..HANDSHAKE_ENVELOPE_MAGIC.len())
-            .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
-        let version = *bytes
-            .get(HANDSHAKE_ENVELOPE_MAGIC.len())
-            .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
-        if magic != HANDSHAKE_ENVELOPE_MAGIC || version != HANDSHAKE_ENVELOPE_VERSION {
-            return Err(CryptoError::HandshakeEnvelopeDecode);
-        }
         if bytes.len() > MAX_HANDSHAKE_ENVELOPE_LEN {
             return Err(CryptoError::HandshakeEnvelopeDecode);
         }
 
-        let (wire, trailing): (HandshakeEnvelopeWire, &[u8]) =
-            postcard::take_from_bytes(bytes).map_err(|_| CryptoError::HandshakeEnvelopeDecode)?;
-        if wire.magic != HANDSHAKE_ENVELOPE_MAGIC
-            || wire.version != HANDSHAKE_ENVELOPE_VERSION
-            || !trailing.is_empty()
-            || wire.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN
-        {
+        let frame =
+            SealedFrame::from_bytes(bytes).map_err(|_| CryptoError::HandshakeEnvelopeDecode)?;
+        if frame.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
             return Err(CryptoError::HandshakeEnvelopeDecode);
         }
-        validate_envelope_public_keys(&wire)?;
+        validate_envelope_public_fields(&frame)?;
+        Ok(Self::from_frame(frame))
+    }
 
-        Ok(Self {
-            initiator_ephemeral_public_key: wire.initiator_ephemeral_public_key,
-            responder_discovery_epoch: wire.responder_discovery_epoch,
-            responder_signed_prekey_public_key: wire.responder_signed_prekey_public_key,
-            one_time_prekey_id: wire.one_time_prekey_id,
-            one_time_prekey_public_key: wire.one_time_prekey_public_key,
-            ratchet_public_key: wire.ratchet_public_key,
-            previous_chain_length: wire.previous_chain_length,
-            message_number: wire.message_number,
-            ciphertext: wire.ciphertext,
-        })
+    fn from_frame(frame: SealedFrame) -> Self {
+        Self {
+            version: frame.version,
+            recipient_public_key: frame.recipient_public_key,
+            prekey_reference: frame.prekey_reference,
+            ephemeral_public_key: frame.ephemeral_public_key,
+            ciphertext: frame.ciphertext,
+        }
+    }
+
+    fn to_frame(&self) -> SealedFrame {
+        SealedFrame {
+            version: self.version,
+            recipient_public_key: self.recipient_public_key,
+            prekey_reference: self.prekey_reference,
+            ephemeral_public_key: self.ephemeral_public_key,
+            ciphertext: self.ciphertext.clone(),
+        }
     }
 }
 
@@ -313,11 +302,10 @@ pub fn initiate<R: RngCore + CryptoRng>(
         plaintext: message.plaintext,
     })?;
     let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
-
-    let envelope = HandshakeEnvelope {
-        initiator_ephemeral_public_key: *initiator_ephemeral_key.public.as_bytes(),
-        responder_discovery_epoch: responder_prekey_bundle.discovery_key.epoch,
-        responder_signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
+    let frame_plaintext = encode_handshake_frame_plaintext(&header, &ciphertext)?;
+    let prekey_reference = SealedFramePreKeyReference {
+        discovery_epoch: responder_prekey_bundle.discovery_key.epoch,
+        signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
         one_time_prekey_id: responder_prekey_bundle
             .one_time_prekey
             .as_ref()
@@ -326,11 +314,14 @@ pub fn initiate<R: RngCore + CryptoRng>(
             .one_time_prekey
             .as_ref()
             .map(|prekey| *prekey.public_key.as_bytes()),
-        ratchet_public_key: *header.public_key.as_bytes(),
-        previous_chain_length: header.previous_chain_length,
-        message_number: header.message_number,
-        ciphertext,
     };
+    let frame = seal_frame_with_ephemeral_key(
+        &initiator_ephemeral_key,
+        &responder_prekey_bundle.discovery_key.public_key,
+        Some(prekey_reference),
+        &frame_plaintext,
+    )?;
+    let envelope = HandshakeEnvelope::from_frame(frame);
     envelope.to_bytes()?;
 
     Ok((state, envelope))
@@ -356,9 +347,8 @@ pub fn initiate<R: RngCore + CryptoRng>(
 ///   associated data, or wrong key).
 /// - [`CryptoError::HandshakeEnvelopeDecode`] when the sealed first message is malformed,
 ///   unsupported, or exceeds local caps.
-/// - [`CryptoError::HandshakeSignedPreKeyMismatch`] when
-///   `envelope.responder_signed_prekey_public_key` does not match
-///   `responder_signed_prekey.public()`.
+/// - [`CryptoError::HandshakeSignedPreKeyMismatch`] when the envelope pre-key reference does not
+///   match `responder_signed_prekey.public()`.
 /// - [`CryptoError::HkdfExpand`] when the HKDF run for root-key derivation fails.
 /// - [`CryptoError::InvalidState`] when ratchet decryption observes an invalid receiving state.
 /// - [`CryptoError::MissingOneTimePreKey`] when the envelope names a one-time pre-key but the
@@ -384,7 +374,8 @@ pub fn accept<R: RngCore + CryptoRng>(
 ) -> Result<(RatchetState, AcceptedInitialMessage), CryptoError> {
     verify_identity_key_bundle(initiator_identity_key)?;
     verify_identity_key_bundle(responder_identity_key)?;
-    if envelope.responder_discovery_epoch != responder_discovery_key.epoch()
+    let prekey_reference = envelope_prekey_reference(envelope)?;
+    if prekey_reference.discovery_epoch != responder_discovery_key.epoch()
         || responder_signed_prekey.epoch() != responder_discovery_key.epoch()
     {
         return Err(CryptoError::StalePreKey);
@@ -393,7 +384,9 @@ pub fn accept<R: RngCore + CryptoRng>(
         return Err(CryptoError::HandshakeEnvelopeDecode);
     }
     let signed_prekey_matches: bool = envelope
-        .responder_signed_prekey_public_key
+        .prekey_reference
+        .map(|reference| reference.signed_prekey_public_key)
+        .ok_or(CryptoError::HandshakeEnvelopeDecode)?
         .ct_eq(responder_signed_prekey.public().as_bytes())
         .into();
     if !signed_prekey_matches {
@@ -403,7 +396,7 @@ pub fn accept<R: RngCore + CryptoRng>(
     let responder_one_time_prekey =
         validate_envelope_one_time_prekey(envelope, responder_one_time_prekey)?;
 
-    let initiator_ephemeral_public_key = PublicKey::from(envelope.initiator_ephemeral_public_key);
+    let initiator_ephemeral_public_key = PublicKey::from(envelope.ephemeral_public_key);
 
     let root_key = derive_root_key_responder(
         &initiator_ephemeral_public_key,
@@ -417,16 +410,19 @@ pub fn accept<R: RngCore + CryptoRng>(
         KeyPair::from_secret_bytes(*responder_signed_prekey.to_secret_bytes());
     let mut state = RatchetState::init_responder(root_key, signed_prekey_key_pair);
 
-    let header = Header {
-        public_key: PublicKey::from(envelope.ratchet_public_key),
-        previous_chain_length: envelope.previous_chain_length,
-        message_number: envelope.message_number,
-    };
     let associated_data = initial_associated_data(
         responder_discovery_key.public_key(),
         responder_discovery_key.epoch(),
     );
-    let sealed = state.ratchet_decrypt(rng, &envelope.ciphertext, &header, &associated_data)?;
+    let frame_plaintext =
+        open_frame_for_discovery_key(responder_discovery_key, &envelope.to_frame())?;
+    let frame_plaintext = decode_handshake_frame_plaintext(&frame_plaintext)?;
+    let sealed = state.ratchet_decrypt(
+        rng,
+        &frame_plaintext.ciphertext,
+        &frame_plaintext.header,
+        &associated_data,
+    )?;
     let decoded = decode_sealed_sender_envelope(&sealed)?;
     let sender_identity = &decoded.message.sender_identity;
     let identity_matches: bool = (sender_identity
@@ -468,9 +464,10 @@ fn validate_envelope_one_time_prekey(
     envelope: &HandshakeEnvelope,
     one_time_prekey: Option<OneTimePreKey>,
 ) -> Result<Option<OneTimePreKey>, CryptoError> {
+    let reference = envelope_prekey_reference(envelope)?;
     match (
-        envelope.one_time_prekey_id,
-        envelope.one_time_prekey_public_key,
+        reference.one_time_prekey_id,
+        reference.one_time_prekey_public_key,
         one_time_prekey,
     ) {
         (None, None, _) => Ok(None),
@@ -481,7 +478,7 @@ fn validate_envelope_one_time_prekey(
             if prekey.id() != expected_id || !public_matches {
                 return Err(CryptoError::OneTimePreKeyMismatch);
             }
-            if prekey.epoch() != envelope.responder_discovery_epoch {
+            if prekey.epoch() != reference.discovery_epoch {
                 return Err(CryptoError::StalePreKey);
             }
             Ok(Some(prekey))
@@ -489,17 +486,60 @@ fn validate_envelope_one_time_prekey(
     }
 }
 
-fn validate_envelope_public_keys(wire: &HandshakeEnvelopeWire) -> Result<(), CryptoError> {
-    if !validate_x25519_public_key(&wire.initiator_ephemeral_public_key)
-        || !validate_x25519_public_key(&wire.responder_signed_prekey_public_key)
-        || !validate_x25519_public_key(&wire.ratchet_public_key)
-        || wire
-            .one_time_prekey_public_key
-            .is_some_and(|key| !validate_x25519_public_key(&key))
-    {
+fn envelope_prekey_reference(
+    envelope: &HandshakeEnvelope,
+) -> Result<SealedFramePreKeyReference, CryptoError> {
+    envelope
+        .prekey_reference
+        .ok_or(CryptoError::HandshakeEnvelopeDecode)
+}
+
+fn validate_envelope_public_fields(frame: &SealedFrame) -> Result<(), CryptoError> {
+    if frame.version != HANDSHAKE_ENVELOPE_VERSION || frame.prekey_reference.is_none() {
         return Err(CryptoError::HandshakeEnvelopeDecode);
     }
     Ok(())
+}
+
+fn encode_handshake_frame_plaintext(
+    header: &Header,
+    ciphertext: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    if ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
+        return Err(CryptoError::HandshakeEnvelopeEncode);
+    }
+    Ok(Zeroizing::new(
+        postcard::to_stdvec(&HandshakeFramePlaintextWire {
+            version: HANDSHAKE_ENVELOPE_VERSION,
+            ratchet_public_key: *header.public_key.as_bytes(),
+            previous_chain_length: header.previous_chain_length,
+            message_number: header.message_number,
+            ciphertext,
+        })
+        .map_err(|_| CryptoError::HandshakeEnvelopeEncode)?,
+    ))
+}
+
+fn decode_handshake_frame_plaintext(
+    bytes: &[u8],
+) -> Result<DecodedHandshakeFramePlaintext, CryptoError> {
+    let (wire, trailing): (DecodedHandshakeFramePlaintextWire, &[u8]) =
+        postcard::take_from_bytes(bytes).map_err(|_| CryptoError::HandshakeEnvelopeDecode)?;
+    if !trailing.is_empty()
+        || wire.version != HANDSHAKE_ENVELOPE_VERSION
+        || wire.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN
+        || !validate_x25519_public_key(&wire.ratchet_public_key)
+    {
+        return Err(CryptoError::HandshakeEnvelopeDecode);
+    }
+    Ok(DecodedHandshakeFramePlaintext {
+        header: Header {
+            public_key: PublicKey::from(wire.ratchet_public_key),
+            previous_chain_length: wire.previous_chain_length,
+            message_number: wire.message_number,
+        },
+        ciphertext: wire.ciphertext,
+    })
 }
 
 // Derives the initiator-side root key from X3DH Diffie-Hellman outputs plus both IK bundles:
@@ -662,20 +702,20 @@ fn envelope_sender_proof_transcript(
     responder_discovery_public_key: &PublicKey,
     sender_identity: &SenderIdentityMaterial,
     sender_discovery_key: &[u8; 32],
-) -> Zeroizing<Vec<u8>> {
-    let one_time_prekey = envelope
+) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let reference = envelope_prekey_reference(envelope)?;
+    let one_time_prekey = reference
         .one_time_prekey_id
-        .zip(envelope.one_time_prekey_public_key)
+        .zip(reference.one_time_prekey_public_key)
         .map(|(id, public_key)| OneTimePreKeyBundle {
             id,
             public_key: PublicKey::from(public_key),
-            epoch: envelope.responder_discovery_epoch,
+            epoch: reference.discovery_epoch,
             created_at: 0,
         });
-    let initiator_ephemeral_public_key = PublicKey::from(envelope.initiator_ephemeral_public_key);
-    let responder_signed_prekey_public_key =
-        PublicKey::from(envelope.responder_signed_prekey_public_key);
-    sender_proof_transcript(SenderProofTranscriptInput {
+    let initiator_ephemeral_public_key = PublicKey::from(envelope.ephemeral_public_key);
+    let responder_signed_prekey_public_key = PublicKey::from(reference.signed_prekey_public_key);
+    Ok(sender_proof_transcript(SenderProofTranscriptInput {
         sender_identity_key: &sender_identity.identity_key,
         sender_identity_verifying_key: &sender_identity.identity_verifying_key,
         sender_discovery_key,
@@ -683,10 +723,10 @@ fn envelope_sender_proof_transcript(
         sender_signature: &sender_identity.signature,
         initiator_ephemeral_public_key: &initiator_ephemeral_public_key,
         responder_discovery_public_key,
-        responder_discovery_epoch: envelope.responder_discovery_epoch,
+        responder_discovery_epoch: reference.discovery_epoch,
         responder_signed_prekey_public_key: &responder_signed_prekey_public_key,
         responder_one_time_prekey: one_time_prekey.as_ref(),
-    })
+    }))
 }
 
 fn derive_sender_proof(
@@ -719,7 +759,7 @@ fn verify_sender_proof(
         responder_discovery_public_key,
         sender_identity,
         sender_discovery_key,
-    );
+    )?;
     let expected_proof = derive_sender_proof(&sender_proof_secret, &transcript)?;
     let proof_matches: bool = expected_proof.as_ref().ct_eq(actual_proof).into();
     if !proof_matches {
@@ -1011,6 +1051,46 @@ mod tests {
         }
     }
 
+    fn envelope_reference(envelope: &HandshakeEnvelope) -> SealedFramePreKeyReference {
+        envelope.prekey_reference.unwrap()
+    }
+
+    fn test_prekey_reference(
+        setup: &FullX3dhSetup,
+        signed_prekey_public_key: &PublicKey,
+        one_time_prekey: Option<&OneTimePreKey>,
+    ) -> SealedFramePreKeyReference {
+        SealedFramePreKeyReference {
+            discovery_epoch: setup.bob_discovery_key.epoch(),
+            signed_prekey_public_key: *signed_prekey_public_key.as_bytes(),
+            one_time_prekey_id: one_time_prekey.map(OneTimePreKey::id),
+            one_time_prekey_public_key: one_time_prekey.map(|prekey| *prekey.public().as_bytes()),
+        }
+    }
+
+    fn test_handshake_envelope(
+        setup: &FullX3dhSetup,
+        initiator_ephemeral_key: &KeyPair,
+        responder_signed_prekey_public_key: &PublicKey,
+        one_time_prekey: Option<&OneTimePreKey>,
+        header: &Header,
+        ciphertext: &[u8],
+    ) -> HandshakeEnvelope {
+        let frame_plaintext = encode_handshake_frame_plaintext(header, ciphertext).unwrap();
+        let frame = seal_frame_with_ephemeral_key(
+            initiator_ephemeral_key,
+            setup.bob_discovery_key.public_key(),
+            Some(test_prekey_reference(
+                setup,
+                responder_signed_prekey_public_key,
+                one_time_prekey,
+            )),
+            &frame_plaintext,
+        )
+        .unwrap();
+        HandshakeEnvelope::from_frame(frame)
+    }
+
     /// Known-answer test for full X3DH root-key derivation with an OPK.
     ///
     /// Source: Aether's X25519 constructors and X3DH HKDF ordering
@@ -1118,7 +1198,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            envelope.one_time_prekey_id,
+            envelope_reference(&envelope).one_time_prekey_id,
             Some(setup.bob_one_time_prekey.id())
         );
         let (_, decrypted) = accept(
@@ -1207,7 +1287,7 @@ mod tests {
             initial_plaintext(plaintext),
         )
         .unwrap();
-        assert_eq!(envelope.one_time_prekey_id, None);
+        assert_eq!(envelope_reference(&envelope).one_time_prekey_id, None);
         let (_, decrypted) = accept(
             &mut rng,
             &envelope,
@@ -1448,7 +1528,11 @@ mod tests {
             initial_plaintext(b"payload"),
         )
         .unwrap();
-        envelope.responder_signed_prekey_public_key[0] ^= 0x01;
+        envelope
+            .prekey_reference
+            .as_mut()
+            .unwrap()
+            .signed_prekey_public_key[0] ^= 0x01;
         assert!(matches!(
             accept(
                 &mut rng,
@@ -1515,17 +1599,14 @@ mod tests {
         let (header, ciphertext) = state
             .ratchet_encrypt(b"not a sealed-sender envelope", &associated_data)
             .unwrap();
-        let envelope = HandshakeEnvelope {
-            initiator_ephemeral_public_key: *initiator_ephemeral_key.public.as_bytes(),
-            responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
-            one_time_prekey_id: None,
-            one_time_prekey_public_key: None,
-            ratchet_public_key: *header.public_key.as_bytes(),
-            previous_chain_length: header.previous_chain_length,
-            message_number: header.message_number,
-            ciphertext,
-        };
+        let envelope = test_handshake_envelope(
+            &setup,
+            &initiator_ephemeral_key,
+            responder_signed_prekey_public_key,
+            None,
+            &header,
+            &ciphertext,
+        );
 
         assert!(matches!(
             accept(
@@ -1579,17 +1660,14 @@ mod tests {
         })
         .unwrap();
         let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data).unwrap();
-        let envelope = HandshakeEnvelope {
-            initiator_ephemeral_public_key: *initiator_ephemeral_key.public.as_bytes(),
-            responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
-            one_time_prekey_id: None,
-            one_time_prekey_public_key: None,
-            ratchet_public_key: *header.public_key.as_bytes(),
-            previous_chain_length: header.previous_chain_length,
-            message_number: header.message_number,
-            ciphertext,
-        };
+        let envelope = test_handshake_envelope(
+            &setup,
+            &initiator_ephemeral_key,
+            responder_signed_prekey_public_key,
+            None,
+            &header,
+            &ciphertext,
+        );
 
         assert!(matches!(
             accept(
@@ -1643,17 +1721,14 @@ mod tests {
         })
         .unwrap();
         let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data).unwrap();
-        let envelope = HandshakeEnvelope {
-            initiator_ephemeral_public_key: *initiator_ephemeral_key.public.as_bytes(),
-            responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
-            one_time_prekey_id: None,
-            one_time_prekey_public_key: None,
-            ratchet_public_key: *header.public_key.as_bytes(),
-            previous_chain_length: header.previous_chain_length,
-            message_number: header.message_number,
-            ciphertext,
-        };
+        let envelope = test_handshake_envelope(
+            &setup,
+            &initiator_ephemeral_key,
+            responder_signed_prekey_public_key,
+            None,
+            &header,
+            &ciphertext,
+        );
 
         assert!(matches!(
             accept(
@@ -1771,17 +1846,14 @@ mod tests {
         })
         .unwrap();
         let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data).unwrap();
-        let envelope = HandshakeEnvelope {
-            initiator_ephemeral_public_key: *initiator_ephemeral_key.public.as_bytes(),
-            responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
-            one_time_prekey_id: None,
-            one_time_prekey_public_key: None,
-            ratchet_public_key: *header.public_key.as_bytes(),
-            previous_chain_length: header.previous_chain_length,
-            message_number: header.message_number,
-            ciphertext,
-        };
+        let envelope = test_handshake_envelope(
+            &setup,
+            &initiator_ephemeral_key,
+            responder_signed_prekey_public_key,
+            None,
+            &header,
+            &ciphertext,
+        );
 
         assert!(matches!(
             accept(
@@ -1859,12 +1931,32 @@ mod tests {
 
     #[test]
     fn envelope_from_bytes_rejects_unsupported_version() {
-        let mut bytes = HANDSHAKE_ENVELOPE_MAGIC.to_vec();
-        bytes.push(2);
+        let bytes = vec![2];
 
         assert!(matches!(
             HandshakeEnvelope::from_bytes(&bytes),
             Err(CryptoError::HandshakeEnvelopeDecode)
+        ));
+    }
+
+    #[test]
+    fn envelope_to_bytes_rejects_missing_prekey_reference() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let bundle = full_prekey_bundle(&setup, true);
+        let (_, mut envelope) = initiate(
+            &mut rng,
+            &setup.alice_discovery_key,
+            &setup.alice_identity_key,
+            &setup.bob_identity_key,
+            &bundle,
+            initial_plaintext(b"payload"),
+        )
+        .unwrap();
+        envelope.prekey_reference = None;
+
+        assert!(matches!(
+            envelope.to_bytes(),
+            Err(CryptoError::HandshakeEnvelopeEncode)
         ));
     }
 
@@ -1936,20 +2028,7 @@ mod tests {
             Err(CryptoError::HandshakeEnvelopeEncode)
         ));
 
-        let bytes = postcard::to_stdvec(&HandshakeEnvelopeWire {
-            magic: HANDSHAKE_ENVELOPE_MAGIC,
-            version: HANDSHAKE_ENVELOPE_VERSION,
-            initiator_ephemeral_public_key: envelope.initiator_ephemeral_public_key,
-            responder_discovery_epoch: envelope.responder_discovery_epoch,
-            responder_signed_prekey_public_key: envelope.responder_signed_prekey_public_key,
-            one_time_prekey_id: envelope.one_time_prekey_id,
-            one_time_prekey_public_key: envelope.one_time_prekey_public_key,
-            ratchet_public_key: envelope.ratchet_public_key,
-            previous_chain_length: envelope.previous_chain_length,
-            message_number: envelope.message_number,
-            ciphertext: envelope.ciphertext,
-        })
-        .unwrap();
+        let bytes = envelope.to_frame().to_bytes().unwrap();
         assert!(bytes.len() <= MAX_HANDSHAKE_ENVELOPE_LEN);
         assert!(matches!(
             HandshakeEnvelope::from_bytes(&bytes),

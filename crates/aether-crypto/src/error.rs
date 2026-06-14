@@ -10,6 +10,10 @@ pub enum CryptoError {
     HandshakeEnvelopeDecode,
     /// Handshake envelope failed to encode.
     HandshakeEnvelopeEncode,
+    /// Sealed-sender frame bytes failed to decode.
+    SealedFrameDecode,
+    /// Sealed-sender frame failed to encode.
+    SealedFrameEncode,
     /// Handshake envelope targets a different signed pre-key than the local one.
     HandshakeSignedPreKeyMismatch,
     /// HKDF-SHA256 rejected the requested output length.
@@ -54,6 +58,8 @@ impl fmt::Display for CryptoError {
             Self::Aead => write!(f, "xchacha20-poly1305 encryption or decryption failed"),
             Self::HandshakeEnvelopeDecode => write!(f, "handshake envelope bytes failed to decode"),
             Self::HandshakeEnvelopeEncode => write!(f, "handshake envelope failed to encode"),
+            Self::SealedFrameDecode => write!(f, "sealed-sender frame bytes failed to decode"),
+            Self::SealedFrameEncode => write!(f, "sealed-sender frame failed to encode"),
             Self::HandshakeSignedPreKeyMismatch => write!(
                 f,
                 "handshake envelope signed pre-key reference does not match local signed pre-key"

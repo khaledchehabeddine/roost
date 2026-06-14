@@ -4,14 +4,14 @@ use aether_core::{
     AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactTrustState, DEFAULT_DEDUPLICATION_CAPACITY,
     IdentityKey, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
-    Message, MessageId, OutboundAcknowledgment, OutboundPlaintext, PayloadKind,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
+    Message, MessageId, OutboundAcknowledgment, OutboundPlaintext, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
     derive_safety_number,
 };
 use aether_crypto::{
-    IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState, SigningKeyPair,
-    accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    DiscoveryKey, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState,
+    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
     sign_identity_key_binding,
 };
@@ -164,6 +164,17 @@ fn pending_acknowledgment_address(key: ProtocolStateKey) -> ProtocolStateAddress
 
 fn accepted_contact_identity() -> ContactIdentity {
     contact_fixture_identities().0
+}
+
+fn accepted_contact_discovery_key() -> DiscoveryKey {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let _identity_key_pair = generate_key_pair(&mut rng);
+    generate_discovery_key(&mut rng, &identity, 0, CREATED_AT)
+}
+
+fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
+    Box::leak(Box::new(accepted_contact_discovery_key()))
 }
 
 fn local_identity_key() -> IdentityKey {
@@ -490,23 +501,34 @@ fn current_version_fixture_matches_decoded_state_expectations() {
     );
     install_accepted_contact(&engine, &mut expected_snapshot);
     let sender_identity = sender_identity();
-    let fixture_message = engine
+    let fixture_result = engine
         .encrypt_message(
             &fixture_snapshot,
             key.clone(),
             outbound(b"fixture", &sender_identity),
         )
-        .unwrap()
-        .message;
-    let expected_message = engine
+        .unwrap();
+    let expected_result = engine
         .encrypt_message(
             &expected_snapshot,
             key,
             outbound(b"fixture", &sender_identity),
         )
-        .unwrap()
-        .message;
-    assert_eq!(fixture_message.payload, expected_message.payload);
+        .unwrap();
+    assert_eq!(fixture_result.message_id, expected_result.message_id);
+    assert_eq!(
+        fixture_result.timestamp_millis,
+        expected_result.timestamp_millis
+    );
+    assert_eq!(fixture_result.payload_kind, expected_result.payload_kind);
+    assert_eq!(
+        fixture_result.message.recipient_public_key,
+        expected_result.message.recipient_public_key
+    );
+    assert_eq!(
+        fixture_result.state_updates[0].blob().unwrap().as_bytes(),
+        expected_result.state_updates[0].blob().unwrap().as_bytes()
+    );
 }
 
 #[test]
@@ -666,7 +688,8 @@ fn assert_duplicate_inbound_replay(
     let replay = fixture.replay.as_ref().unwrap();
     let encoded = hex::decode(&replay.encoded_message_hex).unwrap();
     let message = Message::from_bytes(&encoded).unwrap();
-    assert_eq!(message.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(message.version, 1);
+    assert!(message.prekey_reference.is_none());
     let mut digest_key = [0u8; 32];
     ChaCha20Rng::from_seed([0x44; 32]).fill_bytes(&mut digest_key);
     assert_eq!(
@@ -685,6 +708,7 @@ fn assert_duplicate_inbound_replay(
                 session_key: session_key(),
                 deduplication_key: deduplication_key(),
                 message: &message,
+                recipient_discovery_key: accepted_contact_discovery_key_ref(),
                 acknowledgment: acknowledgment(&acknowledgment_sender),
                 sender_certificate_validation: None,
             },
@@ -701,7 +725,8 @@ fn assert_duplicate_acknowledgment_replay(
     let replay = fixture.replay.as_ref().unwrap();
     let encoded = hex::decode(&replay.encoded_message_hex).unwrap();
     let message = Message::from_bytes(&encoded).unwrap();
-    assert_eq!(message.payload_kind, PayloadKind::Acknowledgment);
+    assert_eq!(message.version, 1);
+    assert!(message.prekey_reference.is_none());
     assert_eq!(
         digest_hex(&encoded),
         replay.digest_hex,
@@ -716,6 +741,7 @@ fn assert_duplicate_acknowledgment_replay(
             InboundAcknowledgmentMessage {
                 session_key: session_key(),
                 message: &message,
+                recipient_discovery_key: accepted_contact_discovery_key_ref(),
             },
         )
         .unwrap();

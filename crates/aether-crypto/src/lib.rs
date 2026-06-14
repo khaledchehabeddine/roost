@@ -47,6 +47,7 @@ mod handshake;
 mod keys;
 mod one_time_prekey;
 mod ratchet;
+mod sealed_frame;
 mod signed_prekey;
 
 pub use discovery_key::{
@@ -67,6 +68,9 @@ pub use keys::{
     verify_identity_key_bundle, verify_with_context,
 };
 pub use one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
+pub use sealed_frame::{
+    SealedFrame, SealedFramePreKeyReference, open_frame, open_frame_for_discovery_key, seal_frame,
+};
 pub use signed_prekey::{
     SignedPreKey, SignedPreKeyBundle, generate_signed_prekey, verify_signed_prekey_bundle,
 };

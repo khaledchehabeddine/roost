@@ -12,14 +12,15 @@ use aether_core::{
     SessionUnrecoverableReason, SessionUnrecoverableResult,
 };
 use aether_crypto::{
-    CryptoError, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey,
-    RatchetState, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initiate, sign_identity_key_binding,
+    CryptoError, DiscoveryKey, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle,
+    PublicKey, RatchetState, SealedFramePreKeyReference, SigningKeyPair, accept,
+    generate_discovery_key, generate_key_pair, generate_one_time_prekey,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate, seal_frame,
+    sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const CREATED_AT: u64 = 1_700_000_000;
 const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
@@ -30,6 +31,21 @@ const CERTIFICATE_REFERENCE_TIME: u64 = 1_700_000_000;
 struct Setup {
     alice_state: RatchetState,
     bob_state: RatchetState,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TestPendingAcknowledgmentsWire {
+    version: u8,
+    pending: Vec<TestPendingAcknowledgmentWire>,
+    acknowledgment_digests: Vec<[u8; 16]>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TestPendingAcknowledgmentWire {
+    message_id: [u8; 16],
+    encoded_message: Vec<u8>,
+    first_sent_millis: u64,
+    last_retry_millis: Option<u64>,
 }
 
 fn setup() -> Setup {
@@ -189,8 +205,26 @@ fn accepted_contact_identity() -> ContactIdentity {
     contact_identities().0
 }
 
+fn accepted_contact_discovery_key() -> DiscoveryKey {
+    let identity = test_sender_identity_signing_key(0xa1);
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    generate_discovery_key(&mut rng, identity, 0, CREATED_AT)
+}
+
+fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
+    Box::leak(Box::new(accepted_contact_discovery_key()))
+}
+
 fn rotated_contact_identity() -> ContactIdentity {
     contact_identities().1
+}
+
+fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
+    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
+}
+
+fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
+    Box::leak(Box::new(acknowledgment_recipient_discovery_key()))
 }
 
 struct ValidatedSender {
@@ -323,6 +357,7 @@ fn inbound_with_certificate_validation<'a>(
         session_key,
         deduplication_key,
         message,
+        recipient_discovery_key: accepted_contact_discovery_key_ref(),
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: Some(sender_certificate_validation(
             domain_signing_keys,
@@ -485,11 +520,12 @@ fn acknowledgment<'a>(
     id: u8,
     sender_identity: &'a SenderIdentityMaterial,
 ) -> OutboundAcknowledgment<'a> {
+    let recipient = acknowledgment_recipient_discovery_key();
     OutboundAcknowledgment {
         id: MessageId::from_bytes([id; 16]),
         sender_identity,
         sender_identity_signing_key: sender_identity_signing_key(sender_identity),
-        recipient_public_key: [3u8; 32],
+        recipient_public_key: *recipient.public_key().as_bytes(),
         timestamp_millis: 1_700_000_100_000 + u64::from(id),
     }
 }
@@ -504,6 +540,7 @@ fn inbound<'a>(
         session_key,
         deduplication_key,
         message,
+        recipient_discovery_key: accepted_contact_discovery_key_ref(),
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: None,
     }
@@ -541,6 +578,7 @@ fn inbound_acknowledgment<'a>(
     InboundAcknowledgmentMessage {
         session_key,
         message,
+        recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
     }
 }
 
@@ -575,16 +613,6 @@ fn session_unrecoverable(outcome: InboundMessageOutcome) -> SessionUnrecoverable
     }
 }
 
-fn message_associated_data(message: &Message) -> Vec<u8> {
-    let mut associated_data = Vec::new();
-    associated_data.extend_from_slice(b"AetherMessage-v1:");
-    associated_data.extend_from_slice(message.id.as_bytes());
-    associated_data.extend_from_slice(&message.recipient_public_key);
-    associated_data.extend_from_slice(&message.timestamp_millis.to_be_bytes());
-    associated_data.push(0);
-    associated_data
-}
-
 fn ratcheted_payload(header: &Header, ciphertext: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(1);
@@ -617,13 +645,59 @@ fn dead_session_blob(event_emitted: bool, peer_sender_identity_key: [u8; 32]) ->
     ProtocolStateBlob::from_bytes(bytes)
 }
 
+fn ratchet_associated_data(
+    session_key: &ProtocolStateKey,
+    recipient_public_key: &[u8; 32],
+) -> Vec<u8> {
+    let mut associated_data = Vec::new();
+    associated_data.extend_from_slice(b"AetherRatchetedPayload-v1:");
+    associated_data.extend_from_slice(&(session_key.as_bytes().len() as u32).to_be_bytes());
+    associated_data.extend_from_slice(session_key.as_bytes());
+    associated_data.extend_from_slice(recipient_public_key);
+    associated_data
+}
+
+fn message_frame_plaintext(
+    id: MessageId,
+    timestamp_millis: u64,
+    payload_kind: PayloadKind,
+    ratcheted_payload: &[u8],
+) -> Vec<u8> {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct Wire<'a> {
+        version: u8,
+        id: [u8; 16],
+        timestamp_millis: u64,
+        payload_kind: u8,
+        ratcheted_payload: &'a [u8],
+    }
+
+    let payload_kind = match payload_kind {
+        PayloadKind::EncryptedText => 0,
+        PayloadKind::Acknowledgment => 1,
+        PayloadKind::KeyExchange => 2,
+        PayloadKind::RatchetHeader => 3,
+        _ => panic!("unsupported test payload kind"),
+    };
+    postcard::to_stdvec(&Wire {
+        version: 1,
+        id: *id.as_bytes(),
+        timestamp_millis,
+        payload_kind,
+        ratcheted_payload,
+    })
+    .unwrap()
+}
+
 fn copy_message(message: &Message) -> Message {
     Message {
-        id: message.id,
+        version: message.version,
         recipient_public_key: message.recipient_public_key,
-        timestamp_millis: message.timestamp_millis,
-        payload_kind: message.payload_kind,
-        payload: message.payload.clone(),
+        prekey_reference: message.prekey_reference,
+        ephemeral_public_key: message.ephemeral_public_key,
+        ciphertext: message.ciphertext.clone(),
     }
 }
 
@@ -647,7 +721,7 @@ fn outbound_message_and_advanced_state_return_together() {
         )
         .unwrap();
 
-    assert_eq!(result.message.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(result.payload_kind, PayloadKind::EncryptedText);
     assert_eq!(result.state_updates.len(), 2);
     assert_eq!(result.state_updates[0].address(), &address);
     assert_eq!(result.state_updates[1].address(), &pending_address);
@@ -732,6 +806,65 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
 }
 
 #[test]
+fn sealed_frame_hides_message_metadata_until_decrypt() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender();
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x42, b"hidden metadata", &sender.sender_identity),
+        )
+        .unwrap();
+
+    assert_eq!(
+        encrypted.message.recipient_public_key,
+        accepted_contact_identity()
+            .discovery_key
+            .prekey_bundle_lookup_key(),
+        "only recipient routing key remains visible"
+    );
+    assert!(encrypted.message.prekey_reference.is_none());
+    assert_ne!(encrypted.message.ephemeral_public_key, [0u8; 32]);
+    assert!(!encrypted.message.ciphertext.is_empty());
+
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x42; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key,
+                deduplication_key,
+                &encrypted.message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+
+    assert_eq!(decrypted.message_id, MessageId::from_bytes([0x42; 16]));
+    assert_eq!(decrypted.timestamp_millis, 1_700_000_000_123 + 0x42);
+    assert_eq!(decrypted.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(decrypted.plaintext.as_slice(), b"hidden metadata");
+}
+
+#[test]
 fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
@@ -768,7 +901,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
         .pending_acknowledgments(&alice_snapshot, key.clone())
         .unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].message.id, encrypted.message.id);
+    assert_eq!(pending[0].message_id, encrypted.message_id);
 
     let decrypted = engine
         .decrypt_message(
@@ -788,15 +921,12 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     bob_snapshot.apply_all(decrypted.state_updates);
 
     assert_eq!(decrypted.plaintext.as_slice(), b"ack me");
-    assert_eq!(
-        decrypted.acknowledgment.payload_kind,
-        PayloadKind::Acknowledgment
-    );
+    assert!(decrypted.acknowledgment.prekey_reference.is_none());
     let encoded_ack = decrypted.acknowledgment.to_bytes().unwrap();
     assert!(
         !encoded_ack
-            .windows(encrypted.message.id.as_bytes().len())
-            .any(|window| window == encrypted.message.id.as_bytes())
+            .windows(encrypted.message_id.as_bytes().len())
+            .any(|window| window == encrypted.message_id.as_bytes())
     );
 
     let cleared = engine
@@ -809,7 +939,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
         panic!("acknowledgment did not clear pending state");
     };
-    assert_eq!(cleared.acknowledged_message_id, encrypted.message.id);
+    assert_eq!(cleared.acknowledged_message_id, encrypted.message_id);
     assert_eq!(
         cleared.sender_identity.identity_key,
         bob_sender.identity_key
@@ -931,7 +1061,7 @@ fn retry_instructions_are_windowed_and_persisted() {
         .retry_instructions(&snapshot, key.clone(), sent_at + 1_000, 1_000)
         .unwrap();
     assert_eq!(due.instructions.len(), 1);
-    assert_eq!(due.instructions[0].message.id, encrypted.message.id);
+    assert_eq!(due.instructions[0].message_id, encrypted.message_id);
     snapshot.apply_all(due.state_updates);
 
     let repeated = ProtocolStateEngine::new()
@@ -980,6 +1110,53 @@ fn pending_acknowledgment_state_faults_on_bad_blobs() {
             major: 2,
             minor: 0
         }) if actual == address
+    ));
+}
+
+#[test]
+fn pending_acknowledgment_state_rejects_x3dh_frame_retries() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let address = pending_acknowledgment_address(key.clone());
+    let sender_identity = sender_identity(0xa1);
+    let snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let encrypted = engine
+        .encrypt_message(
+            &snapshot,
+            key.clone(),
+            outbound(0x35, b"retry wrong frame", &sender_identity),
+        )
+        .unwrap();
+    let pending_update = encrypted
+        .state_updates
+        .iter()
+        .find(|update| update.address().kind() == ProtocolStateKind::PendingAcknowledgments)
+        .unwrap();
+    let pending_blob = pending_update.blob().unwrap().as_bytes();
+    let (mut wire, trailing): (TestPendingAcknowledgmentsWire, &[u8]) =
+        postcard::take_from_bytes(&pending_blob[2..]).unwrap();
+    assert!(trailing.is_empty());
+    assert_eq!(wire.pending.len(), 1);
+
+    let signed_prekey = KeyPair::from_secret_bytes([0x61; 32]);
+    let mut message = Message::from_bytes(&wire.pending[0].encoded_message).unwrap();
+    message.prekey_reference = Some(SealedFramePreKeyReference {
+        discovery_epoch: 7,
+        signed_prekey_public_key: *signed_prekey.public.as_bytes(),
+        one_time_prekey_id: None,
+        one_time_prekey_public_key: None,
+    });
+    wire.pending[0].encoded_message = message.to_bytes().unwrap();
+
+    let mut corrupt_blob = pending_blob[..2].to_vec();
+    corrupt_blob.extend(postcard::to_stdvec(&wire).unwrap());
+    let mut corrupt_snapshot = ProtocolStateSnapshot::new();
+    corrupt_snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(corrupt_blob));
+
+    assert!(matches!(
+        engine.pending_acknowledgments(&corrupt_snapshot, key),
+        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
     ));
 }
 
@@ -1319,7 +1496,7 @@ fn transient_aead_failure_does_not_mark_session_unrecoverable() {
         .unwrap()
         .message;
     let mut tampered = copy_message(&encrypted);
-    *tampered.payload.last_mut().unwrap() ^= 0x01;
+    *tampered.ciphertext.last_mut().unwrap() ^= 0x01;
 
     assert!(matches!(
         engine.decrypt_message(
@@ -1586,10 +1763,7 @@ fn blocked_inbound_message_advances_state_and_returns_acknowledgment_without_pla
         .map(blocked)
         .unwrap();
 
-    assert_eq!(
-        blocked.acknowledgment.payload_kind,
-        PayloadKind::Acknowledgment
-    );
+    assert!(blocked.acknowledgment.prekey_reference.is_none());
     assert_eq!(blocked.state_updates.len(), 2);
     assert_eq!(blocked.state_updates[0].address(), &ratchet_address);
     assert_eq!(blocked.state_updates[1].address(), &deduplication_address);
@@ -1866,6 +2040,7 @@ fn unavailable_revocation_state_rejects_before_plaintext_is_surfaced() {
             session_key: key,
             deduplication_key,
             message: &encrypted,
+            recipient_discovery_key: accepted_contact_discovery_key_ref(),
             acknowledgment: acknowledgment(0xee, &acknowledgment_sender_identity),
             sender_certificate_validation: Some(sender_certificate_validation(
                 &domain_keys,
@@ -2614,7 +2789,7 @@ fn tampered_ciphertext_exposes_no_sender_identity() {
         )
         .unwrap()
         .message;
-    let last = encrypted.payload.last_mut().unwrap();
+    let last = encrypted.ciphertext.last_mut().unwrap();
     *last ^= 0x01;
 
     let result = engine.decrypt_message(
@@ -2656,14 +2831,14 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
         .unwrap()
         .message;
 
-    let mut wrong_id = copy_message(&encrypted);
-    wrong_id.id = MessageId::from_bytes([6; 16]);
     let mut wrong_recipient = copy_message(&encrypted);
-    wrong_recipient.recipient_public_key[0] ^= 0x01;
-    let mut wrong_timestamp = copy_message(&encrypted);
-    wrong_timestamp.timestamp_millis += 1;
-
-    for message in [wrong_id, wrong_recipient, wrong_timestamp] {
+    wrong_recipient.recipient_public_key = *acknowledgment_recipient_discovery_key()
+        .public_key()
+        .as_bytes();
+    let mut wrong_ephemeral = copy_message(&encrypted);
+    wrong_ephemeral.ephemeral_public_key =
+        *KeyPair::from_secret_bytes([0x55; 32]).public.as_bytes();
+    for message in [wrong_recipient, wrong_ephemeral] {
         let result = engine.decrypt_message(
             &mut ChaCha20Rng::from_seed([16u8; 32]),
             &bob_snapshot,
@@ -2780,6 +2955,7 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
         InboundAcknowledgmentMessage {
             session_key: other_key,
             message: &decrypted.acknowledgment,
+            recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
         },
     );
 
@@ -2802,18 +2978,35 @@ fn malformed_sealed_sender_envelope_is_rejected() {
         &sender_identity,
         deduplication_key.clone(),
     );
-    let mut message = Message {
-        id: MessageId::from_bytes([4; 16]),
-        recipient_public_key: [2u8; 32],
-        timestamp_millis: 1_700_000_000_444,
-        payload_kind: PayloadKind::EncryptedText,
-        payload: Vec::new(),
-    };
-    let associated_data = message_associated_data(&message);
+    let recipient_public_key = accepted_contact_identity()
+        .discovery_key
+        .prekey_bundle_lookup_key();
+    let associated_data = ratchet_associated_data(&key, &recipient_public_key);
     let (header, ciphertext) = alice_state
         .ratchet_encrypt(b"not a sealed-sender envelope", &associated_data)
         .unwrap();
-    message.payload = ratcheted_payload(&header, &ciphertext);
+    let ratcheted_payload = ratcheted_payload(&header, &ciphertext);
+    let frame_plaintext = message_frame_plaintext(
+        MessageId::from_bytes([4; 16]),
+        1_700_000_000_444,
+        PayloadKind::EncryptedText,
+        &ratcheted_payload,
+    );
+    let mut rng = ChaCha20Rng::from_seed([0x14; 32]);
+    let frame = seal_frame(
+        &mut rng,
+        &PublicKey::from(recipient_public_key),
+        None,
+        &frame_plaintext,
+    )
+    .unwrap();
+    let message = Message {
+        version: frame.version,
+        recipient_public_key: frame.recipient_public_key,
+        prekey_reference: frame.prekey_reference,
+        ephemeral_public_key: frame.ephemeral_public_key,
+        ciphertext: frame.ciphertext,
+    };
 
     let result = engine.decrypt_message(
         &mut ChaCha20Rng::from_seed([14u8; 32]),
@@ -2849,13 +3042,13 @@ fn large_valid_outbound_message_persists_pending_acknowledgment() {
         )
         .unwrap();
     assert!(result.message.to_bytes().unwrap().len() > 64 * 1024);
-    let message_id = result.message.id;
+    let message_id = result.message_id;
     snapshot.apply_all(result.state_updates);
 
     let pending = engine.pending_acknowledgments(&snapshot, key).unwrap();
 
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].message.id, message_id);
+    assert_eq!(pending[0].message_id, message_id);
 }
 
 #[test]
@@ -3083,5 +3276,5 @@ fn after_wipe_session_operation_requires_explicit_restore() {
     let result = engine
         .encrypt_message(&snapshot, key, outbound(2, b"restored", &sender_identity))
         .unwrap();
-    assert_eq!(result.message.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(result.payload_kind, PayloadKind::EncryptedText);
 }

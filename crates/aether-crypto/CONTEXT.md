@@ -20,6 +20,12 @@ Avoid: KDF, key derivation function
 The 24-byte XChaCha20 IV paired with each message key. Derived alongside the key via HKDF and never transmitted.
 Avoid: IV, salt
 
+**Sealed Frame Agreement** (one per sealed-sender frame):
+The per-frame X25519 agreement between a fresh ephemeral key and the recipient's current Discovery
+Key X25519 half. HKDF expands the agreement into the outer XChaCha20-Poly1305 key and nonce; the
+transport-visible frame fields are authenticated as AEAD associated data.
+Avoid: X3DH root key, ratchet message key
+
 **Ratchet** (one per Session):
 The Double Ratchet state machine that advances on every Message, providing forward secrecy and
 post-compromise recovery. Per-chain and total skipped-key caps reject messages that would exceed

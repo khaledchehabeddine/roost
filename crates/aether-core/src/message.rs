@@ -1,12 +1,10 @@
 use std::error::Error;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use aether_crypto::{SealedFrame, SealedFramePreKeyReference};
 
-const MESSAGE_WIRE_VERSION: u8 = 1;
-const MESSAGE_WIRE_MAGIC: [u8; 4] = *b"AMSG";
-pub(crate) const MAX_MESSAGE_PAYLOAD_LEN: usize = 64 * 1024;
-pub(crate) const MAX_ENCODED_MESSAGE_LEN: usize = MAX_MESSAGE_PAYLOAD_LEN + 128;
+pub(crate) const MAX_MESSAGE_PAYLOAD_LEN: usize = 128 * 1024;
+pub(crate) const MAX_ENCODED_MESSAGE_LEN: usize = SealedFrame::MAX_ENCODED_LEN;
 const PUBLIC_KEY_LEN: usize = 32;
 
 /// The UUID-shaped identifier for a [`Message`].
@@ -27,97 +25,74 @@ impl MessageId {
     }
 }
 
-/// A Session packet encoded for consumer transport.
+/// A sealed-sender frame encoded for consumer transport.
 pub struct Message {
-    /// Stable identifier for this message.
-    pub id: MessageId,
-    /// Recipient X25519 public key bytes. Always 32 bytes.
+    /// Sealed-frame wire version.
+    pub version: u8,
+    /// Recipient Discovery Key X25519 public key bytes. Always 32 bytes.
     pub recipient_public_key: [u8; PUBLIC_KEY_LEN],
-    /// Sender-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
-    /// Interpretation of the payload bytes.
-    pub payload_kind: PayloadKind,
-    /// Opaque payload bytes carried by the message.
-    pub payload: Vec<u8>,
+    /// Optional X3DH prekey reference for initial messages.
+    pub prekey_reference: Option<SealedFramePreKeyReference>,
+    /// Per-frame ephemeral X25519 public key bytes. Always 32 bytes.
+    pub ephemeral_public_key: [u8; PUBLIC_KEY_LEN],
+    /// Opaque frame ciphertext bytes.
+    pub ciphertext: Vec<u8>,
 }
 
 impl Message {
-    /// Encodes this message to the Message wire format.
+    /// Encodes this message to the sealed-frame wire format.
     ///
-    /// The magic and version bytes are internal to the encoded message and are independent of any
+    /// The sealed-frame version is internal to the encoded message and independent of any
     /// transport envelope a consumer may add around the returned bytes.
     ///
     /// # Errors
-    /// - [`MessageError::PayloadTooLarge`] if `payload` exceeds the message payload cap.
+    /// - [`MessageError::PayloadTooLarge`] if `ciphertext` exceeds the message payload cap.
     /// - [`MessageError::Encode`] if Postcard rejects the wire form or the encoded output exceeds
     ///   the message size cap.
     pub fn to_bytes(&self) -> Result<Vec<u8>, MessageError> {
-        if self.payload.len() > MAX_MESSAGE_PAYLOAD_LEN {
+        if self.ciphertext.len() > MAX_MESSAGE_PAYLOAD_LEN {
             return Err(MessageError::PayloadTooLarge);
         }
-
-        let wire = postcard::to_stdvec(&MessageWire {
-            version: MESSAGE_WIRE_VERSION,
-            id: *self.id.as_bytes(),
-            recipient_public_key: self.recipient_public_key.to_vec(),
-            timestamp_millis: self.timestamp_millis,
-            payload_kind: self.payload_kind.tag(),
-            payload: self.payload.clone(),
-        })
-        .map_err(|_| MessageError::Encode)?;
-        let mut bytes = Vec::with_capacity(MESSAGE_WIRE_MAGIC.len() + wire.len());
-        bytes.extend_from_slice(&MESSAGE_WIRE_MAGIC);
-        bytes.extend_from_slice(&wire);
-        if bytes.len() > MAX_ENCODED_MESSAGE_LEN {
-            return Err(MessageError::Encode);
-        }
-        Ok(bytes)
+        self.to_frame().to_bytes().map_err(|_| MessageError::Encode)
     }
 
-    /// Decodes a message from bytes produced by [`Self::to_bytes`].
+    /// Decodes a sealed-frame message from bytes produced by [`Self::to_bytes`].
     ///
     /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
     ///
     /// # Errors
-    /// - [`MessageError::Decode`] if the bytes are empty, oversized, malformed, or have trailing
-    ///   data.
-    /// - [`MessageError::InvalidPublicKey`] if the recipient public-key field is not exactly 32
-    ///   bytes.
-    /// - [`MessageError::PayloadTooLarge`] if the decoded payload exceeds the payload cap.
-    /// - [`MessageError::UnsupportedPayloadKind`] if the payload-kind tag is unknown.
-    /// - [`MessageError::UnsupportedVersion`] if the message format version is not supported.
+    /// - [`MessageError::Decode`] if the bytes are empty, oversized, malformed, unsupported, or
+    ///   have trailing data.
+    /// - [`MessageError::PayloadTooLarge`] if the decoded ciphertext exceeds the payload cap.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MessageError> {
-        let magic = bytes
-            .get(..MESSAGE_WIRE_MAGIC.len())
-            .ok_or(MessageError::Decode)?;
-        if magic != MESSAGE_WIRE_MAGIC {
-            return Err(MessageError::Decode);
-        }
-        let wire_bytes = &bytes[MESSAGE_WIRE_MAGIC.len()..];
-        let version = *wire_bytes.first().ok_or(MessageError::Decode)?;
-        if version != MESSAGE_WIRE_VERSION {
-            return Err(MessageError::UnsupportedVersion(version));
-        }
         if bytes.len() > MAX_ENCODED_MESSAGE_LEN {
             return Err(MessageError::Decode);
         }
-
-        let (wire, trailing): (MessageWire, &[u8]) =
-            postcard::take_from_bytes(wire_bytes).map_err(|_| MessageError::Decode)?;
-        if !trailing.is_empty() {
-            return Err(MessageError::Decode);
-        }
-        if wire.payload.len() > MAX_MESSAGE_PAYLOAD_LEN {
+        let frame = SealedFrame::from_bytes(bytes).map_err(|_| MessageError::Decode)?;
+        if frame.ciphertext.len() > MAX_MESSAGE_PAYLOAD_LEN {
             return Err(MessageError::PayloadTooLarge);
         }
+        Ok(Self::from_frame(frame))
+    }
 
-        Ok(Self {
-            id: MessageId::from_bytes(wire.id),
-            recipient_public_key: public_key_bytes(wire.recipient_public_key)?,
-            timestamp_millis: wire.timestamp_millis,
-            payload_kind: PayloadKind::from_tag(wire.payload_kind)?,
-            payload: wire.payload,
-        })
+    pub(crate) fn from_frame(frame: SealedFrame) -> Self {
+        Self {
+            version: frame.version,
+            recipient_public_key: frame.recipient_public_key,
+            prekey_reference: frame.prekey_reference,
+            ephemeral_public_key: frame.ephemeral_public_key,
+            ciphertext: frame.ciphertext,
+        }
+    }
+
+    pub(crate) fn to_frame(&self) -> SealedFrame {
+        SealedFrame {
+            version: self.version,
+            recipient_public_key: self.recipient_public_key,
+            prekey_reference: self.prekey_reference,
+            ephemeral_public_key: self.ephemeral_public_key,
+            ciphertext: self.ciphertext.clone(),
+        }
     }
 }
 
@@ -145,7 +120,7 @@ impl PayloadKind {
         }
     }
 
-    fn from_tag(tag: u8) -> Result<Self, MessageError> {
+    pub(crate) fn from_tag(tag: u8) -> Result<Self, MessageError> {
         match tag {
             0 => Ok(PayloadKind::EncryptedText),
             1 => Ok(PayloadKind::Acknowledgment),
@@ -192,46 +167,23 @@ impl fmt::Display for MessageError {
 
 impl Error for MessageError {}
 
-#[derive(Deserialize, Serialize)]
-struct MessageWire {
-    version: u8,
-    id: [u8; 16],
-    recipient_public_key: Vec<u8>,
-    timestamp_millis: u64,
-    payload_kind: u8,
-    payload: Vec<u8>,
-}
-
-fn public_key_bytes(bytes: Vec<u8>) -> Result<[u8; PUBLIC_KEY_LEN], MessageError> {
-    bytes.try_into().map_err(|_| MessageError::InvalidPublicKey)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aether_crypto::{KeyPair, seal_frame};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     fn message() -> Message {
-        Message {
-            id: MessageId::from_bytes([1u8; 16]),
-            recipient_public_key: [3u8; PUBLIC_KEY_LEN],
-            timestamp_millis: 1_700_000_000_123,
-            payload_kind: PayloadKind::EncryptedText,
-            payload: vec![0x90, 0x91, 0x92, 0x93, 0x94],
-        }
+        let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
+        let recipient = KeyPair::from_secret_bytes([3u8; PUBLIC_KEY_LEN]);
+        let frame = seal_frame(&mut rng, &recipient.public, None, b"payload").unwrap();
+        Message::from_frame(frame)
     }
 
-    fn wire() -> MessageWire {
-        MessageWire {
-            version: MESSAGE_WIRE_VERSION,
-            id: [1u8; 16],
-            recipient_public_key: vec![3u8; PUBLIC_KEY_LEN],
-            timestamp_millis: 1_700_000_000_123,
-            payload_kind: 0,
-            payload: vec![0x90, 0x91, 0x92, 0x93, 0x94],
-        }
-    }
+    fn old_sender_visible_wire() -> Vec<u8> {
+        use serde::Serialize;
 
-    fn sender_visible_wire() -> Vec<u8> {
         #[derive(Serialize)]
         struct SenderVisibleWireV1 {
             version: u8,
@@ -244,7 +196,7 @@ mod tests {
         }
 
         postcard::to_stdvec(&SenderVisibleWireV1 {
-            version: MESSAGE_WIRE_VERSION,
+            version: SealedFrame::VERSION,
             id: [1u8; 16],
             sender_public_key: vec![2u8; PUBLIC_KEY_LEN],
             recipient_public_key: vec![3u8; PUBLIC_KEY_LEN],
@@ -255,11 +207,14 @@ mod tests {
         .unwrap()
     }
 
-    fn wire_bytes(wire: &MessageWire) -> Vec<u8> {
-        let body = postcard::to_stdvec(wire).unwrap();
-        let mut bytes = MESSAGE_WIRE_MAGIC.to_vec();
-        bytes.extend_from_slice(&body);
-        bytes
+    fn old_message() -> Message {
+        Message {
+            version: SealedFrame::VERSION,
+            recipient_public_key: [3u8; PUBLIC_KEY_LEN],
+            prekey_reference: None,
+            ephemeral_public_key: [4u8; PUBLIC_KEY_LEN],
+            ciphertext: vec![0x90, 0x91, 0x92, 0x93, 0x94],
+        }
     }
 
     fn assert_decode_error(bytes: &[u8], expected: MessageError) {
@@ -274,30 +229,28 @@ mod tests {
         let message = message();
         let decoded = Message::from_bytes(&message.to_bytes().unwrap()).unwrap();
 
-        assert_eq!(decoded.id, message.id);
+        assert_eq!(decoded.version, message.version);
         assert_eq!(decoded.recipient_public_key, message.recipient_public_key);
-        assert_eq!(decoded.timestamp_millis, message.timestamp_millis);
-        assert_eq!(decoded.payload_kind, message.payload_kind);
-        assert_eq!(decoded.payload, message.payload);
+        assert_eq!(decoded.prekey_reference, message.prekey_reference);
+        assert_eq!(decoded.ephemeral_public_key, message.ephemeral_public_key);
+        assert_eq!(decoded.ciphertext, message.ciphertext);
     }
 
     #[test]
     fn from_bytes_rejects_unsupported_version_before_full_decode() {
-        let mut bytes = MESSAGE_WIRE_MAGIC.to_vec();
-        bytes.push(2);
+        let bytes = vec![2];
 
-        assert_decode_error(&bytes, MessageError::UnsupportedVersion(2));
+        assert_decode_error(&bytes, MessageError::Decode);
     }
 
     #[test]
     fn from_bytes_rejects_old_sender_visible_wire_layout() {
-        assert_decode_error(&sender_visible_wire(), MessageError::Decode);
+        assert_decode_error(&old_sender_visible_wire(), MessageError::Decode);
     }
 
     #[test]
     fn from_bytes_rejects_malformed_postcard() {
-        let mut bytes = MESSAGE_WIRE_MAGIC.to_vec();
-        bytes.extend_from_slice(&[MESSAGE_WIRE_VERSION, 0xff]);
+        let bytes = vec![SealedFrame::VERSION, 0xff];
 
         assert_decode_error(&bytes, MessageError::Decode);
     }
@@ -312,26 +265,17 @@ mod tests {
 
     #[test]
     fn from_bytes_rejects_recipient_public_key_with_wrong_shape() {
-        let mut wire = wire();
-        wire.recipient_public_key.push(4);
-        let bytes = wire_bytes(&wire);
+        let mut message = old_message();
+        message.recipient_public_key = [0u8; PUBLIC_KEY_LEN];
+        let bytes = message.to_bytes().unwrap_err();
 
-        assert_decode_error(&bytes, MessageError::InvalidPublicKey);
-    }
-
-    #[test]
-    fn from_bytes_rejects_unknown_payload_kind() {
-        let mut wire = wire();
-        wire.payload_kind = 4;
-        let bytes = wire_bytes(&wire);
-
-        assert_decode_error(&bytes, MessageError::UnsupportedPayloadKind(4));
+        assert_eq!(bytes, MessageError::Encode);
     }
 
     #[test]
     fn to_bytes_rejects_oversized_payload() {
         let mut message = message();
-        message.payload = vec![0; MAX_MESSAGE_PAYLOAD_LEN + 1];
+        message.ciphertext = vec![0; MAX_MESSAGE_PAYLOAD_LEN + 1];
 
         match message.to_bytes() {
             Ok(_) => panic!("message encoded unexpectedly"),

@@ -12,10 +12,10 @@ use aether_core::{
     derive_safety_number,
 };
 use aether_crypto::{
-    HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState,
-    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
-    sign_identity_key_binding,
+    DiscoveryKey, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle,
+    RatchetState, SealedFramePreKeyReference, SigningKeyPair, accept, generate_discovery_key,
+    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initiate, sign_identity_key_binding,
 };
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
@@ -29,16 +29,29 @@ const OLD_SENDER_VISIBLE_MESSAGE_HEX: &str = "0100000000000000000000000000000001
 /// Transport-visible fields decoded from a Message fixture.
 #[derive(uniffi::Record)]
 pub struct MessageTransportFields {
-    /// Message ID as lowercase hex.
-    pub id_hex: String,
+    /// Sealed-frame wire version.
+    pub version: u8,
     /// Recipient public key as lowercase hex.
     pub recipient_public_key_hex: String,
-    /// Sender-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
-    /// Payload kind using fixture spelling.
-    pub payload_kind: String,
-    /// Opaque payload bytes as lowercase hex.
-    pub payload_hex: String,
+    /// Optional X3DH prekey reference.
+    pub prekey_reference: Option<FramePreKeyReferenceReplay>,
+    /// Per-frame ephemeral public key as lowercase hex.
+    pub ephemeral_public_key_hex: String,
+    /// Opaque frame ciphertext bytes as lowercase hex.
+    pub ciphertext_hex: String,
+}
+
+/// Transport-visible X3DH prekey reference.
+#[derive(uniffi::Record)]
+pub struct FramePreKeyReferenceReplay {
+    /// Recipient Discovery Key epoch.
+    pub discovery_epoch: u32,
+    /// Signed pre-key public key as lowercase hex.
+    pub signed_prekey_public_key_hex: String,
+    /// Optional one-time pre-key ID.
+    pub one_time_prekey_id: Option<u64>,
+    /// Optional one-time pre-key public key as lowercase hex.
+    pub one_time_prekey_public_key_hex: Option<String>,
 }
 
 /// Sender identity material that is visible only after decrypt.
@@ -97,23 +110,15 @@ pub struct SealedSenderReplayCase {
 /// Transport-visible fields decoded from an initial handshake fixture.
 #[derive(uniffi::Record)]
 pub struct InitialHandshakeTransportFields {
-    /// Initiator ephemeral public key as lowercase hex.
-    pub initiator_ephemeral_public_key_hex: String,
-    /// Responder discovery-key epoch targeted by the envelope.
-    pub responder_discovery_epoch: u32,
-    /// Responder signed pre-key public key as lowercase hex.
-    pub responder_signed_prekey_public_key_hex: String,
-    /// Optional one-time pre-key ID.
-    pub one_time_prekey_id: Option<u64>,
-    /// Optional one-time pre-key public key as lowercase hex.
-    pub one_time_prekey_public_key_hex: Option<String>,
-    /// First ratchet public key as lowercase hex.
-    pub ratchet_public_key_hex: String,
-    /// Number of messages sent in the previous chain.
-    pub previous_chain_length: u32,
-    /// First message number in the current chain.
-    pub message_number: u32,
-    /// First-message ciphertext bytes as lowercase hex.
+    /// Sealed-frame wire version.
+    pub version: u8,
+    /// Recipient Discovery Key public key as lowercase hex.
+    pub recipient_public_key_hex: String,
+    /// X3DH prekey reference.
+    pub prekey_reference: Option<FramePreKeyReferenceReplay>,
+    /// Initiator/frame ephemeral public key as lowercase hex.
+    pub ephemeral_public_key_hex: String,
+    /// Opaque frame ciphertext bytes as lowercase hex.
     pub ciphertext_hex: String,
 }
 
@@ -203,11 +208,26 @@ struct MessageFixture {
 
 #[derive(Deserialize)]
 struct MessageDecodedFixture {
-    id_hex: String,
+    version: u8,
     recipient_public_key_hex: String,
+    prekey_reference: Option<PreKeyReferenceFixture>,
+    ephemeral_public_key_hex: String,
+    ciphertext_hex: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct PreKeyReferenceFixture {
+    discovery_epoch: u32,
+    signed_prekey_public_key_hex: String,
+    one_time_prekey_id: Option<u64>,
+    one_time_prekey_public_key_hex: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DecryptedMetadataFixture {
+    id_hex: String,
     timestamp_millis: u64,
     payload_kind: String,
-    payload_hex: String,
 }
 
 #[derive(Deserialize)]
@@ -271,6 +291,7 @@ struct SessionMessageFixture {
     recipient_state_fixture: String,
     encoded_hex: String,
     transport_visible: MessageDecodedFixture,
+    decrypted_metadata: DecryptedMetadataFixture,
     plaintext_hex: String,
     post_decryption: SenderIdentityFixture,
 }
@@ -325,15 +346,19 @@ struct TranscriptFixture {
 
 #[derive(Deserialize)]
 struct TranscriptEnvelopeFixture {
-    initiator_ephemeral_public_key: [u8; 32],
-    responder_discovery_epoch: u32,
-    responder_signed_prekey_public_key: [u8; 32],
+    version: u8,
+    recipient_public_key: [u8; 32],
+    prekey_reference: Option<TranscriptPreKeyReferenceFixture>,
+    ephemeral_public_key: [u8; 32],
+    ciphertext_hex: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+struct TranscriptPreKeyReferenceFixture {
+    discovery_epoch: u32,
+    signed_prekey_public_key: [u8; 32],
     one_time_prekey_id: Option<u64>,
     one_time_prekey_public_key: Option<[u8; 32]>,
-    ratchet_public_key: [u8; 32],
-    previous_chain_length: u32,
-    message_number: u32,
-    ciphertext_hex: String,
 }
 
 struct SessionSetup {
@@ -579,7 +604,7 @@ fn replay_sealed_sender_session_fixture(
                 ))
             })?,
     )?;
-    recipient_snapshot.apply_all(decrypted.state_updates);
+    assert_decrypted_metadata(&decrypted, &fixture.decrypted_metadata, &fixture.name)?;
     assert_decrypted_sender(
         decrypted.plaintext.as_slice(),
         &decrypted.sender_identity,
@@ -589,10 +614,11 @@ fn replay_sealed_sender_session_fixture(
     )?;
     assert_acknowledgment_artifact(
         &decrypted.acknowledgment,
-        &message,
+        decrypted.message_id,
         &acknowledgment_sender_identity,
         &fixture.name,
     )?;
+    recipient_snapshot.apply_all(decrypted.state_updates);
     assert_sender_state_fixture_matches(blob_file, &fixture.sender_state_fixture)?;
     let tampered_ciphertext_rejected = session_tamper_rejects_without_sender(
         blob_file,
@@ -831,9 +857,9 @@ fn assert_duplicate_inbound_blob_replay(
         ))
     })?;
     ensure(
-        message.payload_kind == PayloadKind::EncryptedText,
+        message.version == 1 && message.prekey_reference.is_none(),
         format!(
-            "blob fixture {} replay message is not encrypted text",
+            "blob fixture {} replay message is not a session frame",
             fixture.name
         ),
     )?;
@@ -865,6 +891,7 @@ fn assert_duplicate_inbound_blob_replay(
                 session_key: ProtocolStateKey::session(SessionId::from_bytes([9u8; 16])),
                 deduplication_key,
                 message: &message,
+                recipient_discovery_key: Box::leak(Box::new(contact_fixture_discovery_key())),
                 acknowledgment: acknowledgment(
                     &acknowledgment_sender_identity,
                     &acknowledgment_sender_signing_key,
@@ -896,9 +923,9 @@ fn assert_duplicate_acknowledgment_blob_replay(
         ))
     })?;
     ensure(
-        message.payload_kind == PayloadKind::Acknowledgment,
+        message.version == 1 && message.prekey_reference.is_none(),
         format!(
-            "blob fixture {} replay message is not an acknowledgment",
+            "blob fixture {} replay message is not a session frame",
             fixture.name
         ),
     )?;
@@ -924,6 +951,7 @@ fn assert_duplicate_acknowledgment_blob_replay(
             InboundAcknowledgmentMessage {
                 session_key,
                 message: &message,
+                recipient_discovery_key: Box::leak(Box::new(contact_fixture_discovery_key())),
             },
         )
         .map_err(|e| replay_failure(format!("blob fixture {} replay failed: {e}", fixture.name)))?;
@@ -970,6 +998,17 @@ fn contact_fixture_identities() -> (ContactIdentity, ContactIdentity) {
             discovery_key: ContactDiscoveryKey::from(&rotated_discovery_key.bundle()),
         },
     )
+}
+
+fn contact_fixture_discovery_key() -> DiscoveryKey {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let identity = generate_signing_key_pair(&mut rng);
+    let _identity_key_pair = generate_key_pair(&mut rng);
+    generate_discovery_key(&mut rng, &identity, 0, CREATED_AT)
+}
+
+fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
+    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
 }
 
 fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolStateError> {
@@ -1338,6 +1377,7 @@ fn inbound<'a>(
         session_key,
         deduplication_key,
         message,
+        recipient_discovery_key: Box::leak(Box::new(contact_fixture_discovery_key())),
         acknowledgment: acknowledgment(
             acknowledgment_sender_identity,
             acknowledgment_sender_signing_key,
@@ -1359,11 +1399,12 @@ fn acknowledgment<'a>(
     sender_identity: &'a SenderIdentityMaterial,
     sender_identity_signing_key: &'a SigningKeyPair,
 ) -> OutboundAcknowledgment<'a> {
+    let recipient = acknowledgment_recipient_discovery_key();
     OutboundAcknowledgment {
         id: MessageId::from_bytes([0xee; 16]),
         sender_identity,
         sender_identity_signing_key,
-        recipient_public_key: [0xb6; 32],
+        recipient_public_key: *recipient.public_key().as_bytes(),
         timestamp_millis: 1_700_000_100_000,
     }
 }
@@ -1431,11 +1472,11 @@ fn assert_sender_state_fixture_matches(
 
 fn message_transport_fields(message: &Message) -> MessageTransportFields {
     MessageTransportFields {
-        id_hex: hex::encode(message.id.as_bytes()),
+        version: message.version,
         recipient_public_key_hex: hex::encode(message.recipient_public_key),
-        timestamp_millis: message.timestamp_millis,
-        payload_kind: payload_kind_name(message.payload_kind).into(),
-        payload_hex: hex::encode(&message.payload),
+        prekey_reference: message.prekey_reference.map(frame_prekey_reference_report),
+        ephemeral_public_key_hex: hex::encode(message.ephemeral_public_key),
+        ciphertext_hex: hex::encode(&message.ciphertext),
     }
 }
 
@@ -1443,17 +1484,22 @@ fn initial_handshake_transport_fields(
     envelope: &HandshakeEnvelope,
 ) -> InitialHandshakeTransportFields {
     InitialHandshakeTransportFields {
-        initiator_ephemeral_public_key_hex: hex::encode(envelope.initiator_ephemeral_public_key),
-        responder_discovery_epoch: envelope.responder_discovery_epoch,
-        responder_signed_prekey_public_key_hex: hex::encode(
-            envelope.responder_signed_prekey_public_key,
-        ),
-        one_time_prekey_id: envelope.one_time_prekey_id,
-        one_time_prekey_public_key_hex: envelope.one_time_prekey_public_key.map(hex::encode),
-        ratchet_public_key_hex: hex::encode(envelope.ratchet_public_key),
-        previous_chain_length: envelope.previous_chain_length,
-        message_number: envelope.message_number,
+        version: envelope.version,
+        recipient_public_key_hex: hex::encode(envelope.recipient_public_key),
+        prekey_reference: envelope.prekey_reference.map(frame_prekey_reference_report),
+        ephemeral_public_key_hex: hex::encode(envelope.ephemeral_public_key),
         ciphertext_hex: hex::encode(&envelope.ciphertext),
+    }
+}
+
+fn frame_prekey_reference_report(
+    reference: SealedFramePreKeyReference,
+) -> FramePreKeyReferenceReplay {
+    FramePreKeyReferenceReplay {
+        discovery_epoch: reference.discovery_epoch,
+        signed_prekey_public_key_hex: hex::encode(reference.signed_prekey_public_key),
+        one_time_prekey_id: reference.one_time_prekey_id,
+        one_time_prekey_public_key_hex: reference.one_time_prekey_public_key.map(hex::encode),
     }
 }
 
@@ -1490,13 +1536,13 @@ fn pre_auth_sender_material_hidden(
 
 fn assert_acknowledgment_artifact(
     acknowledgment: &Message,
-    acknowledged_message: &Message,
+    acknowledged_message_id: MessageId,
     sender_identity: &SenderIdentityMaterial,
     name: &str,
 ) -> Result<(), AetherError> {
     ensure(
-        acknowledgment.payload_kind == PayloadKind::Acknowledgment,
-        format!("sealed session fixture {name} acknowledgment kind mismatch"),
+        acknowledgment.prekey_reference.is_none(),
+        format!("sealed session fixture {name} acknowledgment carried prekey reference"),
     )?;
     let encoded = acknowledgment.to_bytes().map_err(|e| {
         replay_failure(format!(
@@ -1504,7 +1550,7 @@ fn assert_acknowledgment_artifact(
         ))
     })?;
     ensure(
-        !contains_bytes(&encoded, acknowledged_message.id.as_bytes()),
+        !contains_bytes(&encoded, acknowledged_message_id.as_bytes()),
         format!("sealed session fixture {name} exposed acknowledged message id"),
     )?;
     ensure(
@@ -1529,6 +1575,25 @@ fn assert_acknowledgment_artifact(
     )
 }
 
+fn assert_decrypted_metadata(
+    actual: &aether_core::InboundMessageResult,
+    expected: &DecryptedMetadataFixture,
+    name: &str,
+) -> Result<(), AetherError> {
+    ensure(
+        hex::encode(actual.message_id.as_bytes()) == expected.id_hex,
+        format!("sealed sender fixture {name} decrypted id mismatch"),
+    )?;
+    ensure(
+        actual.timestamp_millis == expected.timestamp_millis,
+        format!("sealed sender fixture {name} decrypted timestamp mismatch"),
+    )?;
+    ensure(
+        payload_kind_name(actual.payload_kind) == expected.payload_kind,
+        format!("sealed sender fixture {name} decrypted kind mismatch"),
+    )
+}
+
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty()
         && haystack
@@ -1542,25 +1607,57 @@ fn assert_message_transport(
     name: &str,
 ) -> Result<(), AetherError> {
     ensure(
-        actual.id_hex == expected.id_hex,
-        format!("message fixture {name} id mismatch"),
+        actual.version == expected.version,
+        format!("message fixture {name} version mismatch"),
     )?;
     ensure(
         actual.recipient_public_key_hex == expected.recipient_public_key_hex,
         format!("message fixture {name} recipient mismatch"),
     )?;
-    ensure(
-        actual.timestamp_millis == expected.timestamp_millis,
-        format!("message fixture {name} timestamp mismatch"),
+    assert_frame_prekey_reference(
+        actual.prekey_reference.as_ref(),
+        expected.prekey_reference.as_ref(),
+        name,
     )?;
     ensure(
-        actual.payload_kind == expected.payload_kind,
-        format!("message fixture {name} payload kind mismatch"),
+        actual.ephemeral_public_key_hex == expected.ephemeral_public_key_hex,
+        format!("message fixture {name} ephemeral key mismatch"),
     )?;
     ensure(
-        actual.payload_hex == expected.payload_hex,
-        format!("message fixture {name} payload mismatch"),
+        actual.ciphertext_hex == expected.ciphertext_hex,
+        format!("message fixture {name} ciphertext mismatch"),
     )
+}
+
+fn assert_frame_prekey_reference(
+    actual: Option<&FramePreKeyReferenceReplay>,
+    expected: Option<&PreKeyReferenceFixture>,
+    name: &str,
+) -> Result<(), AetherError> {
+    match (actual, expected) {
+        (None, None) => Ok(()),
+        (Some(actual), Some(expected)) => {
+            ensure(
+                actual.discovery_epoch == expected.discovery_epoch,
+                format!("message fixture {name} prekey epoch mismatch"),
+            )?;
+            ensure(
+                actual.signed_prekey_public_key_hex == expected.signed_prekey_public_key_hex,
+                format!("message fixture {name} signed prekey mismatch"),
+            )?;
+            ensure(
+                actual.one_time_prekey_id == expected.one_time_prekey_id,
+                format!("message fixture {name} one-time prekey id mismatch"),
+            )?;
+            ensure(
+                actual.one_time_prekey_public_key_hex == expected.one_time_prekey_public_key_hex,
+                format!("message fixture {name} one-time prekey public mismatch"),
+            )
+        }
+        _ => Err(replay_failure(format!(
+            "message fixture {name} prekey reference mismatch"
+        ))),
+    }
 }
 
 fn assert_decrypted_sender(
@@ -1613,36 +1710,21 @@ fn assert_transcript_envelope(
     expected: &TranscriptEnvelopeFixture,
 ) -> Result<(), AetherError> {
     ensure(
-        actual.initiator_ephemeral_public_key == expected.initiator_ephemeral_public_key,
+        actual.version == expected.version,
+        "initial handshake version mismatch",
+    )?;
+    ensure(
+        actual.recipient_public_key == expected.recipient_public_key,
+        "initial handshake recipient key mismatch",
+    )?;
+    assert_transcript_prekey_reference(
+        actual.prekey_reference,
+        expected.prekey_reference,
+        "initial handshake",
+    )?;
+    ensure(
+        actual.ephemeral_public_key == expected.ephemeral_public_key,
         "initial handshake ephemeral key mismatch",
-    )?;
-    ensure(
-        actual.responder_discovery_epoch == expected.responder_discovery_epoch,
-        "initial handshake responder epoch mismatch",
-    )?;
-    ensure(
-        actual.responder_signed_prekey_public_key == expected.responder_signed_prekey_public_key,
-        "initial handshake signed pre-key mismatch",
-    )?;
-    ensure(
-        actual.one_time_prekey_id == expected.one_time_prekey_id,
-        "initial handshake one-time pre-key id mismatch",
-    )?;
-    ensure(
-        actual.one_time_prekey_public_key == expected.one_time_prekey_public_key,
-        "initial handshake one-time pre-key public mismatch",
-    )?;
-    ensure(
-        actual.ratchet_public_key == expected.ratchet_public_key,
-        "initial handshake ratchet key mismatch",
-    )?;
-    ensure(
-        actual.previous_chain_length == expected.previous_chain_length,
-        "initial handshake previous-chain length mismatch",
-    )?;
-    ensure(
-        actual.message_number == expected.message_number,
-        "initial handshake message number mismatch",
     )?;
     ensure(
         actual.ciphertext
@@ -1660,40 +1742,61 @@ fn assert_envelope_eq(
     name: &str,
 ) -> Result<(), AetherError> {
     ensure(
-        actual.initiator_ephemeral_public_key == expected.initiator_ephemeral_public_key,
+        actual.version == expected.version,
+        format!("{name} generated version mismatch"),
+    )?;
+    ensure(
+        actual.recipient_public_key == expected.recipient_public_key,
+        format!("{name} generated recipient key mismatch"),
+    )?;
+    assert_generated_prekey_reference(actual.prekey_reference, expected.prekey_reference, name)?;
+    ensure(
+        actual.ephemeral_public_key == expected.ephemeral_public_key,
         format!("{name} generated ephemeral key mismatch"),
-    )?;
-    ensure(
-        actual.responder_discovery_epoch == expected.responder_discovery_epoch,
-        format!("{name} generated epoch mismatch"),
-    )?;
-    ensure(
-        actual.responder_signed_prekey_public_key == expected.responder_signed_prekey_public_key,
-        format!("{name} generated signed pre-key mismatch"),
-    )?;
-    ensure(
-        actual.one_time_prekey_id == expected.one_time_prekey_id,
-        format!("{name} generated one-time pre-key id mismatch"),
-    )?;
-    ensure(
-        actual.one_time_prekey_public_key == expected.one_time_prekey_public_key,
-        format!("{name} generated one-time pre-key public mismatch"),
-    )?;
-    ensure(
-        actual.ratchet_public_key == expected.ratchet_public_key,
-        format!("{name} generated ratchet key mismatch"),
-    )?;
-    ensure(
-        actual.previous_chain_length == expected.previous_chain_length,
-        format!("{name} generated previous-chain length mismatch"),
-    )?;
-    ensure(
-        actual.message_number == expected.message_number,
-        format!("{name} generated message number mismatch"),
     )?;
     ensure(
         actual.ciphertext == expected.ciphertext,
         format!("{name} generated ciphertext mismatch"),
+    )
+}
+
+fn assert_transcript_prekey_reference(
+    actual: Option<SealedFramePreKeyReference>,
+    expected: Option<TranscriptPreKeyReferenceFixture>,
+    name: &str,
+) -> Result<(), AetherError> {
+    match (actual, expected) {
+        (None, None) => Ok(()),
+        (Some(actual), Some(expected)) => {
+            ensure(
+                actual.discovery_epoch == expected.discovery_epoch,
+                format!("{name} prekey epoch mismatch"),
+            )?;
+            ensure(
+                actual.signed_prekey_public_key == expected.signed_prekey_public_key,
+                format!("{name} signed prekey mismatch"),
+            )?;
+            ensure(
+                actual.one_time_prekey_id == expected.one_time_prekey_id,
+                format!("{name} one-time prekey id mismatch"),
+            )?;
+            ensure(
+                actual.one_time_prekey_public_key == expected.one_time_prekey_public_key,
+                format!("{name} one-time prekey public mismatch"),
+            )
+        }
+        _ => Err(replay_failure(format!("{name} prekey reference mismatch"))),
+    }
+}
+
+fn assert_generated_prekey_reference(
+    actual: Option<SealedFramePreKeyReference>,
+    expected: Option<SealedFramePreKeyReference>,
+    name: &str,
+) -> Result<(), AetherError> {
+    ensure(
+        actual == expected,
+        format!("{name} generated prekey reference mismatch"),
     )
 }
 
@@ -1708,9 +1811,9 @@ fn session_tamper_rejects_without_sender(
 ) -> Result<bool, AetherError> {
     let mut tampered = copy_message(message);
     let last = tampered
-        .payload
+        .ciphertext
         .last_mut()
-        .ok_or_else(|| replay_failure("sealed session fixture payload is empty"))?;
+        .ok_or_else(|| replay_failure("sealed session fixture ciphertext is empty"))?;
     *last ^= 0x01;
     let mut snapshot = snapshot_from_blob_fixture(blob_file, recipient_state_fixture, key)?;
     insert_blob_fixture(
@@ -1773,22 +1876,20 @@ fn initial_handshake_tamper_rejects_without_sender(
 
 fn copy_message(message: &Message) -> Message {
     Message {
-        id: message.id,
+        version: message.version,
         recipient_public_key: message.recipient_public_key,
-        timestamp_millis: message.timestamp_millis,
-        payload_kind: message.payload_kind,
-        payload: message.payload.clone(),
+        prekey_reference: message.prekey_reference,
+        ephemeral_public_key: message.ephemeral_public_key,
+        ciphertext: message.ciphertext.clone(),
     }
 }
 
 fn unsupported_message_version_rejected() -> bool {
-    let mut bytes = b"AMSG".to_vec();
-    bytes.push(2);
-    Message::from_bytes(&bytes).is_err()
+    Message::from_bytes(&[2]).is_err()
 }
 
 fn malformed_message_rejected() -> bool {
-    Message::from_bytes(b"AMSG\x01\xff").is_err()
+    Message::from_bytes(&[1, 0xff]).is_err()
 }
 
 fn old_sender_visible_message_rejected() -> Result<bool, AetherError> {
@@ -1800,9 +1901,7 @@ fn old_sender_visible_message_rejected() -> Result<bool, AetherError> {
 }
 
 fn unsupported_initial_handshake_version_rejected() -> bool {
-    let mut bytes = b"AX3H".to_vec();
-    bytes.push(2);
-    HandshakeEnvelope::from_bytes(&bytes).is_err()
+    HandshakeEnvelope::from_bytes(&[2]).is_err()
 }
 
 fn malformed_initial_handshake_rejected() -> bool {
