@@ -342,10 +342,14 @@ impl KeyStore {
         Ok(self.inner.rotate_signed_prekey_now()?.into())
     }
 
-    /// Exports the current identity as a passphrase-encrypted blob.
+    /// Exports the current identity and discovery key as a passphrase-encrypted blob.
     ///
     /// The blob is portable across devices: pass it to another keystore's
-    /// [`Self::import_encrypted_backup`] with the same `passphrase` to restore.
+    /// [`Self::import_encrypted_backup`] with the same `passphrase` to restore the same identity
+    /// and discovery-epoch lineage.
+    ///
+    /// Requires a stored discovery key; if it is missing, regenerate the identity with
+    /// [`Self::generate_identity`] (which repairs the discovery key) before exporting.
     ///
     /// # Examples
     /// ```
@@ -366,22 +370,24 @@ impl KeyStore {
     /// - [`AetherError::Corrupt`] if only one of the two identity keys is present.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if a stored identity key has the wrong byte length.
-    /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
     /// - [`AetherError::Storage`] on platform storage failure when loading an identity.
     ///
     /// # Performance
-    /// The backup blob is 120 bytes. Each call runs one Argon2id password hashing step using
-    /// 64 MiB memory and 3 iterations.
+    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
+    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
+    /// hashing step using 64 MiB memory and 3 iterations.
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, AetherError> {
         Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
 
     /// Restores an identity from an encrypted backup, replacing any current identity.
     ///
-    /// The backup is decrypted before storage changes begin, so a wrong passphrase leaves the
-    /// existing identity untouched. On success, the restored identity gets a fresh discovery key and
-    /// no one-time pre-keys or signed pre-key. Call [`Self::rotate_signed_prekey_if_stale`] before
-    /// publishing.
+    /// The backup is decrypted and the restored discovery key validated before storage changes
+    /// begin, so a wrong passphrase or malformed blob leaves the existing identity untouched. On
+    /// success, the restored identity keeps the discovery key and epoch lineage carried by the
+    /// backup and has no one-time pre-keys or signed pre-key. Call
+    /// [`Self::rotate_signed_prekey_if_stale`] before publishing.
     ///
     /// Storage failures can happen after writes begin and may leave incomplete key material. Call
     /// [`Self::reset`] before using the keystore again after a failed import.
@@ -406,13 +412,15 @@ impl KeyStore {
     /// # Errors
     /// - [`AetherError::BackupFailed`] on Argon2id parameter error.
     /// - [`AetherError::DecryptionFailed`] on wrong passphrase or tampered ciphertext.
-    /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`AetherError::InvalidData`] if the blob length is wrong.
+    /// - [`AetherError::InternalError`] on storage lock poisoning.
+    /// - [`AetherError::InvalidData`] on a malformed header, unsupported version, below-floor
+    ///   Argon2id parameters, or a malformed discovery-key blob.
     /// - [`AetherError::Storage`] on platform storage failure during commit.
     ///
     /// # Performance
-    /// The backup blob is 120 bytes. Each call runs one Argon2id password hashing step using
-    /// 64 MiB memory and 3 iterations.
+    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
+    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
+    /// hashing step using 64 MiB memory and 3 iterations.
     pub fn import_encrypted_backup(
         &self,
         data: Vec<u8>,

@@ -7,6 +7,4 @@ Identity is split into a permanent identity key (IK) and a rotatable discovery k
 ## Consequences
 
 - Loading the identity returns only the IK and does not check the DK. The DK's signature is verified when it is read for use, so a corrupt or absent DK never blocks loading the IK, and rotation repairs it because minting a fresh DK needs only the IK.
-- The DK is excluded from the encrypted identity backup, so restoring onto a new device begins a fresh epoch lineage. Peers judge DK freshness from its signed timestamp and the IK signature, not from epoch magnitude.
-
-**Divergence (in flight):** the specification now requires the backup to carry both keypairs, so the DK-exclusion consequence above is under revision alongside the backup-format work tracked in [#153](https://github.com/RelayNet/aether/issues/153).
+- The DK is included in the encrypted identity backup, so restoring onto a new device continues the same epoch lineage rather than starting fresh. The restored DK is committed as its own signed blob and re-verified against the restored IK on read, so an interrupted import that lands the IK without the DK degrades to a detectable, re-mintable state instead of a silent hybrid. Peers judge DK freshness from its signed timestamp and the IK signature, not from epoch magnitude.
