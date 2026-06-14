@@ -30,6 +30,38 @@
 //! publish_identity_bundle(&identity, &publication.discovery_key, &publication.signed_prekey)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+//!
+//! # Secret handling
+//!
+//! Identity does not implement `Debug`.
+//!
+//! ```compile_fail
+//! use aether_core::Identity;
+//!
+//! fn assert_debug<T: std::fmt::Debug>() {}
+//!
+//! assert_debug::<Identity>();
+//! ```
+//!
+//! Protocol-state blobs do not implement `Debug`.
+//!
+//! ```compile_fail
+//! use aether_core::ProtocolStateBlob;
+//!
+//! fn assert_debug<T: std::fmt::Debug>() {}
+//!
+//! assert_debug::<ProtocolStateBlob>();
+//! ```
+//!
+//! Secret-owning public result types do not implement caller-visible `Clone`.
+//!
+//! ```compile_fail
+//! use aether_core::InboundMessageResult;
+//!
+//! fn assert_clone<T: Clone>() {}
+//!
+//! assert_clone::<InboundMessageResult>();
+//! ```
 
 mod clock;
 mod contact;

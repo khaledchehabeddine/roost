@@ -61,6 +61,7 @@ struct RatchetStateWire {
     next_skipped_key_sequence: u64,
 }
 
+// Clone stays private so skipped keys can be restored after failed authentication.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 struct SkippedMessageKey {
     message_key: MessageKey,

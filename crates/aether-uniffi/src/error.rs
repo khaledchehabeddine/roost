@@ -161,3 +161,34 @@ impl From<KeyStoreError> for AetherError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decryption_failed_error_formats_are_redacted() {
+        let err = AetherError::from(IdentityError::DecryptionFailed);
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+
+        assert_eq!(display, "decryption failed");
+        assert!(!display.contains("passphrase"));
+        assert!(!debug.contains("wrong-passphrase-secret"));
+        assert!(!debug.contains("backup plaintext"));
+    }
+
+    #[test]
+    fn backup_failed_error_formats_do_not_add_secret_context() {
+        let err = AetherError::from(IdentityError::BackupFailed(
+            "argon2 parameter rejected".into(),
+        ));
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+
+        assert!(display.contains("argon2 parameter rejected"));
+        assert!(!display.contains("passphrase"));
+        assert!(!debug.contains("wrong-passphrase-secret"));
+        assert!(!debug.contains("backup plaintext"));
+    }
+}

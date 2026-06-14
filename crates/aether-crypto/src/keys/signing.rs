@@ -230,6 +230,13 @@ mod tests {
     }
 
     #[test]
+    fn signing_key_pair_zeroizes_on_drop() {
+        fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
+
+        assert_zeroizes_on_drop::<SigningKeyPair>();
+    }
+
+    #[test]
     fn sign_and_verify_round_trip() {
         let key_pair = generated_key_pair();
         let message = b"aether test message";

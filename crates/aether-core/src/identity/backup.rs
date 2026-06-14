@@ -372,6 +372,51 @@ mod tests {
     }
 
     #[test]
+    fn decrypt_backup_wrong_passphrase_error_formats_are_redacted() {
+        let manager = manager_with_identity();
+        let backup = manager
+            .export_encrypted_backup(&mut OsRng, "correct-passphrase", &DK_BLOB)
+            .unwrap();
+        let err = manager
+            .decrypt_backup(&backup, "wrong-passphrase-secret")
+            .unwrap_err();
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+
+        assert!(!display.contains("wrong-passphrase-secret"));
+        assert!(!debug.contains("wrong-passphrase-secret"));
+        assert!(!display.contains("correct-passphrase"));
+        assert!(!debug.contains("correct-passphrase"));
+        assert!(!display.contains("D1"));
+        assert!(!debug.contains("D1"));
+        assert!(!display.contains("backup plaintext"));
+        assert!(!debug.contains("backup plaintext"));
+    }
+
+    #[test]
+    fn decrypt_backup_tampered_ciphertext_error_formats_are_redacted() {
+        let manager = manager_with_identity();
+        let mut backup = manager
+            .export_encrypted_backup(&mut OsRng, "correct-passphrase", &DK_BLOB)
+            .unwrap();
+        let last = backup.len() - 1;
+        backup[last] ^= 0xAA;
+
+        let err = manager
+            .decrypt_backup(&backup, "correct-passphrase")
+            .unwrap_err();
+        let display = err.to_string();
+        let debug = format!("{err:?}");
+
+        assert!(!display.contains("correct-passphrase"));
+        assert!(!debug.contains("correct-passphrase"));
+        assert!(!display.contains("D1"));
+        assert!(!debug.contains("D1"));
+        assert!(!display.contains("backup plaintext"));
+        assert!(!debug.contains("backup plaintext"));
+    }
+
+    #[test]
     fn normalization_form_does_not_change_derived_key() {
         let manager = manager_with_identity();
         // U+00E9 (é, NFC) and "e" + U+0301 (combining acute, NFD) normalize to the same key.

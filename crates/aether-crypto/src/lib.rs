@@ -33,6 +33,48 @@
 //! # Ok::<(), aether_crypto::CryptoError>(())
 //! ```
 //!
+//! # Secret handling
+//!
+//! Secret-owning public types do not implement `Debug`.
+//!
+//! ```compile_fail
+//! use aether_crypto::KeyPair;
+//!
+//! fn assert_debug<T: std::fmt::Debug>() {}
+//!
+//! assert_debug::<KeyPair>();
+//! ```
+//!
+//! Secret-owning public key types do not implement caller-visible `Clone`.
+//!
+//! ```compile_fail
+//! use aether_crypto::SigningKeyPair;
+//!
+//! fn assert_clone<T: Clone>() {}
+//!
+//! assert_clone::<SigningKeyPair>();
+//! ```
+//!
+//! Ratchet state does not implement caller-visible `Clone`.
+//!
+//! ```compile_fail
+//! use aether_crypto::RatchetState;
+//!
+//! fn assert_clone<T: Clone>() {}
+//!
+//! assert_clone::<RatchetState>();
+//! ```
+//!
+//! Decrypted initial-message results do not implement caller-visible `Clone`.
+//!
+//! ```compile_fail
+//! use aether_crypto::AcceptedInitialMessage;
+//!
+//! fn assert_clone<T: Clone>() {}
+//!
+//! assert_clone::<AcceptedInitialMessage>();
+//! ```
+//!
 //! # Limitations
 //!
 //! - Handshake envelopes carry no replay marker. Replay detection belongs above this crate.
