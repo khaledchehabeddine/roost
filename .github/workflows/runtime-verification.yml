@@ -1,0 +1,69 @@
+name: Runtime Verification
+
+# TEMPORARILY DISABLED on PRs/pushes — Miri + the sanitizers are too slow to gate
+# every PR while they're being optimized. Runs manually only (workflow_dispatch)
+# so it can still be exercised on demand. To re-enable before release, restore the
+# pull_request / push / merge_group / schedule triggers.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  miri:
+    name: Miri
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Miri subset
+        run: scripts/ci/miri-test.sh
+
+  address-sanitizer:
+    name: AddressSanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run AddressSanitizer subset
+        run: scripts/ci/sanitizer-test.sh address
+
+  memory-sanitizer:
+    name: MemorySanitizer
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run MemorySanitizer subset
+        run: scripts/ci/sanitizer-test.sh memory

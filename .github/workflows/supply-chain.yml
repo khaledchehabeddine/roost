@@ -1,0 +1,78 @@
+name: Supply Chain
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  schedule:
+    - cron: "0 6 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  supply-chain:
+    name: Dependency Policy
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Supply Chain Tools
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny,cargo-geiger
+
+      - name: Cargo deny
+        run: cargo deny check
+
+      - name: Negative dependency-policy dry run
+        run: |
+          POLICY="$(mktemp -d)/deny.toml"
+          cp deny.toml "$POLICY"
+          perl -0pi -e 's/\n    "MIT",//' "$POLICY"
+
+          if cargo deny check --config "$POLICY" licenses; then
+            echo "expected the temporary license-policy violation to fail"
+            exit 1
+          fi
+
+      - name: Cargo audit
+        run: cargo audit --deny warnings
+
+      - name: Cargo geiger
+        run: |
+          mkdir -p target/geiger
+          for crate in aether-crypto aether-core aether-uniffi; do
+            cargo geiger \
+              --manifest-path "$PWD/crates/$crate/Cargo.toml" \
+              --all-dependencies \
+              --output-format Json \
+              > "target/geiger/$crate.json"
+          done
+
+      - name: Upload cargo-geiger reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-geiger-reports
+          path: target/geiger/*.json
+          if-no-files-found: error
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Enforce no first-party unsafe
+        run: |
+          if rg -n '\bunsafe\b' crates --glob '*.rs'; then
+            echo "first-party unsafe requires explicit security review before release"
+            exit 1
+          fi
