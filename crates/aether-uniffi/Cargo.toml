@@ -18,13 +18,14 @@ path = "uniffi-bindgen-swift.rs"
 
 [features]
 default = []
-fixture-replay = ["dep:hex", "dep:rand", "dep:rand_chacha", "dep:serde", "dep:serde_json"]
+fixture-replay = ["dep:blake3", "dep:hex", "dep:rand", "dep:rand_chacha", "dep:serde", "dep:serde_json"]
 
 [dependencies]
 # Local
 aether-core.workspace = true
 aether-crypto.workspace = true
 # Utility
+blake3 = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }

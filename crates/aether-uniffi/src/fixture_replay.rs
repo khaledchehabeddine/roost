@@ -2,13 +2,14 @@
 
 use crate::error::AetherError;
 use aether_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactSafetyNumberConfirmation,
-    ContactStateChange, DomainSigningKey, DomainSigningKeyStatus, IdentityKey,
-    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation, Message,
-    MessageId, OutboundAcknowledgment, PayloadKind, ProtocolStateAddress, ProtocolStateBlob,
-    ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
-    ProtocolStateSnapshot, ProtocolStateUpdate, RevocationState, SenderCertificateIdentityKey,
-    SenderIdentityMaterial, SessionId, derive_safety_number,
+    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
+    ContactSafetyNumberConfirmation, ContactStateChange, DomainSigningKey, DomainSigningKeyStatus,
+    IdentityKey, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment, PayloadKind,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
+    RevocationState, SenderCertificateIdentityKey, SenderIdentityMaterial, SessionId,
+    derive_safety_number,
 };
 use aether_crypto::{
     HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState,
@@ -16,7 +17,7 @@ use aether_crypto::{
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
     sign_identity_key_binding,
 };
-use rand::SeedableRng;
+use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serde::Deserialize;
 
@@ -301,6 +302,13 @@ struct BlobFixture {
     kind: String,
     key_hex: String,
     current_encoded_hex: String,
+    replay: Option<BlobReplayFixture>,
+}
+
+#[derive(Deserialize)]
+struct BlobReplayFixture {
+    encoded_message_hex: String,
+    digest_hex: String,
 }
 
 #[derive(Deserialize)]
@@ -717,12 +725,34 @@ fn replay_protocol_state_blob_fixture(
                 key,
             )
         }
+        "deduplication_set_identity_with_duplicate_message" => {
+            ensure(
+                kind == ProtocolStateKind::DeduplicationSet,
+                "deduplication fixture kind mismatch",
+            )?;
+            assert_duplicate_inbound_blob_replay(fixture, &encoded, key.clone())?;
+            Ok(ProtocolStateUpdate::set(
+                ProtocolStateAddress::new(kind, key),
+                ProtocolStateBlob::from_bytes(encoded.clone()),
+            ))
+        }
         "pending_acknowledgments_session" => {
             ensure(
                 kind == ProtocolStateKind::PendingAcknowledgments,
                 "pending acknowledgment fixture kind mismatch",
             )?;
             ProtocolStateEngine::new().initialize_pending_acknowledgments(key)
+        }
+        "pending_acknowledgments_session_with_duplicate_ack" => {
+            ensure(
+                kind == ProtocolStateKind::PendingAcknowledgments,
+                "pending acknowledgment fixture kind mismatch",
+            )?;
+            assert_duplicate_acknowledgment_blob_replay(fixture, &encoded, key.clone())?;
+            Ok(ProtocolStateUpdate::set(
+                ProtocolStateAddress::new(kind, key),
+                ProtocolStateBlob::from_bytes(encoded.clone()),
+            ))
         }
         "contact_pending"
         | "contact_unverified"
@@ -778,6 +808,132 @@ fn replay_protocol_state_blob_fixture(
         minor,
         reencoded_hex: hex::encode(reencoded),
     })
+}
+
+fn required_blob_replay(fixture: &BlobFixture) -> Result<&BlobReplayFixture, AetherError> {
+    fixture
+        .replay
+        .as_ref()
+        .ok_or_else(|| invalid_fixture(format!("blob fixture {} has no replay", fixture.name)))
+}
+
+fn assert_duplicate_inbound_blob_replay(
+    fixture: &BlobFixture,
+    encoded_blob: &[u8],
+    deduplication_key: ProtocolStateKey,
+) -> Result<(), AetherError> {
+    let replay = required_blob_replay(fixture)?;
+    let encoded_message = decode_hex(&replay.encoded_message_hex, &fixture.name)?;
+    let message = Message::from_bytes(&encoded_message).map_err(|e| {
+        invalid_fixture(format!(
+            "blob fixture {} replay message failed to decode: {e}",
+            fixture.name
+        ))
+    })?;
+    ensure(
+        message.payload_kind == PayloadKind::EncryptedText,
+        format!(
+            "blob fixture {} replay message is not encrypted text",
+            fixture.name
+        ),
+    )?;
+    let mut digest_key = [0u8; 32];
+    ChaCha20Rng::from_seed(DEDUPLICATION_REPLAY_RNG_SEED).fill_bytes(&mut digest_key);
+    let digest = blake3::keyed_hash(&digest_key, &encoded_message);
+    ensure(
+        hex::encode(&digest.as_bytes()[..16]) == replay.digest_hex,
+        format!("blob fixture {} replay digest mismatch", fixture.name),
+    )?;
+
+    let address = ProtocolStateAddress::new(
+        ProtocolStateKind::DeduplicationSet,
+        deduplication_key.clone(),
+    );
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(
+        address,
+        ProtocolStateBlob::from_bytes(encoded_blob.to_vec()),
+    );
+    let acknowledgment_sender_identity = acknowledgment_sender_identity()?;
+    let acknowledgment_sender_signing_key =
+        sender_identity_signing_key(&acknowledgment_sender_identity)?;
+    let outcome = ProtocolStateEngine::new()
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
+            &snapshot,
+            InboundEncryptedMessage {
+                session_key: ProtocolStateKey::session(SessionId::from_bytes([9u8; 16])),
+                deduplication_key,
+                message: &message,
+                acknowledgment: acknowledgment(
+                    &acknowledgment_sender_identity,
+                    &acknowledgment_sender_signing_key,
+                ),
+                sender_certificate_validation: None,
+            },
+        )
+        .map_err(|e| replay_failure(format!("blob fixture {} replay failed: {e}", fixture.name)))?;
+    ensure(
+        matches!(outcome, InboundMessageOutcome::Duplicate),
+        format!(
+            "blob fixture {} did not replay as duplicate message",
+            fixture.name
+        ),
+    )
+}
+
+fn assert_duplicate_acknowledgment_blob_replay(
+    fixture: &BlobFixture,
+    encoded_blob: &[u8],
+    session_key: ProtocolStateKey,
+) -> Result<(), AetherError> {
+    let replay = required_blob_replay(fixture)?;
+    let encoded_message = decode_hex(&replay.encoded_message_hex, &fixture.name)?;
+    let message = Message::from_bytes(&encoded_message).map_err(|e| {
+        invalid_fixture(format!(
+            "blob fixture {} replay acknowledgment failed to decode: {e}",
+            fixture.name
+        ))
+    })?;
+    ensure(
+        message.payload_kind == PayloadKind::Acknowledgment,
+        format!(
+            "blob fixture {} replay message is not an acknowledgment",
+            fixture.name
+        ),
+    )?;
+    let digest = blake3::hash(&encoded_message);
+    ensure(
+        hex::encode(&digest.as_bytes()[..16]) == replay.digest_hex,
+        format!("blob fixture {} replay digest mismatch", fixture.name),
+    )?;
+
+    let address = ProtocolStateAddress::new(
+        ProtocolStateKind::PendingAcknowledgments,
+        session_key.clone(),
+    );
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(
+        address,
+        ProtocolStateBlob::from_bytes(encoded_blob.to_vec()),
+    );
+    let outcome = ProtocolStateEngine::new()
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
+            &snapshot,
+            InboundAcknowledgmentMessage {
+                session_key,
+                message: &message,
+            },
+        )
+        .map_err(|e| replay_failure(format!("blob fixture {} replay failed: {e}", fixture.name)))?;
+    ensure(
+        matches!(outcome, AcknowledgmentOutcome::Duplicate),
+        format!(
+            "blob fixture {} did not replay as duplicate acknowledgment",
+            fixture.name
+        ),
+    )
 }
 
 fn contact_fixture_identity() -> ContactIdentity {
@@ -1763,7 +1919,7 @@ mod tests {
         assert_eq!(report.message_wire_cases.len(), 4);
         assert_eq!(report.sealed_sender_session_cases.len(), 1);
         assert_eq!(report.initial_handshake_cases.len(), 1);
-        assert_eq!(report.protocol_state_blob_cases.len(), 14);
+        assert_eq!(report.protocol_state_blob_cases.len(), 16);
         assert!(report.unsupported_message_version_rejected);
         assert!(report.malformed_message_rejected);
         assert!(report.old_sender_visible_message_rejected);

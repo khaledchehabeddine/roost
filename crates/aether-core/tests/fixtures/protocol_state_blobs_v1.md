@@ -14,7 +14,12 @@ identity key. The unbound fixture leaves that binding empty because it pins outb
 bound fixture pins key-only peer identity storage.
 
 The current deduplication-set body wraps the configured capacity, the per-Identity keyed BLAKE3
-secret, and the ordered digest window. The fixture pins an initialized empty window.
+secret, and the ordered digest window. Fixtures pin both an initialized empty window and a
+non-empty window whose replay Message must return `InboundMessageOutcome::Duplicate`.
+
+The current pending-acknowledgment body wraps pending outbound Messages and processed
+acknowledgment digests. Fixtures pin both initialized empty state and a non-empty digest window
+whose replay acknowledgment must return `AcknowledgmentOutcome::Duplicate`.
 
 The current contact-state body wraps one Contact Identity — peer IK plus current DK — the IK-bound
 Trust State, and the local blocking flag. Contact fixtures pin Pending, Unverified, Verified,

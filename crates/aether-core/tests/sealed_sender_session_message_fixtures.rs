@@ -3,9 +3,9 @@
 use aether_core::{
     DomainSigningKey, DomainSigningKeyStatus, InboundEncryptedMessage, InboundMessageOutcome,
     InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment, PayloadKind,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
-    SenderIdentityMaterial,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RevocationState,
+    SenderCertificateIdentityKey, SenderIdentityMaterial,
 };
 use aether_crypto::{KeyPair, SigningKeyPair, sign_identity_key_binding};
 use rand::SeedableRng;
@@ -171,23 +171,22 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
 
         let mut tampered = copy_message(&message);
         *tampered.payload.last_mut().unwrap() ^= 0x01;
+        let tampered_result = ProtocolStateEngine::new().decrypt_message(
+            &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
+            &snapshot,
+            inbound(
+                key.clone(),
+                deduplication_key.clone(),
+                &tampered,
+                &acknowledgment_sender_identity,
+                &domain_signing_keys,
+                &validation.revoked_identity_keys,
+                validation.reference_timestamp_secs,
+                validation.grace_window_secs,
+            ),
+        );
         assert!(
-            ProtocolStateEngine::new()
-                .decrypt_message(
-                    &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
-                    &snapshot,
-                    inbound(
-                        key.clone(),
-                        deduplication_key.clone(),
-                        &tampered,
-                        &acknowledgment_sender_identity,
-                        &domain_signing_keys,
-                        &validation.revoked_identity_keys,
-                        validation.reference_timestamp_secs,
-                        validation.grace_window_secs,
-                    ),
-                )
-                .is_err(),
+            matches!(tampered_result, Err(ProtocolStateError::Crypto(_))),
             "{} tampered ciphertext",
             fixture.name
         );
