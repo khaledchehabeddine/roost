@@ -59,6 +59,7 @@ version = "0.7.0"
 dependencies = [
  "aether-core",
  "aether-crypto",
+ "blake3",
  "hex",
  "rand",
  "rand_chacha",

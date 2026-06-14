@@ -33,6 +33,20 @@
         "capacity": 1024
       }
     },
+    {
+      "name": "deduplication_set_identity_with_duplicate_message",
+      "kind": "deduplication_set",
+      "key_hex": "dddddddddddddddddddddddddddddddd",
+      "current_encoded_hex": "010001800873a448384bab47d419f527112f794427e10a2bc0c60421c44c1cd249a0486092010cbd2aad247b80be75a92f6719cdfdc3",
+      "decoded": {
+        "digest_count": 1,
+        "capacity": 1024
+      },
+      "replay": {
+        "encoded_message_hex": "414d53470131313131313131313131313131313131207890ced15231144a75512d16f052833f2428761ba7ff6f911fb767071189666cc1d295ffbc31008d04015221360e4e5a54b65720f5f16e5f04e25b0f66e81dbdb0d94a1305f93e03dd650000000000000001fafd00498d76a9e84cadf707e0c4c06def75dc4ab61ad54da3a214f3cd18d3494318c86420f39ceb26782c55ab4c9d9ab3e92beb168f341a6d7e266b7869ef0de8e71836c1ae26f7be3b9ab31d0f6b977a18ea095539f88b9d864432f472a7c2139fd401f0a0936130c62bef4e8092587727e64f7a4e7e9b828d0bb92ce898b098aa922534c81b93a9874432c22c9b6091fe6ac394fb2536e884d6e72b6224bec36d7bf0ac2dd40d86aa644143d6b453b2a43116fb289dfab2a2a4876a3b00ee4a48f9550e814683526b5b41026628f5b1bdce552daee21b194085e3a06f9f0facc516a60a19a2dd30c92618ecc1e07c6eb6d622bf2c1de52cd5aa2bafe1dc654e572032f77d620a537aead87aacfc5125611ab75036089814cab3e6c2fce6b517f2620e6ab15da56dfcc158cca17bf987959d20aef24a322d7a15aaba4e29cb7843d8637a61a8b3018af4da3ee4fb81ebb5f64963b0a7c83b6f018788eb06d7e0d04be594a79fab24da0138eefb5f94ebe101b941ea5a73b8c1c3b5769b900a64d54c8d13a13d3fcaca25b5b1d813168cc3ebba520fe40f641bb8bc03ed1a5962f2233b3bcdcd923571db855e8d2d22486c3902428136b174b97d0fe4cee7751534b2e5c09c93613f5afc8315926dc1866816e470e1ee0e4a1670520f8dc03009fbdb19",
+        "digest_hex": "0cbd2aad247b80be75a92f6719cdfdc3"
+      }
+    },
         {
             "name": "pending_acknowledgments_session",
             "kind": "pending_acknowledgments",
@@ -41,6 +55,20 @@
             "decoded": {
                 "pending_count": 0,
                 "acknowledgment_digest_count": 0
+            }
+        },
+        {
+            "name": "pending_acknowledgments_session_with_duplicate_ack",
+            "kind": "pending_acknowledgments",
+            "key_hex": "09090909090909090909090909090909",
+            "current_encoded_hex": "01000100019e9e80a45b38bedf63da14f6a1a84ab1",
+            "decoded": {
+                "pending_count": 0,
+                "acknowledgment_digest_count": 1
+            },
+            "replay": {
+                "encoded_message_hex": "414d534701eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee20b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6a0dd9bffbc3101d30201ccf825d6b7e2b4efb2dbf16776be3ccf0fce91679795e03bddfc0fbb32243e650000000000000000b950c87232b33f736414d8e912f6e0b849336fed9d5895c289e1be44abaaabe68174e078bd21813eb2e3da1c142fbb8aef31e7fa05d0fb09fd01e473e118405041963a3ccc92aebe09a03c11d3029bf85a8a75a185de4ce2f73bbf5e302639e6983938128160245abb0017d99615090759d78d6be142a3f658251d04e732deeda425e75da5b3bb632b43f5b14c3eb989d96d8ee30a43d2b1c4e7599318d6ef850f77768d67ff40c34aa7f5a6968015287495379da081d6e287f91443345b323863f528abf6d87b3014d903f7e0d44b900c289c116096a0dbed46a952e97658fe873f396aa775c48812b8dc6e395a601c4892b6c16406ded4e38494169a0e62091c926e5edf56ac00d570357749a376d5f2bdd57ac21236c99bfd0a2b7ec77e5a8a2c47175b00161a8234",
+                "digest_hex": "9e9e80a45b38bedf63da14f6a1a84ab1"
             }
         },
         {

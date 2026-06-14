@@ -1,8 +1,10 @@
 //! Verifies checked-in Protocol State Blob fixtures across the public Core API.
 
 use aether_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ContactSafetyNumberConfirmation,
-    ContactTrustState, DEFAULT_DEDUPLICATION_CAPACITY, IdentityKey, MessageId, OutboundPlaintext,
+    AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
+    ContactSafetyNumberConfirmation, ContactTrustState, DEFAULT_DEDUPLICATION_CAPACITY,
+    IdentityKey, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    Message, MessageId, OutboundAcknowledgment, OutboundPlaintext, PayloadKind,
     ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionId,
     derive_safety_number,
@@ -13,6 +15,7 @@ use aether_crypto::{
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
     sign_identity_key_binding,
 };
+use rand::RngCore;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::{Deserialize, Serialize};
@@ -39,6 +42,7 @@ struct Fixture {
     key_hex: String,
     current_encoded_hex: String,
     decoded: DecodedFixture,
+    replay: Option<ReplayFixture>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +56,12 @@ struct DecodedFixture {
     blocked: Option<bool>,
     discovery_epoch: Option<u32>,
     discovery_created_at: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ReplayFixture {
+    encoded_message_hex: String,
+    digest_hex: String,
 }
 
 #[derive(Serialize)]
@@ -357,6 +367,10 @@ fn contact_state_name(state: ContactTrustState) -> &'static str {
 }
 
 fn contact_fixture<'a>(fixture_file: &'a FixtureFile, name: &str) -> &'a Fixture {
+    fixture_named(fixture_file, name)
+}
+
+fn fixture_named<'a>(fixture_file: &'a FixtureFile, name: &str) -> &'a Fixture {
     fixture_file
         .fixtures
         .iter()
@@ -421,6 +435,16 @@ fn sender_identity() -> SenderIdentityMaterial {
 
 fn sender_identity_signing_key() -> &'static SigningKeyPair {
     Box::leak(Box::new(SigningKeyPair::from_signing_bytes([1u8; 32])))
+}
+
+fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
+    OutboundAcknowledgment {
+        id: MessageId::from_bytes([0xee; 16]),
+        sender_identity,
+        sender_identity_signing_key: sender_identity_signing_key(),
+        recipient_public_key: [0xb6; 32],
+        timestamp_millis: 1_700_000_100_000,
+    }
 }
 
 #[test]
@@ -524,7 +548,7 @@ fn bound_peer_identity_fixture_matches_decoded_state_expectations() {
 #[test]
 fn deduplication_set_fixture_matches_decoded_state_expectations() {
     let fixture_file = fixture_file();
-    let fixture = &fixture_file.fixtures[2];
+    let fixture = fixture_named(&fixture_file, "deduplication_set_identity");
     let engine = ProtocolStateEngine::new();
     let key = deduplication_key();
     let address = deduplication_address(key.clone());
@@ -557,7 +581,7 @@ fn deduplication_set_fixture_matches_decoded_state_expectations() {
 #[test]
 fn pending_acknowledgments_fixture_matches_decoded_state_expectations() {
     let fixture_file = fixture_file();
-    let fixture = &fixture_file.fixtures[3];
+    let fixture = fixture_named(&fixture_file, "pending_acknowledgments_session");
     let engine = ProtocolStateEngine::new();
     let key = session_key();
     let address = pending_acknowledgment_address(key.clone());
@@ -582,6 +606,129 @@ fn pending_acknowledgments_fixture_matches_decoded_state_expectations() {
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
     assert!(snapshot.get(&address).is_some());
+}
+
+#[test]
+fn deduplication_replay_fixture_rejects_duplicate_message() {
+    let fixture_file = fixture_file();
+    let fixture = fixture_named(
+        &fixture_file,
+        "deduplication_set_identity_with_duplicate_message",
+    );
+    let engine = ProtocolStateEngine::new();
+    let key = deduplication_key();
+    let address = deduplication_address(key.clone());
+    let current = hex::decode(&fixture.current_encoded_hex).unwrap();
+
+    assert_eq!(fixture.kind, "deduplication_set");
+    assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
+    assert_eq!(current[..2], [1, 0]);
+    assert_eq!(fixture.decoded.digest_count, Some(1));
+    assert_eq!(
+        fixture.decoded.capacity,
+        Some(DEFAULT_DEDUPLICATION_CAPACITY)
+    );
+
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(address, ProtocolStateBlob::from_bytes(current));
+    assert_duplicate_inbound_replay(&engine, &snapshot, fixture);
+}
+
+#[test]
+fn pending_acknowledgment_replay_fixture_rejects_duplicate_acknowledgment() {
+    let fixture_file = fixture_file();
+    let fixture = fixture_named(
+        &fixture_file,
+        "pending_acknowledgments_session_with_duplicate_ack",
+    );
+    let engine = ProtocolStateEngine::new();
+    let key = session_key();
+    let address = pending_acknowledgment_address(key.clone());
+    let current = hex::decode(&fixture.current_encoded_hex).unwrap();
+
+    assert_eq!(fixture.kind, "pending_acknowledgments");
+    assert_eq!(hex::decode(&fixture.key_hex).unwrap(), key.as_bytes());
+    assert_eq!(current[..2], [1, 0]);
+    assert_eq!(fixture.decoded.pending_count, Some(0));
+    assert_eq!(fixture.decoded.acknowledgment_digest_count, Some(1));
+
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.set(address, ProtocolStateBlob::from_bytes(current));
+    assert_duplicate_acknowledgment_replay(&engine, &snapshot, fixture);
+}
+
+fn assert_duplicate_inbound_replay(
+    engine: &ProtocolStateEngine,
+    snapshot: &ProtocolStateSnapshot,
+    fixture: &Fixture,
+) {
+    let replay = fixture.replay.as_ref().unwrap();
+    let encoded = hex::decode(&replay.encoded_message_hex).unwrap();
+    let message = Message::from_bytes(&encoded).unwrap();
+    assert_eq!(message.payload_kind, PayloadKind::EncryptedText);
+    let mut digest_key = [0u8; 32];
+    ChaCha20Rng::from_seed([0x44; 32]).fill_bytes(&mut digest_key);
+    assert_eq!(
+        keyed_digest_hex(&digest_key, &encoded),
+        replay.digest_hex,
+        "{} replay digest",
+        fixture.name
+    );
+
+    let acknowledgment_sender = sender_identity();
+    let outcome = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x55; 32]),
+            snapshot,
+            InboundEncryptedMessage {
+                session_key: session_key(),
+                deduplication_key: deduplication_key(),
+                message: &message,
+                acknowledgment: acknowledgment(&acknowledgment_sender),
+                sender_certificate_validation: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, InboundMessageOutcome::Duplicate));
+}
+
+fn assert_duplicate_acknowledgment_replay(
+    engine: &ProtocolStateEngine,
+    snapshot: &ProtocolStateSnapshot,
+    fixture: &Fixture,
+) {
+    let replay = fixture.replay.as_ref().unwrap();
+    let encoded = hex::decode(&replay.encoded_message_hex).unwrap();
+    let message = Message::from_bytes(&encoded).unwrap();
+    assert_eq!(message.payload_kind, PayloadKind::Acknowledgment);
+    assert_eq!(
+        digest_hex(&encoded),
+        replay.digest_hex,
+        "{} replay digest",
+        fixture.name
+    );
+
+    let outcome = engine
+        .process_acknowledgment(
+            &mut ChaCha20Rng::from_seed([0x56; 32]),
+            snapshot,
+            InboundAcknowledgmentMessage {
+                session_key: session_key(),
+                message: &message,
+            },
+        )
+        .unwrap();
+    assert!(matches!(outcome, AcknowledgmentOutcome::Duplicate));
+}
+
+fn keyed_digest_hex(key: &[u8; 32], encoded: &[u8]) -> String {
+    let hash = blake3::keyed_hash(key, encoded);
+    hex::encode(&hash.as_bytes()[..16])
+}
+
+fn digest_hex(encoded: &[u8]) -> String {
+    let hash = blake3::hash(encoded);
+    hex::encode(&hash.as_bytes()[..16])
 }
 
 #[test]

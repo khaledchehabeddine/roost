@@ -12,7 +12,15 @@ fun main() {
     requireReplay(report.messageWireCases.size == 4, "message fixture count")
     requireReplay(report.sealedSenderSessionCases.size == 1, "sealed-sender session fixture count")
     requireReplay(report.initialHandshakeCases.size == 1, "initial handshake fixture count")
-    requireReplay(report.protocolStateBlobCases.size == 14, "protocol-state blob fixture count")
+    requireReplay(report.protocolStateBlobCases.size == 16, "protocol-state blob fixture count")
+    requireReplay(
+        report.protocolStateBlobCases.any { it.name == "deduplication_set_identity_with_duplicate_message" },
+        "duplicate message blob fixture",
+    )
+    requireReplay(
+        report.protocolStateBlobCases.any { it.name == "pending_acknowledgments_session_with_duplicate_ack" },
+        "duplicate acknowledgment blob fixture",
+    )
     requireReplay(report.unsupportedMessageVersionRejected, "unsupported message version")
     requireReplay(report.malformedMessageRejected, "malformed message")
     requireReplay(report.oldSenderVisibleMessageRejected, "old sender-visible message")
