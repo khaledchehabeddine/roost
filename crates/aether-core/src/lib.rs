@@ -61,14 +61,14 @@ pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
-    AcknowledgmentOutcome, BlockedInboundMessageResult, ClearedAcknowledgment,
-    DEFAULT_DEDUPLICATION_CAPACITY, InboundAcknowledgmentMessage, InboundEncryptedMessage,
-    InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
-    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, OutboundAcknowledgment,
-    OutboundMessageResult, OutboundPlaintext, PendingAcknowledgment, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate, RetryInstruction,
-    RetryInstructionResult, SessionEvent, SessionId, SessionUnrecoverableReason,
+    AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
+    ClearedAcknowledgment, DEFAULT_DEDUPLICATION_CAPACITY, InboundAcknowledgmentMessage,
+    InboundEncryptedMessage, InboundMessageOutcome, InboundMessageResult,
+    InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
+    OutboundAcknowledgment, OutboundMessageResult, OutboundPlaintext, PendingAcknowledgment,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
+    RetryInstruction, RetryInstructionResult, SessionEvent, SessionId, SessionUnrecoverableReason,
     SessionUnrecoverableResult,
 };
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
