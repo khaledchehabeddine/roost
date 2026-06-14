@@ -23,6 +23,7 @@ dependencies = [
  "curve25519-dalek",
  "hex",
  "postcard",
+ "proptest",
  "rand",
  "rand_chacha",
  "serde",
