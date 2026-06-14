@@ -60,6 +60,14 @@ impl std::fmt::Display for AetherError {
     }
 }
 
+impl From<uniffi::UnexpectedUniFFICallbackError> for AetherError {
+    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        AetherError::InternalError {
+            reason: "unexpected foreign callback failure".into(),
+        }
+    }
+}
+
 impl From<IdentityError> for AetherError {
     fn from(e: IdentityError) -> Self {
         match e {
