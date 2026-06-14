@@ -4,8 +4,8 @@ The platform FFI binding layer that generates Swift and Kotlin bindings from Rus
 
 ## Language
 
-**Fixture Replay Harness** (test-only binding surface):
-Feature-gated Swift and Kotlin binding checks that replay canonical Core and Crypto fixtures. It verifies generated binding behavior without becoming production SDK API.
+**Binding Test Harness** (test-only binding surface):
+Feature-gated Swift and Kotlin binding checks that exercise generated bindings through fixture replay and FFI-boundary regressions. It verifies generated binding behavior without becoming production SDK API.
 Avoid: sample app, transport test, SDK feature
 
 **SecureStorage** (one implementation per platform):

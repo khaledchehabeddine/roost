@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Replay canonical fixtures through generated Swift and Kotlin UniFFI bindings.
+# Replay binding checks through generated Swift and Kotlin UniFFI bindings.
 
 set -euo pipefail
 
@@ -33,6 +33,24 @@ need_tool() {
     fi
 }
 
+run_swift_harness() {
+    local source="$1"
+    local name="$2"
+    local swift_out="$3"
+
+    swiftc \
+        -module-cache-path "$swift_out/module-cache" \
+        -I "$swift_out" \
+        -L "$ROOT/target/debug" \
+        -Xlinker -rpath \
+        -Xlinker "$ROOT/target/debug" \
+        -laether \
+        "$swift_out/Aether.swift" \
+        "$HARNESS/$source" \
+        -o "$swift_out/$name"
+    "$swift_out/$name"
+}
+
 run_swift() {
     need_tool swiftc
 
@@ -49,17 +67,8 @@ run_swift() {
         --modulemap --module-name AetherFFI --modulemap-filename module.modulemap
 
     mkdir -p "$swift_out/module-cache"
-    swiftc \
-        -module-cache-path "$swift_out/module-cache" \
-        -I "$swift_out" \
-        -L "$ROOT/target/debug" \
-        -Xlinker -rpath \
-        -Xlinker "$ROOT/target/debug" \
-        -laether \
-        "$swift_out/Aether.swift" \
-        "$HARNESS/FixtureReplay.swift" \
-        -o "$swift_out/fixture-replay"
-    "$swift_out/fixture-replay"
+    run_swift_harness "FixtureReplay.swift" "fixture-replay" "$swift_out"
+    run_swift_harness "SecureStorageUnexpectedError.swift" "secure-storage-unexpected-error" "$swift_out"
 }
 
 jna_jar() {
@@ -80,6 +89,24 @@ jna_jar() {
     echo "$jar"
 }
 
+run_kotlin_harness() {
+    local source="$1"
+    local name="$2"
+    local kotlin_out="$3"
+    local jna="$4"
+
+    kotlinc \
+        "$kotlin_out/com/aurelion/aether/aether.kt" \
+        "$HARNESS/$source" \
+        -cp "$jna" \
+        -include-runtime \
+        -d "$kotlin_out/$name.jar"
+    java \
+        -Djava.library.path="$ROOT/target/debug" \
+        -cp "$kotlin_out/$name.jar:$jna" \
+        "com.aurelion.aether.${name}Kt"
+}
+
 run_kotlin() {
     need_tool java
     need_tool kotlinc
@@ -94,16 +121,8 @@ run_kotlin() {
 
     local jna
     jna="$(jna_jar)"
-    kotlinc \
-        "$kotlin_out/com/aurelion/aether/aether.kt" \
-        "$HARNESS/FixtureReplay.kt" \
-        -cp "$jna" \
-        -include-runtime \
-        -d "$kotlin_out/fixture-replay.jar"
-    java \
-        -Djava.library.path="$ROOT/target/debug" \
-        -cp "$kotlin_out/fixture-replay.jar:$jna" \
-        com.aurelion.aether.FixtureReplayKt
+    run_kotlin_harness "FixtureReplay.kt" "FixtureReplay" "$kotlin_out" "$jna"
+    run_kotlin_harness "SecureStorageUnexpectedError.kt" "SecureStorageUnexpectedError" "$kotlin_out" "$jna"
 }
 
 need_tool cargo
