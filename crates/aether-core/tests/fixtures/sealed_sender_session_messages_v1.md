@@ -10,7 +10,7 @@ Binding replay should:
 
 - decode and re-encode `encoded_hex` byte-for-byte
 - verify transport-visible fields match `transport_visible`
-- decrypt with the referenced recipient state fixture
+- decrypt with the referenced recipient state fixture and `sender_certificate_validation`
 - verify plaintext and `post_decryption` sender material only after successful decrypt
 - reject tampered ciphertext without returning sender identity material
 

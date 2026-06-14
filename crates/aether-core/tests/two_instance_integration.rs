@@ -387,13 +387,15 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
     let second_instance = ProtocolStateEngine::new();
     let session_key = session_key();
     let deduplication_key = deduplication_key();
-    let alice_sender = sender_identity(0xa1);
+    let alice = validated_sender();
+    let alice_domain_keys = [alice.domain_signing_key()];
+    let revoked = [];
     let bob_sender = sender_identity(0xb1);
     let (mut alice_store, mut bob_store) = initialize_stores(
         &first_instance,
         session_key.clone(),
         deduplication_key.clone(),
-        &alice_sender,
+        &alice.sender_identity,
         &bob_sender,
     );
     let events = InstanceEventStream::with_observer_capacity(Vec::new(), 1).unwrap();
@@ -404,7 +406,7 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
         .encrypt_message(
             &alice_store.snapshot(),
             session_key.clone(),
-            outbound(0x01, b"first", &alice_sender),
+            outbound(0x01, b"first", &alice.sender_identity),
         )
         .unwrap();
     let first_message = first.message;
@@ -413,7 +415,7 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
         .encrypt_message(
             &alice_store.snapshot(),
             session_key.clone(),
-            outbound(0x02, b"second", &alice_sender),
+            outbound(0x02, b"second", &alice.sender_identity),
         )
         .unwrap();
     let second_message = second.message;
@@ -453,12 +455,14 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([0x12; 32]),
             &bob_store.snapshot(),
-            inbound(
+            inbound_with_certificate_validation(
                 session_key.clone(),
                 deduplication_key.clone(),
                 &second_message,
                 &bob_sender,
                 0x12,
+                &alice_domain_keys,
+                &revoked,
             ),
         )
         .map(accepted)
@@ -487,12 +491,14 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([0x13; 32]),
             &bob_store.snapshot(),
-            inbound(
+            inbound_with_certificate_validation(
                 session_key.clone(),
                 deduplication_key.clone(),
                 &first_message,
                 &bob_sender,
                 0x13,
+                &alice_domain_keys,
+                &revoked,
             ),
         )
         .map(accepted)
@@ -690,13 +696,15 @@ fn duplicate_messages_and_ack_replays_are_idempotent_across_instance_recreation(
     let second_instance = ProtocolStateEngine::new();
     let session_key = session_key();
     let deduplication_key = deduplication_key();
-    let alice_sender = sender_identity(0xa1);
+    let alice = validated_sender();
+    let alice_domain_keys = [alice.domain_signing_key()];
+    let revoked = [];
     let bob_sender = sender_identity(0xb1);
     let (mut alice_store, mut bob_store) = initialize_stores(
         &first_instance,
         session_key.clone(),
         deduplication_key.clone(),
-        &alice_sender,
+        &alice.sender_identity,
         &bob_sender,
     );
     let events = InstanceEventStream::new(Vec::new());
@@ -705,7 +713,7 @@ fn duplicate_messages_and_ack_replays_are_idempotent_across_instance_recreation(
         .encrypt_message(
             &alice_store.snapshot(),
             session_key.clone(),
-            outbound(0x31, b"deliver once", &alice_sender),
+            outbound(0x31, b"deliver once", &alice.sender_identity),
         )
         .unwrap();
     let message = encrypted.message;
@@ -714,12 +722,14 @@ fn duplicate_messages_and_ack_replays_are_idempotent_across_instance_recreation(
         .decrypt_message(
             &mut ChaCha20Rng::from_seed([0x31; 32]),
             &bob_store.snapshot(),
-            inbound(
+            inbound_with_certificate_validation(
                 session_key.clone(),
                 deduplication_key.clone(),
                 &message,
                 &bob_sender,
                 0x41,
+                &alice_domain_keys,
+                &revoked,
             ),
         )
         .map(accepted)
