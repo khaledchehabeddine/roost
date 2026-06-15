@@ -138,7 +138,8 @@ Avoid: retry cache, outbox, in-memory pending state
 The `prekey/*` secure-storage records managed by KeyStore: the current Discovery Key, current and
 immediately superseded signed pre-key, and one-time pre-key pool for the current Epoch. Publication
 uses caller-created material; rotating the Discovery Key advances the Epoch and immediately destroys
-prior-Epoch signed and one-time prekey secrets.
+prior-Epoch signed and one-time prekey secrets. PreKey State is not a Protocol State Blob; malformed
+prekey corpora exercise KeyStore secure-storage decoders.
 Avoid: protocol state blob, in-memory prekey cache, automatic publication rotation
 
 **Protocol State Blob** (many per Identity or Session):
@@ -155,9 +156,10 @@ or restore signals.
 Avoid: schema version, ratchet version
 
 **Protocol State Kind** (one per Protocol State Blob address):
-The stable category for a Protocol State Blob — ratchet/session state, prekey state, sender
-certificate, deduplication set, pending acknowledgments, or contact state. The consumer combines
-the Kind with a key such as a Session or Identity identifier to address one Blob.
+The stable category for a Protocol State Blob address. Current blob decode surfaces are
+ratchet/session state, deduplication set, pending acknowledgments, and contact state, including
+trust and blocking. PreKey State remains KeyStore secure-storage state, and Sender Certificates are
+validated caller inputs rather than persisted blob bodies.
 Avoid: table, bucket, namespace
 
 **Retry Instruction** (many per pending-acknowledgment query):
@@ -197,7 +199,8 @@ Avoid: compression, random padding
 **Sender Certificate** (one domain-signed binding for sender IK and DK):
 A signed public statement from a trusted domain signing key binding a sender's IK, current DK,
 signing-key identifier, and expiry. Validation is a caller-timed verdict over the current
-trusted-key and revocation inputs.
+trusted-key and revocation inputs. Sender Certificate malformed-input corpora exercise validation
+inputs, not Protocol State Blob decoding.
 Avoid: trust state, sender profile, discovery key signature
 
 **Sender Identity Material** (one per Sealed Sender Envelope):

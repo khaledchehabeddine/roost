@@ -1,0 +1,37 @@
+name: Fuzz Smoke
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, ready_for_review, reopened, synchronize]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz-smoke:
+    name: Cargo Fuzz Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Run fuzz smoke
+        env:
+          AETHER_FUZZ_RUNS: 64
+          AETHER_FUZZ_TOOLCHAIN: nightly
+        run: scripts/ci/fuzz-smoke.sh

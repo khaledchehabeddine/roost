@@ -425,6 +425,13 @@ fn checked_blob(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
     decode_signed_prekey_store(raw)
 }
 
+#[cfg(fuzzing)]
+#[allow(missing_docs)]
+pub fn fuzz_decode_signed_prekey_blob(raw: &[u8]) -> Result<(), SignedPreKeyError> {
+    let _ = decode_signed_prekey_store(raw)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -346,6 +346,13 @@ fn decode_pool(raw: &[u8]) -> Result<OneTimePreKeyPool, OneTimePreKeyError> {
     })
 }
 
+#[cfg(fuzzing)]
+#[allow(missing_docs)]
+pub fn fuzz_decode_one_time_prekey_pool(raw: &[u8]) -> Result<(), OneTimePreKeyError> {
+    let _ = decode_pool(raw)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
