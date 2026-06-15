@@ -625,8 +625,10 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::InvalidDeduplicationCapacity`] if `capacity` is outside the
     ///   supported range.
     pub fn with_deduplication_capacity(capacity: usize) -> Result<Self, ProtocolStateError> {
-        let mut limits = ProtocolHardeningLimits::default();
-        limits.deduplication_capacity = capacity;
+        let limits = ProtocolHardeningLimits {
+            deduplication_capacity: capacity,
+            ..Default::default()
+        };
         Self::with_hardening_limits(limits)
     }
 
@@ -2986,6 +2988,32 @@ fn decode_contact_state_payload(
     decoded_contact_state(address, decoded_contact_state_parts_v1(wire))
 }
 
+#[cfg(fuzzing)]
+#[allow(missing_docs)]
+pub fn fuzz_decode_protocol_state_blob(
+    kind: ProtocolStateKind,
+    key: ProtocolStateKey,
+    blob: ProtocolStateBlob,
+) -> Result<(), ProtocolStateError> {
+    let address = ProtocolStateAddress::new(kind, key);
+    let limits = ProtocolHardeningLimits::default();
+    match kind {
+        ProtocolStateKind::RatchetSession => {
+            decode_session_state(&address, &blob, limits).map(|_| ())
+        }
+        ProtocolStateKind::DeduplicationSet => {
+            decode_deduplication_set(&address, &blob, limits).map(|_| ())
+        }
+        ProtocolStateKind::PendingAcknowledgments => {
+            decode_pending_acknowledgments(&address, &blob, limits).map(|_| ())
+        }
+        ProtocolStateKind::ContactState => {
+            decode_contact_state(&address, &blob, limits).map(|_| ())
+        }
+        ProtocolStateKind::PreKey | ProtocolStateKind::SenderCertificate => Ok(()),
+    }
+}
+
 struct DecodedContactStateParts {
     identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
@@ -3686,6 +3714,12 @@ fn decode_sealed_sender_envelope(
     })
 }
 
+#[cfg(fuzzing)]
+#[allow(missing_docs)]
+pub fn fuzz_decode_sealed_sender_envelope(bytes: &[u8]) -> Result<(), ProtocolStateError> {
+    decode_sealed_sender_envelope(bytes, ProtocolHardeningLimits::default()).map(|_| ())
+}
+
 fn receive_state_updates(
     address: &ProtocolStateAddress,
     state: &RatchetState,
@@ -3933,6 +3967,21 @@ fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolSta
     ))
 }
 
+#[cfg(fuzzing)]
+#[allow(missing_docs)]
+pub fn fuzz_unpad_sealed_payload(padded: &[u8]) -> Result<(), ProtocolStateError> {
+    unpad_sealed_payload(padded).map(|_| ())
+}
+
+#[cfg(fuzzing)]
+#[allow(missing_docs)]
+pub fn fuzz_deduplication_digest(
+    digest_key: [u8; DEDUPLICATION_KEY_LEN],
+    encoded_message: &[u8],
+) -> [u8; DEDUPLICATION_DIGEST_LEN] {
+    deduplication_digest(&digest_key, encoded_message)
+}
+
 fn sender_identity_key_matches(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
     expected.ct_eq(actual).into()
 }
@@ -3967,10 +4016,10 @@ fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
 mod tests {
     use super::{
         DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
-        MIN_DEDUPLICATION_CAPACITY, MessageTranscriptInput, PayloadKind, SEALED_PAYLOAD_BUCKETS,
-        SEALED_PAYLOAD_LEN_PREFIX_LEN, contains_digest, deduplication_digest, pad_sealed_payload,
-        record_deduplication_digest, sign_message_transcript, unpad_sealed_payload,
-        verify_message_transcript,
+        MIN_DEDUPLICATION_CAPACITY, MessageTranscriptInput, PayloadKind, ProtocolStateError,
+        SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN, contains_digest,
+        deduplication_digest, pad_sealed_payload, record_deduplication_digest,
+        sign_message_transcript, unpad_sealed_payload, verify_message_transcript,
     };
     use crate::{MessageId, SenderIdentityMaterial};
     use aether_crypto::{KeyPair, SigningKeyPair, sign_identity_key_binding};
@@ -4035,10 +4084,31 @@ mod tests {
     }
 
     #[test]
-    fn sealed_payload_padding_rejects_invalid_bucket_length() {
-        let padded = vec![0u8; SEALED_PAYLOAD_BUCKETS[0] + 1];
+    fn sealed_payload_padding_accepts_bucket_boundary_lengths() {
+        for bucket in SEALED_PAYLOAD_BUCKETS {
+            let plaintext_len = bucket - SEALED_PAYLOAD_LEN_PREFIX_LEN;
+            let mut padded = vec![0x41; bucket];
+            padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN]
+                .copy_from_slice(&(plaintext_len as u32).to_be_bytes());
 
-        assert!(unpad_sealed_payload(&padded).is_err());
+            let plaintext = unpad_sealed_payload(&padded).unwrap();
+
+            assert_eq!(plaintext.len(), plaintext_len);
+            assert!(plaintext.iter().all(|byte| *byte == 0x41));
+        }
+    }
+
+    #[test]
+    fn sealed_payload_padding_rejects_invalid_bucket_lengths() {
+        for padded in [
+            vec![0u8; SEALED_PAYLOAD_BUCKETS[0] - 1],
+            vec![0u8; SEALED_PAYLOAD_BUCKETS[0] + 1],
+        ] {
+            assert!(matches!(
+                unpad_sealed_payload(&padded),
+                Err(ProtocolStateError::InvalidMessage { .. })
+            ));
+        }
     }
 
     #[test]
@@ -4047,7 +4117,10 @@ mod tests {
         let plaintext_len = (SEALED_PAYLOAD_BUCKETS[0] + 1) as u32;
         padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
 
-        assert!(unpad_sealed_payload(&padded).is_err());
+        assert!(matches!(
+            unpad_sealed_payload(&padded),
+            Err(ProtocolStateError::InvalidMessage { .. })
+        ));
     }
 
     #[test]
@@ -4058,7 +4131,10 @@ mod tests {
         padded[SEALED_PAYLOAD_LEN_PREFIX_LEN] = 0xaa;
         padded[SEALED_PAYLOAD_LEN_PREFIX_LEN + 1] = 0x01;
 
-        assert!(unpad_sealed_payload(&padded).is_err());
+        assert!(matches!(
+            unpad_sealed_payload(&padded),
+            Err(ProtocolStateError::InvalidMessage { .. })
+        ));
     }
 
     #[test]

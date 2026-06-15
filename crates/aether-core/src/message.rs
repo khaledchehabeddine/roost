@@ -287,6 +287,16 @@ mod tests {
     }
 
     #[test]
+    fn from_bytes_rejects_oversized_before_full_decode() {
+        let max_len = ProtocolHardeningLimits::default()
+            .bounded()
+            .max_encoded_message_len;
+        let bytes = vec![0; max_len + 1];
+
+        assert_decode_error(&bytes, MessageError::EncodedTooLarge);
+    }
+
+    #[test]
     fn from_bytes_rejects_old_sender_visible_wire_layout() {
         assert_decode_error(&old_sender_visible_wire(), MessageError::Decode);
     }

@@ -252,6 +252,14 @@ fn decode_discovery_key(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> DiscoveryKey {
     )
 }
 
+#[cfg(fuzzing)]
+#[allow(missing_docs)]
+pub fn fuzz_decode_discovery_key_blob(raw: &[u8]) -> Result<(), DiscoveryKeyError> {
+    let blob = checked_blob(raw)?;
+    let _ = decode_discovery_key(blob);
+    Ok(())
+}
+
 fn read_epoch(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> u32 {
     let mut epoch_bytes = [0u8; 4];
     epoch_bytes.copy_from_slice(&blob[1..5]);

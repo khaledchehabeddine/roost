@@ -4,6 +4,7 @@ members = [
     "crates/aether-crypto",
     "crates/aether-uniffi"
 ]
+exclude = ["fuzz"]
 resolver = "3"
 
 [workspace.package]
@@ -32,6 +33,7 @@ zeroize = "1.8.2"
 
 [workspace.lints.rust]
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [workspace.lints.clippy]
 new_without_default = "allow"

@@ -115,3 +115,15 @@ pub use sender_certificate::{
 };
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
+
+#[cfg(fuzzing)]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::discovery_key::fuzz_decode_discovery_key_blob;
+    pub use crate::one_time_prekey::fuzz_decode_one_time_prekey_pool;
+    pub use crate::protocol_state::{
+        fuzz_decode_protocol_state_blob, fuzz_decode_sealed_sender_envelope,
+        fuzz_deduplication_digest, fuzz_unpad_sealed_payload,
+    };
+    pub use crate::signed_prekey::fuzz_decode_signed_prekey_blob;
+}
