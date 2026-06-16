@@ -9,20 +9,20 @@ GENERATED="$ROOT/crates/aether-uniffi/$NAME.json"
 cd "$ROOT"
 
 mkdir -p "$(dirname "$OUTPUT")"
-rm -f "$GENERATED" "$OUTPUT"
+rm -f "$ROOT"/crates/*/"$NAME.json" "$OUTPUT"
 
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}"
 
 cargo metadata --locked >/dev/null
 
-# `--describe crate` writes one SBOM with Cargo targets as subcomponents.
+# The default crate mode writes one SBOM with Cargo targets as subcomponents.
 cargo cyclonedx \
     --manifest-path crates/aether-uniffi/Cargo.toml \
     --format json \
     --spec-version 1.5 \
-    --describe crate \
     --target all \
     --override-filename "$NAME"
 
 mv "$GENERATED" "$OUTPUT"
+rm -f "$ROOT"/crates/*/"$NAME.json"
 echo "SBOM written to $OUTPUT"

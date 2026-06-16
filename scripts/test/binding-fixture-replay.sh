@@ -101,14 +101,34 @@ run_kotlin_harness() {
         -cp "$jna" \
         -include-runtime \
         -d "$kotlin_out/$name.jar"
-    java \
-        -Djava.library.path="$ROOT/target/debug" \
-        -cp "$kotlin_out/$name.jar:$jna" \
-        "com.aurelion.aether.${name}Kt"
+    run_kotlin_class "$kotlin_out/$name.jar:$jna" "com.aurelion.aether.${name}Kt"
+}
+
+run_kotlin_class() {
+    local classpath="$1"
+    local class_name="$2"
+
+    if command -v java >/dev/null 2>&1 && java -version >/dev/null 2>&1; then
+        java \
+            -Djava.library.path="$ROOT/target/debug" \
+            -cp "$classpath" \
+            "$class_name"
+        return
+    fi
+
+    if command -v kotlin >/dev/null 2>&1; then
+        kotlin \
+            -J-Djna.library.path="$ROOT/target/debug" \
+            -cp "$classpath" \
+            "$class_name"
+        return
+    fi
+
+    echo "missing required tool: java or kotlin" >&2
+    exit 2
 }
 
 run_kotlin() {
-    need_tool java
     need_tool kotlinc
 
     local kotlin_out="$OUT/kotlin"
