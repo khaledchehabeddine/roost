@@ -31,7 +31,6 @@ fun main() {
 
     val sessionCase = report.sealedSenderSessionCases[0]
     requireReplay(sessionCase.name == "sealed_text", "sealed-sender fixture name")
-    requireReplay(sessionCase.transportVisible.payloadKind == "text", "sealed-sender transport kind")
     requireReplay(
         sessionCase.plaintextHex == "66697874757265207365616c65642073657373696f6e",
         "sealed-sender plaintext",
@@ -41,15 +40,15 @@ fun main() {
     requireReplay(sessionCase.senderSignatureHiddenBeforeDecrypt, "sender signature hidden before decrypt")
     requireReplay(sessionCase.tamperedCiphertextRejected, "tampered ciphertext rejection")
     requireReplay(
-        !sessionCase.transportVisible.payloadHex.contains(sessionCase.postDecryption.senderIdentityKeyHex),
+        !sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderIdentityKeyHex),
         "identity leaked into transport payload",
     )
     requireReplay(
-        !sessionCase.transportVisible.payloadHex.contains(sessionCase.postDecryption.senderCertificateHex),
+        !sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderCertificateHex),
         "certificate leaked into transport payload",
     )
     requireReplay(
-        !sessionCase.transportVisible.payloadHex.contains(sessionCase.postDecryption.senderSignatureHex),
+        !sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderSignatureHex),
         "signature leaked into transport payload",
     )
 

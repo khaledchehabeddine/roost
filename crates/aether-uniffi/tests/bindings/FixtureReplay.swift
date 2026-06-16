@@ -21,15 +21,14 @@ struct FixtureReplay {
 
         let sessionCase = report.sealedSenderSessionCases[0]
         require(sessionCase.name == "sealed_text", "sealed-sender fixture name")
-        require(sessionCase.transportVisible.payloadKind == "text", "sealed-sender transport kind")
         require(sessionCase.plaintextHex == "66697874757265207365616c65642073657373696f6e", "sealed-sender plaintext")
         require(sessionCase.senderIdentityHiddenBeforeDecrypt, "sender identity hidden before decrypt")
         require(sessionCase.senderCertificateHiddenBeforeDecrypt, "sender certificate hidden before decrypt")
         require(sessionCase.senderSignatureHiddenBeforeDecrypt, "sender signature hidden before decrypt")
         require(sessionCase.tamperedCiphertextRejected, "tampered ciphertext rejection")
-        require(!sessionCase.transportVisible.payloadHex.contains(sessionCase.postDecryption.senderIdentityKeyHex), "identity leaked into transport payload")
-        require(!sessionCase.transportVisible.payloadHex.contains(sessionCase.postDecryption.senderCertificateHex), "certificate leaked into transport payload")
-        require(!sessionCase.transportVisible.payloadHex.contains(sessionCase.postDecryption.senderSignatureHex), "signature leaked into transport payload")
+        require(!sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderIdentityKeyHex), "identity leaked into transport payload")
+        require(!sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderCertificateHex), "certificate leaked into transport payload")
+        require(!sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderSignatureHex), "signature leaked into transport payload")
 
         let initialCase = report.initialHandshakeCases[0]
         require(initialCase.senderIdentityHiddenBeforeDecrypt, "initial handshake identity hidden before decrypt")
