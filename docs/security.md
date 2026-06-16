@@ -3,6 +3,29 @@
 This page records denial-of-service hardening behavior that callers must preserve when integrating
 the protocol core.
 
+## Current Guarantees
+
+- Messages authenticate the sealed-sender frame before plaintext, sender identity material, payload
+  kind, or Message metadata are surfaced.
+- Protocol State Blobs are versioned, opaque caller-persisted values. Unsupported or malformed
+  blobs fault instead of silently resetting state.
+- X3DH and established Messages bind the peer Identity Key so a Session cannot be relabeled under a
+  different verified Identity.
+- Replay, skipped-key, acknowledgment, and malformed-input paths are bounded by documented caps.
+- Secret-bearing Rust values avoid debug formatting where they own key or plaintext material, and
+  heap secrets are wrapped for zeroization at library boundaries.
+
+## Known Limitations
+
+- The library does not provide metadata protection: transport routing data, timing, IP unlinking,
+  batching, and traffic-shaping remain host responsibilities.
+- The library does not provide endpoint-compromise protection. If a Device, host secure-storage
+  implementation, or caller-owned plaintext copy is compromised, the library cannot protect values
+  already exposed to that endpoint.
+- The library does not implement network rate limiting, abuse throttling, or transport retries.
+- Sender Certificate validation is caller-timed and depends on caller-provided trusted signing keys
+  and revocation inputs.
+
 ## Resource Limits
 
 Core rejects externally influenced inputs before expensive work where the boundary is visible:

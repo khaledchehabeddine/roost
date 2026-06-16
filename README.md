@@ -37,5 +37,7 @@ Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B")
 - [`CONTEXT_MAP.md`](CONTEXT_MAP.md) — workspace context paths and relationships
 - [`docs/adr/`](docs/adr/) — workspace-wide architectural decisions (per-crate decisions under `crates/<crate>/docs/adr/`)
 - [`docs/building-mobile.md`](docs/building-mobile.md) — Android, iOS, and manual UniFFI bindings
+- [`docs/ci.md`](docs/ci.md) — CI, runtime verification, and supply-chain gates
+- [`docs/release.md`](docs/release.md) — release artifact, SBOM, and reproducible-build verification
 - [`docs/security/secret-handling.md`](docs/security/secret-handling.md) — secret-handling audit notes and limits
 - [`docs/security.md`](docs/security.md) — DoS limits, caller responsibilities, and constrained-host trade-offs
