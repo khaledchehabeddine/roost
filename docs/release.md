@@ -29,6 +29,26 @@ Runner requirements match the underlying build scripts:
 - Android requires `cargo-ndk` and the Android NDK.
 - iOS requires Xcode command-line tools.
 
+## Constrained Decryption Profile
+
+The v0.9.0 release gate measures the real spec-v1.0 encrypted Message receive path in an optimized
+Rust test binary:
+
+```bash
+scripts/ci/constrained-decryption-budget.sh
+```
+
+The constrained profile uses a 24 MiB tracked Rust heap allocation budget and a 250 ms wall-clock
+budget per measured decrypt operation. The profile is compatible with the iOS Notification Service
+Extension class target referenced by AE-FFI-04, but it is release-gate evidence for this harness,
+not a guarantee for every host extension configuration.
+
+The gate covers first and repeated decrypts, representative padding buckets, maximum-size precheck,
+sealed-frame decode, pre-decryption deduplication lookup, envelope AEAD decrypt, sender-certificate
+validation, sender transcript-signature verification, ratchet advancement, deduplication record
+production, and acknowledgment/state-update output production. It does not claim protection for
+rooted, jailbroken, malware-compromised, or otherwise untrusted endpoints.
+
 ## SBOM
 
 Generate the release SBOM with:

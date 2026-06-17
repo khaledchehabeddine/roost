@@ -31,6 +31,18 @@ The sanitizer subset targets `x86_64-unknown-linux-gnu` and runs library plus in
 the Rust-instrumented test surface. UniFFI binding replay and mobile target builds remain covered by
 their own workflows, not by sanitizer jobs.
 
+## Constrained Decryption Budget
+
+The v0.9.0 constrained decryption release gate runs the optimized Core budget harness:
+
+```bash
+scripts/ci/constrained-decryption-budget.sh
+```
+
+The harness measures the real `ProtocolStateEngine::decrypt_message` path one operation at a time
+against the documented 24 MiB tracked Rust heap allocation budget and 250 ms wall-clock budget. It
+is a release gate for the profiled constrained path, not a general endpoint security guarantee.
+
 ## Supply Chain
 
 `deny.toml` is the committed dependency policy. It blocks disallowed licenses, vulnerable or yanked

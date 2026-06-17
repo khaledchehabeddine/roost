@@ -29,6 +29,14 @@ permanent and owns Trust State; the DK is current routing/discovery material and
 without changing trust.
 Avoid: account, profile, sender metadata
 
+**Constrained Decryption Profile** (one release-gate budget):
+The measured v0.9.0 release profile for the real spec-v1.0 encrypted Message receive path under
+extension-class execution constraints. The gate measures one decrypt operation at a time in an
+optimized test run, with a 24 MiB tracked Rust heap allocation budget and a 250 ms wall-clock
+budget. It is release evidence for the profiled path, not a guarantee for every host extension
+configuration or compromised endpoint.
+Avoid: production SLA, memory proof, endpoint guarantee
+
 **Current State Snapshot** (one per Event Stream query):
 A self-contained public view of the producer's current state, tagged with the last Event ID reflected by that view. Lagged Observers use it to replace their local view, then resume after the tagged Event ID without replaying already-reflected Events.
 Avoid: cache, checkpoint

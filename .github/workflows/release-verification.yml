@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
 
       - name: Cache Dependencies
         uses: Swatinem/rust-cache@v2
@@ -35,6 +35,21 @@ jobs:
           name: aether-uniffi-v0.8.0-sbom
           path: target/sbom/aether-uniffi-v0.8.0-sbom.json
           if-no-files-found: error
+
+  constrained-decryption-budget:
+    name: Constrained Decryption Budget
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run constrained decryption budget gate
+        run: scripts/ci/constrained-decryption-budget.sh
 
   android-reproducible:
     name: Android Reproducible Artifacts
