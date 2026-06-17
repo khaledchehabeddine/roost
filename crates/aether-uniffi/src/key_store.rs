@@ -368,7 +368,8 @@ impl KeyStore {
     /// # Errors
     /// - [`AetherError::BackupFailed`] on randomness failure, Argon2id derivation error, or
     ///   authenticated encryption failure.
-    /// - [`AetherError::Corrupt`] if only one of the two identity keys is present.
+    /// - [`AetherError::Corrupt`] if identity keys are incomplete or the discovery key does not
+    ///   verify against the current identity.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if a stored identity key has the wrong byte length.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
@@ -385,10 +386,12 @@ impl KeyStore {
 
     /// Restores an identity from an encrypted backup, replacing any current identity.
     ///
-    /// The backup is decrypted and the restored discovery key validated before storage changes
-    /// begin, so a wrong passphrase or malformed blob leaves the existing identity untouched. On
-    /// success, the restored identity keeps the discovery key and epoch lineage carried by the
-    /// backup and has no one-time pre-keys or signed pre-key. Call
+    /// The backup is decrypted and the restored discovery key is validated against the restored
+    /// identity before storage changes begin, so a wrong passphrase or malformed blob leaves the
+    /// existing identity untouched. On success, the restored identity keeps the discovery key and
+    /// epoch lineage carried by the backup and has no one-time pre-keys or signed pre-key. Restore
+    /// does not restore protocol state; wipe or replace session, deduplication, and pending
+    /// acknowledgment state, then use session recovery or re-handshake paths. Call
     /// [`Self::rotate_signed_prekey_if_stale`] before publishing.
     ///
     /// Storage failures can happen after writes begin and may leave incomplete key material. Call
@@ -412,11 +415,13 @@ impl KeyStore {
     /// ```
     ///
     /// # Errors
-    /// - [`AetherError::BackupFailed`] on Argon2id parameter error.
-    /// - [`AetherError::DecryptionFailed`] on wrong passphrase or tampered ciphertext.
+    /// - [`AetherError::BackupFailed`] on Argon2id derivation failure.
+    /// - [`AetherError::DecryptionFailed`] on wrong passphrase or backup authentication failure.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
-    /// - [`AetherError::InvalidData`] on a malformed header, unsupported version, below-floor
-    ///   Argon2id parameters, or a malformed discovery-key blob.
+    /// - [`AetherError::Corrupt`] if the backup's discovery key is not signed by the backup's
+    ///   identity key.
+    /// - [`AetherError::InvalidData`] on a malformed header, authenticated unsupported version,
+    ///   out-of-range Argon2id parameters, or a malformed discovery-key blob.
     /// - [`AetherError::Storage`] on platform storage failure during commit.
     ///
     /// # Performance

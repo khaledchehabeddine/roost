@@ -68,7 +68,7 @@ A rotatable keypair — an Ed25519 signing key plus X25519 key-agreement key —
 Avoid: prekey, ephemeral key
 
 **Epoch** (one per Discovery Key generation):
-The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup creates a new Discovery Key at Epoch 0, so use the signed `created_at` timestamp to compare freshness across restored lineages.
+The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup preserves the backed-up Discovery Key and its Epoch, so use the signed `created_at` timestamp to compare freshness across restored lineages.
 Avoid: window, generation
 
 **Event** (many per Event Stream):
@@ -97,6 +97,10 @@ Avoid: user, account, profile
 **Identity Key (IK)** (exactly one per Identity, permanent):
 The permanent keypair — an Ed25519 signing key plus X25519 key-agreement key — that anchors an Identity. Safety numbers and sender certificates bind to it and its Ed25519 key signs the Discovery Key; it never rotates and takes no part in the X3DH key agreement.
 Avoid: master key, root key
+
+**Identity Backup** (one encrypted export of Identity material):
+A passphrase-encrypted portable envelope containing the permanent Identity Key and current Discovery Key. Restoring it rewinds only Identity material; Protocol State Blobs, Sessions, and pending acknowledgments remain caller-owned and must be wiped or replaced before session recovery or re-handshake.
+Avoid: account backup, protocol-state backup, session restore
 
 **Identity Secret Blob** (one secure-storage entry per Identity):
 The versioned local secure-storage payload that commits both permanent Identity Key secret halves together. It is the durable private form of the Identity Key and replaces the pre-release two-entry `identity/x25519` plus `identity/ed25519` encoding.

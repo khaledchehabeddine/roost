@@ -53,6 +53,7 @@ impl IdentityManager {
         passphrase: &str,
         dk_blob: &[u8],
     ) -> Result<Vec<u8>, IdentityError> {
+        validate_export_argon2_params(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)?;
         let (x25519_bytes, ed25519_bytes) = self.load_identity_key_bytes()?;
 
         let mut plaintext = Zeroizing::new(Vec::with_capacity(IK_LEN + dk_blob.len()));
@@ -106,25 +107,12 @@ impl IdentityManager {
             ));
         }
         let (header, ciphertext) = data.split_at(HEADER_LEN);
-        if header[0] != BACKUP_FORMAT_VERSION {
-            return Err(IdentityError::InvalidData(format!(
-                "unsupported backup format version: {}",
-                header[0]
-            )));
-        }
         let m_cost = read_u32(&header[1..5]);
         let t_cost = read_u32(&header[5..9]);
         let p_cost = read_u32(&header[9..13]);
         // Bound the work factor before spending Argon2id memory: the floor blocks downgrade, the
         // ceiling blocks an unauthenticated memory-exhaustion DoS from a hostile header.
-        if !(MIN_M_COST..=MAX_M_COST).contains(&m_cost)
-            || !(MIN_T_COST..=MAX_T_COST).contains(&t_cost)
-            || p_cost != ARGON2_P_COST
-        {
-            return Err(IdentityError::InvalidData(
-                "backup Argon2id parameters outside the accepted work-factor range".into(),
-            ));
-        }
+        validate_import_argon2_params(m_cost, t_cost, p_cost)?;
         let salt = &header[13..13 + SALT_LEN];
         let nonce_bytes = &header[13 + SALT_LEN..HEADER_LEN];
 
@@ -141,6 +129,12 @@ impl IdentityManager {
                 )
                 .map_err(|_| IdentityError::DecryptionFailed)?,
         );
+        if header[0] != BACKUP_FORMAT_VERSION {
+            return Err(IdentityError::InvalidData(format!(
+                "unsupported backup format version: {}",
+                header[0]
+            )));
+        }
 
         let ik: [u8; IK_LEN] = plaintext
             .get(..IK_LEN)
@@ -190,6 +184,35 @@ fn read_u32(bytes: &[u8]) -> u32 {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(bytes);
     u32::from_be_bytes(buf)
+}
+
+fn validate_export_argon2_params(
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<(), IdentityError> {
+    if m_cost < MIN_M_COST || t_cost < MIN_T_COST || p_cost != ARGON2_P_COST {
+        return Err(IdentityError::BackupFailed(
+            "backup Argon2id parameters are below the accepted work-factor floor".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_import_argon2_params(
+    m_cost: u32,
+    t_cost: u32,
+    p_cost: u32,
+) -> Result<(), IdentityError> {
+    if !(MIN_M_COST..=MAX_M_COST).contains(&m_cost)
+        || !(MIN_T_COST..=MAX_T_COST).contains(&t_cost)
+        || p_cost != ARGON2_P_COST
+    {
+        return Err(IdentityError::InvalidData(
+            "backup Argon2id parameters outside the accepted work-factor range".into(),
+        ));
+    }
+    Ok(())
 }
 
 // Salt and nonce come from the injected CSPRNG via the fallible `try_fill_bytes`, so an entropy
@@ -243,6 +266,44 @@ mod tests {
         manager
     }
 
+    fn authenticated_backup_with_version(
+        manager: &IdentityManager,
+        passphrase: &str,
+        version: u8,
+    ) -> Vec<u8> {
+        let backup = manager
+            .export_encrypted_backup(&mut OsRng, passphrase, &DK_BLOB)
+            .unwrap();
+        let (ik, dk_blob) = manager.decrypt_backup(&backup, passphrase).unwrap();
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(IK_LEN + dk_blob.len()));
+        plaintext.extend_from_slice(&*ik);
+        plaintext.extend_from_slice(&dk_blob);
+
+        let mut header: [u8; HEADER_LEN] = backup[..HEADER_LEN].try_into().unwrap();
+        header[0] = version;
+        let m_cost = read_u32(&header[1..5]);
+        let t_cost = read_u32(&header[5..9]);
+        let p_cost = read_u32(&header[9..13]);
+        let salt = &header[13..13 + SALT_LEN];
+        let nonce_bytes = &header[13 + SALT_LEN..HEADER_LEN];
+        let key_bytes = derive_key(passphrase, salt, m_cost, t_cost, p_cost).unwrap();
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
+        let ciphertext = cipher
+            .encrypt(
+                XNonce::from_slice(nonce_bytes),
+                Payload {
+                    msg: plaintext.as_slice(),
+                    aad: &header,
+                },
+            )
+            .unwrap();
+
+        let mut authenticated = Vec::with_capacity(HEADER_LEN + ciphertext.len());
+        authenticated.extend_from_slice(&header);
+        authenticated.extend_from_slice(&ciphertext);
+        authenticated
+    }
+
     #[test]
     fn export_backup_without_identity_returns_not_found() {
         let manager = manager();
@@ -289,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_backup_rejects_unknown_version() {
+    fn decrypt_backup_rejects_tampered_version_as_authentication_failure() {
         let manager = manager_with_identity();
         let mut backup = manager
             .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
@@ -297,7 +358,19 @@ mod tests {
         backup[0] = BACKUP_FORMAT_VERSION + 1;
         assert!(matches!(
             manager.decrypt_backup(&backup, "passphrase"),
-            Err(IdentityError::InvalidData(_))
+            Err(IdentityError::DecryptionFailed)
+        ));
+    }
+
+    #[test]
+    fn decrypt_backup_rejects_authenticated_future_version() {
+        let manager = manager_with_identity();
+        let backup =
+            authenticated_backup_with_version(&manager, "passphrase", BACKUP_FORMAT_VERSION + 1);
+        assert!(matches!(
+            manager.decrypt_backup(&backup, "passphrase"),
+            Err(IdentityError::InvalidData(reason))
+                if reason.contains("unsupported backup format version")
         ));
     }
 
@@ -342,6 +415,19 @@ mod tests {
                 "header offset {header_offset} should fail the work-factor ceiling"
             );
         }
+    }
+
+    #[test]
+    fn decrypt_backup_rejects_tampered_in_range_kdf_metadata() {
+        let manager = manager_with_identity();
+        let mut backup = manager
+            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .unwrap();
+        backup[5..9].copy_from_slice(&(ARGON2_T_COST + 1).to_be_bytes());
+        assert!(matches!(
+            manager.decrypt_backup(&backup, "passphrase"),
+            Err(IdentityError::DecryptionFailed)
+        ));
     }
 
     #[test]
@@ -464,5 +550,14 @@ mod tests {
             ARGON2_P_COST,
         );
         assert_ne!(*first.unwrap(), *second.unwrap());
+    }
+
+    #[test]
+    fn export_argon2id_parameters_reject_below_floor_memory() {
+        assert!(matches!(
+            validate_export_argon2_params(MIN_M_COST - 1, ARGON2_T_COST, ARGON2_P_COST),
+            Err(IdentityError::BackupFailed(_))
+        ));
+        assert!(validate_export_argon2_params(MIN_M_COST, ARGON2_T_COST, ARGON2_P_COST).is_ok());
     }
 }

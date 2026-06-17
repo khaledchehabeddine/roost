@@ -373,8 +373,8 @@ impl KeyStore {
     /// [`Self::generate_identity`] (which repairs a missing discovery key) before exporting.
     ///
     /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`InvalidData` | `LockPoisoned` | `NotFound` | `Storage`)
-    ///   when loading the discovery key to export fails.
+    /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `LockPoisoned` | `NotFound`
+    ///   | `Storage`) when loading or verifying the discovery key to export fails.
     /// - [`KeyStoreError::Identity`] (`BackupFailed`) on RNG failure, Argon2id derivation error,
     ///   or authenticated encryption failure.
     /// - [`KeyStoreError::Identity`] (`Corrupt` | `InvalidData` | `NotFound`) when loading the
@@ -382,6 +382,7 @@ impl KeyStore {
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failures.
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
+        self.0.discovery.current()?;
         let dk_blob = self.0.discovery.export_blob()?;
         Ok(self
             .0
@@ -391,16 +392,20 @@ impl KeyStore {
 
     /// Restores an identity and its discovery key from an encrypted backup.
     ///
-    /// Authenticates the backup and validates the restored discovery key before changing storage,
-    /// so a wrong passphrase or malformed blob leaves existing material untouched. On success the
-    /// restored identity keeps the discovery key and epoch lineage carried by the backup, with no
-    /// one-time pre-keys or signed pre-key; callers can create a signed pre-key with
-    /// [`Self::rotate_signed_prekey_if_stale`]. The identity commits as one versioned blob and the
-    /// discovery key as its own signed blob, so an interrupted commit that lands the identity
-    /// without the discovery key leaves a detectable, re-mintable discovery key, never a silent
-    /// hybrid.
+    /// Authenticates the backup and validates the restored discovery key against the restored
+    /// identity before changing storage, so a wrong passphrase or malformed blob leaves existing
+    /// material untouched. On success the restored identity keeps the discovery key and epoch
+    /// lineage carried by the backup, with no one-time pre-keys or signed pre-key; callers can
+    /// create a signed pre-key with [`Self::rotate_signed_prekey_if_stale`]. Restore does not
+    /// restore protocol state; callers must wipe or replace session, deduplication, and pending
+    /// acknowledgment state, then use session recovery or re-handshake paths. The identity commits
+    /// as one versioned blob and the discovery key as its own signed blob, so an interrupted commit
+    /// that lands the identity without the discovery key leaves a detectable, re-mintable discovery
+    /// key, never a silent hybrid.
     ///
     /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`Corrupt`) if the backup's discovery key is not signed by
+    ///   the backup's identity key.
     /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the backup's discovery-key blob is
     ///   malformed.
     /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key reset or
@@ -422,8 +427,8 @@ impl KeyStore {
     ) -> Result<(), KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let (identity_key, dk_blob) = self.0.identity.decrypt_backup(data, passphrase)?;
-        // Validate the restored discovery key before clearing any existing material.
-        DiscoveryKeyManager::validate_blob(&dk_blob)?;
+        // Validate the restored key graph before clearing any existing material.
+        DiscoveryKeyManager::validate_blob_for_identity(&dk_blob, &identity_key)?;
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
         self.0.discovery.reset()?;
@@ -1002,6 +1007,40 @@ mod tests {
     }
 
     #[test]
+    fn import_with_mismatched_discovery_key_leaves_state_untouched() {
+        let source_store = store();
+        source_store.generate_identity().unwrap();
+        let other_store = store();
+        other_store.generate_identity().unwrap();
+        let other_discovery_blob = other_store.0.discovery.export_blob().unwrap();
+        let mismatched_backup = source_store
+            .0
+            .identity
+            .export_encrypted_backup(&mut OsRng, "pass", &other_discovery_blob)
+            .unwrap();
+
+        let destination_store = store();
+        let original_identity = destination_store.generate_identity().unwrap();
+        destination_store.rotate_signed_prekey_if_stale().unwrap();
+
+        assert!(matches!(
+            destination_store.import_encrypted_backup(&mismatched_backup, "pass"),
+            Err(KeyStoreError::Discovery(DiscoveryKeyError::Corrupt))
+        ));
+
+        let current_identity = destination_store.load_identity().unwrap();
+        assert_eq!(
+            original_identity.public_key(),
+            current_identity.public_key()
+        );
+        assert_eq!(
+            original_identity.verifying_key().as_bytes(),
+            current_identity.verifying_key().as_bytes()
+        );
+        assert!(destination_store.current_signed_prekey_bundle().is_ok());
+    }
+
+    #[test]
     fn import_encrypted_backup_commits_identity_with_single_store() {
         struct CountingIdentityWriteStorage {
             inner: InMemorySecureStorage,
@@ -1179,6 +1218,58 @@ mod tests {
                 .unwrap()
                 .epoch,
             2
+        );
+    }
+
+    #[test]
+    fn export_rejects_discovery_key_not_signed_by_identity() {
+        let (key_store, storage) = store_with_storage();
+        key_store.generate_identity().unwrap();
+        let mut blob = storage
+            .lock()
+            .unwrap()
+            .load(DISCOVERY_KEY)
+            .unwrap()
+            .unwrap()
+            .to_vec();
+        blob[69] ^= 0x01;
+        storage.lock().unwrap().store(DISCOVERY_KEY, &blob).unwrap();
+
+        assert!(matches!(
+            key_store.export_encrypted_backup("pass"),
+            Err(KeyStoreError::Discovery(DiscoveryKeyError::Corrupt))
+        ));
+    }
+
+    #[test]
+    fn unicode_normalized_passphrases_restore_same_identity_and_discovery_key() {
+        let source_store = store();
+        let source_identity = source_store.generate_identity().unwrap();
+        let source_discovery = source_store.current_discovery_key_bundle().unwrap();
+        let backup = source_store.export_encrypted_backup("caf\u{00e9}").unwrap();
+
+        let destination_store = store();
+        destination_store
+            .import_encrypted_backup(&backup, "cafe\u{0301}")
+            .unwrap();
+
+        let destination_identity = destination_store.load_identity().unwrap();
+        let destination_discovery = destination_store.current_discovery_key_bundle().unwrap();
+        assert_eq!(
+            source_identity.public_key(),
+            destination_identity.public_key()
+        );
+        assert_eq!(
+            source_identity.verifying_key().as_bytes(),
+            destination_identity.verifying_key().as_bytes()
+        );
+        assert_eq!(
+            source_discovery.public_key.as_bytes(),
+            destination_discovery.public_key.as_bytes()
+        );
+        assert_eq!(
+            source_discovery.verifying_key.as_bytes(),
+            destination_discovery.verifying_key.as_bytes()
         );
     }
 

@@ -2,7 +2,8 @@ use crate::clock::Clock;
 use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
 use aether_crypto::{
-    DiscoveryKey, DiscoveryKeyBundle, generate_discovery_key, verify_discovery_key_bundle,
+    DiscoveryKey, DiscoveryKeyBundle, SigningKeyPair, generate_discovery_key,
+    verify_discovery_key_bundle,
 };
 use rand::{CryptoRng, RngCore};
 use std::error::Error;
@@ -170,8 +171,24 @@ impl DiscoveryKeyManager {
 
     // Validates a discovery-key blob's structure without storing it, so a malformed backup aborts
     // an import before any existing key material is cleared.
+    #[cfg(test)]
     pub(crate) fn validate_blob(blob: &[u8]) -> Result<(), DiscoveryKeyError> {
         checked_blob(blob).map(|_| ())
+    }
+
+    // Validates that a discovery-key blob is structurally valid and signed by the restored
+    // identity key before an encrypted-backup import mutates storage.
+    pub(crate) fn validate_blob_for_identity(
+        blob: &[u8],
+        identity_key: &[u8; 64],
+    ) -> Result<(), DiscoveryKeyError> {
+        let discovery_key = decode_discovery_key(checked_blob(blob)?);
+        let mut signing_secret = Zeroizing::new([0u8; 32]);
+        signing_secret.copy_from_slice(&identity_key[32..]);
+        let identity_signing = SigningKeyPair::from_signing_bytes(*signing_secret);
+        verify_discovery_key_bundle(&discovery_key.bundle(), &identity_signing.verifying)
+            .map_err(|_| DiscoveryKeyError::Corrupt)?;
+        Ok(())
     }
 
     // Restores a discovery-key blob verbatim with a single store, preserving its epoch lineage and
