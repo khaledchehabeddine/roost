@@ -1,3 +1,14 @@
+mod messaging;
+mod session;
+
+pub use messaging::{
+    AcknowledgmentProcessing, MessageDecryption, MessageEncryption, MessageOperationError,
+};
+pub use session::{
+    SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
+    SessionInitiationResult,
+};
+
 use crate::clock::{Clock, SystemClock};
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager, DiscoveryKeyStatus};
 use crate::identity::{Identity, IdentityError, IdentityManager};

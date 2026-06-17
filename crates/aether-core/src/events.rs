@@ -25,6 +25,12 @@ impl EventId {
         Self(0)
     }
 
+    /// Creates an event ID from its raw integer value.
+    #[must_use]
+    pub const fn from_u64(value: u64) -> Self {
+        Self(value)
+    }
+
     /// Returns the raw integer value.
     #[must_use]
     pub const fn as_u64(self) -> u64 {
@@ -71,6 +77,12 @@ pub struct EventStreamSnapshot<S> {
 }
 
 impl<S> EventStreamSnapshot<S> {
+    /// Creates a snapshot from an event ID and self-contained state value.
+    #[must_use]
+    pub fn from_parts(event_id: EventId, state: S) -> Self {
+        Self { event_id, state }
+    }
+
     /// Returns the last event ID reflected by this snapshot.
     #[must_use]
     pub fn event_id(&self) -> EventId {

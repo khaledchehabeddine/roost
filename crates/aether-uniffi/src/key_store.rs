@@ -1,12 +1,27 @@
 //! UniFFI keystore object exposing identity, discovery-key, and signed-pre-key operations.
 
 use crate::SecureStorage;
+use crate::certificate::{
+    SenderCertificateValidation, domain_signing_keys_to_core, revocation_state_to_core,
+    revoked_identity_keys_to_core,
+};
 use crate::error::AetherError;
+use crate::message::{Message, SenderIdentityMaterial};
+use crate::protocol::{
+    AcknowledgmentOutcome, IdentityKey as FfiIdentityKey, InboundMessageOutcome,
+    OutboundMessageResult, ProtocolStateEntry, ProtocolStateUpdate, protocol_key,
+    snapshot_input_from_entries, updates_from_core_absent,
+};
 use crate::records::{
     DiscoveryKeyBundle, Identity, OneTimePreKeyBundle, PublicationBundle, SignedPreKeyBundle,
+    fixed_16, fixed_32,
 };
 use crate::storage::SecureStorageAdapter;
-use aether_core::KeyStore as CoreKeyStore;
+use aether_core::{
+    AcknowledgmentProcessing, InboundSenderCertificateValidation, KeyStore as CoreKeyStore,
+    MessageDecryption, MessageEncryption, MessageId, ProtocolStateKey, SessionAcceptance,
+    SessionInitiation,
+};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -17,6 +32,26 @@ use zeroize::Zeroizing;
 #[derive(uniffi::Object)]
 pub struct KeyStore {
     inner: CoreKeyStore,
+}
+
+/// Result of starting a Session through X3DH.
+#[derive(uniffi::Record)]
+pub struct SessionInitiationResult {
+    /// X3DH first Message to send after host commit.
+    pub message: Message,
+    /// Opaque protocol-state updates to commit.
+    pub state_updates: Vec<ProtocolStateUpdate>,
+}
+
+/// Result of accepting a Session through X3DH.
+#[derive(uniffi::Record)]
+pub struct SessionAcceptanceResult {
+    /// Decrypted first-message plaintext.
+    pub plaintext: Vec<u8>,
+    /// Sender identity material decoded after authentication.
+    pub sender_identity: SenderIdentityMaterial,
+    /// Opaque protocol-state updates to commit.
+    pub state_updates: Vec<ProtocolStateUpdate>,
 }
 
 #[uniffi::export]
@@ -236,6 +271,24 @@ impl KeyStore {
             .collect())
     }
 
+    /// Replenishes the one-time-prekey pool when it falls below the replenish threshold.
+    ///
+    /// Returns an empty list when the current pool is already above the threshold.
+    ///
+    /// # Errors
+    /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
+    /// - [`AetherError::InvalidData`] if stored one-time-prekey data is malformed.
+    /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn replenish_one_time_prekeys(&self) -> Result<Vec<OneTimePreKeyBundle>, AetherError> {
+        Ok(self
+            .inner
+            .replenish_one_time_prekeys()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
     /// Rotates the discovery key and signed pre-key together, returning both bundles.
     ///
     /// The discovery-key and signed-pre-key rotations are one operation. Stored one-time pre-keys
@@ -341,6 +394,227 @@ impl KeyStore {
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, AetherError> {
         Ok(self.inner.rotate_signed_prekey_now()?.into())
+    }
+
+    /// Starts a new Session as the initiator.
+    ///
+    /// Commit the returned state updates atomically with the returned Message before transport
+    /// send. `session_key` is the host-chosen Session protocol-state key.
+    ///
+    /// # Errors
+    /// - [`AetherError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
+    ///   fails.
+    /// - [`AetherError::InvalidData`] if key, message, certificate, or prekey inputs are malformed.
+    /// - [`AetherError::NotFound`] if local identity or Discovery Key material is missing.
+    /// - [`AetherError::ProtocolStateFault`] if install state cannot be encoded.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn initiate_session(
+        &self,
+        session_key: Vec<u8>,
+        responder_identity: Identity,
+        responder_publication: PublicationBundle,
+        responder_one_time_prekey: Option<OneTimePreKeyBundle>,
+        sender_certificate: Vec<u8>,
+        sender_signature: Vec<u8>,
+        plaintext: Vec<u8>,
+    ) -> Result<SessionInitiationResult, AetherError> {
+        let sender_certificate = Zeroizing::new(sender_certificate);
+        let sender_signature = Zeroizing::new(sender_signature);
+        let plaintext = Zeroizing::new(plaintext);
+        let result = self.inner.initiate_session(SessionInitiation {
+            session_key: ProtocolStateKey::from_bytes(session_key)?,
+            responder_identity_key: responder_identity.to_core()?,
+            responder_prekey_bundle: responder_publication
+                .to_prekey_bundle(responder_one_time_prekey)?,
+            sender_certificate: &sender_certificate,
+            sender_signature: &sender_signature,
+            plaintext: &plaintext,
+        })?;
+        Ok(SessionInitiationResult {
+            message: Message::from_core(result.message),
+            state_updates: updates_from_core_absent(result.state_updates)?,
+        })
+    }
+
+    /// Accepts a new Session as the responder.
+    ///
+    /// A referenced one-time prekey is consumed only after the first Message authenticates.
+    ///
+    /// # Errors
+    /// - [`AetherError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
+    ///   fails.
+    /// - [`AetherError::InvalidData`] if the message, key, or prekey inputs are malformed.
+    /// - [`AetherError::NotFound`] if required local identity, Discovery Key, signed-prekey, or
+    ///   one-time-prekey material is missing.
+    /// - [`AetherError::ProtocolStateFault`] if install state cannot be encoded.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn accept_session(
+        &self,
+        session_key: Vec<u8>,
+        initiator_identity: Identity,
+        message: Message,
+    ) -> Result<SessionAcceptanceResult, AetherError> {
+        let core_message = message.to_core()?;
+        let result = self.inner.accept_session(SessionAcceptance {
+            session_key: ProtocolStateKey::from_bytes(session_key)?,
+            initiator_identity_key: initiator_identity.to_core()?,
+            message: &core_message,
+        })?;
+        Ok(SessionAcceptanceResult {
+            plaintext: result.plaintext.to_vec(),
+            sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
+            state_updates: updates_from_core_absent(result.state_updates)?,
+        })
+    }
+
+    /// Encrypts an established-session Message using stored local identity signing material.
+    ///
+    /// Commit the returned state updates atomically with the returned Message before transport
+    /// send.
+    ///
+    /// # Errors
+    /// - [`AetherError::BlockedContact`] if the contact is locally blocked.
+    /// - [`AetherError::InvalidData`] if message IDs, keys, or message fields are malformed.
+    /// - [`AetherError::NotFound`] if local identity material is missing.
+    /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn encrypt_message(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        session_key: Vec<u8>,
+        message_id: Vec<u8>,
+        contact_identity_key: FfiIdentityKey,
+        recipient_public_key: Vec<u8>,
+        timestamp_millis: u64,
+        sender_certificate: Vec<u8>,
+        sender_signature: Vec<u8>,
+        plaintext: Vec<u8>,
+    ) -> Result<OutboundMessageResult, AetherError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let sender_certificate = Zeroizing::new(sender_certificate);
+        let sender_signature = Zeroizing::new(sender_signature);
+        let plaintext = Zeroizing::new(plaintext);
+        OutboundMessageResult::from_core(
+            &snapshot,
+            self.inner.encrypt_message(MessageEncryption {
+                snapshot: &snapshot.snapshot,
+                session_key: protocol_key(session_key)?,
+                message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
+                contact_identity_key: contact_identity_key.to_core()?,
+                recipient_public_key: fixed_32(&recipient_public_key, "recipient public key")?,
+                timestamp_millis,
+                sender_certificate: &sender_certificate,
+                sender_signature: &sender_signature,
+                plaintext: &plaintext,
+            })?,
+        )
+    }
+
+    /// Decrypts an established-session Message and optionally returns an acknowledgment Message.
+    ///
+    /// Unique Messages require `sender_certificate_validation`; duplicates can return before
+    /// validation because they surface no plaintext.
+    ///
+    /// # Errors
+    /// - [`AetherError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
+    ///   authentication fails.
+    /// - [`AetherError::CertificateRejected`] if sender-certificate validation rejects the sender.
+    /// - [`AetherError::InvalidData`] if message IDs, keys, or message fields are malformed.
+    /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn decrypt_message(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        session_key: Vec<u8>,
+        deduplication_key: Vec<u8>,
+        message: Message,
+        acknowledgment_id: Vec<u8>,
+        acknowledgment_recipient_public_key: Vec<u8>,
+        acknowledgment_timestamp_millis: u64,
+        acknowledgment_sender_certificate: Vec<u8>,
+        acknowledgment_sender_signature: Vec<u8>,
+        sender_certificate_validation: Option<SenderCertificateValidation>,
+    ) -> Result<InboundMessageOutcome, AetherError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let message = message.to_core()?;
+        let acknowledgment_sender_certificate = Zeroizing::new(acknowledgment_sender_certificate);
+        let acknowledgment_sender_signature = Zeroizing::new(acknowledgment_sender_signature);
+
+        let validation_storage = if let Some(validation) = &sender_certificate_validation {
+            Some((
+                domain_signing_keys_to_core(&validation.domain_signing_keys)?,
+                revoked_identity_keys_to_core(&validation.revocation_state)?,
+            ))
+        } else {
+            None
+        };
+        let core_validation = sender_certificate_validation
+            .as_ref()
+            .zip(validation_storage.as_ref())
+            .map(
+                |(validation, (domain_signing_keys, revoked_identity_keys))| {
+                    InboundSenderCertificateValidation {
+                        domain_signing_keys,
+                        revocation_state: revocation_state_to_core(
+                            &validation.revocation_state,
+                            revoked_identity_keys,
+                        ),
+                        reference_timestamp_secs: validation.reference_timestamp_secs,
+                        grace_window_secs: validation.grace_window_secs,
+                    }
+                },
+            );
+
+        InboundMessageOutcome::from_core(
+            &snapshot,
+            self.inner.decrypt_message(MessageDecryption {
+                snapshot: &snapshot.snapshot,
+                session_key: protocol_key(session_key)?,
+                deduplication_key: protocol_key(deduplication_key)?,
+                message: &message,
+                acknowledgment_id: MessageId::from_bytes(fixed_16(
+                    &acknowledgment_id,
+                    "acknowledgment id",
+                )?),
+                acknowledgment_recipient_public_key: fixed_32(
+                    &acknowledgment_recipient_public_key,
+                    "acknowledgment recipient public key",
+                )?,
+                acknowledgment_timestamp_millis,
+                acknowledgment_sender_certificate: &acknowledgment_sender_certificate,
+                acknowledgment_sender_signature: &acknowledgment_sender_signature,
+                sender_certificate_validation: core_validation,
+            })?,
+        )
+    }
+
+    /// Processes an encrypted acknowledgment Message.
+    ///
+    /// Commit returned updates before clearing local transport retry state.
+    ///
+    /// # Errors
+    /// - [`AetherError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
+    ///   authentication fails.
+    /// - [`AetherError::InvalidData`] if message fields are malformed.
+    /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn process_acknowledgment(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        session_key: Vec<u8>,
+        message: Message,
+    ) -> Result<AcknowledgmentOutcome, AetherError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let message = message.to_core()?;
+        AcknowledgmentOutcome::from_core(
+            &snapshot,
+            self.inner
+                .process_acknowledgment(AcknowledgmentProcessing {
+                    snapshot: &snapshot.snapshot,
+                    session_key: protocol_key(session_key)?,
+                    message: &message,
+                })?,
+        )
     }
 
     /// Exports the current identity and discovery key as a passphrase-encrypted blob.
@@ -468,7 +742,11 @@ impl KeyStore {
 mod tests {
     use super::KeyStore;
     use crate::{
-        InMemorySecureStorage, SecureStorage,
+        AetherError, InMemorySecureStorage, SecureStorage,
+        protocol::{
+            ContactDiscoveryKey, ContactIdentity, IdentityKey, ProtocolStateEngine,
+            ProtocolStateEntry, ProtocolStateKind, ProtocolStateUpdate,
+        },
         records::{
             DiscoveryKeyBundle as FfiDiscoveryKeyBundle, Identity as FfiIdentity,
             OneTimePreKeyBundle as FfiOneTimePreKeyBundle,
@@ -556,6 +834,81 @@ mod tests {
         assert_eq!(bundle.epoch, epoch);
     }
 
+    fn identity_key(identity: &FfiIdentity) -> IdentityKey {
+        IdentityKey {
+            x25519_public_key: identity.x25519_public_key.clone(),
+            ed25519_verifying_key: identity.ed25519_verifying_key.clone(),
+        }
+    }
+
+    fn contact_identity(
+        identity: &FfiIdentity,
+        publication: &FfiPublicationBundle,
+    ) -> ContactIdentity {
+        ContactIdentity {
+            identity_key: identity_key(identity),
+            discovery_key: ContactDiscoveryKey {
+                x25519_public_key: publication.discovery_key.public_key.clone(),
+                ed25519_verifying_key: publication.discovery_key.verifying_key.clone(),
+                epoch: publication.discovery_key.epoch,
+                created_at: publication.discovery_key.created_at,
+                identity_signature: publication.discovery_key.signature.clone(),
+            },
+        }
+    }
+
+    fn same_protocol_state_kind(left: ProtocolStateKind, right: ProtocolStateKind) -> bool {
+        matches!(
+            (left, right),
+            (
+                ProtocolStateKind::RatchetSession,
+                ProtocolStateKind::RatchetSession
+            ) | (ProtocolStateKind::PreKey, ProtocolStateKind::PreKey)
+                | (
+                    ProtocolStateKind::SenderCertificate,
+                    ProtocolStateKind::SenderCertificate
+                )
+                | (
+                    ProtocolStateKind::DeduplicationSet,
+                    ProtocolStateKind::DeduplicationSet
+                )
+                | (
+                    ProtocolStateKind::PendingAcknowledgments,
+                    ProtocolStateKind::PendingAcknowledgments
+                )
+                | (
+                    ProtocolStateKind::ContactState,
+                    ProtocolStateKind::ContactState
+                )
+        )
+    }
+
+    fn apply_updates(entries: &mut Vec<ProtocolStateEntry>, updates: Vec<ProtocolStateUpdate>) {
+        for update in updates {
+            entries.retain(|entry| {
+                !same_protocol_state_kind(entry.kind, update.kind) || entry.key != update.key
+            });
+            if let Some(blob) = update.blob {
+                entries.push(ProtocolStateEntry {
+                    kind: update.kind,
+                    key: update.key,
+                    blob,
+                });
+            }
+        }
+    }
+
+    fn copy_snapshot(entries: &[ProtocolStateEntry]) -> Vec<ProtocolStateEntry> {
+        entries
+            .iter()
+            .map(|entry| ProtocolStateEntry {
+                kind: entry.kind,
+                key: entry.key.clone(),
+                blob: entry.blob.clone(),
+            })
+            .collect()
+    }
+
     #[test]
     fn generate_identity_returns_ffi_safe_public_keys() {
         let store = key_store();
@@ -614,5 +967,215 @@ mod tests {
         let rotation = store.rotate_discovery_key_now().unwrap();
         assert_eq!(rotation.discovery_key.epoch, initial_discovery.epoch + 1);
         assert_publication_verifies(&identity, &rotation);
+    }
+
+    #[test]
+    fn replenish_one_time_prekeys_returns_public_records() {
+        let store = key_store();
+        store.generate_identity().unwrap();
+        let discovery = store.current_discovery_key_bundle().unwrap();
+        let bundles = store.replenish_one_time_prekeys().unwrap();
+
+        assert_eq!(bundles.len(), 100);
+        for bundle in &bundles {
+            assert_one_time_prekey_record(bundle, discovery.epoch);
+        }
+        assert!(store.replenish_one_time_prekeys().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_establishment_round_trips_first_message_through_ffi_records() {
+        let alice = key_store();
+        let bob = key_store();
+        let alice_identity = alice.generate_identity().unwrap();
+        let bob_identity = bob.generate_identity().unwrap();
+        bob.rotate_signed_prekey_now().unwrap();
+        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
+
+        let session_key = vec![0x44; 16];
+        let initiation = alice
+            .initiate_session(
+                session_key.clone(),
+                bob_identity,
+                bob_publication,
+                Some(bob_one_time_prekey),
+                b"alice certificate".to_vec(),
+                b"alice signature".to_vec(),
+                b"hello bob".to_vec(),
+            )
+            .unwrap();
+
+        assert!(initiation.message.prekey_reference.is_some());
+        assert_eq!(initiation.state_updates.len(), 2);
+
+        let acceptance = bob
+            .accept_session(session_key, alice_identity, initiation.message)
+            .unwrap();
+
+        assert_eq!(acceptance.plaintext, b"hello bob".to_vec());
+        assert_eq!(
+            acceptance.sender_identity.certificate,
+            b"alice certificate".to_vec()
+        );
+        assert_eq!(acceptance.state_updates.len(), 2);
+    }
+
+    #[test]
+    fn encrypt_message_returns_message_and_pending_state_update() {
+        let alice = key_store();
+        let bob = key_store();
+        let alice_identity = alice.generate_identity().unwrap();
+        let bob_identity = bob.generate_identity().unwrap();
+        bob.rotate_signed_prekey_now().unwrap();
+        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
+        let session_key = vec![0x55; 16];
+        let initiation = alice
+            .initiate_session(
+                session_key.clone(),
+                bob_identity.clone(),
+                bob_publication.clone(),
+                Some(bob_one_time_prekey),
+                b"alice certificate".to_vec(),
+                b"alice signature".to_vec(),
+                b"hello bob".to_vec(),
+            )
+            .unwrap();
+        let acceptance = bob
+            .accept_session(
+                session_key.clone(),
+                alice_identity,
+                initiation.message.clone(),
+            )
+            .unwrap();
+
+        let engine = ProtocolStateEngine::new();
+        let mut alice_snapshot = Vec::new();
+        apply_updates(&mut alice_snapshot, initiation.state_updates);
+        let change = engine
+            .record_contact(
+                Vec::new(),
+                contact_identity(&bob_identity, &bob_publication),
+            )
+            .unwrap();
+        apply_updates(&mut alice_snapshot, change.state_updates);
+        let accepted = engine
+            .accept_contact(copy_snapshot(&alice_snapshot), identity_key(&bob_identity))
+            .unwrap();
+        apply_updates(&mut alice_snapshot, accepted.state_updates);
+
+        let outbound = alice
+            .encrypt_message(
+                copy_snapshot(&alice_snapshot),
+                session_key.clone(),
+                vec![0x77; 16],
+                identity_key(&bob_identity),
+                bob_publication.discovery_key.public_key,
+                42,
+                b"alice certificate".to_vec(),
+                b"alice signature".to_vec(),
+                b"follow-up".to_vec(),
+            )
+            .unwrap();
+
+        assert_eq!(outbound.message_id, vec![0x77; 16]);
+        assert_eq!(outbound.state_updates.len(), 2);
+        apply_updates(&mut alice_snapshot, outbound.state_updates);
+        let pending = engine
+            .pending_acknowledgments(alice_snapshot, session_key)
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(acceptance.plaintext, b"hello bob".to_vec());
+    }
+
+    #[test]
+    fn decrypt_message_requires_certificate_validation_for_unique_message() {
+        let alice = key_store();
+        let bob = key_store();
+        let alice_identity = alice.generate_identity().unwrap();
+        let bob_identity = bob.generate_identity().unwrap();
+        alice.rotate_signed_prekey_now().unwrap();
+        bob.rotate_signed_prekey_now().unwrap();
+        let alice_publication = alice.current_publication_bundle().unwrap();
+        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
+        let session_key = vec![0x66; 16];
+        let initiation = alice
+            .initiate_session(
+                session_key.clone(),
+                bob_identity.clone(),
+                bob_publication.clone(),
+                Some(bob_one_time_prekey),
+                b"alice certificate".to_vec(),
+                b"alice signature".to_vec(),
+                b"hello bob".to_vec(),
+            )
+            .unwrap();
+        let acceptance = bob
+            .accept_session(
+                session_key.clone(),
+                alice_identity.clone(),
+                initiation.message,
+            )
+            .unwrap();
+
+        let engine = ProtocolStateEngine::new();
+        let mut alice_snapshot = Vec::new();
+        apply_updates(&mut alice_snapshot, initiation.state_updates);
+        let change = engine
+            .record_contact(
+                Vec::new(),
+                contact_identity(&bob_identity, &bob_publication),
+            )
+            .unwrap();
+        apply_updates(&mut alice_snapshot, change.state_updates);
+        let accepted = engine
+            .accept_contact(copy_snapshot(&alice_snapshot), identity_key(&bob_identity))
+            .unwrap();
+        apply_updates(&mut alice_snapshot, accepted.state_updates);
+        let outbound = alice
+            .encrypt_message(
+                alice_snapshot,
+                session_key.clone(),
+                vec![0x88; 16],
+                identity_key(&bob_identity),
+                bob_publication.discovery_key.public_key,
+                43,
+                b"alice certificate".to_vec(),
+                b"alice signature".to_vec(),
+                b"follow-up".to_vec(),
+            )
+            .unwrap();
+
+        let mut bob_snapshot = Vec::new();
+        apply_updates(&mut bob_snapshot, acceptance.state_updates);
+        let deduplication_key = b"bob-dedup".to_vec();
+        apply_updates(
+            &mut bob_snapshot,
+            vec![
+                engine
+                    .initialize_deduplication_set(deduplication_key.clone())
+                    .unwrap(),
+            ],
+        );
+        let result = bob.decrypt_message(
+            bob_snapshot,
+            session_key,
+            deduplication_key,
+            outbound.message,
+            vec![0x99; 16],
+            alice_publication.discovery_key.public_key,
+            44,
+            b"bob certificate".to_vec(),
+            b"bob signature".to_vec(),
+            None,
+        );
+
+        match result {
+            Err(AetherError::InvalidData { .. }) => {}
+            Err(error) => panic!("expected InvalidData, got {error}"),
+            Ok(_) => panic!("expected InvalidData"),
+        }
     }
 }

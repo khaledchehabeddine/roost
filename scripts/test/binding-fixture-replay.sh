@@ -55,6 +55,7 @@ run_swift() {
     need_tool swiftc
 
     local swift_out="$OUT/swift"
+    rm -rf "$swift_out"
     mkdir -p "$swift_out"
 
     cargo run --features fixture-replay --bin uniffi-bindgen-swift -- \
@@ -68,6 +69,7 @@ run_swift() {
 
     mkdir -p "$swift_out/module-cache"
     run_swift_harness "FixtureReplay.swift" "fixture-replay" "$swift_out"
+    run_swift_harness "Issue122Coverage.swift" "issue-122-coverage" "$swift_out"
     run_swift_harness "SecureStorageUnexpectedError.swift" "secure-storage-unexpected-error" "$swift_out"
 }
 
@@ -132,6 +134,7 @@ run_kotlin() {
     need_tool kotlinc
 
     local kotlin_out="$OUT/kotlin"
+    rm -rf "$kotlin_out"
     mkdir -p "$kotlin_out"
 
     cargo run --features fixture-replay --bin uniffi-bindgen -- generate \
@@ -142,6 +145,7 @@ run_kotlin() {
     local jna
     jna="$(jna_jar)"
     run_kotlin_harness "FixtureReplay.kt" "FixtureReplay" "$kotlin_out" "$jna"
+    run_kotlin_harness "Issue122Coverage.kt" "Issue122Coverage" "$kotlin_out" "$jna"
     run_kotlin_harness "SecureStorageUnexpectedError.kt" "SecureStorageUnexpectedError" "$kotlin_out" "$jna"
 }
 
