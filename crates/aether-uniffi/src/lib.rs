@@ -33,15 +33,39 @@ uniffi::setup_scaffolding!("aether");
 #[cfg(all(feature = "fixture-replay", not(debug_assertions)))]
 compile_error!("fixture-replay is test-only and must not be enabled for release builds");
 
+mod certificate;
 mod error;
+mod events;
 #[cfg(feature = "fixture-replay")]
 mod fixture_replay;
 mod key_store;
+mod message;
+mod protocol;
 mod records;
 mod storage;
 
+pub use certificate::{
+    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
+    SenderCertificateValidation, ValidatedSenderCertificate, validate_sender_certificate,
+};
 pub use error::AetherError;
-pub use key_store::KeyStore;
+pub use events::{
+    ContactEventEnvelope, ContactEventObserver, ContactEventSnapshot, ContactEventStream,
+    ContactEventStreamItem, ContactEventStreamItemKind,
+};
+pub use key_store::{KeyStore, SessionAcceptanceResult, SessionInitiationResult};
+pub use message::{FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial};
+pub use protocol::{
+    AcknowledgmentOutcome, AcknowledgmentOutcomeKind, BlockedContactAcknowledgmentPolicy,
+    ContactDiscoveryKey, ContactEvent, ContactEventKind, ContactIdentity,
+    ContactSafetyNumberConfirmation, ContactSafetyNumberConfirmationKind, ContactState,
+    ContactStateChange, ContactTrustState, IdentityKey, InboundMessageOutcome,
+    InboundMessageOutcomeKind, OutboundMessageResult, PendingAcknowledgment,
+    ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateCommitCheck, ProtocolStateEngine,
+    ProtocolStateEntry, ProtocolStateKind, ProtocolStateStore, ProtocolStateUpdate,
+    RetryInstruction, RetryInstructionResult, SafetyNumber, SessionEvent,
+    SessionUnrecoverableReason, derive_safety_number, protocol_state_blob_digest,
+};
 pub use records::{
     DiscoveryKeyBundle, Identity, OneTimePreKeyBundle, PublicationBundle, SignedPreKeyBundle,
 };

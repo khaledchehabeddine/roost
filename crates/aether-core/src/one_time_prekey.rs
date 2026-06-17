@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub(crate) const ONE_TIME_PREKEY_POOL_TARGET: usize = 100;
@@ -181,6 +182,35 @@ impl OneTimePreKeyManager {
         let blob = encode_pool(&pool);
         storage.store(ONE_TIME_PREKEY_POOL_KEY, &blob)?;
         Ok(prekey)
+    }
+
+    pub(crate) fn one_time_prekey_for_public_key(
+        &self,
+        epoch: u32,
+        id: u64,
+        public_key: &[u8; 32],
+    ) -> Result<OneTimePreKey, OneTimePreKeyError> {
+        let storage = self.lock_storage()?;
+        let raw = storage
+            .load(ONE_TIME_PREKEY_POOL_KEY)?
+            .ok_or(OneTimePreKeyError::NotFound)?;
+        let pool = decode_pool(&raw)?;
+        if pool.epoch != epoch {
+            return Err(OneTimePreKeyError::StaleEpoch);
+        }
+        let entry = pool
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or(OneTimePreKeyError::NotFound)?;
+        let prekey =
+            OneTimePreKey::from_secret_bytes(entry.id, entry.secret, pool.epoch, entry.created_at);
+        let public_matches = prekey.public().as_bytes().ct_eq(public_key).unwrap_u8() == 1;
+        if public_matches {
+            Ok(prekey)
+        } else {
+            Err(OneTimePreKeyError::NotFound)
+        }
     }
 
     pub(crate) fn reset(&self) -> Result<(), OneTimePreKeyError> {

@@ -94,7 +94,11 @@ pub use hardening::{
     ProtocolHardeningLimits,
 };
 pub use identity::{Identity, IdentityError};
-pub use key_store::{KeyStore, KeyStoreError, PublicationBundle};
+pub use key_store::{
+    AcknowledgmentProcessing, KeyStore, KeyStoreError, MessageDecryption, MessageEncryption,
+    MessageOperationError, PublicationBundle, SessionAcceptance, SessionAcceptanceResult,
+    SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
+};
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
