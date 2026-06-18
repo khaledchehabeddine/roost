@@ -25,6 +25,11 @@ the protocol core.
 - The library does not implement network rate limiting, abuse throttling, or transport retries.
 - Sender Certificate validation is caller-timed and depends on caller-provided trusted signing keys
   and revocation inputs.
+- Post-handshake messages carry sealed Identity Key transcript signatures; first-contact sender
+  material uses a sealed key-possession proof. Aether does not provide a deniable messaging mode or
+  message franking.
+- The library does not claim protection against rooted, jailbroken, malware-compromised, or
+  otherwise untrusted endpoints.
 
 ## Resource Limits
 
@@ -56,8 +61,18 @@ integrity-preserving store. Load the required blobs before one operation, commit
 updates atomically with any outbound Message or acknowledgment, and serialize concurrent mutation
 for one Identity's protocol state.
 
+Protocol State Blobs are secret-bearing live key material. Protect them at rest with controls
+comparable to identity-key storage.
+
 The library does not implement transport batching, IP unlinking, network rate limiting, or
-metadata protection. Host applications own those policies.
+metadata protection. Host applications own those policies and all network I/O. Caller-added
+identifiers outside the encoded Message are outside Aether's sealed-sender boundary.
+
+Unsupported major versions for Messages, Protocol State Blobs, and backups reject as faults. They
+are not guessed, silently discarded, or reinitialized.
+
+Identity backup restore rewinds only Identity material. Treat restore as a fresh compromise
+boundary: wipe or replace Protocol State Blobs before session recovery or re-handshake.
 
 ## Replay, Retry, and Skipped Keys
 

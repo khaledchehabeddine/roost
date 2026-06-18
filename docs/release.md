@@ -12,6 +12,8 @@ released artifacts are the mobile UniFFI outputs built by the existing scripts:
 - iOS Swift sources under `target/xcframework/Sources/`
 - iOS Swift Package under `target/ios-distribution/aether-ios-v0.9.0/`
 - iOS xcframework archive `target/ios-distribution/Aether-v0.9.0.xcframework.zip`
+- detached OpenPGP signatures and pinned SHA-256 checksums for the final iOS xcframework archive
+  and Android AAR
 
 The workspace is not published to crates.io.
 
@@ -50,9 +52,8 @@ scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v0.9.0
 ```
 
 CI uploads the package, `Aether-v0.9.0.xcframework.zip`, and `SHA256SUMS` from the same
-release-candidate run. Verify that run's hash before testing the artifact. Final artifact
-signatures and pinned checksums are published by the release process, not by this release-candidate
-packaging step.
+release-candidate run. Release-tag CI signs the final xcframework archive and publishes its pinned
+checksum.
 
 ## Android AAR Distribution
 
@@ -79,9 +80,67 @@ Android API 36 managed device, including identity/session, encrypted backup, hos
 state blobs, sealed-sender message encryption/decryption, certificate validation, deduplication
 outputs, acknowledgments, and event visibility.
 
-The #126 AAR is unsigned release-candidate output. #127 signs the final artifact and publishes
-pinned checksums; before that step, consumers can verify only the resolved coordinate and version,
-not a final release signature or pinned checksum.
+Release-tag CI signs the final AAR, publishes its pinned checksum, and writes a signed Maven
+Central bundle when Gradle publication signing is enabled.
+
+## Signed Artifact Verification
+
+The release signing path uses detached OpenPGP signatures and SHA-256 checksum sidecars. The
+signing job requires:
+
+- `AETHER_RELEASE_GPG_PRIVATE_KEY`
+- `AETHER_RELEASE_GPG_PASSPHRASE`
+- `AETHER_RELEASE_GPG_FINGERPRINT`
+
+Sign one artifact with:
+
+```bash
+scripts/release/sign-artifact.sh target/ios-distribution/Aether-v0.9.0.xcframework.zip
+```
+
+Verify one artifact with:
+
+```bash
+scripts/release/verify-artifact.sh \
+  Aether-v0.9.0.xcframework.zip \
+  Aether-v0.9.0.xcframework.zip.asc \
+  Aether-v0.9.0.xcframework.zip.sha256 \
+  aether-v0.9.0-release-key.asc
+```
+
+Use the same command shape for `aether-0.9.0.aar`. Host-application builds must fail closed on
+signature mismatch, pinned-checksum mismatch, missing fingerprint, or signing-key mismatch. Do not
+continue with an unsigned artifact, a different checksum file, or a substituted public key. Set
+`AETHER_RELEASE_GPG_FINGERPRINT` to the expected release signing key fingerprint.
+
+The release artifact verification test covers both mobile artifacts:
+
+```bash
+scripts/test/release-artifact-verification.sh \
+  Aether-v0.9.0.xcframework.zip \
+  aether-0.9.0.aar \
+  aether-v0.9.0-release-key.asc
+```
+
+It verifies happy paths and negative paths for iOS and Android signature mismatch, checksum
+mismatch, and fingerprint mismatch.
+
+## v0.9.0 Final Gates
+
+Before pushing `v0.9.0`, verify that GitHub issues #121, #122, #123, #124, and #126 remain closed.
+After the tag workflow publishes signed artifacts and checksums, check the remaining v0.9.0
+checklist boxes in #120 and #127 and publish the GitHub prerelease notes from
+`docs/release-notes/v0.9.0.md`.
+
+Run the prerequisite gate before tagging:
+
+```bash
+scripts/release/verify-v0.9.0-gates.sh
+```
+
+The command requires GitHub CLI access to `RelayNet/aether`; in CI, the signed-release workflow
+provides `GH_TOKEN`. The workflow runs the same gate before it uploads signed assets or publishes
+the GitHub prerelease.
 
 ## Constrained Decryption Profile
 
