@@ -33,8 +33,20 @@ scripts/test/android-aar-consumer.sh
 ```
 
 The consumer check resolves the Maven artifact and runs the Kotlin binding coverage flow on an
-Android API 36 managed device. Signature verification and pinned checksum verification are release
-steps, not guarantees provided by this unsigned local artifact.
+Android API 36 managed device. Release consumers must verify the final AAR signature and pinned
+checksum before Gradle consumes the artifact:
+
+```bash
+scripts/release/verify-artifact.sh \
+  aether-0.9.0.aar \
+  aether-0.9.0.aar.asc \
+  aether-0.9.0.aar.sha256 \
+  aether-v0.9.0-release-key.asc
+```
+
+Run this as a build preflight with `AETHER_RELEASE_GPG_FINGERPRINT` set to the expected release key
+fingerprint. Verification fails closed when the fingerprint is missing or mismatched; do not fall
+back to an unsigned, checksum-mismatched, or wrong-key-signed artifact.
 
 ## iOS
 
@@ -58,6 +70,21 @@ Verify the package with an iOS Simulator consumer:
 ```bash
 scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v0.9.0
 ```
+
+Release consumers must verify the final xcframework archive signature and pinned checksum before
+the Swift Package consumes the binary target:
+
+```bash
+scripts/release/verify-artifact.sh \
+  Aether-v0.9.0.xcframework.zip \
+  Aether-v0.9.0.xcframework.zip.asc \
+  Aether-v0.9.0.xcframework.zip.sha256 \
+  aether-v0.9.0-release-key.asc
+```
+
+Run this as a build preflight with `AETHER_RELEASE_GPG_FINGERPRINT` set to the expected release key
+fingerprint. Verification fails closed when the fingerprint is missing or mismatched; do not fall
+back to an unsigned, checksum-mismatched, or wrong-key-signed artifact.
 
 ## Manual Bindings
 
@@ -86,9 +113,9 @@ cache; do not commit them to this repository.
 ## iOS Artifact Verification
 
 Release-candidate CI uploads `Aether-v0.9.0.xcframework.zip`, the local Swift Package, and
-`SHA256SUMS` from the same build. Verify the downloaded artifact against that run's `SHA256SUMS`
-before local testing. Final signing and pinned-checksum publication are release work; do not treat
-release-candidate hashes as a distribution trust root.
+`SHA256SUMS` from the same build. Release-tag CI publishes the final OpenPGP signature, pinned
+checksum, and public release key for the xcframework archive. Treat release-candidate hashes as
+reproducibility evidence, not as the distribution trust root.
 
 ## Binding Surface
 

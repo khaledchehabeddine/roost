@@ -9,6 +9,9 @@ VERSION="${AETHER_ANDROID_VERSION:-}"
 MAVEN_REPO="${AETHER_ANDROID_MAVEN_REPO:-$ROOT/target/android/maven}"
 CENTRAL_DIR="${AETHER_ANDROID_CENTRAL_DIR:-$ROOT/target/android/central}"
 GRADLE_BIN="${GRADLE_BIN:-gradle}"
+SIGN_PUBLICATION="${AETHER_ANDROID_SIGN_PUBLICATION:-false}"
+SIGNING_KEY=""
+SIGNING_PASSWORD=""
 
 if [[ -z "$VERSION" ]]; then
     VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
@@ -52,17 +55,57 @@ require_tool "$GRADLE_BIN"
 require_tool jar
 require_tool unzip
 
+case "$SIGN_PUBLICATION" in
+    true | false)
+        ;;
+    *)
+        echo "AETHER_ANDROID_SIGN_PUBLICATION must be true or false" >&2
+        exit 2
+        ;;
+esac
+
+if [[ "$SIGN_PUBLICATION" == "true" ]]; then
+    if [[ -z "${AETHER_RELEASE_GPG_PRIVATE_KEY:-}" ]]; then
+        echo "missing AETHER_RELEASE_GPG_PRIVATE_KEY" >&2
+        exit 2
+    fi
+    if [[ -z "${AETHER_RELEASE_GPG_PASSPHRASE:-}" ]]; then
+        echo "missing AETHER_RELEASE_GPG_PASSPHRASE" >&2
+        exit 2
+    fi
+
+    SIGNING_KEY="$AETHER_RELEASE_GPG_PRIVATE_KEY"
+    SIGNING_PASSWORD="$AETHER_RELEASE_GPG_PASSPHRASE"
+fi
+
+unset \
+    AETHER_RELEASE_GPG_PRIVATE_KEY \
+    AETHER_RELEASE_GPG_PASSPHRASE \
+    ORG_GRADLE_PROJECT_aetherSignPublication \
+    ORG_GRADLE_PROJECT_signingInMemoryKey \
+    ORG_GRADLE_PROJECT_signingInMemoryKeyPassword
+
 cd "$ROOT"
 scripts/build/android.sh
 
 rm -rf "$MAVEN_REPO/com/aurelion/aether/$VERSION" "$CENTRAL_DIR"
 
-"$GRADLE_BIN" \
-    --no-daemon \
-    -p "$ROOT/packaging/android" \
-    -PaetherVersion="$VERSION" \
-    -PaetherMavenRepo="$MAVEN_REPO" \
+GRADLE_ARGS=(
+    --no-daemon
+    -p "$ROOT/packaging/android"
+    -PaetherVersion="$VERSION"
+    -PaetherMavenRepo="$MAVEN_REPO"
     :aether:publishReleasePublicationToAetherLocalRepository
+)
+
+if [[ "$SIGN_PUBLICATION" == "true" ]]; then
+    ORG_GRADLE_PROJECT_aetherSignPublication=true \
+        ORG_GRADLE_PROJECT_signingInMemoryKey="$SIGNING_KEY" \
+        ORG_GRADLE_PROJECT_signingInMemoryKeyPassword="$SIGNING_PASSWORD" \
+        "$GRADLE_BIN" "${GRADLE_ARGS[@]}"
+else
+    "$GRADLE_BIN" "${GRADLE_ARGS[@]}"
+fi
 
 ARTIFACT_DIR="$MAVEN_REPO/com/aurelion/aether/$VERSION"
 AAR="$ARTIFACT_DIR/aether-$VERSION.aar"
@@ -84,10 +127,34 @@ CENTRAL_STAGE="$(mktemp -d)"
 trap 'rm -rf "$CENTRAL_STAGE"' EXIT
 mkdir -p "$CENTRAL_STAGE/com/aurelion/aether" "$CENTRAL_DIR"
 cp -R "$ARTIFACT_DIR" "$CENTRAL_STAGE/com/aurelion/aether/$VERSION"
+
+if [[ "$SIGN_PUBLICATION" == "true" ]]; then
+    missing_signature=0
+    while IFS= read -r file; do
+        case "$file" in
+            *.asc | *.md5 | *.sha1 | *.sha256 | *.sha512)
+                continue
+                ;;
+        esac
+        if [[ ! -s "$file.asc" ]]; then
+            echo "missing Maven publication signature: $file.asc" >&2
+            missing_signature=1
+        fi
+    done < <(find "$ARTIFACT_DIR" -maxdepth 1 -type f | LC_ALL=C sort)
+    if [[ "$missing_signature" -ne 0 ]]; then
+        exit 1
+    fi
+fi
+
+if [[ "$SIGN_PUBLICATION" == "true" ]]; then
+    CENTRAL_ZIP="$CENTRAL_DIR/aether-$VERSION-maven-central-signed.zip"
+else
+    CENTRAL_ZIP="$CENTRAL_DIR/aether-$VERSION-maven-central-unsigned.zip"
+fi
 (
     cd "$CENTRAL_STAGE"
-    jar cf "$CENTRAL_DIR/aether-$VERSION-maven-central-unsigned.zip" com
+    jar cf "$CENTRAL_ZIP" com
 )
 
 echo "Android AAR published to $AAR"
-echo "Unsigned Maven Central bundle written to $CENTRAL_DIR/aether-$VERSION-maven-central-unsigned.zip"
+echo "Maven Central bundle written to $CENTRAL_ZIP"

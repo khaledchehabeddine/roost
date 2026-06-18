@@ -58,6 +58,33 @@ This gate proves packaging, local Maven metadata, generated Kotlin bindings, nat
 placement, and consumer execution. Final artifact signatures and pinned checksums are verified by
 the signed-release gate, not by this unsigned distribution check.
 
+## Signed Release Artifacts
+
+On release tags, the release-verification workflow signs the exact uploaded mobile artifacts from
+the release jobs:
+
+- `Aether-v<version>.xcframework.zip`
+- `aether-<version>.aar`
+
+The signed-release job imports the OpenPGP release key from repository secrets, writes detached
+`.asc` signatures and `.sha256` checksum sidecars, exports the public release key, and runs
+`scripts/test/release-artifact-verification.sh`. That test covers iOS and Android happy paths plus
+signature-mismatch, checksum-mismatch, and fingerprint-mismatch failures for both artifacts.
+
+Required secrets:
+
+- `AETHER_RELEASE_GPG_PRIVATE_KEY`
+- `AETHER_RELEASE_GPG_PASSPHRASE`
+- `AETHER_RELEASE_GPG_FINGERPRINT`
+
+The Android AAR distribution job also enables Gradle publication signing on release tags so the
+Maven Central bundle contains Maven `.asc` signatures. Non-tag workflow runs keep producing
+unsigned release-candidate artifacts.
+
+Before uploading signed assets or publishing the GitHub prerelease, the signed-release job runs
+`scripts/release/verify-v0.9.0-gates.sh` to confirm the v0.9.0 prerequisite child issues are still
+closed. The job passes `GH_TOKEN` from `github.token` so the GitHub CLI can read issue state.
+
 ## Supply Chain
 
 `deny.toml` is the committed dependency policy. It blocks disallowed licenses, vulnerable or yanked

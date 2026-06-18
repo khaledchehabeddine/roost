@@ -9,7 +9,9 @@ Feature-gated Swift and Kotlin binding checks that exercise generated bindings t
 Avoid: sample app, transport test, SDK feature
 
 **SecureStorage** (one implementation per platform):
-The Rust trait the host app implements to expose its platform secret store (iOS Keychain, Android Keystore) to Aether. Consumed as a trait object by `KeyStore` in Core; the implementation is provided at compile time.
+The generated UniFFI storage protocol the host app implements to expose its platform secret store
+(iOS Keychain, Android Keystore) to Aether. Rust adapts that implementation into
+`aether_core::SecureStorage` for Core; the implementation is provided at compile time.
 Avoid: keychain, keystore, secrets store
 
 **ProtocolStateStore** (one durable host transaction boundary):
@@ -37,11 +39,25 @@ The release-candidate Swift Package assembled under `target/` from generated Swi
 `Aether.xcframework` binary target. It is a packaging artifact, not checked-in SDK source.
 Avoid: source package, signed release, pinned checksum publication
 
+**Signed Release Artifact** (one final mobile binary artifact):
+The release artifact generated from the tagged release commit and published with a detached
+OpenPGP signature. For v0.9.0 this means the iOS xcframework archive and Android AAR, not earlier
+release-candidate outputs or generated source directories.
+Avoid: release-candidate artifact, reproducibility pass output, unsigned package
+
+**Pinned Artifact Checksum** (one SHA-256 sidecar per signed artifact):
+The release-published checksum generated after the final artifact bytes are fixed. Consumers verify
+it together with the OpenPGP signature before their host build consumes the artifact.
+Avoid: reproducibility manifest, CI scratch hash, trust root
+
 ## Example
 
 **Dev:** Does Aether store private keys directly in the iOS Keychain?
 
-**Domain expert:** Aether doesn't touch the Keychain. The host app implements `SecureStorage` against the Keychain and hands the implementation to Aether at compile time. Aether sees the trait, not the platform API. The trait itself lives in `aether-core` so the contract is defined at the layer that owns identity logic, not at the FFI boundary.
+**Domain expert:** Aether doesn't touch the Keychain. The host app implements the generated UniFFI
+storage protocol against the Keychain and hands the implementation to Aether at compile time. The
+FFI adapter translates that protocol into Core's `SecureStorage` trait, so Core sees a storage
+contract, not the platform API.
 
 **Dev:** So `InMemorySecureStorage` is the same shape, just with no platform behind it?
 
