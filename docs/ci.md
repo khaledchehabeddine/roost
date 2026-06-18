@@ -43,6 +43,21 @@ The harness measures the real `ProtocolStateEngine::decrypt_message` path one op
 against the documented 24 MiB tracked Rust heap allocation budget and 250 ms wall-clock budget. It
 is a release gate for the profiled constrained path, not a general endpoint security guarantee.
 
+## Android AAR Distribution
+
+The release-verification workflow builds the Android AAR from the checked-out source, publishes it
+to a local Maven repository, uploads the unsigned Maven layout for later signing, and runs two
+consumer checks:
+
+- happy path: resolve `com.aurelion:aether:<workspace-version>` and run the Kotlin binding coverage
+  flow on an Android API 36 managed device
+- negative path: remove the AAR from a temporary Maven layout and require consumer resolution to
+  fail
+
+This gate proves packaging, local Maven metadata, generated Kotlin bindings, native library
+placement, and consumer execution. Final artifact signatures and pinned checksums are verified by
+the signed-release gate, not by this unsigned distribution check.
+
 ## Supply Chain
 
 `deny.toml` is the committed dependency policy. It blocks disallowed licenses, vulnerable or yanked
