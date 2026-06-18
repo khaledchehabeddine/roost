@@ -32,6 +32,11 @@ The release-candidate Android package containing UniFFI-generated Kotlin classes
 outputs during release verification; signing and pinned checksums are separate release steps.
 Avoid: checked-in SDK, handwritten binding layer, final signed release artifact
 
+**iOS Distribution Package** (one generated Swift Package per artifact version):
+The release-candidate Swift Package assembled under `target/` from generated Swift sources and the
+`Aether.xcframework` binary target. It is a packaging artifact, not checked-in SDK source.
+Avoid: source package, signed release, pinned checksum publication
+
 ## Example
 
 **Dev:** Does Aether store private keys directly in the iOS Keychain?

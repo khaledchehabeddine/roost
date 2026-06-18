@@ -44,6 +44,21 @@ Requires Xcode command-line tools:
 ./scripts/build/xcframework.sh
 ```
 
+To assemble the generated Swift Package binary distribution:
+
+```bash
+./scripts/build/ios-package.sh
+```
+
+The package is written under `target/ios-distribution/aether-ios-v<version>/` with product
+`Aether`, generated Swift source target `Aether`, and binary target `AetherFFI`.
+
+Verify the package with an iOS Simulator consumer:
+
+```bash
+scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v0.9.0
+```
+
 ## Manual Bindings
 
 ```bash
@@ -67,6 +82,13 @@ cargo run --bin uniffi-bindgen-swift -- \
 
 Generated Swift and Kotlin sources are build outputs. Keep them under `target/` or your app build
 cache; do not commit them to this repository.
+
+## iOS Artifact Verification
+
+Release-candidate CI uploads `Aether-v0.9.0.xcframework.zip`, the local Swift Package, and
+`SHA256SUMS` from the same build. Verify the downloaded artifact against that run's `SHA256SUMS`
+before local testing. Final signing and pinned-checksum publication are release work; do not treat
+release-candidate hashes as a distribution trust root.
 
 ## Binding Surface
 

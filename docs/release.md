@@ -1,6 +1,6 @@
 # Release Verification
 
-Release verification applies to artifacts produced from the exact release commit. For v0.8.0, the
+Release verification applies to artifacts produced from the exact release commit. For v0.9.0, the
 released artifacts are the mobile UniFFI outputs built by the existing scripts:
 
 - Android shared libraries for `aarch64-linux-android`, `armv7-linux-androideabi`, and
@@ -10,6 +10,8 @@ released artifacts are the mobile UniFFI outputs built by the existing scripts:
   `target/android/maven/`
 - iOS `target/xcframework/Aether.xcframework`
 - iOS Swift sources under `target/xcframework/Sources/`
+- iOS Swift Package under `target/ios-distribution/aether-ios-v0.9.0/`
+- iOS xcframework archive `target/ios-distribution/Aether-v0.9.0.xcframework.zip`
 
 The workspace is not published to crates.io.
 
@@ -29,7 +31,28 @@ released files, and fails if the two hash manifests differ.
 Runner requirements match the underlying build scripts:
 
 - Android requires `cargo-ndk` and the Android NDK.
-- iOS requires Xcode command-line tools.
+- iOS requires Xcode command-line tools and an available iOS Simulator for package-consumer
+  verification.
+
+## iOS Swift Package
+
+Build the release-candidate package with:
+
+```bash
+scripts/build/ios-package.sh
+```
+
+The package exposes product `Aether`, generated Swift target `Aether`, and binary target
+`AetherFFI`. Verify it with:
+
+```bash
+scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v0.9.0
+```
+
+CI uploads the package, `Aether-v0.9.0.xcframework.zip`, and `SHA256SUMS` from the same
+release-candidate run. Verify that run's hash before testing the artifact. Final artifact
+signatures and pinned checksums are published by the release process, not by this release-candidate
+packaging step.
 
 ## Android AAR Distribution
 
@@ -91,14 +114,14 @@ scripts/release/sbom.sh
 The output is:
 
 ```text
-target/sbom/aether-uniffi-v0.8.0-sbom.json
+target/sbom/aether-uniffi-v0.9.0-sbom.json
 ```
 
 The SBOM is CycloneDX JSON generated from `crates/aether-uniffi/Cargo.toml` with all Cargo targets
 described. Release verification uploads this file as a CI artifact.
 
 To verify an uploaded SBOM, check out the same commit, rerun `scripts/release/sbom.sh`, and compare
-the SHA-256 hash of `target/sbom/aether-uniffi-v0.8.0-sbom.json` with the uploaded artifact.
+the SHA-256 hash of `target/sbom/aether-uniffi-v0.9.0-sbom.json` with the uploaded artifact.
 
 ## Malformed-Input Fuzz Campaigns
 
