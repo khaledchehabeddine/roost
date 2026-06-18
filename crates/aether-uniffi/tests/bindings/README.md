@@ -6,6 +6,8 @@ Swift and Kotlin harnesses in this directory exercise UniFFI bindings built with
 - `Issue122Coverage.*`: generated API coverage for identity, backup, protocol-state store,
   sessions, messages, contacts/blocking, events, delivery retry, prekey replenishment, and negative
   binding-visible errors.
+- `Issue124PackageConsumerTests.swift`: generated iOS Swift Package consumer coverage, run through
+  `scripts/test/ios-package-consumer.sh`.
 - `SecureStorageUnexpectedError.*`: foreign storage exception mapping and mutex recovery.
 
 Run through `scripts/test/binding-fixture-replay.sh`.

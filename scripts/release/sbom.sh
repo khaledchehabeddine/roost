@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-NAME="aether-uniffi-v0.8.0-sbom"
+PKGID="$(cargo pkgid --manifest-path "$ROOT/crates/aether-uniffi/Cargo.toml")"
+VERSION="${PKGID##*#}"
+NAME="aether-uniffi-v$VERSION-sbom"
 OUTPUT="$ROOT/target/sbom/$NAME.json"
 GENERATED="$ROOT/crates/aether-uniffi/$NAME.json"
 
