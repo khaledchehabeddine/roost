@@ -87,6 +87,69 @@ jobs:
             target/release-verification/reproducible-mobile/android/pass-1/SHA256SUMS
           if-no-files-found: error
 
+  android-aar-distribution:
+    name: Android AAR Distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.4.1"
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - name: Install Android SDK and NDK
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;28.2.13676358" \
+            "system-images;android-36;aosp_atd;x86_64"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/28.2.13676358" >> "$GITHUB_ENV"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build and publish local Android AAR
+        run: scripts/release/android-aar.sh
+
+      - name: Verify negative Android AAR consumer path
+        run: scripts/test/android-aar-negative.sh
+
+      - name: Verify Android AAR consumer path
+        run: scripts/test/android-aar-consumer.sh
+
+      - name: Upload Android AAR artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aar-distribution
+          path: |
+            target/android/maven/**
+            target/android/central/*.zip
+          if-no-files-found: error
+
   ios-reproducible:
     name: iOS Reproducible Artifacts
     runs-on: macos-latest

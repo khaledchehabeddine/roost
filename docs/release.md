@@ -6,6 +6,8 @@ released artifacts are the mobile UniFFI outputs built by the existing scripts:
 - Android shared libraries for `aarch64-linux-android`, `armv7-linux-androideabi`, and
   `x86_64-linux-android`
 - Android Kotlin bindings under `target/android/kotlin/`
+- Android AAR Maven artifact `com.aurelion:aether:<workspace-version>` under
+  `target/android/maven/`
 - iOS `target/xcframework/Aether.xcframework`
 - iOS Swift sources under `target/xcframework/Sources/`
 
@@ -28,6 +30,35 @@ Runner requirements match the underlying build scripts:
 
 - Android requires `cargo-ndk` and the Android NDK.
 - iOS requires Xcode command-line tools.
+
+## Android AAR Distribution
+
+Build the Android AAR from the release-candidate source and publish it to a local Maven layout:
+
+```bash
+scripts/release/android-aar.sh
+```
+
+The script uses the workspace package version from `Cargo.toml`, publishes
+`com.aurelion:aether:<workspace-version>` to `target/android/maven/`, verifies the AAR structure,
+and writes an unsigned Maven Central bundle to `target/android/central/`.
+
+Run the consumer checks after the local Maven layout exists:
+
+```bash
+scripts/test/android-aar-negative.sh
+scripts/test/android-aar-consumer.sh
+```
+
+The negative check removes the AAR from a temporary Maven layout and expects dependency resolution
+to fail. The consumer check resolves the artifact and runs the Kotlin binding coverage flow on an
+Android API 36 managed device, including identity/session, encrypted backup, host-owned protocol
+state blobs, sealed-sender message encryption/decryption, certificate validation, deduplication
+outputs, acknowledgments, and event visibility.
+
+The #126 AAR is unsigned release-candidate output. #127 signs the final artifact and publishes
+pinned checksums; before that step, consumers can verify only the resolved coordinate and version,
+not a final release signature or pinned checksum.
 
 ## Constrained Decryption Profile
 

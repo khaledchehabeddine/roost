@@ -1,6 +1,11 @@
 # Cargo/Rust
 target
 
+# Android packaging
+packaging/android/.gradle/
+packaging/android/**/build/
+packaging/android/local.properties
+
 # Claude Code
 .claude/agent-memory-local/
 .claude/settings.local.json

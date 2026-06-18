@@ -26,6 +26,12 @@ Kotlin APIs. Generated files live under `target/` during builds and tests; sourc
 the Rust declarations and harnesses.
 Avoid: handwritten FFI, SDK source drop, generated artifact
 
+**Android AAR Distribution** (one generated Maven artifact):
+The release-candidate Android package containing UniFFI-generated Kotlin classes and ABI-specific
+`libaether.so` libraries under Maven coordinates. It is built from Rust source and generated
+outputs during release verification; signing and pinned checksums are separate release steps.
+Avoid: checked-in SDK, handwritten binding layer, final signed release artifact
+
 ## Example
 
 **Dev:** Does Aether store private keys directly in the iOS Keychain?

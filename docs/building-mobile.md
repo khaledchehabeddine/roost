@@ -8,6 +8,34 @@ Requires [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) and the Android NDK:
 ./scripts/build/android.sh
 ```
 
+This writes ABI-specific shared libraries to `target/android/jniLibs/` and generated Kotlin
+bindings to `target/android/kotlin/`.
+
+Build the Android AAR and publish it to a local Maven repository:
+
+```bash
+scripts/release/android-aar.sh
+```
+
+The local artifact is published as:
+
+```text
+com.aurelion:aether:<workspace-version>
+```
+
+by default under `target/android/maven/`. Override the version or local repository with
+`AETHER_ANDROID_VERSION` and `AETHER_ANDROID_MAVEN_REPO`.
+
+Verify a consumer against that local repository with:
+
+```bash
+scripts/test/android-aar-consumer.sh
+```
+
+The consumer check resolves the Maven artifact and runs the Kotlin binding coverage flow on an
+Android API 36 managed device. Signature verification and pinned checksum verification are release
+steps, not guarantees provided by this unsigned local artifact.
+
 ## iOS
 
 Requires Xcode command-line tools:
