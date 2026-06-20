@@ -74,13 +74,14 @@ acknowledgments.
 Contact, trust, and blocking state persists as one IK-keyed Contact State Protocol State Blob per
 local Identity and peer IK. Contact state is decoded alongside ratchet/session state,
 deduplication set, and pending acknowledgments; PreKey State remains KeyStore storage and Sender
-Certificates remain caller validation inputs. The blob stores the current DK material, Trust State,
-and blocking flag so contact updates, trust transitions, and block/unblock operations return one
-atomic ProtocolStateUpdate. Events follow the existing per-instance Event Stream model, but are
-emitted only after the consumer confirms durable commit of the returned ProtocolStateUpdate. Each
-committed contact, trust, or blocking change emits a self-contained public snapshot, observers
-recover from lag through Current State Snapshots, and cross-instance visibility still comes from
-the shared Protocol State Blob store rather than the in-process Event Stream.
+Certificates remain caller validation inputs rather than Protocol State Blob bodies. The contact
+blob stores the current DK material, Trust State, and blocking flag so contact updates, trust
+transitions, and block/unblock operations return one atomic ProtocolStateUpdate.
+Events follow the existing per-instance Event Stream model, but are emitted only after the consumer
+confirms durable commit of the returned ProtocolStateUpdate. Each committed contact, trust, or
+blocking change emits a self-contained public snapshot, observers recover from lag through Current
+State Snapshots, and cross-instance visibility still comes from the shared Protocol State Blob
+store rather than the in-process Event Stream.
 
 The public Rust API review resolves to five future surfaces: certificate validation takes the full
 input set above and returns a typed verdict; contact APIs create/update IK-keyed Contact Identity

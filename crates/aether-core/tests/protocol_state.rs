@@ -3770,19 +3770,35 @@ fn wipe_removes_all_state_kinds_for_key() {
     let engine = ProtocolStateEngine::new();
     let key = key();
     let mut snapshot = ProtocolStateSnapshot::new();
-    for kind in ProtocolStateKind::all() {
+    let active_kinds = [
+        ProtocolStateKind::RatchetSession,
+        ProtocolStateKind::DeduplicationSet,
+        ProtocolStateKind::PendingAcknowledgments,
+        ProtocolStateKind::ContactState,
+    ];
+    assert_eq!(ProtocolStateKind::all(), active_kinds.as_slice());
+
+    for kind in active_kinds {
         snapshot.set(
-            ProtocolStateAddress::new(*kind, key.clone()),
-            ProtocolStateBlob::from_bytes(vec![*kind as u8, 7]),
+            ProtocolStateAddress::new(kind, key.clone()),
+            ProtocolStateBlob::from_bytes(vec![kind as u8, 7]),
         );
     }
 
-    snapshot.apply_all(engine.wipe(key.clone()));
+    let updates = engine.wipe(key.clone());
+    assert_eq!(
+        updates
+            .iter()
+            .map(|update| update.address().kind())
+            .collect::<Vec<_>>(),
+        active_kinds
+    );
+    snapshot.apply_all(updates);
 
-    for kind in ProtocolStateKind::all() {
+    for kind in active_kinds {
         assert!(
             snapshot
-                .get(&ProtocolStateAddress::new(*kind, key.clone()))
+                .get(&ProtocolStateAddress::new(kind, key.clone()))
                 .is_none()
         );
     }

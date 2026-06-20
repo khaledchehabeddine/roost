@@ -1,7 +1,8 @@
-//! Provides Ed25519 signing key-pair generation and signatures.
+//! Provides Ed25519 signing key-pair generation and signatures over caller-supplied bytes.
 //!
 //! Re-exports [`Signature`] and [`VerifyingKey`] so callers do not depend on `ed25519_dalek`
-//! directly.
+//! directly. This module does not define a transport-authentication layout; callers provide the
+//! exact bytes and domain-separation context they want signed.
 
 pub use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -23,9 +24,10 @@ pub struct SigningKeyPair {
 }
 
 impl SigningKeyPair {
-    /// Signs `message` with this key pair.
+    /// Signs `message` bytes as provided with this key pair.
     ///
-    /// Ed25519 signing is deterministic, so identical inputs produce identical signatures.
+    /// Ed25519 signing is deterministic, so identical inputs produce identical signatures. Callers
+    /// using raw signing own any domain separation.
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)
@@ -33,7 +35,8 @@ impl SigningKeyPair {
 
     /// Signs `context || message` with this key pair.
     ///
-    /// `context` must be a non-empty domain separator naming the signature purpose.
+    /// `context` must be a non-empty domain separator naming the signature purpose. Both inputs are
+    /// caller-supplied bytes; this helper does not define a transport signing layout.
     pub fn sign_with_context(
         &self,
         context: &[u8],
@@ -68,7 +71,7 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
     SigningKeyPair { signing, verifying }
 }
 
-/// Verifies a signature over `context || message`.
+/// Verifies a signature over caller-supplied `context || message` bytes.
 pub fn verify_with_context(
     verifying_key: &VerifyingKey,
     context: &[u8],

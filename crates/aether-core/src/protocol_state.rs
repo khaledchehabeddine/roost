@@ -131,10 +131,6 @@ impl From<ContactIdentityKey> for ProtocolStateKey {
 pub enum ProtocolStateKind {
     /// Double Ratchet session state.
     RatchetSession = 0,
-    /// Prekey state.
-    PreKey = 1,
-    /// Sender-certificate state.
-    SenderCertificate = 2,
     /// Deduplication-set state.
     DeduplicationSet = 3,
     /// Pending-acknowledgment state.
@@ -149,8 +145,6 @@ impl ProtocolStateKind {
     pub fn all() -> &'static [Self] {
         &[
             Self::RatchetSession,
-            Self::PreKey,
-            Self::SenderCertificate,
             Self::DeduplicationSet,
             Self::PendingAcknowledgments,
             Self::ContactState,
@@ -162,8 +156,6 @@ impl fmt::Display for ProtocolStateKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RatchetSession => write!(f, "ratchet/session state"),
-            Self::PreKey => write!(f, "pre-key state"),
-            Self::SenderCertificate => write!(f, "sender-certificate state"),
             Self::DeduplicationSet => write!(f, "deduplication-set state"),
             Self::PendingAcknowledgments => write!(f, "pending-acknowledgment state"),
             Self::ContactState => write!(f, "contact state"),
@@ -3010,7 +3002,6 @@ pub fn fuzz_decode_protocol_state_blob(
         ProtocolStateKind::ContactState => {
             decode_contact_state(&address, &blob, limits).map(|_| ())
         }
-        ProtocolStateKind::PreKey | ProtocolStateKind::SenderCertificate => Ok(()),
     }
 }
 
