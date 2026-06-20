@@ -13,6 +13,7 @@ targets=(
 toolchain="${AETHER_FUZZ_TOOLCHAIN:-nightly}"
 cargo_fuzz=(cargo "+${toolchain}" fuzz)
 
+cargo "+${toolchain}" metadata --manifest-path fuzz/Cargo.toml --locked --format-version 1 >/dev/null
 "${cargo_fuzz[@]}" --version >/dev/null
 
 runs="${AETHER_FUZZ_RUNS:-64}"
