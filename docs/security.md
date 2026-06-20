@@ -17,8 +17,10 @@ the protocol core.
 
 ## Known Limitations
 
-- The library does not provide metadata protection: transport routing data, timing, IP unlinking,
-  batching, and traffic-shaping remain host responsibilities.
+- The library does not provide metadata hiding beyond sealing sender and Message fields into
+  ciphertext and padding payloads into fixed buckets. Transport routing data, timing, IP unlinking,
+  batching, traffic shaping, transport-identifier hygiene, push-token privacy, and Relay validation
+  are outside Aether's responsibility.
 - The library does not provide endpoint-compromise protection. If a Device, host secure-storage
   implementation, or caller-owned plaintext copy is compromised, the library cannot protect values
   already exposed to that endpoint.
@@ -64,9 +66,10 @@ for one Identity's protocol state.
 Protocol State Blobs are secret-bearing live key material. Protect them at rest with controls
 comparable to identity-key storage.
 
-The library does not implement transport batching, IP unlinking, network rate limiting, or
-metadata protection. Host applications own those policies and all network I/O. Caller-added
-identifiers outside the encoded Message are outside Aether's sealed-sender boundary.
+The library does not implement transport batching, IP unlinking, transport-identifier hygiene,
+push-token privacy, Relay validation, network rate limiting, or metadata protection. Host and
+Relay integrations own those policies and all network I/O. Caller-added identifiers outside the
+encoded Message are outside Aether's sealed-sender boundary.
 
 Unsupported major versions for Messages, Protocol State Blobs, and backups reject as faults. They
 are not guessed, silently discarded, or reinitialized.

@@ -181,13 +181,14 @@ impl KeyStore {
         )?;
         let message = message_from_handshake_envelope(envelope)?;
         let engine = crate::ProtocolStateEngine::new();
-        let mut state_updates = Vec::with_capacity(2);
-        state_updates.push(engine.set_session_state_with_peer_identity_key(
-            input.session_key.clone(),
-            &state,
-            *input.responder_identity_key.public_key.as_bytes(),
-        )?);
-        state_updates.push(engine.initialize_pending_acknowledgments(input.session_key)?);
+        let state_updates = vec![
+            engine.set_session_state_with_peer_identity_key(
+                input.session_key.clone(),
+                &state,
+                *input.responder_identity_key.public_key.as_bytes(),
+            )?,
+            engine.initialize_pending_acknowledgments(input.session_key)?,
+        ];
 
         Ok(SessionInitiationResult {
             message,
@@ -261,13 +262,14 @@ impl KeyStore {
         }
 
         let engine = crate::ProtocolStateEngine::new();
-        let mut state_updates = Vec::with_capacity(2);
-        state_updates.push(engine.set_session_state_with_peer_identity(
-            input.session_key.clone(),
-            &state,
-            &accepted.sender_identity,
-        )?);
-        state_updates.push(engine.initialize_pending_acknowledgments(input.session_key)?);
+        let state_updates = vec![
+            engine.set_session_state_with_peer_identity(
+                input.session_key.clone(),
+                &state,
+                &accepted.sender_identity,
+            )?,
+            engine.initialize_pending_acknowledgments(input.session_key)?,
+        ];
 
         Ok(SessionAcceptanceResult {
             plaintext: accepted.plaintext,

@@ -408,6 +408,7 @@ impl KeyStore {
     /// - [`AetherError::NotFound`] if local identity or Discovery Key material is missing.
     /// - [`AetherError::ProtocolStateFault`] if install state cannot be encoded.
     /// - [`AetherError::Storage`] on platform storage failure.
+    #[allow(clippy::too_many_arguments)]
     pub fn initiate_session(
         &self,
         session_key: Vec<u8>,
@@ -478,6 +479,7 @@ impl KeyStore {
     /// - [`AetherError::NotFound`] if local identity material is missing.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
     /// - [`AetherError::Storage`] on platform storage failure.
+    #[allow(clippy::too_many_arguments)]
     pub fn encrypt_message(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
@@ -522,6 +524,7 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if message IDs, keys, or message fields are malformed.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
     /// - [`AetherError::Storage`] on platform storage failure.
+    #[allow(clippy::too_many_arguments)]
     pub fn decrypt_message(
         &self,
         snapshot: Vec<ProtocolStateEntry>,

@@ -1204,8 +1204,10 @@ fn pending_acknowledgment_state_rejects_x3dh_frame_retries() {
 
 #[test]
 fn hardening_limits_round_trip_on_engine() {
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.deduplication_capacity = MIN_DEDUPLICATION_CAPACITY;
+    let limits = ProtocolHardeningLimits {
+        deduplication_capacity: MIN_DEDUPLICATION_CAPACITY,
+        ..ProtocolHardeningLimits::default()
+    };
 
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
@@ -1255,8 +1257,10 @@ fn oversized_inbound_message_rejects_before_state_load() {
         .unwrap()
         .message;
     let encoded_len = encrypted.to_bytes().unwrap().len();
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.max_encoded_message_len = encoded_len - 1;
+    let limits = ProtocolHardeningLimits {
+        max_encoded_message_len: encoded_len - 1,
+        ..ProtocolHardeningLimits::default()
+    };
     let rejecting_engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
     let ratchet_address = ratchet_address(key.clone());
     let deduplication_address = deduplication_address(deduplication_key.clone());
@@ -1308,8 +1312,10 @@ fn configured_blob_limit_rejects_decode_before_restore() {
     let snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
     let address = ratchet_address(key.clone());
     let blob_len = snapshot.get(&address).unwrap().as_bytes().len();
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.max_protocol_state_blob_len = blob_len - 1;
+    let limits = ProtocolHardeningLimits {
+        max_protocol_state_blob_len: blob_len - 1,
+        ..ProtocolHardeningLimits::default()
+    };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
     let result = engine.encrypt_message(
@@ -1332,8 +1338,10 @@ fn configured_blob_limit_accepts_exact_size() {
     let snapshot = snapshot_with_state(&default_engine, key.clone(), &setup.alice_state);
     let address = pending_acknowledgment_address(key.clone());
     let blob_len = snapshot.get(&address).unwrap().as_bytes().len();
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.max_protocol_state_blob_len = blob_len;
+    let limits = ProtocolHardeningLimits {
+        max_protocol_state_blob_len: blob_len,
+        ..ProtocolHardeningLimits::default()
+    };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
     let pending = engine.pending_acknowledgments(&snapshot, key).unwrap();
@@ -1367,8 +1375,10 @@ fn configured_payload_limit_rejects_before_state_load() {
         )
         .unwrap()
         .message;
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.max_message_payload_len = encrypted.ciphertext.len() - 1;
+    let limits = ProtocolHardeningLimits {
+        max_message_payload_len: encrypted.ciphertext.len() - 1,
+        ..ProtocolHardeningLimits::default()
+    };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
     let deduplication_address = deduplication_address(deduplication_key.clone());
     let corrupt = vec![1, 0, 0xaa];
@@ -1440,8 +1450,10 @@ fn configured_sender_material_limits_reject_without_state_updates() {
         .unwrap()
         .as_bytes()
         .to_vec();
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.max_sender_certificate_len = sender.sender_identity.certificate.len() - 1;
+    let limits = ProtocolHardeningLimits {
+        max_sender_certificate_len: sender.sender_identity.certificate.len() - 1,
+        ..ProtocolHardeningLimits::default()
+    };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
     let result = engine.decrypt_message(
@@ -1470,8 +1482,10 @@ fn configured_sender_material_limits_reject_without_state_updates() {
         dedup_before
     );
 
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.max_sender_signature_len = sender.sender_identity.signature.len() - 1;
+    let limits = ProtocolHardeningLimits {
+        max_sender_signature_len: sender.sender_identity.signature.len() - 1,
+        ..ProtocolHardeningLimits::default()
+    };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
     let result = engine.decrypt_message(
         &mut ChaCha20Rng::from_seed([0x3b; 32]),
@@ -1518,11 +1532,13 @@ fn configured_boundary_limits_accept_exact_sizes() {
         )
         .unwrap()
         .message;
-    let mut limits = ProtocolHardeningLimits::default();
-    limits.max_encoded_message_len = encrypted.to_bytes().unwrap().len();
-    limits.max_message_payload_len = encrypted.ciphertext.len();
-    limits.max_sender_certificate_len = sender.sender_identity.certificate.len();
-    limits.max_sender_signature_len = sender.sender_identity.signature.len();
+    let limits = ProtocolHardeningLimits {
+        max_encoded_message_len: encrypted.to_bytes().unwrap().len(),
+        max_message_payload_len: encrypted.ciphertext.len(),
+        max_sender_certificate_len: sender.sender_identity.certificate.len(),
+        max_sender_signature_len: sender.sender_identity.signature.len(),
+        ..ProtocolHardeningLimits::default()
+    };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
     let result = engine
