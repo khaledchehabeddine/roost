@@ -33,7 +33,7 @@ their own workflows, not by sanitizer jobs.
 
 ## Constrained Decryption Budget
 
-The v0.9.0 constrained decryption release gate runs the optimized Core budget harness:
+The v1.0.0 constrained decryption release gate runs the optimized Core budget harness:
 
 ```bash
 scripts/ci/constrained-decryption-budget.sh
@@ -81,8 +81,13 @@ The Android AAR distribution job also enables Gradle publication signing on rele
 Maven Central bundle contains Maven `.asc` signatures. Non-tag workflow runs keep producing
 unsigned release-candidate artifacts.
 
+On non-tag release-verification runs, CI signs copied release-candidate artifacts with an ephemeral
+CI-only OpenPGP key and runs the same fail-closed verification script. This proves the AE-FFI-03
+signature, checksum, and public-key verification flow before final publication, but it does not
+publish release assets or create a public trust root.
+
 Before uploading signed assets or publishing the GitHub prerelease, the signed-release job runs
-`scripts/release/verify-v0.9.0-gates.sh` to confirm the v0.9.0 prerequisite child issues are still
+`scripts/release/verify-release-gates.sh` to confirm the v1.0.0 prerequisite issues are still
 closed. The job passes `GH_TOKEN` from `github.token` so the GitHub CLI can read issue state.
 
 ## Supply Chain
