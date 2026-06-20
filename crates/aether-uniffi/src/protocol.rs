@@ -32,10 +32,6 @@ pub trait ProtocolStateStore: Send + Sync {
 pub enum ProtocolStateKind {
     /// Double Ratchet session state.
     RatchetSession,
-    /// Prekey state.
-    PreKey,
-    /// Sender-certificate state.
-    SenderCertificate,
     /// Deduplication-set state.
     DeduplicationSet,
     /// Pending-acknowledgment state.
@@ -759,8 +755,6 @@ impl ProtocolStateKind {
     fn from_core(value: aether_core::ProtocolStateKind) -> Result<Self, AetherError> {
         match value {
             aether_core::ProtocolStateKind::RatchetSession => Ok(Self::RatchetSession),
-            aether_core::ProtocolStateKind::PreKey => Ok(Self::PreKey),
-            aether_core::ProtocolStateKind::SenderCertificate => Ok(Self::SenderCertificate),
             aether_core::ProtocolStateKind::DeduplicationSet => Ok(Self::DeduplicationSet),
             aether_core::ProtocolStateKind::PendingAcknowledgments => {
                 Ok(Self::PendingAcknowledgments)
@@ -777,8 +771,6 @@ impl From<ProtocolStateKind> for aether_core::ProtocolStateKind {
     fn from(value: ProtocolStateKind) -> Self {
         match value {
             ProtocolStateKind::RatchetSession => Self::RatchetSession,
-            ProtocolStateKind::PreKey => Self::PreKey,
-            ProtocolStateKind::SenderCertificate => Self::SenderCertificate,
             ProtocolStateKind::DeduplicationSet => Self::DeduplicationSet,
             ProtocolStateKind::PendingAcknowledgments => Self::PendingAcknowledgments,
             ProtocolStateKind::ContactState => Self::ContactState,

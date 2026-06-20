@@ -1945,8 +1945,6 @@ fn malformed_blob_rejected() -> Result<bool, AetherError> {
 fn protocol_state_kind(kind: &str) -> Result<ProtocolStateKind, AetherError> {
     match kind {
         "ratchet_session" => Ok(ProtocolStateKind::RatchetSession),
-        "pre_key" => Ok(ProtocolStateKind::PreKey),
-        "sender_certificate" => Ok(ProtocolStateKind::SenderCertificate),
         "deduplication_set" => Ok(ProtocolStateKind::DeduplicationSet),
         "pending_acknowledgments" => Ok(ProtocolStateKind::PendingAcknowledgments),
         "contact_state" => Ok(ProtocolStateKind::ContactState),

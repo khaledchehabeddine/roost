@@ -7,9 +7,10 @@ by the library as opaque Protocol State Blobs and persisted by the consumer thro
 interface, because the consumer owns persistence on the platform and inspecting blob contents on
 either side would couple the two layers tightly. PreKey State is KeyStore-owned secure-storage
 state, and Sender Certificates are caller validation inputs rather than current decoded Protocol
-State Blob bodies; workspace ADR 0005 and Core ADR 0012 own that refined release boundary. The
-library holds no authoritative in-memory copy across operations, so each blob is loaded at operation
-start and the advanced blob is written back at the end through a consumer-serialized transaction.
+State Blob bodies; workspace ADR 0005 and [Core ADR 0012](0012-prekey-lifecycle-and-session-recovery.md)
+own that refined release boundary. The library holds no authoritative in-memory copy across
+operations, so each blob is loaded at operation start and the advanced blob is written back at the
+end through a consumer-serialized transaction.
 
 The consumer's store must protect Protocol State Blobs at rest with confidentiality and integrity
 controls comparable to identity-key storage, must commit atomically and durably with any outbox or

@@ -866,24 +866,21 @@ mod tests {
             (
                 ProtocolStateKind::RatchetSession,
                 ProtocolStateKind::RatchetSession
-            ) | (ProtocolStateKind::PreKey, ProtocolStateKind::PreKey)
-                | (
-                    ProtocolStateKind::SenderCertificate,
-                    ProtocolStateKind::SenderCertificate
-                )
-                | (
-                    ProtocolStateKind::DeduplicationSet,
-                    ProtocolStateKind::DeduplicationSet
-                )
-                | (
-                    ProtocolStateKind::PendingAcknowledgments,
-                    ProtocolStateKind::PendingAcknowledgments
-                )
-                | (
-                    ProtocolStateKind::ContactState,
-                    ProtocolStateKind::ContactState
-                )
+            ) | (
+                ProtocolStateKind::DeduplicationSet,
+                ProtocolStateKind::DeduplicationSet
+            ) | (
+                ProtocolStateKind::PendingAcknowledgments,
+                ProtocolStateKind::PendingAcknowledgments
+            ) | (
+                ProtocolStateKind::ContactState,
+                ProtocolStateKind::ContactState
+            )
         )
+    }
+
+    fn assert_protocol_state_kind(actual: ProtocolStateKind, expected: ProtocolStateKind) {
+        assert!(same_protocol_state_kind(actual, expected));
     }
 
     fn apply_updates(entries: &mut Vec<ProtocolStateEntry>, updates: Vec<ProtocolStateUpdate>) {
@@ -899,6 +896,20 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn wipe_returns_only_active_protocol_state_kinds() {
+        let engine = ProtocolStateEngine::new();
+
+        let updates = engine.wipe(vec![0x44; 16]).unwrap();
+
+        assert_eq!(updates.len(), 4);
+        assert_protocol_state_kind(updates[0].kind, ProtocolStateKind::RatchetSession);
+        assert_protocol_state_kind(updates[1].kind, ProtocolStateKind::DeduplicationSet);
+        assert_protocol_state_kind(updates[2].kind, ProtocolStateKind::PendingAcknowledgments);
+        assert_protocol_state_kind(updates[3].kind, ProtocolStateKind::ContactState);
+        assert!(updates.iter().all(|update| update.blob.is_none()));
     }
 
     fn copy_snapshot(entries: &[ProtocolStateEntry]) -> Vec<ProtocolStateEntry> {
