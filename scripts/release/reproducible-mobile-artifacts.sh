@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 MODE="${1:-}"
 OUT="$ROOT/target/release-verification/reproducible-mobile"
 ARCHIVE_REF="${AETHER_REPRO_ARCHIVE_REF:-HEAD}"
+COMMAND="scripts/release/reproducible-mobile-artifacts.sh $MODE"
 
 usage() {
     echo "usage: $0 <android|ios>" >&2
@@ -36,6 +37,14 @@ archive_object() {
     git -C "$ROOT" rev-parse "$ARCHIVE_REF^{object}"
 }
 
+archive_commit() {
+    if git -C "$ROOT" cat-file -e "$ARCHIVE_REF^{commit}" 2>/dev/null; then
+        git -C "$ROOT" rev-parse "$ARCHIVE_REF^{commit}"
+    else
+        git -C "$ROOT" rev-parse HEAD
+    fi
+}
+
 checkout_archive() {
     local workdir="$1"
 
@@ -56,7 +65,7 @@ build_artifacts() {
 
         case "$MODE" in
             android)
-                scripts/build/android.sh
+                scripts/release/android-aar.sh
                 ;;
             ios)
                 scripts/build/ios-package.sh
@@ -97,6 +106,16 @@ copy_artifacts() {
 
             mkdir -p "$artifact_dir/android"
             cp -R "$workdir/target/android/kotlin" "$artifact_dir/android/kotlin"
+
+            local version
+            version="$(package_version "$workdir")"
+
+            local maven_artifact_dir
+            maven_artifact_dir="$workdir/target/android/maven/com/aurelion/aether/$version"
+
+            mkdir -p "$artifact_dir/android-aar"
+            cp "$maven_artifact_dir/aether-$version.aar" "$artifact_dir/android-aar/"
+            cp "$maven_artifact_dir/aether-$version.pom" "$artifact_dir/android-aar/"
             ;;
         ios)
             local version
@@ -111,6 +130,54 @@ copy_artifacts() {
                 "$artifact_dir/Aether-v$version.xcframework.zip"
             ;;
     esac
+}
+
+tool_line() {
+    local label="$1"
+    shift
+
+    if command -v "$1" >/dev/null 2>&1; then
+        local value
+        value="$("$@" 2>&1 | awk 'NF { print; exit }' || true)"
+        printf '%s=%s\n' "$label" "$value"
+    else
+        printf '%s=missing\n' "$label"
+    fi
+}
+
+write_evidence() {
+    local artifact_dir="$1"
+    local evidence="$artifact_dir/EVIDENCE.md"
+
+    {
+        echo "# Reproducible Mobile Artifact Evidence"
+        echo
+        printf 'mode=%s\n' "$MODE"
+        printf 'command=%s\n' "$COMMAND"
+        printf 'archive_ref=%s\n' "$ARCHIVE_REF"
+        printf 'archive_object=%s\n' "$ARCHIVE_OBJECT"
+        printf 'archive_commit=%s\n' "$ARCHIVE_COMMIT"
+        printf 'source_date_epoch=%s\n' "$SOURCE_DATE_EPOCH"
+        echo "artifact_hashes=../SHA256SUMS"
+        echo
+        echo "## Environment"
+        printf 'uname=%s\n' "$(uname -srm)"
+        tool_line git git --version
+        tool_line cargo cargo --version
+        tool_line rustc rustc --version
+        case "$MODE" in
+            android)
+                tool_line cargo_ndk cargo ndk --version
+                tool_line gradle "${GRADLE_BIN:-gradle}" --version
+                printf 'ANDROID_HOME=%s\n' "${ANDROID_HOME:-}"
+                printf 'ANDROID_NDK_HOME=%s\n' "${ANDROID_NDK_HOME:-}"
+                printf 'ANDROID_NDK_ROOT=%s\n' "${ANDROID_NDK_ROOT:-}"
+                ;;
+            ios)
+                tool_line xcodebuild xcodebuild -version
+                ;;
+        esac
+    } > "$evidence"
 }
 
 write_manifest() {
@@ -137,12 +204,14 @@ run_pass() {
     checkout_archive "$workdir"
     build_artifacts "$workdir"
     copy_artifacts "$workdir" "$artifacts"
+    write_evidence "$artifacts"
     write_manifest "$artifacts" "$pass_dir/SHA256SUMS"
 }
 
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(commit_timestamp)}"
 export SOURCE_DATE_EPOCH
 ARCHIVE_OBJECT="$(archive_object)"
+ARCHIVE_COMMIT="$(archive_commit)"
 
 if [[ -n "${GITHUB_ACTIONS:-}" && "$ARCHIVE_REF" != "HEAD" ]]; then
     echo "AETHER_REPRO_ARCHIVE_REF is local-only and must not be set in GitHub Actions" >&2

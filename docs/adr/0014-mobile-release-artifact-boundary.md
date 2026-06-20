@@ -33,6 +33,8 @@ release artifacts.
 
 - `docs/release.md` and `docs/ci.md` document iOS/Android artifact production, signing, checksum,
   and negative verification paths.
+- `scripts/test/release-candidate-artifact-verification.sh` signs copied release-candidate
+  artifacts with an ephemeral CI key and verifies the same fail-closed paths before publication.
 - `scripts/test/release-artifact-verification.sh` exercises happy paths plus signature, checksum,
   and fingerprint mismatch failures for both final mobile artifacts.
 - `scripts/test/ios-package-consumer.sh` and `scripts/test/android-aar-consumer.sh` verify generated

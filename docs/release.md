@@ -1,6 +1,6 @@
 # Release Verification
 
-Release verification applies to artifacts produced from the exact release commit. For v0.9.0, the
+Release verification applies to artifacts produced from the exact release commit. For v1.0.0, the
 released artifacts are the mobile UniFFI outputs built by the existing scripts:
 
 - Android shared libraries for `aarch64-linux-android`, `armv7-linux-androideabi`, and
@@ -10,8 +10,8 @@ released artifacts are the mobile UniFFI outputs built by the existing scripts:
   `target/android/maven/`
 - iOS `target/xcframework/Aether.xcframework`
 - iOS Swift sources under `target/xcframework/Sources/`
-- iOS Swift Package under `target/ios-distribution/aether-ios-v0.9.0/`
-- iOS xcframework archive `target/ios-distribution/Aether-v0.9.0.xcframework.zip`
+- iOS Swift Package under `target/ios-distribution/aether-ios-v1.0.0/`
+- iOS xcframework archive `target/ios-distribution/Aether-v1.0.0.xcframework.zip`
 - detached OpenPGP signatures and pinned SHA-256 checksums for the final iOS xcframework archive
   and Android AAR
 
@@ -29,6 +29,11 @@ scripts/release/reproducible-mobile-artifacts.sh ios
 Each command builds the selected artifact set twice from `git archive HEAD`, sets
 `SOURCE_DATE_EPOCH` to the commit timestamp, disables Cargo incremental compilation, hashes the
 released files, and fails if the two hash manifests differ.
+
+Each reproducibility pass records release-candidate evidence alongside its `SHA256SUMS`: command,
+tool and runner environment, archive reference, commit object, `SOURCE_DATE_EPOCH`, and artifact
+hashes. The Android reproducibility pass covers the local Maven AAR and POM metadata in addition
+to generated Kotlin and ABI-specific shared libraries.
 
 Runner requirements match the underlying build scripts:
 
@@ -48,10 +53,10 @@ The package exposes product `Aether`, generated Swift target `Aether`, and binar
 `AetherFFI`. Verify it with:
 
 ```bash
-scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v0.9.0
+scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v1.0.0
 ```
 
-CI uploads the package, `Aether-v0.9.0.xcframework.zip`, and `SHA256SUMS` from the same
+CI uploads the package, `Aether-v1.0.0.xcframework.zip`, and `SHA256SUMS` from the same
 release-candidate run. Release-tag CI signs the final xcframework archive and publishes its pinned
 checksum.
 
@@ -95,47 +100,53 @@ signing job requires:
 Sign one artifact with:
 
 ```bash
-scripts/release/sign-artifact.sh target/ios-distribution/Aether-v0.9.0.xcframework.zip
+scripts/release/sign-artifact.sh target/ios-distribution/Aether-v1.0.0.xcframework.zip
 ```
 
 Verify one artifact with:
 
 ```bash
 scripts/release/verify-artifact.sh \
-  Aether-v0.9.0.xcframework.zip \
-  Aether-v0.9.0.xcframework.zip.asc \
-  Aether-v0.9.0.xcframework.zip.sha256 \
-  aether-v0.9.0-release-key.asc
+  Aether-v1.0.0.xcframework.zip \
+  Aether-v1.0.0.xcframework.zip.asc \
+  Aether-v1.0.0.xcframework.zip.sha256 \
+  aether-v1.0.0-release-key.asc
 ```
 
-Use the same command shape for `aether-0.9.0.aar`. Host-application builds must fail closed on
+Use the same command shape for `aether-1.0.0.aar`. Host-application builds must fail closed on
 signature mismatch, pinned-checksum mismatch, missing fingerprint, or signing-key mismatch. Do not
 continue with an unsigned artifact, a different checksum file, or a substituted public key. Set
 `AETHER_RELEASE_GPG_FINGERPRINT` to the expected release signing key fingerprint.
+
+Release-candidate CI exercises the same AE-FFI-03 verification flow without publishing final
+assets: it signs copied release-candidate artifacts with an ephemeral CI-only key, exports that
+temporary public key, and runs the fail-closed happy and negative paths. These release-candidate
+signatures and checksums are evidence that the final tag workflow will sign and checksum-pin the
+same artifact shapes; they are not public release trust roots.
 
 The release artifact verification test covers both mobile artifacts:
 
 ```bash
 scripts/test/release-artifact-verification.sh \
-  Aether-v0.9.0.xcframework.zip \
-  aether-0.9.0.aar \
-  aether-v0.9.0-release-key.asc
+  Aether-v1.0.0.xcframework.zip \
+  aether-1.0.0.aar \
+  aether-v1.0.0-release-key.asc
 ```
 
 It verifies happy paths and negative paths for iOS and Android signature mismatch, checksum
 mismatch, and fingerprint mismatch.
 
-## v0.9.0 Final Gates
+## v1.0.0 Final Gates
 
-Before pushing `v0.9.0`, verify that GitHub issues #121, #122, #123, #124, and #126 remain closed.
-After the tag workflow publishes signed artifacts and checksums, check the remaining v0.9.0
-checklist boxes in #120 and #127 and publish the GitHub prerelease notes from
-`docs/release-notes/v0.9.0.md`.
+Before pushing `v1.0.0`, verify that the Aether-side v1.0.0 release-candidate issues remain
+closed and that external Relay tests, checks, and functionality criteria have passed. Final
+artifact signatures, pinned checksums, and the GitHub Release remain blocked until that tag is
+created after Relay approval.
 
 Run the prerequisite gate before tagging:
 
 ```bash
-scripts/release/verify-v0.9.0-gates.sh
+scripts/release/verify-release-gates.sh
 ```
 
 The command requires GitHub CLI access to `RelayNet/aether`; in CI, the signed-release workflow
@@ -144,7 +155,7 @@ the GitHub prerelease.
 
 ## Constrained Decryption Profile
 
-The v0.9.0 release gate measures the real spec-v1.0 encrypted Message receive path in an optimized
+The v1.0.0 release gate measures the real spec-v1.0 encrypted Message receive path in an optimized
 Rust test binary:
 
 ```bash
@@ -153,8 +164,8 @@ scripts/ci/constrained-decryption-budget.sh
 
 The constrained profile uses a 24 MiB tracked Rust heap allocation budget and a 250 ms wall-clock
 budget per measured decrypt operation. The profile is compatible with the iOS Notification Service
-Extension class target referenced by AE-FFI-04, but it is release-gate evidence for this harness,
-not a guarantee for every host extension configuration.
+Extension class target referenced by AE-FFI-04, but it is release-candidate evidence for this
+harness, not a guarantee for every host extension configuration.
 
 The gate covers first and repeated decrypts, representative padding buckets, maximum-size precheck,
 sealed-frame decode, pre-decryption deduplication lookup, envelope AEAD decrypt, sender-certificate
@@ -173,14 +184,14 @@ scripts/release/sbom.sh
 The output is:
 
 ```text
-target/sbom/aether-uniffi-v0.9.0-sbom.json
+target/sbom/aether-uniffi-v1.0.0-sbom.json
 ```
 
 The SBOM is CycloneDX JSON generated from `crates/aether-uniffi/Cargo.toml` with all Cargo targets
 described. Release verification uploads this file as a CI artifact.
 
 To verify an uploaded SBOM, check out the same commit, rerun `scripts/release/sbom.sh`, and compare
-the SHA-256 hash of `target/sbom/aether-uniffi-v0.9.0-sbom.json` with the uploaded artifact.
+the SHA-256 hash of `target/sbom/aether-uniffi-v1.0.0-sbom.json` with the uploaded artifact.
 
 ## Malformed-Input Fuzz Campaigns
 

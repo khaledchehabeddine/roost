@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 #
-# Verify release-management gates that must hold before v0.9.0 is treated as publishable.
+# Verify release-management gates that must hold before the release is treated as publishable.
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 REPO="${AETHER_GITHUB_REPO:-RelayNet/aether}"
-TAG="${AETHER_RELEASE_TAG:-v0.9.0}"
-REQUIRED_ISSUES=(121 122 123 124 126)
+TAG="${AETHER_RELEASE_TAG:-}"
+REQUIRED_ISSUES=(128 129 130 131 132 133 189)
+
+usage() {
+    echo "usage: $0" >&2
+}
+
+if [[ $# -ne 0 ]]; then
+    usage
+    exit 2
+fi
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -20,6 +30,12 @@ issue_state() {
 }
 
 require_tool gh
+
+if [[ -z "$TAG" ]]; then
+    require_tool cargo
+    pkgid="$(cargo pkgid --manifest-path "$ROOT/crates/aether-uniffi/Cargo.toml")"
+    TAG="v${pkgid##*#}"
+fi
 
 for issue in "${REQUIRED_ISSUES[@]}"; do
     state="$(issue_state "$issue")"
