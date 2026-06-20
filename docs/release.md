@@ -1,7 +1,8 @@
 # Release Verification
 
 Release verification applies to artifacts produced from the exact release commit. For v1.0.0, the
-released artifacts are the mobile UniFFI outputs built by the existing scripts:
+release-candidate and final-release artifacts are the mobile UniFFI outputs built by the existing
+scripts:
 
 - Android shared libraries for `aarch64-linux-android`, `armv7-linux-androideabi`, and
   `x86_64-linux-android`
@@ -10,12 +11,15 @@ released artifacts are the mobile UniFFI outputs built by the existing scripts:
   `target/android/maven/`
 - iOS `target/xcframework/Aether.xcframework`
 - iOS Swift sources under `target/xcframework/Sources/`
-- iOS Swift Package under `target/ios-distribution/aether-ios-v1.0.0/`
-- iOS xcframework archive `target/ios-distribution/Aether-v1.0.0.xcframework.zip`
+- iOS Swift Package under `target/ios-distribution/aether-ios-v<version>/`
+- iOS xcframework archive `target/ios-distribution/Aether-v<version>.xcframework.zip`
 - detached OpenPGP signatures and pinned SHA-256 checksums for the final iOS xcframework archive
   and Android AAR
 
-The workspace is not published to crates.io.
+Release-candidate hashes and local build outputs are reproducibility evidence, not the distribution
+trust root. Final consumer trust is attached to the fixed iOS xcframework archive and Android AAR
+bytes after release-tag CI signs them and publishes pinned checksums. The workspace is not
+published to crates.io.
 
 ## Reproducible Builds
 
@@ -53,10 +57,11 @@ The package exposes product `Aether`, generated Swift target `Aether`, and binar
 `AetherFFI`. Verify it with:
 
 ```bash
-scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v1.0.0
+version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
+scripts/test/ios-package-consumer.sh "target/ios-distribution/aether-ios-v$version"
 ```
 
-CI uploads the package, `Aether-v1.0.0.xcframework.zip`, and `SHA256SUMS` from the same
+CI uploads the package, `Aether-v<version>.xcframework.zip`, and `SHA256SUMS` from the same
 release-candidate run. Release-tag CI signs the final xcframework archive and publishes its pinned
 checksum.
 
@@ -100,20 +105,22 @@ signing job requires:
 Sign one artifact with:
 
 ```bash
-scripts/release/sign-artifact.sh target/ios-distribution/Aether-v1.0.0.xcframework.zip
+version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
+scripts/release/sign-artifact.sh "target/ios-distribution/Aether-v$version.xcframework.zip"
 ```
 
 Verify one artifact with:
 
 ```bash
+version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
 scripts/release/verify-artifact.sh \
-  Aether-v1.0.0.xcframework.zip \
-  Aether-v1.0.0.xcframework.zip.asc \
-  Aether-v1.0.0.xcframework.zip.sha256 \
-  aether-v1.0.0-release-key.asc
+  "Aether-v$version.xcframework.zip" \
+  "Aether-v$version.xcframework.zip.asc" \
+  "Aether-v$version.xcframework.zip.sha256" \
+  "aether-v$version-release-key.asc"
 ```
 
-Use the same command shape for `aether-1.0.0.aar`. Host-application builds must fail closed on
+Use the same command shape for `"aether-$version.aar"`. Host-application builds must fail closed on
 signature mismatch, pinned-checksum mismatch, missing fingerprint, or signing-key mismatch. Do not
 continue with an unsigned artifact, a different checksum file, or a substituted public key. Set
 `AETHER_RELEASE_GPG_FINGERPRINT` to the expected release signing key fingerprint.
@@ -127,10 +134,11 @@ same artifact shapes; they are not public release trust roots.
 The release artifact verification test covers both mobile artifacts:
 
 ```bash
+version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
 scripts/test/release-artifact-verification.sh \
-  Aether-v1.0.0.xcframework.zip \
-  aether-1.0.0.aar \
-  aether-v1.0.0-release-key.asc
+  "Aether-v$version.xcframework.zip" \
+  "aether-$version.aar" \
+  "aether-v$version-release-key.asc"
 ```
 
 It verifies happy paths and negative paths for iOS and Android signature mismatch, checksum
@@ -138,10 +146,12 @@ mismatch, and fingerprint mismatch.
 
 ## v1.0.0 Final Gates
 
-Before pushing `v1.0.0`, verify that the Aether-side v1.0.0 release-candidate issues remain
-closed and that external Relay tests, checks, and functionality criteria have passed. Final
-artifact signatures, pinned checksums, and the GitHub Release remain blocked until that tag is
-created after Relay approval.
+Do not create the `v1.0.0` tag or publish the GitHub Release from the Aether-side release-candidate
+work. Both remain blocked until Relay tests, checks, and functionality criteria pass.
+
+Before treating `v1.0.0` as publishable, verify that GitHub issues #129, #130, #131, #132, and
+#133 are closed. Issue #128 is the umbrella release-candidate closeout, and issue #189 completes
+release-facing docs and draft notes; both are intentionally outside the pre-tag prerequisite script.
 
 Run the prerequisite gate before tagging:
 
@@ -150,8 +160,8 @@ scripts/release/verify-release-gates.sh
 ```
 
 The command requires GitHub CLI access to `RelayNet/aether`; in CI, the signed-release workflow
-provides `GH_TOKEN`. The workflow runs the same gate before it uploads signed assets or publishes
-the GitHub prerelease.
+provides `GH_TOKEN`. The workflow runs the same gate at preflight and again before signed asset
+upload or GitHub prerelease publication.
 
 ## Constrained Decryption Profile
 
@@ -184,14 +194,14 @@ scripts/release/sbom.sh
 The output is:
 
 ```text
-target/sbom/aether-uniffi-v1.0.0-sbom.json
+target/sbom/aether-uniffi-v<version>-sbom.json
 ```
 
 The SBOM is CycloneDX JSON generated from `crates/aether-uniffi/Cargo.toml` with all Cargo targets
 described. Release verification uploads this file as a CI artifact.
 
 To verify an uploaded SBOM, check out the same commit, rerun `scripts/release/sbom.sh`, and compare
-the SHA-256 hash of `target/sbom/aether-uniffi-v1.0.0-sbom.json` with the uploaded artifact.
+the SHA-256 hash of `target/sbom/aether-uniffi-v<version>-sbom.json` with the uploaded artifact.
 
 ## Malformed-Input Fuzz Campaigns
 

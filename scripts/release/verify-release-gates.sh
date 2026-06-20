@@ -4,10 +4,11 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 REPO="${AETHER_GITHUB_REPO:-RelayNet/aether}"
-TAG="${AETHER_RELEASE_TAG:-}"
-REQUIRED_ISSUES=(128 129 130 131 132 133 189)
+TAG="${AETHER_RELEASE_TAG:-v1.0.0}"
+EXPECTED_TAG="v1.0.0"
+# #128 is the umbrella closeout and #189 delivers this script; gate only prerequisite evidence.
+REQUIRED_ISSUES=(129 130 131 132 133)
 
 usage() {
     echo "usage: $0" >&2
@@ -31,10 +32,14 @@ issue_state() {
 
 require_tool gh
 
-if [[ -z "$TAG" ]]; then
-    require_tool cargo
-    pkgid="$(cargo pkgid --manifest-path "$ROOT/crates/aether-uniffi/Cargo.toml")"
-    TAG="v${pkgid##*#}"
+if [[ "$TAG" != "$EXPECTED_TAG" ]]; then
+    echo "unsupported release tag: $TAG, expected $EXPECTED_TAG" >&2
+    exit 2
+fi
+
+if [[ -n "${GITHUB_REF_NAME:-}" && "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]]; then
+    echo "unsupported GitHub ref: $GITHUB_REF_NAME, expected $EXPECTED_TAG" >&2
+    exit 2
 fi
 
 for issue in "${REQUIRED_ISSUES[@]}"; do

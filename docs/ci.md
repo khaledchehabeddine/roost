@@ -86,9 +86,10 @@ CI-only OpenPGP key and runs the same fail-closed verification script. This prov
 signature, checksum, and public-key verification flow before final publication, but it does not
 publish release assets or create a public trust root.
 
-Before uploading signed assets or publishing the GitHub prerelease, the signed-release job runs
-`scripts/release/verify-release-gates.sh` to confirm the v1.0.0 prerequisite issues are still
-closed. The job passes `GH_TOKEN` from `github.token` so the GitHub CLI can read issue state.
+The release-preflight job runs `scripts/release/verify-release-gates.sh` early for fail-fast tag
+checks, and the signed-release job runs the same gate again immediately before signed asset upload
+or GitHub prerelease publication. Both jobs pass `GH_TOKEN` from `github.token` so the GitHub CLI
+can read issue state.
 
 ## Supply Chain
 

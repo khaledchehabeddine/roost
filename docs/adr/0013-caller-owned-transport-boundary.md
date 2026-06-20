@@ -33,7 +33,7 @@ transport-authentication layout or make caller-added identifiers part of the sea
 
 - `docs/security.md` records that transports expose routing metadata and that host applications own
   network IO, rate limiting, batching, and caller-added identifiers.
-- `docs/public-api-review-v0.9.0.md` records that the public API performs no network IO and keeps
-  transport wrappers host-owned.
+- `crates/aether-uniffi/docs/api-coverage.md` records that binding docs avoid transport-routing and
+  transport-authentication layout claims.
 - `crates/aether-core/docs/adr/0009-encrypted-acknowledgments-and-retries.md` records that
   acknowledgments and retries are returned to the consumer for transport instead of sent by Core.

@@ -37,11 +37,12 @@ Android API 36 managed device. Release consumers must verify the final AAR signa
 checksum before Gradle consumes the artifact:
 
 ```bash
+version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
 scripts/release/verify-artifact.sh \
-  aether-1.0.0.aar \
-  aether-1.0.0.aar.asc \
-  aether-1.0.0.aar.sha256 \
-  aether-v1.0.0-release-key.asc
+  "aether-$version.aar" \
+  "aether-$version.aar.asc" \
+  "aether-$version.aar.sha256" \
+  "aether-v$version-release-key.asc"
 ```
 
 Run this as a build preflight with `AETHER_RELEASE_GPG_FINGERPRINT` set to the expected release key
@@ -68,18 +69,20 @@ The package is written under `target/ios-distribution/aether-ios-v<version>/` wi
 Verify the package with an iOS Simulator consumer:
 
 ```bash
-scripts/test/ios-package-consumer.sh target/ios-distribution/aether-ios-v1.0.0
+version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
+scripts/test/ios-package-consumer.sh "target/ios-distribution/aether-ios-v$version"
 ```
 
 Release consumers must verify the final xcframework archive signature and pinned checksum before
 the Swift Package consumes the binary target:
 
 ```bash
+version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
 scripts/release/verify-artifact.sh \
-  Aether-v1.0.0.xcframework.zip \
-  Aether-v1.0.0.xcframework.zip.asc \
-  Aether-v1.0.0.xcframework.zip.sha256 \
-  aether-v1.0.0-release-key.asc
+  "Aether-v$version.xcframework.zip" \
+  "Aether-v$version.xcframework.zip.asc" \
+  "Aether-v$version.xcframework.zip.sha256" \
+  "aether-v$version-release-key.asc"
 ```
 
 Run this as a build preflight with `AETHER_RELEASE_GPG_FINGERPRINT` set to the expected release key
@@ -112,7 +115,7 @@ cache; do not commit them to this repository.
 
 ## iOS Artifact Verification
 
-Release-candidate CI uploads `Aether-v1.0.0.xcframework.zip`, the local Swift Package, and
+Release-candidate CI uploads `Aether-v<version>.xcframework.zip`, the local Swift Package, and
 `SHA256SUMS` from the same build. Release-tag CI publishes the final OpenPGP signature, pinned
 checksum, and public release key for the xcframework archive. Treat release-candidate hashes as
 reproducibility evidence, not as the distribution trust root. Final publication remains Relay-gated.
