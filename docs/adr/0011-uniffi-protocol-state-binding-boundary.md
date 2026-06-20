@@ -44,3 +44,13 @@ and prekey lifecycle behavior.
 - Check generated Kotlin and Swift into the repo. Rejected because current CI already verifies
   generation from source, and checked-in generated output would add review noise without improving
   the binding contract.
+
+## Verification Evidence
+
+- `crates/aether-uniffi/docs/api-coverage.md` maps issue 122 surfaces to generated Swift/Kotlin
+  fixture replay and records opaque state, atomic mutation outputs, commit checks, and FFI error
+  mappings.
+- `scripts/test/binding-fixture-replay.sh` exercises generated bindings through the fixture replay
+  harness.
+- `crates/aether-core/tests/fixtures/protocol_state_blobs_v1.md` records that consumers persist
+  Protocol State Blobs opaquely by kind/key without inspecting contents.

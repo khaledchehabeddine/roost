@@ -10,3 +10,12 @@ Receive paths must not surface plaintext or sender identity until the sealed sen
 validates against caller-supplied trusted signing keys, revocation input, reference time, and grace
 window. A duplicate receive may return a duplicate outcome before validation because it exposes no
 plaintext or sender identity and does not advance ratchet/session state.
+
+## Verification Evidence
+
+- `crates/aether-core/tests/sender_certificate_fixtures.rs` replays trusted, untrusted, revoked,
+  expired, malformed, and signature-failure certificate cases.
+- `crates/aether-core/tests/fixtures/sealed_sender_session_messages_v1.md` records that sender
+  certificate material appears only after decrypt.
+- `crates/aether-uniffi/docs/api-coverage.md` records binding coverage for certificate validation
+  and rejected certificate inputs.
