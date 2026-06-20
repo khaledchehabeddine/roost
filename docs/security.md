@@ -33,6 +33,10 @@ the protocol core.
 - The library does not claim protection against rooted, jailbroken, malware-compromised, or
   otherwise untrusted endpoints.
 
+Release-facing documentation and notes must preserve these limits. Artifact signatures,
+reproducible builds, and CI evidence authenticate distribution outputs only; they do not broaden
+runtime metadata privacy, endpoint-compromise, or transport-security claims.
+
 ## Resource Limits
 
 Core rejects externally influenced inputs before expensive work where the boundary is visible:
@@ -72,7 +76,7 @@ Relay integrations own those policies and all network I/O. Caller-added identifi
 encoded Message are outside Aether's sealed-sender boundary.
 
 Unsupported major versions for Messages, Protocol State Blobs, and backups reject as faults. They
-are not guessed, silently discarded, or reinitialized.
+are not guessed, silently discarded, reinitialized, or upgraded through pre-release legacy paths.
 
 Identity backup restore rewinds only Identity material. Treat restore as a fresh compromise
 boundary: wipe or replace Protocol State Blobs before session recovery or re-handshake.
