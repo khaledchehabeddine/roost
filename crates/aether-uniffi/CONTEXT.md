@@ -41,8 +41,8 @@ Avoid: source package, signed release, pinned checksum publication
 
 **Signed Release Artifact** (one final mobile binary artifact):
 The release artifact generated from the tagged release commit and published with a detached
-OpenPGP signature. For v0.9.0 this means the iOS xcframework archive and Android AAR, not earlier
-release-candidate outputs or generated source directories.
+OpenPGP signature. For mobile releases this means the iOS xcframework archive and Android AAR, not
+earlier release-candidate outputs or generated source directories.
 Avoid: release-candidate artifact, reproducibility pass output, unsigned package
 
 **Pinned Artifact Checksum** (one SHA-256 sidecar per signed artifact):

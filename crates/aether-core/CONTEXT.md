@@ -9,6 +9,13 @@ An encrypted Message with `PayloadKind::Acknowledgment` that proves the receiver
 Message. Core returns it to the consumer for transport; Core never transmits it.
 Avoid: receipt, delivery callback, network ack
 
+**Caller-Owned Transport** (one host-selected route per send):
+The host application's network and authentication boundary for sending encoded Messages,
+Acknowledgment Artifacts, and Retry Instructions. Core produces or consumes opaque protocol bytes
+and caller-supplied signing inputs, but it does not select transports, define transport headers,
+perform network IO, or authenticate a transport envelope.
+Avoid: Core network, transport session, library-owned routing
+
 **Blocking** (one local verdict per Contact Identity):
 An IK-keyed local suppression rule. Blocking is independent of Trust State and distinct from
 sender-certificate revocation; it controls consumer-visible surfacing, not protocol acceptance. A
@@ -30,11 +37,11 @@ without changing trust.
 Avoid: account, profile, sender metadata
 
 **Constrained Decryption Profile** (one release-gate budget):
-The measured v0.9.0 release profile for the real spec-v1.0 encrypted Message receive path under
-extension-class execution constraints. The gate measures one decrypt operation at a time in an
-optimized test run, with a 24 MiB tracked Rust heap allocation budget and a 250 ms wall-clock
-budget. It is release evidence for the profiled path, not a guarantee for every host extension
-configuration or compromised endpoint.
+The measured release profile for the real encrypted Message receive path under extension-class
+execution constraints. The gate measures one decrypt operation at a time in an optimized test run,
+with a 24 MiB tracked Rust heap allocation budget and a 250 ms wall-clock budget. It is release
+evidence for the profiled path, not a guarantee for every host extension configuration or
+compromised endpoint.
 Avoid: production SLA, memory proof, endpoint guarantee
 
 **Current State Snapshot** (one per Event Stream query):
@@ -163,8 +170,8 @@ Avoid: cache, in-memory state, decoded state
 
 **Protocol State Blob Version** (one per Protocol State Blob):
 The Core-owned major/minor envelope version read before decoding a Blob's version-specific
-payload. Only the current pre-release envelope is accepted; unknown versions are faults, not reset
-or restore signals.
+payload. Only supported current-format envelopes and explicitly supported same-major body shapes are
+accepted; unsupported envelope versions are faults, not reset or restore signals.
 Avoid: schema version, ratchet version
 
 **Protocol State Kind** (one per Protocol State Blob address):

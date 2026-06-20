@@ -72,15 +72,15 @@ plaintext. Duplicate blocked Messages follow normal duplicate behavior and do no
 acknowledgments.
 
 Contact, trust, and blocking state persists as one IK-keyed Contact State Protocol State Blob per
-local Identity and peer IK. Contact state is a Protocol State Kind alongside ratchet/session state,
-prekey state, sender-certificate state, deduplication set, and pending acknowledgments. The blob
-stores the current DK material, Trust State, and blocking flag so contact updates, trust
-transitions, and block/unblock operations return one atomic ProtocolStateUpdate. Events follow the
-existing per-instance Event Stream model, but are emitted only after the consumer confirms durable
-commit of the returned ProtocolStateUpdate. Each committed contact, trust, or blocking change emits
-a self-contained public snapshot, observers recover from lag through Current State Snapshots, and
-cross-instance visibility still comes from the shared Protocol State Blob store rather than the
-in-process Event Stream.
+local Identity and peer IK. Contact state is decoded alongside ratchet/session state,
+deduplication set, and pending acknowledgments; PreKey State remains KeyStore storage and Sender
+Certificates remain caller validation inputs. The blob stores the current DK material, Trust State,
+and blocking flag so contact updates, trust transitions, and block/unblock operations return one
+atomic ProtocolStateUpdate. Events follow the existing per-instance Event Stream model, but are
+emitted only after the consumer confirms durable commit of the returned ProtocolStateUpdate. Each
+committed contact, trust, or blocking change emits a self-contained public snapshot, observers
+recover from lag through Current State Snapshots, and cross-instance visibility still comes from
+the shared Protocol State Blob store rather than the in-process Event Stream.
 
 The public Rust API review resolves to five future surfaces: certificate validation takes the full
 input set above and returns a typed verdict; contact APIs create/update IK-keyed Contact Identity
@@ -92,8 +92,8 @@ fixed-byte certificate and Safety Number encodings before those APIs release.
 
 ## Scope Boundary
 
-This record fixes the v0.7.0 behavioral and API shape before code lands. It does not require Rust
-implementation in the decision-record change.
+This record fixes certificate validation, contact identity, trust, safety number, and blocking
+behavior. It does not require Rust implementation in the decision-record change.
 
 ## Considered Options
 
@@ -101,5 +101,15 @@ implementation in the decision-record change.
   domain signers and auditors to an internal Rust serialization choice.
 - Canonical JSON certificate signed content. Rejected. It is readable but adds cryptographic
   canonicalization risk.
-- Separate contact, trust, and blocking blobs. Rejected for v0.7.0 because one IK-keyed blob keeps
-  local contact state transitions atomic under the existing Protocol State Blob model.
+- Separate contact, trust, and blocking blobs. Rejected because one IK-keyed blob keeps local
+  contact state transitions atomic under the existing Protocol State Blob model.
+
+## Verification Evidence
+
+- `crates/aether-core/tests/fixtures/protocol_state_blobs_v1.md` pins Contact State blobs for
+  Pending, Unverified, Verified, blocked, DK-rotated, and unblocked restored-state contacts.
+- `crates/aether-core/tests/protocol_state.rs` covers blocked inbound unreachable and
+  silent-receipt acknowledgment behavior, duplicate blocked Messages, DK rotation while blocked,
+  and unblock-without-handshake recovery.
+- `crates/aether-uniffi/docs/api-coverage.md` records binding coverage for contact trust,
+  blocking, blocked-contact negative paths, and stale protocol-state commits.

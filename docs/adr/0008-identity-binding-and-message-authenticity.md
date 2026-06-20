@@ -8,3 +8,13 @@ X3DH session derivation binds both parties' canonical Identity Key encodings int
 
 - Preserve sender-anonymous X3DH root derivation. Rejected. It kept first-contact deniability but left the root secret bound only to prekey material, conflicting with the active identity-misbinding prevention requirement.
 - Sign Message transcripts with the DK Ed25519 key. Rejected. It limits long-lived IK signature exposure, but the active specification makes non-repudiable IK authorship the authenticity boundary.
+
+## Verification Evidence
+
+- `crates/aether-crypto/docs/adr/0004-x3dh-handshake.md` records X3DH root-key identity binding and
+  first-contact sender-material sealing.
+- `crates/aether-crypto/docs/adr/0008-sender-proof-transcript.md` records the private sender
+  key-possession proof that prevents first-message field splicing without making the proof a
+  third-party-verifiable signature.
+- `crates/aether-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins post-decryption
+  sender identity material and transport-visible field boundaries for established Messages.

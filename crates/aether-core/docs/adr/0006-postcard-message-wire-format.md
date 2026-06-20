@@ -15,8 +15,9 @@ certificate, sender signature, Message ID, timestamp, payload kind, and ratchet 
 encrypted/authenticated payloads, because transports can route by recipient-facing frame metadata
 without learning who sent the Message or which in-session artifact it carries. Established Sessions
 bind the expected peer sender identity key in opaque ratchet/session state and compare it only after
-decrypt. Old sender-visible and pre-frame layouts are rejected instead of decoded as the current
-Message format.
+decrypt. Acknowledgment Artifacts use the same Message encoding with an encrypted acknowledgment
+payload and no X3DH prekey reference. Old sender-visible and pre-frame layouts are rejected instead
+of decoded as the current Message format.
 
 **Identity-binding update:** workspace ADR 0008 adds a sealed IK Ed25519 Message transcript signature and X3DH identity binding. These signatures remain inside the encrypted sealed-sender payload; no sender IK, certificate, or signature becomes a transport-visible Message field.
 
@@ -27,3 +28,12 @@ Message format.
 - Keep sender identity fields beside the ciphertext. Rejected because it would expose the sender identity key and future sender certificate material to transports before ciphertext authentication.
 - Keep a distinct X3DH first-message sealed-sender schema. Rejected because session messages,
   acknowledgments, and X3DH initials share one frame/envelope version namespace.
+
+## Verification Evidence
+
+- `crates/aether-core/tests/fixtures/message_wire_v1.md` pins current Message encoding and explicit
+  rejection inputs for old sender-visible layouts.
+- `crates/aether-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins session Message
+  transport-visible fields and post-decryption sender material.
+- `crates/aether-uniffi/docs/api-coverage.md` records binding replay coverage for sealed-sender
+  encode/decode, acknowledgments, and protocol-state outputs.
