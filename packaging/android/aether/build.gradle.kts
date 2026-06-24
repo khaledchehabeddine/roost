@@ -3,8 +3,9 @@ import org.gradle.api.publish.PublishingExtension
 import org.gradle.plugins.signing.SigningExtension
 
 plugins {
+    // AGP 9.0+ provides built-in Kotlin support; applying org.jetbrains.kotlin.android
+    // is now an error (see https://kotl.in/gradle/agp-built-in-kotlin).
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
     id("maven-publish")
     id("signing")
 }
@@ -33,7 +34,10 @@ android {
 
     sourceSets {
         getByName("main") {
-            java.srcDir(generatedKotlinDir)
+            // AGP 9 built-in Kotlin compiles the `kotlin` source set; the generated UniFFI
+            // bindings must be registered there (not `java`), otherwise compileReleaseKotlin
+            // reports NO-SOURCE and the published AAR ships an empty classes.jar.
+            kotlin.srcDir(generatedKotlinDir)
             jniLibs.srcDir(generatedJniLibsDir)
         }
     }
