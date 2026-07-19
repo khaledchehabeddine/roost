@@ -26,6 +26,19 @@ com.aurelion:aether:<workspace-version>
 by default under `target/android/maven/`. Override the version or local repository with
 `AETHER_ANDROID_VERSION` and `AETHER_ANDROID_MAVEN_REPO`.
 
+Local peer simulations can publish a separate artifact containing the opt-in development
+certificate authority:
+
+```bash
+AETHER_CARGO_FEATURES=development-certificates \
+AETHER_ANDROID_ARTIFACT_ID=aether-development \
+scripts/release/android-aar.sh
+```
+
+This produces `com.aurelion:aether-development:<workspace-version>`. The packaging check requires
+the development authority in that coordinate and requires it to be absent from the default
+production artifact.
+
 Verify a consumer against that local repository with:
 
 ```bash

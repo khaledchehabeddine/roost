@@ -112,6 +112,10 @@ pub use protocol_state::{
     SessionUnrecoverableResult,
 };
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
+#[cfg(feature = "development-certificates")]
+pub use sender_certificate::{
+    DevelopmentCertificateAuthority, DevelopmentCertificateError, DevelopmentSenderCertificate,
+};
 pub use sender_certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
     SenderCertificateIdentityKey, SenderCertificateValidationError,
