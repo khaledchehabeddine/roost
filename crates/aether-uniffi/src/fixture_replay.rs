@@ -1362,6 +1362,10 @@ fn deduplication_key() -> Result<ProtocolStateKey, AetherError> {
         .map_err(|e| invalid_fixture(format!("invalid deduplication fixture key: {e}")))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "fixture construction mirrors the nine fields of InboundEncryptedMessage"
+)]
 fn inbound<'a>(
     session_key: ProtocolStateKey,
     deduplication_key: ProtocolStateKey,

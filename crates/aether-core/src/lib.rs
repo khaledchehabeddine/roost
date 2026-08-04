@@ -1,3 +1,14 @@
+#![cfg_attr(
+    not(test),
+    forbid(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented
+    )
+)]
+
 //! Application-layer key management for private messaging clients.
 //!
 //! This crate wraps [`aether_crypto`] primitives with persistence, identity lifecycle management,

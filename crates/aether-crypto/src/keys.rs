@@ -9,3 +9,4 @@ pub use identity::{IdentityKeyBundle, sign_identity_key_binding, verify_identity
 pub use signing::{
     Signature, SigningKeyPair, VerifyingKey, generate_signing_key_pair, verify_with_context,
 };
+pub(crate) use signing::{StaticSignatureContext, verify_with_static_context};

@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/target/bindings/fixture-replay"
 HARNESS="$ROOT/crates/aether-uniffi/tests/bindings"
 JNA_VERSION="5.18.1"
+JNA_SHA256="260c4b1e22b1db9e110ee441c4f13ce115f841fa48c41d78750986214b395557"
 
 case "$(uname -s)" in
     Darwin)
@@ -58,11 +59,11 @@ run_swift() {
     rm -rf "$swift_out"
     mkdir -p "$swift_out"
 
-    cargo run --features fixture-replay --bin uniffi-bindgen-swift -- \
+    cargo run --locked --features fixture-replay --bin uniffi-bindgen-swift -- \
         "$LIB_PATH" \
         "$swift_out" \
         --swift-sources --headers
-    cargo run --features fixture-replay --bin uniffi-bindgen-swift -- \
+    cargo run --locked --features fixture-replay --bin uniffi-bindgen-swift -- \
         "$LIB_PATH" \
         "$swift_out" \
         --modulemap --module-name AetherFFI --modulemap-filename module.modulemap
@@ -73,22 +74,66 @@ run_swift() {
     run_swift_harness "SecureStorageUnexpectedError.swift" "secure-storage-unexpected-error" "$swift_out"
 }
 
+sha256_file() {
+    local file="$1"
+    local output
+    if command -v shasum >/dev/null 2>&1; then
+        output="$(shasum -a 256 -- "$file")"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        output="$(sha256sum -- "$file")"
+    else
+        echo "missing required tool: shasum or sha256sum" >&2
+        return 2
+    fi
+    printf '%s\n' "${output%% *}"
+}
+
+verify_sha256() {
+    local file="$1"
+    local expected="$2"
+    [[ -s "$file" ]] || {
+        echo "JNA artifact is missing or empty: $file" >&2
+        return 1
+    }
+
+    local actual
+    actual="$(sha256_file "$file")"
+    [[ "$actual" == "$expected" ]] || {
+        echo "JNA checksum mismatch for $file: expected $expected, got $actual" >&2
+        return 1
+    }
+}
+
 jna_jar() {
+    local jar
     if [[ -n "${JNA_JAR:-}" ]]; then
-        echo "$JNA_JAR"
-        return
+        jar="$JNA_JAR"
+    else
+        local jar_dir="$OUT/jna"
+        jar="$jar_dir/jna-$JNA_VERSION.jar"
+        if [[ ! -s "$jar" ]]; then
+            need_tool curl
+            mkdir -p "$jar_dir"
+            local download
+            download="$(mktemp "$jar_dir/.jna-$JNA_VERSION.XXXXXX")"
+            if ! curl --fail --location --silent --show-error \
+                --proto '=https' \
+                --proto-redir '=https' \
+                "https://repo1.maven.org/maven2/net/java/dev/jna/jna/$JNA_VERSION/jna-$JNA_VERSION.jar" \
+                --output "$download"; then
+                rm -f "$download"
+                return 1
+            fi
+            if ! verify_sha256 "$download" "$JNA_SHA256"; then
+                rm -f "$download"
+                return 1
+            fi
+            mv "$download" "$jar"
+        fi
     fi
 
-    local jar_dir="$OUT/jna"
-    local jar="$jar_dir/jna-$JNA_VERSION.jar"
-    if [[ ! -s "$jar" ]]; then
-        need_tool curl
-        mkdir -p "$jar_dir"
-        curl --fail --location --silent --show-error \
-            "https://repo1.maven.org/maven2/net/java/dev/jna/jna/$JNA_VERSION/jna-$JNA_VERSION.jar" \
-            --output "$jar"
-    fi
-    echo "$jar"
+    verify_sha256 "$jar" "$JNA_SHA256" || return
+    printf '%s\n' "$jar"
 }
 
 run_kotlin_harness() {
@@ -137,7 +182,7 @@ run_kotlin() {
     rm -rf "$kotlin_out"
     mkdir -p "$kotlin_out"
 
-    cargo run --features fixture-replay --bin uniffi-bindgen -- generate \
+    cargo run --locked --features fixture-replay --bin uniffi-bindgen -- generate \
         "$LIB_PATH" \
         --language kotlin \
         --out-dir "$kotlin_out"
@@ -149,22 +194,28 @@ run_kotlin() {
     run_kotlin_harness "SecureStorageUnexpectedError.kt" "SecureStorageUnexpectedError" "$kotlin_out" "$jna"
 }
 
-need_tool cargo
-cargo build -p aether-uniffi --features fixture-replay
+main() {
+    need_tool cargo
+    cargo build --locked -p aether-uniffi --features fixture-replay
 
-case "${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" in
-    swift)
-        run_swift
-        ;;
-    kotlin)
-        run_kotlin
-        ;;
-    swift,kotlin | kotlin,swift)
-        run_swift
-        run_kotlin
-        ;;
-    *)
-        echo "unsupported AETHER_BINDING_REPLAY_LANGS value: ${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" >&2
-        exit 2
-        ;;
-esac
+    case "${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" in
+        swift)
+            run_swift
+            ;;
+        kotlin)
+            run_kotlin
+            ;;
+        swift,kotlin | kotlin,swift)
+            run_swift
+            run_kotlin
+            ;;
+        *)
+            echo "unsupported AETHER_BINDING_REPLAY_LANGS value: ${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" >&2
+            exit 2
+            ;;
+    esac
+}
+
+if [[ "${AETHER_BINDING_FIXTURE_SOURCE_ONLY:-}" != "1" ]]; then
+    main "$@"
+fi
