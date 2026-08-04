@@ -6,8 +6,8 @@
 
 use crate::error::CryptoError;
 use crate::keys::{
-    SigningKeyPair, generate_signing_key_pair, parse_ed25519_verifying_key_bytes,
-    validate_x25519_public_key, verify_with_context,
+    IdentityKeyBundle, SigningKeyPair, generate_signing_key_pair, identity_key_binding_payload,
+    parse_ed25519_verifying_key_bytes, validate_x25519_public_key, verify_with_context,
 };
 use crate::signed_prekey::{SignedPreKey, generate_signed_prekey};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -15,8 +15,11 @@ use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
-// Domain separator for identity-key signatures over discovery keys.
+// Domain separator for identity-key signatures over discovery keys (IK→DK).
 const DISCOVERY_KEY_CONTEXT: &[u8] = b"AetherDK-v1:";
+
+// Domain separator for discovery-key signatures over identity keys (DK→IK).
+const DISCOVERY_TO_IDENTITY_CONTEXT: &[u8] = b"AetherDKToIK-v1:";
 
 /// A rotatable discovery key signed by the identity key.
 ///
@@ -112,6 +115,51 @@ impl DiscoveryKey {
     pub fn signing_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         self.signing.to_signing_bytes()
     }
+
+    /// Signs `identity`'s public halves with this discovery key's Ed25519 half.
+    ///
+    /// This is the DK→IK half of the mutual binding (AE-KEY-04). A peer starting from a discovery
+    /// key verifies it to learn that the discovery key really authorized the identity it was
+    /// handed, without trusting whoever handed it over.
+    ///
+    /// The signature covers only the two identity public halves — no epoch, no timestamp. The
+    /// IK→DK direction needs an epoch because one permanent identity key signs many discovery keys
+    /// over its lifetime; this direction does not, because a fresh discovery key is minted per
+    /// inbox generation and so already identifies the generation it belongs to.
+    ///
+    /// # Errors
+    /// - [`CryptoError::InvalidSignatureContext`] if the domain-separation context is empty, which
+    ///   a non-empty constant precludes.
+    pub fn sign_identity_binding(
+        &self,
+        identity: &IdentityKeyBundle,
+    ) -> Result<Signature, CryptoError> {
+        self.signing.sign_with_context(
+            DISCOVERY_TO_IDENTITY_CONTEXT,
+            &identity_key_binding_payload(&identity.public_key, &identity.verifying_key),
+        )
+    }
+}
+
+/// Verifies that `discovery_verifying_key` signed `identity`'s public halves.
+///
+/// The DK→IK half of the mutual binding (AE-KEY-04). Verify both directions before trusting a
+/// discovery-key-to-identity mapping: this one proves the discovery key authorized the identity,
+/// and [`verify_discovery_key_bundle`] proves the identity authorized the discovery key.
+///
+/// # Errors
+/// - [`CryptoError::SignatureInvalid`] when the signature does not validate.
+pub fn verify_discovery_to_identity_binding(
+    identity: &IdentityKeyBundle,
+    discovery_verifying_key: &VerifyingKey,
+    signature: &Signature,
+) -> Result<(), CryptoError> {
+    verify_with_context(
+        discovery_verifying_key,
+        DISCOVERY_TO_IDENTITY_CONTEXT,
+        &identity_key_binding_payload(&identity.public_key, &identity.verifying_key),
+        signature,
+    )
 }
 
 /// Public discovery-key material distributed to peers.
@@ -252,6 +300,7 @@ pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::{IdentityKeyBundle, sign_identity_key_binding};
     use crate::signed_prekey::verify_signed_prekey_bundle;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -530,6 +579,179 @@ mod tests {
         assert!(verify_signed_prekey_bundle(&bundle, setup.discovery_key.verifying_key()).is_ok());
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &setup.identity.verifying),
+            Err(CryptoError::SignatureInvalid)
+        ));
+    }
+
+    /// Builds a verifiable identity-key bundle from fixed secret bytes.
+    fn identity_bundle(signing_secret: [u8; 32], x25519_public: [u8; 32]) -> IdentityKeyBundle {
+        let signing = SigningKeyPair::from_signing_bytes(signing_secret);
+        let public_key = PublicKey::from(x25519_public);
+        let binding_signature = sign_identity_key_binding(&signing, &public_key).unwrap();
+        IdentityKeyBundle {
+            public_key,
+            verifying_key: signing.verifying,
+            binding_signature,
+        }
+    }
+
+    #[test]
+    fn identity_binding_verifies_under_discovery_verifying_key() {
+        let setup = setup();
+        let identity = identity_bundle([0x11u8; 32], [0x22u8; 32]);
+
+        let signature = setup
+            .discovery_key
+            .sign_identity_binding(&identity)
+            .unwrap();
+
+        assert!(
+            verify_discovery_to_identity_binding(
+                &identity,
+                setup.discovery_key.verifying_key(),
+                &signature,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn identity_binding_rejects_wrong_discovery_key() {
+        let mut setup = setup();
+        let identity = identity_bundle([0x11u8; 32], [0x22u8; 32]);
+        let other_discovery = generate_discovery_key(
+            &mut setup.rng,
+            &setup.identity,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
+
+        let signature = setup
+            .discovery_key
+            .sign_identity_binding(&identity)
+            .unwrap();
+
+        assert!(matches!(
+            verify_discovery_to_identity_binding(
+                &identity,
+                other_discovery.verifying_key(),
+                &signature,
+            ),
+            Err(CryptoError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn identity_binding_rejects_tampered_identity_halves() {
+        let setup = setup();
+        let identity = identity_bundle([0x11u8; 32], [0x22u8; 32]);
+        let signature = setup
+            .discovery_key
+            .sign_identity_binding(&identity)
+            .unwrap();
+        let verifying_key = setup.discovery_key.verifying_key();
+
+        let mut tampered_x25519 = identity_bundle([0x11u8; 32], [0x22u8; 32]);
+        let mut public_key_bytes = *tampered_x25519.public_key.as_bytes();
+        public_key_bytes[0] ^= 0x01;
+        tampered_x25519.public_key = PublicKey::from(public_key_bytes);
+        assert!(matches!(
+            verify_discovery_to_identity_binding(&tampered_x25519, verifying_key, &signature),
+            Err(CryptoError::SignatureInvalid)
+        ));
+
+        let tampered_ed25519 = identity_bundle([0x44u8; 32], [0x22u8; 32]);
+        assert!(matches!(
+            verify_discovery_to_identity_binding(&tampered_ed25519, verifying_key, &signature),
+            Err(CryptoError::SignatureInvalid)
+        ));
+    }
+
+    #[test]
+    fn identity_binding_rejects_signature_without_domain_prefix() {
+        let setup = setup();
+        let identity = identity_bundle([0x11u8; 32], [0x22u8; 32]);
+
+        let mut bare_payload = Vec::new();
+        bare_payload.extend_from_slice(identity.public_key.as_bytes());
+        bare_payload.extend_from_slice(identity.verifying_key.as_bytes());
+        let signature = setup.discovery_key.signing.sign(&bare_payload);
+
+        assert!(matches!(
+            verify_discovery_to_identity_binding(
+                &identity,
+                setup.discovery_key.verifying_key(),
+                &signature,
+            ),
+            Err(CryptoError::SignatureInvalid)
+        ));
+    }
+
+    /// Cross-implementation known-answer test for the discovery-to-identity binding.
+    ///
+    /// Source: the RFC 8032 section 7.1 reference implementation, run independently of
+    /// `ed25519-dalek` over the documented preimage. The reference was itself validated against
+    /// RFC 8032 test vector 1 before deriving this value, so agreement here means two unrelated
+    /// implementations produce the same bytes — not that Aether agrees with itself.
+    ///
+    /// Inputs:
+    /// - `discovery_signing_secret = [0x33; 32]`
+    /// - `identity_signing_secret = [0x11; 32]`
+    /// - `identity_x25519_public = [0x22; 32]`
+    ///
+    /// Preimage: `"AetherDKToIK-v1:" || ik_x25519 || ik_ed25519`, 80 bytes.
+    ///
+    /// Relay verifies this signature, so this vector is the contract between the two codebases.
+    #[test]
+    fn discovery_to_identity_binding_known_answer() {
+        const EXPECTED_SIGNATURE: [u8; 64] = [
+            23, 176, 66, 29, 223, 45, 7, 68, 91, 59, 148, 206, 50, 223, 115, 109, 194, 201, 106,
+            32, 137, 187, 191, 19, 110, 197, 48, 245, 250, 62, 46, 60, 44, 33, 24, 225, 68, 168,
+            87, 141, 199, 190, 216, 91, 107, 9, 172, 19, 103, 128, 236, 209, 71, 214, 224, 71, 59,
+            0, 112, 9, 51, 239, 0, 0,
+        ];
+
+        let discovery_signing = SigningKeyPair::from_signing_bytes([0x33u8; 32]);
+        let identity = identity_bundle([0x11u8; 32], [0x22u8; 32]);
+        let discovery_key = DiscoveryKey {
+            key_agreement_secret: StaticSecret::from([0x55u8; 32]),
+            key_agreement_public: PublicKey::from(&StaticSecret::from([0x55u8; 32])),
+            signing: discovery_signing,
+            epoch: FIXED_EPOCH,
+            created_at: FIXED_CREATED_AT,
+            identity_signature: Signature::from_bytes(&[0u8; 64]),
+        };
+
+        let signature = discovery_key.sign_identity_binding(&identity).unwrap();
+
+        assert_eq!(signature.to_bytes(), EXPECTED_SIGNATURE);
+        assert!(
+            verify_discovery_to_identity_binding(
+                &identity,
+                discovery_key.verifying_key(),
+                &signature,
+            )
+            .is_ok()
+        );
+    }
+
+    /// The two directions cover identical bytes, so only the context separates them. A discovery
+    /// key signing the identity halves under the identity-binding context must not satisfy the
+    /// discovery-to-identity check (AE-KEY-02).
+    #[test]
+    fn identity_binding_rejects_signature_made_under_identity_binding_context() {
+        let setup = setup();
+        let identity = identity_bundle([0x11u8; 32], [0x22u8; 32]);
+
+        let signature =
+            sign_identity_key_binding(&setup.discovery_key.signing, &identity.public_key).unwrap();
+
+        assert!(matches!(
+            verify_discovery_to_identity_binding(
+                &identity,
+                setup.discovery_key.verifying_key(),
+                &signature,
+            ),
             Err(CryptoError::SignatureInvalid)
         ));
     }

@@ -29,5 +29,22 @@ Supported version:
 
 - `2` is the current envelope. The earlier versionless 120-byte layout is not produced or read.
 
+## Regenerated for discovery-key blob version 2
+
+The envelope format is unchanged, but the discovery-key blob it carries verbatim moved from version
+1 to version 2: the blob gained a trailing 32-byte recipient delivery capability, and the inbox
+generation was rebased to start at 1 instead of 0. See
+[aether-core ADR 0013](../../docs/adr/0013-inbox-generation-and-delivery-capability.md).
+
+The fixture bytes were therefore regenerated with the same recipe recorded in `provenance`. Two
+consequences are visible in the vector and are expected:
+
+- `discovery_epoch` moved from 2 to 3, because the same three rotations now start at 1.
+- The discovery key material changed, because generating the capability draws from the same seeded
+  RNG and shifts the stream. The identity key material is unchanged, since it is drawn first.
+
+A version 1 blob is rejected on import by the length check. That is a deliberate break, taken while
+no client has implemented backup export or restore and so no such backup exists outside this file.
+
 Reads reject a backup whose Argon2id work factor falls below the normative floor (64 MiB memory,
 three iterations, single lane), blocking work-factor downgrade from old or hostile files.

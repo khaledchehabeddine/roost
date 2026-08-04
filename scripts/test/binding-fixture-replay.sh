@@ -110,8 +110,13 @@ run_kotlin_class() {
     local classpath="$1"
     local class_name="$2"
 
+    # jna.library.path is the property JNA's own loader reads; java.library.path alone is not
+    # enough for the direct-mapped Native.register call in the generated bindings. The
+    # DYLD_LIBRARY_PATH exported above cannot cover for it on macOS either, because SIP strips
+    # DYLD_* from the environment when launching a system binary such as /usr/bin/java.
     if command -v java >/dev/null 2>&1 && java -version >/dev/null 2>&1; then
         java \
+            -Djna.library.path="$ROOT/target/debug" \
             -Djava.library.path="$ROOT/target/debug" \
             -cp "$classpath" \
             "$class_name"

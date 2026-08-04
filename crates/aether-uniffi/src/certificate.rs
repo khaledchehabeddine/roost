@@ -43,23 +43,14 @@ pub struct RevocationState {
 pub struct SenderCertificateValidation {
     /// Known domain-signing keys.
     pub domain_signing_keys: Vec<DomainSigningKey>,
+    /// Relay domain incoming certificates must name.
+    pub expected_relay_domain: Vec<u8>,
     /// Caller-supplied revocation state.
     pub revocation_state: RevocationState,
     /// Caller-supplied Unix timestamp in seconds.
     pub reference_timestamp_secs: u64,
     /// Caller-supplied grace window in seconds.
     pub grace_window_secs: u64,
-}
-
-/// Sender Discovery Key contents carried by a validated certificate.
-#[derive(uniffi::Record)]
-pub struct SenderCertificateDiscoveryKey {
-    /// Sender DK X25519 public key. Always 32 bytes.
-    pub x25519_public_key: Vec<u8>,
-    /// Sender DK Ed25519 verifying-key bytes. Always 32 bytes.
-    pub ed25519_verifying_key: Vec<u8>,
-    /// Discovery Key epoch bound into the certificate.
-    pub epoch: u32,
 }
 
 /// Validated sender certificate contents.
@@ -69,8 +60,11 @@ pub struct ValidatedSenderCertificate {
     pub signing_key_identifier: Vec<u8>,
     /// Sender Identity Key bound by the certificate.
     pub identity_key: IdentityKey,
-    /// Sender Discovery Key bound by the certificate.
-    pub discovery_key: SenderCertificateDiscoveryKey,
+    /// Relay domain bound by the certificate.
+    ///
+    /// A certificate is valid only at the relay it names, so this cannot be replayed at another
+    /// relay that happens to trust the same signing key.
+    pub relay_domain: Vec<u8>,
     /// Certificate expiry Unix timestamp in seconds.
     pub expires_at_secs: u64,
 }
@@ -81,6 +75,7 @@ pub fn validate_sender_certificate(
     certificate: Vec<u8>,
     signature: Vec<u8>,
     domain_signing_keys: Vec<DomainSigningKey>,
+    expected_relay_domain: Vec<u8>,
     revocation_state: RevocationState,
     reference_timestamp_secs: u64,
     grace_window_secs: u64,
@@ -92,6 +87,7 @@ pub fn validate_sender_certificate(
         certificate: &certificate,
         signature: &signature,
         domain_signing_keys: &core_domain_keys,
+        expected_relay_domain: &expected_relay_domain,
         revocation_state: core_revocation_state,
         reference_timestamp_secs,
         grace_window_secs,
@@ -102,11 +98,7 @@ pub fn validate_sender_certificate(
             x25519_public_key: validated.identity_key.x25519_public_key.to_vec(),
             ed25519_verifying_key: validated.identity_key.ed25519_verifying_key.to_vec(),
         },
-        discovery_key: SenderCertificateDiscoveryKey {
-            x25519_public_key: validated.discovery_key.x25519_public_key.to_vec(),
-            ed25519_verifying_key: validated.discovery_key.ed25519_verifying_key.to_vec(),
-            epoch: validated.discovery_key.epoch,
-        },
+        relay_domain: validated.relay_domain,
         expires_at_secs: validated.expires_at_secs,
     })
 }

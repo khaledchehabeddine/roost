@@ -7,10 +7,10 @@ use aether_core::{
     ProtocolStateSnapshot, SenderIdentityMaterial, SessionId, derive_safety_number,
 };
 use aether_crypto::{
-    IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState, SigningKeyPair,
-    accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
-    sign_identity_key_binding,
+    IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState,
+    RecipientDeliveryCapability, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initiate, sign_identity_key_binding,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -815,4 +815,125 @@ fn contact_input_rejects_invalid_discovery_key_signature() {
         engine.record_contact(&ProtocolStateSnapshot::new(), identity),
         Err(ProtocolStateError::InvalidStateBinding { .. })
     ));
+}
+
+/// A peer's delivery capability is a bearer secret they handed us for submission (AE-CON-05).
+/// It must survive a commit and read back exactly, since a wrong byte means the relay rejects
+/// every submission to that contact.
+#[test]
+fn peer_inbox_authorization_round_trips_through_protocol_state() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+    let capability = RecipientDeliveryCapability::from_bytes([0x5Au8; 32]);
+
+    snapshot.apply_all(
+        engine
+            .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 4, &capability)
+            .unwrap(),
+    );
+
+    let stored = engine
+        .peer_inbox_authorization(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.generation, 4);
+    assert_eq!(*stored.capability.to_bytes(), *capability.to_bytes());
+}
+
+#[test]
+fn peer_inbox_authorization_is_absent_until_recorded() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+
+    assert!(
+        engine
+            .peer_inbox_authorization(&snapshot, setup.bob_identity)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Replaying an older inbox-authorization update must not roll a contact back to a capability
+/// they have already rotated away from — which is exactly what a blocked sender would want
+/// (AE-BLK-08).
+#[test]
+fn peer_inbox_authorization_refuses_to_go_backwards() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+    let current = RecipientDeliveryCapability::from_bytes([0x11u8; 32]);
+    let superseded = RecipientDeliveryCapability::from_bytes([0x22u8; 32]);
+    snapshot.apply_all(
+        engine
+            .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 7, &current)
+            .unwrap(),
+    );
+
+    let updates = engine
+        .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 6, &superseded)
+        .unwrap();
+
+    assert!(
+        updates.is_empty(),
+        "a lower generation must produce no update"
+    );
+    let stored = engine
+        .peer_inbox_authorization(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.generation, 7);
+    assert_eq!(*stored.capability.to_bytes(), *current.to_bytes());
+}
+
+#[test]
+fn peer_inbox_authorization_advances_on_a_higher_generation() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    snapshot.apply_all(
+        engine
+            .record_contact(&snapshot, contact_identity(&setup))
+            .unwrap()
+            .state_updates,
+    );
+    let first = RecipientDeliveryCapability::from_bytes([0x11u8; 32]);
+    let rotated = RecipientDeliveryCapability::from_bytes([0x22u8; 32]);
+    snapshot.apply_all(
+        engine
+            .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 1, &first)
+            .unwrap(),
+    );
+
+    snapshot.apply_all(
+        engine
+            .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 2, &rotated)
+            .unwrap(),
+    );
+
+    let stored = engine
+        .peer_inbox_authorization(&snapshot, setup.bob_identity)
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.generation, 2);
+    assert_eq!(*stored.capability.to_bytes(), *rotated.to_bytes());
 }

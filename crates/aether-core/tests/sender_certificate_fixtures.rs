@@ -1,7 +1,7 @@
 //! Replays checked-in sender certificate fixtures across the public Core validation API.
 
 use aether_core::{
-    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
+    DomainSigningKey, DomainSigningKeyStatus, RevocationState,
     SenderCertificateIdentityKey, SenderCertificateValidationError,
     SenderCertificateValidationInput, validate_sender_certificate,
 };
@@ -10,6 +10,7 @@ use serde::Deserialize;
 #[derive(Deserialize)]
 struct FixtureFile {
     version: u8,
+    relay_domain: String,
     reference_timestamp_secs: u64,
     grace_window_secs: u64,
     fixtures: Vec<Fixture>,
@@ -44,9 +45,6 @@ struct DecodedFixture {
     signing_key_identifier_hex: String,
     identity_x25519_public_key_hex: String,
     identity_ed25519_verifying_key_hex: String,
-    discovery_x25519_public_key_hex: String,
-    discovery_ed25519_verifying_key_hex: String,
-    discovery_epoch: u32,
     expires_at_secs: u64,
 }
 
@@ -94,6 +92,7 @@ fn replay_fixture(fixture_file: &FixtureFile, fixture: &Fixture) {
         certificate: &certificate,
         signature: &signature,
         domain_signing_keys: &domain_signing_keys,
+        expected_relay_domain: fixture_file.relay_domain.as_bytes(),
         revocation_state: RevocationState::Available(&revoked_identity_keys),
         reference_timestamp_secs: fixture_file.reference_timestamp_secs,
         grace_window_secs: fixture_file.grace_window_secs,
@@ -115,9 +114,9 @@ fn replay_fixture(fixture_file: &FixtureFile, fixture: &Fixture) {
                 fixture.name
             );
             assert_eq!(
-                validated.discovery_key,
-                decoded_discovery_key(&fixture.decoded),
-                "{} discovery key",
+                validated.relay_domain,
+                fixture_file.relay_domain.as_bytes().to_vec(),
+                "{} relay domain",
                 fixture.name
             );
             assert_eq!(
@@ -173,13 +172,6 @@ fn decoded_identity_key(decoded: &DecodedFixture) -> SenderCertificateIdentityKe
     }
 }
 
-fn decoded_discovery_key(decoded: &DecodedFixture) -> SenderCertificateDiscoveryKey {
-    SenderCertificateDiscoveryKey {
-        x25519_public_key: hex_array(&decoded.discovery_x25519_public_key_hex),
-        ed25519_verifying_key: hex_array(&decoded.discovery_ed25519_verifying_key_hex),
-        epoch: decoded.discovery_epoch,
-    }
-}
 
 fn hex_array<const N: usize>(hex: &str) -> [u8; N] {
     hex::decode(hex).unwrap().try_into().unwrap()

@@ -2,8 +2,8 @@ use crate::clock::Clock;
 use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
 use aether_crypto::{
-    DiscoveryKey, DiscoveryKeyBundle, SigningKeyPair, generate_discovery_key,
-    verify_discovery_key_bundle,
+    DiscoveryKey, DiscoveryKeyBundle, RecipientDeliveryCapability, Signature, SigningKeyPair,
+    generate_discovery_key, generate_recipient_delivery_capability, verify_discovery_key_bundle,
 };
 use rand::{CryptoRng, RngCore};
 use std::error::Error;
@@ -12,10 +12,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::Zeroizing;
 
 const DISCOVERY_KEY: &str = "discovery/current";
-const DISCOVERY_KEY_VERSION: u8 = 1;
-// Blob layout: version (1) | epoch (4) | x25519 secret (32) | ed25519 secret (32) |
-// identity signature (64) | created_at (8).
-const DISCOVERY_KEY_BLOB_LEN: usize = 1 + 4 + 32 + 32 + 64 + 8;
+// Version 2 added the recipient delivery capability. A version 1 blob is rejected by the length
+// check in `checked_blob` before the version byte is even read; it predates the inbox generation
+// model and has no capability to migrate, so the host must reset and re-register.
+const DISCOVERY_KEY_VERSION: u8 = 2;
+// Blob layout: version (1) | generation (4) | x25519 secret (32) | ed25519 secret (32) |
+// identity signature (64) | created_at (8) | delivery capability (32).
+const DISCOVERY_KEY_BLOB_LEN: usize = 1 + 4 + 32 + 32 + 64 + 8 + 32;
+const CAPABILITY_OFFSET: usize = 141;
+// Identity creation starts at inbox generation 1 (AE-IDN-07).
+const FIRST_INBOX_GENERATION: u32 = 1;
 
 /// Errors returned by discovery-key operations.
 #[derive(Debug)]
@@ -120,6 +126,24 @@ impl DiscoveryKeyManager {
         Ok(self.current()?.bundle())
     }
 
+    // Returns the DK→IK binding for `discovery_key` against the stored identity (AE-KEY-04).
+    //
+    // Recomputed per call rather than persisted. The signature covers only the identity's two
+    // public halves — no epoch, no timestamp — so it holds nothing time-varying, and Ed25519 is
+    // deterministic, which makes every recomputation byte-identical. Storing it would grow the
+    // discovery-key blob and force a version bump to record a value already derivable from it.
+    pub(crate) fn identity_binding(
+        &self,
+        discovery_key: &DiscoveryKey,
+    ) -> Result<Signature, DiscoveryKeyError> {
+        let identity = self.identity.load_identity()?;
+        discovery_key
+            .sign_identity_binding(&identity.identity_key_bundle()?)
+            .map_err(|e| {
+                DiscoveryKeyError::InvalidData(format!("discovery-to-identity binding: {e}"))
+            })
+    }
+
     pub(crate) fn stored_status(&self) -> Result<DiscoveryKeyStatus, DiscoveryKeyError> {
         let Some(raw) = self.load_raw()? else {
             return Ok(DiscoveryKeyStatus::Absent);
@@ -140,7 +164,7 @@ impl DiscoveryKeyManager {
     ) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let identity = self.identity.load_identity()?;
         let epoch = match self.stored_status()? {
-            DiscoveryKeyStatus::Absent => 0,
+            DiscoveryKeyStatus::Absent => FIRST_INBOX_GENERATION,
             DiscoveryKeyStatus::Present { epoch } => epoch.saturating_add(1),
             DiscoveryKeyStatus::Malformed => {
                 return Err(DiscoveryKeyError::InvalidData(
@@ -150,10 +174,24 @@ impl DiscoveryKeyManager {
         };
         let now = self.now_secs()?;
         let discovery_key = generate_discovery_key(rng, identity.signing_key_pair(), epoch, now);
-        let blob = encode_discovery_key(&discovery_key);
+        // The capability rotates with the discovery key because both belong to one inbox
+        // generation (AE-IDN-07), and they are written in one store so they cannot diverge.
+        let capability = generate_recipient_delivery_capability(rng);
+        let blob = encode_discovery_key(&discovery_key, &capability);
         let mut storage = self.lock_storage()?;
         storage.store(DISCOVERY_KEY, &*blob)?;
         Ok(discovery_key)
+    }
+
+    // Returns the recipient delivery capability bound to the current inbox generation (AE-IDN-06).
+    //
+    // Secret-bearing: the caller presents it to authorized contacts and never registers it. Only
+    // its verifier (AE-IDN-10) is registered with the relay.
+    pub(crate) fn current_capability(
+        &self,
+    ) -> Result<RecipientDeliveryCapability, DiscoveryKeyError> {
+        let raw = self.load_raw()?.ok_or(DiscoveryKeyError::NotFound)?;
+        Ok(decode_capability(checked_blob(&raw)?))
     }
 
     // Use `KeyStore::reset` to clear signed pre-key state before discovery key and identity.
@@ -239,15 +277,25 @@ fn checked_blob(raw: &[u8]) -> Result<&[u8; DISCOVERY_KEY_BLOB_LEN], DiscoveryKe
     Ok(blob)
 }
 
-fn encode_discovery_key(discovery_key: &DiscoveryKey) -> Zeroizing<[u8; DISCOVERY_KEY_BLOB_LEN]> {
+fn encode_discovery_key(
+    discovery_key: &DiscoveryKey,
+    capability: &RecipientDeliveryCapability,
+) -> Zeroizing<[u8; DISCOVERY_KEY_BLOB_LEN]> {
     let mut blob = Zeroizing::new([0u8; DISCOVERY_KEY_BLOB_LEN]);
     blob[0] = DISCOVERY_KEY_VERSION;
     blob[1..5].copy_from_slice(&discovery_key.epoch().to_be_bytes());
     blob[5..37].copy_from_slice(&*discovery_key.key_agreement_secret_bytes());
     blob[37..69].copy_from_slice(&*discovery_key.signing_secret_bytes());
     blob[69..133].copy_from_slice(&discovery_key.identity_signature().to_bytes());
-    blob[133..DISCOVERY_KEY_BLOB_LEN].copy_from_slice(&discovery_key.created_at().to_be_bytes());
+    blob[133..CAPABILITY_OFFSET].copy_from_slice(&discovery_key.created_at().to_be_bytes());
+    blob[CAPABILITY_OFFSET..DISCOVERY_KEY_BLOB_LEN].copy_from_slice(&*capability.to_bytes());
     blob
+}
+
+fn decode_capability(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> RecipientDeliveryCapability {
+    let mut capability = Zeroizing::new([0u8; 32]);
+    capability.copy_from_slice(&blob[CAPABILITY_OFFSET..DISCOVERY_KEY_BLOB_LEN]);
+    RecipientDeliveryCapability::from_bytes(*capability)
 }
 
 fn decode_discovery_key(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> DiscoveryKey {
@@ -259,7 +307,7 @@ fn decode_discovery_key(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> DiscoveryKey {
     signature.copy_from_slice(&blob[69..133]);
     let epoch = read_epoch(blob);
     let mut created_at_bytes = [0u8; 8];
-    created_at_bytes.copy_from_slice(&blob[133..DISCOVERY_KEY_BLOB_LEN]);
+    created_at_bytes.copy_from_slice(&blob[133..CAPABILITY_OFFSET]);
     DiscoveryKey::from_secret_bytes(
         key_agreement_secret,
         signing_secret,
@@ -379,7 +427,7 @@ mod tests {
         discovery.rotate_now(&mut OsRng).unwrap();
         assert!(matches!(
             discovery.stored_status().unwrap(),
-            DiscoveryKeyStatus::Present { epoch: 0 }
+            DiscoveryKeyStatus::Present { epoch: 1 }
         ));
         discovery
             .lock_storage()
@@ -393,36 +441,63 @@ mod tests {
     }
 
     #[test]
-    fn rotate_now_establishes_epoch_zero_and_verifies() {
+    fn rotate_now_establishes_generation_one_and_verifies() {
         let DiscoveryKeySetup {
             identity,
             manager: discovery,
         } = setup_with_identity();
         let rotated = discovery.rotate_now(&mut OsRng).unwrap();
-        assert_eq!(rotated.epoch(), 0);
+        // Identity creation starts at inbox generation 1, not 0 (AE-IDN-07).
+        assert_eq!(rotated.epoch(), 1);
         let bundle = discovery.current_bundle().unwrap();
-        assert_eq!(bundle.epoch, 0);
+        assert_eq!(bundle.epoch, 1);
         let loaded_identity = identity.load_identity().unwrap();
         assert!(verify_discovery_key_bundle(&bundle, loaded_identity.verifying_key()).is_ok());
     }
 
+    /// The discovery key and the delivery capability share one generation, so rotation must
+    /// replace both (AE-IDN-07). A rotation that advanced the generation while leaving the
+    /// capability intact would leave a blocked contact still able to deliver (AE-BLK-08).
     #[test]
-    fn rotate_now_advances_epoch() {
+    fn rotation_replaces_the_delivery_capability() {
         let discovery = setup_with_identity().manager;
-        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 0);
+        discovery.rotate_now(&mut OsRng).unwrap();
+        let before = *discovery.current_capability().unwrap().to_bytes();
+
+        discovery.rotate_now(&mut OsRng).unwrap();
+        let after = *discovery.current_capability().unwrap().to_bytes();
+
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn capability_survives_a_reload() {
+        let discovery = setup_with_identity().manager;
+        discovery.rotate_now(&mut OsRng).unwrap();
+
+        let first = *discovery.current_capability().unwrap().to_bytes();
+        let second = *discovery.current_capability().unwrap().to_bytes();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn rotate_now_advances_the_generation() {
+        let discovery = setup_with_identity().manager;
         assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 1);
         assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 2);
+        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 3);
     }
 
     #[test]
     fn rotate_now_recovers_from_tampered_signature_preserving_epoch() {
         let discovery = setup_with_identity().manager;
-        // Reach epoch 1 first, so recovery to epoch 2 proves the stored epoch is read, not reset.
+        // Reach generation 2 first, so recovery to 3 proves the stored value is read, not reset.
         discovery.rotate_now(&mut OsRng).unwrap();
         let rotated = discovery.rotate_now(&mut OsRng).unwrap();
-        assert_eq!(rotated.epoch(), 1);
+        assert_eq!(rotated.epoch(), 2);
 
-        // Corrupt the signature of the epoch-1 key.
+        // Corrupt the signature of the generation-2 key.
         let mut blob = discovery
             .lock_storage()
             .unwrap()
@@ -442,7 +517,7 @@ mod tests {
         ));
 
         let recovered = discovery.rotate_now(&mut OsRng).unwrap();
-        assert_eq!(recovered.epoch(), 2);
+        assert_eq!(recovered.epoch(), 3);
         assert!(discovery.current().is_ok());
     }
 
@@ -478,7 +553,7 @@ mod tests {
             .store(DISCOVERY_KEY, &[0xAAu8; 50])
             .unwrap();
         discovery.reset().unwrap();
-        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 0);
+        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 1);
     }
 
     #[test]
@@ -486,9 +561,15 @@ mod tests {
         let identity = setup_with_identity().identity;
         let loaded = identity.load_identity().unwrap();
         let original = generate_discovery_key(&mut OsRng, loaded.signing_key_pair(), 9, FIXED_NOW);
-        let blob = encode_discovery_key(&original);
+        let capability = generate_recipient_delivery_capability(&mut OsRng);
+        let blob = encode_discovery_key(&original, &capability);
         assert_eq!(blob.len(), DISCOVERY_KEY_BLOB_LEN);
         let restored = decode_discovery_key(&blob);
+        assert_eq!(
+            *decode_capability(&blob).to_bytes(),
+            *capability.to_bytes(),
+            "the capability must survive the same round trip as the key"
+        );
         assert_eq!(
             original.public_key().as_bytes(),
             restored.public_key().as_bytes()
@@ -519,14 +600,14 @@ mod tests {
         let discovery = setup_with_identity().manager;
         discovery.rotate_now(&mut OsRng).unwrap();
         let exported = discovery.rotate_now(&mut OsRng).unwrap();
-        assert_eq!(exported.epoch(), 1);
+        assert_eq!(exported.epoch(), 2);
         let blob = discovery.export_blob().unwrap();
 
         discovery.reset().unwrap();
         discovery.restore_from_blob(&blob).unwrap();
 
         let restored = discovery.current().unwrap();
-        assert_eq!(restored.epoch(), 1);
+        assert_eq!(restored.epoch(), 2);
         assert_eq!(
             restored.public_key().as_bytes(),
             exported.public_key().as_bytes()

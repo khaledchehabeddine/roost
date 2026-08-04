@@ -14,8 +14,10 @@ use std::error::Error;
 use std::fmt;
 use subtle::{Choice, ConstantTimeEq};
 
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
-const CERTIFICATE_VERSION: u8 = 1;
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
+const CERTIFICATE_VERSION: u8 = 2;
+// A relay domain is a DNS name; 255 is the widest a single length byte can express.
+const MAX_RELAY_DOMAIN_LEN: usize = 255;
 const IDENTITY_KEY_DOMAIN_TAG: &[u8] = b"AetherIK-v1:";
 const SIGNATURE_LEN: usize = 64;
 const MAX_SIGNING_KEY_IDENTIFIER_LEN: usize = 64;
@@ -33,6 +35,12 @@ pub struct SenderCertificateValidationInput<'a> {
     pub signature: &'a [u8],
     /// Known domain-signing keys indexed by certificate signing-key identifier.
     pub domain_signing_keys: &'a [DomainSigningKey<'a>],
+    /// Relay domain the recipient expects the certificate to name (AE-CRT-01).
+    ///
+    /// Checked against the domain signed into the certificate. Without this comparison the signed
+    /// domain would be decorative and a certificate would stay replayable at any relay that trusts
+    /// the same signing key.
+    pub expected_relay_domain: &'a [u8],
     /// Caller-supplied revocation input for the sender Identity Key check.
     pub revocation_state: RevocationState<'a>,
     /// Caller-supplied Unix timestamp in seconds used for expiry evaluation.
@@ -122,8 +130,8 @@ pub struct ValidatedSenderCertificate {
     pub signing_key_identifier: Vec<u8>,
     /// Sender Identity Key bound by the certificate.
     pub identity_key: SenderCertificateIdentityKey,
-    /// Sender Discovery Key bound by the certificate.
-    pub discovery_key: SenderCertificateDiscoveryKey,
+    /// Relay domain bound by the certificate (AE-CRT-01).
+    pub relay_domain: Vec<u8>,
     /// Certificate expiry Unix timestamp in seconds.
     pub expires_at_secs: u64,
 }
@@ -160,6 +168,8 @@ pub enum DevelopmentCertificateError {
     InvalidIdentityKey,
     /// The sender Discovery Key is not canonically encoded.
     InvalidDiscoveryKey,
+    /// The relay domain is empty or longer than a single length byte can express.
+    InvalidRelayDomain,
 }
 
 #[cfg(feature = "development-certificates")]
@@ -177,6 +187,9 @@ impl fmt::Display for DevelopmentCertificateError {
             }
             Self::InvalidDiscoveryKey => {
                 write!(f, "development certificate discovery key is invalid")
+            }
+            Self::InvalidRelayDomain => {
+                write!(f, "development certificate relay domain is invalid")
             }
         }
     }
@@ -267,31 +280,31 @@ impl DevelopmentCertificateAuthority {
     pub fn issue(
         &self,
         identity_key: SenderCertificateIdentityKey,
-        discovery_key: SenderCertificateDiscoveryKey,
+        relay_domain: &[u8],
         expires_at_secs: u64,
     ) -> Result<DevelopmentSenderCertificate, DevelopmentCertificateError> {
         validate_identity_key(&identity_key)
             .map_err(|_| DevelopmentCertificateError::InvalidIdentityKey)?;
-        validate_discovery_key(&discovery_key)
-            .map_err(|_| DevelopmentCertificateError::InvalidDiscoveryKey)?;
+        if relay_domain.is_empty() || relay_domain.len() > MAX_RELAY_DOMAIN_LEN {
+            return Err(DevelopmentCertificateError::InvalidRelayDomain);
+        }
 
         let mut certificate = Vec::with_capacity(
             CERTIFICATE_DOMAIN_TAG.len()
-                + 2
+                + 3
                 + self.signing_key_identifier.len()
-                + PUBLIC_KEY_LEN * 4
-                + 4
+                + relay_domain.len()
+                + PUBLIC_KEY_LEN * 2
                 + 8,
         );
         certificate.extend_from_slice(CERTIFICATE_DOMAIN_TAG);
         certificate.push(CERTIFICATE_VERSION);
         certificate.push(self.signing_key_identifier.len() as u8);
         certificate.extend_from_slice(&self.signing_key_identifier);
+        certificate.push(relay_domain.len() as u8);
+        certificate.extend_from_slice(relay_domain);
         certificate.extend_from_slice(&identity_key.x25519_public_key);
         certificate.extend_from_slice(&identity_key.ed25519_verifying_key);
-        certificate.extend_from_slice(&discovery_key.x25519_public_key);
-        certificate.extend_from_slice(&discovery_key.ed25519_verifying_key);
-        certificate.extend_from_slice(&discovery_key.epoch.to_be_bytes());
         certificate.extend_from_slice(&expires_at_secs.to_be_bytes());
         let signature = self.signing_key.sign(&certificate).to_bytes().to_vec();
 
@@ -319,6 +332,8 @@ fn validate_development_signing_key_identifier(
 pub enum SenderCertificateValidationError {
     /// Certificate bytes are malformed.
     MalformedCertificate,
+    /// The certificate names a different relay domain than the recipient expects.
+    RelayDomainMismatch,
     /// A public-key byte field is not canonically encoded.
     InvalidKeyEncoding,
     /// The certificate names no known signing-key identifier.
@@ -341,6 +356,9 @@ impl fmt::Display for SenderCertificateValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::MalformedCertificate => write!(f, "sender certificate is malformed"),
+            Self::RelayDomainMismatch => {
+                write!(f, "sender certificate names an unexpected relay domain")
+            }
             Self::InvalidKeyEncoding => write!(f, "sender certificate key encoding is invalid"),
             Self::UnknownSigningKeyIdentifier => {
                 write!(f, "sender certificate signing-key identifier is unknown")
@@ -365,8 +383,8 @@ impl Error for SenderCertificateValidationError {}
 
 struct ParsedSenderCertificate<'a> {
     signing_key_identifier: &'a [u8],
+    relay_domain: &'a [u8],
     identity_key: SenderCertificateIdentityKey,
-    discovery_key: SenderCertificateDiscoveryKey,
     expires_at_secs: u64,
 }
 
@@ -403,7 +421,9 @@ pub fn validate_sender_certificate(
 ) -> Result<ValidatedSenderCertificate, SenderCertificateValidationError> {
     let certificate = parse_certificate(input.certificate)?;
     validate_identity_key(&certificate.identity_key)?;
-    validate_discovery_key(&certificate.discovery_key)?;
+    if certificate.relay_domain != input.expected_relay_domain {
+        return Err(SenderCertificateValidationError::RelayDomainMismatch);
+    }
 
     let domain_signing_key = matching_domain_signing_key(
         certificate.signing_key_identifier,
@@ -437,7 +457,7 @@ pub fn validate_sender_certificate(
     Ok(ValidatedSenderCertificate {
         signing_key_identifier: certificate.signing_key_identifier.to_vec(),
         identity_key: certificate.identity_key,
-        discovery_key: certificate.discovery_key,
+        relay_domain: certificate.relay_domain.to_vec(),
         expires_at_secs: certificate.expires_at_secs,
     })
 }
@@ -461,21 +481,24 @@ fn parse_certificate(
     if identifier_len == 0 || identifier_len > MAX_SIGNING_KEY_IDENTIFIER_LEN {
         return Err(SenderCertificateValidationError::MalformedCertificate);
     }
+    let signing_key_identifier = read_slice(bytes, &mut offset, identifier_len)?;
+    if offset >= bytes.len() {
+        return Err(SenderCertificateValidationError::MalformedCertificate);
+    }
+    let domain_len = bytes[offset] as usize;
+    offset += 1;
+    if domain_len == 0 || domain_len > MAX_RELAY_DOMAIN_LEN {
+        return Err(SenderCertificateValidationError::MalformedCertificate);
+    }
     let expected_len =
-        CERTIFICATE_DOMAIN_TAG.len() + 2 + identifier_len + PUBLIC_KEY_LEN * 4 + 4 + 8;
+        CERTIFICATE_DOMAIN_TAG.len() + 3 + identifier_len + domain_len + PUBLIC_KEY_LEN * 2 + 8;
     if bytes.len() != expected_len {
         return Err(SenderCertificateValidationError::MalformedCertificate);
     }
-
-    let signing_key_identifier = read_slice(bytes, &mut offset, identifier_len)?;
+    let relay_domain = read_slice(bytes, &mut offset, domain_len)?;
     let identity_key = SenderCertificateIdentityKey {
         x25519_public_key: read_array(bytes, &mut offset)?,
         ed25519_verifying_key: read_array(bytes, &mut offset)?,
-    };
-    let discovery_key = SenderCertificateDiscoveryKey {
-        x25519_public_key: read_array(bytes, &mut offset)?,
-        ed25519_verifying_key: read_array(bytes, &mut offset)?,
-        epoch: u32::from_be_bytes(read_array(bytes, &mut offset)?),
     };
     let expires_at_secs = u64::from_be_bytes(read_array(bytes, &mut offset)?);
     if offset != bytes.len() {
@@ -484,8 +507,8 @@ fn parse_certificate(
 
     Ok(ParsedSenderCertificate {
         signing_key_identifier,
+        relay_domain,
         identity_key,
-        discovery_key,
         expires_at_secs,
     })
 }
@@ -551,14 +574,6 @@ fn validate_identity_key(
     Ok(())
 }
 
-fn validate_discovery_key(
-    discovery_key: &SenderCertificateDiscoveryKey,
-) -> Result<(), SenderCertificateValidationError> {
-    validate_x25519_public_key(&discovery_key.x25519_public_key)?;
-    parse_ed25519_verifying_key_bytes(&discovery_key.ed25519_verifying_key)?;
-    Ok(())
-}
-
 fn validate_x25519_public_key(
     bytes: &[u8; PUBLIC_KEY_LEN],
 ) -> Result<(), SenderCertificateValidationError> {
@@ -618,7 +633,6 @@ mod tests {
         certificate: Vec<u8>,
         signature: Vec<u8>,
         identity_key: SenderCertificateIdentityKey,
-        discovery_key: SenderCertificateDiscoveryKey,
         expires_at_secs: u64,
     }
 
@@ -633,18 +647,13 @@ mod tests {
         }
     }
 
-    fn discovery_key() -> SenderCertificateDiscoveryKey {
-        SenderCertificateDiscoveryKey {
-            x25519_public_key: [0x31; PUBLIC_KEY_LEN],
-            ed25519_verifying_key: signing_key(0x41).verifying.to_bytes(),
-            epoch: 7,
-        }
-    }
+    const RELAY_DOMAIN: &[u8] = b"relay.example";
+    const OTHER_RELAY_DOMAIN: &[u8] = b"other.example";
 
     fn certificate_bytes(
         identifier: &[u8],
         identity_key: SenderCertificateIdentityKey,
-        discovery_key: SenderCertificateDiscoveryKey,
+        relay_domain: &[u8],
         expires_at_secs: u64,
     ) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -652,11 +661,10 @@ mod tests {
         bytes.push(CERTIFICATE_VERSION);
         bytes.push(identifier.len() as u8);
         bytes.extend_from_slice(identifier);
+        bytes.push(relay_domain.len() as u8);
+        bytes.extend_from_slice(relay_domain);
         bytes.extend_from_slice(&identity_key.x25519_public_key);
         bytes.extend_from_slice(&identity_key.ed25519_verifying_key);
-        bytes.extend_from_slice(&discovery_key.x25519_public_key);
-        bytes.extend_from_slice(&discovery_key.ed25519_verifying_key);
-        bytes.extend_from_slice(&discovery_key.epoch.to_be_bytes());
         bytes.extend_from_slice(&expires_at_secs.to_be_bytes());
         bytes
     }
@@ -667,15 +675,13 @@ mod tests {
         expires_at_secs: u64,
     ) -> SignedCertificate {
         let identity_key = identity_key();
-        let discovery_key = discovery_key();
         let certificate =
-            certificate_bytes(identifier, identity_key, discovery_key, expires_at_secs);
+            certificate_bytes(identifier, identity_key, RELAY_DOMAIN, expires_at_secs);
         let signature = domain_key.sign(&certificate).to_bytes().to_vec();
         SignedCertificate {
             certificate,
             signature,
             identity_key,
-            discovery_key,
             expires_at_secs,
         }
     }
@@ -689,6 +695,7 @@ mod tests {
             certificate: &signed.certificate,
             signature: &signed.signature,
             domain_signing_keys,
+            expected_relay_domain: RELAY_DOMAIN,
             revocation_state: RevocationState::Available(revoked_identity_keys),
             reference_timestamp_secs: NOW_SECS,
             grace_window_secs: GRACE_SECS,
@@ -711,6 +718,40 @@ mod tests {
             Ok(_) => panic!("sender certificate validated unexpectedly"),
             Err(actual) => assert_eq!(actual, expected),
         }
+    }
+
+    /// A certificate issued for one relay must not validate at another, even when both relays
+    /// trust the same domain-signing key. Without the signed relay domain this replay succeeded,
+    /// which is why AE-CRT-01 and REL-RLY-23 both require the domain in the signed content.
+    #[test]
+    fn certificate_for_another_relay_is_rejected() {
+        let domain_key = signing_key(0x01);
+        let verifying = domain_key.verifying.to_bytes();
+        let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying)];
+        let identity_key = identity_key();
+        // Issued naming a different relay, but signed by a key this recipient trusts.
+        let certificate = certificate_bytes(
+            PRIMARY_IDENTIFIER,
+            identity_key,
+            OTHER_RELAY_DOMAIN,
+            NOW_SECS + 300,
+        );
+        let signature = domain_key.sign(&certificate).to_bytes().to_vec();
+
+        let result = validate_sender_certificate(SenderCertificateValidationInput {
+            certificate: &certificate,
+            signature: &signature,
+            domain_signing_keys: &domain_keys,
+            expected_relay_domain: RELAY_DOMAIN,
+            revocation_state: RevocationState::Available(&[]),
+            reference_timestamp_secs: NOW_SECS,
+            grace_window_secs: GRACE_SECS,
+        });
+
+        assert_eq!(
+            result.unwrap_err(),
+            SenderCertificateValidationError::RelayDomainMismatch
+        );
     }
 
     #[test]
@@ -740,7 +781,7 @@ mod tests {
 
         assert_eq!(primary.signing_key_identifier, PRIMARY_IDENTIFIER);
         assert_eq!(primary.identity_key, primary_certificate.identity_key);
-        assert_eq!(primary.discovery_key, primary_certificate.discovery_key);
+        assert_eq!(primary.relay_domain, RELAY_DOMAIN.to_vec());
         assert_eq!(secondary.signing_key_identifier, SECONDARY_IDENTIFIER);
         assert_eq!(
             secondary.expires_at_secs,
@@ -952,18 +993,16 @@ mod tests {
         let verifying_key = signing_key.verifying.to_bytes();
         let mut identity_key = identity_key();
         identity_key.x25519_public_key = x25519_field_modulus();
-        let discovery_key = discovery_key();
         let certificate = certificate_bytes(
             PRIMARY_IDENTIFIER,
             identity_key,
-            discovery_key,
+            RELAY_DOMAIN,
             NOW_SECS + 300,
         );
         let signed = SignedCertificate {
             signature: signing_key.sign(&certificate).to_bytes().to_vec(),
             certificate,
             identity_key,
-            discovery_key,
             expires_at_secs: NOW_SECS + 300,
         };
         let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
@@ -980,18 +1019,16 @@ mod tests {
         let verifying_key = signing_key.verifying.to_bytes();
         let mut identity_key = identity_key();
         identity_key.x25519_public_key = [0; PUBLIC_KEY_LEN];
-        let discovery_key = discovery_key();
         let certificate = certificate_bytes(
             PRIMARY_IDENTIFIER,
             identity_key,
-            discovery_key,
+            RELAY_DOMAIN,
             NOW_SECS + 300,
         );
         let signed = SignedCertificate {
             signature: signing_key.sign(&certificate).to_bytes().to_vec(),
             certificate,
             identity_key,
-            discovery_key,
             expires_at_secs: NOW_SECS + 300,
         };
         let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
@@ -1009,18 +1046,16 @@ mod tests {
         let mut identity_key = identity_key();
         identity_key.x25519_public_key = x25519_field_modulus();
         identity_key.x25519_public_key[0] -= 1;
-        let discovery_key = discovery_key();
         let certificate = certificate_bytes(
             PRIMARY_IDENTIFIER,
             identity_key,
-            discovery_key,
+            RELAY_DOMAIN,
             NOW_SECS + 300,
         );
         let signed = SignedCertificate {
             signature: signing_key.sign(&certificate).to_bytes().to_vec(),
             certificate,
             identity_key,
-            discovery_key,
             expires_at_secs: NOW_SECS + 300,
         };
         let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
@@ -1038,18 +1073,16 @@ mod tests {
         let mut identity_key = identity_key();
         identity_key.ed25519_verifying_key = [0; PUBLIC_KEY_LEN];
         identity_key.ed25519_verifying_key[0] = 1;
-        let discovery_key = discovery_key();
         let certificate = certificate_bytes(
             PRIMARY_IDENTIFIER,
             identity_key,
-            discovery_key,
+            RELAY_DOMAIN,
             NOW_SECS + 300,
         );
         let signed = SignedCertificate {
             signature: signing_key.sign(&certificate).to_bytes().to_vec(),
             certificate,
             identity_key,
-            discovery_key,
             expires_at_secs: NOW_SECS + 300,
         };
         let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];

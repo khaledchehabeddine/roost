@@ -7,7 +7,7 @@ use crate::error::AetherError;
 use crate::records::{DiscoveryKeyBundle, Identity, fixed_32};
 use aether_core::{
     DevelopmentCertificateAuthority as CoreDevelopmentCertificateAuthority,
-    SenderCertificateDiscoveryKey, SenderCertificateIdentityKey,
+    SenderCertificateIdentityKey,
 };
 use std::sync::Arc;
 
@@ -82,9 +82,9 @@ impl DevelopmentCertificateAuthority {
     /// let store = KeyStore::new(storage);
     /// let identity = store.generate_identity()?;
     /// store.rotate_signed_prekey_now()?;
-    /// let discovery_key = store.current_publication_bundle()?.discovery_key;
+    /// let relay_domain = b"relay.example".to_vec();
     /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec())?;
-    /// let issued = authority.issue(identity, discovery_key, 1_800_000_000)?;
+    /// let issued = authority.issue(identity, relay_domain, 1_800_000_000)?;
     /// assert_eq!(issued.signature.len(), 64);
     /// # Ok::<(), aether::AetherError>(())
     /// ```
@@ -95,7 +95,7 @@ impl DevelopmentCertificateAuthority {
     pub fn issue(
         &self,
         identity: Identity,
-        discovery_key: DiscoveryKeyBundle,
+        relay_domain: Vec<u8>,
         expires_at_secs: u64,
     ) -> Result<DevelopmentSenderCertificate, AetherError> {
         let identity_key = SenderCertificateIdentityKey {
@@ -108,20 +108,9 @@ impl DevelopmentCertificateAuthority {
                 "development certificate identity Ed25519 verifying key",
             )?,
         };
-        let discovery_key = SenderCertificateDiscoveryKey {
-            x25519_public_key: fixed_32(
-                &discovery_key.public_key,
-                "development certificate discovery X25519 public key",
-            )?,
-            ed25519_verifying_key: fixed_32(
-                &discovery_key.verifying_key,
-                "development certificate discovery Ed25519 verifying key",
-            )?,
-            epoch: discovery_key.epoch,
-        };
         let issued = self
             .inner
-            .issue(identity_key, discovery_key, expires_at_secs)
+            .issue(identity_key, &relay_domain, expires_at_secs)
             .map_err(|e| AetherError::InvalidData {
                 reason: e.to_string(),
             })?;
@@ -176,10 +165,10 @@ mod tests {
         let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()));
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
-        let discovery_key = store.current_publication_bundle().unwrap().discovery_key;
+        let relay_domain = b"relay.example".to_vec();
         let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec()).unwrap();
         let issued = authority
-            .issue(identity, discovery_key, 1_800_000_000)
+            .issue(identity, relay_domain, 1_800_000_000)
             .unwrap();
         let validation = authority.sender_certificate_validation(1_700_000_000, 0);
 

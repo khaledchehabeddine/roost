@@ -82,6 +82,7 @@
 //! - This crate has no signed-pre-key storage. Delayed handshake envelopes require the caller to
 //!   retain and pass the matching key to [`accept`].
 
+mod delivery_capability;
 mod discovery_key;
 mod double_ratchet;
 mod error;
@@ -92,9 +93,13 @@ mod ratchet;
 mod sealed_frame;
 mod signed_prekey;
 
+pub use delivery_capability::{
+    RecipientDeliveryCapability, RecipientDeliveryVerifier, generate_recipient_delivery_capability,
+};
 pub use discovery_key::{
     DiscoveryKey, DiscoveryKeyBundle, generate_discovery_key,
     generate_signed_prekey_for_discovery_key, verify_discovery_key_bundle,
+    verify_discovery_to_identity_binding,
 };
 pub use double_ratchet::{Header, RatchetState};
 pub use error::CryptoError;

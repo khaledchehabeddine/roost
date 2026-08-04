@@ -163,7 +163,21 @@ pub struct PublicationBundle {
     /// Version of the public pre-key bundle format.
     pub version: u8,
     /// Discovery-key bundle for this publication.
+    ///
+    /// Its `signature` field is the IK→DK half of the mutual binding.
     pub discovery_key: DiscoveryKeyBundle,
+    /// The DK→IK half of the mutual binding: [`Self::discovery_key`] signing the identity it
+    /// belongs to. Always 64 bytes.
+    ///
+    /// Publish this alongside the discovery key. A relay verifies both directions before accepting
+    /// a registration and rejects it when either fails.
+    pub discovery_to_identity: Vec<u8>,
+    /// Public commitment to this inbox generation's recipient delivery capability. Always 32
+    /// bytes.
+    ///
+    /// Register this value. Never register the capability itself — that is a bearer secret, and
+    /// handing it to the relay would defeat the point of committing to it.
+    pub recipient_delivery_verifier: Vec<u8>,
     /// Signed pre-key bundle for this publication.
     pub signed_prekey: SignedPreKeyBundle,
 }
@@ -173,9 +187,24 @@ impl From<CorePublicationBundle> for PublicationBundle {
         PublicationBundle {
             version: b.version,
             discovery_key: b.discovery_key.into(),
+            discovery_to_identity: b.discovery_to_identity.to_bytes().to_vec(),
+            recipient_delivery_verifier: b.recipient_delivery_verifier.as_bytes().to_vec(),
             signed_prekey: b.signed_prekey.into(),
         }
     }
+}
+
+/// Everything one inbox rotation produces.
+///
+/// Publish and register [`Self::publication`]; persist [`Self::capability`] in secure storage and
+/// give it only to authorized contacts. The two are returned together so a new generation cannot be
+/// published while contacts still hold the previous generation's capability.
+#[derive(Clone, uniffi::Record)]
+pub struct InboxRotation {
+    /// Material to publish and register for the new generation.
+    pub publication: PublicationBundle,
+    /// The new generation's recipient delivery capability. Always 32 bytes, and secret.
+    pub capability: Vec<u8>,
 }
 
 impl PublicationBundle {

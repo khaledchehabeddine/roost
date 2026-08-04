@@ -15,6 +15,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use serde::Deserialize;
 
+const TEST_RELAY_DOMAIN: &[u8] = b"relay.test";
+
 const SESSION_REPLAY_RNG_SEED: [u8; 32] = [11u8; 32];
 
 #[derive(Deserialize)]
@@ -285,6 +287,7 @@ fn inbound<'a>(
         acknowledgment: acknowledgment(acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             domain_signing_keys,
+            expected_relay_domain: TEST_RELAY_DOMAIN,
             revocation_state: RevocationState::Available(revoked_identity_keys),
             reference_timestamp_secs,
             grace_window_secs,

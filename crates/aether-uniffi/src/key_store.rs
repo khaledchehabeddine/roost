@@ -13,8 +13,8 @@ use crate::protocol::{
     snapshot_input_from_entries, updates_from_core_absent,
 };
 use crate::records::{
-    DiscoveryKeyBundle, Identity, OneTimePreKeyBundle, PublicationBundle, SignedPreKeyBundle,
-    fixed_16, fixed_32,
+    DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
+    SignedPreKeyBundle, fixed_16, fixed_32,
 };
 use crate::storage::SecureStorageAdapter;
 use aether_core::{
@@ -248,6 +248,27 @@ impl KeyStore {
         Ok(self.inner.current_publication_bundle()?.into())
     }
 
+    /// Returns the recipient delivery capability for the current inbox generation. Always 32
+    /// bytes.
+    ///
+    /// This is a bearer secret. Give it only to authorized contacts over an encrypted channel and
+    /// persist it in platform secure storage. Register
+    /// [`PublicationBundle::recipient_delivery_verifier`] with the relay instead — Aether never
+    /// registers, validates, or transmits a capability.
+    ///
+    /// # Errors
+    /// - [`AetherError::InternalError`] on storage lock poisoning.
+    /// - [`AetherError::InvalidData`] if the stored discovery-key blob is malformed.
+    /// - [`AetherError::NotFound`] if no discovery key is stored.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn current_delivery_capability(&self) -> Result<Vec<u8>, AetherError> {
+        Ok(self
+            .inner
+            .current_delivery_capability()?
+            .to_bytes()
+            .to_vec())
+    }
+
     /// Generates exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
     ///
     /// The returned records contain only public material. The secret halves remain in secure
@@ -307,8 +328,8 @@ impl KeyStore {
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
     /// # store.generate_identity()?;
-    /// let rotation = store.rotate_discovery_key_now()?;
-    /// publish_rotation(&rotation)?;
+    /// let rotation = store.rotate_inbox_now()?;
+    /// publish_rotation(&rotation.publication)?;
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
@@ -319,8 +340,12 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if stored discovery-key or identity bytes are malformed.
     /// - [`AetherError::NotFound`] if no identity is stored.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn rotate_discovery_key_now(&self) -> Result<PublicationBundle, AetherError> {
-        Ok(self.inner.rotate_discovery_key_now()?.into())
+    pub fn rotate_inbox_now(&self) -> Result<InboxRotation, AetherError> {
+        let rotation = self.inner.rotate_inbox_now()?;
+        Ok(InboxRotation {
+            publication: rotation.publication.into(),
+            capability: rotation.capability.to_bytes().to_vec(),
+        })
     }
 
     /// Rotates the signed pre-key if the stored one is missing or older than the rotation window.
@@ -567,6 +592,7 @@ impl KeyStore {
                 |(validation, (domain_signing_keys, revoked_identity_keys))| {
                     InboundSenderCertificateValidation {
                         domain_signing_keys,
+                        expected_relay_domain: &validation.expected_relay_domain,
                         revocation_state: revocation_state_to_core(
                             &validation.revocation_state,
                             revoked_identity_keys,
@@ -767,9 +793,11 @@ mod tests {
     };
     use aether_crypto::{
         DiscoveryKeyBundle as CryptoDiscoveryKeyBundle,
-        IdentityKeyBundle as CryptoIdentityKeyBundle, PublicKey, Signature,
+        IdentityKeyBundle as CryptoIdentityKeyBundle, PublicKey,
+        RecipientDeliveryCapability as CryptoCapability, Signature,
         SignedPreKeyBundle as CryptoSignedPreKeyBundle, VerifyingKey, verify_discovery_key_bundle,
-        verify_identity_key_bundle, verify_signed_prekey_bundle,
+        verify_discovery_to_identity_binding, verify_identity_key_bundle,
+        verify_signed_prekey_bundle,
     };
     use std::sync::Arc;
 
@@ -835,10 +863,71 @@ mod tests {
         assert!(verify_signed_prekey_bundle(&crypto_prekey, &discovery.verifying_key).is_ok());
     }
 
+    fn assert_discovery_to_identity_verifies(
+        identity: &FfiIdentity,
+        publication: &FfiPublicationBundle,
+        discovery: &CryptoDiscoveryKeyBundle,
+    ) {
+        let signature = Signature::from_bytes(
+            &<[u8; 64]>::try_from(publication.discovery_to_identity.as_slice()).unwrap(),
+        );
+        assert!(
+            verify_discovery_to_identity_binding(
+                &identity_bundle(identity),
+                &discovery.verifying_key,
+                &signature,
+            )
+            .is_ok()
+        );
+    }
+
     fn assert_publication_verifies(identity: &FfiIdentity, publication: &FfiPublicationBundle) {
         assert_eq!(publication.version, aether_crypto::PREKEY_BUNDLE_VERSION);
         let discovery = assert_discovery_key_verifies(identity, &publication.discovery_key);
         assert_signed_prekey_verifies(&publication.signed_prekey, &discovery);
+        assert_discovery_to_identity_verifies(identity, publication, &discovery);
+    }
+
+    /// The host registers the verifier and shares the capability only with authorized contacts, so
+    /// both must cross the FFI boundary and the verifier must commit to the capability actually in
+    /// storage (AE-IDN-10).
+    #[test]
+    fn publication_verifier_commits_to_the_capability_across_ffi() {
+        let key_store = key_store();
+        key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
+
+        let publication = key_store.current_publication_bundle().unwrap();
+        let capability = key_store.current_delivery_capability().unwrap();
+
+        assert_eq!(publication.recipient_delivery_verifier.len(), 32);
+        assert_eq!(capability.len(), 32);
+        // The capability is the secret; publishing it instead of the verifier would be the whole
+        // bug this separation exists to prevent.
+        assert_ne!(publication.recipient_delivery_verifier, capability);
+
+        let expected =
+            CryptoCapability::from_bytes(<[u8; 32]>::try_from(capability.as_slice()).unwrap());
+        assert_eq!(
+            publication.recipient_delivery_verifier,
+            expected.verifier().as_bytes().to_vec()
+        );
+    }
+
+    /// The DK→IK binding must survive the FFI boundary as 64 usable bytes, not merely exist on the
+    /// Rust side. A host reads this field straight out of the generated record to populate
+    /// `relay.cloud.v1.KeyBindingSignatures.discovery_to_identity`.
+    #[test]
+    fn publication_bundle_carries_discovery_to_identity_binding_across_ffi() {
+        let key_store = key_store();
+        let identity = key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
+
+        let publication = key_store.current_publication_bundle().unwrap();
+
+        assert_eq!(publication.discovery_to_identity.len(), 64);
+        assert_ne!(publication.discovery_to_identity, vec![0u8; 64]);
+        assert_publication_verifies(&identity, &publication);
     }
 
     fn assert_one_time_prekey_record(bundle: &FfiOneTimePreKeyBundle, epoch: u32) {
@@ -884,6 +973,12 @@ mod tests {
             ) | (
                 ProtocolStateKind::ContactState,
                 ProtocolStateKind::ContactState
+            ) | (
+                ProtocolStateKind::PeerInboxAuthorization,
+                ProtocolStateKind::PeerInboxAuthorization
+            ) | (
+                ProtocolStateKind::LocalInboxAuthorization,
+                ProtocolStateKind::LocalInboxAuthorization
             )
         )
     }
@@ -913,11 +1008,15 @@ mod tests {
 
         let updates = engine.wipe(vec![0x44; 16]).unwrap();
 
-        assert_eq!(updates.len(), 4);
+        assert_eq!(updates.len(), 6);
         assert_protocol_state_kind(updates[0].kind, ProtocolStateKind::RatchetSession);
         assert_protocol_state_kind(updates[1].kind, ProtocolStateKind::DeduplicationSet);
         assert_protocol_state_kind(updates[2].kind, ProtocolStateKind::PendingAcknowledgments);
         assert_protocol_state_kind(updates[3].kind, ProtocolStateKind::ContactState);
+        // A wipe must reach the peer's delivery capability too, or session replacement leaves a
+        // stale bearer secret behind with nothing left that uses it.
+        assert_protocol_state_kind(updates[4].kind, ProtocolStateKind::PeerInboxAuthorization);
+        assert_protocol_state_kind(updates[5].kind, ProtocolStateKind::LocalInboxAuthorization);
         assert!(updates.iter().all(|update| update.blob.is_none()));
     }
 
@@ -983,13 +1082,22 @@ mod tests {
     }
 
     #[test]
-    fn rotate_discovery_key_now_advances_epoch_and_returns_verifiable_records() {
+    fn rotate_inbox_now_advances_epoch_and_returns_verifiable_records() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
         let initial_discovery = store.current_discovery_key_bundle().unwrap();
-        let rotation = store.rotate_discovery_key_now().unwrap();
-        assert_eq!(rotation.discovery_key.epoch, initial_discovery.epoch + 1);
-        assert_publication_verifies(&identity, &rotation);
+        let rotation = store.rotate_inbox_now().unwrap();
+        assert_eq!(
+            rotation.publication.discovery_key.epoch,
+            initial_discovery.epoch + 1
+        );
+        assert_publication_verifies(&identity, &rotation.publication);
+        // The capability returned by the rotation is the one the new verifier commits to.
+        assert_eq!(rotation.capability.len(), 32);
+        assert_eq!(
+            rotation.capability,
+            store.current_delivery_capability().unwrap()
+        );
     }
 
     #[test]
