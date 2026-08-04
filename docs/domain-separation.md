@@ -9,8 +9,7 @@ context string or a field order fails every verification rather than degrading, 
 are normative for the listed library version and are read directly from the source, not restated
 from the specification.
 
-Applies to: **Aether v0.9.0**, plus `AetherDKToIK-v1:` added for v0.10.0. Update on any change and
-note the affected release.
+Applies to: **Aether v0.10.0**. Update on any change and note the affected release.
 
 ## How a context is applied
 
@@ -158,15 +157,30 @@ total. Consumed by the safety-number derivation and the sender certificate. Sour
 First input to the safety-number hash. Source:
 [`safety_number.rs`](../crates/aether-core/src/safety_number.rs).
 
-### `AetherSenderCertificate-v1:`
+### `AetherSenderCertificate-v2:`
 
-Prefix of the sender-certificate byte encoding. Source:
+Prefix of the sender-certificate byte encoding, signed as a whole by a domain-signing key. Source:
 [`sender_certificate.rs`](../crates/aether-core/src/sender_certificate.rs).
 
-> The certificate layout this tag prefixes is itself contested: it carries no relay domain
-> (AE-CRT-01 and Relay REL-RLY-23 both require one) and does bind the DK and epoch (REL-RLY-24 says
-> it must not). Reconciling it is a v0.10.0 decision and a wire break. Treat the current layout as
-> descriptive, not normative.
+| Field | Size | Notes |
+|---|---|---|
+| domain tag | 27 | `AetherSenderCertificate-v2:` |
+| version | 1 | `2` |
+| `id_len` | 1 | signing-key identifier length, 1..=64 |
+| `signing_key_identifier` | `id_len` | selects the domain-signing key |
+| `domain_len` | 1 | relay domain length, 1..=255 |
+| `relay_domain` | `domain_len` | the relay this certificate is valid at |
+| `ik_x25519` | 32 | sender IK key-agreement half |
+| `ik_ed25519` | 32 | sender IK verifying key |
+| `expires_at` | 8 | `u64` big-endian, Unix seconds |
+
+Version 2 replaced version 1, which carried no relay domain and bound the sender's discovery key and
+epoch. Both were wrong against the specification: AE-CRT-01 and REL-RLY-23 require the domain, and
+REL-RLY-24 and AE-IDN-05 forbid binding the DK, since certificate validity must survive discovery-key
+rotation. Without the domain a certificate was replayable at any relay trusting the same signing key.
+
+A validator must compare `relay_domain` against the domain it expects — the signed value alone stops
+nothing. `validate_sender_certificate` requires `expected_relay_domain` for exactly that reason.
 
 ### `AetherProtocolStateCommit-v1:`
 
@@ -177,7 +191,7 @@ Digest context for the protocol-state commit. Source:
 
 ### `aether-recipient-delivery-capability-v1`
 
-Recipient delivery verifier derivation (AE-IDN-10). **Not** an Ed25519 signature context — this is a
+Recipient delivery verifier derivation (AE-IDN-10). Added in v0.10.0. **Not** an Ed25519 signature context — this is a
 SHA-256 preimage prefix.
 
 ```

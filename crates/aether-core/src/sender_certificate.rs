@@ -146,6 +146,7 @@ pub struct ValidatedSenderCertificate {
 #[cfg(feature = "development-certificates")]
 pub struct DevelopmentCertificateAuthority {
     signing_key_identifier: Vec<u8>,
+    relay_domain: Vec<u8>,
     signing_key: SigningKeyPair,
 }
 
@@ -210,18 +211,31 @@ impl DevelopmentCertificateAuthority {
     /// ```
     /// use aether_core::DevelopmentCertificateAuthority;
     ///
-    /// let authority = DevelopmentCertificateAuthority::new(b"local-loopback".to_vec())?;
+    /// let authority = DevelopmentCertificateAuthority::new(
+    ///     b"local-loopback".to_vec(),
+    ///     b"relay.example".to_vec(),
+    /// )?;
     /// assert_eq!(authority.verifying_key().len(), 32);
+    /// assert_eq!(authority.relay_domain(), b"relay.example");
     /// # Ok::<(), aether_core::DevelopmentCertificateError>(())
     /// ```
     ///
     /// # Errors
     /// - [`DevelopmentCertificateError::InvalidSigningKeyIdentifier`] if the identifier is empty
     ///   or exceeds the certificate format's 64-byte limit.
-    pub fn new(signing_key_identifier: Vec<u8>) -> Result<Self, DevelopmentCertificateError> {
+    /// - [`DevelopmentCertificateError::InvalidRelayDomain`] if the relay domain is empty or
+    ///   longer than a single length byte can express.
+    pub fn new(
+        signing_key_identifier: Vec<u8>,
+        relay_domain: Vec<u8>,
+    ) -> Result<Self, DevelopmentCertificateError> {
         validate_development_signing_key_identifier(&signing_key_identifier)?;
+        if relay_domain.is_empty() || relay_domain.len() > MAX_RELAY_DOMAIN_LEN {
+            return Err(DevelopmentCertificateError::InvalidRelayDomain);
+        }
         Ok(Self {
             signing_key_identifier,
+            relay_domain,
             signing_key: generate_signing_key_pair(&mut OsRng),
         })
     }
@@ -232,42 +246,44 @@ impl DevelopmentCertificateAuthority {
         &self.signing_key_identifier
     }
 
+    /// Returns the relay domain every certificate from this authority names.
+    ///
+    /// A certificate is only valid at the relay it names, so a validator needs this same value as
+    /// its expected domain. Holding it on the authority keeps the two sides from drifting.
+    #[must_use]
+    pub fn relay_domain(&self) -> &[u8] {
+        &self.relay_domain
+    }
+
     /// Returns the Ed25519 verifying key peers explicitly trust for local development.
     #[must_use]
     pub fn verifying_key(&self) -> [u8; PUBLIC_KEY_LEN] {
         self.signing_key.verifying.to_bytes()
     }
 
-    /// Issues a development sender certificate for one Identity Key and Discovery Key.
+    /// Issues a development sender certificate for one Identity Key.
     ///
-    /// The returned bytes use the production certificate encoding and signature verification
-    /// path. This method does not validate the Identity Key binding signature or Discovery Key
-    /// lineage; callers must obtain both values from an already initialized keystore.
+    /// The returned bytes use the production certificate encoding and signature verification path,
+    /// naming this authority's relay domain. This method does not validate the Identity Key binding
+    /// signature; callers must obtain the key from an already initialized keystore.
     ///
     /// # Examples
     /// ```
-    /// use aether_core::{
-    ///     DevelopmentCertificateAuthority, SenderCertificateDiscoveryKey,
-    ///     SenderCertificateIdentityKey,
-    /// };
+    /// use aether_core::{DevelopmentCertificateAuthority, SenderCertificateIdentityKey};
     ///
     /// # use aether_crypto::{generate_key_pair, generate_signing_key_pair};
     /// # use rand::rngs::OsRng;
     /// # let identity_agreement = generate_key_pair(&mut OsRng);
     /// # let identity_signing = generate_signing_key_pair(&mut OsRng);
-    /// # let discovery_agreement = generate_key_pair(&mut OsRng);
-    /// # let discovery_signing = generate_signing_key_pair(&mut OsRng);
     /// # let identity = SenderCertificateIdentityKey {
     /// #     x25519_public_key: *identity_agreement.public.as_bytes(),
     /// #     ed25519_verifying_key: identity_signing.verifying.to_bytes(),
     /// # };
-    /// # let discovery = SenderCertificateDiscoveryKey {
-    /// #     x25519_public_key: *discovery_agreement.public.as_bytes(),
-    /// #     ed25519_verifying_key: discovery_signing.verifying.to_bytes(),
-    /// #     epoch: 0,
-    /// # };
-    /// let authority = DevelopmentCertificateAuthority::new(b"local-loopback".to_vec())?;
-    /// let issued = authority.issue(identity, discovery, 1_800_000_000)?;
+    /// let authority = DevelopmentCertificateAuthority::new(
+    ///     b"local-loopback".to_vec(),
+    ///     b"relay.example".to_vec(),
+    /// )?;
+    /// let issued = authority.issue(identity, 1_800_000_000)?;
     /// assert_eq!(issued.signature.len(), 64);
     /// # Ok::<(), aether_core::DevelopmentCertificateError>(())
     /// ```
@@ -275,19 +291,14 @@ impl DevelopmentCertificateAuthority {
     /// # Errors
     /// - [`DevelopmentCertificateError::InvalidIdentityKey`] if either Identity Key public key is
     ///   not canonically encoded.
-    /// - [`DevelopmentCertificateError::InvalidDiscoveryKey`] if either Discovery Key public key
-    ///   is not canonically encoded.
     pub fn issue(
         &self,
         identity_key: SenderCertificateIdentityKey,
-        relay_domain: &[u8],
         expires_at_secs: u64,
     ) -> Result<DevelopmentSenderCertificate, DevelopmentCertificateError> {
         validate_identity_key(&identity_key)
             .map_err(|_| DevelopmentCertificateError::InvalidIdentityKey)?;
-        if relay_domain.is_empty() || relay_domain.len() > MAX_RELAY_DOMAIN_LEN {
-            return Err(DevelopmentCertificateError::InvalidRelayDomain);
-        }
+        let relay_domain = self.relay_domain.as_slice();
 
         let mut certificate = Vec::with_capacity(
             CERTIFICATE_DOMAIN_TAG.len()
@@ -1123,12 +1134,13 @@ mod tests {
     #[cfg(feature = "development-certificates")]
     #[test]
     fn development_authority_issues_through_production_validation_path() {
-        let authority = DevelopmentCertificateAuthority::new(PRIMARY_IDENTIFIER.to_vec()).unwrap();
+        let authority = DevelopmentCertificateAuthority::new(
+            PRIMARY_IDENTIFIER.to_vec(),
+            RELAY_DOMAIN.to_vec(),
+        )
+        .unwrap();
         let identity_key = identity_key();
-        let discovery_key = discovery_key();
-        let issued = authority
-            .issue(identity_key, discovery_key, NOW_SECS + 300)
-            .unwrap();
+        let issued = authority.issue(identity_key, NOW_SECS + 300).unwrap();
         let verifying_key = authority.verifying_key();
         let domain_keys = [trusted_key(
             authority.signing_key_identifier(),
@@ -1139,6 +1151,7 @@ mod tests {
             certificate: &issued.certificate,
             signature: &issued.signature,
             domain_signing_keys: &domain_keys,
+            expected_relay_domain: authority.relay_domain(),
             revocation_state: RevocationState::Available(&[]),
             reference_timestamp_secs: NOW_SECS,
             grace_window_secs: 0,
@@ -1146,19 +1159,58 @@ mod tests {
         .unwrap();
 
         assert_eq!(validated.identity_key, identity_key);
-        assert_eq!(validated.discovery_key, discovery_key);
+        assert_eq!(validated.relay_domain, RELAY_DOMAIN.to_vec());
+    }
+
+    /// An authority speaks for one relay, so a certificate it issues must not validate at another.
+    #[cfg(feature = "development-certificates")]
+    #[test]
+    fn development_authority_certificate_is_scoped_to_its_relay() {
+        let authority = DevelopmentCertificateAuthority::new(
+            PRIMARY_IDENTIFIER.to_vec(),
+            RELAY_DOMAIN.to_vec(),
+        )
+        .unwrap();
+        let issued = authority.issue(identity_key(), NOW_SECS + 300).unwrap();
+        let verifying_key = authority.verifying_key();
+        let domain_keys = [trusted_key(
+            authority.signing_key_identifier(),
+            &verifying_key,
+        )];
+
+        let result = validate_sender_certificate(SenderCertificateValidationInput {
+            certificate: &issued.certificate,
+            signature: &issued.signature,
+            domain_signing_keys: &domain_keys,
+            expected_relay_domain: OTHER_RELAY_DOMAIN,
+            revocation_state: RevocationState::Available(&[]),
+            reference_timestamp_secs: NOW_SECS,
+            grace_window_secs: 0,
+        });
+
+        assert_eq!(
+            result.unwrap_err(),
+            SenderCertificateValidationError::RelayDomainMismatch
+        );
     }
 
     #[cfg(feature = "development-certificates")]
     #[test]
     fn development_authority_rejects_invalid_identifier() {
         assert!(matches!(
-            DevelopmentCertificateAuthority::new(Vec::new()),
+            DevelopmentCertificateAuthority::new(Vec::new(), RELAY_DOMAIN.to_vec()),
             Err(DevelopmentCertificateError::InvalidSigningKeyIdentifier)
         ));
         assert!(matches!(
-            DevelopmentCertificateAuthority::new(vec![0; MAX_SIGNING_KEY_IDENTIFIER_LEN + 1]),
+            DevelopmentCertificateAuthority::new(
+                vec![0; MAX_SIGNING_KEY_IDENTIFIER_LEN + 1],
+                RELAY_DOMAIN.to_vec()
+            ),
             Err(DevelopmentCertificateError::InvalidSigningKeyIdentifier)
+        ));
+        assert!(matches!(
+            DevelopmentCertificateAuthority::new(PRIMARY_IDENTIFIER.to_vec(), Vec::new()),
+            Err(DevelopmentCertificateError::InvalidRelayDomain)
         ));
     }
 }
