@@ -23,6 +23,28 @@ pub struct SigningKeyPair {
     signing: SigningKey,
 }
 
+/// A non-empty, crate-defined Ed25519 signature domain separator.
+#[derive(Clone, Copy)]
+pub(crate) struct StaticSignatureContext {
+    first: u8,
+    rest: &'static [u8],
+}
+
+impl StaticSignatureContext {
+    pub(crate) const fn new(first: u8, rest: &'static [u8]) -> Self {
+        Self { first, rest }
+    }
+
+    fn append_to(self, signed: &mut Vec<u8>) {
+        signed.push(self.first);
+        signed.extend_from_slice(self.rest);
+    }
+
+    fn len(self) -> usize {
+        1 + self.rest.len()
+    }
+}
+
 impl SigningKeyPair {
     /// Signs `message` bytes as provided with this key pair.
     ///
@@ -46,6 +68,14 @@ impl SigningKeyPair {
             return Err(CryptoError::InvalidSignatureContext);
         }
         Ok(self.sign(&contextual_message(context, message)?))
+    }
+
+    pub(crate) fn sign_with_static_context(
+        &self,
+        context: StaticSignatureContext,
+        message: &[u8],
+    ) -> Signature {
+        self.sign(&contextual_static_message(context, message))
     }
 
     /// Returns this key pair's signing bytes for secure storage.
@@ -88,6 +118,19 @@ pub fn verify_with_context(
         .map_err(|_| CryptoError::SignatureInvalid)
 }
 
+pub(crate) fn verify_with_static_context(
+    verifying_key: &VerifyingKey,
+    context: StaticSignatureContext,
+    message: &[u8],
+    signature: &Signature,
+) -> Result<(), CryptoError> {
+    use ed25519_dalek::Verifier;
+
+    verifying_key
+        .verify(&contextual_static_message(context, message), signature)
+        .map_err(|_| CryptoError::SignatureInvalid)
+}
+
 fn contextual_message(context: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
     let mut signed = Vec::with_capacity(
         context
@@ -98,6 +141,13 @@ fn contextual_message(context: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoE
     signed.extend_from_slice(context);
     signed.extend_from_slice(message);
     Ok(signed)
+}
+
+fn contextual_static_message(context: StaticSignatureContext, message: &[u8]) -> Vec<u8> {
+    let mut signed = Vec::with_capacity(context.len().saturating_add(message.len()));
+    context.append_to(&mut signed);
+    signed.extend_from_slice(message);
+    signed
 }
 
 #[cfg(test)]
@@ -275,6 +325,23 @@ mod tests {
                 &signature,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn static_context_signature_verifies_with_its_matching_context() {
+        let key_pair = generated_key_pair();
+        let context = StaticSignatureContext::new(b'A', b"etherTest-v1:static");
+        let signature = key_pair.sign_with_static_context(context, b"context-bound message");
+
+        assert!(
+            verify_with_static_context(
+                &key_pair.verifying,
+                context,
+                b"context-bound message",
+                &signature,
+            )
+            .is_ok()
         );
     }
 

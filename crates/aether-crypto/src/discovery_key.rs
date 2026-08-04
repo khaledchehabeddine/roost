@@ -5,9 +5,11 @@
 //! signed pre-key public keys.
 
 use crate::error::CryptoError;
+use crate::keys::StaticSignatureContext;
 use crate::keys::{
     IdentityKeyBundle, SigningKeyPair, generate_signing_key_pair, identity_key_binding_payload,
     parse_ed25519_verifying_key_bytes, validate_x25519_public_key, verify_with_context,
+    verify_with_static_context,
 };
 use crate::signed_prekey::{SignedPreKey, generate_signed_prekey};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -16,7 +18,8 @@ use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 // Domain separator for identity-key signatures over discovery keys (IK→DK).
-const DISCOVERY_KEY_CONTEXT: &[u8] = b"AetherDK-v1:";
+const DISCOVERY_KEY_CONTEXT: StaticSignatureContext =
+    StaticSignatureContext::new(b'A', b"etherDK-v1:");
 
 // Domain separator for discovery-key signatures over identity keys (DK→IK).
 const DISCOVERY_TO_IDENTITY_CONTEXT: &[u8] = b"AetherDKToIK-v1:";
@@ -235,9 +238,7 @@ pub fn generate_discovery_key<R: RngCore + CryptoRng>(
     let signing = generate_signing_key_pair(rng);
     let payload =
         discovery_key_payload(&key_agreement_public, &signing.verifying, epoch, created_at);
-    let identity_signature = identity
-        .sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)
-        .expect("non-empty discovery-key signature context");
+    let identity_signature = identity.sign_with_static_context(DISCOVERY_KEY_CONTEXT, &payload);
     DiscoveryKey {
         key_agreement_secret,
         signing,
@@ -262,7 +263,7 @@ pub fn verify_discovery_key_bundle(
         bundle.epoch,
         bundle.created_at,
     );
-    verify_with_context(
+    verify_with_static_context(
         identity_verifying_key,
         DISCOVERY_KEY_CONTEXT,
         &payload,
@@ -361,9 +362,7 @@ mod tests {
             FIXED_CREATED_AT,
         );
 
-        let signature = identity
-            .sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)
-            .unwrap();
+        let signature = identity.sign_with_static_context(DISCOVERY_KEY_CONTEXT, &payload);
         let bundle = DiscoveryKeyBundle {
             public_key: key_agreement_public,
             verifying_key: discovery_signing.verifying,

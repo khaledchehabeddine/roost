@@ -1366,9 +1366,11 @@ fn deduplication_key() -> Result<ProtocolStateKey, AetherError> {
         .map_err(|e| invalid_fixture(format!("invalid deduplication fixture key: {e}")))
 }
 
-// Fixture wiring mirrors the InboundEncryptedMessage fields one-for-one; bundling them into a
-// struct here would add a type that exists only to satisfy the lint.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "fixture wiring mirrors the InboundEncryptedMessage fields one-for-one; bundling them \
+              into a struct here would add a type that exists only to satisfy the lint"
+)]
 fn inbound<'a>(
     session_key: ProtocolStateKey,
     deduplication_key: ProtocolStateKey,
