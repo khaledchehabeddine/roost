@@ -276,6 +276,7 @@ private fun expectCertificateRejection() {
             byteArrayOf(0x01),
             byteArrayOf(),
             emptyList(),
+            "relay.test".toByteArray(),
             RevocationState(true, emptyList()),
             0uL,
             0uL,
