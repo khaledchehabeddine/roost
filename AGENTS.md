@@ -1,133 +1,27 @@
 # Aether
 
-## Overview
+Aether is the shared cryptographic and networking core for a private, end-to-end encrypted cloud messaging system. See [README.md](README.md#architecture) for crate ownership and dependencies.
 
-Aether is the shared cryptographic and networking core for a private, end-to-end encrypted cloud messaging system.
+## Project invariants
 
-## Architecture
+- Prioritize correctness, security, and auditability; then clarity and minimal design; then measured performance; raw reduction comes last.
+- `aether-crypto` owns cryptographic primitives and protocol mechanics, `aether-core` owns entities and orchestration, and `aether-uniffi` owns platform adaptation. Hosts own network I/O, transport routing, transport-envelope authentication, durable persistence, and OS security integrations; Aether owns protocol identity binding and Message authenticity.
+- Use Rust 1.95.0. Unsafe Rust is forbidden. Model every production failure path with `Result`; `unwrap()`, `expect()`, `panic!()`, `todo!()`, and `unimplemented!()` are forbidden outside tests.
+- Use OS randomness, distinct non-empty HKDF domains, and HKDF-derived message nonces. Immediately zeroize heap and FFI secrets, compare secrets in constant time, cap attacker-controlled work, and keep CPU-bound crypto synchronous.
+- Minimize public and FFI surfaces. Expose a secret-bearing form only to a consumer that specifically needs it, wrap FFI secret bytes immediately on the Rust side, and never put secrets in errors or logs.
+- Keep tests deterministic and prove boundary contracts plus security and protocol invariants.
+- Read the [Rust quality router](.agents/instructions/skills/rust-quality/SKILL.md) and only its matching references for detailed rules.
 
-See [`README.md`](README.md#architecture) for the crate dependency graph.
+## Project instructions
 
-## Coding Guidelines
-
-### Agent Config
-
-- Customizations that benefit collaborators on this project must live in project scope (`.agents/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`)
-- Customization may live in user scope only if it neither shapes the project's workflow nor improves agent quality for collaborators
-- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation
-- Follow the structure and style from existing peer customizations of the same type within the same agent
-- Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.)
-- Pattern-skill descriptions list the same items as the body, in the same order
-- Skills that set `paths:` must not restate the location filter in their description — `paths:` gates autoloading
-- Customization descriptions don't explicitly reference the project name (Aether). Literal paths like `crates/aether-uniffi` are exceptions
-
-### Async
-
-- A function is `async` only when its natural implementation suspends on an event it does not produce — network response, peer message, subscriber pull, timer
-- Suspension justifies `async` when at least one of these holds:
-  - the surrounding subsystem can interleave multiple such waits
-  - cancellation, timeout, retries, or backpressure are part of the operation's contract
-- Functions returning a `Stream` whose items arrive over time qualify
-- CPU-bound work (AEAD, KDFs, signing), single bounded syscalls (one keychain read), and "could block in theory" are not justification
-
-### Crypto
-
-- Cryptographic primitives:
-  - Encryption: XChaCha20-Poly1305
-  - Key exchange: X25519
-  - Signing: Ed25519
-  - Key derivation: Argon2id
-- Production randomness must come from the OS CSPRNG — `OsRng` or `getrandom`. No `thread_rng()`, seeded, or non-cryptographic RNGs outside test modules
-- AEAD nonces must be derived alongside the message key via HKDF — never randomly under a long-lived key
-- Every HKDF call must use a distinct, non-empty `info` string for domain separation
-- Wrap heap secrets (`Vec<u8>`, decrypted output) and FFI-bound values in `Zeroizing` immediately — before validation or early returns. Stack-locals consumed immediately by a constructor don't need wrapping
-- Custom secret-bearing structs derive `Zeroize, ZeroizeOnDrop`. Mark fields with `#[zeroize(skip)]` if they are non-secret or if the field's type doesn't impl `Zeroize` (e.g., `ed25519_dalek::Signature`)
-- Types holding secret material must not derive `Clone`, `Debug`, or `Serialize` unless they also derive `ZeroizeOnDrop` — add a comment explaining why
-- Comparisons of MACs, keys, tokens, or hashes must use `subtle::ConstantTimeEq`, never `==`
-- Collections sized by external input (`HashMap`, `Vec`) must have a hard cap constant
-- Protocol invariants (Double Ratchet, X3DH): replay rejection, ratchet ordering, key expiration, skipped-key caps — see `docs/agents/crypto-protocol-state.md` for detail
-
-### Dependencies
-
-- Necessity check before adding any dep — can the standard library or an existing dep cover the need?
-- MSRV of any added dep must be ≤ workspace MSRV (see `rust-toolchain.toml`)
-- For crypto-adjacent crates (touching keys, signatures, encryption, KDFs): require maintainer reputation (RustCrypto org, dalek-cryptography, etc.) and audit history
-- Prefer audited crates
-- Pin major versions in each crate's `Cargo.toml`; hoist shared deps to `[workspace.dependencies]`. Update via `cargo update -p <crate>` with reasoning in the commit message
-- License, advisory, source, and yanked policy: enforced by `cargo-deny`
-- After bumping any crypto-adjacent dep, run `cargo deny check bans` for transitive duplicates. Allowed duplicates need an explicit `[bans] skip` entry in `deny.toml` with reasoning
-
-### Error Handling
-
-- Each crate defines its own domain error type
-- All error paths return `Result` — `unwrap()`, `expect()`, and `panic!()` are banned outside of tests
-- Error text (Display, Debug, source chain) is for operator logs — concise, debug-useful, lowercase first word, no trailing period (composes via `{e}` chaining)
-- Never include secret material — key bytes, plaintext, seeds. Reference by stable identifiers (key IDs, message numbers) instead
-
-### Public API
-
-- Modules are organizational, not public-API boundaries
-- `pub` minimization — every `pub` item needs an out-of-crate user (a `pub use` at `lib.rs` doesn't count)
-- Secret-bearing types additionally require a consumer who specifically needs the secret form
-- Acronym tolerance scales with proximity to consumers, tightest at the FFI boundary:
-  - `#[uniffi::export]` (T1): none except universal (`URL`, `HTTP`, `JSON`); all crypto terms spelled out (`signed_prekey`, not `spk`)
-  - Cross-crate `pub` (T2): industry-standard primitives only (`KDF`, `AEAD`, `HKDF`, `MAC`); no protocol-internal acronyms (`SPK`, `OPK`, `IK`)
-  - `pub(crate)` (T3): protocol shorthand fine (`spk`, `ik`, `ek`, `dh`, `ad`)
-  - Function-local: anything readable in context
-- Public types must follow project rustdoc guidelines — see `docs/agents/rust-docs-style.md`
-- Binary-breaking FFI changes (struct field layout under `#[repr(C)]`, removing a `#[uniffi::export]`) require a major version bump
-
-### Rust Style
-
-- Module ordering: `mod` declarations → `use` declarations → types → traits → impls → functions, with each impl grouped with the type or trait it implements
-- No `pub use` glob re-exports
-- Local names: short when one obvious value is in scope; role names when same-shaped values coexist (including tests)
-- Functions: verbs for actions (`generate_*`, `rotate_*`, `verify_*`); nouns for accessors (`current_bundle`, `public_key`); predicates with `is_*`/`has_*`
-- No `get_` prefix on accessors
-- `try_*` prefix only when contrasting with a non-fallible variant in the same scope — not as a generic `Result`-returning marker
-- Constructors: `Type::new(...)` canonical; `Type::from_<form>(...)` for alternate sources (e.g., `from_secret_bytes`); `Type::with_<thing>(...)` for builder-style
-- Type suffixes:
-  - `*Error` for errors
-  - `*Bundle` for containers of related public material
-  - `*Manager` only when paired with the type it manages (e.g., `IdentityManager` vs `Identity`)
-  - `*Store` for facades composing multiple managers (e.g., `KeyStore` over `IdentityManager` + `SignedPreKeyManager`)
-  - Avoid `*Helper`, `*Util`, `*Service`
-
-### Tests
-
-- Test names define behavior scope. Assertions should prove that named behavior and its required preconditions
-- Avoid duplicate coverage at the same responsibility layer. Higher-level tests focus on the contract added by that layer
-- Keep repeated coverage when it protects a security/protocol invariant or verifies behavior across an API, persistence, serialization, FFI, or other boundary
-- Inline unit tests live in `#[cfg(test)] mod tests { ... }` at the bottom of the source file they exercise
-- Integration tests live in `crates/<crate>/tests/<scenario>.rs` and exercise only the public API; if a test needs an internal item, the test belongs inline
-- One scenario per integration test file
-- Module docstring on integration tests states the scenario and what crosses what boundary
-- Test-only dependencies live under `[dev-dependencies]` in Cargo.toml
-- Test assertions must not depend on `SystemTime::now()` or `OsRng` outputs — both may be opaque inputs (e.g., relative timestamps, round-trip keys)
-- No shared mutable state across tests — each test owns its `Setup` via a `setup()` function, no `static mut` or `Lazy<>`
-
-### UniFFI
-
-- FFI-incompatible core types must be wrapped in the `aether-uniffi` crate — `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, external-crate types without conversion
-- Secret bytes cross as bare `Vec<u8>` and wrap in `Zeroizing` immediately in the adapter layer, not client code
-- Stateful types wrap with `#[derive(uniffi::Object)]` and interior mutability — decouples internal type evolution from FFI stability
-- Foreign-implementable traits use `#[uniffi::export(with_foreign)]` to let clients implement Rust-callable traits
-- Errors crossing the UniFFI boundary must use `#[derive(uniffi::Error)]` — library errors and panics cannot propagate
-- Internal errors convert to `AetherError` via `From` impls
-- `AetherError` variants describe failures in client-relevant terms (e.g., `AlreadyExists`, `NotFound`)
-- Internal failures the client cannot meaningfully handle (e.g., lock poisoning, KDF output overflow) reduce to a generic `InternalError { reason: String }` — `reason` is for logs, not client logic
-
-## Decision Records
-
-ADRs preserve why a decision was made so future contributors — human or agent — inherit the context. After changes to cross-crate public API, crypto, FFI, or architecture, propose one only when all three hold:
-
-1. **Hard to reverse** — the cost of changing your mind later is meaningful
-2. **Surprising without context** — a future reader will wonder "why did they do it this way?"
-3. **The result of a real trade-off** — there were genuine alternatives, and you picked one for specific reasons
-
-If any of the three is missing, skip the ADR. Use [`docs/adr/TEMPLATE.md`](docs/adr/TEMPLATE.md) for format. Place cross-crate decisions in `docs/adr/` and crate-specific decisions in the owning crate's `docs/adr/`.
-
-## Workflow
-
-- See `CONTRIBUTING.md` for branches, commits, and PR conventions
-- After a non-obvious project-specific discovery or workaround worth keeping, suggest an `AGENTS.md` update
+- Keep canonical project skill and reviewer bodies in `.agents/instructions/`. Keep `.agents/skills/`, `.claude/skills/`, `.claude/rules/`, `.claude/agents/`, and `.codex/agents/` adapters as native metadata plus one route to a canonical target.
+- Run agent shell searches as `rg --no-config`; the command boundary rejects user-configured preprocessing and helper execution.
+- Keep collaborator-facing customization in this repository; use user scope only for preferences that neither shape project workflow nor improve collaborator results.
+- Mirror discovery or invocation-policy changes across Claude and Codex adapters without copying canonical bodies. Follow the native shape of peer adapters.
+- Keep skill metadata aligned with the canonical workflow and in the same trigger order. When `paths` gates loading, do not repeat that path filter in the description. Omit the project name from customization descriptions except in literal paths.
+- For Rust implementation, review, tests, dependencies, public APIs, UniFFI, or rustdoc, follow the Rust quality route above.
+- For terminology, context boundaries, context relationships, or architectural decisions, read [.agents/instructions/skills/domain-modeling/SKILL.md](.agents/instructions/skills/domain-modeling/SKILL.md).
+- `CONTRIBUTING.md` governs every branch, commit, and pull-request convention.
+- Stage, commit, push, or create or update a pull request only through explicit `commit-push` invocation and its action-specific confirmations.
+- Never merge or force-push.
+- After a non-obvious project-specific discovery or workaround worth preserving, propose the smallest canonical instruction update.

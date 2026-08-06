@@ -1,5 +1,16 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/hooks/enforce-git-boundary.sh"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash",
@@ -35,6 +46,7 @@
       "Bash(git reset --hard*)",
       "Bash(git tag --delete*)",
       "Bash(git tag -d*)",
+      "Bash(scripts/push-reviewed-branch.sh)",
       "Bash(rm -f -r*)",
       "Bash(rm -fr*)",
       "Bash(rm -r -f*)",
@@ -42,9 +54,10 @@
     ],
     "deny": [
       "Bash(cargo yank*)",
-      "Bash(git push --force)",
-      "Bash(git push --force *)",
-      "Bash(git push -f*)"
+      "Bash(gh auth token*)",
+      "Bash(gh pr merge*)",
+      "Bash(git push*)",
+      "Bash(git * push*)"
     ]
   }
 }
