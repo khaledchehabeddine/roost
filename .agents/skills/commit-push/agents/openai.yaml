@@ -1,2 +1,7 @@
+interface:
+  display_name: "Commit and Push"
+  short_description: "Review, gate, commit, push, and open a PR"
+  default_prompt: "Use $commit-push to review and publish the current branch's reviewed changes."
+
 policy:
   allow_implicit_invocation: false
