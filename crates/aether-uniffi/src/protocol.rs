@@ -11,6 +11,7 @@ use aether_core::{
     ProtocolStateSnapshot as CoreProtocolStateSnapshot,
     ProtocolStateUpdate as CoreProtocolStateUpdate,
 };
+use aether_crypto::RecipientDeliveryCapability as CoreRecipientDeliveryCapability;
 use rand::rngs::OsRng;
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -178,6 +179,18 @@ pub struct ContactEvent {
     pub kind: ContactEventKind,
     /// Complete changed contact snapshot.
     pub contact: ContactState,
+}
+
+/// A peer's recipient delivery capability for one of its inbox generations.
+///
+/// Deliberately not [`Clone`]: [`Self::capability`] is a bearer secret, and every clone is another
+/// heap copy nothing scrubs. Hand it straight to the relay submission that needs it.
+#[derive(uniffi::Record)]
+pub struct PeerInboxAuthorization {
+    /// The peer inbox generation this authorization belongs to.
+    pub generation: u32,
+    /// The peer's recipient delivery capability for that generation. Always 32 bytes, and secret.
+    pub capability: Vec<u8>,
 }
 
 /// Contact mutation result.
@@ -515,6 +528,119 @@ impl ProtocolStateEngine {
             self.inner
                 .accept_contact(&snapshot.snapshot, identity_key.to_core()?)?,
         )
+    }
+
+    /// Records a peer's inbox authorization for a generation (AE-CON-05).
+    ///
+    /// Returns no updates when `generation` is not newer than what is stored. That refusal is
+    /// load-bearing: an old authorization replayed at a contact would restore a capability the
+    /// peer has already rotated away from, which is exactly the state a blocked sender wants to
+    /// reach (AE-BLK-08).
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identity_key` or `capability` has the wrong length.
+    /// - [`AetherError::ProtocolStateFault`] if the stored or new authorization cannot be coded.
+    pub fn record_peer_inbox_authorization(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        identity_key: IdentityKey,
+        generation: u32,
+        capability: Vec<u8>,
+    ) -> Result<Vec<ProtocolStateUpdate>, AetherError> {
+        let capability = Zeroizing::new(capability);
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let capability = CoreRecipientDeliveryCapability::from_bytes(fixed_32(
+            &capability,
+            "recipient delivery capability",
+        )?);
+        updates_from_core_with_snapshot(
+            &snapshot,
+            self.inner.record_peer_inbox_authorization(
+                &snapshot.snapshot,
+                identity_key.to_core()?,
+                generation,
+                &capability,
+            )?,
+        )
+    }
+
+    /// Returns the stored inbox authorization for a peer, if one has been recorded.
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identity_key` has the wrong length.
+    /// - [`AetherError::ProtocolStateFault`] if the stored authorization cannot be decoded.
+    pub fn peer_inbox_authorization(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        identity_key: IdentityKey,
+    ) -> Result<Option<PeerInboxAuthorization>, AetherError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        Ok(self
+            .inner
+            .peer_inbox_authorization(&snapshot.snapshot, identity_key.to_core()?)?
+            .map(|stored| PeerInboxAuthorization {
+                generation: stored.generation,
+                capability: stored.capability.to_bytes().to_vec(),
+            }))
+    }
+
+    /// Records that a contact has been given local inbox generation `generation`.
+    ///
+    /// Call this only once the authorization update has actually reached transport. Recording it
+    /// earlier would let an app killed mid-re-key resume past a contact that never received
+    /// anything, leaving that contact unable to deliver until the next rotation.
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identity_key` has the wrong length.
+    /// - [`AetherError::ProtocolStateFault`] if the stored or new record cannot be coded.
+    pub fn record_inbox_authorization_delivered(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        identity_key: IdentityKey,
+        generation: u32,
+    ) -> Result<Vec<ProtocolStateUpdate>, AetherError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        updates_from_core_with_snapshot(
+            &snapshot,
+            self.inner.record_inbox_authorization_delivered(
+                &snapshot.snapshot,
+                identity_key.to_core()?,
+                generation,
+            )?,
+        )
+    }
+
+    /// Returns which of `candidates` still need the current inbox generation.
+    ///
+    /// A contact qualifies when it has never been given an authorization or was last given an
+    /// older one. Blocked contacts are always excluded — re-supplying one would hand back the very
+    /// capability the rotation revoked and silently undo the block (AE-BLK-08). Contacts with no
+    /// stored contact record are skipped.
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if a candidate key has the wrong length.
+    /// - [`AetherError::ProtocolStateFault`] if a stored record cannot be decoded.
+    pub fn contacts_needing_inbox_authorization(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        current_generation: u32,
+        candidates: Vec<IdentityKey>,
+    ) -> Result<Vec<IdentityKey>, AetherError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let candidates = candidates
+            .iter()
+            .map(IdentityKey::to_core)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self
+            .inner
+            .contacts_needing_inbox_authorization(
+                &snapshot.snapshot,
+                current_generation,
+                &candidates,
+            )?
+            .into_iter()
+            .map(IdentityKey::from_core)
+            .collect())
     }
 
     /// Confirms a Safety Number out of band.
@@ -941,7 +1067,7 @@ impl ContactEvent {
 }
 
 impl ContactStateChange {
-    fn from_core(
+    pub(crate) fn from_core(
         snapshot: &ProtocolStateSnapshotInput,
         value: CoreContactStateChange,
     ) -> Result<Self, AetherError> {

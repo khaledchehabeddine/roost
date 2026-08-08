@@ -71,6 +71,7 @@ run_swift() {
     run_swift_harness "FixtureReplay.swift" "fixture-replay" "$swift_out"
     run_swift_harness "Issue122Coverage.swift" "issue-122-coverage" "$swift_out"
     run_swift_harness "SecureStorageUnexpectedError.swift" "secure-storage-unexpected-error" "$swift_out"
+    run_swift_harness "InboxAuthorization.swift" "inbox-authorization" "$swift_out"
 }
 
 jna_jar() {
@@ -152,6 +153,7 @@ run_kotlin() {
     run_kotlin_harness "FixtureReplay.kt" "FixtureReplay" "$kotlin_out" "$jna"
     run_kotlin_harness "Issue122Coverage.kt" "Issue122Coverage" "$kotlin_out" "$jna"
     run_kotlin_harness "SecureStorageUnexpectedError.kt" "SecureStorageUnexpectedError" "$kotlin_out" "$jna"
+    run_kotlin_harness "InboxAuthorization.kt" "InboxAuthorization" "$kotlin_out" "$jna"
 }
 
 need_tool cargo
