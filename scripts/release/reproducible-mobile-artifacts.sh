@@ -218,7 +218,7 @@ if [[ -n "${GITHUB_ACTIONS:-}" && "$ARCHIVE_REF" != "HEAD" ]]; then
     exit 2
 fi
 
-rm -rf "$OUT/$MODE"
+rm -rf "${OUT:?}/${MODE:?}"
 echo "$MODE archive object: $ARCHIVE_OBJECT"
 
 run_pass 1

@@ -15,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/check.sh"
+            "command": "scripts/check.sh quick"
           }
         ]
       }

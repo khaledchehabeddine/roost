@@ -62,7 +62,8 @@ expect_failure() {
 
 signature_mismatch_fails() {
     local artifact="$1"
-    local bad="$TMP/$(basename "$artifact").signature-mismatch"
+    local bad
+    bad="$TMP/$(basename "$artifact").signature-mismatch"
 
     cp "$artifact" "$bad"
     printf 'tamper' >> "$bad"
@@ -74,7 +75,8 @@ signature_mismatch_fails() {
 
 checksum_mismatch_fails() {
     local artifact="$1"
-    local bad_checksum="$TMP/$(basename "$artifact").checksum-mismatch.sha256"
+    local bad_checksum
+    bad_checksum="$TMP/$(basename "$artifact").checksum-mismatch.sha256"
 
     printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' \
         "$(basename "$artifact")" > "$bad_checksum"
