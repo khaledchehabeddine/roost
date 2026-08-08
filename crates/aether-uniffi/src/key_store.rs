@@ -453,6 +453,8 @@ impl KeyStore {
         let result = self.inner.initiate_session(SessionInitiation {
             session_key: ProtocolStateKey::from_bytes(session_key)?,
             responder_identity_key: responder_identity.to_core()?,
+            responder_discovery_to_identity: responder_publication
+                .discovery_to_identity_signature()?,
             responder_prekey_bundle: responder_publication
                 .to_prekey_bundle(responder_one_time_prekey)?,
             sender_certificate: &sender_certificate,

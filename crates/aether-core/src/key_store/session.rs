@@ -5,7 +5,7 @@ use crate::{
 };
 use aether_crypto::{
     CryptoError, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, PreKeyBundle,
-    SenderIdentityMaterial, accept, initiate,
+    SenderIdentityMaterial, Signature, accept, initiate, verify_discovery_to_identity_binding,
 };
 use rand::rngs::OsRng;
 use std::error::Error;
@@ -18,6 +18,14 @@ pub struct SessionInitiation<'a> {
     pub session_key: ProtocolStateKey,
     /// Responder permanent Identity Key bundle.
     pub responder_identity_key: IdentityKeyBundle,
+    /// The responder's DK→IK binding: its discovery key signing the identity above (AE-KEY-04).
+    ///
+    /// Checked before any handshake work. The IK→DK half travels inside
+    /// [`Self::responder_prekey_bundle`] and the handshake verifies it, but that direction alone
+    /// only proves an identity vouched for a discovery key — not that the discovery key vouches
+    /// for this identity. Whoever supplies the bundle would otherwise be free to pair a genuine
+    /// discovery key with an identity of their choosing.
+    pub responder_discovery_to_identity: Signature,
     /// Responder publication bundle containing DK, signed pre-key, and optional one-time pre-key.
     pub responder_prekey_bundle: PreKeyBundle,
     /// Opaque sender certificate sealed into the first message.
@@ -163,6 +171,18 @@ impl KeyStore {
         input: SessionInitiation<'_>,
     ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
+
+        // Before any local state is loaded or any handshake work is spent: the
+        // mapping this session is built on has to hold in both directions
+        // (AE-KEY-04). `initiate` checks IK→DK from inside the prekey bundle;
+        // nothing but this checks DK→IK, and a bundle that fails it names an
+        // identity its discovery key never vouched for.
+        verify_discovery_to_identity_binding(
+            &input.responder_identity_key,
+            &input.responder_prekey_bundle.discovery_key.verifying_key,
+            &input.responder_discovery_to_identity,
+        )?;
+
         let identity = self.0.identity.load_identity()?;
         let identity_key = identity.identity_key_bundle()?;
         let discovery_key = self.0.discovery.current()?;
@@ -314,6 +334,48 @@ mod tests {
             .collect()
     }
 
+    /// AE-KEY-04 requires both directions before a discovery-key-to-identity
+    /// mapping is trusted. The IK→DK half rides on the discovery-key bundle and
+    /// the handshake already checks it; this is the other half, which proves the
+    /// discovery key vouches for the identity rather than merely being named
+    /// alongside it. Without it, whoever hands over the bundle — the relay, or
+    /// anyone who can answer for it — can pair a real discovery key with an
+    /// identity of their choosing.
+    #[test]
+    fn initiation_refuses_a_discovery_key_that_does_not_vouch_for_the_identity() {
+        let alice = store();
+        let bob = store();
+        let mallory = store();
+        alice.generate_identity().unwrap();
+        let bob_identity = bob.generate_identity().unwrap();
+        mallory.generate_identity().unwrap();
+        bob.rotate_signed_prekey_now().unwrap();
+        mallory.rotate_signed_prekey_now().unwrap();
+        let bob_publication = bob.current_publication_bundle().unwrap();
+        // Mallory's DK→IK signature: valid bytes over the wrong identity.
+        let mallory_publication = mallory.current_publication_bundle().unwrap();
+
+        let result = alice.initiate_session(SessionInitiation {
+            session_key: ProtocolStateKey::session(SessionId::from_bytes([0x24; 16])),
+            responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+            responder_discovery_to_identity: mallory_publication.discovery_to_identity,
+            responder_prekey_bundle: aether_crypto::PreKeyBundle {
+                version: bob_publication.version,
+                discovery_key: bob_publication.discovery_key,
+                signed_prekey: bob_publication.signed_prekey,
+                one_time_prekey: None,
+            },
+            sender_certificate: b"alice certificate",
+            sender_signature: b"alice signature",
+            plaintext: b"hello bob",
+        });
+
+        assert!(
+            result.is_err(),
+            "a DK→IK signature over another identity must not establish a session"
+        );
+    }
+
     #[test]
     fn initiate_and_accept_session_return_first_message_plaintext_and_state_updates() {
         let alice = store();
@@ -329,6 +391,7 @@ mod tests {
             .initiate_session(SessionInitiation {
                 session_key: session_key.clone(),
                 responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                responder_discovery_to_identity: bob_publication.discovery_to_identity,
                 responder_prekey_bundle: aether_crypto::PreKeyBundle {
                     version: bob_publication.version,
                     discovery_key: bob_publication.discovery_key,
@@ -386,6 +449,7 @@ mod tests {
             .initiate_session(SessionInitiation {
                 session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
                 responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                responder_discovery_to_identity: bob_publication.discovery_to_identity,
                 responder_prekey_bundle: aether_crypto::PreKeyBundle {
                     version: bob_publication.version,
                     discovery_key: bob_publication.discovery_key,

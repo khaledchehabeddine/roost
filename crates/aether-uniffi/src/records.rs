@@ -208,6 +208,18 @@ pub struct InboxRotation {
 }
 
 impl PublicationBundle {
+    /// The DK→IK half as a signature, rejecting anything that is not 64 bytes.
+    ///
+    /// Separate from [`Self::to_prekey_bundle`] because [`CorePreKeyBundle`] has no field for it:
+    /// the binding is verified against the responder identity, which a prekey bundle does not
+    /// carry. Session initiation checks it before any handshake work.
+    pub(crate) fn discovery_to_identity_signature(&self) -> Result<Signature, AetherError> {
+        Ok(Signature::from_bytes(&fixed_64(
+            &self.discovery_to_identity,
+            "discovery_to_identity",
+        )?))
+    }
+
     pub(crate) fn to_prekey_bundle(
         &self,
         one_time_prekey: Option<OneTimePreKeyBundle>,
