@@ -15,6 +15,12 @@
 //! Apps provide a platform [`SecureStorage`] implementation, then use one [`KeyStore`] for the app
 //! lifetime to manage the local identity and publication keys.
 //!
+//! # Feature flags
+//!
+//! - `development-certificates` exposes an in-memory certificate authority for local peer
+//!   simulations. Normal artifacts omit the API.
+//! - `fixture-replay` exposes checked-in fixture replay support for tests and tooling.
+//!
 //! # Examples
 //!
 //! ```
@@ -45,6 +51,8 @@ uniffi::setup_scaffolding!("aether");
 compile_error!("fixture-replay is test-only and must not be enabled for release builds");
 
 mod certificate;
+#[cfg(feature = "development-certificates")]
+mod development_certificate;
 mod error;
 mod events;
 #[cfg(feature = "fixture-replay")]
@@ -56,9 +64,11 @@ mod records;
 mod storage;
 
 pub use certificate::{
-    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
-    SenderCertificateValidation, ValidatedSenderCertificate, validate_sender_certificate,
+    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
+    ValidatedSenderCertificate, validate_sender_certificate,
 };
+#[cfg(feature = "development-certificates")]
+pub use development_certificate::{DevelopmentCertificateAuthority, DevelopmentSenderCertificate};
 pub use error::AetherError;
 pub use events::{
     ContactEventEnvelope, ContactEventObserver, ContactEventSnapshot, ContactEventStream,
@@ -78,6 +88,7 @@ pub use protocol::{
     SessionUnrecoverableReason, derive_safety_number, protocol_state_blob_digest,
 };
 pub use records::{
-    DiscoveryKeyBundle, Identity, OneTimePreKeyBundle, PublicationBundle, SignedPreKeyBundle,
+    DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
+    SignedPreKeyBundle,
 };
 pub use storage::{InMemorySecureStorage, SecureStorage};

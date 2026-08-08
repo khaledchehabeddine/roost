@@ -34,7 +34,7 @@ Text seed forms:
 - Protocol-state seeds use `kind:`, `key:`, and `blob:` fields.
 - PreKey seeds use `kind: discovery|signed|one_time` and `blob:`.
 - Sender-certificate seeds use `certificate:`, `signature:`, `domain_id:`, `domain_key:`,
-  `domain_status:`, `reference:`, and `grace:`.
+  `domain_status:`, `expected_relay_domain:`, `reference:`, and `grace:`.
 
 When a new fixture is added, add one happy-path seed for it and one nearby rejection seed if the
 wire shape exposes a new malformed class.

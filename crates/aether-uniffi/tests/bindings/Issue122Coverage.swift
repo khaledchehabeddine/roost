@@ -342,6 +342,7 @@ struct Issue122Coverage {
                 certificate: Data([0x01]),
                 signature: Data(),
                 domainSigningKeys: [],
+                expectedRelayDomain: Data("relay.test".utf8),
                 revocationState: RevocationState(available: true, revokedIdentityKeys: []),
                 referenceTimestampSecs: 0,
                 graceWindowSecs: 0

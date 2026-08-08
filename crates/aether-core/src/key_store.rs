@@ -10,14 +10,17 @@ pub use session::{
 };
 
 use crate::clock::{Clock, SystemClock};
+use crate::contact::{ContactIdentityKey, ContactStateChange};
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager, DiscoveryKeyStatus};
 use crate::identity::{Identity, IdentityError, IdentityManager};
 use crate::one_time_prekey::{OneTimePreKeyError, OneTimePreKeyManager};
+use crate::protocol_state::{ProtocolStateEngine, ProtocolStateSnapshot};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
 use aether_crypto::{
     DiscoveryKeyBundle, OneTimePreKey, OneTimePreKeyBundle, PREKEY_BUNDLE_VERSION,
-    SignedPreKeyBundle, verify_signed_prekey_bundle,
+    RecipientDeliveryCapability, RecipientDeliveryVerifier, Signature, SignedPreKeyBundle,
+    verify_signed_prekey_bundle,
 };
 use rand::rngs::OsRng;
 use std::error::Error;
@@ -33,6 +36,8 @@ pub enum KeyStoreError {
     Identity(IdentityError),
     /// A one-time-pre-key operation failed.
     OneTimePreKey(OneTimePreKeyError),
+    /// A protocol-state operation failed.
+    ProtocolState(crate::protocol_state::ProtocolStateError),
     /// A signed-pre-key operation failed.
     SignedPreKey(SignedPreKeyError),
 }
@@ -43,6 +48,7 @@ impl fmt::Display for KeyStoreError {
             KeyStoreError::Discovery(e) => write!(f, "discovery key: {e}"),
             KeyStoreError::Identity(e) => write!(f, "identity: {e}"),
             KeyStoreError::OneTimePreKey(e) => write!(f, "one-time pre-key: {e}"),
+            KeyStoreError::ProtocolState(e) => write!(f, "protocol state: {e}"),
             KeyStoreError::SignedPreKey(e) => write!(f, "signed pre-key: {e}"),
         }
     }
@@ -54,6 +60,7 @@ impl Error for KeyStoreError {
             KeyStoreError::Discovery(e) => Some(e),
             KeyStoreError::Identity(e) => Some(e),
             KeyStoreError::OneTimePreKey(e) => Some(e),
+            KeyStoreError::ProtocolState(e) => Some(e),
             KeyStoreError::SignedPreKey(e) => Some(e),
         }
     }
@@ -68,6 +75,12 @@ impl From<DiscoveryKeyError> for KeyStoreError {
 impl From<IdentityError> for KeyStoreError {
     fn from(e: IdentityError) -> Self {
         KeyStoreError::Identity(e)
+    }
+}
+
+impl From<crate::protocol_state::ProtocolStateError> for KeyStoreError {
+    fn from(e: crate::protocol_state::ProtocolStateError) -> Self {
+        KeyStoreError::ProtocolState(e)
     }
 }
 
@@ -92,9 +105,54 @@ pub struct PublicationBundle {
     /// Version of the public pre-key bundle format.
     pub version: u8,
     /// The discovery key for this publication.
+    ///
+    /// Its `signature` field is the IK→DK half of the mutual binding.
     pub discovery_key: DiscoveryKeyBundle,
+    /// The DK→IK half of the mutual binding: [`Self::discovery_key`] signing the identity it
+    /// belongs to (AE-KEY-04).
+    ///
+    /// A relay verifies this alongside the IK→DK direction before accepting a registration, and a
+    /// peer that starts from a discovery key verifies it to learn the identity really was
+    /// authorized by that discovery key.
+    pub discovery_to_identity: Signature,
+    /// Public commitment to the recipient delivery capability of this inbox generation
+    /// (AE-IDN-10).
+    ///
+    /// Register this with the relay. The capability it commits to is a bearer secret and is
+    /// reached only through [`KeyStore::current_delivery_capability`].
+    pub recipient_delivery_verifier: RecipientDeliveryVerifier,
     /// The signed pre-key for this publication.
     pub signed_prekey: SignedPreKeyBundle,
+}
+
+/// Everything one inbox rotation produces (AE-IDN-08).
+///
+/// A rotation advances the inbox generation and replaces the discovery key, its mutual binding
+/// signatures, the prekey bundle, and the recipient delivery capability together. Both halves are
+/// returned from the one call so a caller cannot publish the new generation while still
+/// distributing the previous generation's capability.
+pub struct InboxRotation {
+    /// Material to publish and register, including the new generation and verifier.
+    pub publication: PublicationBundle,
+    /// The new generation's bearer secret, to persist and share with authorized contacts.
+    ///
+    /// Deliberately kept out of [`PublicationBundle`]: everything in that struct is meant to be
+    /// published, and a secret sitting inside it is one careless `publish(bundle)` away from
+    /// reaching the relay.
+    pub capability: RecipientDeliveryCapability,
+}
+
+/// Result of blocking a contact (AE-BLK-08).
+pub struct ContactBlock {
+    /// Contact state change to commit durably, then emit.
+    pub contact: ContactStateChange,
+    /// The inbox rotation the block performed, or `None` when the contact was already blocked.
+    ///
+    /// Present means every remaining contact now holds a stale delivery capability and must be
+    /// given [`InboxRotation::capability`] before they can reach this inbox again. The blocked
+    /// contact is deliberately not among them — that is what makes the block bite at the relay
+    /// rather than only locally.
+    pub rotation: Option<InboxRotation>,
 }
 
 struct KeyStoreInner {
@@ -251,7 +309,10 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key has been created.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        let discovery_key = self.0.discovery.current_bundle()?;
+        let discovery_key = self.0.discovery.current()?;
+        let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
+        let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
+        let discovery_key = discovery_key.bundle();
         let signed_prekey = self.0.signed_prekey.current_bundle()?;
         // Reject storage rollback/desync before publishing a mismatched pair.
         verify_signed_prekey_bundle(&signed_prekey, &discovery_key.verifying_key)
@@ -259,8 +320,68 @@ impl KeyStore {
         Ok(PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
             discovery_key,
+            discovery_to_identity,
+            recipient_delivery_verifier,
             signed_prekey,
         })
+    }
+
+    /// Blocks a contact and rotates the inbox so the block takes effect at the relay (AE-BLK-08).
+    ///
+    /// Blocking alone only stops messages being surfaced locally; the relay would still accept and
+    /// queue them, because the blocked contact still holds a working delivery capability. Rotating
+    /// the inbox invalidates that capability. The cost is that every *other* contact's copy is
+    /// invalidated too and must be re-supplied — see [`ContactBlock::rotation`].
+    ///
+    /// A contact that is already blocked produces no state change and no rotation, so repeating the
+    /// call does not churn every contact's capability.
+    ///
+    /// The contact update is computed before the rotation is performed, so a rotation failure
+    /// leaves nothing committed. If the caller then fails to commit the returned updates, the
+    /// inbox has rotated without the block landing — recoverable by blocking again.
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::ProtocolState`] if the contact blob is missing, malformed, or
+    ///   `identity_key` is not canonical.
+    /// - [`KeyStoreError::Discovery`] (`Clock` | `Identity` | `InvalidData`) if the rotation
+    ///   cannot read the clock, the identity, or the stored discovery key.
+    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::OneTimePreKey`] |
+    ///   [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
+    pub fn block_contact(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<ContactBlock, KeyStoreError> {
+        let contact = ProtocolStateEngine::new().block_contact(snapshot, identity_key)?;
+        // An unchanged contact yields no updates; rotating anyway would re-key every other contact
+        // for nothing.
+        if contact.state_updates.is_empty() {
+            return Ok(ContactBlock {
+                contact,
+                rotation: None,
+            });
+        }
+        let rotation = self.rotate_inbox_now()?;
+        Ok(ContactBlock {
+            contact,
+            rotation: Some(rotation),
+        })
+    }
+
+    /// Returns the recipient delivery capability for the current inbox generation (AE-IDN-06).
+    ///
+    /// Secret-bearing. Give it only to authorized contacts through an encrypted channel, and
+    /// register [`PublicationBundle::recipient_delivery_verifier`] instead — Aether never
+    /// registers, validates, or transmits a capability (AE-IDN-09).
+    ///
+    /// # Errors
+    /// - [`KeyStoreError::Discovery`] (`InvalidData` | `NotFound`) if the stored discovery key is
+    ///   malformed or absent.
+    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on storage failures.
+    pub fn current_delivery_capability(
+        &self,
+    ) -> Result<RecipientDeliveryCapability, KeyStoreError> {
+        Ok(self.0.discovery.current_capability()?)
     }
 
     /// Generates exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
@@ -314,12 +435,16 @@ impl KeyStore {
         Ok(self.0.one_time_prekey.consume_one_time_prekey(epoch, id)?)
     }
 
-    /// Rotates the discovery key and signed pre-key together.
+    /// Rotates the whole inbox: generation, discovery key, capability, and pre-keys (AE-IDN-08).
     ///
-    /// Advances the discovery-key epoch, clears epoch-bound one-time pre-keys, and returns a fresh
-    /// [`PublicationBundle`]. If signed-pre-key storage fails after the discovery key rotates, the
-    /// old signed pre-key has been cleared, so no stale signed pre-key remains publishable with
-    /// the new discovery key.
+    /// Advances the inbox generation, replaces the discovery key and the recipient delivery
+    /// capability together, clears generation-bound one-time pre-keys, and returns both the
+    /// publishable material and the new capability. If signed-pre-key storage fails after the
+    /// discovery key rotates, the old signed pre-key has been cleared, so no stale signed pre-key
+    /// remains publishable with the new discovery key.
+    ///
+    /// This invalidates every contact's delivery authorization — that is what makes it the
+    /// mechanism behind blocking (AE-BLK-08), and why it is not merely a discovery-key rotation.
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
@@ -327,16 +452,25 @@ impl KeyStore {
     /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
     /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::OneTimePreKey`] |
     ///   [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn rotate_discovery_key_now(&self) -> Result<PublicationBundle, KeyStoreError> {
+    pub fn rotate_inbox_now(&self) -> Result<InboxRotation, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
         let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
+        let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
+        let capability = self.0.discovery.current_capability()?;
+        let recipient_delivery_verifier = capability.verifier();
         let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
-        Ok(PublicationBundle {
+        let publication = PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
             discovery_key: discovery_key.bundle(),
+            discovery_to_identity,
+            recipient_delivery_verifier,
             signed_prekey: signed_prekey.bundle(),
+        };
+        Ok(InboxRotation {
+            publication,
+            capability,
         })
     }
 
@@ -488,7 +622,7 @@ mod tests {
         ONE_TIME_PREKEY_POOL_TARGET, ONE_TIME_PREKEY_REPLENISH_THRESHOLD,
     };
     use crate::storage::{InMemorySecureStorage, StorageError};
-    use aether_crypto::verify_discovery_key_bundle;
+    use aether_crypto::{verify_discovery_key_bundle, verify_discovery_to_identity_binding};
     use std::collections::HashSet;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -544,12 +678,65 @@ mod tests {
         assert!(cloned_store.load_identity().is_ok());
     }
 
+    /// AE-IDN-08 requires one operation to return everything a rotation produces. Returning the
+    /// publishable material without the capability invites a caller to publish a new generation
+    /// while still handing contacts the previous generation's secret.
     #[test]
-    fn generate_identity_persists_discovery_key_at_epoch_zero() {
+    fn inbox_rotation_returns_publication_and_capability_together() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+
+        let rotation = key_store.rotate_inbox_now().unwrap();
+
+        assert_eq!(
+            rotation.publication.recipient_delivery_verifier,
+            rotation.capability.verifier()
+        );
+        assert_eq!(
+            *rotation.capability.to_bytes(),
+            *key_store.current_delivery_capability().unwrap().to_bytes()
+        );
+        assert_eq!(rotation.publication.discovery_key.epoch, 2);
+    }
+
+    /// The host registers the verifier and never the capability (AE-IDN-10), so the published
+    /// bundle must carry a verifier that actually commits to the capability currently in storage.
+    #[test]
+    fn publication_bundle_carries_the_verifier_for_the_current_capability() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
+
+        let publication = key_store.current_publication_bundle().unwrap();
+        let capability = key_store.current_delivery_capability().unwrap();
+
+        assert_eq!(
+            publication.recipient_delivery_verifier,
+            capability.verifier()
+        );
+    }
+
+    #[test]
+    fn rotation_changes_the_published_verifier() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
+        let before = key_store.current_publication_bundle().unwrap();
+
+        let after = key_store.rotate_inbox_now().unwrap().publication;
+
+        assert_ne!(
+            before.recipient_delivery_verifier,
+            after.recipient_delivery_verifier
+        );
+    }
+
+    #[test]
+    fn generate_identity_persists_discovery_key_at_generation_one() {
         let key_store = store();
         key_store.generate_identity().unwrap();
         let bundle = key_store.current_discovery_key_bundle().unwrap();
-        assert_eq!(bundle.epoch, 0);
+        assert_eq!(bundle.epoch, 1);
     }
 
     #[test]
@@ -582,6 +769,84 @@ mod tests {
         key_store.generate_identity().unwrap();
         storage.lock().unwrap().delete(DISCOVERY_KEY).unwrap();
         assert!(key_store.load_identity().is_ok());
+    }
+
+    #[test]
+    fn current_publication_bundle_carries_both_binding_directions() {
+        let key_store = store();
+        let identity = key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
+
+        let publication = key_store.current_publication_bundle().unwrap();
+
+        // IK→DK: the identity authorized this discovery key.
+        assert!(
+            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
+                .is_ok()
+        );
+        // DK→IK: the discovery key authorized this identity.
+        assert!(
+            verify_discovery_to_identity_binding(
+                &identity.identity_key_bundle().unwrap(),
+                &publication.discovery_key.verifying_key,
+                &publication.discovery_to_identity,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rotate_inbox_now_carries_both_binding_directions() {
+        let key_store = store();
+        let identity = key_store.generate_identity().unwrap();
+
+        let publication = key_store.rotate_inbox_now().unwrap().publication;
+
+        assert!(
+            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
+                .is_ok()
+        );
+        assert!(
+            verify_discovery_to_identity_binding(
+                &identity.identity_key_bundle().unwrap(),
+                &publication.discovery_key.verifying_key,
+                &publication.discovery_to_identity,
+            )
+            .is_ok()
+        );
+    }
+
+    /// The binding is recomputed per read rather than persisted, so it must be byte-stable.
+    /// Ed25519 is deterministic and the payload carries no timestamp, so two reads of an
+    /// unchanged discovery key must produce identical bytes.
+    #[test]
+    fn discovery_to_identity_binding_is_stable_across_reads() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
+
+        let first = key_store.current_publication_bundle().unwrap();
+        let second = key_store.current_publication_bundle().unwrap();
+
+        assert_eq!(
+            first.discovery_to_identity.to_bytes(),
+            second.discovery_to_identity.to_bytes()
+        );
+    }
+
+    #[test]
+    fn rotation_changes_the_discovery_to_identity_binding() {
+        let key_store = store();
+        key_store.generate_identity().unwrap();
+        key_store.rotate_signed_prekey_now().unwrap();
+        let before = key_store.current_publication_bundle().unwrap();
+
+        let after = key_store.rotate_inbox_now().unwrap().publication;
+
+        assert_ne!(
+            before.discovery_to_identity.to_bytes(),
+            after.discovery_to_identity.to_bytes()
+        );
     }
 
     #[test]
@@ -785,11 +1050,11 @@ mod tests {
     }
 
     #[test]
-    fn rotate_discovery_key_now_clears_one_time_prekey_pool() {
+    fn rotate_inbox_now_clears_one_time_prekey_pool() {
         let key_store = store();
         key_store.generate_identity().unwrap();
         key_store.replenish_one_time_prekeys().unwrap();
-        let rotation = key_store.rotate_discovery_key_now().unwrap();
+        let rotation = key_store.rotate_inbox_now().unwrap().publication;
         let bundles = key_store.replenish_one_time_prekeys().unwrap();
         assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
         assert!(
@@ -833,7 +1098,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .to_vec();
-        key_store.rotate_discovery_key_now().unwrap();
+        key_store.rotate_inbox_now().unwrap();
         storage
             .lock()
             .unwrap()
@@ -846,15 +1111,15 @@ mod tests {
     }
 
     #[test]
-    fn rotate_discovery_key_now_advances_epoch_and_refreshes_prekey() {
+    fn rotate_inbox_now_advances_epoch_and_refreshes_prekey() {
         let key_store = store();
         key_store.generate_identity().unwrap();
         let first_dk = key_store.current_discovery_key_bundle().unwrap();
-        assert_eq!(first_dk.epoch, 0);
+        assert_eq!(first_dk.epoch, 1);
 
-        let rotation = key_store.rotate_discovery_key_now().unwrap();
+        let rotation = key_store.rotate_inbox_now().unwrap().publication;
         assert_eq!(rotation.version, aether_crypto::PREKEY_BUNDLE_VERSION);
-        assert_eq!(rotation.discovery_key.epoch, 1);
+        assert_eq!(rotation.discovery_key.epoch, 2);
         assert_ne!(
             rotation.discovery_key.public_key.as_bytes(),
             first_dk.public_key.as_bytes()
@@ -869,13 +1134,13 @@ mod tests {
     }
 
     #[test]
-    fn rotate_discovery_key_now_clears_prior_epoch_signed_prekey_secret() {
+    fn rotate_inbox_now_clears_prior_epoch_signed_prekey_secret() {
         let key_store = store();
         key_store.generate_identity().unwrap();
         let first_epoch = key_store.current_discovery_key_bundle().unwrap().epoch;
         let first_prekey = key_store.rotate_signed_prekey_now().unwrap();
 
-        key_store.rotate_discovery_key_now().unwrap();
+        key_store.rotate_inbox_now().unwrap();
 
         assert!(matches!(
             key_store
@@ -887,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_discovery_key_now_failure_leaves_no_mismatched_prekey() {
+    fn rotate_inbox_now_failure_leaves_no_mismatched_prekey() {
         struct FailingSignedPreKeyStorage {
             inner: InMemorySecureStorage,
             should_fail: Arc<AtomicBool>,
@@ -920,10 +1185,10 @@ mod tests {
         assert!(key_store.rotate_signed_prekey_if_stale().unwrap().is_some());
 
         should_fail.store(true, Ordering::SeqCst);
-        assert!(key_store.rotate_discovery_key_now().is_err());
+        assert!(key_store.rotate_inbox_now().is_err());
         should_fail.store(false, Ordering::SeqCst);
 
-        assert_eq!(key_store.current_discovery_key_bundle().unwrap().epoch, 1);
+        assert_eq!(key_store.current_discovery_key_bundle().unwrap().epoch, 2);
         assert!(matches!(
             key_store.current_signed_prekey_bundle(),
             Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
@@ -940,7 +1205,7 @@ mod tests {
         let rotate_prekey = key_store.clone();
         let discovery_thread = std::thread::spawn(move || {
             for _ in 0..8 {
-                rotate_discovery.rotate_discovery_key_now().unwrap();
+                rotate_discovery.rotate_inbox_now().unwrap();
             }
         });
         let prekey_thread = std::thread::spawn(move || {
@@ -966,7 +1231,7 @@ mod tests {
         let rotator = key_store.clone();
         let rotate_thread = std::thread::spawn(move || {
             for _ in 0..8 {
-                rotator.rotate_discovery_key_now().unwrap();
+                rotator.rotate_inbox_now().unwrap();
             }
         });
         for _ in 0..8 {
@@ -1207,11 +1472,11 @@ mod tests {
     fn import_restores_discovery_key_epoch_lineage() {
         let source_store = store();
         source_store.generate_identity().unwrap();
-        source_store.rotate_discovery_key_now().unwrap();
-        source_store.rotate_discovery_key_now().unwrap();
+        source_store.rotate_inbox_now().unwrap();
+        source_store.rotate_inbox_now().unwrap();
         assert_eq!(
             source_store.current_discovery_key_bundle().unwrap().epoch,
-            2
+            3
         );
         let backup = source_store.export_encrypted_backup("pass").unwrap();
 
@@ -1221,14 +1486,14 @@ mod tests {
             .import_encrypted_backup(&backup, "pass")
             .unwrap();
 
-        // The restored discovery key keeps the source epoch lineage instead of resetting to zero,
-        // and verifies against the restored identity.
+        // The restored discovery key keeps the source generation lineage instead of resetting to
+        // the first generation, and verifies against the restored identity.
         assert_eq!(
             destination_store
                 .current_discovery_key_bundle()
                 .unwrap()
                 .epoch,
-            2
+            3
         );
     }
 

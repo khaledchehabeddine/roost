@@ -19,6 +19,7 @@ path = "uniffi-bindgen-swift.rs"
 
 [features]
 default = []
+development-certificates = ["aether-core/development-certificates"]
 fixture-replay = ["dep:hex", "dep:rand_chacha", "dep:serde", "dep:serde_json"]
 
 [dependencies]

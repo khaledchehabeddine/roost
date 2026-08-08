@@ -23,8 +23,9 @@ use zeroize::Zeroizing;
 
 const CREATED_AT: u64 = 1_700_000_000;
 const RETRY_WINDOW_MILLIS: u64 = 1_000;
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
-const CERTIFICATE_VERSION: u8 = 1;
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
+const TEST_RELAY_DOMAIN: &[u8] = b"relay.test";
+const CERTIFICATE_VERSION: u8 = 2;
 const CERTIFICATE_EXPIRES_AT: u64 = 1_700_100_000;
 const CERTIFICATE_REFERENCE_TIME: u64 = 1_700_000_000;
 
@@ -298,11 +299,10 @@ fn sender_certificate_bytes(
     bytes.push(CERTIFICATE_VERSION);
     bytes.push(signing_key_identifier.len() as u8);
     bytes.extend_from_slice(signing_key_identifier);
+    bytes.push(TEST_RELAY_DOMAIN.len() as u8);
+    bytes.extend_from_slice(TEST_RELAY_DOMAIN);
     bytes.extend_from_slice(&contact.identity_key.x25519_public_key);
     bytes.extend_from_slice(&contact.identity_key.ed25519_verifying_key);
-    bytes.extend_from_slice(&contact.discovery_key.x25519_public_key);
-    bytes.extend_from_slice(&contact.discovery_key.ed25519_verifying_key);
-    bytes.extend_from_slice(&contact.discovery_key.epoch.to_be_bytes());
     bytes.extend_from_slice(&expires_at_secs.to_be_bytes());
     bytes
 }
@@ -372,6 +372,7 @@ fn inbound_with_certificate_validation<'a>(
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
+            expected_relay_domain: TEST_RELAY_DOMAIN,
             domain_signing_keys,
             revocation_state: RevocationState::Available(revoked_identity_keys),
             reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,

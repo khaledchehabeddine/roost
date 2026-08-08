@@ -5,6 +5,10 @@ publish.workspace = true
 rust-version.workspace = true
 version.workspace = true
 
+[features]
+default = []
+development-certificates = []
+
 [dependencies]
 # Local
 aether-crypto.workspace = true

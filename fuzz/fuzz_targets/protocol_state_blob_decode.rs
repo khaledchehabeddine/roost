@@ -49,15 +49,14 @@ fn kind_from_name(name: &str) -> Option<ProtocolStateKind> {
         "deduplication_set" => Some(ProtocolStateKind::DeduplicationSet),
         "pending_acknowledgments" => Some(ProtocolStateKind::PendingAcknowledgments),
         "contact_state" => Some(ProtocolStateKind::ContactState),
+        "peer_inbox_authorization" => Some(ProtocolStateKind::PeerInboxAuthorization),
+        "local_inbox_authorization" => Some(ProtocolStateKind::LocalInboxAuthorization),
         _ => None,
     }
 }
 
 fn kind_from_byte(byte: u8) -> ProtocolStateKind {
-    match byte % 4 {
-        0 => ProtocolStateKind::RatchetSession,
-        1 => ProtocolStateKind::DeduplicationSet,
-        2 => ProtocolStateKind::PendingAcknowledgments,
-        _ => ProtocolStateKind::ContactState,
-    }
+    let kinds = ProtocolStateKind::all();
+    let index = usize::from(byte) % kinds.len();
+    kinds[index]
 }

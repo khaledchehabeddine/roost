@@ -3,6 +3,7 @@
 use crate::contact::{
     ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
+    PeerInboxAuthorization,
 };
 use crate::hardening::{
     DEFAULT_MAX_ACKNOWLEDGMENT_DIGESTS, DEFAULT_MAX_PENDING_ACKNOWLEDGMENTS,
@@ -20,8 +21,9 @@ use crate::sender_certificate::{
 use crate::{Message, MessageError, MessageId, PayloadKind};
 use aether_crypto::{
     DiscoveryKey, DiscoveryKeyBundle, Header, IdentityKeyBundle, PublicKey, RatchetState,
-    SenderIdentityMaterial, Signature, SigningKeyPair, open_frame_for_discovery_key, seal_frame,
-    verify_discovery_key_bundle, verify_identity_key_bundle, verify_with_context,
+    RecipientDeliveryCapability, SenderIdentityMaterial, Signature, SigningKeyPair,
+    open_frame_for_discovery_key, seal_frame, verify_discovery_key_bundle,
+    verify_identity_key_bundle, verify_with_context,
 };
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
@@ -41,6 +43,8 @@ const SESSION_STATE_WITH_CONTACT_WIRE_VERSION: u8 = 2;
 const SESSION_STATE_UNRECOVERABLE_WIRE_VERSION: u8 = 3;
 const DEDUPLICATION_SET_WIRE_VERSION: u8 = 1;
 const PENDING_ACKNOWLEDGMENTS_WIRE_VERSION: u8 = 1;
+const PEER_INBOX_AUTHORIZATION_VERSION: u8 = 1;
+const LOCAL_INBOX_AUTHORIZATION_VERSION: u8 = 1;
 const CONTACT_STATE_WIRE_VERSION: u8 = 2;
 const CONTACT_STATE_WIRE_VERSION_V1: u8 = 1;
 const ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION: u8 = 1;
@@ -137,6 +141,19 @@ pub enum ProtocolStateKind {
     PendingAcknowledgments = 4,
     /// Identity-key-addressed contact state.
     ContactState = 5,
+    /// Identity-key-addressed peer inbox authorization (AE-STA-01).
+    ///
+    /// Kept separate from [`Self::ContactState`] rather than folded into that blob because a
+    /// peer's delivery capability is a bearer secret, while contact state is mirrored to every
+    /// event-stream observer as a public snapshot.
+    PeerInboxAuthorization = 6,
+    /// Identity-key-addressed record of which local inbox generation a contact has been given
+    /// (AE-STA-01).
+    ///
+    /// Distribution bookkeeping, not key material: the local capability itself lives in secure
+    /// storage. This answers "who still holds a superseded capability and must be re-supplied",
+    /// which is what makes a post-rotation re-key both complete and resumable.
+    LocalInboxAuthorization = 7,
 }
 
 impl ProtocolStateKind {
@@ -148,6 +165,8 @@ impl ProtocolStateKind {
             Self::DeduplicationSet,
             Self::PendingAcknowledgments,
             Self::ContactState,
+            Self::PeerInboxAuthorization,
+            Self::LocalInboxAuthorization,
         ]
     }
 }
@@ -159,6 +178,8 @@ impl fmt::Display for ProtocolStateKind {
             Self::DeduplicationSet => write!(f, "deduplication-set state"),
             Self::PendingAcknowledgments => write!(f, "pending-acknowledgment state"),
             Self::ContactState => write!(f, "contact state"),
+            Self::PeerInboxAuthorization => write!(f, "peer inbox-authorization state"),
+            Self::LocalInboxAuthorization => write!(f, "local inbox-authorization state"),
         }
     }
 }
@@ -388,6 +409,8 @@ pub struct InboundEncryptedMessage<'a> {
 pub struct InboundSenderCertificateValidation<'a> {
     /// Known domain-signing keys indexed by certificate signing-key identifier.
     pub domain_signing_keys: &'a [DomainSigningKey<'a>],
+    /// Relay domain the recipient expects incoming certificates to name (AE-CRT-01).
+    pub expected_relay_domain: &'a [u8],
     /// Caller-supplied revocation input for the sender Identity Key check.
     pub revocation_state: RevocationState<'a>,
     /// Caller-supplied Unix timestamp in seconds used for expiry evaluation.
@@ -1024,6 +1047,155 @@ impl ProtocolStateEngine {
         contact.trust_state = ContactTrustState::Verified;
         changed_contact_state(address, contact, self.limits)
             .map(ContactSafetyNumberConfirmation::Matched)
+    }
+
+    /// Records a peer's inbox authorization, refusing to move backwards (AE-CON-05).
+    ///
+    /// Returns updates to commit, or an empty vector when `generation` is not newer than what is
+    /// already stored. Refusing a lower generation matters because an old authorization replayed at
+    /// a contact would restore a capability the peer has already rotated away from — the exact
+    /// state a blocked sender would want to reach (AE-BLK-08).
+    ///
+    /// The capability never enters [`ContactState`], so it is not mirrored to event observers.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the stored authorization fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the new authorization fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    pub fn record_peer_inbox_authorization(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+        generation: u32,
+        capability: &RecipientDeliveryCapability,
+    ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
+        let address = peer_inbox_authorization_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        if let Some(stored) = load_peer_inbox_authorization(snapshot, &address)?
+            && generation <= stored.generation
+        {
+            return Ok(Vec::new());
+        }
+        let wire = PeerInboxAuthorizationWire {
+            version: PEER_INBOX_AUTHORIZATION_VERSION,
+            generation,
+            capability: *capability.to_bytes(),
+        };
+        let blob = postcard::to_stdvec(&wire).map_err(|e| ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+        Ok(vec![ProtocolStateUpdate::set(
+            address,
+            ProtocolStateBlob::from_bytes(blob),
+        )])
+    }
+
+    /// Records that `identity_key` has been given local inbox generation `generation`.
+    ///
+    /// Call this only after the in-band authorization update has actually been handed to the
+    /// transport, so an app killed mid-re-key resumes rather than skipping contacts. Returns no
+    /// updates when the contact already holds this generation or a newer one.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the stored record fails to decode.
+    /// - [`ProtocolStateError::BlobEncode`] if the new record fails to encode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    pub fn record_inbox_authorization_delivered(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+        generation: u32,
+    ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
+        let address = local_inbox_authorization_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        if let Some(delivered) = load_delivered_inbox_authorization(snapshot, &address)?
+            && generation <= delivered
+        {
+            return Ok(Vec::new());
+        }
+        let wire = LocalInboxAuthorizationWire {
+            version: LOCAL_INBOX_AUTHORIZATION_VERSION,
+            generation,
+        };
+        let blob = postcard::to_stdvec(&wire).map_err(|e| ProtocolStateError::BlobEncode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+        Ok(vec![ProtocolStateUpdate::set(
+            address,
+            ProtocolStateBlob::from_bytes(blob),
+        )])
+    }
+
+    /// Returns the local inbox generation `identity_key` was last given, if any.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the stored record fails to decode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn delivered_inbox_authorization(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<Option<u32>, ProtocolStateError> {
+        let address = local_inbox_authorization_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        load_delivered_inbox_authorization(snapshot, &address)
+    }
+
+    /// Returns which of `candidates` still need the current inbox generation.
+    ///
+    /// A contact qualifies when it has never been given an authorization, or was last given one
+    /// older than `current_generation`. **Blocked contacts are always excluded**: re-supplying a
+    /// blocked contact would hand back the very capability the rotation revoked and silently undo
+    /// the block (AE-BLK-08). Contacts with no stored contact record are skipped.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if a stored record fails to decode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if a candidate key is not canonical.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a blob version is not supported.
+    pub fn contacts_needing_inbox_authorization(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        current_generation: u32,
+        candidates: &[ContactIdentityKey],
+    ) -> Result<Vec<ContactIdentityKey>, ProtocolStateError> {
+        let mut stale = Vec::new();
+        for identity_key in candidates {
+            let contact_address = contact_address(*identity_key);
+            validate_contact_identity_key(&contact_address, identity_key)?;
+            let Some(blob) = snapshot.get(&contact_address) else {
+                continue;
+            };
+            if decode_contact_state(&contact_address, blob, self.limits)?.blocked {
+                continue;
+            }
+            let delivered = load_delivered_inbox_authorization(
+                snapshot,
+                &local_inbox_authorization_address(*identity_key),
+            )?;
+            if delivered.is_none_or(|delivered| delivered < current_generation) {
+                stale.push(*identity_key);
+            }
+        }
+        Ok(stale)
+    }
+
+    /// Returns the stored inbox authorization for a peer, if one has been recorded.
+    ///
+    /// # Errors
+    /// - [`ProtocolStateError::BlobDecode`] if the stored authorization fails to decode.
+    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
+    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    pub fn peer_inbox_authorization(
+        &self,
+        snapshot: &ProtocolStateSnapshot,
+        identity_key: ContactIdentityKey,
+    ) -> Result<Option<PeerInboxAuthorization>, ProtocolStateError> {
+        let address = peer_inbox_authorization_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        load_peer_inbox_authorization(snapshot, &address)
     }
 
     fn set_contact_blocked(
@@ -1770,6 +1942,67 @@ fn contact_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::ContactState, identity_key.into())
 }
 
+fn peer_inbox_authorization_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(
+        ProtocolStateKind::PeerInboxAuthorization,
+        identity_key.into(),
+    )
+}
+
+fn local_inbox_authorization_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(
+        ProtocolStateKind::LocalInboxAuthorization,
+        identity_key.into(),
+    )
+}
+
+fn load_delivered_inbox_authorization(
+    snapshot: &ProtocolStateSnapshot,
+    address: &ProtocolStateAddress,
+) -> Result<Option<u32>, ProtocolStateError> {
+    let Some(blob) = snapshot.get(address) else {
+        return Ok(None);
+    };
+    let wire: LocalInboxAuthorizationWire =
+        postcard::from_bytes(blob.as_bytes()).map_err(|e| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+    if wire.version != LOCAL_INBOX_AUTHORIZATION_VERSION {
+        return Err(ProtocolStateError::UnsupportedBlobVersion {
+            address: address.clone(),
+            major: wire.version,
+            minor: 0,
+        });
+    }
+    Ok(Some(wire.generation))
+}
+
+fn load_peer_inbox_authorization(
+    snapshot: &ProtocolStateSnapshot,
+    address: &ProtocolStateAddress,
+) -> Result<Option<PeerInboxAuthorization>, ProtocolStateError> {
+    let Some(blob) = snapshot.get(address) else {
+        return Ok(None);
+    };
+    let wire: PeerInboxAuthorizationWire =
+        postcard::from_bytes(blob.as_bytes()).map_err(|e| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+    if wire.version != PEER_INBOX_AUTHORIZATION_VERSION {
+        return Err(ProtocolStateError::UnsupportedBlobVersion {
+            address: address.clone(),
+            major: wire.version,
+            minor: 0,
+        });
+    }
+    Ok(Some(PeerInboxAuthorization {
+        generation: wire.generation,
+        capability: RecipientDeliveryCapability::from_bytes(wire.capability),
+    }))
+}
+
 fn validate_persisted_deduplication_capacity(
     address: &ProtocolStateAddress,
     capacity: usize,
@@ -2104,6 +2337,20 @@ where
     }
 
     deserializer.deserialize_seq(AcknowledgmentDigestListVisitor)
+}
+
+#[derive(Deserialize, Serialize)]
+struct LocalInboxAuthorizationWire {
+    version: u8,
+    generation: u32,
+}
+
+// Persistence requires serialization; `ZeroizeOnDrop` scrubs the temporary bearer-secret copy.
+#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+struct PeerInboxAuthorizationWire {
+    version: u8,
+    generation: u32,
+    capability: [u8; 32],
 }
 
 #[derive(Serialize)]
@@ -3002,6 +3249,16 @@ pub fn fuzz_decode_protocol_state_blob(
         ProtocolStateKind::ContactState => {
             decode_contact_state(&address, &blob, limits).map(|_| ())
         }
+        ProtocolStateKind::PeerInboxAuthorization => {
+            let mut snapshot = ProtocolStateSnapshot::new();
+            snapshot.set(address.clone(), blob);
+            load_peer_inbox_authorization(&snapshot, &address).map(|_| ())
+        }
+        ProtocolStateKind::LocalInboxAuthorization => {
+            let mut snapshot = ProtocolStateSnapshot::new();
+            snapshot.set(address.clone(), blob);
+            load_delivered_inbox_authorization(&snapshot, &address).map(|_| ())
+        }
     }
 }
 
@@ -3273,6 +3530,7 @@ fn inbound_contact_identity_key(
         certificate: &sender_identity.certificate,
         signature: &sender_identity.signature,
         domain_signing_keys: validation.domain_signing_keys,
+        expected_relay_domain: validation.expected_relay_domain,
         revocation_state: validation.revocation_state,
         reference_timestamp_secs: validation.reference_timestamp_secs,
         grace_window_secs: validation.grace_window_secs,
