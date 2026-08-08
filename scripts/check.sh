@@ -49,7 +49,9 @@ tool_setup() {
         java) echo "install a JDK and ensure java is on PATH" ;;
         gpg) echo "install GnuPG and ensure gpg is on PATH" ;;
         gh) echo "install GitHub CLI and authenticate with gh auth login" ;;
+        codex) echo "install Codex CLI and ensure codex is on PATH" ;;
         git) echo "install Git and ensure git is on PATH" ;;
+        jq) echo "install jq and ensure jq is on PATH" ;;
         rg) echo "install ripgrep and ensure rg is on PATH" ;;
         rustup) echo "install rustup from https://rustup.rs and ensure rustup is on PATH" ;;
         *) echo "install $1 and ensure it is on PATH" ;;
@@ -60,6 +62,10 @@ require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
         die "missing required tool: $1; $(tool_setup "$1")"
     fi
+}
+
+repository_search() {
+    rg --no-config "$@"
 }
 
 require_rust_component() {
@@ -171,6 +177,144 @@ run_harness_self_test() {
     bash "$ROOT/scripts/test/check-harness.sh"
 }
 
+check_canonical_target() {
+    local root="$1"
+    local canonical_root="$2"
+    local adapter="$3"
+    local target="$4"
+    local target_path="$5"
+    local target_dir
+    target_dir="$(dirname "$target_path")"
+    if [[ ! -d "$target_dir" ]] || \
+        [[ ! -e "$target_path" && ! -L "$target_path" ]]; then
+        echo "missing canonical target for ${adapter#"$root/"}: $target" >&2
+        return 1
+    fi
+    local resolved
+    resolved="$(cd "$target_dir" && pwd -P)/$(basename "$target_path")"
+    case "$resolved" in
+        "$canonical_root"/*) ;;
+        *)
+            echo "non-canonical target for ${adapter#"$root/"}: $target" >&2
+            return 1
+            ;;
+    esac
+    if [[ ! -f "$resolved" || -L "$target_path" ]]; then
+        echo "non-canonical target for ${adapter#"$root/"}: $target" >&2
+        return 1
+    fi
+}
+
+check_markdown_adapter() {
+    local root="$1"
+    local canonical_root="$2"
+    local adapter="$3"
+    local body
+    body="$(awk '
+        NR == 1 && $0 == "---" { frontmatter = 1; next }
+        frontmatter && $0 == "---" { frontmatter = 0; next }
+        frontmatter { next }
+        NF { print }
+    ' "$adapter")"
+    local route_pattern='^Read \[[^]]+\]\(([^)]+)\)\.$'
+    if [[ "$(wc -l <<<"$body")" -ne 1 ]] || \
+        [[ ! "$body" =~ $route_pattern ]]; then
+        echo "copied adapter body in ${adapter#"$root/"}; keep one canonical route" >&2
+        return 1
+    fi
+    local target="${BASH_REMATCH[1]}"
+    check_canonical_target \
+        "$root" "$canonical_root" "$adapter" "$target" \
+        "$(dirname "$adapter")/$target"
+}
+
+check_toml_adapter() {
+    local root="$1"
+    local canonical_root="$2"
+    local adapter="$3"
+    local instruction
+    local instruction_pattern='^developer_instructions = "Read ([^"]+)"$'
+    instruction="$(awk '/^developer_instructions = / { print }' "$adapter")"
+    if [[ "$(wc -l <<<"$instruction")" -ne 1 ]] || \
+        [[ ! "$instruction" =~ $instruction_pattern ]]; then
+        echo "copied adapter body in ${adapter#"$root/"}; keep one canonical route" >&2
+        return 1
+    fi
+    local target="${BASH_REMATCH[1]}"
+    check_canonical_target \
+        "$root" "$canonical_root" "$adapter" "$target" "$root/$target"
+}
+
+check_root_claude_adapter() {
+    local root="$1"
+    local adapter="$root/CLAUDE.md"
+    if [[ ! -f "$adapter" || -L "$adapter" ]]; then
+        echo "root CLAUDE.md must be a regular non-symlink file" >&2
+        return 1
+    fi
+    if [[ "$(wc -l < "$adapter")" -ne 1 ]] || \
+        [[ "$(sed -n '1p' "$adapter")" != "@AGENTS.md" ]]; then
+        echo "root CLAUDE.md must contain only @AGENTS.md" >&2
+        return 1
+    fi
+    if [[ ! -f "$root/AGENTS.md" || -L "$root/AGENTS.md" ]]; then
+        echo "root CLAUDE.md target must be a regular non-symlink AGENTS.md" >&2
+        return 1
+    fi
+}
+
+check_adapter_tree() {
+    local root="$1"
+    local directory="$2"
+    if [[ ! -d "$directory" || -L "$directory" ]]; then
+        echo "adapter directory must be a regular non-symlink directory: ${directory#"$root/"}" >&2
+        return 1
+    fi
+    local symlink
+    symlink="$(find "$directory" -type l -print -quit)"
+    if [[ -n "$symlink" ]]; then
+        echo "symlinked adapter entry: ${symlink#"$root/"}" >&2
+        return 1
+    fi
+}
+
+check_agent_adapters() {
+    local root="${1:-$ROOT}"
+    local physical_root
+    physical_root="$(cd "$root" && pwd -P)"
+    local canonical_root
+    if [[ ! -d "$root/.agents/instructions" ]] || \
+        [[ -L "$root/.agents/instructions" ]]; then
+        echo "missing canonical instruction root: .agents/instructions" >&2
+        return 1
+    fi
+    canonical_root="$(cd "$root/.agents/instructions" && pwd -P)"
+    if [[ "$canonical_root" != "$physical_root/.agents/instructions" ]]; then
+        echo "non-canonical instruction root: .agents/instructions" >&2
+        return 1
+    fi
+    local directory
+    local adapter
+    for directory in \
+        "$root/.agents/skills" \
+        "$root/.claude/skills" \
+        "$root/.claude/rules" \
+        "$root/.claude/agents"; do
+        check_adapter_tree "$root" "$directory" || return 1
+        while IFS= read -r adapter; do
+            check_markdown_adapter \
+                "$root" "$canonical_root" "$adapter" || return 1
+        done < <(find "$directory" -type f -name '*.md' -print | sort)
+    done
+    check_root_claude_adapter "$root" || return 1
+    directory="$root/.codex/agents"
+    check_adapter_tree "$root" "$directory" || return 1
+    while IFS= read -r adapter; do
+        check_toml_adapter \
+            "$root" "$canonical_root" "$adapter" || return 1
+    done < <(find "$directory" -type f -name '*.toml' -print | sort)
+}
+
 shell() {
     require_tool shellcheck
     require_tool actionlint
@@ -186,12 +330,65 @@ shell() {
 
 agent_config() {
     require_tool rg
+    require_tool codex
+    require_tool jq
     [[ -x "$ROOT/scripts/check.sh" ]] || die "scripts/check.sh must be executable"
+    [[ -x "$ROOT/scripts/push-reviewed-branch.sh" ]] || \
+        die "scripts/push-reviewed-branch.sh must be executable"
     [[ ! -e "$ROOT/scripts/hooks/check.sh" ]] || die "obsolete scripts/hooks/check.sh must be removed"
     for config in "$ROOT/.codex/hooks.json" "$ROOT/.claude/settings.json"; do
-        rg -Fq 'scripts/check.sh quick' "$config" || die "$config must invoke scripts/check.sh quick"
-        ! rg -Fq 'scripts/hooks/check.sh' "$config" || die "$config still invokes the obsolete nested check script"
+        repository_search -Fq 'scripts/check.sh quick' "$config" || die "$config must invoke scripts/check.sh quick"
+        repository_search -Fq 'scripts/hooks/enforce-git-boundary.sh' "$config" || \
+            die "$config must enforce the Git boundary before execution"
+        ! repository_search -Fq 'scripts/hooks/check.sh' "$config" || die "$config still invokes the obsolete nested check script"
     done
+    local codex_safety="$ROOT/.codex/rules/safety.rules"
+    local codex_reviewed_push
+    codex_reviewed_push=$'pattern = ["scripts/push-reviewed-branch.sh"],\n    decision = "prompt",'
+    repository_search -UFq "$codex_reviewed_push" "$codex_safety" || \
+        die ".codex/rules/safety.rules must prompt for the reviewed push wrapper"
+    local codex_raw_push
+    codex_raw_push=$'pattern = ["git", "push"],\n    decision = "forbidden",'
+    repository_search -UFq "$codex_raw_push" "$codex_safety" || \
+        die ".codex/rules/safety.rules must forbid raw Git pushes"
+    local policy_output
+    local policy_decision
+    policy_output="$(
+        codex execpolicy check \
+            --rules "$codex_safety" \
+            scripts/push-reviewed-branch.sh 2> /dev/null
+    )" || die "Codex could not evaluate .codex/rules/safety.rules"
+    policy_decision="$(jq -er '.decision' <<< "$policy_output")" || \
+        die "Codex returned no final decision for the reviewed push wrapper"
+    [[ "$policy_decision" == "prompt" ]] || \
+        die "reviewed push wrapper must resolve to a prompt decision"
+    local claude_settings="$ROOT/.claude/settings.json"
+    repository_search -Fq '"Bash(scripts/push-reviewed-branch.sh)"' "$claude_settings" || \
+        die ".claude/settings.json must ask before the reviewed push wrapper"
+    repository_search -Fq '"Bash(git push*)"' "$claude_settings" || \
+        die ".claude/settings.json must deny direct raw Git pushes"
+    repository_search -Fq '"Bash(git * push*)"' "$claude_settings" || \
+        die ".claude/settings.json must deny global-option raw Git pushes"
+    repository_search -Fq '"Bash(gh auth token*)"' "$claude_settings" || \
+        die ".claude/settings.json must deny GitHub credential output"
+    repository_search -Fq '"Bash(gh pr merge*)"' "$claude_settings" || \
+        die ".claude/settings.json must deny agent-driven pull-request merges"
+    local commit_push_adapter="$ROOT/.claude/skills/commit-push/SKILL.md"
+    ! repository_search -Fq 'Bash(git *)' "$commit_push_adapter" || \
+        die ".claude/skills/commit-push/SKILL.md must not grant broad Git access"
+    repository_search -Fq 'Bash(scripts/push-reviewed-branch.sh)' "$commit_push_adapter" || \
+        die ".claude/skills/commit-push/SKILL.md must use the reviewed push wrapper"
+    ! repository_search -Fq 'Bash(gh *)' "$commit_push_adapter" || \
+        die ".claude/skills/commit-push/SKILL.md must not grant broad GitHub access"
+    local issue_adapter="$ROOT/.claude/skills/issue/SKILL.md"
+    ! repository_search -Fq 'Bash(gh *)' "$issue_adapter" || \
+        die ".claude/skills/issue/SKILL.md must not grant broad GitHub access"
+    local commit_push_workflow="$ROOT/.agents/instructions/skills/commit-push/SKILL.md"
+    repository_search -Fq 'scripts/push-reviewed-branch.sh' "$commit_push_workflow" || \
+        die "canonical commit-push must use the reviewed push wrapper"
+    ! repository_search -Fq 'git push -u origin HEAD' "$commit_push_workflow" || \
+        die "canonical commit-push must not invoke raw Git push"
+    check_agent_adapters "$ROOT"
     AETHER_CHECK_HARNESS_COMMAND_SURFACE_ONLY=1 bash "$ROOT/scripts/test/check-harness.sh"
 }
 
@@ -246,7 +443,7 @@ doctor() {
     local missing=0
     local tool
     local installed_name
-    for tool in cargo rustup git rg cargo-llvm-cov cargo-deny shellcheck actionlint cargo-fuzz curl swiftc kotlinc java gpg gh; do
+    for tool in cargo rustup git rg jq codex cargo-llvm-cov cargo-deny shellcheck actionlint cargo-fuzz curl swiftc kotlinc java gpg gh; do
         if command -v "$tool" >/dev/null 2>&1; then
             echo "available: $tool"
         else
