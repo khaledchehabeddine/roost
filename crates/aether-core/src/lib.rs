@@ -94,6 +94,7 @@ pub use aether_crypto::SenderIdentityMaterial;
 pub use contact::{
     ContactDiscoveryKey, ContactEvent, ContactEventStream, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
+    PeerInboxAuthorization,
 };
 pub use discovery_key::DiscoveryKeyError;
 pub use events::{
@@ -106,9 +107,10 @@ pub use hardening::{
 };
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
-    AcknowledgmentProcessing, KeyStore, KeyStoreError, MessageDecryption, MessageEncryption,
-    MessageOperationError, PublicationBundle, SessionAcceptance, SessionAcceptanceResult,
-    SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
+    AcknowledgmentProcessing, ContactBlock, InboxRotation, KeyStore, KeyStoreError,
+    MessageDecryption, MessageEncryption, MessageOperationError, PublicationBundle,
+    SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
+    SessionInitiationResult,
 };
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;
@@ -123,6 +125,10 @@ pub use protocol_state::{
     SessionUnrecoverableResult,
 };
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
+#[cfg(feature = "development-certificates")]
+pub use sender_certificate::{
+    DevelopmentCertificateAuthority, DevelopmentCertificateError, DevelopmentSenderCertificate,
+};
 pub use sender_certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
     SenderCertificateIdentityKey, SenderCertificateValidationError,

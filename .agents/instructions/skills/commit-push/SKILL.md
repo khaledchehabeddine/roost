@@ -55,6 +55,6 @@ Waivers
 2. If staged work exists, verify it matches the reviewed state, then propose commit grouping and messages. Require user confirmation specifically for the commit or commits, then create them.
 3. Recompute the committed base diff plus pending state. Verify its content matches the reviewed change set and no unrelated change appeared; otherwise repeat the full gate and applicable reviews.
 4. When the reviewed branch needs publishing, require user confirmation specifically for the push, then run `scripts/push-reviewed-branch.sh` without arguments. Clean reviewed commits do not require staging or commit confirmation before this separately confirmed push.
-5. Build the title and body from the confirmed base diff and `.github/PULL_REQUEST_TEMPLATE.md`, including gate evidence and waivers.
+5. Build the title and body from the confirmed base diff and `.github/PULL_REQUEST_TEMPLATE.md`, including gate evidence and waivers. Pass the body directly or through an absolute, reviewed, regular non-symlink file inside the repository.
 6. Check for an existing pull request. Require user confirmation specifically for creating a draft pull request or updating the existing pull request, then perform only the confirmed action against the confirmed base.
 7. Return branch, commit, push, and pull-request results. Never mark a draft ready, merge, or force-push.

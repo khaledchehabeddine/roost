@@ -234,6 +234,7 @@ impl From<KeyStoreError> for AetherError {
             KeyStoreError::Discovery(e) => e.into(),
             KeyStoreError::Identity(e) => e.into(),
             KeyStoreError::OneTimePreKey(e) => e.into(),
+            KeyStoreError::ProtocolState(e) => e.into(),
             KeyStoreError::SignedPreKey(e) => e.into(),
         }
     }

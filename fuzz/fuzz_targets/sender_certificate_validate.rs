@@ -24,6 +24,7 @@ struct CertificateCase {
     domain_identifier: Vec<u8>,
     domain_verifying_key: Vec<u8>,
     domain_status: DomainSigningKeyStatus,
+    expected_relay_domain: Vec<u8>,
     revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
     reference_timestamp_secs: u64,
     grace_window_secs: u64,
@@ -40,6 +41,7 @@ fn validate(case: CertificateCase) {
         certificate: &case.certificate,
         signature: &case.signature,
         domain_signing_keys: &domain_signing_keys,
+        expected_relay_domain: &case.expected_relay_domain,
         revocation_state: RevocationState::Available(&case.revoked_identity_keys),
         reference_timestamp_secs: case.reference_timestamp_secs,
         grace_window_secs: case.grace_window_secs,
@@ -67,6 +69,7 @@ fn text_case(text: &str) -> Option<CertificateCase> {
             Some("untrusted") => DomainSigningKeyStatus::Untrusted,
             _ => DomainSigningKeyStatus::Trusted,
         },
+        expected_relay_domain: support::hex_field(text, "expected_relay_domain")?,
         revoked_identity_keys,
         reference_timestamp_secs: support::u64_field(text, "reference", 1_700_000_000),
         grace_window_secs: support::u64_field(text, "grace", 60),
@@ -87,6 +90,10 @@ fn binary_case(data: &[u8]) -> CertificateCase {
     };
     let (domain_identifier, rest) = take_len(rest, usize::from(identifier_len % 65));
     let (domain_verifying_key, rest) = take_len(rest, 32);
+    let Some((&relay_domain_len, rest)) = rest.split_first() else {
+        return empty_case();
+    };
+    let (expected_relay_domain, rest) = take_len(rest, usize::from(relay_domain_len));
     let revoked_identity_keys = (rest.len() >= 64)
         .then(|| SenderCertificateIdentityKey {
             x25519_public_key: support::array_32(&rest[..32]),
@@ -99,6 +106,7 @@ fn binary_case(data: &[u8]) -> CertificateCase {
         signature: signature.to_vec(),
         domain_identifier: domain_identifier.to_vec(),
         domain_verifying_key: domain_verifying_key.to_vec(),
+        expected_relay_domain: expected_relay_domain.to_vec(),
         domain_status: rest
             .first()
             .is_some_and(|byte| byte % 2 == 0)
@@ -117,6 +125,7 @@ fn empty_case() -> CertificateCase {
         domain_identifier: Vec::new(),
         domain_verifying_key: Vec::new(),
         domain_status: DomainSigningKeyStatus::Trusted,
+        expected_relay_domain: Vec::new(),
         revoked_identity_keys: Vec::new(),
         reference_timestamp_secs: 0,
         grace_window_secs: 0,

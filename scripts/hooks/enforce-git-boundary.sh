@@ -292,13 +292,149 @@ validate_gh_api() {
     ((saw_get == 1))
 }
 
+validate_gh_auth_status() {
+    local index
+    local token
+
+    for ((index = 3; index < ${#COMMAND_WORDS[@]}; index++)); do
+        token="${COMMAND_WORDS[index]}"
+        case "$token" in
+            --active | --help | -a)
+                ;;
+            --hostname | --jq | --json | --template | -h)
+                ((index++))
+                ((index < ${#COMMAND_WORDS[@]})) || return 1
+                [[ -n "${COMMAND_WORDS[index]}" && "${COMMAND_WORDS[index]}" != -* ]] || return 1
+                ;;
+            --hostname=* | --jq=* | --json=* | --template=*)
+                [[ -n "${token#*=}" ]] || return 1
+                ;;
+            --show-token | --show-token=* | -t | -[^-]*t*)
+                return 1
+                ;;
+            --* | -* | *)
+                return 1
+                ;;
+        esac
+    done
+}
+
+validate_repository_input_file() {
+    local path="$1"
+    local physical_parent
+
+    [[ "$path" == /* && -f "$path" && ! -L "$path" ]] || return 1
+    physical_parent="$(cd "$(dirname "$path")" && pwd -P)" || return 1
+    [[ "$physical_parent" == "$ROOT" || "$physical_parent" == "$ROOT/"* ]]
+}
+
+validate_gh_pr_create() {
+    local index
+    local saw_base=0
+    local saw_body=0
+    local saw_draft=0
+    local saw_head=0
+    local saw_title=0
+    local token
+    local value
+
+    for ((index = 3; index < ${#COMMAND_WORDS[@]}; index++)); do
+        token="${COMMAND_WORDS[index]}"
+        case "$token" in
+            --head | -H)
+                ((index++))
+                ((index < ${#COMMAND_WORDS[@]})) || return 1
+                value="${COMMAND_WORDS[index]}"
+                [[ -n "$value" && "$value" != -* ]] || return 1
+                saw_head=1
+                ;;
+            --head=*)
+                value="${token#*=}"
+                [[ -n "$value" && "$value" != -* ]] || return 1
+                saw_head=1
+                ;;
+            --base | -B)
+                ((index++))
+                ((index < ${#COMMAND_WORDS[@]})) || return 1
+                value="${COMMAND_WORDS[index]}"
+                [[ -n "$value" && "$value" != -* ]] || return 1
+                saw_base=1
+                ;;
+            --base=*)
+                value="${token#*=}"
+                [[ -n "$value" && "$value" != -* ]] || return 1
+                saw_base=1
+                ;;
+            --title | -t)
+                ((index++))
+                ((index < ${#COMMAND_WORDS[@]})) || return 1
+                [[ -n "${COMMAND_WORDS[index]}" && "${COMMAND_WORDS[index]}" != -* ]] || return 1
+                saw_title=1
+                ;;
+            --title=*)
+                [[ -n "${token#*=}" ]] || return 1
+                saw_title=1
+                ;;
+            --body | -b)
+                ((index++))
+                ((index < ${#COMMAND_WORDS[@]})) || return 1
+                [[ -n "${COMMAND_WORDS[index]}" && "${COMMAND_WORDS[index]}" != -* ]] || return 1
+                saw_body=1
+                ;;
+            --body=*)
+                [[ -n "${token#*=}" ]] || return 1
+                saw_body=1
+                ;;
+            --body-file | -F)
+                ((index++))
+                ((index < ${#COMMAND_WORDS[@]})) || return 1
+                validate_repository_input_file "${COMMAND_WORDS[index]}" || return 1
+                saw_body=1
+                ;;
+            --body-file=*)
+                validate_repository_input_file "${token#*=}" || return 1
+                saw_body=1
+                ;;
+            --assignee | --label | --milestone | --project | --reviewer | \
+                -a | -l | -m | -p | -r)
+                ((index++))
+                ((index < ${#COMMAND_WORDS[@]})) || return 1
+                [[ -n "${COMMAND_WORDS[index]}" && "${COMMAND_WORDS[index]}" != -* ]] || return 1
+                ;;
+            --assignee=* | --label=* | --milestone=* | --project=* | --reviewer=*)
+                [[ -n "${token#*=}" ]] || return 1
+                ;;
+            --draft | -d)
+                saw_draft=1
+                ;;
+            --dry-run | --no-maintainer-edit)
+                ;;
+            --editor | --fill | --fill-first | --fill-verbose | --recover | --recover=* | \
+                --template | --template=* | --web | -e | -f | -T | -w)
+                return 1
+                ;;
+            --* | -* | *)
+                return 1
+                ;;
+        esac
+    done
+
+    ((saw_base == 1 && saw_body == 1 && saw_draft == 1 && saw_head == 1 && saw_title == 1))
+}
+
 validate_github_cli() {
     ((${#COMMAND_WORDS[@]} >= 3)) || return 1
     case "${COMMAND_WORDS[1]}:${COMMAND_WORDS[2]}" in
-        auth:status | issue:create | issue:list | issue:view | label:list | \
-            pr:checks | pr:create | pr:diff | pr:edit | pr:list | pr:status | pr:view | \
+        auth:status)
+            validate_gh_auth_status
+            ;;
+        issue:create | issue:list | issue:view | label:list | \
+            pr:checks | pr:diff | pr:edit | pr:list | pr:status | pr:view | \
             run:list | run:view | run:watch | workflow:list | workflow:view)
             return 0
+            ;;
+        pr:create)
+            validate_gh_pr_create
             ;;
         *)
             [[ "${COMMAND_WORDS[1]}" == 'api' ]] && validate_gh_api

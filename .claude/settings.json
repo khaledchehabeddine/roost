@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/enforce-git-boundary.sh"
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/scripts/hooks/enforce-git-boundary.sh\""
           }
         ]
       }

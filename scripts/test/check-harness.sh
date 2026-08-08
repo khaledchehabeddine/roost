@@ -5,6 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 REAL_GIT="$(command -v git)"
+REAL_JQ="$(command -v jq)"
 
 output="$("$ROOT/scripts/check.sh" --help)"
 for command in doctor quick full format lint test docs coverage supply-chain shell agent-config bindings fuzz release; do
@@ -19,8 +20,13 @@ if [[ "${AETHER_CHECK_HARNESS_COMMAND_SURFACE_ONLY:-}" == "1" ]]; then
 fi
 
 temp_dir="$(mktemp -d)"
-trap 'rm -rf "$temp_dir"' EXIT
+repo_temp_dir="$(mktemp -d "$ROOT/.aether-check-harness.XXXXXX")"
+trap 'rm -rf "$temp_dir" "$repo_temp_dir"' EXIT
 mkdir "$temp_dir/bin"
+printf '%s\n' 'reviewed body' > "$repo_temp_dir/body.md"
+printf '%s\n' 'outside body' > "$temp_dir/body.md"
+mkfifo "$repo_temp_dir/body.fifo"
+ln -s "$repo_temp_dir/body.md" "$repo_temp_dir/body-link.md"
 error_file="$temp_dir/error"
 
 cat > "$temp_dir/bin/cargo" <<'EOF'
@@ -211,7 +217,42 @@ expect_shell_denied 'gh auth token'
 expect_shell_denied '/opt/homebrew/bin/gh auth token'
 expect_shell_denied 'env gh auth token'
 expect_shell_denied 'time gh auth token'
+expect_shell_denied 'gh auth status --show-token'
+expect_shell_denied 'gh auth status --show-token=true'
+expect_shell_denied 'gh auth status -t'
+expect_shell_denied 'gh auth status -at'
+expect_shell_denied 'gh auth status --hostname --show-token'
+expect_shell_denied 'gh auth status -h -t'
 expect_shell_denied 'time scripts/push-reviewed-branch.sh'
+expect_shell_denied 'gh pr create --base main --head review --title test --body body'
+expect_shell_denied 'gh pr create --draft --head review --title test --body body'
+expect_shell_denied 'gh pr create --draft --base main --title test --body body'
+expect_shell_denied 'gh pr create --draft --base main --head= --title test --body body'
+expect_shell_denied 'gh pr create --head review --title test --body body --web'
+expect_shell_denied 'gh pr create --head review --title test --body body -w'
+expect_shell_denied 'gh pr create --head review --editor'
+expect_shell_denied 'gh pr create --head review --title test --body --web'
+expect_shell_denied 'gh pr create --head review --base main'
+expect_shell_denied 'gh pr create --draft --base main --head review --fill'
+expect_shell_denied 'gh pr create --draft --base main --head review --fill-first'
+expect_shell_denied 'gh pr create --draft --base main --head review --fill-verbose'
+expect_shell_denied 'gh pr create --draft --base main --head review -f'
+for unsafe_body_file in \
+    - \
+    /dev/stdin \
+    /dev/tty \
+    "$repo_temp_dir/body.fifo" \
+    "$repo_temp_dir/body-link.md" \
+    "$temp_dir/body.md"; do
+    expect_shell_denied \
+        "gh pr create --draft --base main --head review --title test --body-file $unsafe_body_file"
+done
+expect_shell_denied \
+    "gh pr create --draft --base main --head review --title test --template $repo_temp_dir/body.md"
+expect_shell_denied \
+    "gh pr create --draft --base main --head review --title test --template=$repo_temp_dir/body.md"
+expect_shell_denied \
+    "gh pr create --draft --base main --head review --title test -T $repo_temp_dir/body.md"
 expect_shell_denied 'gh api --method GET -XPOST repos/Aurelion/aether/issues'
 expect_shell_denied 'gh api --method GET -XDELETE repos/Aurelion/aether/issues/1'
 expect_shell_denied 'gh api --method GET -iXPUT repos/Aurelion/aether/pulls/199/merge'
@@ -223,6 +264,10 @@ expect_shell_denied 'gh api --method GET --input=payload.json repos/Aurelion/aet
 for allowed_command in \
     'git status --short' \
     'git diff --check' \
+    'gh auth status' \
+    'gh auth status --active --hostname github.com' \
+    'gh pr create --draft --base main --head review --title test --body body' \
+    "gh pr create --draft --base main --head review --title test --body-file $repo_temp_dir/body.md" \
     'gh pr view 199' \
     "sed -n '1p' .github/PULL_REQUEST_TEMPLATE.md" \
     'ls .gitignore' \
@@ -238,6 +283,39 @@ for allowed_command in \
     'scripts/push-reviewed-branch.sh'; do
     allowed_input="$(jq -cn --arg command "$allowed_command" '{tool_input: {command: $command}}')"
     printf '%s\n' "$allowed_input" | bash "$raw_push_hook"
+done
+
+expect_registered_hook_denied() {
+    local config="$1"
+    local working_directory="$2"
+    local hook_command
+    local hook_input
+    hook_command="$($REAL_JQ -er '.hooks.PreToolUse[0].hooks[0].command' "$config")"
+    # shellcheck disable=SC2016 # Expand command inside jq, not in this shell.
+    hook_input="$($REAL_JQ -cn --arg command 'git push origin main' \
+        '{tool_input: {command: $command}}')"
+    if (
+        cd "$working_directory"
+        printf '%s\n' "$hook_input" | \
+            CLAUDE_PROJECT_DIR="$ROOT" \
+            PATH="$(dirname "$REAL_GIT"):$(dirname "$REAL_JQ"):/usr/bin:/bin" \
+            bash -c "$hook_command" > /dev/null 2> "$error_file"
+    ); then
+        echo "registered hook allowed a raw push from $working_directory: $config" >&2
+        exit 1
+    else
+        local status="$?"
+        if [[ "$status" -ne 2 ]]; then
+            echo "registered hook returned $status instead of 2 from $working_directory: $config" >&2
+            exit 1
+        fi
+    fi
+}
+
+for config in "$ROOT/.claude/settings.json" "$ROOT/.codex/hooks.json"; do
+    expect_registered_hook_denied "$config" "$ROOT/crates/aether-core"
+    expect_registered_hook_denied "$config" "$ROOT/.git"
+    expect_registered_hook_denied "$config" "$temp_dir"
 done
 
 cat > "$temp_dir/hostile-ripgrep.conf" <<'EOF'

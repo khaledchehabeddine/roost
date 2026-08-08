@@ -6,6 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 VERSION="${AETHER_ANDROID_VERSION:-}"
+ARTIFACT_ID="${AETHER_ANDROID_ARTIFACT_ID:-aether}"
 MAVEN_REPO="${AETHER_ANDROID_MAVEN_REPO:-$ROOT/target/android/maven}"
 CENTRAL_DIR="${AETHER_ANDROID_CENTRAL_DIR:-$ROOT/target/android/central}"
 GRADLE_BIN="${GRADLE_BIN:-gradle}"
@@ -38,8 +39,15 @@ verify_aar() {
     trap 'rm -rf "$tmp"' RETURN
 
     grep -q "<version>$VERSION</version>" "$pom"
+    grep -q "<artifactId>$ARTIFACT_ID</artifactId>" "$pom"
     unzip -q "$aar" classes.jar -d "$tmp"
     jar tf "$tmp/classes.jar" | grep -q 'com/aurelion/aether/KeyStore.class'
+    if [[ "$ARTIFACT_ID" == "aether-development" ]]; then
+        jar tf "$tmp/classes.jar" | grep -q 'com/aurelion/aether/DevelopmentCertificateAuthority.class'
+    elif jar tf "$tmp/classes.jar" | grep -q 'com/aurelion/aether/DevelopmentCertificateAuthority.class'; then
+        echo "production AAR unexpectedly contains the development certificate authority" >&2
+        return 1
+    fi
 
     for entry in \
         "jni/arm64-v8a/libaether.so" \
@@ -63,6 +71,21 @@ case "$SIGN_PUBLICATION" in
         exit 2
         ;;
 esac
+
+case "$ARTIFACT_ID" in
+    aether | aether-development)
+        ;;
+    *)
+        echo "AETHER_ANDROID_ARTIFACT_ID must be aether or aether-development" >&2
+        exit 2
+        ;;
+esac
+
+if [[ "$ARTIFACT_ID" == "aether-development" \
+    && "${AETHER_CARGO_FEATURES:-}" != *development-certificates* ]]; then
+    echo "aether-development requires the development-certificates Cargo feature" >&2
+    exit 2
+fi
 
 if [[ "$SIGN_PUBLICATION" == "true" ]]; then
     if [[ -z "${AETHER_RELEASE_GPG_PRIVATE_KEY:-}" ]]; then
@@ -88,12 +111,16 @@ unset \
 cd "$ROOT"
 scripts/build/android.sh
 
-rm -rf "$MAVEN_REPO/com/aurelion/aether/$VERSION" "$CENTRAL_DIR"
+rm -rf "$MAVEN_REPO/com/aurelion/$ARTIFACT_ID/$VERSION"
+mkdir -p "$CENTRAL_DIR"
+find "$CENTRAL_DIR" -maxdepth 1 -type f \
+    -name "$ARTIFACT_ID-$VERSION-maven-central-*.zip" -delete
 
 GRADLE_ARGS=(
     --no-daemon
     -p "$ROOT/packaging/android"
     -PaetherVersion="$VERSION"
+    -PaetherArtifactId="$ARTIFACT_ID"
     -PaetherMavenRepo="$MAVEN_REPO"
     :aether:publishReleasePublicationToAetherLocalRepository
 )
@@ -107,9 +134,9 @@ else
     "$GRADLE_BIN" "${GRADLE_ARGS[@]}"
 fi
 
-ARTIFACT_DIR="$MAVEN_REPO/com/aurelion/aether/$VERSION"
-AAR="$ARTIFACT_DIR/aether-$VERSION.aar"
-POM="$ARTIFACT_DIR/aether-$VERSION.pom"
+ARTIFACT_DIR="$MAVEN_REPO/com/aurelion/$ARTIFACT_ID/$VERSION"
+AAR="$ARTIFACT_DIR/$ARTIFACT_ID-$VERSION.aar"
+POM="$ARTIFACT_DIR/$ARTIFACT_ID-$VERSION.pom"
 
 if [[ ! -s "$AAR" ]]; then
     echo "missing AAR artifact: $AAR" >&2
@@ -125,8 +152,8 @@ verify_aar "$AAR" "$POM"
 
 CENTRAL_STAGE="$(mktemp -d)"
 trap 'rm -rf "$CENTRAL_STAGE"' EXIT
-mkdir -p "$CENTRAL_STAGE/com/aurelion/aether" "$CENTRAL_DIR"
-cp -R "$ARTIFACT_DIR" "$CENTRAL_STAGE/com/aurelion/aether/$VERSION"
+mkdir -p "$CENTRAL_STAGE/com/aurelion/$ARTIFACT_ID" "$CENTRAL_DIR"
+cp -R "$ARTIFACT_DIR" "$CENTRAL_STAGE/com/aurelion/$ARTIFACT_ID/$VERSION"
 
 if [[ "$SIGN_PUBLICATION" == "true" ]]; then
     missing_signature=0
@@ -147,9 +174,9 @@ if [[ "$SIGN_PUBLICATION" == "true" ]]; then
 fi
 
 if [[ "$SIGN_PUBLICATION" == "true" ]]; then
-    CENTRAL_ZIP="$CENTRAL_DIR/aether-$VERSION-maven-central-signed.zip"
+    CENTRAL_ZIP="$CENTRAL_DIR/$ARTIFACT_ID-$VERSION-maven-central-signed.zip"
 else
-    CENTRAL_ZIP="$CENTRAL_DIR/aether-$VERSION-maven-central-unsigned.zip"
+    CENTRAL_ZIP="$CENTRAL_DIR/$ARTIFACT_ID-$VERSION-maven-central-unsigned.zip"
 fi
 (
     cd "$CENTRAL_STAGE"

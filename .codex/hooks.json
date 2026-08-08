@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/hooks/enforce-git-boundary.sh"
+            "command": "aether_project_root=\"$(git rev-parse --show-toplevel)\" && bash \"$aether_project_root/scripts/hooks/enforce-git-boundary.sh\" || exit 2"
           }
         ]
       }
