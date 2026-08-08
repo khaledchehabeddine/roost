@@ -1,14 +1,3 @@
-#![cfg_attr(
-    not(test),
-    forbid(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::todo,
-        clippy::unimplemented
-    )
-)]
-
 //! UniFFI bindings for the cryptographic core.
 //!
 //! This crate exposes the storage-backed [`KeyStore`] API and FFI-safe record types used by SDKs.

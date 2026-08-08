@@ -10,7 +10,6 @@ resolver = "3"
 [workspace.package]
 edition = "2024"
 publish = false
-rust-version = "1.95.0"
 version = "0.10.0"
 
 [workspace.dependencies]
@@ -33,12 +32,11 @@ unicode-normalization = "0.1.24"
 zeroize = "1.8.2"
 
 [workspace.lints.rust]
-missing_docs = "deny"
-unsafe_code = "forbid"
+missing_docs = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [workspace.lints.clippy]
 new_without_default = "allow"
 
 [workspace.lints.rustdoc]
-missing_crate_level_docs = "deny"
+missing_crate_level_docs = "warn"

@@ -1,17 +1,14 @@
 //! Provides signed X25519 pre-keys for the X3DH handshake.
 
 use crate::error::CryptoError;
-use crate::keys::{
-    SigningKeyPair, StaticSignatureContext, validate_x25519_public_key, verify_with_static_context,
-};
+use crate::keys::{SigningKeyPair, validate_x25519_public_key, verify_with_context};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // Domain separator for signatures over signed pre-key public keys and epoch metadata.
-const SIGNED_PREKEY_CONTEXT: StaticSignatureContext =
-    StaticSignatureContext::new(b'A', b"etherSPK-v1:");
+const SIGNED_PREKEY_CONTEXT: &[u8] = b"AetherSPK-v1:";
 
 /// An X25519 pre-key signed by an Ed25519 signing key.
 ///
@@ -157,7 +154,9 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
     let payload = signed_prekey_payload(&public_key, epoch, created_at);
-    let signature = signing_key.sign_with_static_context(SIGNED_PREKEY_CONTEXT, &payload);
+    let signature = signing_key
+        .sign_with_context(SIGNED_PREKEY_CONTEXT, &payload)
+        .expect("non-empty signed-pre-key signature context");
     SignedPreKey {
         secret_key,
         public_key,
@@ -176,7 +175,7 @@ pub fn verify_signed_prekey_bundle(
     signer_verifying_key: &VerifyingKey,
 ) -> Result<(), CryptoError> {
     let payload = signed_prekey_payload(&bundle.public_key, bundle.epoch, bundle.created_at);
-    verify_with_static_context(
+    verify_with_context(
         signer_verifying_key,
         SIGNED_PREKEY_CONTEXT,
         &payload,
