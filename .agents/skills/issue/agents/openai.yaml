@@ -1,7 +1,2 @@
-interface:
-  display_name: "Create Issue"
-  short_description: "Create a confirmed issue from a scaffold"
-  default_prompt: "Use $issue to draft and create a repository issue from the matching scaffold."
-
 policy:
   allow_implicit_invocation: false
