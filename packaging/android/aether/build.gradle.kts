@@ -12,6 +12,7 @@ plugins {
 
 val aetherVersion = rootProject.extensions.extraProperties["aetherVersion"] as String
 val aetherMavenRepo = rootProject.extensions.extraProperties["aetherMavenRepo"] as String
+val aetherArtifactId = rootProject.extensions.extraProperties["aetherArtifactId"] as String
 val generatedKotlinDir = rootProject.layout.projectDirectory.dir("../../target/android/kotlin")
 val generatedJniLibsDir = rootProject.layout.projectDirectory.dir("../../target/android/jniLibs")
 
@@ -71,7 +72,7 @@ afterEvaluate {
     val releasePublication = publishingExtension.publications.create<MavenPublication>("release") {
         from(components["release"])
         groupId = "com.aurelion"
-        artifactId = "aether"
+        artifactId = aetherArtifactId
         version = aetherVersion
 
         pom {
