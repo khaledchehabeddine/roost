@@ -4,10 +4,10 @@ use crate::certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
 };
 use crate::error::AetherError;
-use crate::records::{DiscoveryKeyBundle, Identity, fixed_32};
+use crate::records::{Identity, fixed_32};
 use aether_core::{
     DevelopmentCertificateAuthority as CoreDevelopmentCertificateAuthority,
-    SenderCertificateDiscoveryKey, SenderCertificateIdentityKey,
+    SenderCertificateIdentityKey,
 };
 use std::sync::Arc;
 
@@ -45,7 +45,7 @@ impl DevelopmentCertificateAuthority {
     /// ```
     /// use aether::DevelopmentCertificateAuthority;
     ///
-    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec())?;
+    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
     /// let validation = authority.sender_certificate_validation(1_700_000_000, 0);
     /// assert_eq!(validation.domain_signing_keys.len(), 1);
     /// # Ok::<(), aether::AetherError>(())
@@ -55,12 +55,13 @@ impl DevelopmentCertificateAuthority {
     /// - [`AetherError::InvalidData`] if `signing_key_identifier` is empty or longer than 64
     ///   bytes.
     #[uniffi::constructor]
-    pub fn new(signing_key_identifier: Vec<u8>) -> Result<Arc<Self>, AetherError> {
-        let inner =
-            CoreDevelopmentCertificateAuthority::new(signing_key_identifier).map_err(|e| {
-                AetherError::InvalidData {
-                    reason: e.to_string(),
-                }
+    pub fn new(
+        signing_key_identifier: Vec<u8>,
+        relay_domain: Vec<u8>,
+    ) -> Result<Arc<Self>, AetherError> {
+        let inner = CoreDevelopmentCertificateAuthority::new(signing_key_identifier, relay_domain)
+            .map_err(|e| AetherError::InvalidData {
+                reason: e.to_string(),
             })?;
         Ok(Arc::new(Self { inner }))
     }
@@ -82,9 +83,8 @@ impl DevelopmentCertificateAuthority {
     /// let store = KeyStore::new(storage);
     /// let identity = store.generate_identity()?;
     /// store.rotate_signed_prekey_now()?;
-    /// let discovery_key = store.current_publication_bundle()?.discovery_key;
-    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec())?;
-    /// let issued = authority.issue(identity, discovery_key, 1_800_000_000)?;
+    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
+    /// let issued = authority.issue(identity, 1_800_000_000)?;
     /// assert_eq!(issued.signature.len(), 64);
     /// # Ok::<(), aether::AetherError>(())
     /// ```
@@ -95,7 +95,6 @@ impl DevelopmentCertificateAuthority {
     pub fn issue(
         &self,
         identity: Identity,
-        discovery_key: DiscoveryKeyBundle,
         expires_at_secs: u64,
     ) -> Result<DevelopmentSenderCertificate, AetherError> {
         let identity_key = SenderCertificateIdentityKey {
@@ -108,20 +107,9 @@ impl DevelopmentCertificateAuthority {
                 "development certificate identity Ed25519 verifying key",
             )?,
         };
-        let discovery_key = SenderCertificateDiscoveryKey {
-            x25519_public_key: fixed_32(
-                &discovery_key.public_key,
-                "development certificate discovery X25519 public key",
-            )?,
-            ed25519_verifying_key: fixed_32(
-                &discovery_key.verifying_key,
-                "development certificate discovery Ed25519 verifying key",
-            )?,
-            epoch: discovery_key.epoch,
-        };
         let issued = self
             .inner
-            .issue(identity_key, discovery_key, expires_at_secs)
+            .issue(identity_key, expires_at_secs)
             .map_err(|e| AetherError::InvalidData {
                 reason: e.to_string(),
             })?;
@@ -140,7 +128,7 @@ impl DevelopmentCertificateAuthority {
     /// ```
     /// use aether::DevelopmentCertificateAuthority;
     ///
-    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec())?;
+    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
     /// let validation = authority.sender_certificate_validation(1_700_000_000, 30);
     /// assert!(validation.revocation_state.available);
     /// # Ok::<(), aether::AetherError>(())
@@ -156,6 +144,7 @@ impl DevelopmentCertificateAuthority {
                 verifying_key: self.inner.verifying_key().to_vec(),
                 status: DomainSigningKeyStatus::Trusted,
             }],
+            expected_relay_domain: self.inner.relay_domain().to_vec(),
             revocation_state: RevocationState {
                 available: true,
                 revoked_identity_keys: Vec::new(),
@@ -176,17 +165,19 @@ mod tests {
         let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()));
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
-        let discovery_key = store.current_publication_bundle().unwrap().discovery_key;
-        let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec()).unwrap();
-        let issued = authority
-            .issue(identity, discovery_key, 1_800_000_000)
-            .unwrap();
+        let authority = DevelopmentCertificateAuthority::new(
+            b"relay-loopback".to_vec(),
+            b"relay.example".to_vec(),
+        )
+        .unwrap();
+        let issued = authority.issue(identity, 1_800_000_000).unwrap();
         let validation = authority.sender_certificate_validation(1_700_000_000, 0);
 
         validate_sender_certificate(
             issued.certificate,
             issued.signature,
             validation.domain_signing_keys,
+            validation.expected_relay_domain,
             validation.revocation_state,
             validation.reference_timestamp_secs,
             validation.grace_window_secs,

@@ -1,15 +1,16 @@
 //! Replays checked-in sender certificate fixtures across the public Core validation API.
 
 use aether_core::{
-    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
-    SenderCertificateIdentityKey, SenderCertificateValidationError,
-    SenderCertificateValidationInput, validate_sender_certificate,
+    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateIdentityKey,
+    SenderCertificateValidationError, SenderCertificateValidationInput,
+    validate_sender_certificate,
 };
 use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct FixtureFile {
     version: u8,
+    relay_domain: String,
     reference_timestamp_secs: u64,
     grace_window_secs: u64,
     fixtures: Vec<Fixture>,
@@ -44,9 +45,6 @@ struct DecodedFixture {
     signing_key_identifier_hex: String,
     identity_x25519_public_key_hex: String,
     identity_ed25519_verifying_key_hex: String,
-    discovery_x25519_public_key_hex: String,
-    discovery_ed25519_verifying_key_hex: String,
-    discovery_epoch: u32,
     expires_at_secs: u64,
 }
 
@@ -94,6 +92,7 @@ fn replay_fixture(fixture_file: &FixtureFile, fixture: &Fixture) {
         certificate: &certificate,
         signature: &signature,
         domain_signing_keys: &domain_signing_keys,
+        expected_relay_domain: fixture_file.relay_domain.as_bytes(),
         revocation_state: RevocationState::Available(&revoked_identity_keys),
         reference_timestamp_secs: fixture_file.reference_timestamp_secs,
         grace_window_secs: fixture_file.grace_window_secs,
@@ -115,9 +114,9 @@ fn replay_fixture(fixture_file: &FixtureFile, fixture: &Fixture) {
                 fixture.name
             );
             assert_eq!(
-                validated.discovery_key,
-                decoded_discovery_key(&fixture.decoded),
-                "{} discovery key",
+                validated.relay_domain,
+                fixture_file.relay_domain.as_bytes().to_vec(),
+                "{} relay domain",
                 fixture.name
             );
             assert_eq!(
@@ -173,14 +172,130 @@ fn decoded_identity_key(decoded: &DecodedFixture) -> SenderCertificateIdentityKe
     }
 }
 
-fn decoded_discovery_key(decoded: &DecodedFixture) -> SenderCertificateDiscoveryKey {
-    SenderCertificateDiscoveryKey {
-        x25519_public_key: hex_array(&decoded.discovery_x25519_public_key_hex),
-        ed25519_verifying_key: hex_array(&decoded.discovery_ed25519_verifying_key_hex),
-        epoch: decoded.discovery_epoch,
-    }
-}
-
 fn hex_array<const N: usize>(hex: &str) -> [u8; N] {
     hex::decode(hex).unwrap().try_into().unwrap()
+}
+
+#[test]
+#[ignore = "regenerates sender_certificates_v1.json; run explicitly"]
+fn regenerate_sender_certificate_fixtures() {
+    use aether_crypto::SigningKeyPair;
+
+    const TAG: &[u8] = b"AetherSenderCertificate-v2:";
+    const VERSION: u8 = 2;
+    const RELAY_DOMAIN: &[u8] = b"relay.example";
+    const REF: u64 = 1_700_000_000;
+    const GRACE: u64 = 300;
+    const PRIMARY: &[u8] = b"primary-key";
+    const SECONDARY: &[u8] = b"secondary-key";
+    const UNTRUSTED: &[u8] = b"untrusted-key";
+
+    fn cert(identifier: &[u8], ik_x: [u8; 32], ik_ed: [u8; 32], expires: u64) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(TAG);
+        b.push(VERSION);
+        b.push(identifier.len() as u8);
+        b.extend_from_slice(identifier);
+        b.push(RELAY_DOMAIN.len() as u8);
+        b.extend_from_slice(RELAY_DOMAIN);
+        b.extend_from_slice(&ik_x);
+        b.extend_from_slice(&ik_ed);
+        b.extend_from_slice(&expires.to_be_bytes());
+        b
+    }
+
+    let primary = SigningKeyPair::from_signing_bytes([0x01; 32]);
+    let secondary = SigningKeyPair::from_signing_bytes([0x02; 32]);
+    let untrusted = SigningKeyPair::from_signing_bytes([0x03; 32]);
+    let ik_signing = SigningKeyPair::from_signing_bytes([0x11; 32]);
+    let ik_ed = ik_signing.verifying.to_bytes();
+    let ik_x = [0x22u8; 32];
+    // 2^255 - 19 little-endian: a valid field element but not a canonical X25519 key.
+    let mut modulus = [0xffu8; 32];
+    modulus[0] = 0xed;
+    modulus[31] = 0x7f;
+
+    let mut out = String::new();
+    let emit = |out: &mut String, name: &str, c: &[u8], sig: Vec<u8>, expected: &str| {
+        out.push_str(&format!(
+            "{}|{}|{}|{}\n",
+            name,
+            hex::encode(c),
+            hex::encode(sig),
+            expected
+        ));
+    };
+
+    let valid = cert(PRIMARY, ik_x, ik_ed, REF + 300);
+    emit(
+        &mut out,
+        "valid-primary",
+        &valid,
+        primary.sign(&valid).to_bytes().to_vec(),
+        "valid",
+    );
+
+    let rot = cert(SECONDARY, ik_x, ik_ed, REF + 300);
+    emit(
+        &mut out,
+        "rotation-overlap-secondary",
+        &rot,
+        secondary.sign(&rot).to_bytes().to_vec(),
+        "valid",
+    );
+
+    let unt = cert(UNTRUSTED, ik_x, ik_ed, REF + 300);
+    emit(
+        &mut out,
+        "untrusted-key",
+        &unt,
+        untrusted.sign(&unt).to_bytes().to_vec(),
+        "untrusted_signing_key_identifier",
+    );
+
+    emit(
+        &mut out,
+        "revoked-identity-key",
+        &valid,
+        primary.sign(&valid).to_bytes().to_vec(),
+        "revoked_identity_key",
+    );
+
+    let exp = cert(PRIMARY, ik_x, ik_ed, REF - GRACE - 1);
+    emit(
+        &mut out,
+        "expired-outside-grace",
+        &exp,
+        primary.sign(&exp).to_bytes().to_vec(),
+        "expired_certificate",
+    );
+
+    let trunc = valid[..valid.len() - 4].to_vec();
+    emit(
+        &mut out,
+        "malformed-truncated",
+        &trunc,
+        primary.sign(&trunc).to_bytes().to_vec(),
+        "malformed_certificate",
+    );
+
+    let nc = cert(PRIMARY, modulus, ik_ed, REF + 300);
+    emit(
+        &mut out,
+        "non-canonical-identity-x25519",
+        &nc,
+        primary.sign(&nc).to_bytes().to_vec(),
+        "invalid_key_encoding",
+    );
+
+    println!("FIXTURE_START");
+    print!("{out}");
+    println!(
+        "KEYS|{}|{}|{}",
+        hex::encode(primary.verifying.to_bytes()),
+        hex::encode(secondary.verifying.to_bytes()),
+        hex::encode(untrusted.verifying.to_bytes())
+    );
+    println!("IK|{}|{}", hex::encode(ik_x), hex::encode(ik_ed));
+    println!("FIXTURE_END");
 }

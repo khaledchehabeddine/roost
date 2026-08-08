@@ -83,6 +83,7 @@ pub use aether_crypto::SenderIdentityMaterial;
 pub use contact::{
     ContactDiscoveryKey, ContactEvent, ContactEventStream, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
+    PeerInboxAuthorization,
 };
 pub use discovery_key::DiscoveryKeyError;
 pub use events::{
@@ -95,9 +96,10 @@ pub use hardening::{
 };
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
-    AcknowledgmentProcessing, KeyStore, KeyStoreError, MessageDecryption, MessageEncryption,
-    MessageOperationError, PublicationBundle, SessionAcceptance, SessionAcceptanceResult,
-    SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
+    AcknowledgmentProcessing, ContactBlock, InboxRotation, KeyStore, KeyStoreError,
+    MessageDecryption, MessageEncryption, MessageOperationError, PublicationBundle,
+    SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
+    SessionInitiationResult,
 };
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;

@@ -94,7 +94,15 @@ pub fn verify_identity_key_bundle(bundle: &IdentityKeyBundle) -> Result<(), Cryp
     )
 }
 
-fn identity_key_binding_payload(public_key: &PublicKey, verifying_key: &VerifyingKey) -> [u8; 64] {
+/// Returns the identity key's two public halves, the bytes both binding directions cover.
+///
+/// The IK self-binding signs these under `AetherIKBinding-v1:`, and a discovery key signs the same
+/// bytes under `AetherDKToIK-v1:` (AE-KEY-04). Only the context separates the two, so both
+/// directions must derive the payload here rather than rebuilding it.
+pub(crate) fn identity_key_binding_payload(
+    public_key: &PublicKey,
+    verifying_key: &VerifyingKey,
+) -> [u8; 64] {
     let mut payload = [0u8; 64];
     payload[..PUBLIC_KEY_LEN].copy_from_slice(public_key.as_bytes());
     payload[PUBLIC_KEY_LEN..].copy_from_slice(verifying_key.as_bytes());

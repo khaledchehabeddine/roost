@@ -240,6 +240,7 @@ struct SessionMessageFixtureFile {
 #[derive(Deserialize)]
 struct CertificateValidationFixture {
     domain_signing_keys: Vec<DomainSigningKeyFixture>,
+    relay_domain: String,
     revoked_identity_keys: Vec<IdentityKeyFixture>,
     reference_timestamp_secs: u64,
     grace_window_secs: u64,
@@ -260,6 +261,7 @@ struct IdentityKeyFixture {
 
 struct OwnedCertificateValidation {
     domain_signing_keys: Vec<OwnedDomainSigningKey>,
+    relay_domain: Vec<u8>,
     revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
     reference_timestamp_secs: u64,
     grace_window_secs: u64,
@@ -592,6 +594,7 @@ fn replay_sealed_sender_session_fixture(
                     &acknowledgment_sender_identity,
                     &acknowledgment_sender_signing_key,
                     domain_signing_keys,
+                    &validation.relay_domain,
                     &validation.revoked_identity_keys,
                     validation.reference_timestamp_secs,
                     validation.grace_window_secs,
@@ -1290,6 +1293,7 @@ fn certificate_validation(
             .iter()
             .map(domain_signing_key)
             .collect::<Result<Vec<_>, _>>()?,
+        relay_domain: fixture.relay_domain.clone().into_bytes(),
         revoked_identity_keys: fixture
             .revoked_identity_keys
             .iter()
@@ -1362,6 +1366,9 @@ fn deduplication_key() -> Result<ProtocolStateKey, AetherError> {
         .map_err(|e| invalid_fixture(format!("invalid deduplication fixture key: {e}")))
 }
 
+// Fixture wiring mirrors the InboundEncryptedMessage fields one-for-one; bundling them into a
+// struct here would add a type that exists only to satisfy the lint.
+#[allow(clippy::too_many_arguments)]
 fn inbound<'a>(
     session_key: ProtocolStateKey,
     deduplication_key: ProtocolStateKey,
@@ -1369,6 +1376,7 @@ fn inbound<'a>(
     acknowledgment_sender_identity: &'a SenderIdentityMaterial,
     acknowledgment_sender_signing_key: &'a SigningKeyPair,
     domain_signing_keys: &'a [DomainSigningKey<'a>],
+    expected_relay_domain: &'a [u8],
     revoked_identity_keys: &'a [SenderCertificateIdentityKey],
     reference_timestamp_secs: u64,
     grace_window_secs: u64,
@@ -1384,6 +1392,7 @@ fn inbound<'a>(
         ),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             domain_signing_keys,
+            expected_relay_domain,
             revocation_state: RevocationState::Available(revoked_identity_keys),
             reference_timestamp_secs,
             grace_window_secs,
@@ -1836,6 +1845,7 @@ fn session_tamper_rejects_without_sender(
                 &acknowledgment_sender_identity,
                 &acknowledgment_sender_signing_key,
                 domain_signing_keys,
+                &validation.relay_domain,
                 &validation.revoked_identity_keys,
                 validation.reference_timestamp_secs,
                 validation.grace_window_secs,

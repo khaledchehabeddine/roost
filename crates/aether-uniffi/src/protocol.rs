@@ -38,6 +38,13 @@ pub enum ProtocolStateKind {
     PendingAcknowledgments,
     /// Identity-key-addressed contact state.
     ContactState,
+    /// Identity-key-addressed peer inbox-authorization state.
+    ///
+    /// Separate from [`Self::ContactState`] because it holds the peer's delivery capability, a
+    /// bearer secret that must not ride along with the public contact snapshot.
+    PeerInboxAuthorization,
+    /// Identity-key-addressed record of which local inbox generation a contact has been given.
+    LocalInboxAuthorization,
 }
 
 /// Host-side compare-and-set precondition for one protocol-state update.
@@ -760,6 +767,12 @@ impl ProtocolStateKind {
                 Ok(Self::PendingAcknowledgments)
             }
             aether_core::ProtocolStateKind::ContactState => Ok(Self::ContactState),
+            aether_core::ProtocolStateKind::PeerInboxAuthorization => {
+                Ok(Self::PeerInboxAuthorization)
+            }
+            aether_core::ProtocolStateKind::LocalInboxAuthorization => {
+                Ok(Self::LocalInboxAuthorization)
+            }
             _ => Err(AetherError::UnsupportedVersion {
                 reason: "unknown protocol-state kind".into(),
             }),
@@ -774,6 +787,8 @@ impl From<ProtocolStateKind> for aether_core::ProtocolStateKind {
             ProtocolStateKind::DeduplicationSet => Self::DeduplicationSet,
             ProtocolStateKind::PendingAcknowledgments => Self::PendingAcknowledgments,
             ProtocolStateKind::ContactState => Self::ContactState,
+            ProtocolStateKind::PeerInboxAuthorization => Self::PeerInboxAuthorization,
+            ProtocolStateKind::LocalInboxAuthorization => Self::LocalInboxAuthorization,
         }
     }
 }

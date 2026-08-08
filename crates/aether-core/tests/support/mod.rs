@@ -23,8 +23,8 @@ use serde::Serialize;
 use zeroize::Zeroizing;
 
 pub const CREATED_AT: u64 = 1_700_000_000;
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v1:";
-const CERTIFICATE_VERSION: u8 = 1;
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
+const CERTIFICATE_VERSION: u8 = 2;
 const CERTIFICATE_EXPIRES_AT: u64 = 1_700_100_000;
 const CERTIFICATE_REFERENCE_TIME: u64 = 1_700_000_000;
 
@@ -625,6 +625,8 @@ fn acknowledgment<'a>(
     }
 }
 
+pub const TEST_RELAY_DOMAIN: &[u8] = b"relay.test";
+
 fn sender_certificate_bytes(
     signing_key_identifier: &[u8],
     contact: ContactIdentity,
@@ -635,11 +637,10 @@ fn sender_certificate_bytes(
     bytes.push(CERTIFICATE_VERSION);
     bytes.push(signing_key_identifier.len() as u8);
     bytes.extend_from_slice(signing_key_identifier);
+    bytes.push(TEST_RELAY_DOMAIN.len() as u8);
+    bytes.extend_from_slice(TEST_RELAY_DOMAIN);
     bytes.extend_from_slice(&contact.identity_key.x25519_public_key);
     bytes.extend_from_slice(&contact.identity_key.ed25519_verifying_key);
-    bytes.extend_from_slice(&contact.discovery_key.x25519_public_key);
-    bytes.extend_from_slice(&contact.discovery_key.ed25519_verifying_key);
-    bytes.extend_from_slice(&contact.discovery_key.epoch.to_be_bytes());
     bytes.extend_from_slice(&expires_at_secs.to_be_bytes());
     bytes
 }
@@ -650,6 +651,7 @@ fn sender_certificate_validation<'a>(
 ) -> InboundSenderCertificateValidation<'a> {
     InboundSenderCertificateValidation {
         domain_signing_keys,
+        expected_relay_domain: TEST_RELAY_DOMAIN,
         revocation_state,
         reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
         grace_window_secs: 0,

@@ -53,8 +53,8 @@ mod records;
 mod storage;
 
 pub use certificate::{
-    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateDiscoveryKey,
-    SenderCertificateValidation, ValidatedSenderCertificate, validate_sender_certificate,
+    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
+    ValidatedSenderCertificate, validate_sender_certificate,
 };
 #[cfg(feature = "development-certificates")]
 pub use development_certificate::{DevelopmentCertificateAuthority, DevelopmentSenderCertificate};
@@ -77,6 +77,7 @@ pub use protocol::{
     SessionUnrecoverableReason, derive_safety_number, protocol_state_blob_digest,
 };
 pub use records::{
-    DiscoveryKeyBundle, Identity, OneTimePreKeyBundle, PublicationBundle, SignedPreKeyBundle,
+    DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
+    SignedPreKeyBundle,
 };
 pub use storage::{InMemorySecureStorage, SecureStorage};
