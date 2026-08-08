@@ -8,9 +8,9 @@ use crate::certificate::{
 use crate::error::AetherError;
 use crate::message::{Message, SenderIdentityMaterial};
 use crate::protocol::{
-    AcknowledgmentOutcome, IdentityKey as FfiIdentityKey, InboundMessageOutcome,
-    OutboundMessageResult, ProtocolStateEntry, ProtocolStateUpdate, protocol_key,
-    snapshot_input_from_entries, updates_from_core_absent,
+    AcknowledgmentOutcome, ContactStateChange, IdentityKey as FfiIdentityKey,
+    InboundMessageOutcome, OutboundMessageResult, ProtocolStateEntry, ProtocolStateUpdate,
+    protocol_key, snapshot_input_from_entries, updates_from_core_absent,
 };
 use crate::records::{
     DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
@@ -41,6 +41,19 @@ pub struct SessionInitiationResult {
     pub message: Message,
     /// Opaque protocol-state updates to commit.
     pub state_updates: Vec<ProtocolStateUpdate>,
+}
+
+/// Result of blocking a contact.
+#[derive(uniffi::Record)]
+pub struct ContactBlock {
+    /// Contact state change to commit durably, then emit.
+    pub contact: ContactStateChange,
+    /// The inbox rotation the block performed, absent when the contact was already blocked.
+    ///
+    /// Present means every remaining contact now holds a stale delivery capability and must be
+    /// given the new one before it can reach this inbox again. The blocked contact is deliberately
+    /// not among them — that is what makes the block bite at the relay rather than only locally.
+    pub rotation: Option<InboxRotation>,
 }
 
 /// Result of accepting a Session through X3DH.
@@ -421,6 +434,44 @@ impl KeyStore {
         Ok(self.inner.rotate_signed_prekey_now()?.into())
     }
 
+    /// Blocks a contact and rotates the inbox so the block takes effect at the relay.
+    ///
+    /// [`crate::ProtocolStateEngine::block_contact`] changes local state only, which stops this
+    /// device sending and surfacing that contact's messages but leaves the contact holding a
+    /// working delivery capability — it can still reach the relay and queue messages. Rotating
+    /// invalidates that capability, at the cost of invalidating every *other* contact's copy too:
+    /// when [`ContactBlock::rotation`] is present, each remaining contact must be given the new
+    /// capability before it can deliver again. [`crate::ProtocolStateEngine::
+    /// contacts_needing_inbox_authorization`] returns exactly that list, and excludes the blocked
+    /// contact.
+    ///
+    /// Blocking an already-blocked contact performs no rotation, so repeating the call does not
+    /// churn every contact's capability.
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identity_key` has the wrong length.
+    /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
+    /// - [`AetherError::ProtocolStateFault`] if no contact is stored for `identity_key`, or its
+    ///   blob is malformed.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn block_contact(
+        &self,
+        snapshot: Vec<ProtocolStateEntry>,
+        identity_key: FfiIdentityKey,
+    ) -> Result<ContactBlock, AetherError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let blocked = self
+            .inner
+            .block_contact(&snapshot.snapshot, identity_key.to_core()?)?;
+        Ok(ContactBlock {
+            contact: ContactStateChange::from_core(&snapshot, blocked.contact)?,
+            rotation: blocked.rotation.map(|rotation| InboxRotation {
+                publication: rotation.publication.into(),
+                capability: rotation.capability.to_bytes().to_vec(),
+            }),
+        })
+    }
+
     /// Starts a new Session as the initiator.
     ///
     /// Commit the returned state updates atomically with the returned Message before transport
@@ -453,6 +504,8 @@ impl KeyStore {
         let result = self.inner.initiate_session(SessionInitiation {
             session_key: ProtocolStateKey::from_bytes(session_key)?,
             responder_identity_key: responder_identity.to_core()?,
+            responder_discovery_to_identity: responder_publication
+                .discovery_to_identity_signature()?,
             responder_prekey_bundle: responder_publication
                 .to_prekey_bundle(responder_one_time_prekey)?,
             sender_certificate: &sender_certificate,
