@@ -1,4 +1,0 @@
-interface:
-  display_name: "Rust Quality"
-  short_description: "Route Rust work to repository guidance"
-  default_prompt: "Use $rust-quality to apply the relevant repository-specific Rust guidance to this task."

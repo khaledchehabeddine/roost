@@ -1,4 +1,0 @@
-interface:
-  display_name: "Domain Modeling"
-  short_description: "Maintain domain language and decisions"
-  default_prompt: "Use $domain-modeling to align domain language, context boundaries, and decisions with this change."

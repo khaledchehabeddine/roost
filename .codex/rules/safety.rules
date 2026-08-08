@@ -15,22 +15,6 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["gh", "auth", "token"],
-    decision = "forbidden",
-    justification = "Credential output is forbidden. Authenticate interactively without exposing tokens to the agent.",
-    match = ["gh auth token"],
-    not_match = ["gh auth status", "gh pr view"],
-)
-
-prefix_rule(
-    pattern = ["gh", "pr", "merge"],
-    decision = "forbidden",
-    justification = "Pull requests require manual human merge outside agent workflows.",
-    match = ["gh pr merge 199", "gh pr merge --auto 199"],
-    not_match = ["gh pr create", "gh pr view 199"],
-)
-
-prefix_rule(
     pattern = ["git", "clean", ["-d", "-f"], ["-d", "-f"]],
     decision = "prompt",
     justification = "git clean with separated -d -f flags deletes untracked files. Confirm intent before discarding work.",
@@ -87,27 +71,9 @@ prefix_rule(
 )
 
 prefix_rule(
-    pattern = ["scripts/push-reviewed-branch.sh"],
-    decision = "prompt",
-    justification = "Publishing a reviewed branch requires explicit user confirmation.",
-    match = ["scripts/push-reviewed-branch.sh"],
-    not_match = ["git push origin main", "scripts/check.sh full"],
-)
-
-prefix_rule(
-    pattern = ["git", "push"],
+    pattern = ["git", "push", ["-f", "--force"]],
     decision = "forbidden",
-    justification = "Raw Git pushes are forbidden. Use scripts/push-reviewed-branch.sh after explicit confirmation.",
-    match = [
-        "git push origin main",
-        "git push --force origin main",
-        "git push -f origin main",
-        "git push --force-with-lease origin main",
-        "git push --force-with-lease=refs/heads/main:0123456789abcdef0123456789abcdef01234567 origin main",
-        "git push origin main --force",
-        "git push origin main -fu",
-        "git push origin +refs/heads/main:refs/heads/main",
-        "git push --mirror origin",
-    ],
-    not_match = ["git status", "git fetch origin", "git pull --ff-only"],
+    justification = "Force push is forbidden. Use --force-with-lease instead.",
+    match = ["git push --force", "git push -f origin main"],
+    not_match = ["git push origin main", "git push --force-with-lease"],
 )

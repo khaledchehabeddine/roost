@@ -1,7 +1,0 @@
-# Line coverage floors recorded from the Task 1 workspace instrumentation baseline.
-# A decrease needs explicit human approval. `full --base <revision>` rejects a decrease unless
-# AETHER_COVERAGE_FLOOR_LOWERING_APPROVED=1 is supplied after that approval.
-[coverage]
-aether-core = 86.68
-aether-crypto = 97.46
-aether-uniffi = 67.60

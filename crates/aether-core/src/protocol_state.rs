@@ -2345,7 +2345,8 @@ struct LocalInboxAuthorizationWire {
     generation: u32,
 }
 
-#[derive(Deserialize, Serialize)]
+// Persistence requires serialization; `ZeroizeOnDrop` scrubs the temporary bearer-secret copy.
+#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 struct PeerInboxAuthorizationWire {
     version: u8,
     generation: u32,
@@ -3247,6 +3248,16 @@ pub fn fuzz_decode_protocol_state_blob(
         }
         ProtocolStateKind::ContactState => {
             decode_contact_state(&address, &blob, limits).map(|_| ())
+        }
+        ProtocolStateKind::PeerInboxAuthorization => {
+            let mut snapshot = ProtocolStateSnapshot::new();
+            snapshot.set(address.clone(), blob);
+            load_peer_inbox_authorization(&snapshot, &address).map(|_| ())
+        }
+        ProtocolStateKind::LocalInboxAuthorization => {
+            let mut snapshot = ProtocolStateSnapshot::new();
+            snapshot.set(address.clone(), blob);
+            load_delivered_inbox_authorization(&snapshot, &address).map(|_| ())
         }
     }
 }

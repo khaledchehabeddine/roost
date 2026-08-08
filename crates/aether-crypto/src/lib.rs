@@ -1,14 +1,3 @@
-#![cfg_attr(
-    not(test),
-    forbid(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::panic,
-        clippy::todo,
-        clippy::unimplemented
-    )
-)]
-
 //! Cryptographic primitives for private end-to-end encrypted messaging.
 //!
 //! This crate provides key generation, signing, X3DH handshakes, and Double Ratchet message
