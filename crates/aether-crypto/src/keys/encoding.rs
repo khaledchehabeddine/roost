@@ -8,9 +8,17 @@ pub(crate) fn validate_x25519_public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
     is_canonical_x25519_public_key(bytes) && !is_low_order_x25519_public_key(bytes)
 }
 
-pub(crate) fn parse_ed25519_verifying_key_bytes(
-    bytes: &[u8; PUBLIC_KEY_LEN],
-) -> Option<VerifyingKey> {
+/// Parses 32 bytes into an Ed25519 verifying key, rejecting anything a bundle would reject.
+///
+/// Stricter than [`VerifyingKey::from_bytes`] in two ways that matter for keys arriving from the
+/// network: the encoding must be canonical, so one key has exactly one representation and cannot be
+/// re-encoded to look like a different one, and the point must not be weak — a small-order key
+/// makes signatures verifiable under keys nobody controls.
+///
+/// Public because every entry point that accepts a foreign verifying key has to apply the same
+/// standard. Bundle constructors call it on the way in; a caller verifying a bare signature under a
+/// bare key has no bundle and would otherwise have to settle for the laxer parser.
+pub fn parse_ed25519_verifying_key_bytes(bytes: &[u8; PUBLIC_KEY_LEN]) -> Option<VerifyingKey> {
     let verifying_key = VerifyingKey::from_bytes(bytes).ok()?;
     let recompressed = verifying_key.to_edwards().compress().to_bytes();
     let canonical: bool = recompressed.ct_eq(bytes).into();

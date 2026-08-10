@@ -9,5 +9,7 @@ Swift and Kotlin harnesses in this directory exercise UniFFI bindings built with
 - `Issue124PackageConsumerTests.swift`: generated iOS Swift Package consumer coverage, run through
   `scripts/test/ios-package-consumer.sh`.
 - `SecureStorageUnexpectedError.*`: foreign storage exception mapping and mutex recovery.
+- `KeyBindingVerification.*`: standalone IK/DK binding verification, with the platform's own Ed25519
+  as the counterparty rather than Aether's, plus the context-separation and malformed-input refusals.
 
 Run through `scripts/test/binding-fixture-replay.sh`.

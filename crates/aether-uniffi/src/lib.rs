@@ -39,6 +39,7 @@ uniffi::setup_scaffolding!("aether");
 #[cfg(all(feature = "fixture-replay", not(debug_assertions)))]
 compile_error!("fixture-replay is test-only and must not be enabled for release builds");
 
+mod binding;
 mod certificate;
 #[cfg(feature = "development-certificates")]
 mod development_certificate;
@@ -52,6 +53,7 @@ mod protocol;
 mod records;
 mod storage;
 
+pub use binding::{verify_discovery_to_identity_binding, verify_identity_key_binding};
 pub use certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
     ValidatedSenderCertificate, validate_sender_certificate,

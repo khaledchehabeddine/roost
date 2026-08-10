@@ -16,6 +16,9 @@ runtime policy; code and tests remain authoritative.
 - Messages, sealed-sender frames, acknowledgments, deduplication, retries, contact trust,
   blocking, sender certificates, hardening limits, and event streams: `KeyStore`,
   `ProtocolStateEngine`, and FFI-safe records/enums.
+- Standalone mutual-binding verification, before any session or contact record exists:
+  `verify_identity_key_binding` and `verify_discovery_to_identity_binding`. Public material only,
+  one fixed context each, so neither can be pointed at another Aether preimage.
 - Opt-in local peer simulations: `DevelopmentCertificateAuthority` issues production-format
   sender certificates and returns matching public validation input when the
   `development-certificates` feature is enabled. Normal artifacts omit this surface.
