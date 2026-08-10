@@ -7,6 +7,14 @@ on:
   push:
     branches: [main]
 
+# A push supersedes the run before it, and the superseded run can only report on
+# a commit nobody will merge. Grouping per pull request and cancelling keeps the
+# runner off dead SHAs; on main the ref is the group, so pushes there still
+# queue rather than cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   format:
     name: Cargo Format
