@@ -75,7 +75,7 @@ fn bootstrap(
     let (bob, _) = accept(
         rng,
         &envelope,
-        &setup.alice_identity_key,
+        Some(&setup.alice_identity_key),
         &setup.bob_identity_key,
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
@@ -157,7 +157,7 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
     let (mut bob, decrypted) = accept(
         &mut rng,
         &decoded_envelope,
-        &setup.alice_identity_key,
+        Some(&setup.alice_identity_key),
         &setup.bob_identity_key,
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,

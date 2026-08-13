@@ -610,13 +610,16 @@ impl KeyStore {
     pub fn accept_session(
         &self,
         session_key: Vec<u8>,
-        initiator_identity: Identity,
+        initiator_identity: Option<Identity>,
         message: Message,
     ) -> Result<SessionAcceptanceResult, AetherError> {
         let core_message = message.to_core()?;
+        let initiator_identity_key = initiator_identity
+            .map(|identity| identity.to_core())
+            .transpose()?;
         let result = self.inner.accept_session(SessionAcceptance {
             session_key: ProtocolStateKey::from_bytes(session_key)?,
-            initiator_identity_key: initiator_identity.to_core()?,
+            initiator_identity_key,
             message: &core_message,
         })?;
         Ok(SessionAcceptanceResult {
@@ -1503,7 +1506,7 @@ mod tests {
         assert_eq!(initiation.state_updates.len(), 2);
 
         let acceptance = bob
-            .accept_session(session_key, alice_identity, initiation.message)
+            .accept_session(session_key, Some(alice_identity), initiation.message)
             .unwrap();
 
         assert_eq!(acceptance.plaintext, b"hello bob".to_vec());
@@ -1538,7 +1541,7 @@ mod tests {
         let acceptance = bob
             .accept_session(
                 session_key.clone(),
-                alice_identity,
+                Some(alice_identity),
                 initiation.message.clone(),
             )
             .unwrap();
@@ -1608,7 +1611,7 @@ mod tests {
         let acceptance = bob
             .accept_session(
                 session_key.clone(),
-                alice_identity.clone(),
+                Some(alice_identity.clone()),
                 initiation.message,
             )
             .unwrap();

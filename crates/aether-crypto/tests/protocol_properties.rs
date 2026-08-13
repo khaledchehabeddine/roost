@@ -86,7 +86,7 @@ fn bootstrap(
     let (bob, decrypted) = accept(
         rng,
         &envelope,
-        &setup.alice_identity_key,
+        Some(&setup.alice_identity_key),
         &setup.bob_identity_key,
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,

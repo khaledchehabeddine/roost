@@ -32,7 +32,20 @@ pub const PREKEY_BUNDLE_VERSION: u8 = 1;
 pub const PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM: usize = 1184;
 /// Additive shared-secret headroom reserved in future X3DH KDF input.
 pub const X3DH_ADDITIVE_SHARED_SECRET_HEADROOM: usize = 32;
+/// The outer sealed-frame version. Must track `SEALED_FRAME_VERSION`, which is
+/// what actually rejects a frame on decode; this constant is the handshake's
+/// own assertion about the envelope it produces.
 const HANDSHAKE_ENVELOPE_VERSION: u8 = 1;
+
+/// The version of the plaintext *inside* the sealed frame, which is a separate
+/// format from the frame carrying it — the two were previously the same constant
+/// and agreed only because both were 1.
+///
+/// Version 2 carries the initiator's Identity Key so a responder can open a
+/// first message from a sender it has never seen. Version 1 is not accepted:
+/// nothing has shipped, and supporting it would mean keeping a path on which a
+/// stranger's message is permanently unopenable.
+const HANDSHAKE_FRAME_PLAINTEXT_VERSION: u8 = 2;
 const MAX_HANDSHAKE_ENVELOPE_LEN: usize = 16 * 1024;
 const MAX_HANDSHAKE_CIPHERTEXT_LEN: usize = 8 * 1024;
 const XCHACHA20_POLY1305_TAG_LEN: usize = 16;
@@ -116,6 +129,9 @@ pub struct HandshakeEnvelope {
 #[derive(Serialize)]
 struct HandshakeFramePlaintextWire<'a> {
     version: u8,
+    sender_identity_key: [u8; 32],
+    sender_identity_verifying_key: [u8; 32],
+    sender_identity_binding_signature: &'a [u8],
     ratchet_public_key: [u8; 32],
     previous_chain_length: u32,
     message_number: u32,
@@ -125,6 +141,9 @@ struct HandshakeFramePlaintextWire<'a> {
 #[derive(Deserialize)]
 struct DecodedHandshakeFramePlaintextWire {
     version: u8,
+    sender_identity_key: [u8; 32],
+    sender_identity_verifying_key: [u8; 32],
+    sender_identity_binding_signature: Vec<u8>,
     ratchet_public_key: [u8; 32],
     previous_chain_length: u32,
     message_number: u32,
@@ -134,6 +153,15 @@ struct DecodedHandshakeFramePlaintextWire {
 struct DecodedHandshakeFramePlaintext {
     header: Header,
     ciphertext: Vec<u8>,
+    /// The initiator's Identity Key, carried in the layer sealed to the
+    /// responder's Discovery Key so a recipient who has never seen this sender
+    /// can still derive the root key (AE-KEY-04 binding checked on decode).
+    ///
+    /// Unauthenticated at this layer — a sender may claim anything. A false
+    /// claim derives the wrong root key and fails the AEAD, and the sealed
+    /// envelope's own copy is compared against it after decryption, so the hint
+    /// can only ever select which key is tried, never what is believed.
+    sender_identity_hint: IdentityKeyBundle,
 }
 
 impl HandshakeEnvelope {
@@ -304,7 +332,8 @@ pub fn initiate<R: RngCore + CryptoRng>(
         plaintext: message.plaintext,
     })?;
     let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
-    let frame_plaintext = encode_handshake_frame_plaintext(&header, &ciphertext)?;
+    let frame_plaintext =
+        encode_handshake_frame_plaintext(&header, &ciphertext, initiator_identity_key)?;
     let prekey_reference = SealedFramePreKeyReference {
         discovery_epoch: responder_prekey_bundle.discovery_key.epoch,
         signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
@@ -368,13 +397,12 @@ pub fn initiate<R: RngCore + CryptoRng>(
 pub fn accept<R: RngCore + CryptoRng>(
     rng: &mut R,
     envelope: &HandshakeEnvelope,
-    initiator_identity_key: &IdentityKeyBundle,
+    expected_initiator_identity_key: Option<&IdentityKeyBundle>,
     responder_identity_key: &IdentityKeyBundle,
     responder_discovery_key: &DiscoveryKey,
     responder_signed_prekey: &SignedPreKey,
     responder_one_time_prekey: Option<OneTimePreKey>,
 ) -> Result<(RatchetState, AcceptedInitialMessage), CryptoError> {
-    verify_identity_key_bundle(initiator_identity_key)?;
     verify_identity_key_bundle(responder_identity_key)?;
     let prekey_reference = envelope_prekey_reference(envelope)?;
     if prekey_reference.discovery_epoch != responder_discovery_key.epoch()
@@ -400,6 +428,26 @@ pub fn accept<R: RngCore + CryptoRng>(
 
     let initiator_ephemeral_public_key = PublicKey::from(envelope.ephemeral_public_key);
 
+    let associated_data = initial_associated_data(
+        responder_discovery_key.public_key(),
+        responder_discovery_key.epoch(),
+    );
+    // Opened before the root key is derived, and that ordering is the whole
+    // point: this layer is sealed to the responder's own Discovery Key, so it
+    // is readable without knowing the sender, and it names the sender the root
+    // key needs. Deriving first would require already knowing the answer.
+    let frame_plaintext =
+        open_frame_for_discovery_key(responder_discovery_key, &envelope.to_frame())?;
+    let frame_plaintext = decode_handshake_frame_plaintext(&frame_plaintext)?;
+
+    // A caller that names an expected initiator pins it; one that does not —
+    // a message request from a stranger — takes the frame's claim. Either way
+    // the binding signature is verified here and the sealed envelope's own copy
+    // is compared against it after decryption.
+    let initiator_identity_key =
+        expected_initiator_identity_key.unwrap_or(&frame_plaintext.sender_identity_hint);
+    verify_identity_key_bundle(initiator_identity_key)?;
+
     let root_key = derive_root_key_responder(
         &initiator_ephemeral_public_key,
         initiator_identity_key,
@@ -411,14 +459,6 @@ pub fn accept<R: RngCore + CryptoRng>(
     let signed_prekey_key_pair =
         KeyPair::from_secret_bytes(*responder_signed_prekey.to_secret_bytes());
     let mut state = RatchetState::init_responder(root_key, signed_prekey_key_pair);
-
-    let associated_data = initial_associated_data(
-        responder_discovery_key.public_key(),
-        responder_discovery_key.epoch(),
-    );
-    let frame_plaintext =
-        open_frame_for_discovery_key(responder_discovery_key, &envelope.to_frame())?;
-    let frame_plaintext = decode_handshake_frame_plaintext(&frame_plaintext)?;
     let sealed = state.ratchet_decrypt(
         rng,
         &frame_plaintext.ciphertext,
@@ -506,13 +546,17 @@ fn validate_envelope_public_fields(frame: &SealedFrame) -> Result<(), CryptoErro
 fn encode_handshake_frame_plaintext(
     header: &Header,
     ciphertext: &[u8],
+    initiator_identity_key: &IdentityKeyBundle,
 ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
     if ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
         return Err(CryptoError::HandshakeEnvelopeEncode);
     }
     Ok(Zeroizing::new(
         postcard::to_stdvec(&HandshakeFramePlaintextWire {
-            version: HANDSHAKE_ENVELOPE_VERSION,
+            version: HANDSHAKE_FRAME_PLAINTEXT_VERSION,
+            sender_identity_key: *initiator_identity_key.public_key.as_bytes(),
+            sender_identity_verifying_key: *initiator_identity_key.verifying_key.as_bytes(),
+            sender_identity_binding_signature: &initiator_identity_key.binding_signature.to_bytes(),
             ratchet_public_key: *header.public_key.as_bytes(),
             previous_chain_length: header.previous_chain_length,
             message_number: header.message_number,
@@ -528,12 +572,21 @@ fn decode_handshake_frame_plaintext(
     let (wire, trailing): (DecodedHandshakeFramePlaintextWire, &[u8]) =
         postcard::take_from_bytes(bytes).map_err(|_| CryptoError::HandshakeEnvelopeDecode)?;
     if !trailing.is_empty()
-        || wire.version != HANDSHAKE_ENVELOPE_VERSION
+        || wire.version != HANDSHAKE_FRAME_PLAINTEXT_VERSION
         || wire.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN
         || !validate_x25519_public_key(&wire.ratchet_public_key)
     {
         return Err(CryptoError::HandshakeEnvelopeDecode);
     }
+    // `from_bytes` rejects non-canonical encodings; the binding signature over
+    // the two halves is checked by the caller through `verify_identity_key_bundle`,
+    // on whichever bundle it settles on.
+    let sender_identity_hint = IdentityKeyBundle::from_bytes(
+        &wire.sender_identity_key,
+        &wire.sender_identity_verifying_key,
+        &wire.sender_identity_binding_signature,
+    )
+    .map_err(|_| CryptoError::HandshakeEnvelopeDecode)?;
     Ok(DecodedHandshakeFramePlaintext {
         header: Header {
             public_key: PublicKey::from(wire.ratchet_public_key),
@@ -541,6 +594,7 @@ fn decode_handshake_frame_plaintext(
             message_number: wire.message_number,
         },
         ciphertext: wire.ciphertext,
+        sender_identity_hint,
     })
 }
 
@@ -1078,7 +1132,9 @@ mod tests {
         header: &Header,
         ciphertext: &[u8],
     ) -> HandshakeEnvelope {
-        let frame_plaintext = encode_handshake_frame_plaintext(header, ciphertext).unwrap();
+        let frame_plaintext =
+            encode_handshake_frame_plaintext(header, ciphertext, &setup.alice_identity_key)
+                .unwrap();
         let frame = seal_frame_with_ephemeral_key(
             initiator_ephemeral_key,
             setup.bob_discovery_key.public_key(),
@@ -1206,7 +1262,7 @@ mod tests {
         let (_, decrypted) = accept(
             &mut rng,
             &envelope,
-            &setup.alice_identity_key,
+            Some(&setup.alice_identity_key),
             &setup.bob_identity_key,
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
@@ -1256,7 +1312,53 @@ mod tests {
         let (_, decrypted) = accept(
             &mut rng,
             &envelope,
+            Some(&setup.alice_identity_key),
+            &setup.bob_identity_key,
+            &setup.bob_discovery_key,
+            &setup.bob_signed_prekey,
+            Some(setup.bob_one_time_prekey),
+        )
+        .unwrap();
+
+        assert_eq!(decrypted.plaintext.as_slice(), plaintext);
+        assert_eq!(
+            decrypted.sender_identity.identity_key,
+            *setup.alice_identity_key.public_key.as_bytes()
+        );
+        assert_eq!(
+            decrypted.sender_identity.identity_verifying_key,
+            setup.alice_identity_key.verifying_key.to_bytes()
+        );
+    }
+
+    /// A message request. The responder has never seen this initiator and holds
+    /// nothing to guess with, so it supplies no expected identity and reads the
+    /// sender from the frame instead.
+    ///
+    /// Sealed sender puts the sender inside the layer that needs the sender to
+    /// open — `derive_root_key_responder` wants the initiator's X25519 half
+    /// before any ciphertext can be touched. So without a hint in the layer the
+    /// recipient can already open with its own Discovery Key, a first message
+    /// from a stranger is unopenable, and every X3DH initial stays queued.
+    #[test]
+    fn accept_opens_a_first_message_from_an_unknown_initiator() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let plaintext = b"hello stranger";
+        let bundle = full_prekey_bundle(&setup, true);
+        let (_, envelope) = initiate(
+            &mut rng,
+            &setup.alice_discovery_key,
             &setup.alice_identity_key,
+            &setup.bob_identity_key,
+            &bundle,
+            initial_plaintext(plaintext),
+        )
+        .unwrap();
+
+        let (_, decrypted) = accept(
+            &mut rng,
+            &envelope,
+            None,
             &setup.bob_identity_key,
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
@@ -1293,7 +1395,7 @@ mod tests {
         let (_, decrypted) = accept(
             &mut rng,
             &envelope,
-            &setup.alice_identity_key,
+            Some(&setup.alice_identity_key),
             &setup.bob_identity_key,
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
@@ -1320,7 +1422,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &setup.alice_identity_key,
+                Some(&setup.alice_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1349,7 +1451,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &setup.alice_identity_key,
+                Some(&setup.alice_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1539,7 +1641,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &setup.alice_identity_key,
+                Some(&setup.alice_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1567,7 +1669,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &setup.alice_identity_key,
+                Some(&setup.alice_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1614,7 +1716,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &setup.alice_identity_key,
+                Some(&setup.alice_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1675,7 +1777,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &setup.alice_identity_key,
+                Some(&setup.alice_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1736,7 +1838,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &setup.alice_identity_key,
+                Some(&setup.alice_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1861,7 +1963,7 @@ mod tests {
             accept(
                 &mut rng,
                 &envelope,
-                &root_bound_identity_key,
+                Some(&root_bound_identity_key),
                 &setup.bob_identity_key,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
@@ -1891,7 +1993,7 @@ mod tests {
         let (_, decrypted) = accept(
             &mut rng,
             &decoded_envelope,
-            &setup.alice_identity_key,
+            Some(&setup.alice_identity_key),
             &setup.bob_identity_key,
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,

@@ -675,7 +675,7 @@ fn replay_initial_handshake_fixture(
     let (_, accepted) = accept(
         &mut prepared.rng,
         &decoded,
-        &prepared.initiator_identity_key,
+        Some(&prepared.initiator_identity_key),
         &prepared.responder_identity_key,
         &prepared.bob_discovery_key,
         &prepared.bob_signed_prekey,
@@ -1148,7 +1148,7 @@ fn session_setup() -> Result<SessionSetup, AetherError> {
     let (bob_state, accepted) = accept(
         &mut rng,
         &envelope,
-        &alice_identity_key,
+        Some(&alice_identity_key),
         &bob_identity_key,
         &bob_discovery,
         &bob_signed_prekey,
@@ -1875,7 +1875,7 @@ fn initial_handshake_tamper_rejects_without_sender(
     Ok(accept(
         &mut prepared.rng,
         &tampered,
-        &prepared.initiator_identity_key,
+        Some(&prepared.initiator_identity_key),
         &prepared.responder_identity_key,
         &prepared.bob_discovery_key,
         &prepared.bob_signed_prekey,

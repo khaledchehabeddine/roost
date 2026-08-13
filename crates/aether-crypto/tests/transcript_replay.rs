@@ -158,7 +158,7 @@ fn recorded_session_transcript_reaches_expected_state() {
     let (mut bob, handshake_plaintext) = accept(
         &mut rng,
         &expected_envelope,
-        &alice_identity_key,
+        Some(&alice_identity_key),
         &bob_identity_key,
         &bob_discovery_key,
         &bob_signed_prekey,
@@ -214,6 +214,76 @@ fn recorded_session_transcript_reaches_expected_state() {
         transcript.expected_alice_state_sha256
     );
     assert_eq!(state_digest_hex(&bob), transcript.expected_bob_state_sha256);
+}
+
+/// Reprints the two handshake fields of `session_transcript_v1.json` after a
+/// wire-format change, replaying the fixture's own seed so everything else in
+/// the file stays valid.
+///
+/// Only these two move when the *frame* changes: the Double Ratchet output the
+/// frame wraps is unaffected, so message ciphertexts, headers and both state
+/// digests are still whatever the file already records — which is why this
+/// prints two fields rather than rewriting the document. If a change moves more
+/// than the frame, the replay below will still fail after these are pasted in,
+/// and that failure is the signal to widen this.
+///
+/// The fixture had no regenerator and was hand-edited through #171 and #174;
+/// this exists so the next wire change does not repeat that.
+#[test]
+#[ignore = "reprints session_transcript_v1.json handshake fields; run explicitly"]
+fn regenerate_session_transcript_handshake_fields() {
+    let transcript: Transcript =
+        serde_json::from_str(include_str!("fixtures/session_transcript_v1.json")).unwrap();
+    let mut rng = ChaCha20Rng::from_seed(transcript.rng_seed);
+
+    let alice_identity = generate_signing_key_pair(&mut rng);
+    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
+    let alice_discovery_key = generate_discovery_key(
+        &mut rng,
+        &alice_identity,
+        transcript.alice_discovery_epoch,
+        transcript.created_at,
+    );
+    let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
+    let bob_discovery_key = generate_discovery_key(
+        &mut rng,
+        &bob_identity,
+        transcript.bob_discovery_epoch,
+        transcript.created_at,
+    );
+    let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
+        &mut rng,
+        &bob_discovery_key,
+        transcript.created_at,
+    );
+    let bob_one_time_prekey = generate_one_time_prekey(
+        &mut rng,
+        transcript.bob_one_time_prekey_id,
+        bob_discovery_key.epoch(),
+        transcript.created_at,
+    );
+    let prekey_bundle = PreKeyBundle {
+        version: aether_crypto::PREKEY_BUNDLE_VERSION,
+        discovery_key: bob_discovery_key.bundle(),
+        signed_prekey: bob_signed_prekey.bundle(),
+        one_time_prekey: Some(bob_one_time_prekey.bundle()),
+    };
+
+    let (_, envelope) = initiate(
+        &mut rng,
+        &alice_discovery_key,
+        &alice_identity_key,
+        &bob_identity_key,
+        &prekey_bundle,
+        initial_plaintext(transcript.handshake_plaintext.as_bytes()),
+    )
+    .unwrap();
+
+    println!("handshake_envelope.ciphertext_hex:");
+    println!("{}", hex::encode(&envelope.ciphertext));
+    println!("handshake_envelope_encoded_hex:");
+    println!("{}", hex::encode(envelope.to_bytes().unwrap()));
 }
 
 fn assert_envelope_eq(actual: &HandshakeEnvelope, expected: &HandshakeEnvelope) {
