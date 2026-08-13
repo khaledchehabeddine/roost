@@ -116,7 +116,18 @@ fun main() {
         "hello bob".encodeToByteArray(),
     )
     val decodedInitial = decodeMessage(encodeMessage(initiation.message))
-    val acceptance = bob.acceptSession(sessionKey, aliceIdentity, decodedInitial)
+    // The stranger path: read who sent it before accepting, because the session
+    // key is derived from both identities and acceptSession consumes the
+    // one-time prekey, so it cannot be run twice to find out.
+    val hinted = bob.initiatorIdentityHint(decodedInitial)
+    requireCoverage(
+        hinted.x25519PublicKey.contentEquals(aliceIdentity.x25519PublicKey) &&
+            hinted.ed25519VerifyingKey.contentEquals(aliceIdentity.ed25519VerifyingKey) &&
+            hinted.identityBindingSignature.contentEquals(aliceIdentity.identityBindingSignature),
+        "initiator identity hint",
+    )
+
+    val acceptance = bob.acceptSession(sessionKey, null, decodedInitial)
     requireCoverage(acceptance.plaintext.contentEquals("hello bob".encodeToByteArray()), "session accept plaintext")
 
     val aliceSnapshot = mutableListOf<ProtocolStateEntry>()

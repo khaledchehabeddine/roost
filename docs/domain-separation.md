@@ -9,7 +9,7 @@ context string or a field order fails every verification rather than degrading, 
 are normative for the listed library version and are read directly from the source, not restated
 from the specification.
 
-Applies to: **Aether v0.13.0**. Update on any change and note the affected release.
+Applies to: **Aether v0.14.0**. Update on any change and note the affected release.
 
 ## How a context is applied
 
