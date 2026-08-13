@@ -48,8 +48,14 @@ pub struct SessionInitiationResult {
 pub struct SessionAcceptance<'a> {
     /// Session-scoped protocol-state key for the new ratchet/session blob.
     pub session_key: ProtocolStateKey,
-    /// Initiator permanent Identity Key bundle expected by the caller.
-    pub initiator_identity_key: IdentityKeyBundle,
+    /// Initiator permanent Identity Key bundle expected by the caller, or `None`
+    /// to accept whichever initiator the message names.
+    ///
+    /// A caller that knows who it expects pins it here and a mismatch fails. A
+    /// caller receiving a first message from a stranger cannot know, and passes
+    /// `None`; the identity is then read from the handshake frame and still
+    /// checked against the sealed envelope's own copy after decryption.
+    pub initiator_identity_key: Option<IdentityKeyBundle>,
     /// X3DH first message received from the initiator.
     pub message: &'a Message,
 }
@@ -269,7 +275,7 @@ impl KeyStore {
         let (state, accepted) = accept(
             &mut rng,
             &envelope,
-            &input.initiator_identity_key,
+            input.initiator_identity_key.as_ref(),
             &identity_key,
             &discovery_key,
             &signed_prekey,
@@ -416,7 +422,7 @@ mod tests {
         let acceptance = bob
             .accept_session(SessionAcceptance {
                 session_key,
-                initiator_identity_key: alice_identity.identity_key_bundle().unwrap(),
+                initiator_identity_key: Some(alice_identity.identity_key_bundle().unwrap()),
                 message: &initiation.message,
             })
             .unwrap();
@@ -464,14 +470,14 @@ mod tests {
 
         bob.accept_session(SessionAcceptance {
             session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
-            initiator_identity_key: alice_identity.identity_key_bundle().unwrap(),
+            initiator_identity_key: Some(alice_identity.identity_key_bundle().unwrap()),
             message: &initiation.message,
         })
         .unwrap();
 
         let second = bob.accept_session(SessionAcceptance {
             session_key: ProtocolStateKey::session(SessionId::from_bytes([0x34; 16])),
-            initiator_identity_key: alice_identity.identity_key_bundle().unwrap(),
+            initiator_identity_key: Some(alice_identity.identity_key_bundle().unwrap()),
             message: &initiation.message,
         });
 

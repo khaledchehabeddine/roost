@@ -80,7 +80,7 @@ fn setup() -> Setup {
     let (bob_state, plaintext) = accept(
         &mut rng,
         &envelope,
-        &alice_identity_key,
+        Some(&alice_identity_key),
         &bob_identity_key,
         &bob_discovery,
         &bob_signed_prekey,
