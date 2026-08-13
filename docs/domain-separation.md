@@ -9,7 +9,7 @@ context string or a field order fails every verification rather than degrading, 
 are normative for the listed library version and are read directly from the source, not restated
 from the specification.
 
-Applies to: **Aether v0.10.0**. Update on any change and note the affected release.
+Applies to: **Aether v0.12.0**. Update on any change and note the affected release.
 
 ## How a context is applied
 
@@ -43,6 +43,10 @@ Identity key self-binding — the IK's Ed25519 half signing its own X25519 half 
 Payload is exactly 64 bytes. Source:
 [`keys/identity.rs`](../crates/aether-crypto/src/keys/identity.rs) `identity_key_binding_payload`.
 
+Reachable from a binding as `verify_identity_key_binding`, which takes public material only. Prefer
+it to reimplementing the preimage — the two identity contexts below cover identical bytes, so an
+implementation that drops or swaps one accepts a signature made for the other purpose.
+
 ### `AetherDK-v1:`
 
 Identity-to-discovery binding — the IK's Ed25519 half signing a discovery key (AE-IDN-01, AE-KEY-04,
@@ -75,7 +79,9 @@ for (AE-KEY-04, DK→IK direction). Populates
 
 Payload is exactly 64 bytes; the full preimage including the 16-byte context is 80 bytes. Source:
 [`discovery_key.rs`](../crates/aether-crypto/src/discovery_key.rs)
-`DiscoveryKey::sign_identity_binding`, verified by `verify_discovery_to_identity_binding`.
+`DiscoveryKey::sign_identity_binding`, verified by `verify_discovery_to_identity_binding` — which is
+also the name of the UniFFI export, so a client checking a discovery-key lookup before any session
+exists calls Aether rather than rebuilding this preimage.
 
 **No epoch and no timestamp**, unlike the IK→DK direction above. A permanent identity key signs many
 discovery keys over its lifetime and needs the epoch to disambiguate them; a discovery key is minted

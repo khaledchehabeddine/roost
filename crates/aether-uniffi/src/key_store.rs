@@ -25,6 +25,20 @@ use aether_core::{
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
+/// Largest authentication transcript this keystore will sign, in bytes.
+///
+/// A relay authentication transcript is 159 bytes for the HTTP form and 120 for the WebSocket
+/// form, so this leaves room for long request targets while keeping the export from doubling as a
+/// bulk document signer.
+const MAX_AUTHENTICATION_TRANSCRIPT_LEN: usize = 4096;
+
+/// ASCII prefix reserved for preimages Aether signs or verifies itself.
+///
+/// Every context and domain tag in `docs/domain-separation.md` starts with these bytes, so
+/// refusing them keeps [`KeyStore::sign_authentication_transcript`] disjoint from the whole
+/// registry. Matched case-insensitively to cover the lowercase hash-domain convention as well.
+const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
+
 /// Entry point for local identity, discovery-key, and signed-pre-key state.
 ///
 /// Construct one keystore for the app and keep it for the process lifetime. Methods may be called
@@ -160,6 +174,69 @@ impl KeyStore {
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn has_identity(&self) -> Result<bool, AetherError> {
         Ok(self.inner.has_identity()?)
+    }
+
+    /// Signs a caller-built authentication transcript with the identity key's Ed25519 half.
+    ///
+    /// The transcript is signed exactly as given — no context is prepended. Callers own their own
+    /// domain separation and put it inside the transcript, which is what a relay authentication
+    /// transcript already does: `Relay-HTTP-Auth-v1` and `Relay-WebSocket-Auth-v1` are literal
+    /// prefixes of the bytes the relay rebuilds and verifies. Prepending a second context here
+    /// would produce a preimage no verifier ever reconstructs, so this operation deliberately does
+    /// not. Aether defines neither the transcript layout nor the verifier, and never inspects the
+    /// fields.
+    ///
+    /// What Aether does enforce is that the result can never be mistaken for one of its own
+    /// signatures. A transcript starting with the reserved ASCII prefix `Aether`, matched
+    /// case-insensitively, is refused, because every preimage Aether signs or verifies begins with
+    /// a context from `docs/domain-separation.md` and every one of those begins with those bytes.
+    /// Without the check this export would be a signing oracle able to mint an identity binding, a
+    /// discovery-to-identity binding, or a message-transcript signature under the local identity
+    /// key from bytes the caller — or whoever supplies the caller — chose.
+    ///
+    /// Returns the 64 signature bytes. Ed25519 signing is deterministic, so an identical
+    /// transcript always yields an identical signature.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn challenge_nonce() -> [u8; 32] { [0x22; 32] }
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// # store.generate_identity()?;
+    /// let identity = store.load_identity()?;
+    ///
+    /// // The caller builds the whole preimage, context included.
+    /// let mut transcript = b"Relay-WebSocket-Auth-v1".to_vec();
+    /// transcript.extend_from_slice(&1u16.to_be_bytes());
+    /// transcript.extend_from_slice(&challenge_nonce());
+    /// transcript.extend_from_slice(&identity.ed25519_verifying_key);
+    ///
+    /// let signature = store.sign_authentication_transcript(transcript)?;
+    /// assert_eq!(signature.len(), 64);
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`AetherError::Corrupt`] if only one of the two stored identity key parts is present.
+    /// - [`AetherError::InternalError`] on storage lock poisoning.
+    /// - [`AetherError::InvalidData`] if the transcript is empty, longer than 4096 bytes, starts
+    ///   with the reserved `Aether` prefix, or a stored identity key has the wrong byte length.
+    /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn sign_authentication_transcript(
+        &self,
+        transcript: Vec<u8>,
+    ) -> Result<Vec<u8>, AetherError> {
+        let transcript = Zeroizing::new(transcript);
+        check_signable_transcript(&transcript)?;
+        Ok(self
+            .inner
+            .load_identity()?
+            .sign(&transcript)
+            .to_bytes()
+            .to_vec())
     }
 
     /// Returns the currently stored signed pre-key bundle.
@@ -832,9 +909,37 @@ impl KeyStore {
     }
 }
 
+// Bounds what the identity key will sign for a caller-defined purpose. The prefix rule is the
+// security-relevant half: it keeps this export's preimages disjoint from every context in
+// docs/domain-separation.md, so no signature it produces can satisfy an Aether verifier.
+fn check_signable_transcript(transcript: &[u8]) -> Result<(), AetherError> {
+    if transcript.is_empty() {
+        return Err(AetherError::InvalidData {
+            reason: "authentication transcript is empty".into(),
+        });
+    }
+    if transcript.len() > MAX_AUTHENTICATION_TRANSCRIPT_LEN {
+        return Err(AetherError::InvalidData {
+            reason: format!(
+                "authentication transcript exceeds {MAX_AUTHENTICATION_TRANSCRIPT_LEN} bytes"
+            ),
+        });
+    }
+    let reserved = RESERVED_AETHER_DOMAIN_PREFIX.len();
+    if transcript.len() >= reserved
+        && transcript[..reserved].eq_ignore_ascii_case(RESERVED_AETHER_DOMAIN_PREFIX)
+    {
+        return Err(AetherError::InvalidData {
+            reason: "authentication transcript starts with the reserved Aether domain prefix"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::KeyStore;
+    use super::{KeyStore, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
     use crate::{
         AetherError, InMemorySecureStorage, SecureStorage,
         protocol::{
@@ -851,11 +956,215 @@ mod tests {
         DiscoveryKeyBundle as CryptoDiscoveryKeyBundle,
         IdentityKeyBundle as CryptoIdentityKeyBundle, PublicKey,
         RecipientDeliveryCapability as CryptoCapability, Signature,
-        SignedPreKeyBundle as CryptoSignedPreKeyBundle, VerifyingKey, verify_discovery_key_bundle,
-        verify_discovery_to_identity_binding, verify_identity_key_bundle,
-        verify_signed_prekey_bundle,
+        SignedPreKeyBundle as CryptoSignedPreKeyBundle, SigningKeyPair, VerifyingKey,
+        verify_discovery_key_bundle, verify_discovery_to_identity_binding,
+        verify_identity_key_bundle, verify_signed_prekey_bundle, verify_with_context,
     };
     use std::sync::Arc;
+
+    /// Every Ed25519 signature context and canonical-encoding domain tag in
+    /// `docs/domain-separation.md`, plus the one lowercase hash domain, as of v0.11.0.
+    const AETHER_DOMAIN_REGISTRY: [&str; 10] = [
+        "AetherIKBinding-v1:",
+        "AetherDK-v1:",
+        "AetherDKToIK-v1:",
+        "AetherSPK-v1:",
+        "AetherMessageTranscript-v1:",
+        "AetherIK-v1:",
+        "AetherSafetyNumber-v1:",
+        "AetherSenderCertificate-v2:",
+        "AetherProtocolStateCommit-v1:",
+        "aether-recipient-delivery-capability-v1",
+    ];
+
+    const RELAY_HTTP_AUTH_CONTEXT: &[u8] = b"Relay-HTTP-Auth-v1";
+    const RELAY_PROTOCOL_VERSION: u16 = 1;
+    const REL_RLY_18_KAT_IDENTITY_SIGNING_SECRET: [u8; 32] = [0x11; 32];
+    const REL_RLY_18_KAT_CHALLENGE_NONCE: [u8; 32] = [0x22; 32];
+    const REL_RLY_18_KAT_RELAY_DOMAIN: &[u8] = b"relay.example";
+    const REL_RLY_18_KAT_METHOD: &[u8] = b"POST";
+    const REL_RLY_18_KAT_REQUEST_TARGET: &[u8] = b"/v1/prekeys?count=10";
+    const REL_RLY_18_KAT_BODY_DIGEST_HEX: &str =
+        "5e7ea43567be4f0a65821dcdfa31d2d92cb0d0d666df62b7f6cdaacac19d4047";
+    const REL_RLY_18_KAT_TRANSCRIPT_LEN: usize = 159;
+    const REL_RLY_18_KAT_EXPECTED_VERIFYING_HEX: &str =
+        "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737";
+    const REL_RLY_18_KAT_EXPECTED_SIGNATURE_HEX: &str = "7925dfac93637e618b5fad03a236f2c1\
+         f0a913b252c79ac594123a40a00a2929\
+         951d1a452bafccc602baf9072ff42105\
+         07e53969e62220f2e2fea9d9713d340c";
+
+    fn hex32(hex: &str) -> [u8; 32] {
+        hex::decode(hex).unwrap().try_into().unwrap()
+    }
+
+    fn push_length_prefixed(transcript: &mut Vec<u8>, field: &[u8]) {
+        transcript.extend_from_slice(&(field.len() as u16).to_be_bytes());
+        transcript.extend_from_slice(field);
+    }
+
+    // REL-RLY-16: concat("Relay-HTTP-Auth-v1", protocol_version_u16_be, challenge_nonce,
+    // identity_signing_key, len_u16_be(relay_domain), relay_domain, len_u16_be(method), method,
+    // len_u16_be(request_target), request_target, SHA-256(request_body)). Fixed-width fields and
+    // the context itself carry no length prefix, and nothing separates the context from what
+    // follows it.
+    fn relay_http_transcript(identity_signing_key: &[u8], body_digest: &[u8; 32]) -> Vec<u8> {
+        let mut transcript = RELAY_HTTP_AUTH_CONTEXT.to_vec();
+        transcript.extend_from_slice(&RELAY_PROTOCOL_VERSION.to_be_bytes());
+        transcript.extend_from_slice(&REL_RLY_18_KAT_CHALLENGE_NONCE);
+        transcript.extend_from_slice(identity_signing_key);
+        push_length_prefixed(&mut transcript, REL_RLY_18_KAT_RELAY_DOMAIN);
+        push_length_prefixed(&mut transcript, REL_RLY_18_KAT_METHOD);
+        push_length_prefixed(&mut transcript, REL_RLY_18_KAT_REQUEST_TARGET);
+        transcript.extend_from_slice(body_digest);
+        transcript
+    }
+
+    fn signature_from(bytes: &[u8]) -> Signature {
+        Signature::from_bytes(&<[u8; 64]>::try_from(bytes).unwrap())
+    }
+
+    /// Known-answer test for the REL-RLY-16 authentication transcript and the signature over it.
+    ///
+    /// Source: Relay REL-RLY-18 published vector (`relay/docs/auth-transcript.md`), produced by
+    /// the relay's own transcript encoder and `ed25519-dalek` verifier, which share no code with
+    /// this crate. Matching the expected signature pins all 159 transcript bytes, because any
+    /// difference in field order, length prefixing, or separators changes the signature.
+    ///
+    /// Inputs:
+    /// - `identity_signing_secret = REL_RLY_18_KAT_IDENTITY_SIGNING_SECRET`
+    /// - `challenge_nonce = REL_RLY_18_KAT_CHALLENGE_NONCE`
+    /// - `relay_domain = REL_RLY_18_KAT_RELAY_DOMAIN`
+    /// - `protocol_version = RELAY_PROTOCOL_VERSION`
+    /// - `method = REL_RLY_18_KAT_METHOD`
+    /// - `request_target = REL_RLY_18_KAT_REQUEST_TARGET`
+    /// - `body_digest = REL_RLY_18_KAT_BODY_DIGEST_HEX` (SHA-256 of `b"vector-body"`)
+    ///
+    /// Derivation:
+    /// ```text
+    /// transcript = concat("Relay-HTTP-Auth-v1", protocol_version, challenge_nonce,
+    ///                     identity_signing_key, len(relay_domain), relay_domain, len(method),
+    ///                     method, len(request_target), request_target, body_digest)
+    /// signature = Ed25519-Sign(identity_signing_secret, transcript)
+    /// ```
+    ///
+    /// Output:
+    /// - `identity_signing_key = REL_RLY_18_KAT_EXPECTED_VERIFYING_HEX`
+    /// - `signature = REL_RLY_18_KAT_EXPECTED_SIGNATURE_HEX`
+    #[test]
+    fn relay_http_authentication_transcript_signature_known_answer() {
+        let signing = SigningKeyPair::from_signing_bytes(REL_RLY_18_KAT_IDENTITY_SIGNING_SECRET);
+        assert_eq!(
+            hex::encode(signing.verifying.to_bytes()),
+            REL_RLY_18_KAT_EXPECTED_VERIFYING_HEX
+        );
+
+        let transcript = relay_http_transcript(
+            signing.verifying.as_bytes(),
+            &hex32(REL_RLY_18_KAT_BODY_DIGEST_HEX),
+        );
+
+        assert_eq!(transcript.len(), REL_RLY_18_KAT_TRANSCRIPT_LEN);
+        assert_eq!(
+            hex::encode(signing.sign(&transcript).to_bytes()),
+            REL_RLY_18_KAT_EXPECTED_SIGNATURE_HEX
+        );
+    }
+
+    /// The signature must cover the transcript bytes and nothing else.
+    ///
+    /// The relay rebuilds the transcript alone and calls bare Ed25519 verify, so a context
+    /// prepended on this side — what `sign_with_context` would do — yields a preimage the relay
+    /// never reconstructs. That failure is silent at the boundary and only shows up as a signature
+    /// that verifies nowhere, which is why it is pinned here rather than left to the caller.
+    #[test]
+    fn signed_authentication_transcript_verifies_bare_and_is_not_context_prefixed() {
+        let store = key_store();
+        let identity = store.generate_identity().unwrap();
+        let transcript = relay_http_transcript(
+            &identity.ed25519_verifying_key,
+            &hex32(REL_RLY_18_KAT_BODY_DIGEST_HEX),
+        );
+
+        let signature_bytes = store
+            .sign_authentication_transcript(transcript.clone())
+            .unwrap();
+
+        assert_eq!(signature_bytes.len(), 64);
+        let signature = signature_from(&signature_bytes);
+        let verifying = verifying_key(&identity);
+        assert!(verifying.verify_strict(&transcript, &signature).is_ok());
+        // Re-prepending the transcript's own context is the exact shape a contextual signature
+        // would have had. It must not verify, or this export would be signing the wrong preimage.
+        assert!(
+            verify_with_context(&verifying, RELAY_HTTP_AUTH_CONTEXT, &transcript, &signature)
+                .is_err()
+        );
+        for context in AETHER_DOMAIN_REGISTRY {
+            assert!(
+                verify_with_context(&verifying, context.as_bytes(), &transcript, &signature)
+                    .is_err()
+            );
+        }
+        // Ed25519 is deterministic, so a host retrying the same challenge resends the same proof.
+        assert_eq!(
+            store.sign_authentication_transcript(transcript).unwrap(),
+            signature_bytes
+        );
+    }
+
+    /// An unrestricted "sign these bytes with the identity key" export would be a signing oracle
+    /// over Aether's own preimages: the identity key is what signs identity bindings,
+    /// discovery-key bindings, and message transcripts. Every context Aether signs or verifies
+    /// under starts with `Aether`, so refusing that prefix makes the two preimage sets disjoint.
+    #[test]
+    fn sign_authentication_transcript_refuses_reserved_aether_preimages() {
+        let store = key_store();
+        let identity = store.generate_identity().unwrap();
+
+        for context in AETHER_DOMAIN_REGISTRY {
+            let mut preimage = context.as_bytes().to_vec();
+            preimage.extend_from_slice(&identity.x25519_public_key);
+            preimage.extend_from_slice(&identity.ed25519_verifying_key);
+            match store.sign_authentication_transcript(preimage) {
+                Err(AetherError::InvalidData { .. }) => {}
+                Err(error) => panic!("expected InvalidData for {context}, got {error}"),
+                Ok(_) => panic!("expected InvalidData for {context}"),
+            }
+        }
+    }
+
+    #[test]
+    fn sign_authentication_transcript_bounds_transcript_length() {
+        let store = key_store();
+        store.generate_identity().unwrap();
+
+        match store.sign_authentication_transcript(Vec::new()) {
+            Err(AetherError::InvalidData { .. }) => {}
+            other => panic!("expected InvalidData for an empty transcript, got {other:?}"),
+        }
+        match store
+            .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN + 1])
+        {
+            Err(AetherError::InvalidData { .. }) => {}
+            other => panic!("expected InvalidData past the length cap, got {other:?}"),
+        }
+        assert!(
+            store
+                .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn sign_authentication_transcript_requires_a_stored_identity() {
+        let store = key_store();
+
+        match store.sign_authentication_transcript(b"Relay-HTTP-Auth-v1".to_vec()) {
+            Err(AetherError::NotFound) => {}
+            other => panic!("expected NotFound without an identity, got {other:?}"),
+        }
+    }
 
     fn key_store() -> Arc<KeyStore> {
         let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
