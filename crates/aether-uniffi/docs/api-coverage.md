@@ -16,6 +16,10 @@ runtime policy; code and tests remain authoritative.
 - Messages, sealed-sender frames, acknowledgments, deduplication, retries, contact trust,
   blocking, sender certificates, hardening limits, and event streams: `KeyStore`,
   `ProtocolStateEngine`, and FFI-safe records/enums.
+- Bare identity-key signing over a caller-built authentication transcript:
+  `KeyStore::sign_authentication_transcript`. It carries no transport-authentication layout — the
+  caller owns the bytes and their domain separation — and refuses preimages reserved by
+  `docs/domain-separation.md` so it cannot sign one of Aether's own.
 - Opt-in local peer simulations: `DevelopmentCertificateAuthority` issues production-format
   sender certificates and returns matching public validation input when the
   `development-certificates` feature is enabled. Normal artifacts omit this surface.

@@ -9,7 +9,7 @@ context string or a field order fails every verification rather than degrading, 
 are normative for the listed library version and are read directly from the source, not restated
 from the specification.
 
-Applies to: **Aether v0.10.0**. Update on any change and note the affected release.
+Applies to: **Aether v0.11.0**. Update on any change and note the affected release.
 
 ## How a context is applied
 
@@ -25,6 +25,29 @@ separation the contexts exist to provide. Every value in this document satisfies
 Nothing in the code enforces it, so check any new context against this list before adding it.
 
 The trailing `:` in each string is part of the constant, not a separator the code inserts.
+
+## The reserved `Aether` prefix
+
+Every value in this document — signature context, canonical-encoding domain tag, and hash domain
+string alike — begins with the ASCII bytes `Aether`, in that case or lowercase. That is now load
+bearing rather than a naming habit.
+
+`KeyStore::sign_authentication_transcript` signs caller-supplied bytes **bare**, with no context
+prepended, because the transcripts it exists for carry their own prefix-free context (Relay's
+`Relay-HTTP-Auth-v1` and `Relay-WebSocket-Auth-v1`, which are Relay's constants and are deliberately
+not listed here — Aether neither defines nor verifies them). Prepending a second context would
+produce a preimage the relay never rebuilds.
+
+Signing bare means the caller chooses the whole preimage, and the key doing the signing is the
+identity key — the same key that signs `AetherIKBinding-v1:`, `AetherDKToIK-v1:`, and
+`AetherMessageTranscript-v1:`. So the export refuses any transcript starting with `Aether`, matched
+case-insensitively. Because every Aether verifier recomputes `context || payload` from a context in
+this document, and every one of those starts with the reserved prefix, no signature that export can
+produce is acceptable to any Aether verifier. The two preimage sets are disjoint by construction,
+not by convention.
+
+**A new context must therefore keep the `Aether` prefix as well as being prefix-free against the
+existing set.** Adding one that does not would silently open the gap the refusal closes.
 
 ## Ed25519 signature contexts
 
