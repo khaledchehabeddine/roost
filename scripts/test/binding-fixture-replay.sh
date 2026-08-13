@@ -72,6 +72,7 @@ run_swift() {
     run_swift_harness "Issue122Coverage.swift" "issue-122-coverage" "$swift_out"
     run_swift_harness "SecureStorageUnexpectedError.swift" "secure-storage-unexpected-error" "$swift_out"
     run_swift_harness "InboxAuthorization.swift" "inbox-authorization" "$swift_out"
+    run_swift_harness "AuthenticationTranscriptSigning.swift" "authentication-transcript-signing" "$swift_out"
     run_swift_harness "KeyBindingVerification.swift" "key-binding-verification" "$swift_out"
 }
 
@@ -155,6 +156,7 @@ run_kotlin() {
     run_kotlin_harness "Issue122Coverage.kt" "Issue122Coverage" "$kotlin_out" "$jna"
     run_kotlin_harness "SecureStorageUnexpectedError.kt" "SecureStorageUnexpectedError" "$kotlin_out" "$jna"
     run_kotlin_harness "InboxAuthorization.kt" "InboxAuthorization" "$kotlin_out" "$jna"
+    run_kotlin_harness "AuthenticationTranscriptSigning.kt" "AuthenticationTranscriptSigning" "$kotlin_out" "$jna"
     run_kotlin_harness "KeyBindingVerification.kt" "KeyBindingVerification" "$kotlin_out" "$jna"
 }
 

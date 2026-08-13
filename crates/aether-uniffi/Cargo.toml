@@ -35,5 +35,9 @@ serde_json = { workspace = true, optional = true }
 uniffi = { version = "0.31.1", features = ["cli"] }
 zeroize.workspace = true
 
+[dev-dependencies]
+# Utility
+hex.workspace = true
+
 [lints]
 workspace = true
