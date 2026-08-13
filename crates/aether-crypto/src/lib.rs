@@ -107,7 +107,7 @@ pub use handshake::{
     AcceptedInitialMessage, HandshakeEnvelope, InitialPlaintext,
     PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM, PREKEY_BUNDLE_VERSION, PreKeyBundle,
     SenderIdentityMaterial, X3DH_ADDITIVE_SHARED_SECRET_HEADROOM, accept, initial_associated_data,
-    initiate,
+    initiate, initiator_identity_hint,
 };
 pub use keys::{
     IdentityKeyBundle, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,

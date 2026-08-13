@@ -595,6 +595,35 @@ impl KeyStore {
         })
     }
 
+    /// Reads who sent an X3DH first message, without accepting it.
+    ///
+    /// Call this before [`Self::accept_session`] when the sender is not already known. A host
+    /// addresses Session state by a key derived from both identities, so it needs the sender
+    /// before it can accept — and `accept_session` consumes the referenced one-time pre-key, so
+    /// it cannot be run speculatively to find out.
+    ///
+    /// Opens only the layer sealed to this device's own Discovery Key: it consumes nothing and
+    /// is readable by nobody else. The returned identity is the sender's *claim*, carrying its
+    /// own verified binding signature; `accept_session` then checks it against the sealed
+    /// envelope's authenticated copy, so on its own it proves only that whoever reached this
+    /// inbox named this identity.
+    ///
+    /// # Errors
+    /// - [`AetherError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key,
+    ///   or the named identity's binding signature does not verify.
+    /// - [`AetherError::InvalidData`] if the message is not an X3DH initial or does not decode.
+    /// - [`AetherError::NotFound`] if local Discovery Key material is missing.
+    /// - [`AetherError::Storage`] on platform storage failure.
+    pub fn initiator_identity_hint(&self, message: Message) -> Result<Identity, AetherError> {
+        let core_message = message.to_core()?;
+        let bundle = self.inner.initiator_identity_hint(&core_message)?;
+        Ok(Identity {
+            x25519_public_key: bundle.public_key.as_bytes().to_vec(),
+            ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
+            identity_binding_signature: bundle.binding_signature.to_bytes().to_vec(),
+        })
+    }
+
     /// Accepts a new Session as the responder.
     ///
     /// A referenced one-time prekey is consumed only after the first Message authenticates.

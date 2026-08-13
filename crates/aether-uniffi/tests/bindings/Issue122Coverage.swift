@@ -137,9 +137,20 @@ struct Issue122Coverage {
             plaintext: Data("hello bob".utf8)
         )
         let decodedInitial = try decodeMessage(bytes: try encodeMessage(message: initiation.message))
+        // The stranger path: read who sent it before accepting, because the
+        // session key is derived from both identities and acceptSession
+        // consumes the one-time prekey, so it cannot be run twice to find out.
+        let hinted = try bob.initiatorIdentityHint(message: decodedInitial)
+        require(
+            hinted.x25519PublicKey == aliceIdentity.x25519PublicKey
+                && hinted.ed25519VerifyingKey == aliceIdentity.ed25519VerifyingKey
+                && hinted.identityBindingSignature == aliceIdentity.identityBindingSignature,
+            "initiator identity hint"
+        )
+
         let acceptance = try bob.acceptSession(
             sessionKey: sessionKey,
-            initiatorIdentity: aliceIdentity,
+            initiatorIdentity: nil,
             message: decodedInitial
         )
         require(acceptance.plaintext == Data("hello bob".utf8), "session accept plaintext")

@@ -12,6 +12,8 @@ Swift and Kotlin harnesses in this directory exercise UniFFI bindings built with
 - `AuthenticationTranscriptSigning.*`: bare identity-key signing over a caller-built
   authentication transcript, verified with the platform's own Ed25519 rather than Aether's, plus
   the reserved-prefix refusals.
+- `Issue122Coverage.*` also covers `initiatorIdentityHint`: the stranger path, where the sender is
+  read from the frame and `acceptSession` is then called with no expected identity.
 - `KeyBindingVerification.*`: standalone IK/DK binding verification, with the platform's own Ed25519
   as the counterparty rather than Aether's, plus the context-separation and malformed-input refusals.
 

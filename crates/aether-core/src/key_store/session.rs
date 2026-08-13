@@ -222,6 +222,38 @@ impl KeyStore {
         })
     }
 
+    /// Reads who sent an X3DH first message, without accepting it.
+    ///
+    /// A caller addresses session state by a key derived from both identities,
+    /// so it needs the sender before it can accept — and [`Self::accept_session`]
+    /// consumes the referenced one-time pre-key, so it cannot be run twice to
+    /// find out. This opens only the layer sealed to this device's own Discovery
+    /// Key and consumes nothing.
+    ///
+    /// The returned identity is the sender's *claim*, carrying its own verified
+    /// binding signature. It is what `accept_session` then checks against the
+    /// sealed envelope's authenticated copy; on its own it proves only that
+    /// someone who could reach this inbox named this identity.
+    ///
+    /// # Errors
+    /// - [`SessionEstablishmentError::Crypto`] if the message is not an initial,
+    ///   is not sealed to this Discovery Key, or names an identity whose binding
+    ///   does not verify.
+    /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
+    /// - [`SessionEstablishmentError::Message`] if the Message cannot be encoded.
+    pub fn initiator_identity_hint(
+        &self,
+        message: &Message,
+    ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
+        let _lifecycle = self.lifecycle_guard();
+        let discovery_key = self.0.discovery.current()?;
+        let envelope = handshake_envelope_from_message(message)?;
+        Ok(aether_crypto::initiator_identity_hint(
+            &envelope,
+            &discovery_key,
+        )?)
+    }
+
     /// Accepts a new Session as the X3DH responder.
     ///
     /// A referenced one-time pre-key is consumed only after the first Message authenticates and the

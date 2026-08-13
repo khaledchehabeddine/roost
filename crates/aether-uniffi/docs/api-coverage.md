@@ -20,6 +20,10 @@ runtime policy; code and tests remain authoritative.
   `KeyStore::sign_authentication_transcript`. It carries no transport-authentication layout — the
   caller owns the bytes and their domain separation — and refuses preimages reserved by
   `docs/domain-separation.md` so it cannot sign one of Aether's own.
+- Reading who sent an X3DH first message before accepting it:
+  `KeyStore::initiator_identity_hint`. Opens only the layer sealed to this device's own Discovery
+  Key, so it consumes no one-time pre-key and reveals nothing to anyone else; the claim it returns
+  is checked against the sealed envelope's authenticated copy by `accept_session`.
 - Standalone mutual-binding verification, before any session or contact record exists:
   `verify_identity_key_binding` and `verify_discovery_to_identity_binding`. Public material only,
   one fixed context each, so neither can be pointed at another Aether preimage.

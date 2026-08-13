@@ -358,6 +358,39 @@ pub fn initiate<R: RngCore + CryptoRng>(
     Ok((state, envelope))
 }
 
+/// Reads the initiator's Identity Key out of a handshake envelope, without
+/// accepting it.
+///
+/// This exists because a caller has to know *who* sent a first message before it
+/// can accept one: session state is addressed by a key derived from both
+/// identities, and [`accept`] takes that address as an input. Calling `accept`
+/// speculatively to find out is not an option — it consumes the referenced
+/// one-time prekey, so a second call with the right address would fail.
+///
+/// Opens only the layer sealed to `responder_discovery_key`, so it consumes
+/// nothing and reveals nothing to anyone without that key. The binding
+/// signature over the two halves is checked here; everything else about the
+/// sender is unverified until [`accept`] compares this against the sealed
+/// envelope's own copy.
+///
+/// # Errors
+/// - [`CryptoError::HandshakeEnvelopeDecode`] if the frame is not an initial, is
+///   not sealed to this Discovery Key, or its plaintext does not decode.
+/// - [`CryptoError::InvalidKeyEncoding`] if the named identity is not canonical.
+/// - [`CryptoError::SignatureInvalid`] if the identity's own binding signature
+///   does not verify.
+pub fn initiator_identity_hint(
+    envelope: &HandshakeEnvelope,
+    responder_discovery_key: &DiscoveryKey,
+) -> Result<IdentityKeyBundle, CryptoError> {
+    validate_envelope_public_fields(&envelope.to_frame())?;
+    let frame_plaintext =
+        open_frame_for_discovery_key(responder_discovery_key, &envelope.to_frame())?;
+    let decoded = decode_handshake_frame_plaintext(&frame_plaintext)?;
+    verify_identity_key_bundle(&decoded.sender_identity_hint)?;
+    Ok(decoded.sender_identity_hint)
+}
+
 /// Accepts a handshake envelope and decrypts the first message.
 ///
 /// The responder's first ratchet key is drawn from `rng` during the initial DH ratchet step.
@@ -1329,6 +1362,55 @@ mod tests {
             decrypted.sender_identity.identity_verifying_key,
             setup.alice_identity_key.verifying_key.to_bytes()
         );
+    }
+
+    /// The hint is readable *before* accepting, and that ordering is what makes
+    /// it usable at all.
+    ///
+    /// A caller addresses session state by a key derived from both identities,
+    /// so it has to know who sent a message before it can accept one — and
+    /// `accept` consumes the referenced one-time prekey, so it cannot be called
+    /// speculatively to find out. Reading the hint costs nothing and consumes
+    /// nothing: it opens only the layer sealed to the responder's own Discovery
+    /// Key.
+    #[test]
+    fn the_initiator_identity_is_readable_before_accepting() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let bundle = full_prekey_bundle(&setup, true);
+        let (_, envelope) = initiate(
+            &mut rng,
+            &setup.alice_discovery_key,
+            &setup.alice_identity_key,
+            &setup.bob_identity_key,
+            &bundle,
+            initial_plaintext(b"hello stranger"),
+        )
+        .unwrap();
+
+        let hint = initiator_identity_hint(&envelope, &setup.bob_discovery_key).unwrap();
+
+        assert_eq!(
+            hint.public_key.as_bytes(),
+            setup.alice_identity_key.public_key.as_bytes()
+        );
+        assert_eq!(
+            hint.verifying_key.to_bytes(),
+            setup.alice_identity_key.verifying_key.to_bytes()
+        );
+
+        // Nothing was consumed: the accept that follows still finds its
+        // one-time prekey, which is the whole point of peeking separately.
+        let (_, decrypted) = accept(
+            &mut rng,
+            &envelope,
+            None,
+            &setup.bob_identity_key,
+            &setup.bob_discovery_key,
+            &setup.bob_signed_prekey,
+            Some(setup.bob_one_time_prekey),
+        )
+        .unwrap();
+        assert_eq!(decrypted.plaintext.as_slice(), b"hello stranger");
     }
 
     /// A message request. The responder has never seen this initiator and holds
