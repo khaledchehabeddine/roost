@@ -9,7 +9,7 @@ context string or a field order fails every verification rather than degrading, 
 are normative for the listed library version and are read directly from the source, not restated
 from the specification.
 
-Applies to: **Aether v0.11.0**. Update on any change and note the affected release.
+Applies to: **Aether v0.12.0**. Update on any change and note the affected release.
 
 ## How a context is applied
 
@@ -25,29 +25,6 @@ separation the contexts exist to provide. Every value in this document satisfies
 Nothing in the code enforces it, so check any new context against this list before adding it.
 
 The trailing `:` in each string is part of the constant, not a separator the code inserts.
-
-## The reserved `Aether` prefix
-
-Every value in this document — signature context, canonical-encoding domain tag, and hash domain
-string alike — begins with the ASCII bytes `Aether`, in that case or lowercase. That is now load
-bearing rather than a naming habit.
-
-`KeyStore::sign_authentication_transcript` signs caller-supplied bytes **bare**, with no context
-prepended, because the transcripts it exists for carry their own prefix-free context (Relay's
-`Relay-HTTP-Auth-v1` and `Relay-WebSocket-Auth-v1`, which are Relay's constants and are deliberately
-not listed here — Aether neither defines nor verifies them). Prepending a second context would
-produce a preimage the relay never rebuilds.
-
-Signing bare means the caller chooses the whole preimage, and the key doing the signing is the
-identity key — the same key that signs `AetherIKBinding-v1:`, `AetherDKToIK-v1:`, and
-`AetherMessageTranscript-v1:`. So the export refuses any transcript starting with `Aether`, matched
-case-insensitively. Because every Aether verifier recomputes `context || payload` from a context in
-this document, and every one of those starts with the reserved prefix, no signature that export can
-produce is acceptable to any Aether verifier. The two preimage sets are disjoint by construction,
-not by convention.
-
-**A new context must therefore keep the `Aether` prefix as well as being prefix-free against the
-existing set.** Adding one that does not would silently open the gap the refusal closes.
 
 ## Ed25519 signature contexts
 
@@ -65,6 +42,10 @@ Identity key self-binding — the IK's Ed25519 half signing its own X25519 half 
 
 Payload is exactly 64 bytes. Source:
 [`keys/identity.rs`](../crates/aether-crypto/src/keys/identity.rs) `identity_key_binding_payload`.
+
+Reachable from a binding as `verify_identity_key_binding`, which takes public material only. Prefer
+it to reimplementing the preimage — the two identity contexts below cover identical bytes, so an
+implementation that drops or swaps one accepts a signature made for the other purpose.
 
 ### `AetherDK-v1:`
 
@@ -98,7 +79,9 @@ for (AE-KEY-04, DK→IK direction). Populates
 
 Payload is exactly 64 bytes; the full preimage including the 16-byte context is 80 bytes. Source:
 [`discovery_key.rs`](../crates/aether-crypto/src/discovery_key.rs)
-`DiscoveryKey::sign_identity_binding`, verified by `verify_discovery_to_identity_binding`.
+`DiscoveryKey::sign_identity_binding`, verified by `verify_discovery_to_identity_binding` — which is
+also the name of the UniFFI export, so a client checking a discovery-key lookup before any session
+exists calls Aether rather than rebuilding this preimage.
 
 **No epoch and no timestamp**, unlike the IK→DK direction above. A permanent identity key signs many
 discovery keys over its lifetime and needs the epoch to disambiguate them; a discovery key is minted

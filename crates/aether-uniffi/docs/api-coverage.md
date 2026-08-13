@@ -20,6 +20,9 @@ runtime policy; code and tests remain authoritative.
   `KeyStore::sign_authentication_transcript`. It carries no transport-authentication layout — the
   caller owns the bytes and their domain separation — and refuses preimages reserved by
   `docs/domain-separation.md` so it cannot sign one of Aether's own.
+- Standalone mutual-binding verification, before any session or contact record exists:
+  `verify_identity_key_binding` and `verify_discovery_to_identity_binding`. Public material only,
+  one fixed context each, so neither can be pointed at another Aether preimage.
 - Opt-in local peer simulations: `DevelopmentCertificateAuthority` issues production-format
   sender certificates and returns matching public validation input when the
   `development-certificates` feature is enabled. Normal artifacts omit this surface.

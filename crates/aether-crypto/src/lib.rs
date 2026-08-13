@@ -111,8 +111,8 @@ pub use handshake::{
 };
 pub use keys::{
     IdentityKeyBundle, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
-    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
-    verify_identity_key_bundle, verify_with_context,
+    generate_key_pair, generate_signing_key_pair, parse_ed25519_verifying_key_bytes,
+    sign_identity_key_binding, verify_identity_key_bundle, verify_with_context,
 };
 pub use one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
 pub use sealed_frame::{
