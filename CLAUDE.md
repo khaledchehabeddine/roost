@@ -18,6 +18,20 @@ ADRs preserve why a decision was made so future contributors — human or agent 
 
 If any of the three is missing, skip the ADR. Use [`docs/adr/TEMPLATE.md`](docs/adr/TEMPLATE.md) for format. Place cross-crate decisions in `docs/adr/` and crate-specific decisions in the owning crate's `docs/adr/`.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs use GitHub; before any tracker operation, read `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage maps categories and states to repository labels; before changing either, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain docs are multi-context; before exploring a crate or proposing terminology or architecture, read `docs/agents/domain.md`.
+
 ## Workflow
 
 - See `CONTRIBUTING.md` for branches, commits, and PR conventions
