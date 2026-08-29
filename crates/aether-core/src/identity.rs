@@ -166,7 +166,7 @@ impl IdentityManager {
         has_identity_entry(&**storage)
     }
 
-    // Use `KeyStore::reset` to clear dependent key material before identity.
+    // Use `KeyStore::prepare_reset` to clear dependent key material before identity.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
         storage

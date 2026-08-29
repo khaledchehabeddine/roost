@@ -51,6 +51,32 @@ private class MemoryProtocolStateStore : ProtocolStateStore {
     }
 }
 
+private fun complete(store: KeyStore, operation: KeyStoreOperation) {
+    store.commitOperation(operation.identifier)
+    store.finalizeOperation(operation.identifier)
+}
+
+private fun generateIdentity(store: KeyStore): Identity {
+    val prepared = store.prepareGenerateIdentity()
+    complete(store, prepared.operation)
+    return prepared.identity
+}
+
+private fun rotateSignedPrekeyNow(store: KeyStore) {
+    val prepared = store.prepareRotateSignedPrekeyNow()
+    complete(store, prepared.operation)
+}
+
+private fun replenishOneTimePrekeys(store: KeyStore): List<OneTimePreKeyBundle> {
+    val prepared = store.prepareReplenishOneTimePrekeys()
+    complete(store, prepared.operation)
+    return prepared.oneTimePrekeys
+}
+
+private fun importEncryptedBackup(store: KeyStore, data: ByteArray, passphrase: String) {
+    complete(store, store.prepareImportEncryptedBackup(data, passphrase))
+}
+
 fun main() {
     val engine = ProtocolStateEngine()
     requireCoverage(engine.hardeningLimits().maxEncodedMessageLen > 0uL, "hardening limits")
@@ -89,19 +115,19 @@ fun main() {
 
     val alice = KeyStore(MemorySecureStorage())
     val bob = KeyStore(MemorySecureStorage())
-    val aliceIdentity = alice.generateIdentity()
-    val bobIdentity = bob.generateIdentity()
-    alice.rotateSignedPrekeyNow()
-    bob.rotateSignedPrekeyNow()
+    val aliceIdentity = generateIdentity(alice)
+    val bobIdentity = generateIdentity(bob)
+    rotateSignedPrekeyNow(alice)
+    rotateSignedPrekeyNow(bob)
     val alicePublication = alice.currentPublicationBundle()
     val bobPublication = bob.currentPublicationBundle()
-    val replenished = bob.replenishOneTimePrekeys()
+    val replenished = replenishOneTimePrekeys(bob)
     requireCoverage(replenished.size == 100, "prekey replenishment")
     val bobOneTimePrekey = replenished[0]
 
     val backup = alice.exportEncryptedBackup("passphrase")
     val restored = KeyStore(MemorySecureStorage())
-    restored.importEncryptedBackup(backup, "passphrase")
+    importEncryptedBackup(restored, backup, "passphrase")
     requireCoverage(restored.hasIdentity(), "backup import")
     expectBackupFailure(restored)
 
@@ -117,8 +143,8 @@ fun main() {
     )
     val decodedInitial = decodeMessage(encodeMessage(initiation.message))
     // The stranger path: read who sent it before accepting, because the session
-    // key is derived from both identities and acceptSession consumes the
-    // one-time prekey, so it cannot be run twice to find out.
+    // key is derived from both identities and acceptance stages one-time-prekey
+    // consumption, so it should not be run merely to find out.
     val hinted = bob.initiatorIdentityHint(decodedInitial)
     requireCoverage(
         hinted.x25519PublicKey.contentEquals(aliceIdentity.x25519PublicKey) &&
@@ -127,7 +153,12 @@ fun main() {
         "initiator identity hint",
     )
 
-    val acceptance = bob.acceptSession(sessionKey, null, decodedInitial)
+    val acceptancePreparation = bob.prepareAcceptSession(sessionKey, null, decodedInitial)
+    bob.commitOperation(acceptancePreparation.operation.identifier)
+    val acceptance = acceptancePreparation.acceptance
+    val bobSnapshot = mutableListOf<ProtocolStateEntry>()
+    applyUpdates(bobSnapshot, acceptance.stateUpdates)
+    bob.finalizeOperation(acceptancePreparation.operation.identifier)
     requireCoverage(acceptance.plaintext.contentEquals("hello bob".encodeToByteArray()), "session accept plaintext")
 
     val aliceSnapshot = mutableListOf<ProtocolStateEntry>()
@@ -160,8 +191,6 @@ fun main() {
     applyUpdates(blockedSnapshot, blocked.stateUpdates)
     expectBlockedSend(alice, blockedSnapshot.toList(), sessionKey, bobIdentity, bobPublication)
 
-    val bobSnapshot = mutableListOf<ProtocolStateEntry>()
-    applyUpdates(bobSnapshot, acceptance.stateUpdates)
     applyUpdates(bobSnapshot, listOf(engine.initializeDeduplicationSet(dedupKey)))
     expectMissingCertificateValidation(
         bob,
@@ -222,7 +251,7 @@ private fun exerciseEvents(contact: ContactState) {
 
 private fun expectBackupFailure(store: KeyStore) {
     try {
-        store.importEncryptedBackup(byteArrayOf(0x01), "bad")
+        store.prepareImportEncryptedBackup(byteArrayOf(0x01), "bad")
         failCoverage("backup import should fail")
     } catch (error: AetherException.InvalidData) {
     } catch (error: AetherException.UnsupportedVersion) {

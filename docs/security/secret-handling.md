@@ -1,7 +1,7 @@
 # Secret Handling
 
-This note records the issue 116 review scope. It is audit evidence, not a runtime contract; code
-and tests remain authoritative.
+This note records the issues 116 and 219 review scope. It is audit evidence, not a runtime
+contract; code and tests remain authoritative.
 
 ## Posture
 
@@ -34,6 +34,7 @@ and tests remain authoritative.
 | `InboundMessageResult::plaintext` | `aether-core` | enclosing result has no `Debug` or `Clone` | plaintext bytes zeroize | Rust public API | padding validation branches only after AEAD decrypt |
 | Deduplication digest key | `aether-core` | private only | key bytes zeroize | protocol-state blob | digest comparison scans with `ConstantTimeEq` |
 | `SecureStorage` loaded values | `aether-core` | `Zeroizing<Vec<u8>>` copies only | heap bytes zeroize | storage trait | storage key names are public labels |
+| Prepared-operation journal mutations | `aether-core` | private `Zeroizing<Vec<u8>>` values; no `Debug` or serialization outside the bounded codec | staged values zeroize after encode/decode and are scrubbed from terminal records | stored only in `SecureStorage` | host-visible precondition digests are compared with `ConstantTimeEq` |
 | UniFFI `SecureStorage::store` values | `aether-uniffi` callers | bare `Vec<u8>` at FFI boundary | foreign implementations own scrubbing policy | Swift/Kotlin boundary | host apps must treat values as secret until overwritten |
 | UniFFI `SecureStorage::load` values | `aether-uniffi` | bare `Vec<u8>` at FFI boundary | Rust wraps immediately after receipt | Swift/Kotlin boundary | storage key names are public labels |
 | UniFFI backup passphrases | `aether-uniffi` | bare `String` at FFI boundary | Rust wraps immediately after receipt | Swift/Kotlin boundary | wrong-passphrase errors are redacted |

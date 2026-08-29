@@ -81,8 +81,10 @@ impl DevelopmentCertificateAuthority {
     ///
     /// let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// let store = KeyStore::new(storage);
-    /// let identity = store.generate_identity()?;
-    /// store.rotate_signed_prekey_now()?;
+    /// let prepared = store.prepare_generate_identity()?;
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// let identity = prepared.identity;
     /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
     /// let issued = authority.issue(identity, 1_800_000_000)?;
     /// assert_eq!(issued.signature.len(), 64);

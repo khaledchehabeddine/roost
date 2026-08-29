@@ -1,7 +1,8 @@
 use super::KeyStore;
 use crate::{
-    DiscoveryKeyError, IdentityError, Message, MessageError, OneTimePreKeyError,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateUpdate, SignedPreKeyError,
+    DiscoveryKeyError, IdentityError, KeyStoreOperationError, Message, MessageError,
+    OneTimePreKeyError, PreparedKeyStoreOperation, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateUpdate, SignedPreKeyError,
 };
 use aether_crypto::{
     CryptoError, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, PreKeyBundle,
@@ -83,6 +84,8 @@ pub enum SessionEstablishmentError {
     Message(MessageError),
     /// Loading or consuming local one-time-prekey state failed.
     OneTimePreKey(OneTimePreKeyError),
+    /// Preparing the recoverable secure mutation failed.
+    Operation(KeyStoreOperationError),
     /// Encoding install updates failed.
     ProtocolState(ProtocolStateError),
     /// Loading local signed-prekey state failed.
@@ -97,6 +100,7 @@ impl fmt::Display for SessionEstablishmentError {
             Self::Identity(e) => write!(f, "session establishment identity: {e}"),
             Self::Message(e) => write!(f, "session establishment message: {e}"),
             Self::OneTimePreKey(e) => write!(f, "session establishment one-time pre-key: {e}"),
+            Self::Operation(e) => write!(f, "session establishment prepared operation: {e}"),
             Self::ProtocolState(e) => write!(f, "session establishment protocol state: {e}"),
             Self::SignedPreKey(e) => write!(f, "session establishment signed pre-key: {e}"),
         }
@@ -111,6 +115,7 @@ impl Error for SessionEstablishmentError {
             Self::Identity(e) => Some(e),
             Self::Message(e) => Some(e),
             Self::OneTimePreKey(e) => Some(e),
+            Self::Operation(e) => Some(e),
             Self::ProtocolState(e) => Some(e),
             Self::SignedPreKey(e) => Some(e),
         }
@@ -147,6 +152,12 @@ impl From<OneTimePreKeyError> for SessionEstablishmentError {
     }
 }
 
+impl From<KeyStoreOperationError> for SessionEstablishmentError {
+    fn from(e: KeyStoreOperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
 impl From<ProtocolStateError> for SessionEstablishmentError {
     fn from(e: ProtocolStateError) -> Self {
         Self::ProtocolState(e)
@@ -171,12 +182,14 @@ impl KeyStore {
     /// - [`SessionEstablishmentError::Identity`] if local Identity state cannot be loaded.
     /// - [`SessionEstablishmentError::Message`] if the produced frame cannot be represented as a
     ///   Core Message.
+    /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
     /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
     pub fn initiate_session(
         &self,
         input: SessionInitiation<'_>,
     ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
 
         // Before any local state is loaded or any handshake work is spent: the
         // mapping this session is built on has to hold in both directions
@@ -225,13 +238,12 @@ impl KeyStore {
     /// Reads who sent an X3DH first message, without accepting it.
     ///
     /// A caller addresses session state by a key derived from both identities,
-    /// so it needs the sender before it can accept — and [`Self::accept_session`]
-    /// consumes the referenced one-time pre-key, so it cannot be run twice to
-    /// find out. This opens only the layer sealed to this device's own Discovery
-    /// Key and consumes nothing.
+    /// so it needs the sender before it can accept. [`Self::prepare_accept_session`] stages
+    /// consumption of the referenced one-time prekey, so it should not be run merely to find out.
+    /// This opens only the layer sealed to this device's own Discovery Key and consumes nothing.
     ///
     /// The returned identity is the sender's *claim*, carrying its own verified
-    /// binding signature. It is what `accept_session` then checks against the
+    /// binding signature. It is what `prepare_accept_session` then checks against the
     /// sealed envelope's authenticated copy; on its own it proves only that
     /// someone who could reach this inbox named this identity.
     ///
@@ -241,11 +253,13 @@ impl KeyStore {
     ///   does not verify.
     /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
     /// - [`SessionEstablishmentError::Message`] if the Message cannot be encoded.
+    /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
     pub fn initiator_identity_hint(
         &self,
         message: &Message,
     ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         let discovery_key = self.0.discovery.current()?;
         let envelope = handshake_envelope_from_message(message)?;
         Ok(aether_crypto::initiator_identity_hint(
@@ -256,8 +270,25 @@ impl KeyStore {
 
     /// Accepts a new Session as the X3DH responder.
     ///
-    /// A referenced one-time pre-key is consumed only after the first Message authenticates and the
-    /// new Session state has been produced.
+    /// A referenced one-time pre-key is staged for consumption only after the first Message
+    /// authenticates and the new Session state has been produced. It remains authoritative until
+    /// the prepared operation is finalized.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{KeyStore, SessionAcceptance};
+    ///
+    /// fn accept_session(
+    ///     store: &KeyStore,
+    ///     input: SessionAcceptance<'_>,
+    /// ) -> Result<(), Box<dyn std::error::Error>> {
+    ///     let prepared = store.prepare_accept_session(input)?;
+    ///     store.commit_operation(prepared.operation.identifier)?;
+    ///     // Persist `prepared.output.state_updates` and the identifier atomically.
+    ///     store.finalize_operation(prepared.operation.identifier)?;
+    ///     Ok(())
+    /// }
+    /// ```
     ///
     /// # Errors
     /// - [`SessionEstablishmentError::Crypto`] if X3DH acceptance, sender proof validation, or
@@ -268,10 +299,19 @@ impl KeyStore {
     ///   handshake validation.
     /// - [`SessionEstablishmentError::OneTimePreKey`] if a referenced one-time pre-key is absent,
     ///   stale, already consumed, or cannot be consumed after acceptance.
+    /// - [`SessionEstablishmentError::Operation`] if staging fails or a committed operation needs
+    ///   recovery.
     /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
     /// - [`SessionEstablishmentError::SignedPreKey`] if the referenced signed pre-key is absent
     ///   or cannot be loaded.
-    pub fn accept_session(
+    pub fn prepare_accept_session(
+        &self,
+        input: SessionAcceptance<'_>,
+    ) -> Result<PreparedKeyStoreOperation<SessionAcceptanceResult>, SessionEstablishmentError> {
+        self.prepare_operation(move |staged| staged.accept_session_eager(input))
+    }
+
+    fn accept_session_eager(
         &self,
         input: SessionAcceptance<'_>,
     ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
@@ -334,6 +374,16 @@ impl KeyStore {
             sender_identity: accepted.sender_identity,
             state_updates,
         })
+    }
+}
+
+#[cfg(test)]
+impl KeyStore {
+    fn accept_session(
+        &self,
+        input: SessionAcceptance<'_>,
+    ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
+        self.accept_session_eager(input)
     }
 }
 

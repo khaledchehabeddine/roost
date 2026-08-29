@@ -109,19 +109,19 @@ struct Issue122Coverage {
 
         let alice = KeyStore(storage: MemorySecureStorage())
         let bob = KeyStore(storage: MemorySecureStorage())
-        let aliceIdentity = try alice.generateIdentity()
-        let bobIdentity = try bob.generateIdentity()
-        _ = try alice.rotateSignedPrekeyNow()
-        _ = try bob.rotateSignedPrekeyNow()
+        let aliceIdentity = try generateIdentity(alice)
+        let bobIdentity = try generateIdentity(bob)
+        try rotateSignedPrekeyNow(alice)
+        try rotateSignedPrekeyNow(bob)
         let alicePublication = try alice.currentPublicationBundle()
         let bobPublication = try bob.currentPublicationBundle()
-        let replenished = try bob.replenishOneTimePrekeys()
+        let replenished = try replenishOneTimePrekeys(bob)
         require(replenished.count == 100, "prekey replenishment")
         let bobOneTimePrekey = replenished[0]
 
         let backup = try alice.exportEncryptedBackup(passphrase: "passphrase")
         let restored = KeyStore(storage: MemorySecureStorage())
-        try restored.importEncryptedBackup(data: backup, passphrase: "passphrase")
+        try importEncryptedBackup(restored, data: backup, passphrase: "passphrase")
         let restoredHasIdentity = try restored.hasIdentity()
         require(restoredHasIdentity, "backup import")
         expectBackupFailure(restored)
@@ -138,8 +138,8 @@ struct Issue122Coverage {
         )
         let decodedInitial = try decodeMessage(bytes: try encodeMessage(message: initiation.message))
         // The stranger path: read who sent it before accepting, because the
-        // session key is derived from both identities and acceptSession
-        // consumes the one-time prekey, so it cannot be run twice to find out.
+        // session key is derived from both identities and acceptance stages
+        // one-time-prekey consumption, so it should not be run just to find out.
         let hinted = try bob.initiatorIdentityHint(message: decodedInitial)
         require(
             hinted.x25519PublicKey == aliceIdentity.x25519PublicKey
@@ -148,11 +148,16 @@ struct Issue122Coverage {
             "initiator identity hint"
         )
 
-        let acceptance = try bob.acceptSession(
+        let acceptancePreparation = try bob.prepareAcceptSession(
             sessionKey: sessionKey,
             initiatorIdentity: nil,
             message: decodedInitial
         )
+        _ = try bob.commitOperation(identifier: acceptancePreparation.operation.identifier)
+        let acceptance = acceptancePreparation.acceptance
+        var bobSnapshot: [ProtocolStateEntry] = []
+        apply(&bobSnapshot, acceptance.stateUpdates)
+        _ = try bob.finalizeOperation(identifier: acceptancePreparation.operation.identifier)
         require(acceptance.plaintext == Data("hello bob".utf8), "session accept plaintext")
 
         var aliceSnapshot: [ProtocolStateEntry] = []
@@ -195,8 +200,6 @@ struct Issue122Coverage {
         apply(&blockedSnapshot, blocked.stateUpdates)
         expectBlockedSend(alice, snapshot: blockedSnapshot, sessionKey: sessionKey, bobIdentity: bobIdentity, bobPublication: bobPublication)
 
-        var bobSnapshot: [ProtocolStateEntry] = []
-        apply(&bobSnapshot, acceptance.stateUpdates)
         apply(&bobSnapshot, [try engine.initializeDeduplicationSet(key: dedupKey)])
         expectMissingCertificateValidation(
             bob,
@@ -211,6 +214,37 @@ struct Issue122Coverage {
         try expectCertificateRejection()
         expectInvalidMessageKey()
         print("Swift issue 122 coverage passed")
+    }
+
+    private static func complete(_ store: KeyStore, _ operation: KeyStoreOperation) throws {
+        _ = try store.commitOperation(identifier: operation.identifier)
+        _ = try store.finalizeOperation(identifier: operation.identifier)
+    }
+
+    private static func generateIdentity(_ store: KeyStore) throws -> Identity {
+        let prepared = try store.prepareGenerateIdentity()
+        try complete(store, prepared.operation)
+        return prepared.identity
+    }
+
+    private static func rotateSignedPrekeyNow(_ store: KeyStore) throws {
+        let prepared = try store.prepareRotateSignedPrekeyNow()
+        try complete(store, prepared.operation)
+    }
+
+    private static func replenishOneTimePrekeys(_ store: KeyStore) throws -> [OneTimePreKeyBundle] {
+        let prepared = try store.prepareReplenishOneTimePrekeys()
+        try complete(store, prepared.operation)
+        return prepared.oneTimePrekeys
+    }
+
+    private static func importEncryptedBackup(
+        _ store: KeyStore,
+        data: Data,
+        passphrase: String
+    ) throws {
+        let operation = try store.prepareImportEncryptedBackup(data: data, passphrase: passphrase)
+        try complete(store, operation)
     }
 
     private static func identityKey(_ identity: Identity) -> IdentityKey {
@@ -271,7 +305,7 @@ struct Issue122Coverage {
 
     private static func expectBackupFailure(_ store: KeyStore) {
         do {
-            try store.importEncryptedBackup(data: Data([0x01]), passphrase: "bad")
+            _ = try store.prepareImportEncryptedBackup(data: Data([0x01]), passphrase: "bad")
             fail("backup import should fail")
         } catch let error as AetherError {
             switch error {

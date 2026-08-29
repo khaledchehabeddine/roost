@@ -42,7 +42,10 @@ struct KeyBindingVerification {
 
     static func main() throws {
         let store = KeyStore(storage: MemorySecureStorage())
-        let generated = try store.generateIdentity()
+        let prepared = try store.prepareGenerateIdentity()
+        _ = try store.commitOperation(identifier: prepared.operation.identifier)
+        _ = try store.finalizeOperation(identifier: prepared.operation.identifier)
+        let generated = prepared.identity
         let identity = IdentityKey(
             x25519PublicKey: generated.x25519PublicKey,
             ed25519VerifyingKey: generated.ed25519VerifyingKey

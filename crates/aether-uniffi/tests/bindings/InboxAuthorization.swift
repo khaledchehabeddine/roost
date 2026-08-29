@@ -35,10 +35,19 @@ struct InboxAuthorization {
         let engine = ProtocolStateEngine()
         let alice = KeyStore(storage: MemorySecureStorage())
         let bob = KeyStore(storage: MemorySecureStorage())
-        _ = try alice.generateIdentity()
-        let bobIdentity = try bob.generateIdentity()
-        _ = try alice.rotateSignedPrekeyNow()
-        _ = try bob.rotateSignedPrekeyNow()
+        let aliceIdentityPreparation = try alice.prepareGenerateIdentity()
+        _ = try alice.commitOperation(identifier: aliceIdentityPreparation.operation.identifier)
+        _ = try alice.finalizeOperation(identifier: aliceIdentityPreparation.operation.identifier)
+        let bobIdentityPreparation = try bob.prepareGenerateIdentity()
+        _ = try bob.commitOperation(identifier: bobIdentityPreparation.operation.identifier)
+        _ = try bob.finalizeOperation(identifier: bobIdentityPreparation.operation.identifier)
+        let bobIdentity = bobIdentityPreparation.identity
+        let aliceSignedPrekey = try alice.prepareRotateSignedPrekeyNow()
+        _ = try alice.commitOperation(identifier: aliceSignedPrekey.operation.identifier)
+        _ = try alice.finalizeOperation(identifier: aliceSignedPrekey.operation.identifier)
+        let bobSignedPrekey = try bob.prepareRotateSignedPrekeyNow()
+        _ = try bob.commitOperation(identifier: bobSignedPrekey.operation.identifier)
+        _ = try bob.finalizeOperation(identifier: bobSignedPrekey.operation.identifier)
         let bobPublication = try bob.currentPublicationBundle()
 
         var snapshot: [ProtocolStateEntry] = []
@@ -52,7 +61,10 @@ struct InboxAuthorization {
         ).stateUpdates)
 
         // Alice rotates. Bob has never been given an authorization, so he owes one.
-        let rotation = try alice.rotateInboxNow()
+        let rotationPreparation = try alice.prepareRotateInboxNow()
+        _ = try alice.commitOperation(identifier: rotationPreparation.operation.identifier)
+        _ = try alice.finalizeOperation(identifier: rotationPreparation.operation.identifier)
+        let rotation = rotationPreparation.rotation
         let generation = rotation.publication.discoveryKey.epoch
         let owing = try engine.contactsNeedingInboxAuthorization(
             snapshot: snapshot,
@@ -116,11 +128,17 @@ struct InboxAuthorization {
         // capability and the block bites only on this device. The engine's
         // blockContact is the local-only half; the keystore's is the one that
         // makes the block reach the relay.
-        let blocked = try alice.blockContact(snapshot: snapshot, identityKey: identityKey(bobIdentity))
+        let blockPreparation = try alice.prepareBlockContact(
+            snapshot: snapshot,
+            identityKey: identityKey(bobIdentity)
+        )
+        _ = try alice.commitOperation(identifier: blockPreparation.operation.identifier)
+        apply(&snapshot, blockPreparation.block.contact.stateUpdates)
+        _ = try alice.finalizeOperation(identifier: blockPreparation.operation.identifier)
+        let blocked = blockPreparation.block
         guard let blockRotation = blocked.rotation else {
             fail("blocking must rotate the inbox")
         }
-        apply(&snapshot, blocked.contact.stateUpdates)
         require(
             try engine.contactsNeedingInboxAuthorization(
                 snapshot: snapshot,
@@ -131,8 +149,14 @@ struct InboxAuthorization {
         )
 
         // Repeating the block must not churn every other contact's capability.
+        let repeatedBlock = try alice.prepareBlockContact(
+            snapshot: snapshot,
+            identityKey: identityKey(bobIdentity)
+        )
+        _ = try alice.commitOperation(identifier: repeatedBlock.operation.identifier)
+        _ = try alice.finalizeOperation(identifier: repeatedBlock.operation.identifier)
         require(
-            try alice.blockContact(snapshot: snapshot, identityKey: identityKey(bobIdentity)).rotation == nil,
+            repeatedBlock.block.rotation == nil,
             "blocking an already-blocked contact must not rotate again"
         )
 
