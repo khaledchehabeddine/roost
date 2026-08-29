@@ -153,12 +153,13 @@ the pending-acknowledgment Protocol State Blob with the original encoded Message
 timestamps, then removed when a matching acknowledgment is processed.
 Avoid: retry cache, outbox, in-memory pending state
 
-**Prepared KeyStore Operation** (one per SecureStorage mutation):
+**Prepared KeyStore Operation** (one per prepared KeyStore mutation request):
 A Core-owned recoverable intent containing a stable identifier, SecureStorage preconditions,
-staged secret mutations, and provisional caller output. The host commits related Protocol State
-Blob updates and its operation record atomically between Core commit and finalization; until
-finalization, authoritative key entries do not change. One host-owned per-identity actor or lock
-serializes the whole lifecycle across separately constructed KeyStore instances and processes.
+zero or more staged secret mutations, and provisional caller output. The host commits related
+Protocol State Blob updates and its operation record atomically between Core commit and
+finalization; until finalization, authoritative key entries do not change. One host-owned
+per-identity actor or lock serializes the whole lifecycle across separately constructed KeyStore
+instances and processes.
 Avoid: database transaction, eager key mutation, deferred write
 
 **PreKey State** (one persisted lifecycle surface per local Identity):

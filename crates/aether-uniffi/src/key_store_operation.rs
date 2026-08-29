@@ -12,7 +12,21 @@ use aether_core::{
     UnfinishedKeyStoreOperation as CoreUnfinishedKeyStoreOperation,
 };
 
-/// SecureStorage input that must remain unchanged before an operation commits.
+/// Describes a SecureStorage input that must remain unchanged before an operation commits.
+///
+/// The digest is opaque host metadata returned by Core. A host persists the enclosing operation
+/// identifier with its transaction; Core validates this precondition during `commit_operation`.
+///
+/// # Examples
+/// ```
+/// use aether::SecureStoragePrecondition;
+///
+/// let precondition = SecureStoragePrecondition {
+///     key: "identity/current".into(),
+///     expected_value_digest: None,
+/// };
+/// assert_eq!(precondition.key, "identity/current");
+/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct SecureStoragePrecondition {
     /// Stable SecureStorage entry name.
@@ -38,6 +52,17 @@ impl From<CoreSecureStoragePrecondition> for SecureStoragePrecondition {
 ///
 /// Every returned operation must be finalized or aborted, including operations whose provisional
 /// payload reports that no mutation was needed.
+///
+/// # Examples
+/// ```
+/// use aether::KeyStoreOperation;
+///
+/// let operation = KeyStoreOperation {
+///     identifier: vec![7; 16],
+///     secure_storage_preconditions: Vec::new(),
+/// };
+/// assert_eq!(operation.identifier.len(), 16);
+/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct KeyStoreOperation {
     /// Opaque 16-byte identifier to persist with the host transaction.
@@ -59,7 +84,18 @@ impl From<CoreKeyStoreOperation> for KeyStoreOperation {
     }
 }
 
-/// Durable phase of a prepared KeyStore operation.
+/// Reports the durable phase of a prepared KeyStore operation.
+///
+/// Hosts use this phase together with their transaction record to decide whether startup recovery
+/// aborts an orphan or resumes finalization.
+///
+/// # Examples
+/// ```
+/// use aether::KeyStoreOperationStatus;
+///
+/// let status = KeyStoreOperationStatus::Committed;
+/// assert!(matches!(status, KeyStoreOperationStatus::Committed));
+/// ```
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum KeyStoreOperationStatus {
     /// Secret mutations are staged and may be committed or aborted.
@@ -86,7 +122,24 @@ impl From<CoreKeyStoreOperationStatus> for KeyStoreOperationStatus {
     }
 }
 
-/// An unfinished operation discovered during startup recovery.
+/// Describes an unfinished operation discovered during startup recovery.
+///
+/// The host matches the identifier against its own durable transaction record before choosing
+/// `finalize_operation` or `abort_operation`.
+///
+/// # Examples
+/// ```
+/// use aether::{KeyStoreOperation, KeyStoreOperationStatus, UnfinishedKeyStoreOperation};
+///
+/// let unfinished = UnfinishedKeyStoreOperation {
+///     operation: KeyStoreOperation {
+///         identifier: vec![9; 16],
+///         secure_storage_preconditions: Vec::new(),
+///     },
+///     status: KeyStoreOperationStatus::Prepared,
+/// };
+/// assert_eq!(unfinished.operation.identifier, vec![9; 16]);
+/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct UnfinishedKeyStoreOperation {
     /// Stable operation metadata.
@@ -104,7 +157,22 @@ impl From<CoreUnfinishedKeyStoreOperation> for UnfinishedKeyStoreOperation {
     }
 }
 
-/// Prepared identity generation result.
+/// Carries provisional identity generation output and its recoverable operation.
+///
+/// Publish or persist the identity only in the host transaction associated with the operation
+/// identifier, then finalize the operation.
+///
+/// # Examples
+/// ```
+/// use aether::PreparedIdentityGeneration;
+///
+/// fn host_record(prepared: &PreparedIdentityGeneration) -> (&[u8], &[u8]) {
+///     (
+///         &prepared.operation.identifier,
+///         &prepared.identity.x25519_public_key,
+///     )
+/// }
+/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedIdentityGeneration {
     /// Recoverable operation metadata.
@@ -113,7 +181,19 @@ pub struct PreparedIdentityGeneration {
     pub identity: Identity,
 }
 
-/// Prepared one-time-prekey generation or replenishment result.
+/// Carries provisional one-time-prekey output and its recoverable operation.
+///
+/// The public bundles may be queued for publication in the host transaction; their secret halves
+/// remain staged until finalization.
+///
+/// # Examples
+/// ```
+/// use aether::PreparedOneTimePreKeys;
+///
+/// fn publication_count(prepared: &PreparedOneTimePreKeys) -> usize {
+///     prepared.one_time_prekeys.len()
+/// }
+/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedOneTimePreKeys {
     /// Recoverable operation metadata.
@@ -122,7 +202,19 @@ pub struct PreparedOneTimePreKeys {
     pub one_time_prekeys: Vec<OneTimePreKeyBundle>,
 }
 
-/// Prepared inbox rotation result.
+/// Carries a provisional inbox rotation and its recoverable operation.
+///
+/// The host publishes the returned generation only with the transaction that records the operation
+/// identifier; Core keeps the previous generation authoritative until finalization.
+///
+/// # Examples
+/// ```
+/// use aether::PreparedInboxRotation;
+///
+/// fn provisional_epoch(prepared: &PreparedInboxRotation) -> u32 {
+///     prepared.rotation.publication.discovery_key.epoch
+/// }
+/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedInboxRotation {
     /// Recoverable operation metadata.
@@ -131,7 +223,19 @@ pub struct PreparedInboxRotation {
     pub rotation: InboxRotation,
 }
 
-/// Prepared signed-prekey rotation result.
+/// Carries a provisional signed-prekey rotation and its recoverable operation.
+///
+/// A `None` bundle represents a no-op staleness check, but its operation still requires finalize
+/// or abort so the journal can reach a terminal state.
+///
+/// # Examples
+/// ```
+/// use aether::PreparedSignedPreKeyRotation;
+///
+/// fn needs_publication(prepared: &PreparedSignedPreKeyRotation) -> bool {
+///     prepared.signed_prekey.is_some()
+/// }
+/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedSignedPreKeyRotation {
     /// Recoverable operation metadata.
@@ -140,7 +244,19 @@ pub struct PreparedSignedPreKeyRotation {
     pub signed_prekey: Option<SignedPreKeyBundle>,
 }
 
-/// Prepared contact-block result.
+/// Carries a provisional contact block and inbox rotation as one recoverable operation.
+///
+/// Persist the contact update and operation identifier atomically before finalizing the staged
+/// SecureStorage rotation.
+///
+/// # Examples
+/// ```
+/// use aether::PreparedContactBlock;
+///
+/// fn rotates_inbox(prepared: &PreparedContactBlock) -> bool {
+///     prepared.block.rotation.is_some()
+/// }
+/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedContactBlock {
     /// Recoverable operation metadata.
@@ -149,7 +265,19 @@ pub struct PreparedContactBlock {
     pub block: ContactBlock,
 }
 
-/// Prepared responder-side Session acceptance result.
+/// Carries provisional responder-side Session acceptance as a recoverable operation.
+///
+/// The host persists the Session updates, plaintext disposition, and operation identifier in one
+/// transaction before Core finalizes staged one-time-prekey consumption.
+///
+/// # Examples
+/// ```
+/// use aether::PreparedSessionAcceptance;
+///
+/// fn authenticated_plaintext(prepared: &PreparedSessionAcceptance) -> &[u8] {
+///     &prepared.acceptance.plaintext
+/// }
+/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedSessionAcceptance {
     /// Recoverable operation metadata.

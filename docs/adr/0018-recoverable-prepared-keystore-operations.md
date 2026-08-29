@@ -5,11 +5,9 @@
 Every production KeyStore mutation returns a Prepared KeyStore Operation instead of changing
 authoritative key entries eagerly. Core stages secret mutations in a bounded, Core-owned journal
 inside SecureStorage and returns a stable identifier, SecureStorage preconditions, and provisional
-output. The host asks Core to commit the operation, atomically persists related Protocol State Blob
-updates and the identifier in its own transaction, then asks Core to finalize; it aborts only after
-proving the host transaction did not commit. Startup reconciles unfinished identifiers before
-ordinary key use. This
-application-level protocol is necessary because no atomic transaction spans platform
+output; the host asks Core to commit, atomically persists related Protocol State Blob updates and
+the identifier in its own transaction, then finalizes, aborting only after proving that transaction
+did not commit. Startup reconciliation is required because no atomic transaction spans platform
 SecureStorage and the host database, while staged secrets must not cross into host storage.
 
 ## Considered Options

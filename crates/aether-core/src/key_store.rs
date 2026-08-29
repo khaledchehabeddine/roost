@@ -237,6 +237,18 @@ impl KeyStore {
 
     /// Prepares fresh identity and discovery-key material without changing authoritative storage.
     ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let prepared = store.prepare_generate_identity()?;
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// // Persist or publish `prepared.output` with the host operation identifier.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`KeyStoreError::Identity`] (`AlreadyExists`) if a complete identity already exists.
     /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::Identity`] if stored key material is
@@ -386,6 +398,23 @@ impl KeyStore {
     /// [`ContactBlock::contact`] in the host transaction, then finalize the staged inbox rotation.
     /// Abort only after proving the host transaction did not commit.
     ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{ContactIdentityKey, KeyStore, ProtocolStateSnapshot};
+    ///
+    /// fn block_contact(
+    ///     store: &KeyStore,
+    ///     snapshot: &ProtocolStateSnapshot,
+    ///     identity_key: ContactIdentityKey,
+    /// ) -> Result<(), Box<dyn std::error::Error>> {
+    ///     let prepared = store.prepare_block_contact(snapshot, identity_key)?;
+    ///     store.commit_operation(prepared.operation.identifier)?;
+    ///     // Persist `prepared.output.contact` and the identifier atomically.
+    ///     store.finalize_operation(prepared.operation.identifier)?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
     /// # Errors
     /// - [`KeyStoreError::ProtocolState`] if the contact blob is missing, malformed, or
     ///   `identity_key` is not canonical.
@@ -443,6 +472,21 @@ impl KeyStore {
     /// The new secrets remain staged until finalization. No discovery-key rotation is required.
     /// The call fails if the requested batch would exceed the pool cap.
     ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let identity = store.prepare_generate_identity()?;
+    /// store.commit_operation(identity.operation.identifier)?;
+    /// store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_generate_one_time_prekeys(8)?;
+    /// assert_eq!(prepared.output.len(), 8);
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
     /// - [`KeyStoreError::OneTimePreKey`] (`Discovery`) if the discovery key is malformed,
@@ -474,6 +518,21 @@ impl KeyStore {
     /// Returns the bundles created by this call. A missing or stale pool is rebuilt for the
     /// current discovery-key epoch; a current pool above the replenish threshold is left unchanged
     /// and returns an empty list. The returned no-op operation must still be finalized or aborted.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let identity = store.prepare_generate_identity()?;
+    /// store.commit_operation(identity.operation.identifier)?;
+    /// store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_replenish_one_time_prekeys()?;
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// // Finalize even when `prepared.output` is empty.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
@@ -509,12 +568,26 @@ impl KeyStore {
     ///
     /// Advances the inbox generation, replaces the discovery key and the recipient delivery
     /// capability together, clears generation-bound one-time pre-keys, and returns both the
-    /// publishable material and the new capability. If signed-pre-key storage fails after the
-    /// discovery key rotates, the old signed pre-key has been cleared, so no stale signed pre-key
-    /// remains publishable with the new discovery key.
+    /// publishable material and the new capability. A preparation failure discards the staged
+    /// changes, leaving the previous authoritative inbox generation intact.
     ///
     /// This invalidates every contact's delivery authorization — that is what makes it the
     /// mechanism behind blocking (AE-BLK-08), and why it is not merely a discovery-key rotation.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let identity = store.prepare_generate_identity()?;
+    /// store.commit_operation(identity.operation.identifier)?;
+    /// store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_rotate_inbox_now()?;
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// // Publish `prepared.output.publication` in the host transaction.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
@@ -556,6 +629,21 @@ impl KeyStore {
     /// Returns `Some(bundle)` when callers need to upload a new bundle, or `None` when no rotation
     /// was needed. The returned no-op operation must still be finalized or aborted.
     ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let identity = store.prepare_generate_identity()?;
+    /// store.commit_operation(identity.operation.identifier)?;
+    /// store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_rotate_signed_prekey_if_stale()?;
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// // Finalize even when `prepared.output` is `None`.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
     /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key
@@ -585,6 +673,21 @@ impl KeyStore {
     ///
     /// Use this for explicit key-reset operations that must publish a fresh signed pre-key even
     /// when the stored bundle is still fresh.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let identity = store.prepare_generate_identity()?;
+    /// store.commit_operation(identity.operation.identifier)?;
+    /// store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_rotate_signed_prekey_now()?;
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// // Publish `prepared.output` in the host transaction.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
@@ -637,6 +740,23 @@ impl KeyStore {
     /// deduplication, and pending-acknowledgment state, then finalize. The restored identity keeps
     /// the discovery-key epoch lineage from the backup and has no prekeys.
     ///
+    /// # Examples
+    /// ```
+    /// use aether_core::KeyStore;
+    ///
+    /// fn import_backup(
+    ///     store: &KeyStore,
+    ///     encrypted_backup: &[u8],
+    ///     passphrase: &str,
+    /// ) -> Result<(), Box<dyn std::error::Error>> {
+    ///     let prepared = store.prepare_import_encrypted_backup(encrypted_backup, passphrase)?;
+    ///     store.commit_operation(prepared.operation.identifier)?;
+    ///     // Atomically wipe host-owned protocol state and persist the identifier.
+    ///     store.finalize_operation(prepared.operation.identifier)?;
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Corrupt`) if the backup's discovery key is not signed by
     ///   the backup's identity key.
@@ -685,6 +805,18 @@ impl KeyStore {
     ///
     /// Commit this operation, atomically wipe host-owned protocol state, then finalize. Interrupted
     /// finalization resumes from durable progress.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let prepared = store.prepare_reset()?;
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// // Atomically wipe host-owned protocol state and persist the identifier.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key delete

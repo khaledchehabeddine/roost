@@ -270,8 +270,25 @@ impl KeyStore {
 
     /// Accepts a new Session as the X3DH responder.
     ///
-    /// A referenced one-time pre-key is consumed only after the first Message authenticates and the
-    /// new Session state has been produced.
+    /// A referenced one-time pre-key is staged for consumption only after the first Message
+    /// authenticates and the new Session state has been produced. It remains authoritative until
+    /// the prepared operation is finalized.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{KeyStore, SessionAcceptance};
+    ///
+    /// fn accept_session(
+    ///     store: &KeyStore,
+    ///     input: SessionAcceptance<'_>,
+    /// ) -> Result<(), Box<dyn std::error::Error>> {
+    ///     let prepared = store.prepare_accept_session(input)?;
+    ///     store.commit_operation(prepared.operation.identifier)?;
+    ///     // Persist `prepared.output.state_updates` and the identifier atomically.
+    ///     store.finalize_operation(prepared.operation.identifier)?;
+    ///     Ok(())
+    /// }
+    /// ```
     ///
     /// # Errors
     /// - [`SessionEstablishmentError::Crypto`] if X3DH acceptance, sender proof validation, or

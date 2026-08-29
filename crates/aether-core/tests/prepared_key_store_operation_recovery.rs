@@ -8,8 +8,11 @@ use aether_core::{
     KeyStoreOperationStatus, SecureStorage, StorageError,
 };
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use zeroize::Zeroizing;
+
+const OPERATION_JOURNAL_KEY: &str = "operation/journal";
 
 #[derive(Clone)]
 struct SharedSecureStorage {
@@ -20,9 +23,22 @@ struct StorageState {
     storage: InMemorySecureStorage,
     fail_delete_after_apply: Option<String>,
     fail_store_after_apply: Option<String>,
+    store_failure: Option<StoreFailure>,
     stores_before_failure: Option<usize>,
     successful_deletes: BTreeMap<String, usize>,
     successful_stores: BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailureTiming {
+    BeforeApply,
+    AfterApply,
+}
+
+struct StoreFailure {
+    key: String,
+    matching_stores_before_failure: usize,
+    timing: FailureTiming,
 }
 
 impl SharedSecureStorage {
@@ -32,6 +48,7 @@ impl SharedSecureStorage {
                 storage: InMemorySecureStorage::new(),
                 fail_delete_after_apply: None,
                 fail_store_after_apply: None,
+                store_failure: None,
                 stores_before_failure: None,
                 successful_deletes: BTreeMap::new(),
                 successful_stores: BTreeMap::new(),
@@ -53,6 +70,14 @@ impl SharedSecureStorage {
 
     fn fail_store_after_apply(&self, key: &str) {
         self.state.lock().unwrap().fail_store_after_apply = Some(key.to_owned());
+    }
+
+    fn fail_store(&self, key: &str, matching_stores_before_failure: usize, timing: FailureTiming) {
+        self.state.lock().unwrap().store_failure = Some(StoreFailure {
+            key: key.to_owned(),
+            matching_stores_before_failure,
+            timing,
+        });
     }
 
     fn successful_deletes(&self, key: &str) -> usize {
@@ -86,8 +111,27 @@ impl SecureStorage for SharedSecureStorage {
             }
             *remaining -= 1;
         }
+
+        let failure_timing = state.store_failure.as_mut().and_then(|failure| {
+            if failure.key != key {
+                return None;
+            }
+            if failure.matching_stores_before_failure > 0 {
+                failure.matching_stores_before_failure -= 1;
+                return None;
+            }
+            Some(failure.timing)
+        });
+        if failure_timing == Some(FailureTiming::BeforeApply) {
+            state.store_failure = None;
+            return Err(StorageError::IO("injected pre-apply store failure".into()));
+        }
         state.storage.store(key, value)?;
         *state.successful_stores.entry(key.to_owned()).or_default() += 1;
+        if failure_timing == Some(FailureTiming::AfterApply) {
+            state.store_failure = None;
+            return Err(StorageError::IO("injected post-apply store failure".into()));
+        }
         if state.fail_store_after_apply.as_deref() == Some(key) {
             state.fail_store_after_apply = None;
             return Err(StorageError::IO("injected post-apply store failure".into()));
@@ -114,9 +158,9 @@ impl SecureStorage for SharedSecureStorage {
 }
 
 #[test]
-fn host_serialization_spans_distinct_key_store_instances() {
+fn host_coordinator_blocks_overlapping_lifecycles_across_distinct_key_store_instances() {
     let storage = SharedSecureStorage::new();
-    let coordinator = Mutex::new(());
+    let coordinator = Arc::new(Mutex::new(()));
 
     {
         let _identity_operation = coordinator.lock().unwrap();
@@ -130,19 +174,265 @@ fn host_serialization_spans_distinct_key_store_instances() {
             .unwrap();
     }
 
-    {
-        let _signed_prekey_operation = coordinator.lock().unwrap();
+    let first_store = storage.key_store();
+    let first_coordinator = Arc::clone(&coordinator);
+    let (first_ready_tx, first_ready_rx) = mpsc::channel();
+    let (first_continue_tx, first_continue_rx) = mpsc::channel();
+    let first = thread::spawn(move || {
+        let _operation = first_coordinator.lock().unwrap();
+        let prepared = first_store.prepare_rotate_signed_prekey_now().unwrap();
+        first_ready_tx.send(()).unwrap();
+        first_continue_rx.recv().unwrap();
+        first_store
+            .commit_operation(prepared.operation.identifier)
+            .unwrap();
+        first_store
+            .finalize_operation(prepared.operation.identifier)
+            .unwrap();
+    });
+
+    first_ready_rx.recv().unwrap();
+
+    let second_store = storage.key_store();
+    let second_coordinator = Arc::clone(&coordinator);
+    let (contention_tx, contention_rx) = mpsc::channel();
+    let second = thread::spawn(move || {
+        let was_blocked = second_coordinator.try_lock().is_err();
+        contention_tx.send(was_blocked).unwrap();
+        let _operation = second_coordinator.lock().unwrap();
+        let prepared = second_store.prepare_generate_one_time_prekeys(1).unwrap();
+        second_store
+            .commit_operation(prepared.operation.identifier)
+            .unwrap();
+        second_store
+            .finalize_operation(prepared.operation.identifier)
+            .unwrap();
+    });
+
+    assert!(contention_rx.recv().unwrap());
+    first_continue_tx.send(()).unwrap();
+    first.join().unwrap();
+    second.join().unwrap();
+
+    assert!(storage.key_store().current_publication_bundle().is_ok());
+}
+
+#[test]
+fn prepared_journal_transition_recovers_from_before_and_after_apply_failures() {
+    for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
+        let storage = SharedSecureStorage::new();
+        storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
+
+        assert!(storage.key_store().prepare_generate_identity().is_err());
+
+        let recovered = storage.key_store();
+        let unfinished = recovered.unfinished_operations().unwrap();
+        match timing {
+            FailureTiming::BeforeApply => assert!(unfinished.is_empty()),
+            FailureTiming::AfterApply => {
+                assert_eq!(unfinished.len(), 1);
+                assert_eq!(unfinished[0].status, KeyStoreOperationStatus::Prepared);
+                recovered
+                    .abort_operation(unfinished[0].operation.identifier)
+                    .unwrap();
+            }
+        }
+        assert!(!recovered.has_identity().unwrap());
+    }
+}
+
+#[test]
+fn committed_journal_transition_recovers_from_before_and_after_apply_failures() {
+    for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
+        let storage = SharedSecureStorage::new();
         let store = storage.key_store();
-        let prepared = store.prepare_rotate_signed_prekey_now().unwrap();
+        let prepared = store.prepare_generate_identity().unwrap();
+        storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
+
+        assert!(
+            store
+                .commit_operation(prepared.operation.identifier)
+                .is_err()
+        );
+
+        let recovered = storage.key_store();
+        let expected = match timing {
+            FailureTiming::BeforeApply => KeyStoreOperationStatus::Prepared,
+            FailureTiming::AfterApply => KeyStoreOperationStatus::Committed,
+        };
+        assert_eq!(
+            recovered
+                .operation_status(prepared.operation.identifier)
+                .unwrap(),
+            expected
+        );
+        // The host transaction was deliberately not attempted, so abort is safe in either case.
+        recovered
+            .abort_operation(prepared.operation.identifier)
+            .unwrap();
+        assert!(!recovered.has_identity().unwrap());
+    }
+}
+
+#[test]
+fn finalizing_journal_transition_recovers_from_before_and_after_apply_failures() {
+    for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
+        let storage = SharedSecureStorage::new();
+        let store = storage.key_store();
+        let prepared = store.prepare_generate_identity().unwrap();
         store
             .commit_operation(prepared.operation.identifier)
             .unwrap();
-        store
+        storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
+
+        assert!(
+            store
+                .finalize_operation(prepared.operation.identifier)
+                .is_err()
+        );
+
+        let recovered = storage.key_store();
+        let expected = match timing {
+            FailureTiming::BeforeApply => KeyStoreOperationStatus::Committed,
+            FailureTiming::AfterApply => KeyStoreOperationStatus::Finalizing,
+        };
+        assert_eq!(
+            recovered
+                .operation_status(prepared.operation.identifier)
+                .unwrap(),
+            expected
+        );
+        recovered
             .finalize_operation(prepared.operation.identifier)
             .unwrap();
+        assert!(recovered.has_identity().unwrap());
     }
+}
 
-    assert!(storage.key_store().current_publication_bundle().is_ok());
+#[test]
+fn progress_checkpoint_recovers_from_before_and_after_apply_failures() {
+    for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
+        let storage = SharedSecureStorage::new();
+        let store = storage.key_store();
+        let prepared = store.prepare_generate_identity().unwrap();
+        store
+            .commit_operation(prepared.operation.identifier)
+            .unwrap();
+        // Skip the Finalizing write, then fail the first durable progress checkpoint.
+        storage.fail_store(OPERATION_JOURNAL_KEY, 1, timing);
+
+        assert!(
+            store
+                .finalize_operation(prepared.operation.identifier)
+                .is_err()
+        );
+        assert_eq!(storage.successful_stores("discovery/current"), 1);
+        drop(store);
+
+        let recovered = storage.key_store();
+        assert_eq!(
+            recovered
+                .operation_status(prepared.operation.identifier)
+                .unwrap(),
+            KeyStoreOperationStatus::Finalizing
+        );
+        recovered
+            .finalize_operation(prepared.operation.identifier)
+            .unwrap();
+        let expected_stores = match timing {
+            FailureTiming::BeforeApply => 2,
+            FailureTiming::AfterApply => 1,
+        };
+        assert_eq!(
+            storage.successful_stores("discovery/current"),
+            expected_stores
+        );
+        assert!(recovered.has_identity().unwrap());
+    }
+}
+
+#[test]
+fn finalized_journal_transition_recovers_from_before_and_after_apply_failures() {
+    for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
+        let storage = SharedSecureStorage::new();
+        let store = storage.key_store();
+        let identity = store.prepare_generate_identity().unwrap();
+        store
+            .commit_operation(identity.operation.identifier)
+            .unwrap();
+        store
+            .finalize_operation(identity.operation.identifier)
+            .unwrap();
+        let initial_signed_prekey = store.prepare_rotate_signed_prekey_now().unwrap();
+        store
+            .commit_operation(initial_signed_prekey.operation.identifier)
+            .unwrap();
+        store
+            .finalize_operation(initial_signed_prekey.operation.identifier)
+            .unwrap();
+        let prepared = store.prepare_rotate_signed_prekey_if_stale().unwrap();
+        assert!(prepared.output.is_none());
+        store
+            .commit_operation(prepared.operation.identifier)
+            .unwrap();
+        // A no-op has only Finalizing and Finalized journal writes.
+        storage.fail_store(OPERATION_JOURNAL_KEY, 1, timing);
+
+        assert!(
+            store
+                .finalize_operation(prepared.operation.identifier)
+                .is_err()
+        );
+
+        let recovered = storage.key_store();
+        let expected = match timing {
+            FailureTiming::BeforeApply => KeyStoreOperationStatus::Finalizing,
+            FailureTiming::AfterApply => KeyStoreOperationStatus::Finalized,
+        };
+        assert_eq!(
+            recovered
+                .operation_status(prepared.operation.identifier)
+                .unwrap(),
+            expected
+        );
+        recovered
+            .finalize_operation(prepared.operation.identifier)
+            .unwrap();
+        assert!(recovered.unfinished_operations().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn aborted_journal_transition_recovers_from_before_and_after_apply_failures() {
+    for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
+        let storage = SharedSecureStorage::new();
+        let store = storage.key_store();
+        let prepared = store.prepare_generate_identity().unwrap();
+        storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
+
+        assert!(
+            store
+                .abort_operation(prepared.operation.identifier)
+                .is_err()
+        );
+
+        let recovered = storage.key_store();
+        let expected = match timing {
+            FailureTiming::BeforeApply => KeyStoreOperationStatus::Prepared,
+            FailureTiming::AfterApply => KeyStoreOperationStatus::Aborted,
+        };
+        assert_eq!(
+            recovered
+                .operation_status(prepared.operation.identifier)
+                .unwrap(),
+            expected
+        );
+        recovered
+            .abort_operation(prepared.operation.identifier)
+            .unwrap();
+        assert!(recovered.unfinished_operations().unwrap().is_empty());
+        assert!(!recovered.has_identity().unwrap());
+    }
 }
 
 #[test]

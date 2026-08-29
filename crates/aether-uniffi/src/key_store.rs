@@ -153,6 +153,22 @@ impl KeyStore {
 
     /// Returns the durable status of a retained prepared operation.
     ///
+    /// Use this after an ambiguous lifecycle call or while reconciling startup state. Terminal
+    /// tombstones are retained only within the bounded operation journal, so a sufficiently old
+    /// finalized or aborted identifier may return [`AetherError::NotFound`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// let prepared = store.prepare_generate_identity()?;
+    /// let status = store.operation_status(prepared.operation.identifier)?;
+    /// assert!(matches!(status, KeyStoreOperationStatus::Prepared));
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
     /// - [`AetherError::NotFound`] if the operation is no longer retained.
@@ -174,6 +190,20 @@ impl KeyStore {
     /// Call [`Self::finalize_operation`] after that host commit. Abort only after proving the host
     /// transaction did not commit. If the commit result is ambiguous, reload the host operation
     /// record by identifier and reconcile it through [`Self::unfinished_operations`].
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// let prepared = store.prepare_generate_identity()?;
+    /// let status = store.commit_operation(prepared.operation.identifier.clone())?;
+    /// assert!(matches!(status, KeyStoreOperationStatus::Committed));
+    /// // Atomically persist host-owned output and the identifier here.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), AetherError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
@@ -199,6 +229,20 @@ impl KeyStore {
     ///
     /// Repeating this call resumes interrupted finalization or returns `Finalized` again.
     ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// let prepared = store.prepare_generate_identity()?;
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// // The host transaction committed before finalization.
+    /// let status = store.finalize_operation(prepared.operation.identifier)?;
+    /// assert!(matches!(status, KeyStoreOperationStatus::Finalized));
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
     /// - [`AetherError::NotFound`] if the operation is no longer retained.
@@ -217,6 +261,21 @@ impl KeyStore {
 
     /// Discards staged SecureStorage mutations before finalization starts.
     ///
+    /// A committed operation may be aborted only after proving its host transaction did not commit.
+    /// Reconcile an ambiguous result by identifier instead.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// let prepared = store.prepare_generate_identity()?;
+    /// let status = store.abort_operation(prepared.operation.identifier)?;
+    /// assert!(matches!(status, KeyStoreOperationStatus::Aborted));
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
     /// - [`AetherError::NotFound`] if the operation is no longer retained.
@@ -234,6 +293,22 @@ impl KeyStore {
     }
 
     /// Returns prepared operations that still need startup recovery.
+    ///
+    /// Match each identifier against the host transaction log. Finalize operations whose host
+    /// transaction committed; abort an orphan only after proving that it did not commit.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// let prepared = store.prepare_generate_identity()?;
+    /// let unfinished = store.unfinished_operations()?;
+    /// assert_eq!(unfinished[0].operation.identifier, prepared.operation.identifier);
+    /// assert!(matches!(unfinished[0].status, KeyStoreOperationStatus::Prepared));
+    /// # Ok::<(), AetherError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`AetherError::Corrupt`] | [`AetherError::InternalError`] |
@@ -505,6 +580,23 @@ impl KeyStore {
     /// The returned records contain only public material. The secret halves remain securely staged
     /// in the recoverable operation journal and become authoritative only on finalization.
     ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// # let identity = store.prepare_generate_identity()?;
+    /// # store.commit_operation(identity.operation.identifier.clone())?;
+    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_generate_one_time_prekeys(8)?;
+    /// assert_eq!(prepared.one_time_prekeys.len(), 8);
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// // Atomically queue the public bundles and persist the identifier here.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), AetherError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored one-time-pre-key data is malformed or the batch
@@ -532,6 +624,22 @@ impl KeyStore {
     ///
     /// Returns an empty provisional list when the current pool is already above the threshold. The
     /// returned no-op operation must still be finalized or aborted.
+    ///
+    /// # Examples
+    /// ```
+    /// # use aether::{AetherError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let store = KeyStore::new(storage);
+    /// # let identity = store.prepare_generate_identity()?;
+    /// # store.commit_operation(identity.operation.identifier.clone())?;
+    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_replenish_one_time_prekeys()?;
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// // Finalize even when `one_time_prekeys` is empty.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), AetherError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
@@ -711,17 +819,34 @@ impl KeyStore {
     /// device sending and surfacing that contact's messages but leaves the contact holding a
     /// working delivery capability — it can still reach the relay and queue messages. Rotating
     /// invalidates that capability, at the cost of invalidating every *other* contact's copy too:
-    /// when [`ContactBlock::rotation`] is present, each remaining contact must be given the new
-    /// capability before it can deliver again. [`crate::ProtocolStateEngine::
+    /// when `PreparedContactBlock.block.rotation` is present, each remaining contact must receive
+    /// the new capability before it can deliver again. [`crate::ProtocolStateEngine::
     /// contacts_needing_inbox_authorization`] returns exactly that list, and excludes the blocked
     /// contact.
     ///
     /// Blocking an already-blocked contact performs no rotation, so repeating the call does not
     /// churn every contact's capability. Its no-op operation must still be finalized or aborted.
     ///
-    /// Commit the operation, atomically persist [`ContactBlock::contact`] and any host-owned
-    /// publication work, then finalize the staged SecureStorage rotation. Abort only after proving
-    /// the host transaction did not commit.
+    /// Commit the operation, atomically persist `PreparedContactBlock.block.contact` and any
+    /// host-owned publication work, then finalize the staged SecureStorage rotation. Abort only
+    /// after proving the host transaction did not commit.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether::{AetherError, IdentityKey, KeyStore, ProtocolStateEntry};
+    ///
+    /// fn block(
+    ///     store: &KeyStore,
+    ///     snapshot: Vec<ProtocolStateEntry>,
+    ///     identity_key: IdentityKey,
+    /// ) -> Result<(), AetherError> {
+    ///     let prepared = store.prepare_block_contact(snapshot, identity_key)?;
+    ///     store.commit_operation(prepared.operation.identifier.clone())?;
+    ///     // Persist `prepared.block.contact`, publication work, and the identifier atomically.
+    ///     store.finalize_operation(prepared.operation.identifier)?;
+    ///     Ok(())
+    /// }
+    /// ```
     ///
     /// # Errors
     /// - [`AetherError::InvalidData`] if `identity_key` has the wrong length.
@@ -831,6 +956,24 @@ impl KeyStore {
     /// The output contains provisional protocol-state updates and authenticated plaintext. Commit
     /// the operation, atomically persist those updates, then finalize SecureStorage. The referenced
     /// one-time prekey remains authoritative until finalization.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether::{AetherError, Identity, KeyStore, Message};
+    ///
+    /// fn accept(
+    ///     store: &KeyStore,
+    ///     session_key: Vec<u8>,
+    ///     initiator: Option<Identity>,
+    ///     message: Message,
+    /// ) -> Result<(), AetherError> {
+    ///     let prepared = store.prepare_accept_session(session_key, initiator, message)?;
+    ///     store.commit_operation(prepared.operation.identifier.clone())?;
+    ///     // Persist `prepared.acceptance.state_updates` and the identifier atomically.
+    ///     store.finalize_operation(prepared.operation.identifier)?;
+    ///     Ok(())
+    /// }
+    /// ```
     ///
     /// # Errors
     /// - [`AetherError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work

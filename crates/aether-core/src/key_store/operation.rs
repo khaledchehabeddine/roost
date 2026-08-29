@@ -396,6 +396,23 @@ impl KeyStore {
 
     /// Returns the durable status of a retained prepared operation.
     ///
+    /// Use this after an ambiguous lifecycle call or while reconciling startup state. Terminal
+    /// tombstones are retained only within the bounded operation journal, so a sufficiently old
+    /// finalized or aborted identifier may be unknown.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let prepared = store.prepare_generate_identity()?;
+    /// assert!(matches!(
+    ///     store.operation_status(prepared.operation.identifier)?,
+    ///     KeyStoreOperationStatus::Prepared
+    /// ));
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
+    ///
     /// # Errors
     /// - [`KeyStoreError::Operation`] if the identifier is unknown, the journal is corrupt, or
     ///   SecureStorage fails.
@@ -416,6 +433,21 @@ impl KeyStore {
     /// [`Self::finalize_operation`]. Abort only after proving the host transaction did not commit.
     /// If the host result is ambiguous, reload its operation record and reconcile it through
     /// [`Self::unfinished_operations`].
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let prepared = store.prepare_generate_identity()?;
+    /// assert!(matches!(
+    ///     store.commit_operation(prepared.operation.identifier)?,
+    ///     KeyStoreOperationStatus::Committed
+    /// ));
+    /// // Atomically persist host-owned output and the identifier here.
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::Operation`] if the operation is unknown, another committed operation
@@ -460,6 +492,21 @@ impl KeyStore {
     ///
     /// Finalization records progress after every SecureStorage mutation. Repeating the call resumes
     /// at the last durable step, and repeating it after completion is idempotent.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let prepared = store.prepare_generate_identity()?;
+    /// store.commit_operation(prepared.operation.identifier)?;
+    /// // The host transaction committed before finalization.
+    /// assert!(matches!(
+    ///     store.finalize_operation(prepared.operation.identifier)?,
+    ///     KeyStoreOperationStatus::Finalized
+    /// ));
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::Operation`] if the operation is unknown or uncommitted, the journal is
@@ -517,8 +564,23 @@ impl KeyStore {
 
     /// Discards staged material before finalization starts.
     ///
-    /// Prepared and committed operations may be aborted. Repeating an abort is idempotent; an
-    /// operation that started finalizing cannot be rolled back safely.
+    /// Prepared operations may be aborted. A committed operation may be aborted only after the
+    /// caller proves its host transaction did not commit; an ambiguous host result must be
+    /// reconciled by identifier first. Repeating an abort is idempotent, while an operation that
+    /// started finalizing cannot be rolled back safely.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let prepared = store.prepare_generate_identity()?;
+    /// assert!(matches!(
+    ///     store.abort_operation(prepared.operation.identifier)?,
+    ///     KeyStoreOperationStatus::Aborted
+    /// ));
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::Operation`] if the operation is unknown, finalizing, or finalized; the
@@ -554,6 +616,18 @@ impl KeyStore {
     /// The host matches each identifier against its durable transaction record. It aborts an
     /// orphaned Prepared or Committed stage whose host transaction did not commit, and finalizes a
     /// Committed or Finalizing operation whose host transaction did commit.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
+    ///
+    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    /// let prepared = store.prepare_generate_identity()?;
+    /// let unfinished = store.unfinished_operations()?;
+    /// assert_eq!(unfinished[0].operation.identifier, prepared.operation.identifier);
+    /// assert!(matches!(unfinished[0].status, KeyStoreOperationStatus::Prepared));
+    /// # Ok::<(), aether_core::KeyStoreError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`KeyStoreError::Operation`] if the journal is corrupt or SecureStorage fails.
@@ -1116,6 +1190,40 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    const SECURE_STORAGE_PRECONDITION_KAT_EXPECTED: &str =
+        "1057a0c66b56f08caa9cc9623796774f165575324362504f1626f534e4090c1a";
+
+    /// Source: `lukechampine.com/blake3` v1.4.1's independent Go implementation, using its
+    /// `DeriveKey(subKey, ctx, srcKey)` API under Go 1.27.0.
+    ///
+    /// Inputs: context `AetherSecureStoragePrecondition-v1` and the exact UTF-8 bytes
+    /// `fixture secure value` (no trailing newline).
+    ///
+    /// Derivation:
+    /// ```text
+    /// output := make([]byte, 32)
+    /// blake3.DeriveKey(
+    ///     output,
+    ///     "AetherSecureStoragePrecondition-v1",
+    ///     []byte("fixture secure value"),
+    /// )
+    /// hex.EncodeToString(output)
+    /// ```
+    ///
+    /// Output: `SECURE_STORAGE_PRECONDITION_KAT_EXPECTED`.
+    #[test]
+    fn secure_storage_precondition_digest_known_answer() {
+        let SecureStorageExpectedValue::Digest(digest) =
+            expected_value(Some(b"fixture secure value"))
+        else {
+            panic!("present values must produce a digest");
+        };
+        assert_eq!(
+            hex::encode(digest),
+            SECURE_STORAGE_PRECONDITION_KAT_EXPECTED
+        );
+    }
+
     struct ChangingStorage {
         loads: Arc<AtomicUsize>,
     }
@@ -1168,19 +1276,6 @@ mod tests {
         assert_eq!(
             state.preconditions["identity/current"],
             expected_value(Some(b"first"))
-        );
-    }
-
-    #[test]
-    fn secure_storage_precondition_digest_known_answer() {
-        let SecureStorageExpectedValue::Digest(digest) =
-            expected_value(Some(b"fixture secure value"))
-        else {
-            panic!("present values must produce a digest");
-        };
-        assert_eq!(
-            hex::encode(digest),
-            "1057a0c66b56f08caa9cc9623796774f165575324362504f1626f534e4090c1a"
         );
     }
 }
