@@ -196,7 +196,11 @@ impl ProtocolFixture {
         let session_key = session_key();
         let deduplication_key = deduplication_key();
         let alice_sender = validated_sender();
-        let bob_sender = sender_identity(0xb1);
+        let bob_sender = sender_identity_for_contact(
+            accepted_contact_identity(),
+            vec![0xb2, 0xb3, 0xb4],
+            vec![0xb5; 64],
+        );
         let mut alice_store = HostStore::default();
         let mut bob_store = HostStore::default();
 
@@ -583,7 +587,7 @@ fn validated_sender() -> ValidatedSender {
     }
 }
 
-fn accepted_contact_identity() -> ContactIdentity {
+pub fn accepted_contact_identity() -> ContactIdentity {
     let identity = test_sender_identity_signing_key(0xa1);
     let identity_key_pair = test_identity_key_pair(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);

@@ -19,5 +19,8 @@ Swift and Kotlin harnesses in this directory exercise UniFFI bindings built with
   read from the frame and `prepareAcceptSession` is then called with no expected identity.
 - `KeyBindingVerification.*`: standalone IK/DK binding verification, with the platform's own Ed25519
   as the counterparty rather than Aether's, plus the context-separation and malformed-input refusals.
+- `EvidenceBundleVectors.*`: version-one accepted-Message evidence replay through the production
+  verifier, including malformed, profile, version, signature, and cross-relay replay refusals.
+  CryptoKit and the JDK independently verify both signatures carried by the vector.
 
 Run through `scripts/test/binding-fixture-replay.sh`.

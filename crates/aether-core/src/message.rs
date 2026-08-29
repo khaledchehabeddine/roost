@@ -3,8 +3,10 @@ use std::fmt;
 
 use crate::hardening::ProtocolHardeningLimits;
 use aether_crypto::{SealedFrame, SealedFramePreKeyReference};
+use zeroize::Zeroizing;
 
 const PUBLIC_KEY_LEN: usize = 32;
+pub(crate) const MESSAGE_TRANSCRIPT_CONTEXT: &[u8] = b"AetherMessageTranscript-v1:";
 
 /// The UUID-shaped identifier for a [`Message`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -169,6 +171,36 @@ impl PayloadKind {
             _ => Err(MessageError::UnsupportedPayloadKind(tag)),
         }
     }
+}
+
+pub(crate) struct MessageTranscriptInput<'a> {
+    pub(crate) session_key: &'a [u8],
+    pub(crate) recipient_identity_verifying_key: &'a [u8; PUBLIC_KEY_LEN],
+    pub(crate) id: MessageId,
+    pub(crate) timestamp_millis: u64,
+    pub(crate) payload_kind: PayloadKind,
+    pub(crate) payload: &'a [u8],
+}
+
+pub(crate) fn message_transcript(
+    input: MessageTranscriptInput<'_>,
+) -> Result<Zeroizing<Vec<u8>>, MessageError> {
+    let session_key_len =
+        u32::try_from(input.session_key.len()).map_err(|_| MessageError::PayloadTooLarge)?;
+    let payload_len =
+        u32::try_from(input.payload.len()).map_err(|_| MessageError::PayloadTooLarge)?;
+    let mut transcript = Zeroizing::new(Vec::with_capacity(
+        4 + input.session_key.len() + PUBLIC_KEY_LEN + 16 + 8 + 1 + 4 + input.payload.len(),
+    ));
+    transcript.extend_from_slice(&session_key_len.to_be_bytes());
+    transcript.extend_from_slice(input.session_key);
+    transcript.extend_from_slice(input.recipient_identity_verifying_key);
+    transcript.extend_from_slice(input.id.as_bytes());
+    transcript.extend_from_slice(&input.timestamp_millis.to_be_bytes());
+    transcript.push(input.payload_kind.tag());
+    transcript.extend_from_slice(&payload_len.to_be_bytes());
+    transcript.extend_from_slice(input.payload);
+    Ok(transcript)
 }
 
 /// An error returned by message encoding or decoding.

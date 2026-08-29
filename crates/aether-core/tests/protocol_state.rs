@@ -515,7 +515,11 @@ fn sender_identity(tag: u8) -> SenderIdentityMaterial {
 }
 
 fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
-    sender_identity(0xb1)
+    sender_identity_for_contact(
+        accepted_contact_identity(),
+        vec![0xb2, 0xb3, 0xb4],
+        vec![0xb5; 64],
+    )
 }
 
 fn acknowledgment<'a>(
@@ -581,6 +585,9 @@ fn inbound_acknowledgment<'a>(
         session_key,
         message,
         recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
     }
 }
 
@@ -875,7 +882,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     let alice = validated_sender();
     let alice_domain_keys = [alice.domain_signing_key()];
     let revoked = [];
-    let bob_sender = sender_identity(0xb1);
+    let bob_sender = acknowledgment_sender_identity();
     let mut alice_snapshot = snapshot_with_state_and_peer_identity(
         &engine,
         key.clone(),
@@ -1013,7 +1020,7 @@ fn unknown_acknowledgment_is_non_fatal_miss() {
     let alice = validated_sender();
     let alice_domain_keys = [alice.domain_signing_key()];
     let revoked = [];
-    let bob_sender = sender_identity(0xb1);
+    let bob_sender = acknowledgment_sender_identity();
     let mut alice_snapshot = snapshot_with_state_and_peer_identity(
         &engine,
         key.clone(),
@@ -3568,6 +3575,9 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
             session_key: other_key,
             message: &decrypted.acknowledgment,
             recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
+            recipient_identity_verifying_key: accepted_contact_identity()
+                .identity_key
+                .ed25519_verifying_key,
         },
     );
 

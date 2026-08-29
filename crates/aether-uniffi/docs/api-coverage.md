@@ -1,6 +1,6 @@
 # UniFFI API Coverage
 
-This note maps issues 122 and 219 to source surfaces and binding harness coverage. It is audit
+This note maps issues 122, 219, and 221 to source surfaces and binding harness coverage. It is audit
 metadata, not runtime policy; code and tests remain authoritative.
 
 ## Source Surfaces
@@ -31,6 +31,10 @@ metadata, not runtime policy; code and tests remain authoritative.
 - Standalone mutual-binding verification, before any session or contact record exists:
   `verify_identity_key_binding` and `verify_discovery_to_identity_binding`. Public material only,
   one fixed context each, so neither can be pointed at another Aether preimage.
+- Accepted-Message abuse evidence: `InboundMessageOutcome::evidence_bundle` carries the opaque
+  versioned artifact only for `Accepted`, while `verify_evidence_bundle` authenticates it from
+  trusted domain keys, a pinned relay domain and profile, and the caller-recorded acceptance time
+  without Session state or current revocation input.
 - Opt-in local peer simulations: `DevelopmentCertificateAuthority` issues production-format
   sender certificates and returns matching public validation input when the
   `development-certificates` feature is enabled. Normal artifacts omit this surface.
@@ -51,7 +55,8 @@ metadata, not runtime policy; code and tests remain authoritative.
 - Version, storage, certificate, blocked-contact, lag, prepared-operation recovery, precondition,
   unfinished-operation-cap, and backup errors: mapped through `AetherError`.
 - Secret bytes crossing FFI: adapter code wraps inbound backup passphrases, backup blobs, protocol
-  blobs, message plaintext, and storage-loaded values before validation can return.
+  blobs, message plaintext, Evidence Bundles, and storage-loaded values before validation can
+  return.
 - Non-claims: binding docs avoid metadata-privacy, routing, transport-authentication layout,
   compromised-endpoint protection, host passphrase-strength enforcement, and final-publication
   claims before Relay approval.
@@ -66,3 +71,6 @@ metadata, not runtime policy; code and tests remain authoritative.
   exceptions returning errors. Core Rust tests cover duplicate pre-decryption drop, unsupported
   versions, terminal session recovery, operation precondition mismatch, orphaned stages, and
   interrupted finalization.
+- Evidence vectors: Rust, generated Swift, and generated Kotlin replay the same version-one bundle,
+  malformed/profile/version/signature/replay refusals, and verified contextual fields. CryptoKit
+  and the JDK independently verify the vector's certificate and Message signatures.

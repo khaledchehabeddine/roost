@@ -38,6 +38,7 @@ fun main() {
     requireReplay(sessionCase.senderIdentityHiddenBeforeDecrypt, "sender identity hidden before decrypt")
     requireReplay(sessionCase.senderCertificateHiddenBeforeDecrypt, "sender certificate hidden before decrypt")
     requireReplay(sessionCase.senderSignatureHiddenBeforeDecrypt, "sender signature hidden before decrypt")
+    requireReplay(sessionCase.evidenceBundleHex.isNotEmpty(), "accepted Message evidence bundle")
     requireReplay(sessionCase.tamperedCiphertextRejected, "tampered ciphertext rejection")
     requireReplay(
         !sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderIdentityKeyHex),

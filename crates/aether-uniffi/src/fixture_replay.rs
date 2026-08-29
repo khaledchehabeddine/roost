@@ -91,6 +91,8 @@ pub struct SealedSenderReplayCase {
     pub plaintext_hex: String,
     /// Sender identity material returned after decrypt.
     pub post_decryption: SenderIdentityReplay,
+    /// Opaque Evidence Bundle returned only for the accepted Message.
+    pub evidence_bundle_hex: String,
     /// Canonical re-encoded Message bytes as lowercase hex.
     pub reencoded_hex: String,
     /// True when sender identity key bytes are absent before decrypt.
@@ -582,7 +584,7 @@ fn replay_sealed_sender_session_fixture(
         "deduplication_set_identity",
         deduplication_key,
     )?;
-    let decrypted = accepted(
+    let mut decrypted = accepted(
         ProtocolStateEngine::new()
             .decrypt_message(
                 &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
@@ -621,7 +623,16 @@ fn replay_sealed_sender_session_fixture(
         &acknowledgment_sender_identity,
         &fixture.name,
     )?;
-    recipient_snapshot.apply_all(decrypted.state_updates);
+    let post_decryption = sender_identity_report(&decrypted.sender_identity);
+    recipient_snapshot.apply_all(std::mem::take(&mut decrypted.state_updates));
+    let binding_snapshot = crate::protocol::snapshot_input_from_entries(Vec::new())?;
+    let binding_outcome = crate::protocol::InboundMessageOutcome::from_core(
+        &binding_snapshot,
+        InboundMessageOutcome::Accepted(Box::new(decrypted)),
+    )?;
+    let evidence_bundle = binding_outcome.evidence_bundle.ok_or_else(|| {
+        replay_failure("accepted sealed session fixture omitted its Evidence Bundle")
+    })?;
     assert_sender_state_fixture_matches(blob_file, &fixture.sender_state_fixture)?;
     let tampered_ciphertext_rejected = session_tamper_rejects_without_sender(
         blob_file,
@@ -637,7 +648,8 @@ fn replay_sealed_sender_session_fixture(
         name: fixture.name.clone(),
         transport_visible,
         plaintext_hex: fixture.plaintext_hex.clone(),
-        post_decryption: sender_identity_report(&decrypted.sender_identity),
+        post_decryption,
+        evidence_bundle_hex: hex::encode(evidence_bundle),
         reencoded_hex: hex::encode(reencoded),
         sender_identity_hidden_before_decrypt: pre_auth_hidden.identity_key,
         sender_identity_verifying_key_hidden_before_decrypt: pre_auth_hidden.verifying_key,
@@ -955,6 +967,9 @@ fn assert_duplicate_acknowledgment_blob_replay(
                 session_key,
                 message: &message,
                 recipient_discovery_key: Box::leak(Box::new(contact_fixture_discovery_key())),
+                recipient_identity_verifying_key: contact_fixture_identity()
+                    .identity_key
+                    .ed25519_verifying_key,
             },
         )
         .map_err(|e| replay_failure(format!("blob fixture {} replay failed: {e}", fixture.name)))?;
@@ -1401,7 +1416,18 @@ fn inbound<'a>(
 }
 
 fn acknowledgment_sender_identity() -> Result<SenderIdentityMaterial, AetherError> {
-    sender_identity_with_material(0xb1, vec![0xb2, 0xb3, 0xb4], vec![0xb5; 64])
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let signing_key = generate_signing_key_pair(&mut rng);
+    let identity_key_pair = generate_key_pair(&mut rng);
+    let binding_signature = sign_identity_key_binding(&signing_key, &identity_key_pair.public)
+        .map_err(|e| replay_failure(format!("failed to sign sender identity binding: {e}")))?;
+    Ok(SenderIdentityMaterial {
+        identity_key: *identity_key_pair.public.as_bytes(),
+        identity_verifying_key: signing_key.verifying.to_bytes(),
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
+        certificate: vec![0xb2, 0xb3, 0xb4],
+        signature: vec![0xb5; 64],
+    })
 }
 
 fn acknowledgment<'a>(
@@ -1439,6 +1465,12 @@ fn sender_identity_with_material(
 fn sender_identity_signing_key(
     sender_identity: &SenderIdentityMaterial,
 ) -> Result<SigningKeyPair, AetherError> {
+    let mut fixture_rng = ChaCha20Rng::from_seed([0x71; 32]);
+    let fixture_recipient_signing_key = generate_signing_key_pair(&mut fixture_rng);
+    if fixture_recipient_signing_key.verifying.to_bytes() == sender_identity.identity_verifying_key
+    {
+        return Ok(fixture_recipient_signing_key);
+    }
     for tag in 0..=u8::MAX {
         let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
         if signing_key.verifying.to_bytes() == sender_identity.identity_verifying_key {

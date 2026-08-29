@@ -25,6 +25,7 @@ struct FixtureReplay {
         require(sessionCase.senderIdentityHiddenBeforeDecrypt, "sender identity hidden before decrypt")
         require(sessionCase.senderCertificateHiddenBeforeDecrypt, "sender certificate hidden before decrypt")
         require(sessionCase.senderSignatureHiddenBeforeDecrypt, "sender signature hidden before decrypt")
+        require(!sessionCase.evidenceBundleHex.isEmpty, "accepted Message evidence bundle")
         require(sessionCase.tamperedCiphertextRejected, "tampered ciphertext rejection")
         require(!sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderIdentityKeyHex), "identity leaked into transport payload")
         require(!sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderCertificateHex), "certificate leaked into transport payload")

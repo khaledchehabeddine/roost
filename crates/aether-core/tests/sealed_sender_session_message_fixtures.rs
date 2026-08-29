@@ -302,7 +302,17 @@ fn inbound<'a>(
 }
 
 fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
-    sender_identity_with_material(0xb1, vec![0xb2, 0xb3, 0xb4], vec![0xb5; 64])
+    let contact = fixture_contact_identity();
+    let signing_key = fixture_recipient_identity_signing_key();
+    let public_key = aether_crypto::PublicKey::from(contact.identity_key.x25519_public_key);
+    let binding_signature = sign_identity_key_binding(signing_key, &public_key).unwrap();
+    SenderIdentityMaterial {
+        identity_key: contact.identity_key.x25519_public_key,
+        identity_verifying_key: contact.identity_key.ed25519_verifying_key,
+        identity_binding_signature: binding_signature.to_bytes().to_vec(),
+        certificate: vec![0xb2, 0xb3, 0xb4],
+        signature: vec![0xb5; 64],
+    }
 }
 
 fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
@@ -310,7 +320,7 @@ fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAc
     OutboundAcknowledgment {
         id: MessageId::from_bytes([0xee; 16]),
         sender_identity,
-        sender_identity_signing_key: sender_identity_signing_key(sender_identity),
+        sender_identity_signing_key: fixture_recipient_identity_signing_key(),
         recipient_public_key: *recipient.public_key().as_bytes(),
         timestamp_millis: 1_700_000_100_000,
     }
@@ -728,6 +738,11 @@ fn fixture_contact_identity() -> ContactIdentity {
         },
         discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
     }
+}
+
+fn fixture_recipient_identity_signing_key() -> &'static SigningKeyPair {
+    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    Box::leak(Box::new(generate_signing_key_pair(&mut rng)))
 }
 
 /// Builds the v2 sender certificate binding the sender Identity Key to the relay domain.

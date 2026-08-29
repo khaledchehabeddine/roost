@@ -199,11 +199,12 @@ impl KeyStore {
         )?)
     }
 
-    /// Processes an encrypted acknowledgment using stored local discovery material.
+    /// Processes an encrypted acknowledgment using stored local discovery and identity material.
     ///
     /// # Errors
     /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
     ///   malformed.
+    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
     /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
     /// - [`MessageOperationError::ProtocolState`] if state loading, decryption, or update encoding
     ///   fails.
@@ -213,6 +214,7 @@ impl KeyStore {
     ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
+        let identity = self.0.identity.load_identity()?;
         let discovery_key = self.0.discovery.current()?;
         let mut rng = rand::rngs::OsRng;
         Ok(crate::ProtocolStateEngine::new().process_acknowledgment(
@@ -222,6 +224,7 @@ impl KeyStore {
                 session_key: input.session_key,
                 message: input.message,
                 recipient_discovery_key: &discovery_key,
+                recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
             },
         )?)
     }
