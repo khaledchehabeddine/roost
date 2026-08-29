@@ -1,11 +1,15 @@
 # UniFFI API Coverage
 
-This note maps issue 122 to source surfaces and binding harness coverage. It is audit metadata, not
-runtime policy; code and tests remain authoritative.
+This note maps issues 122 and 219 to source surfaces and binding harness coverage. It is audit
+metadata, not runtime policy; code and tests remain authoritative.
 
 ## Source Surfaces
 
 - Identity, backup, discovery-key, signed-prekey, and one-time-prekey lifecycle: `KeyStore`.
+- Recoverable SecureStorage mutations: `KeyStoreOperation`, the concrete `Prepared*` result
+  records, `commit_operation`, `finalize_operation`, `abort_operation`, and
+  `unfinished_operations`. Operation identifiers and preconditions cross UniFFI; staged secrets do
+  not leave SecureStorage.
 - Session establishment, message encryption/decryption, acknowledgment processing, and
   replacement: `KeyStore` helpers returning protocol-state updates instead of exposing secret
   identity, ratchet, discovery-key, or prekey types.
@@ -23,7 +27,7 @@ runtime policy; code and tests remain authoritative.
 - Reading who sent an X3DH first message before accepting it:
   `KeyStore::initiator_identity_hint`. Opens only the layer sealed to this device's own Discovery
   Key, so it consumes no one-time pre-key and reveals nothing to anyone else; the claim it returns
-  is checked against the sealed envelope's authenticated copy by `accept_session`.
+  is checked against the sealed envelope's authenticated copy by `prepare_accept_session`.
 - Standalone mutual-binding verification, before any session or contact record exists:
   `verify_identity_key_binding` and `verify_discovery_to_identity_binding`. Public material only,
   one fixed context each, so neither can be pointed at another Aether preimage.
@@ -40,8 +44,12 @@ runtime policy; code and tests remain authoritative.
 - Opaque state and atomic mutation outputs: mutation records carry outputs plus
   `Vec<ProtocolStateUpdate>` for host commit, with absent/digest/unchecked commit checks that
   hosts must enforce atomically.
-- Version, storage, certificate, blocked-contact, lag, recovery, and backup errors: mapped through
-  `AetherError`.
+- Prepared KeyStore mutations: Core validates SecureStorage preconditions at operation commit;
+  hosts atomically persist protocol-state updates and operation identifiers before finalization.
+  One per-identity host actor or lock serializes the whole lifecycle across KeyStore instances and
+  processes. Startup recovery aborts orphaned stages or resumes finalization by identifier.
+- Version, storage, certificate, blocked-contact, lag, prepared-operation recovery, precondition,
+  unfinished-operation-cap, and backup errors: mapped through `AetherError`.
 - Secret bytes crossing FFI: adapter code wraps inbound backup passphrases, backup blobs, protocol
   blobs, message plaintext, and storage-loaded values before validation can return.
 - Non-claims: binding docs avoid metadata-privacy, routing, transport-authentication layout,
@@ -56,4 +64,5 @@ runtime policy; code and tests remain authoritative.
 - Negative paths: invalid canonical keys, rejected certificates, blocked contact behavior,
   stale protocol-state commits, observer lag, backup import failure, and expected foreign storage
   exceptions returning errors. Core Rust tests cover duplicate pre-decryption drop, unsupported
-  versions, and terminal session recovery.
+  versions, terminal session recovery, operation precondition mismatch, orphaned stages, and
+  interrupted finalization.

@@ -103,9 +103,15 @@ fn replay_fixture(fixture_file: &FixtureFile, fixture: &Fixture) {
     );
 
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+    let prepared = store
+        .prepare_import_encrypted_backup(&backup, &fixture.passphrase)
+        .unwrap_or_else(|e| panic!("{} import prepare: {e}", fixture.name));
     store
-        .import_encrypted_backup(&backup, &fixture.passphrase)
-        .unwrap_or_else(|e| panic!("{} import: {e}", fixture.name));
+        .commit_operation(prepared.operation.identifier)
+        .unwrap_or_else(|e| panic!("{} import commit: {e}", fixture.name));
+    store
+        .finalize_operation(prepared.operation.identifier)
+        .unwrap_or_else(|e| panic!("{} import finalize: {e}", fixture.name));
 
     let identity = store.load_identity().unwrap();
     assert_eq!(

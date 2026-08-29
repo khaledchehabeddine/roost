@@ -1,9 +1,9 @@
 use super::KeyStore;
 use crate::{
     AcknowledgmentOutcome, DiscoveryKeyError, IdentityError, InboundAcknowledgmentMessage,
-    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation, Message,
-    MessageId, OutboundAcknowledgment, OutboundMessageResult, OutboundPlaintext,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateSnapshot,
+    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation,
+    KeyStoreOperationError, Message, MessageId, OutboundAcknowledgment, OutboundMessageResult,
+    OutboundPlaintext, ProtocolStateError, ProtocolStateKey, ProtocolStateSnapshot,
 };
 use aether_crypto::SenderIdentityMaterial;
 use std::error::Error;
@@ -72,6 +72,8 @@ pub enum MessageOperationError {
     Discovery(DiscoveryKeyError),
     /// Loading local identity state failed.
     Identity(IdentityError),
+    /// A committed KeyStore operation must be recovered before local keys can be used.
+    Operation(KeyStoreOperationError),
     /// Protocol-state or message processing failed.
     ProtocolState(ProtocolStateError),
 }
@@ -81,6 +83,7 @@ impl fmt::Display for MessageOperationError {
         match self {
             Self::Discovery(e) => write!(f, "message operation discovery key: {e}"),
             Self::Identity(e) => write!(f, "message operation identity: {e}"),
+            Self::Operation(e) => write!(f, "message operation prepared operation: {e}"),
             Self::ProtocolState(e) => write!(f, "message operation protocol state: {e}"),
         }
     }
@@ -91,6 +94,7 @@ impl Error for MessageOperationError {
         match self {
             Self::Discovery(e) => Some(e),
             Self::Identity(e) => Some(e),
+            Self::Operation(e) => Some(e),
             Self::ProtocolState(e) => Some(e),
         }
     }
@@ -108,6 +112,12 @@ impl From<IdentityError> for MessageOperationError {
     }
 }
 
+impl From<KeyStoreOperationError> for MessageOperationError {
+    fn from(e: KeyStoreOperationError) -> Self {
+        Self::Operation(e)
+    }
+}
+
 impl From<ProtocolStateError> for MessageOperationError {
     fn from(e: ProtocolStateError) -> Self {
         Self::ProtocolState(e)
@@ -119,6 +129,7 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
+    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
     /// - [`MessageOperationError::ProtocolState`] if state loading, contact gating, encryption, or
     ///   update encoding fails.
     pub fn encrypt_message(
@@ -126,6 +137,7 @@ impl KeyStore {
         input: MessageEncryption<'_>,
     ) -> Result<OutboundMessageResult, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         let identity = self.0.identity.load_identity()?;
         let sender_identity =
             sender_identity_material(&identity, input.sender_certificate, input.sender_signature)?;
@@ -150,6 +162,7 @@ impl KeyStore {
     /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
     ///   malformed.
     /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
+    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
     /// - [`MessageOperationError::ProtocolState`] if deduplication, decryption, sender-certificate
     ///   validation, acknowledgment encryption, or update encoding fails.
     pub fn decrypt_message(
@@ -157,6 +170,7 @@ impl KeyStore {
         input: MessageDecryption<'_>,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         let identity = self.0.identity.load_identity()?;
         let discovery_key = self.0.discovery.current()?;
         let sender_identity = sender_identity_material(
@@ -190,6 +204,7 @@ impl KeyStore {
     /// # Errors
     /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
     ///   malformed.
+    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
     /// - [`MessageOperationError::ProtocolState`] if state loading, decryption, or update encoding
     ///   fails.
     pub fn process_acknowledgment(
@@ -197,6 +212,7 @@ impl KeyStore {
         input: AcknowledgmentProcessing<'_>,
     ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         let discovery_key = self.0.discovery.current()?;
         let mut rng = rand::rngs::OsRng;
         Ok(crate::ProtocolStateEngine::new().process_acknowledgment(

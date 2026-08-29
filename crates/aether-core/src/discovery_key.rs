@@ -194,7 +194,7 @@ impl DiscoveryKeyManager {
         Ok(decode_capability(checked_blob(&raw)?))
     }
 
-    // Use `KeyStore::reset` to clear signed pre-key state before discovery key and identity.
+    // Use `KeyStore::prepare_reset` to clear signed-prekey state before discovery key and identity.
     pub(crate) fn reset(&self) -> Result<(), DiscoveryKeyError> {
         let mut storage = self.lock_storage()?;
         Ok(storage.delete(DISCOVERY_KEY)?)

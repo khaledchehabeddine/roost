@@ -58,10 +58,19 @@ fun main() {
     val engine = ProtocolStateEngine()
     val alice = KeyStore(MemorySecureStorage())
     val bob = KeyStore(MemorySecureStorage())
-    alice.generateIdentity()
-    val bobIdentity = bob.generateIdentity()
-    alice.rotateSignedPrekeyNow()
-    bob.rotateSignedPrekeyNow()
+    val aliceIdentityPreparation = alice.prepareGenerateIdentity()
+    alice.commitOperation(aliceIdentityPreparation.operation.identifier)
+    alice.finalizeOperation(aliceIdentityPreparation.operation.identifier)
+    val bobIdentityPreparation = bob.prepareGenerateIdentity()
+    bob.commitOperation(bobIdentityPreparation.operation.identifier)
+    bob.finalizeOperation(bobIdentityPreparation.operation.identifier)
+    val bobIdentity = bobIdentityPreparation.identity
+    val aliceSignedPrekey = alice.prepareRotateSignedPrekeyNow()
+    alice.commitOperation(aliceSignedPrekey.operation.identifier)
+    alice.finalizeOperation(aliceSignedPrekey.operation.identifier)
+    val bobSignedPrekey = bob.prepareRotateSignedPrekeyNow()
+    bob.commitOperation(bobSignedPrekey.operation.identifier)
+    bob.finalizeOperation(bobSignedPrekey.operation.identifier)
     val bobPublication = bob.currentPublicationBundle()
 
     val snapshot = mutableListOf<ProtocolStateEntry>()
@@ -69,7 +78,10 @@ fun main() {
     applyUpdates(snapshot, engine.acceptContact(snapshot.toList(), identityKey(bobIdentity)).stateUpdates)
 
     // Alice rotates. Bob has never been given an authorization, so he owes one.
-    val rotation = alice.rotateInboxNow()
+    val rotationPreparation = alice.prepareRotateInboxNow()
+    alice.commitOperation(rotationPreparation.operation.identifier)
+    alice.finalizeOperation(rotationPreparation.operation.identifier)
+    val rotation = rotationPreparation.rotation
     val generation = rotation.publication.discoveryKey.epoch
     val owing = engine.contactsNeedingInboxAuthorization(
         snapshot.toList(),
@@ -123,9 +135,12 @@ fun main() {
     // capability and the block bites only on this device. The engine's
     // blockContact is the local-only half; the keystore's is the one that
     // makes the block reach the relay.
-    val blocked = alice.blockContact(snapshot.toList(), identityKey(bobIdentity))
+    val blockPreparation = alice.prepareBlockContact(snapshot.toList(), identityKey(bobIdentity))
+    alice.commitOperation(blockPreparation.operation.identifier)
+    applyUpdates(snapshot, blockPreparation.block.contact.stateUpdates)
+    alice.finalizeOperation(blockPreparation.operation.identifier)
+    val blocked = blockPreparation.block
     check(blocked.rotation != null, "blocking must rotate the inbox")
-    applyUpdates(snapshot, blocked.contact.stateUpdates)
     val afterBlock = engine.contactsNeedingInboxAuthorization(
         snapshot.toList(),
         blocked.rotation!!.publication.discoveryKey.epoch,
@@ -134,8 +149,11 @@ fun main() {
     check(afterBlock.isEmpty(), "a blocked contact must never be re-supplied the capability")
 
     // Repeating the block must not churn every other contact's capability.
+    val repeatedBlock = alice.prepareBlockContact(snapshot.toList(), identityKey(bobIdentity))
+    alice.commitOperation(repeatedBlock.operation.identifier)
+    alice.finalizeOperation(repeatedBlock.operation.identifier)
     check(
-        alice.blockContact(snapshot.toList(), identityKey(bobIdentity)).rotation == null,
+        repeatedBlock.block.rotation == null,
         "blocking an already-blocked contact must not rotate again",
     )
 

@@ -40,7 +40,10 @@ struct AuthenticationTranscriptSigning {
 
     static func main() throws {
         let store = KeyStore(storage: MemorySecureStorage())
-        let identity = try store.generateIdentity()
+        let prepared = try store.prepareGenerateIdentity()
+        _ = try store.commitOperation(identifier: prepared.operation.identifier)
+        _ = try store.finalizeOperation(identifier: prepared.operation.identifier)
+        let identity = prepared.identity
         let transcript = httpTranscript(identitySigningKey: identity.ed25519VerifyingKey)
 
         let signature = try store.signAuthenticationTranscript(transcript: transcript)

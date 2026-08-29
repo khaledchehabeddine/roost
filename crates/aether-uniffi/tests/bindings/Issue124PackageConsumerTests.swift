@@ -46,13 +46,13 @@ final class Issue124PackageConsumerTests: XCTestCase {
 
         let alice = KeyStore(storage: MemorySecureStorage())
         let bob = KeyStore(storage: MemorySecureStorage())
-        let aliceIdentity = try alice.generateIdentity()
-        let bobIdentity = try bob.generateIdentity()
-        _ = try alice.rotateSignedPrekeyNow()
-        _ = try bob.rotateSignedPrekeyNow()
+        let aliceIdentity = try generateIdentity(alice)
+        let bobIdentity = try generateIdentity(bob)
+        try rotateSignedPrekeyNow(alice)
+        try rotateSignedPrekeyNow(bob)
         let alicePublication = try alice.currentPublicationBundle()
         let bobPublication = try bob.currentPublicationBundle()
-        let bobOneTimePrekey = try XCTUnwrap(try bob.replenishOneTimePrekeys().first)
+        let bobOneTimePrekey = try XCTUnwrap(try replenishOneTimePrekeys(bob).first)
 
         let aliceCertificate = try signedCertificate(
             identity: aliceIdentity,
@@ -78,7 +78,7 @@ final class Issue124PackageConsumerTests: XCTestCase {
 
         let backup = try alice.exportEncryptedBackup(passphrase: "issue-124-passphrase")
         let restored = KeyStore(storage: MemorySecureStorage())
-        try restored.importEncryptedBackup(data: backup, passphrase: "issue-124-passphrase")
+        try importEncryptedBackup(restored, data: backup, passphrase: "issue-124-passphrase")
         XCTAssertTrue(try restored.hasIdentity())
 
         let sessionKey = Data(repeating: 0x24, count: 16)
@@ -91,11 +91,16 @@ final class Issue124PackageConsumerTests: XCTestCase {
             senderSignature: aliceCertificate.signature,
             plaintext: Data("hello bob".utf8)
         )
-        let acceptance = try bob.acceptSession(
+        let acceptancePreparation = try bob.prepareAcceptSession(
             sessionKey: sessionKey,
             initiatorIdentity: aliceIdentity,
             message: initiation.message
         )
+        _ = try bob.commitOperation(identifier: acceptancePreparation.operation.identifier)
+        let acceptance = acceptancePreparation.acceptance
+        var bobSnapshot: [ProtocolStateEntry] = []
+        apply(&bobSnapshot, acceptance.stateUpdates)
+        _ = try bob.finalizeOperation(identifier: acceptancePreparation.operation.identifier)
         XCTAssertEqual(acceptance.plaintext, Data("hello bob".utf8))
 
         var aliceSnapshot: [ProtocolStateEntry] = []
@@ -135,8 +140,6 @@ final class Issue124PackageConsumerTests: XCTestCase {
             1
         )
 
-        var bobSnapshot: [ProtocolStateEntry] = []
-        apply(&bobSnapshot, acceptance.stateUpdates)
         let deduplicationKey = Data("bob-dedup".utf8)
         apply(&bobSnapshot, [try engine.initializeDeduplicationSet(key: deduplicationKey)])
 
@@ -190,6 +193,37 @@ final class Issue124PackageConsumerTests: XCTestCase {
     }
 }
 
+private func complete(_ store: KeyStore, _ operation: KeyStoreOperation) throws {
+    _ = try store.commitOperation(identifier: operation.identifier)
+    _ = try store.finalizeOperation(identifier: operation.identifier)
+}
+
+private func generateIdentity(_ store: KeyStore) throws -> Identity {
+    let prepared = try store.prepareGenerateIdentity()
+    try complete(store, prepared.operation)
+    return prepared.identity
+}
+
+private func rotateSignedPrekeyNow(_ store: KeyStore) throws {
+    let prepared = try store.prepareRotateSignedPrekeyNow()
+    try complete(store, prepared.operation)
+}
+
+private func replenishOneTimePrekeys(_ store: KeyStore) throws -> [OneTimePreKeyBundle] {
+    let prepared = try store.prepareReplenishOneTimePrekeys()
+    try complete(store, prepared.operation)
+    return prepared.oneTimePrekeys
+}
+
+private func importEncryptedBackup(
+    _ store: KeyStore,
+    data: Data,
+    passphrase: String
+) throws {
+    let operation = try store.prepareImportEncryptedBackup(data: data, passphrase: passphrase)
+    try complete(store, operation)
+}
+
 private func exerciseCheckedInReceiveFixtures() throws {
     let sessionFile: SessionFixtureFile = try loadFixture("sealed_sender_session_messages_v1")
     let blobFile: BlobFixtureFile = try loadFixture("protocol_state_blobs_v1")
@@ -223,7 +257,7 @@ private func exerciseCheckedInReceiveFixtures() throws {
     )
 
     let store = KeyStore(storage: MemorySecureStorage())
-    _ = try store.generateIdentity()
+    _ = try generateIdentity(store)
     let duplicate = try store.decryptMessage(
         snapshot: [
             ProtocolStateEntry(

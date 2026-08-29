@@ -37,7 +37,10 @@ use aether_crypto::{
 /// # use std::sync::Arc;
 /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
 /// # let store = KeyStore::new(storage);
-/// let identity = store.generate_identity()?;
+/// let prepared = store.prepare_generate_identity()?;
+/// store.commit_operation(prepared.operation.identifier.clone())?;
+/// store.finalize_operation(prepared.operation.identifier)?;
+/// let identity = prepared.identity;
 ///
 /// aether::verify_identity_key_binding(
 ///     IdentityKey {

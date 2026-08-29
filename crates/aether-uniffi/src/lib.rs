@@ -25,10 +25,14 @@
 //! let store = KeyStore::new(storage);
 //!
 //! if !store.has_identity()? {
-//!     store.generate_identity()?;
+//!     let identity = store.prepare_generate_identity()?;
+//!     store.commit_operation(identity.operation.identifier.clone())?;
+//!     store.finalize_operation(identity.operation.identifier)?;
 //! }
 //!
-//! store.rotate_signed_prekey_now()?;
+//! let signed_prekey = store.prepare_rotate_signed_prekey_now()?;
+//! store.commit_operation(signed_prekey.operation.identifier.clone())?;
+//! store.finalize_operation(signed_prekey.operation.identifier)?;
 //! let publication = store.current_publication_bundle()?;
 //! publish(&publication)?;
 //! # Ok::<(), AetherError>(())
@@ -48,6 +52,7 @@ mod events;
 #[cfg(feature = "fixture-replay")]
 mod fixture_replay;
 mod key_store;
+mod key_store_operation;
 mod message;
 mod protocol;
 mod records;
@@ -66,6 +71,11 @@ pub use events::{
     ContactEventStreamItem, ContactEventStreamItemKind,
 };
 pub use key_store::{KeyStore, SessionAcceptanceResult, SessionInitiationResult};
+pub use key_store_operation::{
+    KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
+    PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
+    PreparedSignedPreKeyRotation, SecureStoragePrecondition, UnfinishedKeyStoreOperation,
+};
 pub use message::{FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial};
 pub use protocol::{
     AcknowledgmentOutcome, AcknowledgmentOutcomeKind, BlockedContactAcknowledgmentPolicy,

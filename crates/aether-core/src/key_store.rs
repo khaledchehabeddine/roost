@@ -1,8 +1,14 @@
 mod messaging;
+mod operation;
 mod session;
 
 pub use messaging::{
     AcknowledgmentProcessing, MessageDecryption, MessageEncryption, MessageOperationError,
+};
+pub use operation::{
+    KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationIdentifier,
+    KeyStoreOperationStatus, PreparedKeyStoreOperation, SecureStorageExpectedValue,
+    SecureStoragePrecondition, UnfinishedKeyStoreOperation,
 };
 pub use session::{
     SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
@@ -17,10 +23,11 @@ use crate::one_time_prekey::{OneTimePreKeyError, OneTimePreKeyManager};
 use crate::protocol_state::{ProtocolStateEngine, ProtocolStateSnapshot};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
+#[cfg(test)]
+use aether_crypto::OneTimePreKey;
 use aether_crypto::{
-    DiscoveryKeyBundle, OneTimePreKey, OneTimePreKeyBundle, PREKEY_BUNDLE_VERSION,
-    RecipientDeliveryCapability, RecipientDeliveryVerifier, Signature, SignedPreKeyBundle,
-    verify_signed_prekey_bundle,
+    DiscoveryKeyBundle, OneTimePreKeyBundle, PREKEY_BUNDLE_VERSION, RecipientDeliveryCapability,
+    RecipientDeliveryVerifier, Signature, SignedPreKeyBundle, verify_signed_prekey_bundle,
 };
 use rand::rngs::OsRng;
 use std::error::Error;
@@ -36,6 +43,8 @@ pub enum KeyStoreError {
     Identity(IdentityError),
     /// A one-time-pre-key operation failed.
     OneTimePreKey(OneTimePreKeyError),
+    /// A prepared-operation lifecycle step failed.
+    Operation(KeyStoreOperationError),
     /// A protocol-state operation failed.
     ProtocolState(crate::protocol_state::ProtocolStateError),
     /// A signed-pre-key operation failed.
@@ -48,6 +57,7 @@ impl fmt::Display for KeyStoreError {
             KeyStoreError::Discovery(e) => write!(f, "discovery key: {e}"),
             KeyStoreError::Identity(e) => write!(f, "identity: {e}"),
             KeyStoreError::OneTimePreKey(e) => write!(f, "one-time pre-key: {e}"),
+            KeyStoreError::Operation(e) => write!(f, "prepared operation: {e}"),
             KeyStoreError::ProtocolState(e) => write!(f, "protocol state: {e}"),
             KeyStoreError::SignedPreKey(e) => write!(f, "signed pre-key: {e}"),
         }
@@ -60,6 +70,7 @@ impl Error for KeyStoreError {
             KeyStoreError::Discovery(e) => Some(e),
             KeyStoreError::Identity(e) => Some(e),
             KeyStoreError::OneTimePreKey(e) => Some(e),
+            KeyStoreError::Operation(e) => Some(e),
             KeyStoreError::ProtocolState(e) => Some(e),
             KeyStoreError::SignedPreKey(e) => Some(e),
         }
@@ -87,6 +98,12 @@ impl From<crate::protocol_state::ProtocolStateError> for KeyStoreError {
 impl From<OneTimePreKeyError> for KeyStoreError {
     fn from(e: OneTimePreKeyError) -> Self {
         KeyStoreError::OneTimePreKey(e)
+    }
+}
+
+impl From<KeyStoreOperationError> for KeyStoreError {
+    fn from(e: KeyStoreOperationError) -> Self {
+        KeyStoreError::Operation(e)
     }
 }
 
@@ -156,6 +173,8 @@ pub struct ContactBlock {
 }
 
 struct KeyStoreInner {
+    storage: Arc<Mutex<Box<dyn SecureStorage>>>,
+    clock: Arc<dyn Clock>,
     identity: Arc<IdentityManager>,
     discovery: Arc<DiscoveryKeyManager>,
     one_time_prekey: Arc<OneTimePreKeyManager>,
@@ -166,7 +185,10 @@ struct KeyStoreInner {
 
 /// Facade over identity, discovery-key, and signed-pre-key managers sharing one [`SecureStorage`].
 ///
-/// Clones share the same underlying storage and synchronization.
+/// Clones share the same underlying storage and synchronization. Separately constructed instances
+/// do not. A host that uses multiple instances or processes for one identity namespace must hold
+/// one shared per-identity actor or lock from before preparing an operation until it is finalized,
+/// aborted, or reconciled after an ambiguous host commit.
 #[derive(Clone)]
 pub struct KeyStore(Arc<KeyStoreInner>);
 
@@ -179,6 +201,13 @@ impl KeyStore {
     // Creates a keystore backed by `storage`, reading time from `clock`.
     pub(crate) fn with_clock(storage: Box<dyn SecureStorage>, clock: Arc<dyn Clock>) -> Self {
         let storage = Arc::new(Mutex::new(storage));
+        Self::from_shared_storage(storage, clock)
+    }
+
+    fn from_shared_storage(
+        storage: Arc<Mutex<Box<dyn SecureStorage>>>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         let discovery = Arc::new(DiscoveryKeyManager::new(
             Arc::clone(&storage),
@@ -191,11 +220,13 @@ impl KeyStore {
             Arc::clone(&clock),
         ));
         let signed_prekey = Arc::new(SignedPreKeyManager::new(
-            storage,
+            Arc::clone(&storage),
             Arc::clone(&discovery),
-            clock,
+            Arc::clone(&clock),
         ));
         KeyStore(Arc::new(KeyStoreInner {
+            storage,
+            clock,
             identity,
             discovery,
             one_time_prekey,
@@ -204,21 +235,20 @@ impl KeyStore {
         }))
     }
 
-    /// Generates a fresh [`Identity`] and discovery key, persisting both.
-    ///
-    /// If a previous call stored the identity but not the discovery key, this retries the
-    /// discovery key creation. A malformed stored discovery key must be cleared with
-    /// [`Self::reset`] first.
+    /// Prepares fresh identity and discovery-key material without changing authoritative storage.
     ///
     /// # Errors
-    /// - [`KeyStoreError::Identity`] (`AlreadyExists`) if a complete identity and discovery key
-    ///   exist.
-    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if a stored discovery key is malformed.
-    /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`)
-    ///   on storage failures.
-    pub fn generate_identity(&self) -> Result<Identity, KeyStoreError> {
-        let _lifecycle = self.lifecycle_guard();
+    /// - [`KeyStoreError::Identity`] (`AlreadyExists`) if a complete identity already exists.
+    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::Identity`] if stored key material is
+    ///   malformed, missing a required half, or cannot be read.
+    /// - [`KeyStoreError::Operation`] if staging or operation-journal persistence fails.
+    pub fn prepare_generate_identity(
+        &self,
+    ) -> Result<PreparedKeyStoreOperation<Identity>, KeyStoreError> {
+        self.prepare_operation(|staged| staged.generate_identity_eager())
+    }
+
+    fn generate_identity_eager(&self) -> Result<Identity, KeyStoreError> {
         let identity = match self.0.identity.generate_identity(&mut OsRng) {
             Ok(identity) => identity,
             // A prior partial creation may have stored the identity but not the discovery key.
@@ -248,7 +278,10 @@ impl KeyStore {
     /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
     /// - [`KeyStoreError::Identity`] (`NotFound`) if no identity is stored.
     /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure.
+    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn load_identity(&self) -> Result<Identity, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         Ok(self.0.identity.load_identity()?)
     }
 
@@ -260,7 +293,10 @@ impl KeyStore {
     /// # Errors
     /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
     /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure.
+    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn has_identity(&self) -> Result<bool, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         Ok(self.0.identity.has_identity()?)
     }
 
@@ -273,7 +309,10 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored blob is malformed.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key is stored.
+    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         Ok(self.0.signed_prekey.current_bundle()?)
     }
 
@@ -286,7 +325,10 @@ impl KeyStore {
     /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
     /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on storage failures.
     /// - [`KeyStoreError::Discovery`] (`NotFound`) if no discovery key is stored.
+    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         Ok(self.0.discovery.current_bundle()?)
     }
 
@@ -294,7 +336,8 @@ impl KeyStore {
     ///
     /// Returns a [`PublicationBundle`] whose caller-created keys verify together. Prefer this for
     /// identity publication over reading the two bundles separately. One-time pre-key bundles are
-    /// managed by [`Self::generate_one_time_prekeys`] and [`Self::replenish_one_time_prekeys`].
+    /// managed by [`Self::prepare_generate_one_time_prekeys`] and
+    /// [`Self::prepare_replenish_one_time_prekeys`].
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `NotFound`) if the discovery
@@ -307,8 +350,10 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
     ///   malformed.
     /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key has been created.
+    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         let discovery_key = self.0.discovery.current()?;
         let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
         let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
@@ -334,11 +379,12 @@ impl KeyStore {
     /// invalidated too and must be re-supplied — see [`ContactBlock::rotation`].
     ///
     /// A contact that is already blocked produces no state change and no rotation, so repeating the
-    /// call does not churn every contact's capability.
+    /// call does not churn every contact's capability. Its no-op operation must still be finalized
+    /// or aborted.
     ///
-    /// The contact update is computed before the rotation is performed, so a rotation failure
-    /// leaves nothing committed. If the caller then fails to commit the returned updates, the
-    /// inbox has rotated without the block landing — recoverable by blocking again.
+    /// Neither change is authoritative when this returns. Commit the operation, atomically apply
+    /// [`ContactBlock::contact`] in the host transaction, then finalize the staged inbox rotation.
+    /// Abort only after proving the host transaction did not commit.
     ///
     /// # Errors
     /// - [`KeyStoreError::ProtocolState`] if the contact blob is missing, malformed, or
@@ -347,24 +393,29 @@ impl KeyStore {
     ///   cannot read the clock, the identity, or the stored discovery key.
     /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::OneTimePreKey`] |
     ///   [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn block_contact(
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_block_contact(
         &self,
         snapshot: &ProtocolStateSnapshot,
         identity_key: ContactIdentityKey,
-    ) -> Result<ContactBlock, KeyStoreError> {
+    ) -> Result<PreparedKeyStoreOperation<ContactBlock>, KeyStoreError> {
         let contact = ProtocolStateEngine::new().block_contact(snapshot, identity_key)?;
         // An unchanged contact yields no updates; rotating anyway would re-key every other contact
         // for nothing.
         if contact.state_updates.is_empty() {
-            return Ok(ContactBlock {
-                contact,
-                rotation: None,
+            return self.prepare_operation(move |_| {
+                Ok(ContactBlock {
+                    contact,
+                    rotation: None,
+                })
             });
         }
-        let rotation = self.rotate_inbox_now()?;
-        Ok(ContactBlock {
-            contact,
-            rotation: Some(rotation),
+        self.prepare_operation(move |staged| {
+            let rotation = staged.rotate_inbox_now_eager()?;
+            Ok(ContactBlock {
+                contact,
+                rotation: Some(rotation),
+            })
         })
     }
 
@@ -378,16 +429,19 @@ impl KeyStore {
     /// - [`KeyStoreError::Discovery`] (`InvalidData` | `NotFound`) if the stored discovery key is
     ///   malformed or absent.
     /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on storage failures.
+    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_delivery_capability(
         &self,
     ) -> Result<RecipientDeliveryCapability, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         Ok(self.0.discovery.current_capability()?)
     }
 
-    /// Generates exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
+    /// Prepares exactly `batch_size` one-time prekeys for the current discovery-key epoch.
     ///
-    /// The new secrets are persisted in the existing one-time-pre-key pool and no discovery-key
-    /// rotation is required. The call fails if the requested batch would exceed the pool cap.
+    /// The new secrets remain staged until finalization. No discovery-key rotation is required.
+    /// The call fails if the requested batch would exceed the pool cap.
     ///
     /// # Errors
     /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
@@ -396,7 +450,15 @@ impl KeyStore {
     /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
     ///   malformed or the requested batch exceeds capacity.
     /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn generate_one_time_prekeys(
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_generate_one_time_prekeys(
+        &self,
+        batch_size: usize,
+    ) -> Result<PreparedKeyStoreOperation<Vec<OneTimePreKeyBundle>>, KeyStoreError> {
+        self.prepare_operation(move |staged| staged.generate_one_time_prekeys_eager(batch_size))
+    }
+
+    fn generate_one_time_prekeys_eager(
         &self,
         batch_size: usize,
     ) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
@@ -407,11 +469,11 @@ impl KeyStore {
             .generate_batch(&mut OsRng, batch_size)?)
     }
 
-    /// Replenishes the stored one-time pre-key pool.
+    /// Prepares replenishment of the stored one-time pre-key pool.
     ///
     /// Returns the bundles created by this call. A missing or stale pool is rebuilt for the
     /// current discovery-key epoch; a current pool above the replenish threshold is left unchanged
-    /// and returns an empty list.
+    /// and returns an empty list. The returned no-op operation must still be finalized or aborted.
     ///
     /// # Errors
     /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
@@ -420,22 +482,30 @@ impl KeyStore {
     /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
     ///   malformed.
     /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn replenish_one_time_prekeys(&self) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_replenish_one_time_prekeys(
+        &self,
+    ) -> Result<PreparedKeyStoreOperation<Vec<OneTimePreKeyBundle>>, KeyStoreError> {
+        self.prepare_operation(|staged| staged.replenish_one_time_prekeys_eager())
+    }
+
+    fn replenish_one_time_prekeys_eager(&self) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         Ok(self.0.one_time_prekey.replenish(&mut OsRng)?)
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn consume_one_time_prekey(
         &self,
         epoch: u32,
         id: u64,
     ) -> Result<OneTimePreKey, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         Ok(self.0.one_time_prekey.consume_one_time_prekey(epoch, id)?)
     }
 
-    /// Rotates the whole inbox: generation, discovery key, capability, and pre-keys (AE-IDN-08).
+    /// Prepares rotation of the whole inbox (AE-IDN-08).
     ///
     /// Advances the inbox generation, replaces the discovery key and the recipient delivery
     /// capability together, clears generation-bound one-time pre-keys, and returns both the
@@ -452,7 +522,14 @@ impl KeyStore {
     /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
     /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::OneTimePreKey`] |
     ///   [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn rotate_inbox_now(&self) -> Result<InboxRotation, KeyStoreError> {
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_rotate_inbox_now(
+        &self,
+    ) -> Result<PreparedKeyStoreOperation<InboxRotation>, KeyStoreError> {
+        self.prepare_operation(|staged| staged.rotate_inbox_now_eager())
+    }
+
+    fn rotate_inbox_now_eager(&self) -> Result<InboxRotation, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
@@ -474,10 +551,10 @@ impl KeyStore {
         })
     }
 
-    /// Rotates the stored signed pre-key when its bundle is stale or missing.
+    /// Prepares a signed-pre-key rotation when the stored bundle is stale or missing.
     ///
     /// Returns `Some(bundle)` when callers need to upload a new bundle, or `None` when no rotation
-    /// was needed.
+    /// was needed. The returned no-op operation must still be finalized or aborted.
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
@@ -486,7 +563,14 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
     ///   malformed.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn rotate_signed_prekey_if_stale(
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_rotate_signed_prekey_if_stale(
+        &self,
+    ) -> Result<PreparedKeyStoreOperation<Option<SignedPreKeyBundle>>, KeyStoreError> {
+        self.prepare_operation(|staged| staged.rotate_signed_prekey_if_stale_eager())
+    }
+
+    fn rotate_signed_prekey_if_stale_eager(
         &self,
     ) -> Result<Option<SignedPreKeyBundle>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
@@ -497,7 +581,7 @@ impl KeyStore {
             .map(|signed_prekey| signed_prekey.bundle()))
     }
 
-    /// Forces an immediate signed-pre-key rotation and returns the new bundle.
+    /// Prepares an immediate signed-prekey rotation and returns the provisional bundle.
     ///
     /// Use this for explicit key-reset operations that must publish a fresh signed pre-key even
     /// when the stored bundle is still fresh.
@@ -507,7 +591,14 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key
     ///   fails.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_rotate_signed_prekey_now(
+        &self,
+    ) -> Result<PreparedKeyStoreOperation<SignedPreKeyBundle>, KeyStoreError> {
+        self.prepare_operation(|staged| staged.rotate_signed_prekey_now_eager())
+    }
+
+    fn rotate_signed_prekey_now_eager(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         Ok(self.0.signed_prekey.rotate_now(&mut OsRng)?.bundle())
     }
@@ -515,7 +606,8 @@ impl KeyStore {
     /// Exports the stored identity and current discovery key as a passphrase-encrypted backup blob.
     ///
     /// Requires a stored discovery key; a partially generated identity must be completed with
-    /// [`Self::generate_identity`] (which repairs a missing discovery key) before exporting.
+    /// [`Self::prepare_generate_identity`] (which repairs a missing discovery key) before
+    /// exporting.
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `LockPoisoned` | `NotFound`
@@ -525,8 +617,10 @@ impl KeyStore {
     /// - [`KeyStoreError::Identity`] (`Corrupt` | `InvalidData` | `NotFound`) when loading the
     ///   identity to export fails.
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failures.
+    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
         self.0.discovery.current()?;
         let dk_blob = self.0.discovery.export_blob()?;
         Ok(self
@@ -535,18 +629,13 @@ impl KeyStore {
             .export_encrypted_backup(&mut OsRng, passphrase, &dk_blob)?)
     }
 
-    /// Restores an identity and its discovery key from an encrypted backup.
+    /// Prepares restoration of an identity and discovery key from an encrypted backup.
     ///
     /// Authenticates the backup and validates the restored discovery key against the restored
-    /// identity before changing storage, so a wrong passphrase or malformed blob leaves existing
-    /// material untouched. On success the restored identity keeps the discovery key and epoch
-    /// lineage carried by the backup, with no one-time pre-keys or signed pre-key; callers can
-    /// create a signed pre-key with [`Self::rotate_signed_prekey_if_stale`]. Restore does not
-    /// restore protocol state; callers must wipe or replace session, deduplication, and pending
-    /// acknowledgment state, then use session recovery or re-handshake paths. The identity commits
-    /// as one versioned blob and the discovery key as its own signed blob, so an interrupted commit
-    /// that lands the identity without the discovery key leaves a detectable, re-mintable discovery
-    /// key, never a silent hybrid.
+    /// identity before staging changes, so a wrong passphrase or malformed blob leaves existing
+    /// material untouched. Commit this operation, atomically wipe or replace host-owned Session,
+    /// deduplication, and pending-acknowledgment state, then finalize. The restored identity keeps
+    /// the discovery-key epoch lineage from the backup and has no prekeys.
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`Corrupt`) if the backup's discovery key is not signed by
@@ -565,7 +654,16 @@ impl KeyStore {
     ///   failure.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
     ///   failure.
-    pub fn import_encrypted_backup(
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_import_encrypted_backup(
+        &self,
+        data: &[u8],
+        passphrase: &str,
+    ) -> Result<PreparedKeyStoreOperation<()>, KeyStoreError> {
+        self.prepare_operation(move |staged| staged.import_encrypted_backup_eager(data, passphrase))
+    }
+
+    fn import_encrypted_backup_eager(
         &self,
         data: &[u8],
         passphrase: &str,
@@ -583,10 +681,10 @@ impl KeyStore {
         Ok(())
     }
 
-    /// Clears the stored one-time pre-keys, signed pre-key, discovery key, and identity.
+    /// Prepares deletion of the stored pre-keys, discovery key, and identity.
     ///
-    /// Deletion runs dependents-first (pre-keys, then discovery key, then identity), so a partial
-    /// failure never leaves a key attached to material that is already gone.
+    /// Commit this operation, atomically wipe host-owned protocol state, then finalize. Interrupted
+    /// finalization resumes from durable progress.
     ///
     /// # Errors
     /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key delete
@@ -596,7 +694,12 @@ impl KeyStore {
     ///   failure.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
     ///   failure.
-    pub fn reset(&self) -> Result<(), KeyStoreError> {
+    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    pub fn prepare_reset(&self) -> Result<PreparedKeyStoreOperation<()>, KeyStoreError> {
+        self.prepare_operation(|staged| staged.reset_eager())
+    }
+
+    fn reset_eager(&self) -> Result<(), KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
@@ -612,6 +715,48 @@ impl KeyStore {
             .lifecycle
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+// Existing unit tests exercise the eager manager composition directly. Public integration tests
+// below exercise the prepared-operation boundary; keeping these shims test-only avoids conflating
+// those two responsibility layers.
+#[cfg(test)]
+impl KeyStore {
+    fn generate_identity(&self) -> Result<Identity, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.generate_identity_eager()
+    }
+
+    fn generate_one_time_prekeys(
+        &self,
+        batch_size: usize,
+    ) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+        self.generate_one_time_prekeys_eager(batch_size)
+    }
+
+    fn replenish_one_time_prekeys(&self) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+        self.replenish_one_time_prekeys_eager()
+    }
+
+    fn rotate_inbox_now(&self) -> Result<InboxRotation, KeyStoreError> {
+        self.rotate_inbox_now_eager()
+    }
+
+    fn rotate_signed_prekey_if_stale(&self) -> Result<Option<SignedPreKeyBundle>, KeyStoreError> {
+        self.rotate_signed_prekey_if_stale_eager()
+    }
+
+    fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+        self.rotate_signed_prekey_now_eager()
+    }
+
+    fn import_encrypted_backup(&self, data: &[u8], passphrase: &str) -> Result<(), KeyStoreError> {
+        self.import_encrypted_backup_eager(data, passphrase)
+    }
+
+    fn reset(&self) -> Result<(), KeyStoreError> {
+        self.reset_eager()
     }
 }
 
@@ -644,29 +789,7 @@ mod tests {
     fn store_with_storage() -> (KeyStore, SharedStorage) {
         let storage: SharedStorage = Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())));
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        let discovery = Arc::new(DiscoveryKeyManager::new(
-            Arc::clone(&storage),
-            Arc::clone(&identity),
-            Arc::clone(&clock),
-        ));
-        let one_time_prekey = Arc::new(OneTimePreKeyManager::new(
-            Arc::clone(&storage),
-            Arc::clone(&discovery),
-            Arc::clone(&clock),
-        ));
-        let signed_prekey = Arc::new(SignedPreKeyManager::new(
-            Arc::clone(&storage),
-            Arc::clone(&discovery),
-            clock,
-        ));
-        let key_store = KeyStore(Arc::new(KeyStoreInner {
-            identity,
-            discovery,
-            one_time_prekey,
-            signed_prekey,
-            lifecycle: Mutex::new(()),
-        }));
+        let key_store = KeyStore::from_shared_storage(Arc::clone(&storage), clock);
         (key_store, storage)
     }
 

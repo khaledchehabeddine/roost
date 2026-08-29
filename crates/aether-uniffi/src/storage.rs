@@ -18,7 +18,10 @@ use zeroize::Zeroizing;
 /// # Implementation
 ///
 /// Methods are called synchronously from Rust. Return [`AetherError::Storage`] for platform
-/// failures instead of panicking.
+/// failures instead of panicking. A successful mutation must be durable. An interrupted `store`
+/// must leave either the complete previous value or the complete new value, never a torn value.
+/// Core may retry `store` or `delete` after an ambiguous failure, so both operations must be safe
+/// to repeat.
 ///
 /// See [`InMemorySecureStorage`] for a reference implementation suitable for tests.
 #[uniffi::export(with_foreign)]

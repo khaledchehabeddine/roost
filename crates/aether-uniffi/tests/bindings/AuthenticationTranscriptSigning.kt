@@ -83,7 +83,10 @@ private fun checkInvalidData(store: KeyStore, transcript: ByteArray, message: St
 
 fun main() {
     val store = KeyStore(MemorySecureStorage())
-    val identity = store.generateIdentity()
+    val prepared = store.prepareGenerateIdentity()
+    store.commitOperation(prepared.operation.identifier)
+    store.finalizeOperation(prepared.operation.identifier)
+    val identity = prepared.identity
     val transcript = httpTranscript(identity.ed25519VerifyingKey)
 
     val signature = store.signAuthenticationTranscript(transcript)

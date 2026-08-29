@@ -23,11 +23,20 @@
 //! #     Ok(())
 //! # }
 //! let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-//! let identity = store.generate_identity()?;
+//! let identity = store.prepare_generate_identity()?;
+//! store.commit_operation(identity.operation.identifier)?;
+//! // Commit any host-owned output atomically here, then finalize SecureStorage.
+//! store.finalize_operation(identity.operation.identifier)?;
 //! // Publish the identity with a matching discovery-key + signed-pre-key pair.
-//! store.rotate_signed_prekey_now()?;
+//! let signed_prekey = store.prepare_rotate_signed_prekey_now()?;
+//! store.commit_operation(signed_prekey.operation.identifier)?;
+//! store.finalize_operation(signed_prekey.operation.identifier)?;
 //! let publication = store.current_publication_bundle()?;
-//! publish_identity_bundle(&identity, &publication.discovery_key, &publication.signed_prekey)?;
+//! publish_identity_bundle(
+//!     &identity.output,
+//!     &publication.discovery_key,
+//!     &publication.signed_prekey,
+//! )?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -97,9 +106,12 @@ pub use hardening::{
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
     AcknowledgmentProcessing, ContactBlock, InboxRotation, KeyStore, KeyStoreError,
-    MessageDecryption, MessageEncryption, MessageOperationError, PublicationBundle,
-    SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
-    SessionInitiationResult,
+    KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationIdentifier,
+    KeyStoreOperationStatus, MessageDecryption, MessageEncryption, MessageOperationError,
+    PreparedKeyStoreOperation, PublicationBundle, SecureStorageExpectedValue,
+    SecureStoragePrecondition, SessionAcceptance, SessionAcceptanceResult,
+    SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
+    UnfinishedKeyStoreOperation,
 };
 pub use message::{Message, MessageError, MessageId, PayloadKind};
 pub use one_time_prekey::OneTimePreKeyError;

@@ -9,7 +9,7 @@ context string or a field order fails every verification rather than degrading, 
 are normative for the listed library version and are read directly from the source, not restated
 from the specification.
 
-Applies to: **Aether v0.14.0**. Update on any change and note the affected release.
+Applies to: **Aether v0.15.0**. Update on any change and note the affected release.
 
 ## How a context is applied
 
@@ -194,6 +194,26 @@ Digest context for the protocol-state commit. Source:
 [`aether-uniffi/src/protocol.rs`](../crates/aether-uniffi/src/protocol.rs).
 
 ## Hash domain strings
+
+### `AetherSecureStoragePrecondition-v1`
+
+Prepared KeyStore operation precondition digest. This is the BLAKE3 `derive_key` context argument,
+not a byte prefix concatenated with the value:
+
+```
+digest = BLAKE3-DeriveKey("AetherSecureStoragePrecondition-v1", secure_storage_value)
+```
+
+The 32-byte digest crosses in operation metadata; the SecureStorage value does not enter the host
+protocol-state database. Secret values do cross into the trusted host-provided SecureStorage
+implementation, including when Core stores its operation journal, and its transient buffers must
+remain secret. Core compares the recomputed digest in constant time before committing. Source:
+[`key_store/operation.rs`](../crates/aether-core/src/key_store/operation.rs). The known-answer test
+`secure_storage_precondition_digest_known_answer` pins `b"fixture secure value"` to:
+
+```
+1057a0c66b56f08caa9cc9623796774f165575324362504f1626f534e4090c1a
+```
 
 ### `aether-recipient-delivery-capability-v1`
 

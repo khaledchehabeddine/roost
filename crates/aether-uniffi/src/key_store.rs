@@ -6,6 +6,11 @@ use crate::certificate::{
     revoked_identity_keys_to_core,
 };
 use crate::error::AetherError;
+use crate::key_store_operation::{
+    KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
+    PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
+    PreparedSignedPreKeyRotation, UnfinishedKeyStoreOperation, operation_identifier,
+};
 use crate::message::{Message, SenderIdentityMaterial};
 use crate::protocol::{
     AcknowledgmentOutcome, ContactStateChange, IdentityKey as FfiIdentityKey,
@@ -19,8 +24,9 @@ use crate::records::{
 use crate::storage::SecureStorageAdapter;
 use aether_core::{
     AcknowledgmentProcessing, InboundSenderCertificateValidation, KeyStore as CoreKeyStore,
-    MessageDecryption, MessageEncryption, MessageId, ProtocolStateKey, SessionAcceptance,
-    SessionInitiation,
+    MessageDecryption, MessageEncryption, MessageId,
+    PreparedKeyStoreOperation as CorePreparedKeyStoreOperation, ProtocolStateKey,
+    SessionAcceptance, SessionInitiation,
 };
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -42,7 +48,10 @@ const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 /// Entry point for local identity, discovery-key, and signed-pre-key state.
 ///
 /// Construct one keystore for the app and keep it for the process lifetime. Methods may be called
-/// concurrently, but the keystore serializes access to the underlying [`SecureStorage`].
+/// concurrently, but the keystore serializes access to the underlying [`SecureStorage`]. If more
+/// than one `KeyStore` instance or process addresses the same identity namespace, the host must use
+/// one shared per-identity actor or lock. Hold it from before preparing an operation until that
+/// operation is finalized, aborted, or reconciled after an ambiguous host commit.
 #[derive(uniffi::Object)]
 pub struct KeyStore {
     inner: CoreKeyStore,
@@ -103,8 +112,10 @@ impl KeyStore {
         })
     }
 
-    /// Generates a fresh identity (X25519 + Ed25519 key pairs) and persists it via
-    /// [`SecureStorage`].
+    /// Prepares fresh identity material without changing authoritative key entries.
+    ///
+    /// The secret material is staged in Core's recoverable [`SecureStorage`] journal. Commit the
+    /// operation, persist any host-owned output, then finalize it before using the identity.
     ///
     /// # Examples
     /// ```
@@ -113,8 +124,10 @@ impl KeyStore {
     /// # fn publish_identity(_identity: &Identity) -> Result<(), AetherError> { Ok(()) }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// let identity = store.generate_identity()?;
-    /// publish_identity(&identity)?;
+    /// let prepared = store.prepare_generate_identity()?;
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// store.finalize_operation(prepared.operation.identifier.clone())?;
+    /// publish_identity(&prepared.identity)?;
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
@@ -124,9 +137,114 @@ impl KeyStore {
     /// - [`AetherError::Corrupt`] if stored identity key material is incomplete.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored discovery-key or identity bytes are malformed.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] if platform storage returns an error.
-    pub fn generate_identity(&self) -> Result<Identity, AetherError> {
-        Ok(Identity::from_core(self.inner.generate_identity()?)?)
+    pub fn prepare_generate_identity(&self) -> Result<PreparedIdentityGeneration, AetherError> {
+        let (operation, identity) = self
+            .convert_prepared(self.inner.prepare_generate_identity()?, |identity| {
+                Ok(Identity::from_core(identity)?)
+            })?;
+        Ok(PreparedIdentityGeneration {
+            operation,
+            identity,
+        })
+    }
+
+    /// Returns the durable status of a retained prepared operation.
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`AetherError::NotFound`] if the operation is no longer retained.
+    /// - [`AetherError::Corrupt`] | [`AetherError::InternalError`] |
+    ///   [`AetherError::Storage`] if the operation journal cannot be read.
+    pub fn operation_status(
+        &self,
+        identifier: Vec<u8>,
+    ) -> Result<KeyStoreOperationStatus, AetherError> {
+        Ok(self
+            .inner
+            .operation_status(operation_identifier(&identifier)?)?
+            .into())
+    }
+
+    /// Validates SecureStorage preconditions and reserves an operation for the host transaction.
+    ///
+    /// After this succeeds, commit the provisional protocol-state updates and outputs atomically.
+    /// Call [`Self::finalize_operation`] after that host commit. Abort only after proving the host
+    /// transaction did not commit. If the commit result is ambiguous, reload the host operation
+    /// record by identifier and reconcile it through [`Self::unfinished_operations`].
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`AetherError::NotFound`] if the operation is no longer retained.
+    /// - [`AetherError::OperationConflict`] if the operation cannot be committed in its current
+    ///   state.
+    /// - [`AetherError::OperationRecoveryRequired`] if another committed operation needs recovery.
+    /// - [`AetherError::SecureStoragePreconditionChanged`] if authoritative input changed after
+    ///   preparation.
+    /// - [`AetherError::Corrupt`] | [`AetherError::InternalError`] |
+    ///   [`AetherError::Storage`] if the operation journal cannot be updated.
+    pub fn commit_operation(
+        &self,
+        identifier: Vec<u8>,
+    ) -> Result<KeyStoreOperationStatus, AetherError> {
+        Ok(self
+            .inner
+            .commit_operation(operation_identifier(&identifier)?)?
+            .into())
+    }
+
+    /// Makes a committed operation's staged SecureStorage mutations authoritative.
+    ///
+    /// Repeating this call resumes interrupted finalization or returns `Finalized` again.
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`AetherError::NotFound`] if the operation is no longer retained.
+    /// - [`AetherError::OperationConflict`] if the operation has not committed or was aborted.
+    /// - [`AetherError::Corrupt`] | [`AetherError::InternalError`] |
+    ///   [`AetherError::Storage`] if staged mutations cannot be resumed.
+    pub fn finalize_operation(
+        &self,
+        identifier: Vec<u8>,
+    ) -> Result<KeyStoreOperationStatus, AetherError> {
+        Ok(self
+            .inner
+            .finalize_operation(operation_identifier(&identifier)?)?
+            .into())
+    }
+
+    /// Discards staged SecureStorage mutations before finalization starts.
+    ///
+    /// # Errors
+    /// - [`AetherError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`AetherError::NotFound`] if the operation is no longer retained.
+    /// - [`AetherError::OperationConflict`] if finalization already started or completed.
+    /// - [`AetherError::Corrupt`] | [`AetherError::InternalError`] |
+    ///   [`AetherError::Storage`] if the operation journal cannot be updated.
+    pub fn abort_operation(
+        &self,
+        identifier: Vec<u8>,
+    ) -> Result<KeyStoreOperationStatus, AetherError> {
+        Ok(self
+            .inner
+            .abort_operation(operation_identifier(&identifier)?)?
+            .into())
+    }
+
+    /// Returns prepared operations that still need startup recovery.
+    ///
+    /// # Errors
+    /// - [`AetherError::Corrupt`] | [`AetherError::InternalError`] |
+    ///   [`AetherError::Storage`] if the operation journal cannot be read.
+    pub fn unfinished_operations(&self) -> Result<Vec<UnfinishedKeyStoreOperation>, AetherError> {
+        Ok(self
+            .inner
+            .unfinished_operations()?
+            .into_iter()
+            .map(Into::into)
+            .collect())
     }
 
     /// Loads the stored identity's public material.
@@ -137,7 +255,9 @@ impl KeyStore {
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
+    /// # let prepared = store.prepare_generate_identity()?;
+    /// # store.commit_operation(prepared.operation.identifier.clone())?;
+    /// # store.finalize_operation(prepared.operation.identifier)?;
     /// let identity = store.load_identity()?;
     /// # Ok::<(), AetherError>(())
     /// ```
@@ -147,6 +267,7 @@ impl KeyStore {
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if a stored key has the wrong byte length.
     /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn load_identity(&self) -> Result<Identity, AetherError> {
         Ok(Identity::from_core(self.inner.load_identity()?)?)
@@ -164,13 +285,16 @@ impl KeyStore {
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
     /// if !store.has_identity()? {
-    ///     store.generate_identity()?;
+    ///     let prepared = store.prepare_generate_identity()?;
+    ///     store.commit_operation(prepared.operation.identifier.clone())?;
+    ///     store.finalize_operation(prepared.operation.identifier)?;
     /// }
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
     /// # Errors
     /// - [`AetherError::InternalError`] on storage lock poisoning.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn has_identity(&self) -> Result<bool, AetherError> {
         Ok(self.inner.has_identity()?)
@@ -204,7 +328,9 @@ impl KeyStore {
     /// # fn challenge_nonce() -> [u8; 32] { [0x22; 32] }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
+    /// # let prepared = store.prepare_generate_identity()?;
+    /// # store.commit_operation(prepared.operation.identifier.clone())?;
+    /// # store.finalize_operation(prepared.operation.identifier)?;
     /// let identity = store.load_identity()?;
     ///
     /// // The caller builds the whole preimage, context included.
@@ -224,6 +350,7 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if the transcript is empty, longer than 4096 bytes, starts
     ///   with the reserved `Aether` prefix, or a stored identity key has the wrong byte length.
     /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn sign_authentication_transcript(
         &self,
@@ -254,8 +381,12 @@ impl KeyStore {
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
-    /// # store.rotate_signed_prekey_if_stale()?;
+    /// # let identity = store.prepare_generate_identity()?;
+    /// # store.commit_operation(identity.operation.identifier.clone())?;
+    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # let signed_prekey = store.prepare_rotate_signed_prekey_if_stale()?;
+    /// # store.commit_operation(signed_prekey.operation.identifier.clone())?;
+    /// # store.finalize_operation(signed_prekey.operation.identifier)?;
     /// let bundle = store.current_signed_prekey_bundle()?;
     /// send_bundle_to_peer(&bundle)?;
     /// # Ok::<(), AetherError>(())
@@ -266,6 +397,7 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if the stored blob has the wrong length or unsupported
     ///   version.
     /// - [`AetherError::NotFound`] if no signed pre-key is stored.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, AetherError> {
         Ok(self.inner.current_signed_prekey_bundle()?.into())
@@ -286,7 +418,9 @@ impl KeyStore {
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
+    /// # let prepared = store.prepare_generate_identity()?;
+    /// # store.commit_operation(prepared.operation.identifier.clone())?;
+    /// # store.finalize_operation(prepared.operation.identifier)?;
     /// let bundle = store.current_discovery_key_bundle()?;
     /// send_to_peer(&bundle)?;
     /// # Ok::<(), AetherError>(())
@@ -298,6 +432,7 @@ impl KeyStore {
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if stored discovery-key or identity bytes are malformed.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, AetherError> {
         Ok(self.inner.current_discovery_key_bundle()?.into())
@@ -320,8 +455,12 @@ impl KeyStore {
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
-    /// # store.rotate_signed_prekey_now()?;
+    /// # let identity = store.prepare_generate_identity()?;
+    /// # store.commit_operation(identity.operation.identifier.clone())?;
+    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # let signed_prekey = store.prepare_rotate_signed_prekey_now()?;
+    /// # store.commit_operation(signed_prekey.operation.identifier.clone())?;
+    /// # store.finalize_operation(signed_prekey.operation.identifier)?;
     /// let publication = store.current_publication_bundle()?;
     /// publish(&publication)?;
     /// # Ok::<(), AetherError>(())
@@ -333,6 +472,7 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if stored discovery-key, signed-pre-key, or identity bytes
     ///   are malformed.
     /// - [`AetherError::NotFound`] if no identity, discovery key, or signed pre-key is stored.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, AetherError> {
         Ok(self.inner.current_publication_bundle()?.into())
@@ -350,6 +490,7 @@ impl KeyStore {
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if the stored discovery-key blob is malformed.
     /// - [`AetherError::NotFound`] if no discovery key is stored.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn current_delivery_capability(&self) -> Result<Vec<u8>, AetherError> {
         Ok(self
@@ -359,48 +500,60 @@ impl KeyStore {
             .to_vec())
     }
 
-    /// Generates exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
+    /// Prepares exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
     ///
-    /// The returned records contain only public material. The secret halves remain in secure
-    /// storage and are consumed by Rust when accepting a matching X3DH first message.
+    /// The returned records contain only public material. The secret halves remain securely staged
+    /// in the recoverable operation journal and become authoritative only on finalization.
     ///
     /// # Errors
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored one-time-pre-key data is malformed or the batch
     ///   exceeds capacity.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn generate_one_time_prekeys(
+    pub fn prepare_generate_one_time_prekeys(
         &self,
         batch_size: u32,
-    ) -> Result<Vec<OneTimePreKeyBundle>, AetherError> {
-        Ok(self
-            .inner
-            .generate_one_time_prekeys(batch_size as usize)?
-            .into_iter()
-            .map(Into::into)
-            .collect())
+    ) -> Result<PreparedOneTimePreKeys, AetherError> {
+        let (operation, one_time_prekeys) = self.convert_prepared(
+            self.inner
+                .prepare_generate_one_time_prekeys(batch_size as usize)?,
+            |one_time_prekeys| Ok(one_time_prekeys.into_iter().map(Into::into).collect()),
+        )?;
+        Ok(PreparedOneTimePreKeys {
+            operation,
+            one_time_prekeys,
+        })
     }
 
-    /// Replenishes the one-time-prekey pool when it falls below the replenish threshold.
+    /// Prepares one-time-prekey pool replenishment when it falls below the threshold.
     ///
-    /// Returns an empty list when the current pool is already above the threshold.
+    /// Returns an empty provisional list when the current pool is already above the threshold. The
+    /// returned no-op operation must still be finalized or aborted.
     ///
     /// # Errors
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored one-time-prekey data is malformed.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn replenish_one_time_prekeys(&self) -> Result<Vec<OneTimePreKeyBundle>, AetherError> {
-        Ok(self
-            .inner
-            .replenish_one_time_prekeys()?
-            .into_iter()
-            .map(Into::into)
-            .collect())
+    pub fn prepare_replenish_one_time_prekeys(
+        &self,
+    ) -> Result<PreparedOneTimePreKeys, AetherError> {
+        let (operation, one_time_prekeys) = self.convert_prepared(
+            self.inner.prepare_replenish_one_time_prekeys()?,
+            |one_time_prekeys| Ok(one_time_prekeys.into_iter().map(Into::into).collect()),
+        )?;
+        Ok(PreparedOneTimePreKeys {
+            operation,
+            one_time_prekeys,
+        })
     }
 
-    /// Rotates the discovery key and signed pre-key together, returning both bundles.
+    /// Prepares a discovery-key, capability, and prekey rotation as one operation.
     ///
     /// The discovery-key and signed-pre-key rotations are one operation. Stored one-time pre-keys
     /// are cleared before the discovery-key epoch advances. Publish both returned bundles together
@@ -417,9 +570,13 @@ impl KeyStore {
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
-    /// let rotation = store.rotate_inbox_now()?;
-    /// publish_rotation(&rotation.publication)?;
+    /// # let identity = store.prepare_generate_identity()?;
+    /// # store.commit_operation(identity.operation.identifier.clone())?;
+    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_rotate_inbox_now()?;
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// store.finalize_operation(prepared.operation.identifier.clone())?;
+    /// publish_rotation(&prepared.rotation.publication)?;
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
@@ -429,19 +586,24 @@ impl KeyStore {
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored discovery-key or identity bytes are malformed.
     /// - [`AetherError::NotFound`] if no identity is stored.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn rotate_inbox_now(&self) -> Result<InboxRotation, AetherError> {
-        let rotation = self.inner.rotate_inbox_now()?;
-        Ok(InboxRotation {
-            publication: rotation.publication.into(),
-            capability: rotation.capability.to_bytes().to_vec(),
+    pub fn prepare_rotate_inbox_now(&self) -> Result<PreparedInboxRotation, AetherError> {
+        let (operation, rotation) = self
+            .convert_prepared(self.inner.prepare_rotate_inbox_now()?, |rotation| {
+                Ok(inbox_rotation_from_core(rotation))
+            })?;
+        Ok(PreparedInboxRotation {
+            operation,
+            rotation,
         })
     }
 
-    /// Rotates the signed pre-key if the stored one is missing or older than the rotation window.
+    /// Prepares signed-prekey rotation if the stored one is missing or stale.
     ///
     /// Returns the new bundle when rotation occurred, `None` when the stored signed pre-key is
-    /// still fresh.
+    /// still fresh. The returned no-op operation must still be finalized or aborted.
     ///
     /// Call once at app launch. The returned signed pre-key is signed by the current discovery
     /// key, so publish it together with that discovery-key bundle. Prefer
@@ -459,8 +621,13 @@ impl KeyStore {
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
-    /// if let Some(new_bundle) = store.rotate_signed_prekey_if_stale()? {
+    /// # let identity = store.prepare_generate_identity()?;
+    /// # store.commit_operation(identity.operation.identifier.clone())?;
+    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_rotate_signed_prekey_if_stale()?;
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// if let Some(new_bundle) = prepared.signed_prekey {
     ///     publish_signed_prekey_bundle(&new_bundle)?;
     /// }
     /// # Ok::<(), AetherError>(())
@@ -473,13 +640,23 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if stored signed-pre-key, discovery-key, or identity bytes are
     ///   malformed.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn rotate_signed_prekey_if_stale(&self) -> Result<Option<SignedPreKeyBundle>, AetherError> {
-        Ok(self.inner.rotate_signed_prekey_if_stale()?.map(Into::into))
+    pub fn prepare_rotate_signed_prekey_if_stale(
+        &self,
+    ) -> Result<PreparedSignedPreKeyRotation, AetherError> {
+        let (operation, signed_prekey) = self.convert_prepared(
+            self.inner.prepare_rotate_signed_prekey_if_stale()?,
+            |signed_prekey| Ok(signed_prekey.map(Into::into)),
+        )?;
+        Ok(PreparedSignedPreKeyRotation {
+            operation,
+            signed_prekey,
+        })
     }
 
-    /// Rotates the signed pre-key immediately, regardless of staleness, and returns the new
-    /// bundle.
+    /// Prepares immediate signed-prekey rotation regardless of staleness.
     ///
     /// Use when the caller needs a fresh bundle independent of the rotation window.
     ///
@@ -494,9 +671,15 @@ impl KeyStore {
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
-    /// let new_bundle = store.rotate_signed_prekey_now()?;
-    /// publish_signed_prekey_bundle(&new_bundle)?;
+    /// # let identity = store.prepare_generate_identity()?;
+    /// # store.commit_operation(identity.operation.identifier.clone())?;
+    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// let prepared = store.prepare_rotate_signed_prekey_now()?;
+    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// if let Some(new_bundle) = prepared.signed_prekey {
+    ///     publish_signed_prekey_bundle(&new_bundle)?;
+    /// }
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
@@ -506,12 +689,23 @@ impl KeyStore {
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored discovery-key or identity bytes are malformed.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, AetherError> {
-        Ok(self.inner.rotate_signed_prekey_now()?.into())
+    pub fn prepare_rotate_signed_prekey_now(
+        &self,
+    ) -> Result<PreparedSignedPreKeyRotation, AetherError> {
+        let (operation, signed_prekey) = self.convert_prepared(
+            self.inner.prepare_rotate_signed_prekey_now()?,
+            |signed_prekey| Ok(Some(signed_prekey.into())),
+        )?;
+        Ok(PreparedSignedPreKeyRotation {
+            operation,
+            signed_prekey,
+        })
     }
 
-    /// Blocks a contact and rotates the inbox so the block takes effect at the relay.
+    /// Prepares a contact block and inbox rotation so both cross one host commit boundary.
     ///
     /// [`crate::ProtocolStateEngine::block_contact`] changes local state only, which stops this
     /// device sending and surfacing that contact's messages but leaves the contact holding a
@@ -523,30 +717,36 @@ impl KeyStore {
     /// contact.
     ///
     /// Blocking an already-blocked contact performs no rotation, so repeating the call does not
-    /// churn every contact's capability.
+    /// churn every contact's capability. Its no-op operation must still be finalized or aborted.
+    ///
+    /// Commit the operation, atomically persist [`ContactBlock::contact`] and any host-owned
+    /// publication work, then finalize the staged SecureStorage rotation. Abort only after proving
+    /// the host transaction did not commit.
     ///
     /// # Errors
     /// - [`AetherError::InvalidData`] if `identity_key` has the wrong length.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if no contact is stored for `identity_key`, or its
     ///   blob is malformed.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn block_contact(
+    pub fn prepare_block_contact(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         identity_key: FfiIdentityKey,
-    ) -> Result<ContactBlock, AetherError> {
+    ) -> Result<PreparedContactBlock, AetherError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
-        let blocked = self
+        let prepared = self
             .inner
-            .block_contact(&snapshot.snapshot, identity_key.to_core()?)?;
-        Ok(ContactBlock {
-            contact: ContactStateChange::from_core(&snapshot, blocked.contact)?,
-            rotation: blocked.rotation.map(|rotation| InboxRotation {
-                publication: rotation.publication.into(),
-                capability: rotation.capability.to_bytes().to_vec(),
-            }),
-        })
+            .prepare_block_contact(&snapshot.snapshot, identity_key.to_core()?)?;
+        let (operation, block) = self.convert_prepared(prepared, |blocked| {
+            Ok(ContactBlock {
+                contact: ContactStateChange::from_core(&snapshot, blocked.contact)?,
+                rotation: blocked.rotation.map(inbox_rotation_from_core),
+            })
+        })?;
+        Ok(PreparedContactBlock { operation, block })
     }
 
     /// Starts a new Session as the initiator.
@@ -559,6 +759,7 @@ impl KeyStore {
     ///   fails.
     /// - [`AetherError::InvalidData`] if key, message, certificate, or prekey inputs are malformed.
     /// - [`AetherError::NotFound`] if local identity or Discovery Key material is missing.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if install state cannot be encoded.
     /// - [`AetherError::Storage`] on platform storage failure.
     #[expect(
@@ -597,14 +798,14 @@ impl KeyStore {
 
     /// Reads who sent an X3DH first message, without accepting it.
     ///
-    /// Call this before [`Self::accept_session`] when the sender is not already known. A host
+    /// Call this before [`Self::prepare_accept_session`] when the sender is not already known. A host
     /// addresses Session state by a key derived from both identities, so it needs the sender
-    /// before it can accept — and `accept_session` consumes the referenced one-time pre-key, so
-    /// it cannot be run speculatively to find out.
+    /// before it can accept. Acceptance stages consumption of the referenced one-time prekey, so
+    /// it should not be run merely to discover the sender.
     ///
     /// Opens only the layer sealed to this device's own Discovery Key: it consumes nothing and
     /// is readable by nobody else. The returned identity is the sender's *claim*, carrying its
-    /// own verified binding signature; `accept_session` then checks it against the sealed
+    /// own verified binding signature; `prepare_accept_session` then checks it against the sealed
     /// envelope's authenticated copy, so on its own it proves only that whoever reached this
     /// inbox named this identity.
     ///
@@ -613,6 +814,7 @@ impl KeyStore {
     ///   or the named identity's binding signature does not verify.
     /// - [`AetherError::InvalidData`] if the message is not an X3DH initial or does not decode.
     /// - [`AetherError::NotFound`] if local Discovery Key material is missing.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn initiator_identity_hint(&self, message: Message) -> Result<Identity, AetherError> {
         let core_message = message.to_core()?;
@@ -624,9 +826,11 @@ impl KeyStore {
         })
     }
 
-    /// Accepts a new Session as the responder.
+    /// Prepares responder-side Session acceptance and one-time-prekey consumption.
     ///
-    /// A referenced one-time prekey is consumed only after the first Message authenticates.
+    /// The output contains provisional protocol-state updates and authenticated plaintext. Commit
+    /// the operation, atomically persist those updates, then finalize SecureStorage. The referenced
+    /// one-time prekey remains authoritative until finalization.
     ///
     /// # Errors
     /// - [`AetherError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
@@ -634,27 +838,35 @@ impl KeyStore {
     /// - [`AetherError::InvalidData`] if the message, key, or prekey inputs are malformed.
     /// - [`AetherError::NotFound`] if required local identity, Discovery Key, signed-prekey, or
     ///   one-time-prekey material is missing.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if install state cannot be encoded.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn accept_session(
+    pub fn prepare_accept_session(
         &self,
         session_key: Vec<u8>,
         initiator_identity: Option<Identity>,
         message: Message,
-    ) -> Result<SessionAcceptanceResult, AetherError> {
+    ) -> Result<PreparedSessionAcceptance, AetherError> {
         let core_message = message.to_core()?;
         let initiator_identity_key = initiator_identity
             .map(|identity| identity.to_core())
             .transpose()?;
-        let result = self.inner.accept_session(SessionAcceptance {
+        let prepared = self.inner.prepare_accept_session(SessionAcceptance {
             session_key: ProtocolStateKey::from_bytes(session_key)?,
             initiator_identity_key,
             message: &core_message,
         })?;
-        Ok(SessionAcceptanceResult {
-            plaintext: result.plaintext.to_vec(),
-            sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-            state_updates: updates_from_core_absent(result.state_updates)?,
+        let (operation, acceptance) = self.convert_prepared(prepared, |result| {
+            Ok(SessionAcceptanceResult {
+                plaintext: result.plaintext.to_vec(),
+                sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
+                state_updates: updates_from_core_absent(result.state_updates)?,
+            })
+        })?;
+        Ok(PreparedSessionAcceptance {
+            operation,
+            acceptance,
         })
     }
 
@@ -667,6 +879,7 @@ impl KeyStore {
     /// - [`AetherError::BlockedContact`] if the contact is locally blocked.
     /// - [`AetherError::InvalidData`] if message IDs, keys, or message fields are malformed.
     /// - [`AetherError::NotFound`] if local identity material is missing.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
     /// - [`AetherError::Storage`] on platform storage failure.
     #[expect(
@@ -715,6 +928,7 @@ impl KeyStore {
     ///   authentication fails.
     /// - [`AetherError::CertificateRejected`] if sender-certificate validation rejects the sender.
     /// - [`AetherError::InvalidData`] if message IDs, keys, or message fields are malformed.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
     /// - [`AetherError::Storage`] on platform storage failure.
     #[expect(
@@ -796,6 +1010,7 @@ impl KeyStore {
     /// - [`AetherError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
     ///   authentication fails.
     /// - [`AetherError::InvalidData`] if message fields are malformed.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
     /// - [`AetherError::Storage`] on platform storage failure.
     pub fn process_acknowledgment(
@@ -820,11 +1035,11 @@ impl KeyStore {
     /// Exports the current identity and discovery key as a passphrase-encrypted blob.
     ///
     /// The blob is portable across devices: pass it to another keystore's
-    /// [`Self::import_encrypted_backup`] with the same `passphrase` to restore the same identity
+    /// [`Self::prepare_import_encrypted_backup`] with the same `passphrase` to restore the same identity
     /// and discovery-epoch lineage.
     ///
     /// Requires a stored discovery key; if it is missing, regenerate the identity with
-    /// [`Self::generate_identity`] (which repairs the discovery key) before exporting.
+    /// [`Self::prepare_generate_identity`] (which repairs the discovery key) before exporting.
     ///
     /// # Examples
     /// ```
@@ -833,7 +1048,9 @@ impl KeyStore {
     /// # fn persist_backup_blob(_blob: &[u8]) -> Result<(), AetherError> { Ok(()) }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// # store.generate_identity()?;
+    /// # let prepared = store.prepare_generate_identity()?;
+    /// # store.commit_operation(prepared.operation.identifier.clone())?;
+    /// # store.finalize_operation(prepared.operation.identifier)?;
     /// let blob = store.export_encrypted_backup("strong passphrase".into())?;
     /// persist_backup_blob(&blob)?;
     /// # Ok::<(), AetherError>(())
@@ -847,6 +1064,7 @@ impl KeyStore {
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if a stored identity key has the wrong byte length.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure when loading an identity.
     ///
     /// # Performance
@@ -858,18 +1076,14 @@ impl KeyStore {
         Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
 
-    /// Restores an identity from an encrypted backup, replacing any current identity.
+    /// Prepares restoration of an encrypted identity backup.
     ///
     /// The backup is decrypted and the restored discovery key is validated against the restored
-    /// identity before storage changes begin, so a wrong passphrase or malformed blob leaves the
-    /// existing identity untouched. On success, the restored identity keeps the discovery key and
-    /// epoch lineage carried by the backup and has no one-time pre-keys or signed pre-key. Restore
-    /// does not restore protocol state; wipe or replace session, deduplication, and pending
-    /// acknowledgment state, then use session recovery or re-handshake paths. Call
-    /// [`Self::rotate_signed_prekey_if_stale`] before publishing.
-    ///
-    /// Storage failures can happen after writes begin and may leave incomplete key material. Call
-    /// [`Self::reset`] before using the keystore again after a failed import.
+    /// identity before staging changes, so a wrong passphrase or malformed blob leaves the
+    /// existing identity untouched. Commit the operation, atomically wipe or replace host-owned
+    /// Session, deduplication, and pending-acknowledgment state, then finalize. The restored
+    /// identity keeps the discovery-key epoch lineage from the backup and has no prekeys. Prepare
+    /// a signed-prekey rotation before publishing.
     ///
     /// # Examples
     /// ```
@@ -878,13 +1092,21 @@ impl KeyStore {
     /// // Source keystore: generate an identity and export an encrypted backup.
     /// let source: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// let source_store = KeyStore::new(source);
-    /// source_store.generate_identity()?;
+    /// let identity = source_store.prepare_generate_identity()?;
+    /// source_store.commit_operation(identity.operation.identifier.clone())?;
+    /// source_store.finalize_operation(identity.operation.identifier)?;
     /// let blob = source_store.export_encrypted_backup("strong passphrase".into())?;
     ///
     /// // Restored keystore: import the blob into a fresh store.
     /// let destination: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// let destination_store = KeyStore::new(destination);
-    /// destination_store.import_encrypted_backup(blob, "strong passphrase".into())?;
+    /// let operation = destination_store.prepare_import_encrypted_backup(
+    ///     blob,
+    ///     "strong passphrase".into(),
+    /// )?;
+    /// destination_store.commit_operation(operation.identifier.clone())?;
+    /// // Atomically wipe host-owned protocol state here.
+    /// destination_store.finalize_operation(operation.identifier)?;
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
@@ -896,29 +1118,32 @@ impl KeyStore {
     ///   identity key.
     /// - [`AetherError::InvalidData`] on a malformed header, authenticated unsupported version,
     ///   out-of-range Argon2id parameters, or a malformed discovery-key blob.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure during commit.
     ///
     /// # Performance
     /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
     /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
     /// hashing step using 64 MiB memory and 3 iterations.
-    pub fn import_encrypted_backup(
+    pub fn prepare_import_encrypted_backup(
         &self,
         data: Vec<u8>,
         passphrase: String,
-    ) -> Result<(), AetherError> {
+    ) -> Result<KeyStoreOperation, AetherError> {
         let data = Zeroizing::new(data);
         let passphrase = Zeroizing::new(passphrase);
-        self.inner
-            .import_encrypted_backup(data.as_slice(), passphrase.as_str())
-            .map_err(Into::into)
+        Ok(self
+            .inner
+            .prepare_import_encrypted_backup(data.as_slice(), passphrase.as_str())?
+            .operation
+            .into())
     }
 
-    /// Clears the stored one-time pre-keys, signed pre-key, discovery-key, and identity material.
+    /// Prepares deletion of all stored prekeys, discovery-key, and identity material.
     ///
-    /// Deletion runs dependents-first, so a partial failure does not leave newer key material
-    /// attached to a missing identity. Calling this on an empty store succeeds. Calling it again
-    /// after a partial failure continues deleting any remaining keys.
+    /// Commit the operation, atomically wipe host-owned protocol state, then finalize. Calling this
+    /// on an empty store still produces an idempotent recoverable operation.
     ///
     /// # Examples
     /// ```
@@ -926,15 +1151,50 @@ impl KeyStore {
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = KeyStore::new(storage);
-    /// store.reset()?;
+    /// let operation = store.prepare_reset()?;
+    /// store.commit_operation(operation.identifier.clone())?;
+    /// // Atomically wipe host-owned protocol state here.
+    /// store.finalize_operation(operation.identifier)?;
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
     /// # Errors
     /// - [`AetherError::InternalError`] on storage lock poisoning.
+    /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::Storage`] on platform storage failure.
-    pub fn reset(&self) -> Result<(), AetherError> {
-        self.inner.reset().map_err(Into::into)
+    pub fn prepare_reset(&self) -> Result<KeyStoreOperation, AetherError> {
+        Ok(self.inner.prepare_reset()?.operation.into())
+    }
+}
+
+impl KeyStore {
+    fn convert_prepared<T, U>(
+        &self,
+        prepared: CorePreparedKeyStoreOperation<T>,
+        convert: impl FnOnce(T) -> Result<U, AetherError>,
+    ) -> Result<(KeyStoreOperation, U), AetherError> {
+        let identifier = prepared.operation.identifier;
+        let operation = prepared.operation.into();
+        match convert(prepared.output) {
+            Ok(output) => Ok((operation, output)),
+            Err(error) => match self.inner.abort_operation(identifier) {
+                Ok(_) => Err(error),
+                Err(abort_error) => Err(AetherError::OperationRecoveryRequired {
+                    operation_identifier: identifier.as_bytes().to_vec(),
+                    reason: format!(
+                        "prepared output conversion failed and cleanup also failed: {abort_error}"
+                    ),
+                }),
+            },
+        }
+    }
+}
+
+fn inbox_rotation_from_core(rotation: aether_core::InboxRotation) -> InboxRotation {
+    InboxRotation {
+        publication: rotation.publication.into(),
+        capability: rotation.capability.to_bytes().to_vec(),
     }
 }
 
@@ -967,8 +1227,71 @@ fn check_signable_transcript(transcript: &[u8]) -> Result<(), AetherError> {
 }
 
 #[cfg(test)]
+impl KeyStore {
+    fn complete_prepared<T>(
+        &self,
+        operation: KeyStoreOperation,
+        output: T,
+    ) -> Result<T, AetherError> {
+        self.commit_operation(operation.identifier.clone())?;
+        self.finalize_operation(operation.identifier)?;
+        Ok(output)
+    }
+
+    pub(crate) fn generate_identity(&self) -> Result<Identity, AetherError> {
+        let prepared = self.prepare_generate_identity()?;
+        self.complete_prepared(prepared.operation, prepared.identity)
+    }
+
+    pub(crate) fn generate_one_time_prekeys(
+        &self,
+        batch_size: u32,
+    ) -> Result<Vec<OneTimePreKeyBundle>, AetherError> {
+        let prepared = self.prepare_generate_one_time_prekeys(batch_size)?;
+        self.complete_prepared(prepared.operation, prepared.one_time_prekeys)
+    }
+
+    pub(crate) fn replenish_one_time_prekeys(
+        &self,
+    ) -> Result<Vec<OneTimePreKeyBundle>, AetherError> {
+        let prepared = self.prepare_replenish_one_time_prekeys()?;
+        self.complete_prepared(prepared.operation, prepared.one_time_prekeys)
+    }
+
+    pub(crate) fn rotate_inbox_now(&self) -> Result<InboxRotation, AetherError> {
+        let prepared = self.prepare_rotate_inbox_now()?;
+        self.complete_prepared(prepared.operation, prepared.rotation)
+    }
+
+    pub(crate) fn rotate_signed_prekey_if_stale(
+        &self,
+    ) -> Result<Option<SignedPreKeyBundle>, AetherError> {
+        let prepared = self.prepare_rotate_signed_prekey_if_stale()?;
+        self.complete_prepared(prepared.operation, prepared.signed_prekey)
+    }
+
+    pub(crate) fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, AetherError> {
+        let prepared = self.prepare_rotate_signed_prekey_now()?;
+        let signed_prekey = prepared.signed_prekey.ok_or(AetherError::InternalError {
+            reason: "forced signed-prekey rotation returned no bundle".into(),
+        })?;
+        self.complete_prepared(prepared.operation, signed_prekey)
+    }
+
+    pub(crate) fn accept_session(
+        &self,
+        session_key: Vec<u8>,
+        initiator_identity: Option<Identity>,
+        message: Message,
+    ) -> Result<SessionAcceptanceResult, AetherError> {
+        let prepared = self.prepare_accept_session(session_key, initiator_identity, message)?;
+        self.complete_prepared(prepared.operation, prepared.acceptance)
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{KeyStore, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
+    use super::{KeyStore, KeyStoreOperationStatus, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
     use crate::{
         AetherError, InMemorySecureStorage, SecureStorage,
         protocol::{
@@ -1198,6 +1521,46 @@ mod tests {
     fn key_store() -> Arc<KeyStore> {
         let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
         KeyStore::new(storage)
+    }
+
+    #[test]
+    fn prepared_identity_lifecycle_crosses_the_uniffi_boundary() {
+        let store = key_store();
+        let prepared = store.prepare_generate_identity().unwrap();
+        let identifier = prepared.operation.identifier.clone();
+
+        assert_eq!(identifier.len(), 16);
+        assert!(!prepared.operation.secure_storage_preconditions.is_empty());
+        assert!(matches!(
+            store.operation_status(identifier.clone()).unwrap(),
+            KeyStoreOperationStatus::Prepared
+        ));
+        assert!(!store.has_identity().unwrap());
+
+        assert!(matches!(
+            store.commit_operation(identifier.clone()).unwrap(),
+            KeyStoreOperationStatus::Committed
+        ));
+        assert!(matches!(
+            store.has_identity(),
+            Err(AetherError::OperationRecoveryRequired {
+                operation_identifier,
+                ..
+            }) if operation_identifier == identifier
+        ));
+
+        assert!(matches!(
+            store.finalize_operation(identifier.clone()).unwrap(),
+            KeyStoreOperationStatus::Finalized
+        ));
+        assert!(matches!(
+            store.finalize_operation(identifier).unwrap(),
+            KeyStoreOperationStatus::Finalized
+        ));
+        assert_eq!(
+            store.load_identity().unwrap().x25519_public_key,
+            prepared.identity.x25519_public_key
+        );
     }
 
     fn verifying_key(identity: &FfiIdentity) -> VerifyingKey {

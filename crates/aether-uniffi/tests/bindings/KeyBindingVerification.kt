@@ -109,7 +109,10 @@ private fun checkInvalidData(message: String, block: () -> Unit) {
 
 fun main() {
     val store = KeyStore(MemorySecureStorage())
-    val generated = store.generateIdentity()
+    val prepared = store.prepareGenerateIdentity()
+    store.commitOperation(prepared.operation.identifier)
+    store.finalizeOperation(prepared.operation.identifier)
+    val generated = prepared.identity
     val identity = IdentityKey(generated.x25519PublicKey, generated.ed25519VerifyingKey)
 
     // ── The identity self-binding, both ways round ──────────────────────────

@@ -14,6 +14,14 @@ The generated UniFFI storage protocol the host app implements to expose its plat
 `aether_core::SecureStorage` for Core; the implementation is provided at compile time.
 Avoid: keychain, keystore, secrets store
 
+**Prepared KeyStore Operation** (one host coordination boundary per secure mutation):
+The generated record carrying a stable operation identifier, SecureStorage preconditions, and
+provisional output without exposing staged secrets. The host records the identifier alongside its
+atomic Protocol State Blob transaction, then asks Core to finalize or abort by identifier. One
+host-owned per-identity actor or lock spans that lifecycle across every KeyStore instance and
+process sharing the identity namespace.
+Avoid: platform transaction, background task, eager KeyStore call
+
 **ProtocolStateStore** (one durable host transaction boundary):
 The UniFFI trait or host-side adapter shape that loads and commits opaque Protocol State Blobs by
 Protocol State Kind and key. Rust returns state updates and output values together; the host commits

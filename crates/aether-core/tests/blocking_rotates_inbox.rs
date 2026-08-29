@@ -5,7 +5,7 @@
 
 use aether_core::{
     ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InMemorySecureStorage, KeyStore,
-    ProtocolStateEngine, ProtocolStateSnapshot,
+    PreparedKeyStoreOperation, ProtocolStateEngine, ProtocolStateSnapshot,
 };
 use aether_crypto::{
     generate_discovery_key, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
@@ -14,6 +14,16 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 const CREATED_AT: u64 = 1_700_000_000;
+
+fn complete<T>(key_store: &KeyStore, prepared: PreparedKeyStoreOperation<T>) -> T {
+    key_store
+        .commit_operation(prepared.operation.identifier)
+        .unwrap();
+    key_store
+        .finalize_operation(prepared.operation.identifier)
+        .unwrap();
+    prepared.output
+}
 
 fn peer_contact() -> ContactIdentity {
     let mut rng = ChaCha20Rng::from_seed([21u8; 32]);
@@ -32,7 +42,8 @@ fn peer_contact() -> ContactIdentity {
 
 fn store_with_contact() -> (KeyStore, ProtocolStateSnapshot, ContactIdentityKey) {
     let key_store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    key_store.generate_identity().unwrap();
+    let identity = key_store.prepare_generate_identity().unwrap();
+    complete(&key_store, identity);
     let engine = ProtocolStateEngine::new();
     let contact = peer_contact();
     let mut snapshot = ProtocolStateSnapshot::new();
@@ -51,7 +62,12 @@ fn blocking_a_contact_rotates_the_inbox() {
     let before = key_store.current_discovery_key_bundle().unwrap().epoch;
     let previous_capability = *key_store.current_delivery_capability().unwrap().to_bytes();
 
-    let block = key_store.block_contact(&snapshot, identity_key).unwrap();
+    let block = complete(
+        &key_store,
+        key_store
+            .prepare_block_contact(&snapshot, identity_key)
+            .unwrap(),
+    );
 
     assert!(block.contact.contact.blocked);
     let rotation = block
@@ -67,11 +83,21 @@ fn blocking_a_contact_rotates_the_inbox() {
 #[test]
 fn blocking_an_already_blocked_contact_does_not_rotate_again() {
     let (key_store, mut snapshot, identity_key) = store_with_contact();
-    let first = key_store.block_contact(&snapshot, identity_key).unwrap();
+    let first = complete(
+        &key_store,
+        key_store
+            .prepare_block_contact(&snapshot, identity_key)
+            .unwrap(),
+    );
     snapshot.apply_all(first.contact.state_updates);
     let generation_after_first = key_store.current_discovery_key_bundle().unwrap().epoch;
 
-    let second = key_store.block_contact(&snapshot, identity_key).unwrap();
+    let second = complete(
+        &key_store,
+        key_store
+            .prepare_block_contact(&snapshot, identity_key)
+            .unwrap(),
+    );
 
     assert!(second.rotation.is_none());
     assert_eq!(

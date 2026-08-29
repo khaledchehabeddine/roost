@@ -1,9 +1,9 @@
 //! Error mapping for failures crossing the UniFFI boundary.
 
 use aether_core::{
-    DiscoveryKeyError, IdentityError, KeyStoreError, MessageError, MessageOperationError,
-    OneTimePreKeyError, ProtocolStateError, SafetyNumberError, SenderCertificateValidationError,
-    SessionEstablishmentError, SignedPreKeyError, StorageError,
+    DiscoveryKeyError, IdentityError, KeyStoreError, KeyStoreOperationError, MessageError,
+    MessageOperationError, OneTimePreKeyError, ProtocolStateError, SafetyNumberError,
+    SenderCertificateValidationError, SessionEstablishmentError, SignedPreKeyError, StorageError,
 };
 use aether_crypto::CryptoError;
 
@@ -64,6 +64,18 @@ pub enum AetherError {
     },
     /// Requested identity, discovery-key, or signed-pre-key material is not stored.
     NotFound,
+    /// The requested prepared-operation transition conflicts with its durable state.
+    OperationConflict {
+        /// Diagnostic context for logging only.
+        reason: String,
+    },
+    /// A committed or finalizing KeyStore operation must be recovered before ordinary work.
+    OperationRecoveryRequired {
+        /// Opaque 16-byte identifier of the operation to recover.
+        operation_identifier: Vec<u8>,
+        /// Diagnostic context for logging only.
+        reason: String,
+    },
     /// Protocol-state load, decode, encode, binding, or missing-state fault.
     ProtocolStateFault {
         /// Diagnostic context for logging only.
@@ -75,11 +87,18 @@ pub enum AetherError {
         /// [`SecureStorage`](crate::SecureStorage) implementation.
         reason: String,
     },
+    /// A SecureStorage input changed after a KeyStore operation was prepared.
+    SecureStoragePreconditionChanged {
+        /// Stable SecureStorage entry name that changed.
+        key: String,
+    },
     /// A Session is terminal and must be replaced through a fresh handshake.
     TerminalSessionRecovery {
         /// Diagnostic context for logging only.
         reason: String,
     },
+    /// The bounded prepared-operation journal has no free unfinished-operation slot.
+    TooManyUnfinishedOperations,
     /// A message, blob, backup, or prekey major version is unsupported.
     UnsupportedVersion {
         /// Diagnostic context for logging only.
@@ -111,12 +130,24 @@ impl std::fmt::Display for AetherError {
             AetherError::InternalError { reason } => write!(f, "internal error: {reason}"),
             AetherError::InvalidData { reason } => write!(f, "invalid data: {reason}"),
             AetherError::NotFound => write!(f, "key material not found"),
+            AetherError::OperationConflict { reason } => {
+                write!(f, "prepared-operation conflict: {reason}")
+            }
+            AetherError::OperationRecoveryRequired { reason, .. } => {
+                write!(f, "prepared-operation recovery required: {reason}")
+            }
             AetherError::ProtocolStateFault { reason } => {
                 write!(f, "protocol-state fault: {reason}")
             }
             AetherError::Storage { reason } => write!(f, "storage error: {reason}"),
+            AetherError::SecureStoragePreconditionChanged { key } => {
+                write!(f, "secure-storage precondition changed for {key}")
+            }
             AetherError::TerminalSessionRecovery { reason } => {
                 write!(f, "terminal session recovery required: {reason}")
+            }
+            AetherError::TooManyUnfinishedOperations => {
+                write!(f, "too many unfinished prepared operations")
             }
             AetherError::UnsupportedVersion { reason } => {
                 write!(f, "unsupported version: {reason}")
@@ -228,12 +259,46 @@ impl From<StorageError> for AetherError {
     }
 }
 
+impl From<KeyStoreOperationError> for AetherError {
+    fn from(e: KeyStoreOperationError) -> Self {
+        match e {
+            KeyStoreOperationError::Corrupt(_) => AetherError::Corrupt,
+            KeyStoreOperationError::InvalidTransition { status, action } => {
+                AetherError::OperationConflict {
+                    reason: format!("cannot {action} operation in {status:?} state"),
+                }
+            }
+            KeyStoreOperationError::LockPoisoned => AetherError::InternalError {
+                reason: "prepared-operation lock poisoned".into(),
+            },
+            KeyStoreOperationError::NotFound => AetherError::NotFound,
+            KeyStoreOperationError::PreconditionChanged { key } => {
+                AetherError::SecureStoragePreconditionChanged { key }
+            }
+            KeyStoreOperationError::Randomness => AetherError::InternalError {
+                reason: "operation identifier generation failed".into(),
+            },
+            KeyStoreOperationError::RecoveryRequired { identifier } => {
+                AetherError::OperationRecoveryRequired {
+                    operation_identifier: identifier.as_bytes().to_vec(),
+                    reason: "recover the identified operation before continuing".into(),
+                }
+            }
+            KeyStoreOperationError::Storage(e) => e.into(),
+            KeyStoreOperationError::TooManyUnfinishedOperations => {
+                AetherError::TooManyUnfinishedOperations
+            }
+        }
+    }
+}
+
 impl From<KeyStoreError> for AetherError {
     fn from(e: KeyStoreError) -> Self {
         match e {
             KeyStoreError::Discovery(e) => e.into(),
             KeyStoreError::Identity(e) => e.into(),
             KeyStoreError::OneTimePreKey(e) => e.into(),
+            KeyStoreError::Operation(e) => e.into(),
             KeyStoreError::ProtocolState(e) => e.into(),
             KeyStoreError::SignedPreKey(e) => e.into(),
         }
@@ -356,6 +421,7 @@ impl From<SessionEstablishmentError> for AetherError {
             SessionEstablishmentError::Identity(e) => e.into(),
             SessionEstablishmentError::Message(e) => e.into(),
             SessionEstablishmentError::OneTimePreKey(e) => e.into(),
+            SessionEstablishmentError::Operation(e) => e.into(),
             SessionEstablishmentError::ProtocolState(e) => e.into(),
             SessionEstablishmentError::SignedPreKey(e) => e.into(),
         }
@@ -367,6 +433,7 @@ impl From<MessageOperationError> for AetherError {
         match e {
             MessageOperationError::Discovery(e) => e.into(),
             MessageOperationError::Identity(e) => e.into(),
+            MessageOperationError::Operation(e) => e.into(),
             MessageOperationError::ProtocolState(e) => e.into(),
         }
     }

@@ -23,7 +23,10 @@ impl std::error::Error for StorageError {}
 /// A key-value storage abstraction for sensitive byte payloads.
 ///
 /// Implementations usually wrap platform secure storage. The UniFFI crate exposes a
-/// foreign-implementable adapter for clients.
+/// foreign-implementable adapter for clients. Each operation must be durable when it returns
+/// success. An interrupted `store` must leave either the complete previous value or the complete
+/// new value, never a torn value. `store` and `delete` may be retried after an ambiguous failure,
+/// so repeating either operation must be safe.
 pub trait SecureStorage: Send {
     /// Stores `value` under `key`, overwriting any existing entry.
     ///
