@@ -1162,6 +1162,8 @@ impl InboundMessageOutcome {
     ) -> Result<Self, AetherError> {
         match value {
             aether_core::InboundMessageOutcome::Accepted(result) => {
+                let state_updates =
+                    updates_from_core_with_snapshot(snapshot, result.state_updates)?;
                 let evidence_bundle = result.evidence_bundle.as_bytes().to_vec();
                 Ok(Self {
                     kind: InboundMessageOutcomeKind::Accepted,
@@ -1174,7 +1176,7 @@ impl InboundMessageOutcome {
                     )),
                     evidence_bundle: Some(evidence_bundle),
                     acknowledgment: Some(Message::from_core(result.acknowledgment)),
-                    state_updates: updates_from_core_with_snapshot(snapshot, result.state_updates)?,
+                    state_updates,
                     session_event: None,
                     unrecoverable_reason: None,
                 })

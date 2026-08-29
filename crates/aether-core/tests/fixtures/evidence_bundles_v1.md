@@ -37,5 +37,6 @@ does the same with the JDK Ed25519 provider. This makes the fixture an encoding/
 with independent cryptographic counterparties, rather than an implementation self-check.
 
 The rejection vectors pin malformed bytes, a mismatched profile, an unsupported envelope version,
-a tampered Message signature, and replay under a different expected relay domain. The Core fixture
-test and both generated binding harnesses replay those verdicts.
+a noncanonical recipient Identity Key, a tampered Message signature, an excessive certificate
+grace window, and replay under a different expected relay domain. The Core fixture test and both
+generated binding harnesses replay those verdicts.

@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::key_encoding::parse_ed25519_verifying_key_bytes;
-use crate::message::{MESSAGE_TRANSCRIPT_CONTEXT, MessageTranscriptInput, message_transcript};
-use crate::protocol_state::unpad_sealed_payload;
+use crate::message::{
+    MESSAGE_TRANSCRIPT_CONTEXT, MessageTranscriptInput, message_transcript, unpad_sealed_payload,
+};
 use crate::sender_certificate::{
     DomainSigningKey, RevocationState, SenderCertificateIdentityKey,
     SenderCertificateValidationError, SenderCertificateValidationInput,
@@ -25,6 +26,8 @@ const MAX_EVIDENCE_PADDED_PAYLOAD_LEN: usize = 65_536;
 const MAX_EVIDENCE_CERTIFICATE_LEN: usize = 16 * 1024;
 /// Maximum number of domain-signing keys scanned by one evidence verdict.
 pub const MAX_EVIDENCE_DOMAIN_SIGNING_KEYS: usize = 32;
+/// Maximum certificate grace window accepted by the Message evidence profile.
+pub const MAX_EVIDENCE_GRACE_WINDOW_SECS: u64 = 300;
 const SIGNATURE_LEN: usize = 64;
 
 /// The authenticated transcript interpretation required by an evidence verifier.
@@ -49,14 +52,14 @@ impl EvidenceProfile {
 /// when their reporting policy requires it.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct EvidenceBundle {
-    bytes: Zeroizing<Vec<u8>>,
+    bytes: ZeroizingBuffer,
 }
 
 impl EvidenceBundle {
     /// Returns the opaque evidence-bundle bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_slice()
     }
 }
 
@@ -76,7 +79,7 @@ pub struct EvidenceVerificationInput<'a> {
     pub expected_relay_domain: &'a [u8],
     /// Caller-recorded Unix timestamp in seconds when the Message was accepted.
     pub accepted_timestamp_secs: u64,
-    /// Caller-selected certificate grace window in seconds.
+    /// Caller-selected certificate grace window in seconds, capped at 300 by this profile.
     pub grace_window_secs: u64,
 }
 
@@ -138,6 +141,13 @@ pub enum EvidenceVerificationError {
         /// Maximum number accepted by the verifier.
         maximum: usize,
     },
+    /// The caller supplied a grace window outside the evidence profile.
+    GraceWindowTooLarge {
+        /// Caller-supplied grace window in seconds.
+        actual: u64,
+        /// Maximum grace window accepted by this evidence profile.
+        maximum: u64,
+    },
     /// Sender-certificate validation rejected the evidence at its acceptance context.
     SenderCertificate(SenderCertificateValidationError),
     /// The Message transcript signature is malformed or does not verify.
@@ -160,6 +170,10 @@ impl fmt::Display for EvidenceVerificationError {
             Self::TooManyDomainSigningKeys { count, maximum } => write!(
                 f,
                 "evidence domain-signing key count exceeds limit: {count} > {maximum}"
+            ),
+            Self::GraceWindowTooLarge { actual, maximum } => write!(
+                f,
+                "evidence certificate grace window exceeds limit: {actual} > {maximum}"
             ),
             Self::SenderCertificate(error) => {
                 write!(f, "evidence sender certificate failed: {error}")
@@ -230,6 +244,32 @@ struct DecodedEvidenceBundleWire<'a> {
     transcript_signature: &'a [u8],
 }
 
+#[derive(Zeroize, ZeroizeOnDrop)]
+struct ZeroizingBuffer {
+    bytes: Vec<u8>,
+}
+
+impl ZeroizingBuffer {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Extend<u8> for ZeroizingBuffer {
+    fn extend<T>(&mut self, iter: T)
+    where
+        T: IntoIterator<Item = u8>,
+    {
+        self.bytes.extend(iter);
+    }
+}
+
 pub(crate) fn generate_evidence_bundle(
     input: AcceptedMessageEvidenceInput<'_>,
 ) -> Result<EvidenceBundle, postcard::Error> {
@@ -246,9 +286,11 @@ pub(crate) fn generate_evidence_bundle(
         sender_certificate_signature: &input.sender_identity.signature,
         transcript_signature: input.transcript_signature,
     };
-    Ok(EvidenceBundle {
-        bytes: Zeroizing::new(postcard::to_stdvec(&wire)?),
-    })
+    let encoded_len = postcard::experimental::serialized_size(&wire)?;
+    let buffer = ZeroizingBuffer::with_capacity(encoded_len);
+    let bytes = postcard::to_extend(&wire, buffer)?;
+    debug_assert_eq!(bytes.as_slice().len(), encoded_len);
+    Ok(EvidenceBundle { bytes })
 }
 
 /// Verifies a versioned evidence bundle without device or Session state.
@@ -297,6 +339,8 @@ pub(crate) fn generate_evidence_bundle(
 ///   [`EvidenceVerificationInput::expected_profile`].
 /// - [`EvidenceVerificationError::TooManyDomainSigningKeys`] if the caller supplies more than 32
 ///   trusted domain-signing keys.
+/// - [`EvidenceVerificationError::GraceWindowTooLarge`] if the caller supplies a certificate grace
+///   window greater than 300 seconds.
 /// - [`EvidenceVerificationError::SenderCertificate`] for any certificate trust, relay-domain,
 ///   canonical-key, signature, or acceptance-time failure.
 /// - [`EvidenceVerificationError::SignatureFailure`] if the Message signature is malformed or
@@ -304,6 +348,12 @@ pub(crate) fn generate_evidence_bundle(
 pub fn verify_evidence_bundle(
     input: EvidenceVerificationInput<'_>,
 ) -> Result<VerifiedEvidenceBundle, EvidenceVerificationError> {
+    if input.grace_window_secs > MAX_EVIDENCE_GRACE_WINDOW_SECS {
+        return Err(EvidenceVerificationError::GraceWindowTooLarge {
+            actual: input.grace_window_secs,
+            maximum: MAX_EVIDENCE_GRACE_WINDOW_SECS,
+        });
+    }
     if input.domain_signing_keys.len() > MAX_EVIDENCE_DOMAIN_SIGNING_KEYS {
         return Err(EvidenceVerificationError::TooManyDomainSigningKeys {
             count: input.domain_signing_keys.len(),
@@ -342,6 +392,9 @@ pub fn verify_evidence_bundle(
         || decoded.sender_certificate_signature.len() != SIGNATURE_LEN
         || decoded.transcript_signature.len() != SIGNATURE_LEN
     {
+        return Err(EvidenceVerificationError::MalformedBundle);
+    }
+    if parse_ed25519_verifying_key_bytes(&decoded.recipient_identity_verifying_key).is_none() {
         return Err(EvidenceVerificationError::MalformedBundle);
     }
     let plaintext = unpad_sealed_payload(decoded.padded_payload)

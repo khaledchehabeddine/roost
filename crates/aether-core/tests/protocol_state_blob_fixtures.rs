@@ -709,6 +709,9 @@ fn assert_duplicate_inbound_replay(
                 deduplication_key: deduplication_key(),
                 message: &message,
                 recipient_discovery_key: accepted_contact_discovery_key_ref(),
+                recipient_identity_verifying_key: accepted_contact_identity()
+                    .identity_key
+                    .ed25519_verifying_key,
                 acknowledgment: acknowledgment(&acknowledgment_sender),
                 sender_certificate_validation: None,
             },

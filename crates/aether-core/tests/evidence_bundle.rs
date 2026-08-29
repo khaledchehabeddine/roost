@@ -3,8 +3,9 @@
 mod support;
 
 use aether_core::{
-    EvidenceProfile, EvidenceVerificationError, EvidenceVerificationInput, PayloadKind,
-    ProtocolStateEngine, SenderCertificateValidationError, verify_evidence_bundle,
+    EvidenceProfile, EvidenceVerificationError, EvidenceVerificationInput,
+    MAX_EVIDENCE_GRACE_WINDOW_SECS, PayloadKind, ProtocolStateEngine,
+    SenderCertificateValidationError, verify_evidence_bundle,
 };
 use support::{ProtocolFixture, TEST_RELAY_DOMAIN, accepted_contact_identity};
 
@@ -67,6 +68,10 @@ fn accepted_message_returns_verifiable_evidence_bundle() {
     assert_eq!(
         verified.sender_identity_key.ed25519_verifying_key,
         accepted.sender_identity.identity_verifying_key
+    );
+    assert_ne!(
+        verified.recipient_identity_verifying_key,
+        verified.sender_identity_key.ed25519_verifying_key
     );
 }
 
@@ -215,6 +220,55 @@ fn evidence_verifier_caps_caller_supplied_domain_signing_keys() {
 }
 
 #[test]
+fn evidence_grace_window_above_profile_maximum_is_rejected() {
+    let (fixture, _, accepted) = accepted_evidence(8);
+    let domain_signing_keys = [fixture.alice_sender.domain_signing_key()];
+
+    let actual = verification_error(verify_evidence_bundle(EvidenceVerificationInput {
+        bundle: accepted.evidence_bundle.as_bytes(),
+        expected_profile: EvidenceProfile::MessageTranscriptV1,
+        domain_signing_keys: &domain_signing_keys,
+        expected_relay_domain: TEST_RELAY_DOMAIN,
+        accepted_timestamp_secs: ACCEPTED_TIMESTAMP_SECS,
+        grace_window_secs: MAX_EVIDENCE_GRACE_WINDOW_SECS + 1,
+    }));
+
+    assert_eq!(
+        actual,
+        EvidenceVerificationError::GraceWindowTooLarge {
+            actual: 301,
+            maximum: 300,
+        }
+    );
+}
+
+#[test]
+fn evidence_bundle_with_noncanonical_recipient_identity_key_is_rejected() {
+    let (fixture, _, accepted) = accepted_evidence(9);
+    let domain_signing_keys = [fixture.alice_sender.domain_signing_key()];
+    let recipient_key = accepted_contact_identity()
+        .identity_key
+        .ed25519_verifying_key;
+    let mut malformed = accepted.evidence_bundle.as_bytes().to_vec();
+    let key_offset = malformed
+        .windows(recipient_key.len())
+        .position(|window| window == recipient_key)
+        .unwrap();
+    malformed[key_offset..key_offset + recipient_key.len()].fill(0xff);
+
+    let actual = verification_error(verify_evidence_bundle(EvidenceVerificationInput {
+        bundle: &malformed,
+        expected_profile: EvidenceProfile::MessageTranscriptV1,
+        domain_signing_keys: &domain_signing_keys,
+        expected_relay_domain: TEST_RELAY_DOMAIN,
+        accepted_timestamp_secs: ACCEPTED_TIMESTAMP_SECS,
+        grace_window_secs: 0,
+    }));
+
+    assert_eq!(actual, EvidenceVerificationError::MalformedBundle);
+}
+
+#[test]
 #[ignore = "prints the evidence_bundles_v1.json vector; run explicitly"]
 fn print_evidence_bundle_fixture() {
     let (fixture, sent, accepted) = accepted_evidence(0x0221);
@@ -235,6 +289,14 @@ fn print_evidence_bundle_fixture() {
     unsupported_version[0] = 2;
     let mut tampered_signature = accepted.evidence_bundle.as_bytes().to_vec();
     *tampered_signature.last_mut().unwrap() ^= 0x01;
+    let mut invalid_recipient_identity_key = accepted.evidence_bundle.as_bytes().to_vec();
+    let recipient_key_offset = invalid_recipient_identity_key
+        .windows(verified.recipient_identity_verifying_key.len())
+        .position(|window| window == verified.recipient_identity_verifying_key)
+        .unwrap();
+    invalid_recipient_identity_key[recipient_key_offset
+        ..recipient_key_offset + verified.recipient_identity_verifying_key.len()]
+        .fill(0xff);
     let output = serde_json::json!({
         "version": 1,
         "profile": "message_transcript_v1",
@@ -281,7 +343,10 @@ fn print_evidence_bundle_fixture() {
             "malformed_bundle_hex": "0101ff",
             "wrong_profile_bundle_hex": hex::encode(wrong_profile),
             "unsupported_version_bundle_hex": hex::encode(unsupported_version),
-            "tampered_signature_bundle_hex": hex::encode(tampered_signature)
+            "tampered_signature_bundle_hex": hex::encode(tampered_signature),
+            "invalid_recipient_identity_key_bundle_hex": hex::encode(
+                invalid_recipient_identity_key
+            )
         }
     });
     println!("{}", serde_json::to_string_pretty(&output).unwrap());

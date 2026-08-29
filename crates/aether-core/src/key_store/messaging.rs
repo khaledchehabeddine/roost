@@ -187,6 +187,7 @@ impl KeyStore {
                 deduplication_key: input.deduplication_key,
                 message: input.message,
                 recipient_discovery_key: &discovery_key,
+                recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
                 acknowledgment: OutboundAcknowledgment {
                     id: input.acknowledgment_id,
                     sender_identity: &sender_identity,

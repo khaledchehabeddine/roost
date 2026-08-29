@@ -143,7 +143,22 @@ identity key — see `discovery_signed_prekey_verifies_under_discovery_key_only`
 ### `AetherMessageTranscript-v1:`
 
 Message transcript signature. Source:
-[`protocol_state.rs`](../crates/aether-core/src/protocol_state.rs).
+[`message.rs`](../crates/aether-core/src/message.rs) `message_transcript`.
+
+The context is prepended by `sign_with_context`. The transcript itself is encoded as:
+
+```text
+u32be(session_key_len) || session_key
+|| recipient_ed25519_identity_verifying_key[32]
+|| message_id[16]
+|| u64be(timestamp_millis)
+|| payload_kind[1]
+|| u32be(padded_payload_len) || padded_payload
+```
+
+The recipient key is the Ed25519 verifying half of the recipient Identity Key. The padded payload
+is the exact authenticated sealed payload: a four-byte big-endian plaintext length, the plaintext,
+and zero fill through the selected padding bucket.
 
 ## Domain tags inside canonical encodings
 

@@ -14,7 +14,12 @@ use crate::hardening::{
 use crate::key_encoding::{
     PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes, validate_x25519_public_key,
 };
-use crate::message::{MESSAGE_TRANSCRIPT_CONTEXT, MessageTranscriptInput, message_transcript};
+use crate::message::{
+    MESSAGE_TRANSCRIPT_CONTEXT, MessageTranscriptInput, message_transcript,
+    pad_sealed_payload as pad_message_payload, unpad_sealed_payload as unpad_message_payload,
+};
+#[cfg(test)]
+use crate::message::{SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN};
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
 use crate::sender_certificate::{
     DomainSigningKey, RevocationState, SenderCertificateValidationError,
@@ -51,10 +56,6 @@ const CONTACT_STATE_WIRE_VERSION: u8 = 2;
 const CONTACT_STATE_WIRE_VERSION_V1: u8 = 1;
 const ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION: u8 = 1;
 const MESSAGE_FRAME_PLAINTEXT_WIRE_VERSION: u8 = 1;
-const SEALED_PAYLOAD_LEN_PREFIX_LEN: usize = 4;
-const SEALED_PAYLOAD_BUCKETS: [usize; 12] = [
-    32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536,
-];
 const DEDUPLICATION_DIGEST_LEN: usize = 16;
 const DEDUPLICATION_KEY_LEN: usize = 32;
 const ACKNOWLEDGMENT_DIGEST_LEN: usize = 16;
@@ -391,6 +392,11 @@ pub struct InboundEncryptedMessage<'a> {
     pub message: &'a Message,
     /// Local recipient Discovery Key used to open the sealed-sender frame.
     pub recipient_discovery_key: &'a DiscoveryKey,
+    /// Local recipient Ed25519 Identity Key verifying half authenticated by the transcript.
+    ///
+    /// This must be the Identity Key paired with `recipient_discovery_key`, not a key inferred
+    /// from the acknowledgment sender material.
+    pub recipient_identity_verifying_key: [u8; 32],
     /// Metadata for the encrypted acknowledgment returned when the Message is accepted.
     pub acknowledgment: OutboundAcknowledgment<'a>,
     /// Sender-certificate validation inputs required for unique encrypted receives.
@@ -502,6 +508,8 @@ pub struct InboundAcknowledgmentMessage<'a> {
     /// Local recipient Discovery Key used to open the sealed-sender frame.
     pub recipient_discovery_key: &'a DiscoveryKey,
     /// Local recipient Ed25519 Identity Key verifying half authenticated by the transcript.
+    ///
+    /// This must be the Identity Key that signed `recipient_discovery_key`.
     pub recipient_identity_verifying_key: [u8; 32],
 }
 
@@ -1396,6 +1404,18 @@ impl ProtocolStateEngine {
         if contains_digest(&deduplication.digests, &digest) {
             return Ok(InboundMessageOutcome::Duplicate);
         }
+        let recipient_identity_verifying_key =
+            parse_ed25519_verifying_key_bytes(&inbound.recipient_identity_verifying_key)
+                .ok_or_else(|| ProtocolStateError::InvalidMessage {
+                    reason: "recipient identity verifying key is not canonical".into(),
+                })?;
+        verify_discovery_key_bundle(
+            &inbound.recipient_discovery_key.bundle(),
+            &recipient_identity_verifying_key,
+        )
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "recipient discovery key does not match recipient identity key".into(),
+        })?;
 
         let address = ratchet_address(inbound.session_key);
         let session_key_bytes = address.key().as_bytes().to_vec();
@@ -1459,10 +1479,7 @@ impl ProtocolStateEngine {
             &decoded.sender_identity,
             MessageTranscriptInput {
                 session_key: &session_key_bytes,
-                recipient_identity_verifying_key: &inbound
-                    .acknowledgment
-                    .sender_identity
-                    .identity_verifying_key,
+                recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
                 id: frame_plaintext.id,
                 timestamp_millis: frame_plaintext.timestamp_millis,
                 payload_kind: frame_plaintext.payload_kind,
@@ -1531,10 +1548,7 @@ impl ProtocolStateEngine {
         }
         let evidence_bundle = generate_evidence_bundle(AcceptedMessageEvidenceInput {
             session_key: &session_key_bytes,
-            recipient_identity_verifying_key: &inbound
-                .acknowledgment
-                .sender_identity
-                .identity_verifying_key,
+            recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
             message_id: frame_plaintext.id,
             timestamp_millis: frame_plaintext.timestamp_millis,
             payload_kind: frame_plaintext.payload_kind,
@@ -1667,6 +1681,18 @@ impl ProtocolStateEngine {
         if pending_acknowledgment_digest_seen(snapshot, &pending_address, digest, self.limits)? {
             return Ok(AcknowledgmentOutcome::Duplicate);
         }
+        let recipient_identity_verifying_key =
+            parse_ed25519_verifying_key_bytes(&inbound.recipient_identity_verifying_key)
+                .ok_or_else(|| ProtocolStateError::InvalidMessage {
+                    reason: "recipient identity verifying key is not canonical".into(),
+                })?;
+        verify_discovery_key_bundle(
+            &inbound.recipient_discovery_key.bundle(),
+            &recipient_identity_verifying_key,
+        )
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "recipient discovery key does not match recipient identity key".into(),
+        })?;
         let mut pending = load_pending_acknowledgments(snapshot, &pending_address, self.limits)?;
 
         let address = ratchet_address(inbound.session_key);
@@ -4153,69 +4179,17 @@ fn max_sealed_sender_content_len(limits: ProtocolHardeningLimits) -> usize {
 }
 
 fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    let required_len = plaintext
-        .len()
-        .checked_add(SEALED_PAYLOAD_LEN_PREFIX_LEN)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length overflowed".into(),
-        })?;
-    let bucket = SEALED_PAYLOAD_BUCKETS
-        .iter()
-        .copied()
-        .find(|bucket| required_len <= *bucket)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: format!("sealed payload length exceeds limit: {}", plaintext.len()),
-        })?;
-    let plaintext_len =
-        u32::try_from(plaintext.len()).map_err(|_| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length exceeds u32".into(),
-        })?;
-    let mut padded = Zeroizing::new(vec![0u8; bucket]);
-    padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
-    padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..required_len].copy_from_slice(plaintext);
-    Ok(padded)
+    pad_message_payload(plaintext).map_err(|error| ProtocolStateError::InvalidMessage {
+        reason: error.to_string(),
+    })
 }
 
 pub(crate) fn unpad_sealed_payload(
     padded: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    if !SEALED_PAYLOAD_BUCKETS.contains(&padded.len()) {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: format!("sealed payload padding bucket is invalid: {}", padded.len()),
-        });
-    }
-    let len_bytes: [u8; SEALED_PAYLOAD_LEN_PREFIX_LEN] = padded
-        .get(..SEALED_PAYLOAD_LEN_PREFIX_LEN)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload padding is too short".into(),
-        })?
-        .try_into()
-        .map_err(|_| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length prefix is invalid".into(),
-        })?;
-    let plaintext_len = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| {
-        ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length prefix exceeds platform limit".into(),
-        }
-    })?;
-    let plaintext_end = SEALED_PAYLOAD_LEN_PREFIX_LEN
-        .checked_add(plaintext_len)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length overflowed".into(),
-        })?;
-    if plaintext_end > padded.len() {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length exceeds padding bucket".into(),
-        });
-    }
-    if padded[plaintext_end..].iter().any(|byte| *byte != 0) {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "sealed payload padding is malformed".into(),
-        });
-    }
-    Ok(Zeroizing::new(
-        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..plaintext_end].to_vec(),
-    ))
+    unpad_message_payload(padded).map_err(|error| ProtocolStateError::InvalidMessage {
+        reason: error.to_string(),
+    })
 }
 
 #[cfg(fuzzing)]

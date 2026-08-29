@@ -242,7 +242,8 @@ fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
 }
 
 fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
-    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
+    let mut rng = ChaCha20Rng::from_seed([0xc2; 32]);
+    generate_discovery_key(&mut rng, sender_identity_signing_key(0xa1), 0, CREATED_AT)
 }
 
 fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
@@ -345,6 +346,9 @@ fn inbound<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: None,
     }
@@ -364,6 +368,9 @@ fn inbound_with_certificate_validation<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             expected_relay_domain: TEST_RELAY_DOMAIN,

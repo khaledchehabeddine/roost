@@ -11,6 +11,11 @@ validates the certificate under caller-supplied trusted domain keys, relay domai
 timestamp, and grace window without current revocation state, then verifies the sender Identity Key
 signature without Session or Protocol State Blob access.
 
+The Message evidence profile caps certificate grace at 300 seconds and rejects a larger caller
+input before interpreting the bundle. This evidence-specific policy does not change the generic,
+caller-owned grace contract accepted in [ADR 0007](0007-certificates-contacts-trust-and-public-api-shape.md).
+Both the recipient Ed25519 Identity Key and the certificate key encodings must be canonical.
+
 The transcript fields are the Session identifier, recipient Ed25519 Identity Key verifying half,
 Message ID, sender timestamp, payload-kind tag, and exact padded payload. Verification authenticates
 the padded payload before returning its validated, unpadded plaintext.
@@ -40,8 +45,8 @@ the padded payload before returning its validated, unpadded plaintext.
   its Discovery Key and to bind the padded payload rather than its unpadded form. Per AE-MIG-02,
   Messages and fixtures emitted by the old prerelease transcript are intentionally not preserved.
 - Unknown envelope versions and profile mismatches reject before body interpretation. Malformed,
-  oversized, cross-relay, expired-at-acceptance, and signature-invalid bundles reject with stable
-  typed categories.
+  oversized, noncanonical-key, over-grace, cross-relay, expired-at-acceptance, and
+  signature-invalid bundles reject with stable typed categories.
 - [`evidence_bundles_v1.json`](../../crates/aether-core/tests/fixtures/evidence_bundles_v1.json)
   pins the Rust encoding and rejection vectors; generated Swift and Kotlin harnesses replay the
   same valid bytes and independently verify both Ed25519 signatures with CryptoKit and the JDK.

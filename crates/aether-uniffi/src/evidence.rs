@@ -8,6 +8,20 @@ use crate::message::PayloadKind;
 use crate::protocol::IdentityKey;
 
 /// The authenticated transcript interpretation required by an evidence verifier.
+///
+/// Callers pin a profile explicitly so a future bundle version cannot silently change the
+/// authenticated transcript semantics they interpret.
+///
+/// # Examples
+/// ```
+/// use aether::EvidenceProfile;
+///
+/// let profile = EvidenceProfile::MessageTranscriptVersion1;
+/// assert!(matches!(
+///     profile,
+///     EvidenceProfile::MessageTranscriptVersion1
+/// ));
+/// ```
 #[derive(Clone, Copy, Eq, PartialEq, uniffi::Enum)]
 pub enum EvidenceProfile {
     /// The version-one Message transcript signature profile.
@@ -19,6 +33,20 @@ pub enum EvidenceProfile {
 /// The plaintext and contextual fields come from the sender-signed Message transcript. The sender
 /// Identity Key, relay domain, and expiry come from the independently domain-signed certificate.
 /// Verification needs no local Session or Protocol State Blob.
+///
+/// # Examples
+/// ```
+/// use aether::{EvidenceProfile, VerifiedEvidenceBundle};
+///
+/// # fn inspect(verified: &VerifiedEvidenceBundle) {
+/// assert!(matches!(
+///     verified.profile,
+///     EvidenceProfile::MessageTranscriptVersion1
+/// ));
+/// assert_eq!(verified.message_id.len(), 16);
+/// assert_eq!(verified.recipient_identity_verifying_key.len(), 32);
+/// # }
+/// ```
 #[derive(uniffi::Record)]
 pub struct VerifiedEvidenceBundle {
     /// Transcript profile used for verification.
@@ -48,8 +76,9 @@ pub struct VerifiedEvidenceBundle {
 ///
 /// The caller pins the expected transcript profile and relay domain, supplies the trusted
 /// domain-signing keys, and supplies the Unix timestamp when it accepted the Message. Certificate
-/// validity is evaluated at that acceptance time without current revocation policy, so later
-/// revocation does not invalidate authentic historical evidence.
+/// validity is evaluated at that acceptance time with a grace window no greater than 300 seconds
+/// and without current revocation policy, so later revocation does not invalidate authentic
+/// historical evidence.
 ///
 /// # Examples
 /// ```no_run
@@ -80,8 +109,9 @@ pub struct VerifiedEvidenceBundle {
 /// ```
 ///
 /// # Errors
-/// - [`AetherError::InvalidData`] if the bundle is malformed, oversized, or names a profile other
-///   than `expected_profile`, or if a trusted verifying key is malformed.
+/// - [`AetherError::InvalidData`] if the bundle is malformed, oversized, names a profile other
+///   than `expected_profile`, uses a grace window greater than 300 seconds, or if a trusted
+///   verifying key is malformed.
 /// - [`AetherError::UnsupportedVersion`] if the Evidence Bundle envelope version is unsupported.
 /// - [`AetherError::CertificateRejected`] if certificate trust, relay-domain, signature, or
 ///   acceptance-time validation fails.

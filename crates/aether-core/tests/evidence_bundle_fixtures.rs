@@ -54,6 +54,7 @@ struct RejectionFixtures {
     wrong_profile_bundle_hex: String,
     unsupported_version_bundle_hex: String,
     tampered_signature_bundle_hex: String,
+    invalid_recipient_identity_key_bundle_hex: String,
 }
 
 #[test]
@@ -119,6 +120,14 @@ fn checked_in_evidence_bundle_vector_replays() {
         fixture.accepted_timestamp_secs,
         fixture.grace_window_secs,
         EvidenceVerificationError::SignatureFailure,
+    );
+    assert_rejected(
+        &hex::decode(&fixture.rejections.invalid_recipient_identity_key_bundle_hex).unwrap(),
+        &domain_signing_keys,
+        &relay_domain,
+        fixture.accepted_timestamp_secs,
+        fixture.grace_window_secs,
+        EvidenceVerificationError::MalformedBundle,
     );
     let replay_domain = hex::decode(&fixture.replay_relay_domain_hex).unwrap();
     assert_rejected(

@@ -270,7 +270,13 @@ fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
 }
 
 fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
-    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, 1_700_000_000, [0u8; 64])
+    let mut rng = ChaCha20Rng::from_seed([0xc2; 32]);
+    generate_discovery_key(
+        &mut rng,
+        fixture_recipient_identity_signing_key(),
+        0,
+        1_700_000_000,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -290,6 +296,9 @@ fn inbound<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: fixture_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             domain_signing_keys,

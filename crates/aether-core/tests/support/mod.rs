@@ -326,6 +326,9 @@ pub fn inbound_duplicate<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: None,
     }
@@ -344,6 +347,9 @@ pub fn inbound_with_certificate_validation<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: Some(sender_certificate_validation(
             domain_signing_keys,
@@ -360,6 +366,8 @@ pub fn sequenced_outbound<'a>(
     let contact = accepted_contact_identity();
     let mut id = [0u8; 16];
     id[..2].copy_from_slice(&sequence.to_be_bytes());
+    id[6] = 0x40;
+    id[8] = 0x80;
     OutboundPlaintext {
         id: MessageId::from_bytes(id),
         sender_identity,
@@ -576,7 +584,7 @@ fn sender_identity(tag: u8) -> SenderIdentityMaterial {
 fn validated_sender() -> ValidatedSender {
     let mut rng = ChaCha20Rng::from_seed([0x90; 32]);
     let domain_signing_key = generate_signing_key_pair(&mut rng);
-    let contact = accepted_contact_identity();
+    let contact = sender_contact_identity();
     let domain_identifier = b"test-domain".to_vec();
     let certificate = sender_certificate_bytes(&domain_identifier, contact, CERTIFICATE_EXPIRES_AT);
     let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
@@ -584,6 +592,20 @@ fn validated_sender() -> ValidatedSender {
         sender_identity: sender_identity_for_contact(contact, certificate, signature),
         domain_identifier,
         domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
+    }
+}
+
+fn sender_contact_identity() -> ContactIdentity {
+    let identity = test_sender_identity_signing_key(0xa2);
+    let identity_key_pair = test_identity_key_pair(0xa2);
+    let mut rng = ChaCha20Rng::from_seed([0x72; 32]);
+    let discovery_key = generate_discovery_key(&mut rng, identity, 0, CREATED_AT);
+    ContactIdentity {
+        identity_key: ContactIdentityKey {
+            x25519_public_key: *identity_key_pair.public.as_bytes(),
+            ed25519_verifying_key: identity.verifying.to_bytes(),
+        },
+        discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
     }
 }
 
@@ -612,7 +634,13 @@ fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
 }
 
 fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
-    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
+    let mut rng = ChaCha20Rng::from_seed([0xc2; 32]);
+    generate_discovery_key(
+        &mut rng,
+        test_sender_identity_signing_key(0xa1),
+        0,
+        CREATED_AT,
+    )
 }
 
 fn acknowledgment<'a>(

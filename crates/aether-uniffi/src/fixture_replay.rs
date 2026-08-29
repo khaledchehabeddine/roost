@@ -907,6 +907,9 @@ fn assert_duplicate_inbound_blob_replay(
                 deduplication_key,
                 message: &message,
                 recipient_discovery_key: Box::leak(Box::new(contact_fixture_discovery_key())),
+                recipient_identity_verifying_key: contact_fixture_identity()
+                    .identity_key
+                    .ed25519_verifying_key,
                 acknowledgment: acknowledgment(
                     &acknowledgment_sender_identity,
                     &acknowledgment_sender_signing_key,
@@ -1026,7 +1029,9 @@ fn contact_fixture_discovery_key() -> DiscoveryKey {
 }
 
 fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
-    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
+    let identity = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x71; 32]));
+    let mut rng = ChaCha20Rng::from_seed([0xc2; 32]);
+    generate_discovery_key(&mut rng, &identity, 0, CREATED_AT)
 }
 
 fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolStateError> {
@@ -1401,6 +1406,9 @@ fn inbound<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: Box::leak(Box::new(contact_fixture_discovery_key())),
+        recipient_identity_verifying_key: contact_fixture_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(
             acknowledgment_sender_identity,
             acknowledgment_sender_signing_key,

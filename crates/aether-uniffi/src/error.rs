@@ -412,11 +412,10 @@ impl From<EvidenceVerificationError> for AetherError {
             EvidenceVerificationError::BundleTooLarge
             | EvidenceVerificationError::MalformedBundle
             | EvidenceVerificationError::WrongProfile { .. }
-            | EvidenceVerificationError::TooManyDomainSigningKeys { .. } => {
-                AetherError::InvalidData {
-                    reason: e.to_string(),
-                }
-            }
+            | EvidenceVerificationError::TooManyDomainSigningKeys { .. }
+            | EvidenceVerificationError::GraceWindowTooLarge { .. } => AetherError::InvalidData {
+                reason: e.to_string(),
+            },
             EvidenceVerificationError::UnsupportedVersion(_) => AetherError::UnsupportedVersion {
                 reason: e.to_string(),
             },
