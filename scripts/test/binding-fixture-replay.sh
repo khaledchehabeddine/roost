@@ -75,6 +75,7 @@ run_swift() {
     run_swift_harness "InboxAuthorization.swift" "inbox-authorization" "$swift_out"
     run_swift_harness "AuthenticationTranscriptSigning.swift" "authentication-transcript-signing" "$swift_out"
     run_swift_harness "KeyBindingVerification.swift" "key-binding-verification" "$swift_out"
+    run_swift_harness "EvidenceBundleVectors.swift" "evidence-bundle-vectors" "$swift_out"
 }
 
 jna_jar() {
@@ -160,6 +161,7 @@ run_kotlin() {
     run_kotlin_harness "InboxAuthorization.kt" "InboxAuthorization" "$kotlin_out" "$jna"
     run_kotlin_harness "AuthenticationTranscriptSigning.kt" "AuthenticationTranscriptSigning" "$kotlin_out" "$jna"
     run_kotlin_harness "KeyBindingVerification.kt" "KeyBindingVerification" "$kotlin_out" "$jna"
+    run_kotlin_harness "EvidenceBundleVectors.kt" "EvidenceBundleVectors" "$kotlin_out" "$jna"
 }
 
 need_tool cargo

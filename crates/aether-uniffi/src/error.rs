@@ -1,9 +1,10 @@
 //! Error mapping for failures crossing the UniFFI boundary.
 
 use aether_core::{
-    DiscoveryKeyError, IdentityError, KeyStoreError, KeyStoreOperationError, MessageError,
-    MessageOperationError, OneTimePreKeyError, ProtocolStateError, SafetyNumberError,
-    SenderCertificateValidationError, SessionEstablishmentError, SignedPreKeyError, StorageError,
+    DiscoveryKeyError, EvidenceVerificationError, IdentityError, KeyStoreError,
+    KeyStoreOperationError, MessageError, MessageOperationError, OneTimePreKeyError,
+    ProtocolStateError, SafetyNumberError, SenderCertificateValidationError,
+    SessionEstablishmentError, SignedPreKeyError, StorageError,
 };
 use aether_crypto::CryptoError;
 
@@ -401,6 +402,30 @@ impl From<SenderCertificateValidationError> for AetherError {
     fn from(e: SenderCertificateValidationError) -> Self {
         AetherError::CertificateRejected {
             reason: e.to_string(),
+        }
+    }
+}
+
+impl From<EvidenceVerificationError> for AetherError {
+    fn from(e: EvidenceVerificationError) -> Self {
+        match e {
+            EvidenceVerificationError::BundleTooLarge
+            | EvidenceVerificationError::MalformedBundle
+            | EvidenceVerificationError::WrongProfile { .. }
+            | EvidenceVerificationError::TooManyDomainSigningKeys { .. }
+            | EvidenceVerificationError::GraceWindowTooLarge { .. } => AetherError::InvalidData {
+                reason: e.to_string(),
+            },
+            EvidenceVerificationError::UnsupportedVersion(_) => AetherError::UnsupportedVersion {
+                reason: e.to_string(),
+            },
+            EvidenceVerificationError::SenderCertificate(e) => e.into(),
+            EvidenceVerificationError::SignatureFailure => AetherError::AuthenticationFailed {
+                reason: e.to_string(),
+            },
+            _ => AetherError::InternalError {
+                reason: e.to_string(),
+            },
         }
     }
 }

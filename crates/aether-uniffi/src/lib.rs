@@ -49,6 +49,7 @@ mod certificate;
 mod development_certificate;
 mod error;
 mod events;
+mod evidence;
 #[cfg(feature = "fixture-replay")]
 mod fixture_replay;
 mod key_store;
@@ -70,6 +71,7 @@ pub use events::{
     ContactEventEnvelope, ContactEventObserver, ContactEventSnapshot, ContactEventStream,
     ContactEventStreamItem, ContactEventStreamItemKind,
 };
+pub use evidence::{EvidenceProfile, VerifiedEvidenceBundle, verify_evidence_bundle};
 pub use key_store::{KeyStore, SessionAcceptanceResult, SessionInitiationResult};
 pub use key_store_operation::{
     KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,

@@ -59,6 +59,19 @@ The bounded, ordered window of Deduplication Digests persisted as a Protocol Sta
 loaded at receive start and advanced only after a unique Message decrypts and is accepted.
 Avoid: cache, in-memory set
 
+**Evidence Bundle** (one per accepted established-session Message):
+A versioned, opaque export of the authenticated Message Transcript fields, sender certificate and
+certificate signature, and sender Identity Key transcript signature. A standalone verifier checks
+it at the caller-supplied acceptance timestamp without Session state or current revocation policy;
+persisting it creates a durable non-repudiation artifact containing plaintext.
+Avoid: report payload, acknowledgment artifact, audit log
+
+**Evidence Identity** (one per authenticated Message at one Relay):
+A stable digest derived after Evidence Bundle verification from the sender Identity Key, Relay
+domain, and every Message Transcript field. A Backend persists it to deduplicate repeated valid
+reports without trusting the sender-chosen MessageID or the replaceable bundle encoding.
+Avoid: report ID, MessageID, bundle hash, Deduplication Digest
+
 **Dead Session** (one terminal state per Session generation):
 A Session persisted as unrecoverable after Core records an authenticated terminal condition. Core
 does not attempt further decrypts under that Session and never surfaces plaintext from it; recovery
@@ -130,9 +143,9 @@ Avoid: payload, packet
 
 **Message Transcript** (one per encrypted Message):
 The canonical bytes signed by the sender IK and verified after decrypt before surfacing plaintext.
-It binds the recipient IK, Session identifier, MessageID, timestamp, payload kind, and encrypted
-payload input so a sealed signature cannot be transplanted to another recipient, Message, or
-Session.
+It binds the recipient IK, Session identifier, MessageID, timestamp, payload kind, padded payload,
+and exact sender certificate so a sealed signature cannot be transplanted to another recipient,
+Message, Session, or Relay certificate.
 Avoid: associated data, transport metadata
 
 **MessageID** (one per Message):

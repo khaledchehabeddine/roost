@@ -209,18 +209,12 @@ fn ratchet_address(key: ProtocolStateKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key)
 }
 
-fn sender_identity(tag: u8) -> SenderIdentityMaterial {
-    let signing_key = sender_identity_signing_key(tag);
-    let identity_key_pair = test_identity_key_pair(tag);
-    let binding_signature =
-        sign_identity_key_binding(signing_key, &identity_key_pair.public).unwrap();
-    SenderIdentityMaterial {
-        identity_key: *identity_key_pair.public.as_bytes(),
-        identity_verifying_key: signing_key.verifying.to_bytes(),
-        identity_binding_signature: binding_signature.to_bytes().to_vec(),
-        certificate: vec![tag, tag.wrapping_add(1), tag.wrapping_add(2)],
-        signature: vec![tag.wrapping_add(3); 64],
-    }
+fn recipient_sender_identity() -> SenderIdentityMaterial {
+    sender_identity_for_contact(
+        accepted_contact_identity(),
+        vec![0xb2, 0xb3, 0xb4],
+        vec![0xb5; 64],
+    )
 }
 
 fn accepted_contact_identity() -> ContactIdentity {
@@ -248,7 +242,8 @@ fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
 }
 
 fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
-    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
+    let mut rng = ChaCha20Rng::from_seed([0xc2; 32]);
+    generate_discovery_key(&mut rng, sender_identity_signing_key(0xa1), 0, CREATED_AT)
 }
 
 fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
@@ -351,6 +346,9 @@ fn inbound<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: None,
     }
@@ -370,6 +368,9 @@ fn inbound_with_certificate_validation<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(acknowledgment_id, acknowledgment_sender_identity),
         sender_certificate_validation: Some(InboundSenderCertificateValidation {
             expected_relay_domain: TEST_RELAY_DOMAIN,
@@ -389,6 +390,9 @@ fn inbound_acknowledgment<'a>(
         session_key,
         message,
         recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
     }
 }
 
@@ -494,7 +498,7 @@ fn two_instances_commit_out_of_order_messages_acks_retries_and_resync_in_total_o
     let alice = validated_sender();
     let alice_domain_keys = [alice.domain_signing_key()];
     let revoked = [];
-    let bob_sender = sender_identity(0xb1);
+    let bob_sender = recipient_sender_identity();
     let (mut alice_store, mut bob_store) = initialize_stores(
         &first_instance,
         session_key.clone(),
@@ -693,7 +697,7 @@ fn blocked_out_of_order_and_duplicate_messages_ack_without_visible_events() {
     let alice = validated_sender();
     let alice_domain_keys = [alice.domain_signing_key()];
     let revoked = [];
-    let bob_sender = sender_identity(0xb1);
+    let bob_sender = recipient_sender_identity();
     let (mut alice_store, mut bob_store) = initialize_stores(
         &first_instance,
         session_key.clone(),
@@ -813,7 +817,7 @@ fn duplicate_messages_and_ack_replays_are_idempotent_across_instance_recreation(
     let alice = validated_sender();
     let alice_domain_keys = [alice.domain_signing_key()];
     let revoked = [];
-    let bob_sender = sender_identity(0xb1);
+    let bob_sender = recipient_sender_identity();
     let (mut alice_store, mut bob_store) = initialize_stores(
         &first_instance,
         session_key.clone(),

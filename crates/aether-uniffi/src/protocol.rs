@@ -325,6 +325,11 @@ pub struct InboundMessageOutcome {
     pub plaintext: Option<Vec<u8>>,
     /// Sender identity material for accepted Messages.
     pub sender_identity: Option<SenderIdentityMaterial>,
+    /// Opaque authenticity evidence for an accepted Message, when present.
+    ///
+    /// Persisting or transmitting these bytes creates a durable, non-repudiable record containing
+    /// the accepted plaintext. Callers should retain it only when their reporting policy requires.
+    pub evidence_bundle: Option<Vec<u8>>,
     /// Acknowledgment Message to durably queue, when produced.
     pub acknowledgment: Option<Message>,
     /// Opaque state updates to commit.
@@ -1156,18 +1161,26 @@ impl InboundMessageOutcome {
         value: aether_core::InboundMessageOutcome,
     ) -> Result<Self, AetherError> {
         match value {
-            aether_core::InboundMessageOutcome::Accepted(result) => Ok(Self {
-                kind: InboundMessageOutcomeKind::Accepted,
-                message_id: Some(result.message_id.as_bytes().to_vec()),
-                timestamp_millis: Some(result.timestamp_millis),
-                payload_kind: Some(result.payload_kind.into()),
-                plaintext: Some(result.plaintext.to_vec()),
-                sender_identity: Some(SenderIdentityMaterial::from_core(result.sender_identity)),
-                acknowledgment: Some(Message::from_core(result.acknowledgment)),
-                state_updates: updates_from_core_with_snapshot(snapshot, result.state_updates)?,
-                session_event: None,
-                unrecoverable_reason: None,
-            }),
+            aether_core::InboundMessageOutcome::Accepted(result) => {
+                let state_updates =
+                    updates_from_core_with_snapshot(snapshot, result.state_updates)?;
+                let evidence_bundle = result.evidence_bundle.as_bytes().to_vec();
+                Ok(Self {
+                    kind: InboundMessageOutcomeKind::Accepted,
+                    message_id: Some(result.message_id.as_bytes().to_vec()),
+                    timestamp_millis: Some(result.timestamp_millis),
+                    payload_kind: Some(result.payload_kind.into()),
+                    plaintext: Some(result.plaintext.to_vec()),
+                    sender_identity: Some(SenderIdentityMaterial::from_core(
+                        result.sender_identity,
+                    )),
+                    evidence_bundle: Some(evidence_bundle),
+                    acknowledgment: Some(Message::from_core(result.acknowledgment)),
+                    state_updates,
+                    session_event: None,
+                    unrecoverable_reason: None,
+                })
+            }
             aether_core::InboundMessageOutcome::Blocked(result) => Ok(Self {
                 kind: InboundMessageOutcomeKind::Blocked,
                 message_id: None,
@@ -1175,6 +1188,7 @@ impl InboundMessageOutcome {
                 payload_kind: None,
                 plaintext: None,
                 sender_identity: None,
+                evidence_bundle: None,
                 acknowledgment: result.acknowledgment.map(Message::from_core),
                 state_updates: updates_from_core_with_snapshot(snapshot, result.state_updates)?,
                 session_event: None,
@@ -1201,6 +1215,7 @@ impl InboundMessageOutcome {
             payload_kind: None,
             plaintext: None,
             sender_identity: None,
+            evidence_bundle: None,
             acknowledgment: None,
             state_updates: Vec::new(),
             session_event: None,
@@ -1221,6 +1236,7 @@ impl InboundMessageOutcome {
             payload_kind: None,
             plaintext: None,
             sender_identity: None,
+            evidence_bundle: None,
             acknowledgment: None,
             state_updates: updates_from_core_with_snapshot(snapshot, result.state_updates)?,
             session_event: result.event.map(SessionEvent::from_core),

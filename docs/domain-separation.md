@@ -143,7 +143,26 @@ identity key — see `discovery_signed_prekey_verifies_under_discovery_key_only`
 ### `AetherMessageTranscript-v1:`
 
 Message transcript signature. Source:
-[`protocol_state.rs`](../crates/aether-core/src/protocol_state.rs).
+[`message.rs`](../crates/aether-core/src/message.rs) `message_transcript`.
+
+The context is prepended by `sign_with_context`. The transcript itself is encoded as:
+
+```text
+u32be(session_key_len) || session_key
+|| recipient_ed25519_identity_verifying_key[32]
+|| message_id[16]
+|| u64be(timestamp_millis)
+|| payload_kind[1]
+|| u32be(padded_payload_len) || padded_payload
+|| u32be(sender_certificate_len) || sender_certificate
+```
+
+The recipient key is the Ed25519 verifying half of the recipient Identity Key. The padded payload
+is the exact authenticated sealed payload: a four-byte big-endian plaintext length, the plaintext,
+and zero fill through the selected padding bucket. The final field is the exact opaque certificate
+bytes carried in the sealed-sender envelope. Binding those bytes prevents replacing the certificate
+and its domain signature with another valid certificate for the same Identity Key at a different
+Relay; the certificate's own signature is verified separately.
 
 ## Domain tags inside canonical encodings
 
@@ -194,6 +213,35 @@ Digest context for the protocol-state commit. Source:
 [`aether-uniffi/src/protocol.rs`](../crates/aether-uniffi/src/protocol.rs).
 
 ## Hash domain strings
+
+### `AetherEvidenceIdentity-v1`
+
+Evidence Identity derivation for idempotent abuse-report processing. This is the BLAKE3
+`derive_key` context argument, not a byte prefix concatenated with the value:
+
+```text
+identity = BLAKE3-DeriveKey(
+  "AetherEvidenceIdentity-v1",
+  sender_ik_x25519
+  || sender_ik_ed25519
+  || u8(relay_domain_len) || relay_domain
+  || message_transcript
+)
+```
+
+`message_transcript` includes its own `AetherMessageTranscript-v1:` signature context and every
+canonical transcript field, including the exact sender certificate. The sender Identity Key and
+Relay domain come from that verified certificate. Source:
+[`evidence.rs`](../crates/aether-core/src/evidence.rs).
+
+The version-one Evidence Bundle fixture produces:
+
+```text
+a7af7974cb7c5c3c770baf1b946f8d7d69a295068d99b78425b1df538a6aa489
+```
+
+This value was independently reproduced with the official BLAKE3 C 1.7.0 implementation using
+`blake3_hasher_init_derive_key` and is pinned by the Rust, Swift, and Kotlin fixture replays.
 
 ### `AetherSecureStoragePrecondition-v1`
 

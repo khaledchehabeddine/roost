@@ -5,6 +5,10 @@ use crate::contact::{
     ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
     PeerInboxAuthorization,
 };
+use crate::evidence::{
+    AcceptedMessageEvidenceInput, EvidenceBundle, MAX_EVIDENCE_GRACE_WINDOW_SECS,
+    generate_evidence_bundle,
+};
 use crate::hardening::{
     DEFAULT_MAX_ACKNOWLEDGMENT_DIGESTS, DEFAULT_MAX_PENDING_ACKNOWLEDGMENTS,
     MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits,
@@ -13,6 +17,12 @@ use crate::hardening::{
 use crate::key_encoding::{
     PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes, validate_x25519_public_key,
 };
+use crate::message::{
+    MESSAGE_TRANSCRIPT_CONTEXT, MessageTranscriptInput, message_transcript,
+    pad_sealed_payload as pad_message_payload, unpad_sealed_payload as unpad_message_payload,
+};
+#[cfg(test)]
+use crate::message::{SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN};
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
 use crate::sender_certificate::{
     DomainSigningKey, RevocationState, SenderCertificateValidationError,
@@ -49,10 +59,6 @@ const CONTACT_STATE_WIRE_VERSION: u8 = 2;
 const CONTACT_STATE_WIRE_VERSION_V1: u8 = 1;
 const ACKNOWLEDGMENT_PLAINTEXT_WIRE_VERSION: u8 = 1;
 const MESSAGE_FRAME_PLAINTEXT_WIRE_VERSION: u8 = 1;
-const SEALED_PAYLOAD_LEN_PREFIX_LEN: usize = 4;
-const SEALED_PAYLOAD_BUCKETS: [usize; 12] = [
-    32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536,
-];
 const DEDUPLICATION_DIGEST_LEN: usize = 16;
 const DEDUPLICATION_KEY_LEN: usize = 32;
 const ACKNOWLEDGMENT_DIGEST_LEN: usize = 16;
@@ -60,7 +66,6 @@ const RATCHET_PAYLOAD_VERSION: u8 = 1;
 const RATCHET_PAYLOAD_HEADER_LEN: usize = 1 + 32 + 4 + 4;
 const RATCHET_AEAD_TAG_LEN: usize = 16;
 const SEALED_SENDER_ENVELOPE_VERSION: u8 = 1;
-const MESSAGE_TRANSCRIPT_CONTEXT: &[u8] = b"AetherMessageTranscript-v1:";
 const SEALED_SENDER_ENCODING_OVERHEAD_CAP: usize = 64;
 const TRANSCRIPT_SIGNATURE_LEN: usize = 64;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
@@ -390,6 +395,11 @@ pub struct InboundEncryptedMessage<'a> {
     pub message: &'a Message,
     /// Local recipient Discovery Key used to open the sealed-sender frame.
     pub recipient_discovery_key: &'a DiscoveryKey,
+    /// Local recipient Ed25519 Identity Key verifying half authenticated by the transcript.
+    ///
+    /// This must be the Identity Key paired with `recipient_discovery_key`, not a key inferred
+    /// from the acknowledgment sender material.
+    pub recipient_identity_verifying_key: [u8; 32],
     /// Metadata for the encrypted acknowledgment returned when the Message is accepted.
     pub acknowledgment: OutboundAcknowledgment<'a>,
     /// Sender-certificate validation inputs required for unique encrypted receives.
@@ -415,8 +425,12 @@ pub struct InboundSenderCertificateValidation<'a> {
     pub revocation_state: RevocationState<'a>,
     /// Caller-supplied Unix timestamp in seconds used for expiry evaluation.
     pub reference_timestamp_secs: u64,
-    /// Caller-supplied grace window in seconds, with no library-imposed ceiling; for the
-    /// trade-off, see [`SenderCertificateValidationInput::grace_window_secs`].
+    /// Caller-supplied grace window in seconds.
+    ///
+    /// The standalone certificate API imposes no ceiling; for its trade-off, see
+    /// [`SenderCertificateValidationInput::grace_window_secs`]. Because an accepted unblocked
+    /// Message includes evidence, this receive path rejects a Message more than 300 seconds past
+    /// certificate expiry even when the caller permits a longer grace window.
     pub grace_window_secs: u64,
 }
 
@@ -432,6 +446,8 @@ pub struct InboundMessageResult {
     pub plaintext: Zeroizing<Vec<u8>>,
     /// Sender identity material decoded from the sealed-sender envelope.
     pub sender_identity: SenderIdentityMaterial,
+    /// Opaque authenticity evidence for optional durable abuse reporting.
+    pub evidence_bundle: EvidenceBundle,
     /// Encrypted acknowledgment artifact to durably queue with the returned state updates.
     pub acknowledgment: Message,
     /// Protocol-state updates to commit before treating the inbound Message as processed.
@@ -498,6 +514,10 @@ pub struct InboundAcknowledgmentMessage<'a> {
     pub message: &'a Message,
     /// Local recipient Discovery Key used to open the sealed-sender frame.
     pub recipient_discovery_key: &'a DiscoveryKey,
+    /// Local recipient Ed25519 Identity Key verifying half authenticated by the transcript.
+    ///
+    /// This must be the Identity Key that signed `recipient_discovery_key`.
+    pub recipient_identity_verifying_key: [u8; 32],
 }
 
 /// Pending acknowledgment state exposed to the consumer for durable flushing.
@@ -1266,24 +1286,27 @@ impl ProtocolStateEngine {
             &plaintext.recipient_public_key,
             self.limits,
         )?;
+        validate_sender_identity(plaintext.sender_identity, self.limits)?;
         let session_key_bytes = address.key().as_bytes().to_vec();
         let mut pending = load_pending_acknowledgments(snapshot, &pending_address, self.limits)?;
         let mut state = active_session_state(&address, loaded.status)?;
+        let padded_plaintext = pad_sealed_payload(plaintext.plaintext)?;
         let transcript_signature = sign_message_transcript(
             plaintext.sender_identity_signing_key,
             MessageTranscriptInput {
                 session_key: &session_key_bytes,
-                recipient_identity_key: &plaintext.recipient_public_key,
+                recipient_identity_verifying_key: &contact_identity_key.ed25519_verifying_key,
                 id: plaintext.id,
                 timestamp_millis: plaintext.timestamp_millis,
                 payload_kind: PayloadKind::EncryptedText,
-                payload: plaintext.plaintext,
+                payload: &padded_plaintext,
+                sender_certificate: &plaintext.sender_identity.certificate,
             },
         )?;
-        let sealed = encode_sealed_sender_envelope(
+        let sealed = encode_validated_sealed_sender_envelope(
             plaintext.sender_identity,
             &transcript_signature.to_bytes(),
-            plaintext.plaintext,
+            &padded_plaintext,
             self.limits,
         )?;
         let associated_data =
@@ -1390,6 +1413,18 @@ impl ProtocolStateEngine {
         if contains_digest(&deduplication.digests, &digest) {
             return Ok(InboundMessageOutcome::Duplicate);
         }
+        let recipient_identity_verifying_key =
+            parse_ed25519_verifying_key_bytes(&inbound.recipient_identity_verifying_key)
+                .ok_or_else(|| ProtocolStateError::InvalidMessage {
+                    reason: "recipient identity verifying key is not canonical".into(),
+                })?;
+        verify_discovery_key_bundle(
+            &inbound.recipient_discovery_key.bundle(),
+            &recipient_identity_verifying_key,
+        )
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "recipient discovery key does not match recipient identity key".into(),
+        })?;
 
         let address = ratchet_address(inbound.session_key);
         let session_key_bytes = address.key().as_bytes().to_vec();
@@ -1453,25 +1488,37 @@ impl ProtocolStateEngine {
             &decoded.sender_identity,
             MessageTranscriptInput {
                 session_key: &session_key_bytes,
-                recipient_identity_key: &message.recipient_public_key,
+                recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
                 id: frame_plaintext.id,
                 timestamp_millis: frame_plaintext.timestamp_millis,
                 payload_kind: frame_plaintext.payload_kind,
-                payload: &decoded.plaintext,
+                payload: &decoded.padded_plaintext,
+                sender_certificate: &decoded.sender_identity.certificate,
             },
             &decoded.transcript_signature,
         )?;
         let validation = inbound
             .sender_certificate_validation
             .ok_or(ProtocolStateError::MissingSenderCertificateValidation)?;
-        let inbound_contact_identity_key = inbound_contact_identity_key(
-            validation,
-            &decoded.sender_identity,
-            contact_identity_key,
-            self.limits,
-        )?;
-        record_deduplication_digest(&mut deduplication, digest);
+        let (inbound_contact_identity_key, certificate_expires_at_secs) =
+            inbound_contact_identity_key(
+                validation,
+                &decoded.sender_identity,
+                contact_identity_key,
+                self.limits,
+            )?;
         let blocked = contact_is_blocked(snapshot, inbound_contact_identity_key, self.limits)?;
+        if !blocked
+            && is_certificate_outside_evidence_grace(
+                certificate_expires_at_secs,
+                validation.reference_timestamp_secs,
+            )
+        {
+            return Err(ProtocolStateError::SenderCertificateValidation(
+                SenderCertificateValidationError::ExpiredCertificate,
+            ));
+        }
+        record_deduplication_digest(&mut deduplication, digest);
         // Unreachable policy suppresses the acknowledgment and leaves the sending chain unadvanced;
         // the receiving-chain advance and recorded digest are still committed below.
         if blocked
@@ -1498,6 +1545,7 @@ impl ProtocolStateEngine {
             &mut state,
             &session_key_bytes,
             &inbound.acknowledgment,
+            &decoded.sender_identity.identity_verifying_key,
             frame_plaintext.id,
             rng,
             self.limits,
@@ -1519,6 +1567,19 @@ impl ProtocolStateEngine {
                 },
             )));
         }
+        let evidence_bundle = generate_evidence_bundle(AcceptedMessageEvidenceInput {
+            session_key: &session_key_bytes,
+            recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
+            message_id: frame_plaintext.id,
+            timestamp_millis: frame_plaintext.timestamp_millis,
+            payload_kind: frame_plaintext.payload_kind,
+            padded_payload: &decoded.padded_plaintext,
+            sender_identity: &decoded.sender_identity,
+            transcript_signature: &decoded.transcript_signature,
+        })
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "accepted message evidence failed to encode".into(),
+        })?;
         Ok(InboundMessageOutcome::Accepted(Box::new(
             InboundMessageResult {
                 message_id: frame_plaintext.id,
@@ -1526,6 +1587,7 @@ impl ProtocolStateEngine {
                 payload_kind: frame_plaintext.payload_kind,
                 plaintext: decoded.plaintext,
                 sender_identity: decoded.sender_identity,
+                evidence_bundle,
                 acknowledgment,
                 state_updates,
             },
@@ -1640,6 +1702,18 @@ impl ProtocolStateEngine {
         if pending_acknowledgment_digest_seen(snapshot, &pending_address, digest, self.limits)? {
             return Ok(AcknowledgmentOutcome::Duplicate);
         }
+        let recipient_identity_verifying_key =
+            parse_ed25519_verifying_key_bytes(&inbound.recipient_identity_verifying_key)
+                .ok_or_else(|| ProtocolStateError::InvalidMessage {
+                    reason: "recipient identity verifying key is not canonical".into(),
+                })?;
+        verify_discovery_key_bundle(
+            &inbound.recipient_discovery_key.bundle(),
+            &recipient_identity_verifying_key,
+        )
+        .map_err(|_| ProtocolStateError::InvalidMessage {
+            reason: "recipient discovery key does not match recipient identity key".into(),
+        })?;
         let mut pending = load_pending_acknowledgments(snapshot, &pending_address, self.limits)?;
 
         let address = ratchet_address(inbound.session_key);
@@ -1704,11 +1778,12 @@ impl ProtocolStateEngine {
             &decoded.sender_identity,
             MessageTranscriptInput {
                 session_key: &session_key_bytes,
-                recipient_identity_key: &message.recipient_public_key,
+                recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
                 id: frame_plaintext.id,
                 timestamp_millis: frame_plaintext.timestamp_millis,
                 payload_kind: frame_plaintext.payload_kind,
-                payload: &decoded.plaintext,
+                payload: &decoded.padded_plaintext,
+                sender_certificate: &decoded.sender_identity.certificate,
             },
             &decoded.transcript_signature,
         )?;
@@ -3509,7 +3584,7 @@ fn inbound_contact_identity_key(
     sender_identity: &SenderIdentityMaterial,
     session_contact_identity_key: Option<ContactIdentityKey>,
     limits: ProtocolHardeningLimits,
-) -> Result<ContactIdentityKey, ProtocolStateError> {
+) -> Result<(ContactIdentityKey, u64), ProtocolStateError> {
     if sender_identity.certificate.len() > limits.max_sender_certificate_len {
         return Err(ProtocolStateError::InvalidMessage {
             reason: format!(
@@ -3564,7 +3639,15 @@ fn inbound_contact_identity_key(
             reason: "sender certificate identity key does not match session contact".into(),
         });
     }
-    Ok(identity_key)
+    Ok((identity_key, validated.expires_at_secs))
+}
+
+fn is_certificate_outside_evidence_grace(
+    expires_at_secs: u64,
+    reference_timestamp_secs: u64,
+) -> bool {
+    reference_timestamp_secs > expires_at_secs
+        && reference_timestamp_secs - expires_at_secs > MAX_EVIDENCE_GRACE_WINDOW_SECS
 }
 
 fn contact_is_blocked(
@@ -3805,23 +3888,17 @@ struct DecodedSealedSenderEnvelopeWire {
 struct DecodedSealedSenderEnvelope {
     sender_identity: SenderIdentityMaterial,
     transcript_signature: Vec<u8>,
+    padded_plaintext: Zeroizing<Vec<u8>>,
     plaintext: Zeroizing<Vec<u8>>,
-}
-
-struct MessageTranscriptInput<'a> {
-    session_key: &'a [u8],
-    recipient_identity_key: &'a [u8; 32],
-    id: MessageId,
-    timestamp_millis: u64,
-    payload_kind: PayloadKind,
-    payload: &'a [u8],
 }
 
 fn sign_message_transcript(
     signing_key: &SigningKeyPair,
     input: MessageTranscriptInput<'_>,
 ) -> Result<Signature, ProtocolStateError> {
-    let transcript = message_transcript(input)?;
+    let transcript = message_transcript(input).map_err(|_| ProtocolStateError::InvalidMessage {
+        reason: "message transcript input exceeds limit".into(),
+    })?;
     Ok(signing_key.sign_with_context(MESSAGE_TRANSCRIPT_CONTEXT, &transcript)?)
 }
 
@@ -3842,7 +3919,9 @@ fn verify_message_transcript(
         .ok_or_else(|| ProtocolStateError::InvalidMessage {
             reason: "sender identity verifying key is invalid".into(),
         })?;
-    let transcript = message_transcript(input)?;
+    let transcript = message_transcript(input).map_err(|_| ProtocolStateError::InvalidMessage {
+        reason: "message transcript input exceeds limit".into(),
+    })?;
     verify_with_context(
         &verifying_key,
         MESSAGE_TRANSCRIPT_CONTEXT,
@@ -3852,44 +3931,17 @@ fn verify_message_transcript(
     Ok(())
 }
 
-fn message_transcript(
-    input: MessageTranscriptInput<'_>,
-) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    let session_key_len =
-        u32::try_from(input.session_key.len()).map_err(|_| ProtocolStateError::InvalidMessage {
-            reason: "message transcript session key length exceeds limit".into(),
-        })?;
-    let payload_len =
-        u32::try_from(input.payload.len()).map_err(|_| ProtocolStateError::InvalidMessage {
-            reason: "message transcript payload length exceeds limit".into(),
-        })?;
-    let mut transcript = Zeroizing::new(Vec::with_capacity(
-        4 + input.session_key.len() + 32 + 16 + 8 + 1 + 4 + input.payload.len(),
-    ));
-    transcript.extend_from_slice(&session_key_len.to_be_bytes());
-    transcript.extend_from_slice(input.session_key);
-    transcript.extend_from_slice(input.recipient_identity_key);
-    transcript.extend_from_slice(input.id.as_bytes());
-    transcript.extend_from_slice(&input.timestamp_millis.to_be_bytes());
-    transcript.push(input.payload_kind.tag());
-    transcript.extend_from_slice(&payload_len.to_be_bytes());
-    transcript.extend_from_slice(input.payload);
-    Ok(transcript)
-}
-
-fn encode_sealed_sender_envelope(
+fn encode_validated_sealed_sender_envelope(
     sender_identity: &SenderIdentityMaterial,
     transcript_signature: &[u8],
-    plaintext: &[u8],
+    padded_plaintext: &[u8],
     limits: ProtocolHardeningLimits,
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    validate_sender_identity(sender_identity, limits)?;
     validate_transcript_signature(transcript_signature)?;
-    let padded_plaintext = pad_sealed_payload(plaintext)?;
     validate_sealed_sender_content_len(
         sender_identity,
         transcript_signature,
-        &padded_plaintext,
+        padded_plaintext,
         limits,
     )?;
     let sealed = Zeroizing::new(
@@ -3901,7 +3953,7 @@ fn encode_sealed_sender_envelope(
             sender_certificate: &sender_identity.certificate,
             sender_signature: &sender_identity.signature,
             transcript_signature,
-            padded_plaintext: &padded_plaintext,
+            padded_plaintext,
         })
         .map_err(|_| ProtocolStateError::InvalidMessage {
             reason: "sealed-sender envelope failed to encode".into(),
@@ -3959,6 +4011,7 @@ fn decode_sealed_sender_envelope(
     Ok(DecodedSealedSenderEnvelope {
         sender_identity,
         transcript_signature: wire.transcript_signature,
+        padded_plaintext,
         plaintext,
     })
 }
@@ -3999,26 +4052,30 @@ fn encrypt_acknowledgment(
     state: &mut RatchetState,
     session_key: &[u8],
     acknowledgment: &OutboundAcknowledgment<'_>,
+    recipient_identity_verifying_key: &[u8; 32],
     acknowledged_message_id: MessageId,
     rng: &mut (impl RngCore + CryptoRng),
     limits: ProtocolHardeningLimits,
 ) -> Result<Message, ProtocolStateError> {
+    validate_sender_identity(acknowledgment.sender_identity, limits)?;
     let plaintext = encode_acknowledgment_plaintext(acknowledged_message_id)?;
+    let padded_plaintext = pad_sealed_payload(&plaintext)?;
     let transcript_signature = sign_message_transcript(
         acknowledgment.sender_identity_signing_key,
         MessageTranscriptInput {
             session_key,
-            recipient_identity_key: &acknowledgment.recipient_public_key,
+            recipient_identity_verifying_key,
             id: acknowledgment.id,
             timestamp_millis: acknowledgment.timestamp_millis,
             payload_kind: PayloadKind::Acknowledgment,
-            payload: plaintext.as_slice(),
+            payload: &padded_plaintext,
+            sender_certificate: &acknowledgment.sender_identity.certificate,
         },
     )?;
-    let sealed = encode_sealed_sender_envelope(
+    let sealed = encode_validated_sealed_sender_envelope(
         acknowledgment.sender_identity,
         &transcript_signature.to_bytes(),
-        plaintext.as_slice(),
+        &padded_plaintext,
         limits,
     )?;
     let associated_data =
@@ -4153,67 +4210,17 @@ fn max_sealed_sender_content_len(limits: ProtocolHardeningLimits) -> usize {
 }
 
 fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    let required_len = plaintext
-        .len()
-        .checked_add(SEALED_PAYLOAD_LEN_PREFIX_LEN)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length overflowed".into(),
-        })?;
-    let bucket = SEALED_PAYLOAD_BUCKETS
-        .iter()
-        .copied()
-        .find(|bucket| required_len <= *bucket)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: format!("sealed payload length exceeds limit: {}", plaintext.len()),
-        })?;
-    let plaintext_len =
-        u32::try_from(plaintext.len()).map_err(|_| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length exceeds u32".into(),
-        })?;
-    let mut padded = Zeroizing::new(vec![0u8; bucket]);
-    padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
-    padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..required_len].copy_from_slice(plaintext);
-    Ok(padded)
+    pad_message_payload(plaintext).map_err(|error| ProtocolStateError::InvalidMessage {
+        reason: error.to_string(),
+    })
 }
 
-fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    if !SEALED_PAYLOAD_BUCKETS.contains(&padded.len()) {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: format!("sealed payload padding bucket is invalid: {}", padded.len()),
-        });
-    }
-    let len_bytes: [u8; SEALED_PAYLOAD_LEN_PREFIX_LEN] = padded
-        .get(..SEALED_PAYLOAD_LEN_PREFIX_LEN)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload padding is too short".into(),
-        })?
-        .try_into()
-        .map_err(|_| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length prefix is invalid".into(),
-        })?;
-    let plaintext_len = usize::try_from(u32::from_be_bytes(len_bytes)).map_err(|_| {
-        ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length prefix exceeds platform limit".into(),
-        }
-    })?;
-    let plaintext_end = SEALED_PAYLOAD_LEN_PREFIX_LEN
-        .checked_add(plaintext_len)
-        .ok_or_else(|| ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length overflowed".into(),
-        })?;
-    if plaintext_end > padded.len() {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "sealed payload length exceeds padding bucket".into(),
-        });
-    }
-    if padded[plaintext_end..].iter().any(|byte| *byte != 0) {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "sealed payload padding is malformed".into(),
-        });
-    }
-    Ok(Zeroizing::new(
-        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..plaintext_end].to_vec(),
-    ))
+pub(crate) fn unpad_sealed_payload(
+    padded: &[u8],
+) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
+    unpad_message_payload(padded).map_err(|error| ProtocolStateError::InvalidMessage {
+        reason: error.to_string(),
+    })
 }
 
 #[cfg(fuzzing)]
@@ -4396,22 +4403,23 @@ mod tests {
             identity_key: *identity_key.public.as_bytes(),
             identity_verifying_key: signing_key.verifying.to_bytes(),
             identity_binding_signature: binding_signature.to_bytes().to_vec(),
-            certificate: Vec::new(),
+            certificate: b"sender certificate".to_vec(),
             signature: Vec::new(),
         };
         let session_key = [3u8; 16];
-        let recipient_identity_key = [4u8; 32];
+        let recipient_identity_verifying_key = [4u8; 32];
         let id = MessageId::from_bytes([5u8; 16]);
         let payload = b"payload";
         let signature = sign_message_transcript(
             &signing_key,
             MessageTranscriptInput {
                 session_key: &session_key,
-                recipient_identity_key: &recipient_identity_key,
+                recipient_identity_verifying_key: &recipient_identity_verifying_key,
                 id,
                 timestamp_millis: 6,
                 payload_kind: PayloadKind::EncryptedText,
                 payload,
+                sender_certificate: &sender_identity.certificate,
             },
         )
         .unwrap();
@@ -4419,24 +4427,26 @@ mod tests {
 
         let valid = || MessageTranscriptInput {
             session_key: &session_key,
-            recipient_identity_key: &recipient_identity_key,
+            recipient_identity_verifying_key: &recipient_identity_verifying_key,
             id,
             timestamp_millis: 6,
             payload_kind: PayloadKind::EncryptedText,
             payload,
+            sender_certificate: &sender_identity.certificate,
         };
         assert!(verify_message_transcript(&sender_identity, valid(), &signature_bytes).is_ok());
 
         let other_session_key = [7u8; 16];
-        let other_recipient_identity_key = [8u8; 32];
+        let other_recipient_identity_verifying_key = [8u8; 32];
         let other_payload = b"other payload";
+        let other_sender_certificate = b"other sender certificate";
         let cases = [
             MessageTranscriptInput {
                 session_key: &other_session_key,
                 ..valid()
             },
             MessageTranscriptInput {
-                recipient_identity_key: &other_recipient_identity_key,
+                recipient_identity_verifying_key: &other_recipient_identity_verifying_key,
                 ..valid()
             },
             MessageTranscriptInput {
@@ -4453,6 +4463,10 @@ mod tests {
             },
             MessageTranscriptInput {
                 payload: other_payload,
+                ..valid()
+            },
+            MessageTranscriptInput {
+                sender_certificate: other_sender_certificate,
                 ..valid()
             },
         ];

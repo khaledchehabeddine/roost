@@ -3,14 +3,15 @@
 use aether_core::{
     AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, ContactDiscoveryKey,
     ContactIdentity, ContactIdentityKey, ContactTrustState, DomainSigningKey,
-    DomainSigningKeyStatus, InboundAcknowledgmentMessage, InboundEncryptedMessage,
-    InboundMessageOutcome, InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY,
+    DomainSigningKeyStatus, EvidenceProfile, EvidenceVerificationInput,
+    InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY, MAX_EVIDENCE_GRACE_WINDOW_SECS,
     MIN_DEDUPLICATION_CAPACITY, Message, MessageError, MessageId, OutboundAcknowledgment,
     OutboundPlaintext, PayloadKind, ProtocolHardeningLimits, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
     SenderCertificateValidationError, SenderIdentityMaterial, SessionEvent, SessionId,
-    SessionUnrecoverableReason, SessionUnrecoverableResult,
+    SessionUnrecoverableReason, SessionUnrecoverableResult, verify_evidence_bundle,
 };
 use aether_crypto::{
     CryptoError, DiscoveryKey, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle,
@@ -222,7 +223,13 @@ fn rotated_contact_identity() -> ContactIdentity {
 }
 
 fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
-    DiscoveryKey::from_secret_bytes([0xc2; 32], [0xc3; 32], 0, CREATED_AT, [0u8; 64])
+    let mut rng = ChaCha20Rng::from_seed([0xc2; 32]);
+    generate_discovery_key(
+        &mut rng,
+        test_sender_identity_signing_key(0xa1),
+        0,
+        CREATED_AT,
+    )
 }
 
 fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
@@ -360,6 +367,9 @@ fn inbound_with_certificate_validation<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: Some(sender_certificate_validation(
             domain_signing_keys,
@@ -515,7 +525,11 @@ fn sender_identity(tag: u8) -> SenderIdentityMaterial {
 }
 
 fn acknowledgment_sender_identity() -> SenderIdentityMaterial {
-    sender_identity(0xb1)
+    sender_identity_for_contact(
+        accepted_contact_identity(),
+        vec![0xb2, 0xb3, 0xb4],
+        vec![0xb5; 64],
+    )
 }
 
 fn acknowledgment<'a>(
@@ -543,6 +557,9 @@ fn inbound<'a>(
         deduplication_key,
         message,
         recipient_discovery_key: accepted_contact_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
         acknowledgment: acknowledgment(0xee, acknowledgment_sender_identity),
         sender_certificate_validation: None,
     }
@@ -581,7 +598,72 @@ fn inbound_acknowledgment<'a>(
         session_key,
         message,
         recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
+        recipient_identity_verifying_key: accepted_contact_identity()
+            .identity_key
+            .ed25519_verifying_key,
     }
+}
+
+fn acknowledgment_processing_setup(
+    id: u8,
+) -> (
+    ProtocolStateEngine,
+    ProtocolStateKey,
+    ProtocolStateSnapshot,
+    Message,
+) {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact(accepted_contact_identity());
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(
+                id,
+                b"acknowledgment recipient validation",
+                &sender.sender_identity,
+            ),
+        )
+        .unwrap();
+    alice_snapshot.apply_all(encrypted.state_updates);
+    let decrypted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([id; 32]),
+            &bob_snapshot,
+            inbound_with_certificate_validation(
+                key.clone(),
+                deduplication_key,
+                &encrypted.message,
+                &acknowledgment_sender_identity,
+                &domain_keys,
+                &revoked,
+            ),
+        )
+        .map(accepted)
+        .unwrap();
+    let bound = engine
+        .bind_session_state_peer_identity_key(
+            &alice_snapshot,
+            key.clone(),
+            acknowledgment_sender_identity.identity_key,
+        )
+        .unwrap();
+    alice_snapshot.apply(bound);
+    (engine, key, alice_snapshot, decrypted.acknowledgment)
 }
 
 fn accepted(outcome: InboundMessageOutcome) -> aether_core::InboundMessageResult {
@@ -875,7 +957,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     let alice = validated_sender();
     let alice_domain_keys = [alice.domain_signing_key()];
     let revoked = [];
-    let bob_sender = sender_identity(0xb1);
+    let bob_sender = acknowledgment_sender_identity();
     let mut alice_snapshot = snapshot_with_state_and_peer_identity(
         &engine,
         key.clone(),
@@ -1013,7 +1095,7 @@ fn unknown_acknowledgment_is_non_fatal_miss() {
     let alice = validated_sender();
     let alice_domain_keys = [alice.domain_signing_key()];
     let revoked = [];
-    let bob_sender = sender_identity(0xb1);
+    let bob_sender = acknowledgment_sender_identity();
     let mut alice_snapshot = snapshot_with_state_and_peer_identity(
         &engine,
         key.clone(),
@@ -2259,6 +2341,67 @@ fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_wi
 }
 
 #[test]
+fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact_expires_at(
+        accepted_contact_identity(),
+        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS - 1,
+    );
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(
+                0x5f,
+                b"blocked outside evidence grace",
+                &sender.sender_identity,
+            ),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound_with_certificate_validation(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+        &domain_keys,
+        &revoked,
+    );
+    inbound
+        .sender_certificate_validation
+        .as_mut()
+        .unwrap()
+        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
+
+    let blocked = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x5f; 32]),
+            &bob_snapshot,
+            inbound,
+        )
+        .map(blocked)
+        .unwrap();
+
+    assert!(blocked.acknowledgment.is_none());
+    assert_eq!(blocked.state_updates.len(), 2);
+}
+
+#[test]
 fn blocked_inbound_message_under_silent_receipt_policy_returns_acknowledgment_without_plaintext() {
     let setup = setup();
     let engine = ProtocolStateEngine::new().with_blocked_contact_acknowledgment_policy(
@@ -2653,6 +2796,9 @@ fn unavailable_revocation_state_rejects_before_plaintext_is_surfaced() {
             deduplication_key,
             message: &encrypted,
             recipient_discovery_key: accepted_contact_discovery_key_ref(),
+            recipient_identity_verifying_key: accepted_contact_identity()
+                .identity_key
+                .ed25519_verifying_key,
             acknowledgment: acknowledgment(0xee, &acknowledgment_sender_identity),
             sender_certificate_validation: Some(sender_certificate_validation(
                 &domain_keys,
@@ -2766,6 +2912,127 @@ fn expired_certificate_rejects_before_plaintext_is_surfaced() {
             SenderCertificateValidationError::ExpiredCertificate
         ))
     ));
+}
+
+#[test]
+fn unblocked_message_outside_evidence_grace_is_rejected() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact_expires_at(
+        accepted_contact_identity(),
+        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS - 1,
+    );
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x5d, b"outside evidence grace", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound_with_certificate_validation(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+        &domain_keys,
+        &revoked,
+    );
+    inbound
+        .sender_certificate_validation
+        .as_mut()
+        .unwrap()
+        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x5d; 32]),
+        &bob_snapshot,
+        inbound,
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::SenderCertificateValidation(
+            SenderCertificateValidationError::ExpiredCertificate
+        ))
+    ));
+}
+
+#[test]
+fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact_expires_at(
+        accepted_contact_identity(),
+        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS,
+    );
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x5e, b"at evidence grace", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound_with_certificate_validation(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+        &domain_keys,
+        &revoked,
+    );
+    inbound
+        .sender_certificate_validation
+        .as_mut()
+        .unwrap()
+        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS;
+
+    let accepted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x5e; 32]),
+            &bob_snapshot,
+            inbound,
+        )
+        .map(accepted)
+        .unwrap();
+    let verified = verify_evidence_bundle(EvidenceVerificationInput {
+        bundle: accepted.evidence_bundle.as_bytes(),
+        expected_profile: EvidenceProfile::MessageTranscriptV1,
+        domain_signing_keys: &domain_keys,
+        expected_relay_domain: TEST_RELAY_DOMAIN,
+        accepted_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
+        grace_window_secs: MAX_EVIDENCE_GRACE_WINDOW_SECS,
+    })
+    .unwrap();
+
+    assert_eq!(verified.message_id, accepted.message_id);
 }
 
 #[test]
@@ -3507,6 +3774,98 @@ fn message_transcript_signature_rejects_session_key_transplant() {
 }
 
 #[test]
+fn decrypt_message_rejects_recipient_identity_discovery_mismatch() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender_identity = sender_identity(1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x1a, b"wrong recipient identity", &sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+    );
+    inbound.recipient_identity_verifying_key = SigningKeyPair::from_signing_bytes([0x44; 32])
+        .verifying
+        .to_bytes();
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x1a; 32]),
+        &bob_snapshot,
+        inbound,
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::InvalidMessage { reason })
+            if reason == "recipient discovery key does not match recipient identity key"
+    ));
+}
+
+#[test]
+fn decrypt_message_rejects_noncanonical_recipient_identity_key() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender_identity = sender_identity(1);
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x1b, b"invalid recipient identity", &sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+    );
+    inbound.recipient_identity_verifying_key = [0xff; 32];
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x1b; 32]),
+        &bob_snapshot,
+        inbound,
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::InvalidMessage { reason })
+            if reason == "recipient identity verifying key is not canonical"
+    ));
+}
+
+#[test]
 fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
@@ -3568,10 +3927,47 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
             session_key: other_key,
             message: &decrypted.acknowledgment,
             recipient_discovery_key: acknowledgment_recipient_discovery_key_ref(),
+            recipient_identity_verifying_key: accepted_contact_identity()
+                .identity_key
+                .ed25519_verifying_key,
         },
     );
 
     assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+}
+
+#[test]
+fn process_acknowledgment_rejects_recipient_identity_discovery_mismatch() {
+    let (engine, key, snapshot, acknowledgment) = acknowledgment_processing_setup(0x1c);
+    let mut inbound = inbound_acknowledgment(key, &acknowledgment);
+    inbound.recipient_identity_verifying_key = SigningKeyPair::from_signing_bytes([0x44; 32])
+        .verifying
+        .to_bytes();
+
+    let result =
+        engine.process_acknowledgment(&mut ChaCha20Rng::from_seed([0x1c; 32]), &snapshot, inbound);
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::InvalidMessage { reason })
+            if reason == "recipient discovery key does not match recipient identity key"
+    ));
+}
+
+#[test]
+fn process_acknowledgment_rejects_noncanonical_recipient_identity_key() {
+    let (engine, key, snapshot, acknowledgment) = acknowledgment_processing_setup(0x1d);
+    let mut inbound = inbound_acknowledgment(key, &acknowledgment);
+    inbound.recipient_identity_verifying_key = [0xff; 32];
+
+    let result =
+        engine.process_acknowledgment(&mut ChaCha20Rng::from_seed([0x1d; 32]), &snapshot, inbound);
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::InvalidMessage { reason })
+            if reason == "recipient identity verifying key is not canonical"
+    ));
 }
 
 #[test]

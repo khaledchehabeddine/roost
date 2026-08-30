@@ -38,7 +38,36 @@ pub struct RevocationState {
     pub revoked_identity_keys: Vec<IdentityKey>,
 }
 
-/// Sender-certificate validation policy for one receive operation.
+/// A sender-certificate validation policy for one receive operation.
+///
+/// Standalone certificate validation and blocked receives use the complete caller-selected grace
+/// window. An unblocked established-session Message produces an Evidence Bundle, so receive rejects
+/// it more than 300 seconds past certificate expiry even when `grace_window_secs` is larger. Blocked
+/// outcomes carry no evidence and retain the complete grace window.
+///
+/// # Examples
+/// ```
+/// use aether::{
+///     DomainSigningKey, DomainSigningKeyStatus, RevocationState,
+///     SenderCertificateValidation,
+/// };
+///
+/// let validation = SenderCertificateValidation {
+///     domain_signing_keys: vec![DomainSigningKey {
+///         identifier: b"relay-key".to_vec(),
+///         verifying_key: vec![7; 32],
+///         status: DomainSigningKeyStatus::Trusted,
+///     }],
+///     expected_relay_domain: b"relay.example".to_vec(),
+///     revocation_state: RevocationState {
+///         available: true,
+///         revoked_identity_keys: Vec::new(),
+///     },
+///     reference_timestamp_secs: 1_700_000_000,
+///     grace_window_secs: 300,
+/// };
+/// assert_eq!(validation.grace_window_secs, 300);
+/// ```
 #[derive(uniffi::Record)]
 pub struct SenderCertificateValidation {
     /// Known domain-signing keys.
@@ -49,7 +78,7 @@ pub struct SenderCertificateValidation {
     pub revocation_state: RevocationState,
     /// Caller-supplied Unix timestamp in seconds.
     pub reference_timestamp_secs: u64,
-    /// Caller-supplied grace window in seconds.
+    /// Caller-supplied grace window in seconds, subject to the receive distinction above.
     pub grace_window_secs: u64,
 }
 

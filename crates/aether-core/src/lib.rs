@@ -76,6 +76,7 @@ mod clock;
 mod contact;
 mod discovery_key;
 mod events;
+mod evidence;
 mod hardening;
 mod identity;
 mod key_encoding;
@@ -98,6 +99,11 @@ pub use discovery_key::DiscoveryKeyError;
 pub use events::{
     DEFAULT_OBSERVER_CAPACITY, EventEnvelope, EventId, EventObserver, EventStream,
     EventStreamError, EventStreamItem, EventStreamSnapshot, MAX_OBSERVER_CAPACITY,
+};
+pub use evidence::{
+    EvidenceBundle, EvidenceProfile, EvidenceVerificationError, EvidenceVerificationInput,
+    MAX_EVIDENCE_DOMAIN_SIGNING_KEYS, MAX_EVIDENCE_GRACE_WINDOW_SECS, VerifiedEvidenceBundle,
+    verify_evidence_bundle,
 };
 pub use hardening::{
     DEFAULT_DEDUPLICATION_CAPACITY, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
