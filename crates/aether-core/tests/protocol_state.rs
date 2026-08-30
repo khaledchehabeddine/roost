@@ -3,14 +3,15 @@
 use aether_core::{
     AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, ContactDiscoveryKey,
     ContactIdentity, ContactIdentityKey, ContactTrustState, DomainSigningKey,
-    DomainSigningKeyStatus, InboundAcknowledgmentMessage, InboundEncryptedMessage,
-    InboundMessageOutcome, InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY,
+    DomainSigningKeyStatus, EvidenceProfile, EvidenceVerificationInput,
+    InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
+    InboundSenderCertificateValidation, MAX_DEDUPLICATION_CAPACITY, MAX_EVIDENCE_GRACE_WINDOW_SECS,
     MIN_DEDUPLICATION_CAPACITY, Message, MessageError, MessageId, OutboundAcknowledgment,
     OutboundPlaintext, PayloadKind, ProtocolHardeningLimits, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey,
     SenderCertificateValidationError, SenderIdentityMaterial, SessionEvent, SessionId,
-    SessionUnrecoverableReason, SessionUnrecoverableResult,
+    SessionUnrecoverableReason, SessionUnrecoverableResult, verify_evidence_bundle,
 };
 use aether_crypto::{
     CryptoError, DiscoveryKey, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle,
@@ -2340,6 +2341,67 @@ fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_wi
 }
 
 #[test]
+fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact_expires_at(
+        accepted_contact_identity(),
+        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS - 1,
+    );
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    block_contact(&engine, &mut bob_snapshot);
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(
+                0x5f,
+                b"blocked outside evidence grace",
+                &sender.sender_identity,
+            ),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound_with_certificate_validation(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+        &domain_keys,
+        &revoked,
+    );
+    inbound
+        .sender_certificate_validation
+        .as_mut()
+        .unwrap()
+        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
+
+    let blocked = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x5f; 32]),
+            &bob_snapshot,
+            inbound,
+        )
+        .map(blocked)
+        .unwrap();
+
+    assert!(blocked.acknowledgment.is_none());
+    assert_eq!(blocked.state_updates.len(), 2);
+}
+
+#[test]
 fn blocked_inbound_message_under_silent_receipt_policy_returns_acknowledgment_without_plaintext() {
     let setup = setup();
     let engine = ProtocolStateEngine::new().with_blocked_contact_acknowledgment_policy(
@@ -2850,6 +2912,127 @@ fn expired_certificate_rejects_before_plaintext_is_surfaced() {
             SenderCertificateValidationError::ExpiredCertificate
         ))
     ));
+}
+
+#[test]
+fn unblocked_message_outside_evidence_grace_is_rejected() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact_expires_at(
+        accepted_contact_identity(),
+        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS - 1,
+    );
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x5d, b"outside evidence grace", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound_with_certificate_validation(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+        &domain_keys,
+        &revoked,
+    );
+    inbound
+        .sender_certificate_validation
+        .as_mut()
+        .unwrap()
+        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
+
+    let result = engine.decrypt_message(
+        &mut ChaCha20Rng::from_seed([0x5d; 32]),
+        &bob_snapshot,
+        inbound,
+    );
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::SenderCertificateValidation(
+            SenderCertificateValidationError::ExpiredCertificate
+        ))
+    ));
+}
+
+#[test]
+fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let key = key();
+    let deduplication_key = deduplication_key();
+    let sender = validated_sender_for_contact_expires_at(
+        accepted_contact_identity(),
+        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS,
+    );
+    let domain_keys = [sender.domain_signing_key()];
+    let revoked = [];
+    let acknowledgment_sender_identity = acknowledgment_sender_identity();
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
+    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
+        &engine,
+        key.clone(),
+        &setup.bob_state,
+        &sender.sender_identity,
+        deduplication_key.clone(),
+    );
+    let encrypted = engine
+        .encrypt_message(
+            &alice_snapshot,
+            key.clone(),
+            outbound(0x5e, b"at evidence grace", &sender.sender_identity),
+        )
+        .unwrap()
+        .message;
+    let mut inbound = inbound_with_certificate_validation(
+        key,
+        deduplication_key,
+        &encrypted,
+        &acknowledgment_sender_identity,
+        &domain_keys,
+        &revoked,
+    );
+    inbound
+        .sender_certificate_validation
+        .as_mut()
+        .unwrap()
+        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS;
+
+    let accepted = engine
+        .decrypt_message(
+            &mut ChaCha20Rng::from_seed([0x5e; 32]),
+            &bob_snapshot,
+            inbound,
+        )
+        .map(accepted)
+        .unwrap();
+    let verified = verify_evidence_bundle(EvidenceVerificationInput {
+        bundle: accepted.evidence_bundle.as_bytes(),
+        expected_profile: EvidenceProfile::MessageTranscriptV1,
+        domain_signing_keys: &domain_keys,
+        expected_relay_domain: TEST_RELAY_DOMAIN,
+        accepted_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
+        grace_window_secs: MAX_EVIDENCE_GRACE_WINDOW_SECS,
+    })
+    .unwrap();
+
+    assert_eq!(verified.message_id, accepted.message_id);
 }
 
 #[test]

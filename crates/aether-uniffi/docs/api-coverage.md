@@ -34,7 +34,8 @@ metadata, not runtime policy; code and tests remain authoritative.
 - Accepted-Message abuse evidence: `InboundMessageOutcome::evidence_bundle` carries the opaque
   versioned artifact only for `Accepted`, while `verify_evidence_bundle` authenticates it from
   trusted domain keys, a pinned relay domain and profile, and the caller-recorded acceptance time
-  without Session state or current revocation input.
+  without Session state or current revocation input. Successful verdicts return an Evidence
+  Identity for Backend idempotency over repeated valid reports.
 - Opt-in local peer simulations: `DevelopmentCertificateAuthority` issues production-format
   sender certificates and returns matching public validation input when the
   `development-certificates` feature is enabled. Normal artifacts omit this surface.

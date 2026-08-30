@@ -36,6 +36,7 @@ struct ValidFixture {
 
 #[derive(Deserialize)]
 struct DecodedFixture {
+    evidence_identity_hex: String,
     session_key_hex: String,
     recipient_identity_verifying_key_hex: String,
     message_id_hex: String,
@@ -144,6 +145,10 @@ fn checked_in_evidence_bundle_vector_replays() {
 
 fn assert_verified(actual: &VerifiedEvidenceBundle, expected: &DecodedFixture) {
     assert_eq!(actual.profile, EvidenceProfile::MessageTranscriptV1);
+    assert_eq!(
+        hex::encode(actual.evidence_identity),
+        expected.evidence_identity_hex
+    );
     assert_eq!(hex::encode(&actual.session_key), expected.session_key_hex);
     assert_eq!(
         hex::encode(actual.recipient_identity_verifying_key),

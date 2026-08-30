@@ -31,8 +31,11 @@ pub enum EvidenceProfile {
 /// Authenticated context recovered from a verified Evidence Bundle.
 ///
 /// The plaintext and contextual fields come from the sender-signed Message transcript. The sender
-/// Identity Key, relay domain, and expiry come from the independently domain-signed certificate.
-/// Verification needs no local Session or Protocol State Blob.
+/// Identity Key, relay domain, and expiry come from the domain-signed certificate, whose exact
+/// bytes are also bound by the Message transcript signature.
+/// Verification needs no local Session or Protocol State Blob and does not track repeat
+/// submissions. Before counting or downstream work, consumers must persist and deduplicate
+/// `evidence_identity`; raw bundle bytes and Message ID are not stable substitutes.
 ///
 /// # Examples
 /// ```
@@ -43,6 +46,7 @@ pub enum EvidenceProfile {
 ///     verified.profile,
 ///     EvidenceProfile::MessageTranscriptVersion1
 /// ));
+/// assert_eq!(verified.evidence_identity.len(), 32);
 /// assert_eq!(verified.message_id.len(), 16);
 /// assert_eq!(verified.recipient_identity_verifying_key.len(), 32);
 /// # }
@@ -51,6 +55,9 @@ pub enum EvidenceProfile {
 pub struct VerifiedEvidenceBundle {
     /// Transcript profile used for verification.
     pub profile: EvidenceProfile,
+    /// Stable idempotency key derived from the authenticated sender, relay, and Message Transcript.
+    /// Always 32 bytes.
+    pub evidence_identity: Vec<u8>,
     /// Session-scoped protocol-state key signed into the Message transcript.
     pub session_key: Vec<u8>,
     /// Recipient Ed25519 Identity Key verifying half signed into the Message transcript.
@@ -66,7 +73,7 @@ pub struct VerifiedEvidenceBundle {
     pub plaintext: Vec<u8>,
     /// Sender Identity Key authenticated by both the certificate and Message signature.
     pub sender_identity_key: IdentityKey,
-    /// Relay domain authenticated by the sender certificate.
+    /// Relay domain authenticated by the transcript-bound sender certificate.
     pub relay_domain: Vec<u8>,
     /// Certificate expiry authenticated by the domain-signing key.
     pub certificate_expires_at_secs: u64,
@@ -146,6 +153,7 @@ pub fn verify_evidence_bundle(
     })?;
     Ok(VerifiedEvidenceBundle {
         profile: expected_profile,
+        evidence_identity: verified.evidence_identity.to_vec(),
         session_key: verified.session_key.clone(),
         recipient_identity_verifying_key: verified.recipient_identity_verifying_key.to_vec(),
         message_id: verified.message_id.as_bytes().to_vec(),

@@ -184,6 +184,7 @@ pub(crate) struct MessageTranscriptInput<'a> {
     pub(crate) timestamp_millis: u64,
     pub(crate) payload_kind: PayloadKind,
     pub(crate) payload: &'a [u8],
+    pub(crate) sender_certificate: &'a [u8],
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -232,9 +233,16 @@ pub(crate) fn message_transcript(
         u32::try_from(input.session_key.len()).map_err(|_| MessageError::PayloadTooLarge)?;
     let payload_len =
         u32::try_from(input.payload.len()).map_err(|_| MessageError::PayloadTooLarge)?;
-    let mut transcript = Zeroizing::new(Vec::with_capacity(
-        4 + input.session_key.len() + PUBLIC_KEY_LEN + 16 + 8 + 1 + 4 + input.payload.len(),
-    ));
+    let sender_certificate_len =
+        u32::try_from(input.sender_certificate.len()).map_err(|_| MessageError::PayloadTooLarge)?;
+    let capacity = 4usize
+        .checked_add(input.session_key.len())
+        .and_then(|len| len.checked_add(PUBLIC_KEY_LEN + 16 + 8 + 1 + 4))
+        .and_then(|len| len.checked_add(input.payload.len()))
+        .and_then(|len| len.checked_add(4))
+        .and_then(|len| len.checked_add(input.sender_certificate.len()))
+        .ok_or(MessageError::PayloadTooLarge)?;
+    let mut transcript = Zeroizing::new(Vec::with_capacity(capacity));
     transcript.extend_from_slice(&session_key_len.to_be_bytes());
     transcript.extend_from_slice(input.session_key);
     transcript.extend_from_slice(input.recipient_identity_verifying_key);
@@ -243,6 +251,8 @@ pub(crate) fn message_transcript(
     transcript.push(input.payload_kind.tag());
     transcript.extend_from_slice(&payload_len.to_be_bytes());
     transcript.extend_from_slice(input.payload);
+    transcript.extend_from_slice(&sender_certificate_len.to_be_bytes());
+    transcript.extend_from_slice(input.sender_certificate);
     Ok(transcript)
 }
 

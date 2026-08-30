@@ -3,7 +3,7 @@ import Foundation
 
 @main
 struct EvidenceBundleVectors {
-    private static let validBundle = Data(hex: "01011009090909090909090909090909090909bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a50221000000004000800000000000000081fca7ffbc3100200000001b636f6e7465787420666f7220616e206162757365207265706f7274007b41657468657253656e64657243657274696669636174652d76323a020b746573742d646f6d61696e0a72656c61792e7465737457f24707f390532aa6598f61c43f3bc2dae984525359cb43fc13db947e93f63e65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec00000000655577a0409ed439e636de0aabb9ec5e6c0562d1c2892d1a1679897b3f4d1583bcc4abfc014821307b3bb6e35ec85fe66bca2c2e46ffd56f0bd533e43469659c01f985450640eaf2ff93f3b5216f5e87576201ac51351e2c6a3435eb12143c8e55723240f3181a088d832f1a88a5551b2ecf1e05f66abe8f66f1c75fad71847b642bc11b730d")
+    private static let validBundle = Data(hex: "01011009090909090909090909090909090909bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a50221000000004000800000000000000081fca7ffbc3100200000001b636f6e7465787420666f7220616e206162757365207265706f7274007b41657468657253656e64657243657274696669636174652d76323a020b746573742d646f6d61696e0a72656c61792e7465737457f24707f390532aa6598f61c43f3bc2dae984525359cb43fc13db947e93f63e65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec00000000655577a0409ed439e636de0aabb9ec5e6c0562d1c2892d1a1679897b3f4d1583bcc4abfc014821307b3bb6e35ec85fe66bca2c2e46ffd56f0bd533e43469659c01f985450640340624ac228577b9d3823baec5f873a09708c2e88d4f83ce4f2660911f7606b89a1b0b0f82399c1137947e6fc1c1bec30553cfdc435559c1d76007741143e40f")
     private static let domainKey = DomainSigningKey(
         identifier: Data(hex: "746573742d646f6d61696e"),
         verifyingKey: Data(hex: "6556ea860463d074ae046736e1f20f6c78f7a26e31518d1fe7f645150aaa6ad1"),
@@ -21,6 +21,7 @@ struct EvidenceBundleVectors {
             graceWindowSecs: 0
         )
         require(verified.profile == .messageTranscriptVersion1, "profile")
+        require(verified.evidenceIdentity == Data(hex: "a7af7974cb7c5c3c770baf1b946f8d7d69a295068d99b78425b1df538a6aa489"), "evidence identity")
         require(verified.sessionKey == Data(repeating: 0x09, count: 16), "session key")
         require(verified.recipientIdentityVerifyingKey == Data(hex: "bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5"), "recipient Identity Key")
         require(verified.messageId == Data(hex: "02210000000040008000000000000000"), "message ID")
@@ -37,7 +38,7 @@ struct EvidenceBundleVectors {
         let certificateSignature = Data(hex: "9ed439e636de0aabb9ec5e6c0562d1c2892d1a1679897b3f4d1583bcc4abfc014821307b3bb6e35ec85fe66bca2c2e46ffd56f0bd533e43469659c01f9854506")
         let domainPublicKey = try Curve25519.Signing.PublicKey(rawRepresentation: domainKey.verifyingKey)
         require(domainPublicKey.isValidSignature(certificateSignature, for: certificate), "CryptoKit certificate signature")
-        let messageSignature = Data(hex: "eaf2ff93f3b5216f5e87576201ac51351e2c6a3435eb12143c8e55723240f3181a088d832f1a88a5551b2ecf1e05f66abe8f66f1c75fad71847b642bc11b730d")
+        let messageSignature = Data(hex: "340624ac228577b9d3823baec5f873a09708c2e88d4f83ce4f2660911f7606b89a1b0b0f82399c1137947e6fc1c1bec30553cfdc435559c1d76007741143e40f")
         let senderPublicKey = try Curve25519.Signing.PublicKey(rawRepresentation: verified.senderIdentityKey.ed25519VerifyingKey)
         require(senderPublicKey.isValidSignature(messageSignature, for: messageTranscript()), "CryptoKit Message transcript signature")
 
@@ -92,6 +93,7 @@ struct EvidenceBundleVectors {
 
     private static func messageTranscript() -> Data {
         let paddedPayload = Data(hex: "0000001b636f6e7465787420666f7220616e206162757365207265706f727400")
+        let senderCertificate = Data(hex: "41657468657253656e64657243657274696669636174652d76323a020b746573742d646f6d61696e0a72656c61792e7465737457f24707f390532aa6598f61c43f3bc2dae984525359cb43fc13db947e93f63e65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec00000000655577a0")
         var transcript = Data("AetherMessageTranscript-v1:".utf8)
         transcript.appendBigEndian(UInt32(16))
         transcript.append(Data(repeating: 0x09, count: 16))
@@ -101,6 +103,8 @@ struct EvidenceBundleVectors {
         transcript.append(0)
         transcript.appendBigEndian(UInt32(paddedPayload.count))
         transcript.append(paddedPayload)
+        transcript.appendBigEndian(UInt32(senderCertificate.count))
+        transcript.append(senderCertificate)
         return transcript
     }
 

@@ -88,13 +88,13 @@ pub fn verify_with_context(
         .map_err(|_| CryptoError::SignatureInvalid)
 }
 
-fn contextual_message(context: &[u8], message: &[u8]) -> Result<Vec<u8>, CryptoError> {
-    let mut signed = Vec::with_capacity(
+fn contextual_message(context: &[u8], message: &[u8]) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+    let mut signed = Zeroizing::new(Vec::with_capacity(
         context
             .len()
             .checked_add(message.len())
             .ok_or(CryptoError::InvalidSignatureContext)?,
-    );
+    ));
     signed.extend_from_slice(context);
     signed.extend_from_slice(message);
     Ok(signed)

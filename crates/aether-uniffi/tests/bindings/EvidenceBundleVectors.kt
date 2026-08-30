@@ -5,7 +5,7 @@ import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
 
-private val VALID_EVIDENCE_BUNDLE = "01011009090909090909090909090909090909bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a50221000000004000800000000000000081fca7ffbc3100200000001b636f6e7465787420666f7220616e206162757365207265706f7274007b41657468657253656e64657243657274696669636174652d76323a020b746573742d646f6d61696e0a72656c61792e7465737457f24707f390532aa6598f61c43f3bc2dae984525359cb43fc13db947e93f63e65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec00000000655577a0409ed439e636de0aabb9ec5e6c0562d1c2892d1a1679897b3f4d1583bcc4abfc014821307b3bb6e35ec85fe66bca2c2e46ffd56f0bd533e43469659c01f985450640eaf2ff93f3b5216f5e87576201ac51351e2c6a3435eb12143c8e55723240f3181a088d832f1a88a5551b2ecf1e05f66abe8f66f1c75fad71847b642bc11b730d".hexBytes()
+private val VALID_EVIDENCE_BUNDLE = "01011009090909090909090909090909090909bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a50221000000004000800000000000000081fca7ffbc3100200000001b636f6e7465787420666f7220616e206162757365207265706f7274007b41657468657253656e64657243657274696669636174652d76323a020b746573742d646f6d61696e0a72656c61792e7465737457f24707f390532aa6598f61c43f3bc2dae984525359cb43fc13db947e93f63e65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec00000000655577a0409ed439e636de0aabb9ec5e6c0562d1c2892d1a1679897b3f4d1583bcc4abfc014821307b3bb6e35ec85fe66bca2c2e46ffd56f0bd533e43469659c01f985450640340624ac228577b9d3823baec5f873a09708c2e88d4f83ce4f2660911f7606b89a1b0b0f82399c1137947e6fc1c1bec30553cfdc435559c1d76007741143e40f".hexBytes()
 private val EVIDENCE_DOMAIN_KEY = DomainSigningKey(
     "746573742d646f6d61696e".hexBytes(),
     "6556ea860463d074ae046736e1f20f6c78f7a26e31518d1fe7f645150aaa6ad1".hexBytes(),
@@ -52,6 +52,8 @@ private fun platformVerifies(key: ByteArray, message: ByteArray, signature: Byte
 private fun messageTranscript(): ByteArray {
     val paddedPayload =
         "0000001b636f6e7465787420666f7220616e206162757365207265706f727400".hexBytes()
+    val senderCertificate =
+        "41657468657253656e64657243657274696669636174652d76323a020b746573742d646f6d61696e0a72656c61792e7465737457f24707f390532aa6598f61c43f3bc2dae984525359cb43fc13db947e93f63e65e8f9b0bc6eae124169f0576f97362d295a8cf5f770b45e14357ce647d33eec00000000655577a0".hexBytes()
     return "AetherMessageTranscript-v1:".encodeToByteArray() +
         ByteBuffer.allocate(4).putInt(16).array() +
         ByteArray(16) { 0x09 } +
@@ -60,12 +62,15 @@ private fun messageTranscript(): ByteArray {
         ByteBuffer.allocate(8).putLong(1_700_000_300_545L).array() +
         byteArrayOf(0) +
         ByteBuffer.allocate(4).putInt(paddedPayload.size).array() +
-        paddedPayload
+        paddedPayload +
+        ByteBuffer.allocate(4).putInt(senderCertificate.size).array() +
+        senderCertificate
 }
 
 fun main() {
     val verified = verifyEvidence(VALID_EVIDENCE_BUNDLE)
     requireEvidence(verified.profile == EvidenceProfile.MESSAGE_TRANSCRIPT_VERSION1, "profile")
+    requireEvidence(verified.evidenceIdentity.contentEquals("a7af7974cb7c5c3c770baf1b946f8d7d69a295068d99b78425b1df538a6aa489".hexBytes()), "evidence identity")
     requireEvidence(verified.sessionKey.contentEquals(ByteArray(16) { 0x09 }), "session key")
     requireEvidence(verified.recipientIdentityVerifyingKey.contentEquals("bc7cbcb5636375fa1d82434d466724d92377f53b980695dd49d26d0ce12205a5".hexBytes()), "recipient Identity Key")
     requireEvidence(verified.messageId.contentEquals("02210000000040008000000000000000".hexBytes()), "message ID")
@@ -83,7 +88,7 @@ fun main() {
         platformVerifies(EVIDENCE_DOMAIN_KEY.verifyingKey, certificate, certificateSignature),
         "JDK certificate signature",
     )
-    val messageSignature = "eaf2ff93f3b5216f5e87576201ac51351e2c6a3435eb12143c8e55723240f3181a088d832f1a88a5551b2ecf1e05f66abe8f66f1c75fad71847b642bc11b730d".hexBytes()
+    val messageSignature = "340624ac228577b9d3823baec5f873a09708c2e88d4f83ce4f2660911f7606b89a1b0b0f82399c1137947e6fc1c1bec30553cfdc435559c1d76007741143e40f".hexBytes()
     requireEvidence(
         platformVerifies(
             verified.senderIdentityKey.ed25519VerifyingKey,

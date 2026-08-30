@@ -24,6 +24,7 @@ const MAX_EVIDENCE_BUNDLE_LEN: usize = 160 * 1024;
 const MAX_EVIDENCE_SESSION_KEY_LEN: usize = 96;
 const MAX_EVIDENCE_PADDED_PAYLOAD_LEN: usize = 65_536;
 const MAX_EVIDENCE_CERTIFICATE_LEN: usize = 16 * 1024;
+const EVIDENCE_IDENTITY_CONTEXT: &str = "AetherEvidenceIdentity-v1";
 /// Maximum number of domain-signing keys scanned by one evidence verdict.
 pub const MAX_EVIDENCE_DOMAIN_SIGNING_KEYS: usize = 32;
 /// Maximum certificate grace window accepted by the Message evidence profile.
@@ -65,9 +66,11 @@ impl EvidenceBundle {
 
 /// Inputs for one standalone evidence authenticity verdict.
 ///
-/// Verification is pure and needs no Session or Protocol State Blob. Certificate expiry is
-/// evaluated at `accepted_timestamp_secs`; current sender revocation is intentionally not an input
-/// because revocation after acceptance must not invalidate authentic historical evidence.
+/// Verification is pure and needs no Session or Protocol State Blob. It authenticates one bundle
+/// but does not track repeat submissions; reporting backends must deduplicate verified semantic
+/// identities rather than raw bundle encodings. Certificate expiry is evaluated at
+/// `accepted_timestamp_secs`; current sender revocation is intentionally not an input because
+/// revocation after acceptance must not invalidate authentic historical evidence.
 pub struct EvidenceVerificationInput<'a> {
     /// Opaque bytes returned in [`crate::InboundMessageResult::evidence_bundle`].
     pub bundle: &'a [u8],
@@ -89,6 +92,9 @@ pub struct VerifiedEvidenceBundle {
     /// Transcript profile used for verification.
     #[zeroize(skip)]
     pub profile: EvidenceProfile,
+    /// Stable identity derived from the authenticated sender, relay, and Message Transcript.
+    #[zeroize(skip)]
+    pub evidence_identity: [u8; 32],
     /// Session-scoped protocol-state key signed into the Message transcript.
     #[zeroize(skip)]
     pub session_key: Vec<u8>,
@@ -426,6 +432,7 @@ pub fn verify_evidence_bundle(
         timestamp_millis: decoded.timestamp_millis,
         payload_kind,
         payload: decoded.padded_payload,
+        sender_certificate: decoded.sender_certificate,
     })
     .map_err(|_| EvidenceVerificationError::MalformedBundle)?;
     verify_with_context(
@@ -435,9 +442,15 @@ pub fn verify_evidence_bundle(
         &signature,
     )
     .map_err(|_| EvidenceVerificationError::SignatureFailure)?;
+    let evidence_identity = derive_evidence_identity(
+        &validated_certificate.identity_key,
+        &validated_certificate.relay_domain,
+        &transcript,
+    )?;
 
     Ok(VerifiedEvidenceBundle {
         profile: input.expected_profile,
+        evidence_identity,
         session_key: decoded.session_key.to_vec(),
         recipient_identity_verifying_key: decoded.recipient_identity_verifying_key,
         message_id: MessageId::from_bytes(decoded.message_id),
@@ -448,4 +461,22 @@ pub fn verify_evidence_bundle(
         relay_domain: validated_certificate.relay_domain,
         certificate_expires_at_secs: validated_certificate.expires_at_secs,
     })
+}
+
+fn derive_evidence_identity(
+    sender_identity_key: &SenderCertificateIdentityKey,
+    relay_domain: &[u8],
+    transcript: &[u8],
+) -> Result<[u8; 32], EvidenceVerificationError> {
+    let relay_domain_len =
+        u8::try_from(relay_domain.len()).map_err(|_| EvidenceVerificationError::MalformedBundle)?;
+    let mut hasher = Zeroizing::new(blake3::Hasher::new_derive_key(EVIDENCE_IDENTITY_CONTEXT));
+    hasher.update(&sender_identity_key.x25519_public_key);
+    hasher.update(&sender_identity_key.ed25519_verifying_key);
+    hasher.update(&[relay_domain_len]);
+    hasher.update(relay_domain);
+    hasher.update(MESSAGE_TRANSCRIPT_CONTEXT);
+    hasher.update(transcript);
+    let digest = Zeroizing::new(hasher.finalize());
+    Ok(*digest.as_bytes())
 }
