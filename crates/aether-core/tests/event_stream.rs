@@ -20,6 +20,7 @@ fn assert_event(
         EventStreamItem::Lagged { missed } => {
             panic!("expected event, got lag signal for {missed} missed events")
         }
+        EventStreamItem::Stale => panic!("expected event, got stale-state signal"),
     }
 }
 
@@ -73,6 +74,80 @@ fn event_stream_observer_lag_uses_snapshot_tag_to_resume_without_gap_or_replay()
     assert_eq!(observer.cursor().unwrap().as_u64(), 3);
     assert_event(observer.poll_next().unwrap(), 4, "four");
     assert_eq!(observer.poll_next().unwrap(), None);
+}
+
+#[test]
+fn importing_current_state_marks_existing_observers_stale_without_advancing_event_id() {
+    let stream = TestStream::new(Vec::new());
+    let observer = stream.subscribe().unwrap();
+
+    stream.emit("local", vec!["local"]).unwrap();
+    assert_event(observer.poll_next().unwrap(), 1, "local");
+
+    let imported = stream
+        .import_current_state(vec!["local", "external"])
+        .unwrap();
+
+    assert_eq!(imported.event_id().as_u64(), 1);
+    assert_eq!(imported.state_revision(), 1);
+    assert_eq!(imported.state(), &vec!["local", "external"]);
+    assert_eq!(observer.poll_next().unwrap(), Some(EventStreamItem::Stale));
+    assert_eq!(observer.cursor().unwrap().as_u64(), 1);
+
+    observer.resume_after(&imported).unwrap();
+    assert_eq!(observer.poll_next().unwrap(), None);
+    assert_eq!(stream.current_state().unwrap(), imported);
+}
+
+#[test]
+fn observer_rejects_snapshot_older_than_latest_state_import() {
+    let stream = TestStream::new(Vec::new());
+    let observer = stream.subscribe().unwrap();
+
+    let first_import = stream.import_current_state(vec!["first"]).unwrap();
+    assert_eq!(observer.poll_next().unwrap(), Some(EventStreamItem::Stale));
+
+    let second_import = stream
+        .import_current_state(vec!["first", "second"])
+        .unwrap();
+
+    assert_eq!(
+        observer.resume_after(&first_import),
+        Err(EventStreamError::StaleSnapshot {
+            snapshot_revision: 1,
+            current_revision: 2,
+        })
+    );
+    assert_eq!(observer.poll_next().unwrap(), Some(EventStreamItem::Stale));
+
+    observer.resume_after(&second_import).unwrap();
+    assert_eq!(observer.poll_next().unwrap(), None);
+}
+
+#[test]
+fn observer_rejects_another_streams_snapshot_without_discarding_local_events() {
+    let stream = TestStream::new(Vec::new());
+    let observer = stream.subscribe().unwrap();
+    stream.emit("local one", vec!["local one"]).unwrap();
+    stream
+        .emit("local two", vec!["local one", "local two"])
+        .unwrap();
+
+    let other_stream = TestStream::new(Vec::new());
+    other_stream
+        .emit("foreign one", vec!["foreign one"])
+        .unwrap();
+    other_stream
+        .emit("foreign two", vec!["foreign one", "foreign two"])
+        .unwrap();
+    let foreign_snapshot = other_stream.current_state().unwrap();
+
+    assert_eq!(
+        observer.resume_after(&foreign_snapshot),
+        Err(EventStreamError::SnapshotFromDifferentStream)
+    );
+    assert_event(observer.poll_next().unwrap(), 1, "local one");
+    assert_event(observer.poll_next().unwrap(), 2, "local two");
 }
 
 #[test]

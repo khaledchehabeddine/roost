@@ -1,6 +1,6 @@
 # UniFFI API Coverage
 
-This note maps issues 122, 217, 219, and 221 to source surfaces and binding harness coverage. It is audit
+This note maps issues 122, 217, 219, 220, and 221 to source surfaces and binding harness coverage. It is audit
 metadata, not runtime policy; code and tests remain authoritative.
 
 ## Source Surfaces
@@ -22,6 +22,11 @@ metadata, not runtime policy; code and tests remain authoritative.
 - Messages, sealed-sender frames, acknowledgments, deduplication, retries, contact trust,
   blocking, sender certificates, hardening limits, and event streams: `KeyStore`,
   `ProtocolStateEngine`, and FFI-safe records/enums.
+- Cross-instance contact-view recovery: `ProtocolStateEngine::contact_states` rebuilds public
+  state from committed opaque blobs, while `ContactEventStream::import_current_state` preserves
+  local Event IDs, advances a local State Revision, and marks existing observers stale without
+  emitting a cross-instance Event. `ContactEventSnapshot` is opaque and bound to its producing
+  stream, so another stream's matching numeric tags cannot advance an observer.
 - Bare identity-key signing over a caller-built authentication transcript:
   `KeyStore::sign_authentication_transcript`. It carries no transport-authentication layout — the
   caller owns the bytes and their domain separation — and refuses preimages reserved by
@@ -56,7 +61,8 @@ metadata, not runtime policy; code and tests remain authoritative.
   One per-identity host actor or lock serializes the whole lifecycle across KeyStore instances and
   processes. Startup recovery aborts orphaned stages or resumes finalization by identifier.
 - Version, storage, certificate, blocked-contact, lag, prepared-operation recovery, precondition,
-  unfinished-operation-cap, and backup errors: mapped through `AetherError`.
+  unfinished-operation-cap, foreign/stale event snapshot, and backup errors: mapped through
+  `AetherError`.
 - Secret bytes crossing FFI: adapter code wraps inbound backup passphrases, backup blobs, protocol
   blobs, message plaintext, Evidence Bundles, and storage-loaded values before validation can
   return.
@@ -68,12 +74,15 @@ metadata, not runtime policy; code and tests remain authoritative.
 
 - Happy paths: identity create/load, backup export/import, protocol-state load/commit, session
   establishment, sealed-sender encode/decode, outbound encryption, certificate validation, contact
-  trust, blocking, event observation, retry-visible delivery, and one-time-prekey replenishment.
+  trust, blocking, event observation, committed-store reload through a second instance,
+  cross-instance current-state import, restart reconstruction, retry-visible delivery, and
+  one-time-prekey replenishment.
 - Negative paths: invalid canonical keys, rejected certificates, blocked contact behavior,
-  stale protocol-state commits, observer lag, backup import failure, and expected foreign storage
-  exceptions returning errors. Core Rust tests cover duplicate pre-decryption drop, unsupported
-  versions, terminal session recovery, operation precondition mismatch, orphaned stages, and
-  interrupted finalization.
+  stale protocol-state commits, observer lag, foreign and stale event snapshots, backup import
+  failure, and expected foreign storage exceptions returning errors. Core Rust tests cover
+  app/NSE-style interleaving, deterministic current-state reconstruction, future snapshot
+  rejection, duplicate pre-decryption drop, unsupported versions, terminal session recovery,
+  operation precondition mismatch, orphaned stages, and interrupted finalization.
 - Evidence vectors: Rust, generated Swift, and generated Kotlin replay the same version-one bundle,
   malformed/profile/version/signature/replay refusals, and verified contextual fields. CryptoKit
   and the JDK independently verify the vector's certificate and Message signatures.

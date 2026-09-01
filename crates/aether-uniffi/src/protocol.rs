@@ -1355,14 +1355,23 @@ impl From<EventStreamError> for AetherError {
                 }
             }
             EventStreamError::ObserverClosed => AetherError::EventStreamClosed,
+            EventStreamError::SnapshotFromDifferentStream => AetherError::ForeignEventSnapshot,
+            EventStreamError::StaleSnapshot {
+                snapshot_revision,
+                current_revision,
+            } => AetherError::StaleEventSnapshot {
+                snapshot_revision,
+                current_revision,
+            },
             EventStreamError::LockPoisoned => AetherError::InternalError {
                 reason: "event stream lock poisoned".into(),
             },
-            EventStreamError::EventIdOverflow | EventStreamError::ObserverIdOverflow => {
-                AetherError::InternalError {
-                    reason: e.to_string(),
-                }
-            }
+            EventStreamError::EventIdOverflow
+            | EventStreamError::ObserverIdOverflow
+            | EventStreamError::SnapshotEventIdInFuture { .. }
+            | EventStreamError::StateRevisionOverflow => AetherError::InternalError {
+                reason: e.to_string(),
+            },
             _ => AetherError::InternalError {
                 reason: e.to_string(),
             },

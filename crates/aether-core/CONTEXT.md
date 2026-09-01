@@ -54,7 +54,7 @@ compromised endpoint.
 Avoid: production SLA, memory proof, endpoint guarantee
 
 **Current State Snapshot** (one per Event Stream query):
-A self-contained public view of the producer's current state, tagged with the last Event ID reflected by that view. Lagged Observers use it to replace their local view, then resume after the tagged Event ID without replaying already-reflected Events.
+A self-contained public view of one Library Instance's current state, bound to its Event Stream and tagged with that stream's last local Event ID and current State Revision. Lagged or stale Observers replace their local view from it, then resume without replaying already-reflected Events. An Observer rejects a snapshot bound to another Event Stream.
 Avoid: cache, checkpoint
 
 **Deduplication Digest** (one per received encrypted Message):
@@ -105,8 +105,12 @@ An immutable public value describing one committed state change. Each Event carr
 Avoid: notification, callback
 
 **Event ID** (one per Event):
-The monotonic identifier assigned when an Event is committed to an Event Stream. Event ID 0 is reserved for the initial Current State Snapshot; emitted Events start at 1 and form one total order per stream.
+The monotonic identifier assigned when an Event is committed to an Event Stream. Event IDs are local to the producing Library Instance and are never imported; ID 0 is reserved for its initial Current State Snapshot.
 Avoid: sequence number, offset
+
+**State Revision** (one per Current State Snapshot):
+The monotonic local tag advanced when a Library Instance imports rebuilt current state without emitting an Event. It distinguishes snapshots that share the same last Event ID and is neither persisted nor transferred between Library Instances.
+Avoid: event ID, protocol-state version
 
 **Event Stream** (one per library instance state surface):
 The in-process, per-library-instance feed of committed public state changes. It serves Observers in one total order, but it is not a cross-instance delivery channel; changes from another library instance arrive through shared Protocol State Blobs.
@@ -138,6 +142,10 @@ Avoid: key pair cache, backup blob
 **Lag Signal** (one per Observer overrun):
 An explicit Event Stream item reporting how many Events an Observer missed after its bounded buffer overflowed. Producers do not wait indefinitely for slow Observers; the Observer must recover through a Current State Snapshot.
 Avoid: drop, overflow
+
+**Stale State Signal** (one per Observer after current-state import):
+An explicit Event Stream item reporting that a Library Instance imported current state rebuilt from committed Protocol State Blobs. It carries no Event or foreign Event ID; the Observer must recover through a fresh Current State Snapshot.
+Avoid: cross-instance event, lag signal
 
 **Library Instance** (one in-process Core object graph):
 A live Core object graph in one process, such as one Event Stream and its producers. It is not a Device and does not define durable ownership; durable cross-instance coordination goes through the consumer-held Protocol State Blobs.

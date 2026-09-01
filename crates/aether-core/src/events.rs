@@ -69,24 +69,43 @@ impl<E> EventEnvelope<E> {
     }
 }
 
-/// A state snapshot tagged with the last [`EventId`] it reflects.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A stream-bound state snapshot tagged with the local [`EventId`] and state revision it reflects.
+///
+/// [`EventStream::current_state`] and [`EventStream::import_current_state`] create snapshots. A
+/// snapshot can resume observers from that stream, but not observers from another stream whose
+/// numeric Event ID happens to match.
+///
+/// # Examples
+/// ```
+/// use aether_core::EventStream;
+///
+/// let stream = EventStream::<&str, Vec<&str>>::new(Vec::new());
+/// let snapshot = stream.current_state()?;
+/// assert_eq!(snapshot.event_id().as_u64(), 0);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Debug)]
 pub struct EventStreamSnapshot<S> {
+    origin: Arc<StreamOrigin>,
     event_id: EventId,
+    state_revision: u64,
     state: S,
 }
 
 impl<S> EventStreamSnapshot<S> {
-    /// Creates a snapshot from an event ID and self-contained state value.
-    #[must_use]
-    pub fn from_parts(event_id: EventId, state: S) -> Self {
-        Self { event_id, state }
-    }
-
     /// Returns the last event ID reflected by this snapshot.
     #[must_use]
     pub fn event_id(&self) -> EventId {
         self.event_id
+    }
+
+    /// Returns the local state revision reflected by this snapshot.
+    ///
+    /// The revision advances when current state is imported without emitting an event. It is local
+    /// to one [`EventStream`] and is not a durable Protocol State Blob version.
+    #[must_use]
+    pub fn state_revision(&self) -> u64 {
+        self.state_revision
     }
 
     /// Returns the self-contained state value.
@@ -94,13 +113,21 @@ impl<S> EventStreamSnapshot<S> {
     pub fn state(&self) -> &S {
         &self.state
     }
+}
 
-    /// Consumes the snapshot and returns its state value.
-    #[must_use]
-    pub fn into_state(self) -> S {
-        self.state
+impl<S> PartialEq for EventStreamSnapshot<S>
+where
+    S: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.origin, &other.origin)
+            && self.event_id == other.event_id
+            && self.state_revision == other.state_revision
+            && self.state == other.state
     }
 }
+
+impl<S> Eq for EventStreamSnapshot<S> where S: Eq {}
 
 /// The next item available to an event observer.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -112,6 +139,8 @@ pub enum EventStreamItem<E> {
         /// Number of events missed since the last lag signal.
         missed: u64,
     },
+    /// The observer's state is stale because current state was imported without a stream event.
+    Stale,
 }
 
 /// Errors returned by event-stream operations.
@@ -133,6 +162,24 @@ pub enum EventStreamError {
     ObserverIdOverflow,
     /// The observer is no longer registered with its stream.
     ObserverClosed,
+    /// The snapshot belongs to another event stream.
+    SnapshotFromDifferentStream,
+    /// The snapshot names an event the stream has not emitted.
+    SnapshotEventIdInFuture {
+        /// Event ID carried by the rejected snapshot.
+        snapshot_event_id: EventId,
+        /// Latest Event ID emitted by the stream.
+        current_event_id: EventId,
+    },
+    /// The local state revision counter reached its maximum value.
+    StateRevisionOverflow,
+    /// A snapshot predates the stream's latest current-state import.
+    StaleSnapshot {
+        /// State revision carried by the rejected snapshot.
+        snapshot_revision: u64,
+        /// Latest state revision held by the stream.
+        current_revision: u64,
+    },
 }
 
 impl fmt::Display for EventStreamError {
@@ -146,6 +193,26 @@ impl fmt::Display for EventStreamError {
             Self::LockPoisoned => write!(f, "internal event-stream lock poisoned"),
             Self::ObserverIdOverflow => write!(f, "event observer ID counter overflowed"),
             Self::ObserverClosed => write!(f, "event observer is closed"),
+            Self::SnapshotFromDifferentStream => {
+                write!(f, "event-stream snapshot belongs to another stream")
+            }
+            Self::SnapshotEventIdInFuture {
+                snapshot_event_id,
+                current_event_id,
+            } => write!(
+                f,
+                "event-stream snapshot ID {} is ahead of current ID {}",
+                snapshot_event_id.as_u64(),
+                current_event_id.as_u64()
+            ),
+            Self::StateRevisionOverflow => write!(f, "state revision counter overflowed"),
+            Self::StaleSnapshot {
+                snapshot_revision,
+                current_revision,
+            } => write!(
+                f,
+                "stale event-stream snapshot revision {snapshot_revision}; current revision is {current_revision}"
+            ),
         }
     }
 }
@@ -158,6 +225,8 @@ impl Error for EventStreamError {}
 /// after subscription. Each observer has a bounded buffer. When that buffer overflows, the
 /// observer receives [`EventStreamItem::Lagged`] with the missed-event count and should recover by
 /// reading [`EventStream::current_state`] and calling [`EventObserver::resume_after`].
+/// A host that imports current state rebuilt from durable storage does not emit an event; existing
+/// observers receive [`EventStreamItem::Stale`] and recover through the same snapshot flow.
 ///
 /// This stream is scoped to one library instance. Events from other instances arrive through the
 /// shared protocol-state store, not through this in-process stream. Future producers must put the
@@ -207,10 +276,15 @@ pub struct EventObserver<E, S> {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ObserverId(u64);
 
+#[derive(Debug)]
+struct StreamOrigin;
+
 struct EventStreamInner<E, S> {
     last_event_id: EventId,
     observer_capacity: usize,
     next_observer_id: ObserverId,
+    origin: Arc<StreamOrigin>,
+    state_revision: u64,
     state: S,
     observers: BTreeMap<ObserverId, ObserverState<E>>,
 }
@@ -220,6 +294,7 @@ struct ObserverState<E> {
     buffer: VecDeque<EventEnvelope<E>>,
     missed: u64,
     needs_resume: bool,
+    stale: bool,
 }
 
 impl<E, S> EventStream<E, S>
@@ -269,6 +344,7 @@ where
                 buffer: VecDeque::with_capacity(observer_capacity),
                 missed: 0,
                 needs_resume: false,
+                stale: false,
             },
         );
         Ok(EventObserver {
@@ -312,7 +388,57 @@ where
     pub fn current_state(&self) -> Result<EventStreamSnapshot<S>, EventStreamError> {
         let inner = self.lock_inner()?;
         Ok(EventStreamSnapshot {
+            origin: Arc::clone(&inner.origin),
             event_id: inner.last_event_id,
+            state_revision: inner.state_revision,
+            state: inner.state.clone(),
+        })
+    }
+
+    /// Imports rebuilt current state without emitting a cross-instance event.
+    ///
+    /// The caller must rebuild `state` from the latest committed durable state while holding the
+    /// same host-owned serializer used for protocol-state mutation. The import leaves the local
+    /// Event ID unchanged, advances the local state revision, and causes existing observers to
+    /// receive [`EventStreamItem::Stale`]. Those observers must apply a fresh snapshot and call
+    /// [`EventObserver::resume_after`].
+    ///
+    /// # Errors
+    /// - [`EventStreamError::LockPoisoned`] if the stream lock was poisoned.
+    /// - [`EventStreamError::StateRevisionOverflow`] if no further state revisions can be assigned.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{EventStream, EventStreamItem};
+    ///
+    /// let stream = EventStream::<&str, Vec<&str>>::new(Vec::new());
+    /// let observer = stream.subscribe()?;
+    /// let snapshot = stream.import_current_state(vec!["committed"])?;
+    ///
+    /// assert_eq!(observer.poll_next()?, Some(EventStreamItem::Stale));
+    /// observer.resume_after(&snapshot)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn import_current_state(
+        &self,
+        state: S,
+    ) -> Result<EventStreamSnapshot<S>, EventStreamError> {
+        let mut inner = self.lock_inner()?;
+        inner.state_revision = inner
+            .state_revision
+            .checked_add(1)
+            .ok_or(EventStreamError::StateRevisionOverflow)?;
+        inner.state = state;
+        for observer in inner.observers.values_mut() {
+            observer.buffer.clear();
+            observer.missed = 0;
+            observer.needs_resume = false;
+            observer.stale = true;
+        }
+        Ok(EventStreamSnapshot {
+            origin: Arc::clone(&inner.origin),
+            event_id: inner.last_event_id,
+            state_revision: inner.state_revision,
             state: inner.state.clone(),
         })
     }
@@ -323,6 +449,8 @@ where
                 last_event_id: EventId::initial(),
                 observer_capacity,
                 next_observer_id: ObserverId(0),
+                origin: Arc::new(StreamOrigin),
+                state_revision: 0,
                 state: initial_state,
                 observers: BTreeMap::new(),
             })),
@@ -343,11 +471,12 @@ where
     E: Clone,
     S: Clone,
 {
-    /// Returns the next event or lag signal available to this observer.
+    /// Returns the next event, lag signal, or stale-state signal available to this observer.
     ///
     /// If this returns [`EventStreamItem::Lagged`], call [`EventStream::current_state`] on the
     /// owning stream, replace local state with that snapshot, then call
-    /// [`Self::resume_after`] before consuming later events.
+    /// [`Self::resume_after`] before consuming later events. Follow the same recovery flow after
+    /// [`EventStreamItem::Stale`].
     ///
     /// # Errors
     /// - [`EventStreamError::LockPoisoned`] if the stream lock was poisoned.
@@ -358,6 +487,11 @@ where
             .observers
             .get_mut(&self.id)
             .ok_or(EventStreamError::ObserverClosed)?;
+        if observer.stale {
+            observer.stale = false;
+            observer.needs_resume = true;
+            return Ok(Some(EventStreamItem::Stale));
+        }
         if observer.missed > 0 {
             let missed = observer.missed;
             observer.missed = 0;
@@ -388,23 +522,47 @@ where
             .cursor)
     }
 
-    /// Resumes this observer after applying `snapshot`.
+    /// Resumes this observer after applying a current snapshot from its stream.
     ///
     /// Queued events at or before the snapshot's event ID are skipped. Queued events after the
-    /// snapshot's event ID remain available.
+    /// snapshot's event ID remain available. The snapshot must come from this stream, cannot name
+    /// a future Event ID, and must carry the latest current-state import revision.
     ///
     /// # Errors
     /// - [`EventStreamError::LockPoisoned`] if the stream lock was poisoned.
     /// - [`EventStreamError::ObserverClosed`] if this observer is no longer registered.
+    /// - [`EventStreamError::SnapshotFromDifferentStream`] if another stream created the snapshot.
+    /// - [`EventStreamError::SnapshotEventIdInFuture`] if the snapshot names an Event ID this
+    ///   stream has not emitted.
+    /// - [`EventStreamError::StaleSnapshot`] if the snapshot predates the latest current-state
+    ///   import.
     pub fn resume_after(&self, snapshot: &EventStreamSnapshot<S>) -> Result<(), EventStreamError> {
         let mut inner = self.lock_inner()?;
         let last_event_id = inner.last_event_id;
+        let current_revision = inner.state_revision;
+        let same_stream = Arc::ptr_eq(&snapshot.origin, &inner.origin);
         let observer = inner
             .observers
             .get_mut(&self.id)
             .ok_or(EventStreamError::ObserverClosed)?;
+        if !same_stream {
+            return Err(EventStreamError::SnapshotFromDifferentStream);
+        }
+        if snapshot.event_id > last_event_id {
+            return Err(EventStreamError::SnapshotEventIdInFuture {
+                snapshot_event_id: snapshot.event_id,
+                current_event_id: last_event_id,
+            });
+        }
+        if snapshot.state_revision != current_revision {
+            return Err(EventStreamError::StaleSnapshot {
+                snapshot_revision: snapshot.state_revision,
+                current_revision,
+            });
+        }
         observer.missed = 0;
         observer.needs_resume = false;
+        observer.stale = false;
         if snapshot.event_id > observer.cursor {
             observer.cursor = snapshot.event_id;
         }
@@ -474,4 +632,25 @@ fn validate_observer_capacity(observer_capacity: usize) -> Result<(), EventStrea
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observer_rejects_snapshot_with_future_event_id() {
+        let stream = EventStream::<&str, Vec<&str>>::new(Vec::new());
+        let observer = stream.subscribe().unwrap();
+        let mut snapshot = stream.current_state().unwrap();
+        snapshot.event_id = EventId::from_u64(1);
+
+        assert_eq!(
+            observer.resume_after(&snapshot),
+            Err(EventStreamError::SnapshotEventIdInFuture {
+                snapshot_event_id: EventId::from_u64(1),
+                current_event_id: EventId::initial(),
+            })
+        );
+    }
 }

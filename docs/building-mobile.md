@@ -150,3 +150,9 @@ reproducibility evidence, not as the distribution trust root. Final publication 
   message decryption, and acknowledgment processing.
 - Use `ProtocolStateEngine` for protocol-state initialization/wipe, contacts/trust/blocking,
   pending acknowledgments, retry instructions, hardening limits, and snapshot loading.
+- When another host instance commits contact-state blobs, rebuild the contact view with
+  `ProtocolStateEngine.contactStates`, then call `ContactEventStream.importCurrentState` while
+  holding the same host serializer. The import preserves the local Event ID and makes existing
+  observers recover from a fresh snapshot through an explicit stale-state item. Retain the opaque
+  snapshot object for `resumeAfter`; a snapshot from another stream is rejected even if its numeric
+  tags match.

@@ -107,6 +107,15 @@ pub enum AetherError {
         /// Diagnostic context for logging only.
         reason: String,
     },
+    /// A contact-event snapshot belongs to another event stream.
+    ForeignEventSnapshot,
+    /// A contact-event snapshot predates the latest imported current state.
+    StaleEventSnapshot {
+        /// State revision carried by the rejected snapshot.
+        snapshot_revision: u64,
+        /// Latest state revision held by the stream.
+        current_revision: u64,
+    },
 }
 
 impl std::error::Error for AetherError {}
@@ -130,6 +139,16 @@ impl std::fmt::Display for AetherError {
             AetherError::DecryptionFailed => write!(f, "decryption failed"),
             AetherError::EventStreamClosed => write!(f, "event stream observer is closed"),
             AetherError::EventLag { missed } => write!(f, "event stream observer lagged: {missed}"),
+            AetherError::ForeignEventSnapshot => {
+                write!(f, "event snapshot belongs to another stream")
+            }
+            AetherError::StaleEventSnapshot {
+                snapshot_revision,
+                current_revision,
+            } => write!(
+                f,
+                "stale event snapshot revision {snapshot_revision}; current revision is {current_revision}"
+            ),
             AetherError::InternalError { reason } => write!(f, "internal error: {reason}"),
             AetherError::InvalidData { reason } => write!(f, "invalid data: {reason}"),
             AetherError::InboxRotationRequired => {
