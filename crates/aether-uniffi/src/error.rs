@@ -4,7 +4,7 @@ use aether_core::{
     DiscoveryKeyError, EvidenceVerificationError, IdentityError, KeyStoreError,
     KeyStoreOperationError, MessageError, MessageOperationError, OneTimePreKeyError,
     ProtocolStateError, SafetyNumberError, SenderCertificateValidationError,
-    SessionEstablishmentError, SignedPreKeyError, StorageError,
+    SessionEstablishmentError, SignedPreKeyError, StorageError, TransportBindingError,
 };
 use aether_crypto::CryptoError;
 
@@ -406,8 +406,7 @@ impl From<ProtocolStateError> for AetherError {
             | ProtocolStateError::InvalidHardeningLimit { .. }
             | ProtocolStateError::InvalidMessage { .. }
             | ProtocolStateError::InvalidStateKey { .. }
-            | ProtocolStateError::MessageEncode(_)
-            | ProtocolStateError::RelayRoute(_) => AetherError::InvalidData {
+            | ProtocolStateError::MessageEncode(_) => AetherError::InvalidData {
                 reason: e.to_string(),
             },
             ProtocolStateError::InvalidStateBinding { reason, .. }
@@ -475,9 +474,6 @@ impl From<SessionEstablishmentError> for AetherError {
             SessionEstablishmentError::OneTimePreKey(e) => e.into(),
             SessionEstablishmentError::Operation(e) => e.into(),
             SessionEstablishmentError::ProtocolState(e) => e.into(),
-            SessionEstablishmentError::RelayRoute(e) => AetherError::InvalidData {
-                reason: e.to_string(),
-            },
             SessionEstablishmentError::SignedPreKey(e) => e.into(),
         }
     }
@@ -490,6 +486,14 @@ impl From<MessageOperationError> for AetherError {
             MessageOperationError::Identity(e) => e.into(),
             MessageOperationError::Operation(e) => e.into(),
             MessageOperationError::ProtocolState(e) => e.into(),
+        }
+    }
+}
+
+impl From<TransportBindingError> for AetherError {
+    fn from(e: TransportBindingError) -> Self {
+        AetherError::InvalidData {
+            reason: e.to_string(),
         }
     }
 }

@@ -1,6 +1,6 @@
 # UniFFI API Coverage
 
-This note maps issues 122, 217, 219, 220, and 221 to source surfaces and binding harness coverage. It is audit
+This note maps issues 122, 217, 218, 219, 220, and 221 to source surfaces and binding harness coverage. It is audit
 metadata, not runtime policy; code and tests remain authoritative.
 
 ## Source Surfaces
@@ -8,6 +8,11 @@ metadata, not runtime policy; code and tests remain authoritative.
 - Identity, backup, discovery-key, signed-prekey, and one-time-prekey lifecycle: `KeyStore`.
   Signed- and one-time-prekey records preserve Core's stable unsigned 64-bit identifiers without
   narrowing at the FFI boundary.
+- Caller-owned Message binding: `TransportBinding` carries bounded opaque public bytes, while
+  `PreKeySelection` carries Aether-owned signed- and optional one-time-prekey identifiers for bound
+  X3DH receive. Transport-Bound `KeyStore` operations cover initiation, identity hints, prepared
+  acceptance, established encryption/decryption, and acknowledgments without defining a consumer
+  transport schema.
 - Recoverable SecureStorage mutations: `KeyStoreOperation`, the concrete `Prepared*` result
   records, `commit_operation`, `finalize_operation`, `abort_operation`, and
   `unfinished_operations`. Operation identifiers and preconditions cross UniFFI; staged secrets do
@@ -63,6 +68,10 @@ metadata, not runtime policy; code and tests remain authoritative.
 - Version, storage, certificate, blocked-contact, lag, prepared-operation recovery, precondition,
   unfinished-operation-cap, foreign/stale event snapshot, and backup errors: mapped through
   `AetherError`.
+- Transport Binding and PreKey Selection fields use fully spelled-out generated names. Swift
+  `UInt64` and Kotlin `ULong` preserve stable prekey identifiers without a signed or
+  platform-integer conversion. Empty or oversized bindings return `InvalidData`; mismatched bytes
+  or one-time-prekey identifiers return `AuthenticationFailed`.
 - Secret bytes crossing FFI: adapter code wraps inbound backup passphrases, backup blobs, protocol
   blobs, message plaintext, Evidence Bundles, and storage-loaded values before validation can
   return.
@@ -76,10 +85,14 @@ metadata, not runtime policy; code and tests remain authoritative.
   establishment, sealed-sender encode/decode, outbound encryption, certificate validation, contact
   trust, blocking, event observation, committed-store reload through a second instance,
   cross-instance current-state import, restart reconstruction, retry-visible delivery, and
-  one-time-prekey replenishment.
+  one-time-prekey replenishment. Both generated consumers exercise Transport-Bound initiation,
+  acceptance, established messages, and acknowledgments.
 - Negative paths: invalid canonical keys, rejected certificates, blocked contact behavior,
   stale protocol-state commits, observer lag, foreign and stale event snapshots, backup import
-  failure, and expected foreign storage exceptions returning errors. Core Rust tests cover
+  failure, expected foreign storage exceptions returning errors, empty and oversized Transport
+  Bindings, changed binding bytes, mismatched prekey identifiers, and maximum unsigned 64-bit
+  identifiers.
+  Core Rust tests cover
   app/NSE-style interleaving, deterministic current-state reconstruction, future snapshot
   rejection, duplicate pre-decryption drop, unsupported versions, terminal session recovery,
   operation precondition mismatch, orphaned stages, and interrupted finalization.

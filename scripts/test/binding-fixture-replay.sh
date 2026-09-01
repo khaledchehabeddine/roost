@@ -58,17 +58,18 @@ run_swift() {
     rm -rf "$swift_out"
     mkdir -p "$swift_out"
 
-    cargo run --features fixture-replay --bin uniffi-bindgen-swift -- \
+    cargo run --features fixture-replay,development-certificates --bin uniffi-bindgen-swift -- \
         "$LIB_PATH" \
         "$swift_out" \
         --swift-sources --headers
-    cargo run --features fixture-replay --bin uniffi-bindgen-swift -- \
+    cargo run --features fixture-replay,development-certificates --bin uniffi-bindgen-swift -- \
         "$LIB_PATH" \
         "$swift_out" \
         --modulemap --module-name AetherFFI --modulemap-filename module.modulemap
 
     mkdir -p "$swift_out/module-cache"
     run_swift_harness "FixtureReplay.swift" "fixture-replay" "$swift_out"
+    run_swift_harness "TransportBindingBindings.swift" "transport-binding-bindings" "$swift_out"
     run_swift_harness "Issue122Coverage.swift" "issue-122-coverage" "$swift_out"
     run_swift_harness "Issue219PreparedOperations.swift" "issue-219-prepared-operations" "$swift_out"
     run_swift_harness "SecureStorageUnexpectedError.swift" "secure-storage-unexpected-error" "$swift_out"
@@ -147,7 +148,7 @@ run_kotlin() {
     rm -rf "$kotlin_out"
     mkdir -p "$kotlin_out"
 
-    cargo run --features fixture-replay --bin uniffi-bindgen -- generate \
+    cargo run --features fixture-replay,development-certificates --bin uniffi-bindgen -- generate \
         "$LIB_PATH" \
         --language kotlin \
         --out-dir "$kotlin_out"
@@ -155,6 +156,7 @@ run_kotlin() {
     local jna
     jna="$(jna_jar)"
     run_kotlin_harness "FixtureReplay.kt" "FixtureReplay" "$kotlin_out" "$jna"
+    run_kotlin_harness "TransportBindingBindings.kt" "TransportBindingBindings" "$kotlin_out" "$jna"
     run_kotlin_harness "Issue122Coverage.kt" "Issue122Coverage" "$kotlin_out" "$jna"
     run_kotlin_harness "Issue219PreparedOperations.kt" "Issue219PreparedOperations" "$kotlin_out" "$jna"
     run_kotlin_harness "SecureStorageUnexpectedError.kt" "SecureStorageUnexpectedError" "$kotlin_out" "$jna"
@@ -165,7 +167,7 @@ run_kotlin() {
 }
 
 need_tool cargo
-cargo build -p aether-uniffi --features fixture-replay
+cargo build -p aether-uniffi --features fixture-replay,development-certificates
 
 case "${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" in
     swift)

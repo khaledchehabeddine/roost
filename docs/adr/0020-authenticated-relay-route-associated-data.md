@@ -1,6 +1,6 @@
 # Authenticate Minimal Relay Route Metadata
 
-**Status:** Accepted
+**Status:** Superseded by [0021: Opaque Transport Bindings](0021-opaque-transport-bindings.md)
 
 Relay-facing operations authenticate a canonical `relay-route-v1` value as additional associated
 data in the outer sealed-sender frame. The value contains only the Relay protocol version, route

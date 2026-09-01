@@ -3,6 +3,8 @@
 Swift and Kotlin harnesses in this directory exercise UniFFI bindings built with the `fixture-replay` feature. They are test-only consumers of canonical fixtures and FFI-boundary regressions, not production SDK examples.
 
 - `FixtureReplay.*`: canonical message, handshake, and protocol-state fixture replay.
+- `TransportBindingBindings.*`: generated-client coverage for opaque Transport Bindings across
+  initial and established-session operations, including binding-size and authentication failures.
 - `Issue122Coverage.*`: generated API coverage for identity, backup, protocol-state store,
   sessions, messages, contacts/blocking, events, delivery retry, prekey replenishment, and negative
   binding-visible errors. Event coverage commits through a second instance, reloads the shared

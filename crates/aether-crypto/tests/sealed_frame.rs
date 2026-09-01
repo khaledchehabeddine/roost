@@ -21,8 +21,8 @@ fn sealed_frame_authenticates_external_associated_data() {
         &mut rng,
         recipient.public_key(),
         None,
-        b"route-bound payload",
-        b"relay-route-v1:expected",
+        b"transport-bound payload",
+        b"consumer-binding:expected",
     )
     .unwrap();
 
@@ -30,17 +30,17 @@ fn sealed_frame_authenticates_external_associated_data() {
         open_frame_for_discovery_key_with_associated_data(
             &recipient,
             &frame,
-            b"relay-route-v1:expected",
+            b"consumer-binding:expected",
         )
         .unwrap()
         .as_slice(),
-        b"route-bound payload"
+        b"transport-bound payload"
     );
     assert!(matches!(
         open_frame_for_discovery_key_with_associated_data(
             &recipient,
             &frame,
-            b"relay-route-v1:rerouted",
+            b"consumer-binding:changed",
         ),
         Err(CryptoError::Aead)
     ));

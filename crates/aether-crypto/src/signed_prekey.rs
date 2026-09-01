@@ -116,8 +116,8 @@ pub struct SignedPreKeyBundle {
     pub signature: Signature,
     /// Stable unsigned identifier allocated within [`Self::epoch`].
     ///
-    /// The identifier is lookup metadata and is not covered by [`Self::signature`]. Route
-    /// associated data binds it to the encrypted initial message that selected this pre-key.
+    /// The identifier is lookup metadata and is not covered by [`Self::signature`]. A host that
+    /// needs it authenticated as transport metadata must include it in its Transport Binding.
     pub id: u64,
     /// Discovery-key epoch this signed pre-key was produced under.
     pub epoch: u32,
@@ -130,7 +130,7 @@ impl SignedPreKeyBundle {
     ///
     /// This validates byte lengths only. Call [`verify_signed_prekey_bundle`] with the discovery
     /// verifying key to authenticate the public key, epoch, and creation time. The identifier is
-    /// authenticated separately by the initial Relay route.
+    /// authenticated separately only when the host includes it in the initial Transport Binding.
     ///
     /// # Errors
     /// - [`CryptoError::InvalidKeyEncoding`] when the public key or signature has the wrong

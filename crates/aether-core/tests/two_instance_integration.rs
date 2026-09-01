@@ -9,8 +9,8 @@ use aether_core::{
     InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation, Message,
     MessageId, OutboundAcknowledgment, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob,
     ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
-    ProtocolStateSnapshot, RelayRoute, RelayRouteError, RevocationState,
-    SenderCertificateIdentityKey, SenderIdentityMaterial, SessionId,
+    ProtocolStateSnapshot, RevocationState, SenderCertificateIdentityKey, SenderIdentityMaterial,
+    SessionId, TransportBinding,
 };
 use aether_crypto::{
     DiscoveryKey, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey,
@@ -623,7 +623,7 @@ fn app_instance_rebuilds_current_state_after_extension_commits_without_importing
 }
 
 #[test]
-fn established_relay_route_is_authenticated_for_messages_and_acknowledgments() {
+fn transport_bindings_are_authenticated_for_messages_and_acknowledgments() {
     let engine = ProtocolStateEngine::new();
     let session_key = session_key();
     let deduplication_key = deduplication_key();
@@ -642,29 +642,29 @@ fn established_relay_route_is_authenticated_for_messages_and_acknowledgments() {
         alice_contact,
         bob_contact,
     );
-    let message_route = RelayRoute::established(1, bob_contact.identity_key.ed25519_verifying_key);
-    let acknowledgment_route =
-        RelayRoute::established(1, alice_contact.identity_key.ed25519_verifying_key);
-    let wrong_message_version =
-        RelayRoute::established(2, bob_contact.identity_key.ed25519_verifying_key);
-    let wrong_acknowledgment_version =
-        RelayRoute::established(2, alice_contact.identity_key.ed25519_verifying_key);
-    let wrong_recipient = RelayRoute::established(1, [0x99; 32]);
+    let message_binding = TransportBinding::new(b"message transport metadata".to_vec()).unwrap();
+    let acknowledgment_binding =
+        TransportBinding::new(b"acknowledgment transport metadata".to_vec()).unwrap();
+    let changed_message_binding =
+        TransportBinding::new(b"changed message transport metadata".to_vec()).unwrap();
+    let changed_acknowledgment_binding =
+        TransportBinding::new(b"changed acknowledgment transport metadata".to_vec()).unwrap();
 
     let outbound = engine
-        .encrypt_message_with_relay_route(
+        .encrypt_message_with_transport_binding(
             &alice_store.snapshot(),
             session_key.clone(),
-            outbound(0x41, b"route bound", &alice.sender_identity),
-            &message_route,
+            outbound(0x41, b"transport bound", &alice.sender_identity),
+            &message_binding,
         )
         .unwrap();
     let outbound_message_id = outbound.message_id;
     alice_store.apply_all(outbound.state_updates);
 
     let alice_discovery_key = route_acknowledgment_recipient_discovery_key();
-    let receive = |route: &RelayRoute, acknowledgment_route: &RelayRoute| {
-        engine.decrypt_message_with_relay_routes(
+    let receive = |transport_binding: &TransportBinding,
+                   acknowledgment_transport_binding: &TransportBinding| {
+        engine.decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x42; 32]),
             &bob_store.snapshot(),
             InboundEncryptedMessage {
@@ -690,33 +690,21 @@ fn established_relay_route_is_authenticated_for_messages_and_acknowledgments() {
                     grace_window_secs: 0,
                 }),
             },
-            route,
-            acknowledgment_route,
+            transport_binding,
+            acknowledgment_transport_binding,
         )
     };
     assert!(matches!(
-        receive(&wrong_recipient, &acknowledgment_route),
-        Err(ProtocolStateError::RelayRoute(
-            RelayRouteError::RecipientMismatch
-        ))
-    ));
-    assert!(matches!(
-        receive(&wrong_message_version, &acknowledgment_route),
+        receive(&changed_message_binding, &acknowledgment_binding),
         Err(ProtocolStateError::Crypto(aether_crypto::CryptoError::Aead))
     ));
-    assert!(matches!(
-        receive(&message_route, &message_route),
-        Err(ProtocolStateError::RelayRoute(
-            RelayRouteError::RecipientMismatch
-        ))
-    ));
 
-    let received = accepted(receive(&message_route, &acknowledgment_route).unwrap());
-    assert_eq!(received.plaintext.as_slice(), b"route bound");
+    let received = accepted(receive(&message_binding, &acknowledgment_binding).unwrap());
+    assert_eq!(received.plaintext.as_slice(), b"transport bound");
     let acknowledgment = received.acknowledgment;
 
     assert!(matches!(
-        engine.process_acknowledgment_with_relay_route(
+        engine.process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x43; 32]),
             &alice_store.snapshot(),
             InboundAcknowledgmentMessage {
@@ -725,12 +713,12 @@ fn established_relay_route_is_authenticated_for_messages_and_acknowledgments() {
                 recipient_discovery_key: &alice_discovery_key,
                 recipient_identity_verifying_key: alice_contact.identity_key.ed25519_verifying_key,
             },
-            &wrong_acknowledgment_version,
+            &changed_acknowledgment_binding,
         ),
         Err(ProtocolStateError::Crypto(aether_crypto::CryptoError::Aead))
     ));
     assert!(matches!(
-        engine.process_acknowledgment_with_relay_route(
+        engine.process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x44; 32]),
             &alice_store.snapshot(),
             InboundAcknowledgmentMessage {
@@ -739,14 +727,12 @@ fn established_relay_route_is_authenticated_for_messages_and_acknowledgments() {
                 recipient_discovery_key: &alice_discovery_key,
                 recipient_identity_verifying_key: alice_contact.identity_key.ed25519_verifying_key,
             },
-            &message_route,
+            &message_binding,
         ),
-        Err(ProtocolStateError::RelayRoute(
-            RelayRouteError::RecipientMismatch
-        ))
+        Err(ProtocolStateError::Crypto(aether_crypto::CryptoError::Aead))
     ));
     let outcome = engine
-        .process_acknowledgment_with_relay_route(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x44; 32]),
             &alice_store.snapshot(),
             InboundAcknowledgmentMessage {
@@ -755,7 +741,7 @@ fn established_relay_route_is_authenticated_for_messages_and_acknowledgments() {
                 recipient_discovery_key: &alice_discovery_key,
                 recipient_identity_verifying_key: alice_contact.identity_key.ed25519_verifying_key,
             },
-            &acknowledgment_route,
+            &acknowledgment_binding,
         )
         .unwrap();
     assert!(matches!(

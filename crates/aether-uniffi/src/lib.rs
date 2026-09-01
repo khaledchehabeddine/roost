@@ -58,6 +58,7 @@ mod message;
 mod protocol;
 mod records;
 mod storage;
+mod transport_binding;
 
 pub use binding::{verify_discovery_to_identity_binding, verify_identity_key_binding};
 pub use certificate::{
@@ -95,3 +96,4 @@ pub use records::{
     SignedPreKeyBundle,
 };
 pub use storage::{InMemorySecureStorage, SecureStorage};
+pub use transport_binding::{PreKeySelection, TransportBinding};

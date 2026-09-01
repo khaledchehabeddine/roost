@@ -24,8 +24,8 @@ Avoid: IV, salt
 The per-frame X25519 agreement between a fresh ephemeral key and the recipient's current Discovery
 Key X25519 half. HKDF expands the agreement into the outer XChaCha20-Poly1305 key and nonce; the
 transport-visible frame fields are authenticated as AEAD associated data. Callers may also bind
-separately transported canonical metadata, such as a Relay Route, through length-framed external
-associated data that is authenticated but not encoded into the frame.
+separately transported opaque metadata through length-framed external associated data that is
+authenticated but not encoded into the frame.
 Avoid: X3DH root key, ratchet message key
 
 **Ratchet** (one per Session):

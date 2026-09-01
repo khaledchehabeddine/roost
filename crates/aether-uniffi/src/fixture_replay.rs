@@ -48,8 +48,8 @@ pub struct FramePreKeyReferenceReplay {
     pub discovery_epoch: u32,
     /// Signed pre-key public key as lowercase hex.
     pub signed_prekey_public_key_hex: String,
-    /// Optional one-time pre-key ID.
-    pub one_time_prekey_id: Option<u64>,
+    /// Optional one-time-prekey identifier.
+    pub one_time_prekey_identifier: Option<u64>,
     /// Optional one-time pre-key public key as lowercase hex.
     pub one_time_prekey_public_key_hex: Option<String>,
 }
@@ -1548,7 +1548,7 @@ fn frame_prekey_reference_report(
     FramePreKeyReferenceReplay {
         discovery_epoch: reference.discovery_epoch,
         signed_prekey_public_key_hex: hex::encode(reference.signed_prekey_public_key),
-        one_time_prekey_id: reference.one_time_prekey_id,
+        one_time_prekey_identifier: reference.one_time_prekey_id,
         one_time_prekey_public_key_hex: reference.one_time_prekey_public_key.map(hex::encode),
     }
 }
@@ -1696,7 +1696,7 @@ fn assert_frame_prekey_reference(
                 format!("message fixture {name} signed prekey mismatch"),
             )?;
             ensure(
-                actual.one_time_prekey_id == expected.one_time_prekey_id,
+                actual.one_time_prekey_identifier == expected.one_time_prekey_id,
                 format!("message fixture {name} one-time prekey id mismatch"),
             )?;
             ensure(

@@ -54,6 +54,10 @@ fun main() {
     )
 
     val initialCase = report.initialHandshakeCases[0]
+    requireReplay(
+        initialCase.transportVisible.prekeyReference?.oneTimePrekeyIdentifier == 7uL,
+        "frame one-time prekey identifier",
+    )
     requireReplay(initialCase.senderIdentityHiddenBeforeDecrypt, "initial handshake identity hidden before decrypt")
     requireReplay(initialCase.senderCertificateHiddenBeforeDecrypt, "initial handshake certificate hidden before decrypt")
     requireReplay(initialCase.senderSignatureHiddenBeforeDecrypt, "initial handshake signature hidden before decrypt")

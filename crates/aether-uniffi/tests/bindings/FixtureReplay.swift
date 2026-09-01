@@ -32,6 +32,7 @@ struct FixtureReplay {
         require(!sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderSignatureHex), "signature leaked into transport payload")
 
         let initialCase = report.initialHandshakeCases[0]
+        require(initialCase.transportVisible.prekeyReference?.oneTimePrekeyIdentifier == 7, "frame one-time prekey identifier")
         require(initialCase.senderIdentityHiddenBeforeDecrypt, "initial handshake identity hidden before decrypt")
         require(initialCase.senderCertificateHiddenBeforeDecrypt, "initial handshake certificate hidden before decrypt")
         require(initialCase.senderSignatureHiddenBeforeDecrypt, "initial handshake signature hidden before decrypt")

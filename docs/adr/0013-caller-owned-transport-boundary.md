@@ -7,28 +7,27 @@ may send over any route they choose per send. Retry Instructions are host-local 
 callers may retransmit the enclosed Message, but the instruction metadata itself is not a transport
 payload. The library performs no network IO, stores no transport routing policy, and does not
 authenticate a general transport envelope; any transport-level signing, headers, identifiers,
-batching, retry scheduling, rate limiting, or abuse controls belong to the host application. The
-narrow exception is the canonical Relay Route defined by
-[ADR 0020](0020-authenticated-relay-route-associated-data.md): its protocol version, route kind,
-recipient signing key, and selected prekey identifiers are authenticated as sealed-frame associated
-data. Protocol APIs accept caller-supplied signature bytes where the protocol needs them, but
+batching, retry scheduling, rate limiting, or abuse controls belong to the host application. A
+caller may opt into authenticating an opaque Transport Binding as sealed-frame associated data, as
+defined by [ADR 0021](0021-opaque-transport-bindings.md), but the caller owns its encoding and
+meaning. Protocol APIs accept caller-supplied signature bytes where the protocol needs them, while
 transport signing and verification remain host-owned and outside the UniFFI surface.
 
 ## Considered Options
 
 - Library-selected transport routing. Rejected because the protocol core has no network IO and
   cannot own app-specific delivery, push, Relay, or retry policy.
-- Canonical transport-authentication envelope. Rejected because callers need transport-specific
-  metadata and Relay-facing contracts outside the encrypted Message bytes; ADR 0020 authenticates
-  only the minimal cryptographic Relay Route.
+- Canonical transport-authentication envelope. Rejected because consumers need different metadata
+  and versioning contracts; ADR 0021 authenticates opaque caller-owned bytes without defining them.
 - Treating transport authentication as sender authenticity. Rejected because sender authenticity is
   established by X3DH identity binding, certificates, and sealed message transcripts after protocol
   authentication, while transport authentication proves only a caller-defined outer channel.
 
 ## Consequences
 
-- Caller-added identifiers, headers, push tokens, and route metadata beyond ADR 0020's canonical
-  Relay Route are outside sealed sender and must not be documented as protected by the library.
+- Caller-added identifiers, headers, push tokens, and route metadata are outside sealed sender
+  unless the host includes their canonical encoding in the exact Transport Binding bytes passed to
+  a bound operation.
 - Release verification checks protocol outputs and artifact authenticity, not host transport
   contracts.
 

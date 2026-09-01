@@ -3,11 +3,10 @@
 Versioned inventory of every domain-separation string Aether uses, and the exact bytes each one
 covers. Satisfies AE-KEY-02.
 
-This document exists because independent implementations — the Relay Cloud relay above all — must
-reproduce these preimages byte for byte to verify Aether-produced signatures. A mismatch in a
-context string or a field order fails every verification rather than degrading, so the values below
-are normative for the listed library version and are read directly from the source, not restated
-from the specification.
+This document exists because independent consumers and verifiers must reproduce these preimages
+byte for byte to verify Aether-produced signatures. A mismatch in a context string or a field order
+fails every verification rather than degrading, so the values below are normative for the listed
+library version and are read directly from the source, not restated from the specification.
 
 Applies to: **Aether v0.15.0**. Update on any change and note the affected release.
 
@@ -141,8 +140,10 @@ Verification uses `DiscoveryKey::verifying_key()`. A signed pre-key does **not**
 identity key — see `discovery_signed_prekey_verifies_under_discovery_key_only`.
 
 The stable signed-prekey `u64` identifier is deliberately not part of this signature payload. It is
-Core-allocated lookup metadata within one Discovery Key Epoch and is authenticated with the
-selected key by the initial `relay-route-v1` associated data below.
+Core-allocated lookup metadata within one Discovery Key Epoch. A bound X3DH receive uses it to find
+retained state, then checks the selected public key against the authenticated initial frame. A host
+that needs the identifier authenticated as transport metadata includes it in its own Transport
+Binding encoding.
 
 ### `AetherMessageTranscript-v1:`
 
@@ -215,35 +216,6 @@ nothing. `validate_sender_certificate` requires `expected_relay_domain` for exac
 
 Digest context for the protocol-state commit. Source:
 [`aether-uniffi/src/protocol.rs`](../crates/aether-uniffi/src/protocol.rs).
-
-### `relay-route-v1`
-
-Canonical Relay Route bytes supplied separately from a Message and authenticated as outer
-sealed-frame associated data. Source:
-[`relay_route.rs`](../crates/aether-core/src/relay_route.rs).
-
-Every route starts with:
-
-| Field | Size | Notes |
-|---|---|---|
-| domain tag | 14 | ASCII `relay-route-v1` |
-| protocol version | 2 | `u16` big-endian |
-| route kind | 1 | `0x01` initial, `0x02` established |
-| recipient signing key | 32 | initial: DK Ed25519; established: IK Ed25519 |
-
-An established route ends there at 49 bytes. An initial route appends:
-
-| Field | Size | Notes |
-|---|---|---|
-| prekey block length | 2 | `u16` big-endian value `17` |
-| signed-prekey identifier | 8 | `u64` big-endian, stable within the DK Epoch |
-| one-time-prekey presence | 1 | exactly `0` or `1` |
-| one-time-prekey identifier | 8 | `u64` big-endian when present; all zero when absent |
-
-An initial route is exactly 68 bytes. Wrong kinds, lengths, presence values, key sizes, or nonzero
-absent-value padding are not canonical and must reject. Capabilities and Relay admission proofs are
-excluded because they authorize delivery rather than identify the cryptographic recipient or
-selected prekeys.
 
 ## Hash domain strings
 
@@ -355,7 +327,10 @@ the prefix-freedom requirement above applies to signature contexts, not to HKDF 
 |---|---|
 | `AetherRatchetedPayload-v1:` | Prefix of the ratcheted-payload associated data |
 | `AetherSealedFrame-v1:external-ad` | Length-framed suffix that binds caller-supplied associated data to a sealed frame |
-| `relay-route-v1` | Canonical external associated data for route-bound Relay operations |
+
+Transport Binding contents are intentionally absent from this registry. Consumers own their byte
+encoding and its domain separation; Aether authenticates the complete value under the
+`AetherSealedFrame-v1:external-ad` framing below.
 
 The sealed-frame input is its canonical Postcard-encoded public fields followed, when external data
 is nonempty, by:
