@@ -1,6 +1,10 @@
 //! Feature-gated fixture replay exports for generated Swift and Kotlin bindings.
 
 use crate::error::AetherError;
+use crate::relay_route::{
+    RelayPreKeyReference, RelayRoute, RelayRouteKind, encode_relay_route_associated_data,
+    verify_relay_route_associated_data,
+};
 use aether_core::{
     AcknowledgmentOutcome, ContactDiscoveryKey, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactStateChange, DomainSigningKey, DomainSigningKeyStatus,
@@ -48,8 +52,8 @@ pub struct FramePreKeyReferenceReplay {
     pub discovery_epoch: u32,
     /// Signed pre-key public key as lowercase hex.
     pub signed_prekey_public_key_hex: String,
-    /// Optional one-time pre-key ID.
-    pub one_time_prekey_id: Option<u64>,
+    /// Optional one-time-prekey identifier.
+    pub one_time_prekey_identifier: Option<u64>,
     /// Optional one-time pre-key public key as lowercase hex.
     pub one_time_prekey_public_key_hex: Option<String>,
 }
@@ -168,6 +172,17 @@ pub struct BlobReplayCase {
     pub reencoded_hex: String,
 }
 
+/// One checked-in Relay Route vector replayed through the Binding Surface.
+#[derive(Clone, uniffi::Record)]
+pub struct RelayRouteReplayCase {
+    /// Fixture case name.
+    pub name: String,
+    /// Typed route reconstructed from the fixture inputs.
+    pub route: RelayRoute,
+    /// Canonical associated-data bytes pinned by the fixture.
+    pub associated_data: Vec<u8>,
+}
+
 /// Full binding fixture replay report.
 #[derive(uniffi::Record)]
 pub struct FixtureReplayReport {
@@ -179,6 +194,8 @@ pub struct FixtureReplayReport {
     pub initial_handshake_cases: Vec<InitialHandshakeReplayCase>,
     /// Protocol State Blob replay cases.
     pub protocol_state_blob_cases: Vec<BlobReplayCase>,
+    /// Canonical Relay Route replay cases.
+    pub relay_route_cases: Vec<RelayRouteReplayCase>,
     /// True when unsupported Message versions reject.
     pub unsupported_message_version_rejected: bool,
     /// True when malformed Message bytes reject.
@@ -337,6 +354,28 @@ struct BlobReplayFixture {
 }
 
 #[derive(Deserialize)]
+struct RelayRouteFixtureFile {
+    version: u8,
+    vectors: Vec<RelayRouteFixture>,
+}
+
+#[derive(Deserialize)]
+struct RelayRouteFixture {
+    name: String,
+    inputs: RelayRouteInputs,
+    expected_associated_data_hex: String,
+}
+
+#[derive(Deserialize)]
+struct RelayRouteInputs {
+    protocol_version: u16,
+    route_kind: String,
+    recipient_signing_key_hex: String,
+    signed_prekey_id: Option<u64>,
+    one_time_prekey_id: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct TranscriptFixture {
     rng_seed: [u8; 32],
     created_at: u64,
@@ -395,6 +434,7 @@ pub fn replay_fixture_harness() -> Result<FixtureReplayReport, AetherError> {
         sealed_sender_session_cases: replay_sealed_sender_session_fixtures()?,
         initial_handshake_cases: replay_initial_handshake_fixtures()?,
         protocol_state_blob_cases: replay_protocol_state_blob_fixtures()?,
+        relay_route_cases: replay_relay_route_fixtures()?,
         unsupported_message_version_rejected: unsupported_message_version_rejected(),
         malformed_message_rejected: malformed_message_rejected(),
         old_sender_visible_message_rejected: old_sender_visible_message_rejected()?,
@@ -501,6 +541,75 @@ pub fn replay_protocol_state_blob_fixtures() -> Result<Vec<BlobReplayCase>, Aeth
         .iter()
         .map(|fixture| replay_protocol_state_blob_fixture(fixture, &setup, &sender_identity))
         .collect()
+}
+
+fn replay_relay_route_fixtures() -> Result<Vec<RelayRouteReplayCase>, AetherError> {
+    let fixture_file: RelayRouteFixtureFile = fixture_json(include_str!(
+        "../../aether-core/tests/fixtures/relay_route_associated_data_v1.json"
+    ))?;
+    ensure(
+        fixture_file.version == 1,
+        "relay route fixture version must be 1",
+    )?;
+
+    fixture_file
+        .vectors
+        .into_iter()
+        .map(replay_relay_route_fixture)
+        .collect()
+}
+
+fn replay_relay_route_fixture(
+    fixture: RelayRouteFixture,
+) -> Result<RelayRouteReplayCase, AetherError> {
+    let (kind, prekey_reference) = match fixture.inputs.route_kind.as_str() {
+        "initial" => (
+            RelayRouteKind::Initial,
+            Some(RelayPreKeyReference {
+                signed_prekey_identifier: fixture.inputs.signed_prekey_id.ok_or_else(|| {
+                    invalid_fixture("initial relay route fixture is missing its signed prekey id")
+                })?,
+                one_time_prekey_identifier: fixture.inputs.one_time_prekey_id,
+            }),
+        ),
+        "established"
+            if fixture.inputs.signed_prekey_id.is_none()
+                && fixture.inputs.one_time_prekey_id.is_none() =>
+        {
+            (RelayRouteKind::Established, None)
+        }
+        "established" => {
+            return Err(invalid_fixture(
+                "established relay route fixture carries a prekey id",
+            ));
+        }
+        _ => return Err(invalid_fixture("unknown relay route fixture kind")),
+    };
+    let route = RelayRoute {
+        protocol_version: fixture.inputs.protocol_version,
+        kind,
+        recipient_signing_key: decode_hex(
+            &fixture.inputs.recipient_signing_key_hex,
+            "relay route recipient signing key",
+        )?,
+        prekey_reference,
+    };
+    let expected = decode_hex(
+        &fixture.expected_associated_data_hex,
+        "relay route associated data",
+    )?;
+    let actual = encode_relay_route_associated_data(route.clone())?;
+    ensure(
+        actual == expected,
+        format!("relay route fixture {} did not reproduce", fixture.name),
+    )?;
+    verify_relay_route_associated_data(route.clone(), expected.clone())?;
+
+    Ok(RelayRouteReplayCase {
+        name: fixture.name,
+        route,
+        associated_data: expected,
+    })
 }
 
 fn replay_message_wire_fixture(
@@ -1548,7 +1657,7 @@ fn frame_prekey_reference_report(
     FramePreKeyReferenceReplay {
         discovery_epoch: reference.discovery_epoch,
         signed_prekey_public_key_hex: hex::encode(reference.signed_prekey_public_key),
-        one_time_prekey_id: reference.one_time_prekey_id,
+        one_time_prekey_identifier: reference.one_time_prekey_id,
         one_time_prekey_public_key_hex: reference.one_time_prekey_public_key.map(hex::encode),
     }
 }
@@ -1696,7 +1805,7 @@ fn assert_frame_prekey_reference(
                 format!("message fixture {name} signed prekey mismatch"),
             )?;
             ensure(
-                actual.one_time_prekey_id == expected.one_time_prekey_id,
+                actual.one_time_prekey_identifier == expected.one_time_prekey_id,
                 format!("message fixture {name} one-time prekey id mismatch"),
             )?;
             ensure(

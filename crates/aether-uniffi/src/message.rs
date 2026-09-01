@@ -6,6 +6,19 @@ use aether_core::Message as CoreMessage;
 use aether_crypto::SealedFramePreKeyReference as CorePreKeyReference;
 
 /// Transport-visible X3DH prekey reference in a sealed-sender frame.
+///
+/// # Examples
+/// ```
+/// use aether::FramePreKeyReference;
+///
+/// let reference = FramePreKeyReference {
+///     discovery_epoch: 7,
+///     signed_prekey_public_key: vec![0x11; 32],
+///     one_time_prekey_identifier: Some(u64::MAX),
+///     one_time_prekey_public_key: Some(vec![0x22; 32]),
+/// };
+/// assert_eq!(reference.one_time_prekey_identifier, Some(u64::MAX));
+/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct FramePreKeyReference {
     /// Recipient Discovery Key epoch.
@@ -13,7 +26,7 @@ pub struct FramePreKeyReference {
     /// Recipient signed-prekey X25519 public key. Always 32 bytes.
     pub signed_prekey_public_key: Vec<u8>,
     /// Optional one-time-prekey identifier.
-    pub one_time_prekey_id: Option<u64>,
+    pub one_time_prekey_identifier: Option<u64>,
     /// Optional one-time-prekey X25519 public key. Always 32 bytes when present.
     pub one_time_prekey_public_key: Option<Vec<u8>>,
 }
@@ -106,7 +119,7 @@ impl FramePreKeyReference {
         Self {
             discovery_epoch: reference.discovery_epoch,
             signed_prekey_public_key: reference.signed_prekey_public_key.to_vec(),
-            one_time_prekey_id: reference.one_time_prekey_id,
+            one_time_prekey_identifier: reference.one_time_prekey_id,
             one_time_prekey_public_key: reference
                 .one_time_prekey_public_key
                 .map(|public_key| public_key.to_vec()),
@@ -120,7 +133,7 @@ impl FramePreKeyReference {
                 &self.signed_prekey_public_key,
                 "signed pre-key public key",
             )?,
-            one_time_prekey_id: self.one_time_prekey_id,
+            one_time_prekey_id: self.one_time_prekey_identifier,
             one_time_prekey_public_key: self
                 .one_time_prekey_public_key
                 .as_deref()

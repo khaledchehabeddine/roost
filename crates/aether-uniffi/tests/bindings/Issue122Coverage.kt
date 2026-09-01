@@ -124,6 +124,8 @@ fun main() {
     val replenished = replenishOneTimePrekeys(bob)
     requireCoverage(replenished.size == 100, "prekey replenishment")
     val bobOneTimePrekey = replenished[0]
+    requireCoverage(bobPublication.signedPrekey.identifier == 0uL, "published signed prekey identifier")
+    requireCoverage(bobOneTimePrekey.identifier == 0uL, "published one-time prekey identifier")
 
     val backup = alice.exportEncryptedBackup("passphrase")
     val restored = KeyStore(MemorySecureStorage())

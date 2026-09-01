@@ -9,6 +9,12 @@ struct FixtureReplay {
         require(report.sealedSenderSessionCases.count == 1, "sealed-sender session fixture count")
         require(report.initialHandshakeCases.count == 1, "initial handshake fixture count")
         require(report.protocolStateBlobCases.count == 16, "protocol-state blob fixture count")
+        require(report.relayRouteCases.count == 3, "Relay Route fixture count")
+        let initialRoute = report.relayRouteCases.first {
+            $0.name == "initial route consuming a one-time prekey"
+        }
+        require(initialRoute?.route.prekeyReference?.signedPrekeyIdentifier == 7, "signed prekey identifier")
+        require(initialRoute?.route.prekeyReference?.oneTimePrekeyIdentifier == 4_242, "one-time prekey identifier")
         require(report.protocolStateBlobCases.contains { $0.name == "deduplication_set_identity_with_duplicate_message" }, "duplicate message blob fixture")
         require(report.protocolStateBlobCases.contains { $0.name == "pending_acknowledgments_session_with_duplicate_ack" }, "duplicate acknowledgment blob fixture")
         require(report.unsupportedMessageVersionRejected, "unsupported message version")
@@ -32,6 +38,7 @@ struct FixtureReplay {
         require(!sessionCase.transportVisible.ciphertextHex.contains(sessionCase.postDecryption.senderSignatureHex), "signature leaked into transport payload")
 
         let initialCase = report.initialHandshakeCases[0]
+        require(initialCase.transportVisible.prekeyReference?.oneTimePrekeyIdentifier == 7, "frame one-time prekey identifier")
         require(initialCase.senderIdentityHiddenBeforeDecrypt, "initial handshake identity hidden before decrypt")
         require(initialCase.senderCertificateHiddenBeforeDecrypt, "initial handshake certificate hidden before decrypt")
         require(initialCase.senderSignatureHiddenBeforeDecrypt, "initial handshake signature hidden before decrypt")

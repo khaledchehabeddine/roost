@@ -118,6 +118,8 @@ struct Issue122Coverage {
         let replenished = try replenishOneTimePrekeys(bob)
         require(replenished.count == 100, "prekey replenishment")
         let bobOneTimePrekey = replenished[0]
+        require(bobPublication.signedPrekey.identifier == 0, "published signed prekey identifier")
+        require(bobOneTimePrekey.identifier == 0, "published one-time prekey identifier")
 
         let backup = try alice.exportEncryptedBackup(passphrase: "passphrase")
         let restored = KeyStore(storage: MemorySecureStorage())

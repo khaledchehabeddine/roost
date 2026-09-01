@@ -57,6 +57,7 @@ mod key_store_operation;
 mod message;
 mod protocol;
 mod records;
+mod relay_route;
 mod storage;
 
 pub use binding::{verify_discovery_to_identity_binding, verify_identity_key_binding};
@@ -93,5 +94,9 @@ pub use protocol::{
 pub use records::{
     DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
     SignedPreKeyBundle,
+};
+pub use relay_route::{
+    RelayPreKeyReference, RelayRoute, RelayRouteKind, encode_relay_route_associated_data,
+    verify_relay_route_associated_data,
 };
 pub use storage::{InMemorySecureStorage, SecureStorage};

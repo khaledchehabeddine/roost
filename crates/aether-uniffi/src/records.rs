@@ -46,11 +46,25 @@ impl Identity {
 /// Public signed pre-key material used to start a session.
 ///
 /// Verify this bundle with the matching discovery-key verifying key.
+///
+/// # Examples
+/// ```
+/// use aether::SignedPreKeyBundle;
+///
+/// let bundle = SignedPreKeyBundle {
+///     identifier: u64::MAX,
+///     public_key: vec![0x11; 32],
+///     signature: vec![0x22; 64],
+///     epoch: 7,
+///     created_at: 1_700_000_000,
+/// };
+/// assert_eq!(bundle.identifier, u64::MAX);
+/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct SignedPreKeyBundle {
     /// Stable unsigned identifier within the discovery-key epoch. The Relay route, not the
     /// signed-prekey signature, authenticates this lookup value.
-    pub id: u64,
+    pub identifier: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
     /// Ed25519 signature over `public_key`, `epoch`, and `created_at`. Always 64 bytes.
@@ -64,7 +78,7 @@ pub struct SignedPreKeyBundle {
 impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
     fn from(b: CoreSignedPreKeyBundle) -> Self {
         SignedPreKeyBundle {
-            id: b.id,
+            identifier: b.id,
             public_key: b.public_key.as_bytes().to_vec(),
             signature: b.signature.to_bytes().to_vec(),
             epoch: b.epoch,
@@ -76,7 +90,7 @@ impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
 impl SignedPreKeyBundle {
     pub(crate) fn to_core(&self) -> Result<CoreSignedPreKeyBundle, AetherError> {
         Ok(CoreSignedPreKeyBundle {
-            id: self.id,
+            id: self.identifier,
             public_key: public_key_from_vec(&self.public_key)?,
             signature: signature_from_vec(&self.signature)?,
             epoch: self.epoch,
@@ -88,10 +102,23 @@ impl SignedPreKeyBundle {
 /// Public one-time pre-key material used to start a session.
 ///
 /// The secret half stays in Rust-managed secure storage and is consumed at most once.
+///
+/// # Examples
+/// ```
+/// use aether::OneTimePreKeyBundle;
+///
+/// let bundle = OneTimePreKeyBundle {
+///     identifier: u64::MAX,
+///     public_key: vec![0x11; 32],
+///     epoch: 7,
+///     created_at: 1_700_000_000,
+/// };
+/// assert_eq!(bundle.identifier, u64::MAX);
+/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct OneTimePreKeyBundle {
     /// One-time pre-key identifier within the current discovery-key epoch.
-    pub id: u64,
+    pub identifier: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
     /// Discovery-key epoch this one-time pre-key is bound to.
@@ -103,7 +130,7 @@ pub struct OneTimePreKeyBundle {
 impl From<CoreOneTimePreKeyBundle> for OneTimePreKeyBundle {
     fn from(b: CoreOneTimePreKeyBundle) -> Self {
         OneTimePreKeyBundle {
-            id: b.id,
+            identifier: b.id,
             public_key: b.public_key.as_bytes().to_vec(),
             epoch: b.epoch,
             created_at: b.created_at,
@@ -113,8 +140,13 @@ impl From<CoreOneTimePreKeyBundle> for OneTimePreKeyBundle {
 
 impl OneTimePreKeyBundle {
     pub(crate) fn to_core(&self) -> Result<CoreOneTimePreKeyBundle, AetherError> {
-        CoreOneTimePreKeyBundle::from_bytes(self.id, &self.public_key, self.epoch, self.created_at)
-            .map_err(AetherError::from)
+        CoreOneTimePreKeyBundle::from_bytes(
+            self.identifier,
+            &self.public_key,
+            self.epoch,
+            self.created_at,
+        )
+        .map_err(AetherError::from)
     }
 }
 
@@ -279,14 +311,14 @@ mod tests {
             .as_bytes()
             .to_vec();
         let signed = SignedPreKeyBundle {
-            id: u64::MAX,
+            identifier: u64::MAX,
             public_key: public_key.clone(),
             signature: vec![0; 64],
             epoch: u32::MAX,
             created_at: u64::MAX,
         };
         let one_time = OneTimePreKeyBundle {
-            id: u64::MAX,
+            identifier: u64::MAX,
             public_key,
             epoch: u32::MAX,
             created_at: u64::MAX,

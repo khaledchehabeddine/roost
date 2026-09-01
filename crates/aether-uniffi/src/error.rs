@@ -3,7 +3,7 @@
 use aether_core::{
     DiscoveryKeyError, EvidenceVerificationError, IdentityError, KeyStoreError,
     KeyStoreOperationError, MessageError, MessageOperationError, OneTimePreKeyError,
-    ProtocolStateError, SafetyNumberError, SenderCertificateValidationError,
+    ProtocolStateError, RelayRouteError, SafetyNumberError, SenderCertificateValidationError,
     SessionEstablishmentError, SignedPreKeyError, StorageError,
 };
 use aether_crypto::CryptoError;
@@ -81,6 +81,11 @@ pub enum AetherError {
     },
     /// Protocol-state load, decode, encode, binding, or missing-state fault.
     ProtocolStateFault {
+        /// Diagnostic context for logging only.
+        reason: String,
+    },
+    /// A Relay Route does not match the operation, recipient, prekeys, or canonical bytes.
+    RelayRouteRejected {
         /// Diagnostic context for logging only.
         reason: String,
     },
@@ -163,6 +168,9 @@ impl std::fmt::Display for AetherError {
             }
             AetherError::ProtocolStateFault { reason } => {
                 write!(f, "protocol-state fault: {reason}")
+            }
+            AetherError::RelayRouteRejected { reason } => {
+                write!(f, "relay route rejected: {reason}")
             }
             AetherError::Storage { reason } => write!(f, "storage error: {reason}"),
             AetherError::SecureStoragePreconditionChanged { key } => {
@@ -406,10 +414,10 @@ impl From<ProtocolStateError> for AetherError {
             | ProtocolStateError::InvalidHardeningLimit { .. }
             | ProtocolStateError::InvalidMessage { .. }
             | ProtocolStateError::InvalidStateKey { .. }
-            | ProtocolStateError::MessageEncode(_)
-            | ProtocolStateError::RelayRoute(_) => AetherError::InvalidData {
+            | ProtocolStateError::MessageEncode(_) => AetherError::InvalidData {
                 reason: e.to_string(),
             },
+            ProtocolStateError::RelayRoute(source) => (*source).into(),
             ProtocolStateError::InvalidStateBinding { reason, .. }
                 if reason.contains("blocked contact") =>
             {
@@ -475,9 +483,7 @@ impl From<SessionEstablishmentError> for AetherError {
             SessionEstablishmentError::OneTimePreKey(e) => e.into(),
             SessionEstablishmentError::Operation(e) => e.into(),
             SessionEstablishmentError::ProtocolState(e) => e.into(),
-            SessionEstablishmentError::RelayRoute(e) => AetherError::InvalidData {
-                reason: e.to_string(),
-            },
+            SessionEstablishmentError::RelayRoute(e) => e.into(),
             SessionEstablishmentError::SignedPreKey(e) => e.into(),
         }
     }
@@ -490,6 +496,14 @@ impl From<MessageOperationError> for AetherError {
             MessageOperationError::Identity(e) => e.into(),
             MessageOperationError::Operation(e) => e.into(),
             MessageOperationError::ProtocolState(e) => e.into(),
+        }
+    }
+}
+
+impl From<RelayRouteError> for AetherError {
+    fn from(e: RelayRouteError) -> Self {
+        AetherError::RelayRouteRejected {
+            reason: e.to_string(),
         }
     }
 }
