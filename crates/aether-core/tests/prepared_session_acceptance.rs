@@ -4,9 +4,9 @@
 //! and that two preparations from the same prekey state cannot both commit.
 
 use aether_core::{
-    InMemorySecureStorage, KeyStore, KeyStoreError, KeyStoreOperationError, ProtocolStateKey,
-    RelayPreKeyReference, RelayRoute, RelayRouteError, SessionAcceptance,
-    SessionEstablishmentError, SessionId, SessionInitiation, SignedPreKeyError,
+    InMemorySecureStorage, KeyStore, KeyStoreError, KeyStoreOperationError, PreKeySelection,
+    ProtocolStateKey, SessionAcceptance, SessionEstablishmentError, SessionId, SessionInitiation,
+    SignedPreKeyError, TransportBinding,
 };
 
 fn finalize<T>(store: &KeyStore, prepared: &aether_core::PreparedKeyStoreOperation<T>) {
@@ -32,18 +32,16 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
     finalize(&bob, &one_time_prekeys);
     let bob_publication = bob.current_publication_bundle().unwrap();
     let bob_one_time_prekey = one_time_prekeys.output[0].clone();
-    let route = RelayRoute::initial(
-        1,
-        bob_publication.discovery_key.verifying_key.to_bytes(),
-        RelayPreKeyReference {
-            signed_prekey_id: bob_publication.signed_prekey.id,
-            one_time_prekey_id: Some(bob_one_time_prekey.id),
-        },
-    );
+    let transport_binding =
+        TransportBinding::new(b"consumer-owned initial binding".to_vec()).unwrap();
+    let prekey_selection = PreKeySelection {
+        signed_prekey_identifier: bob_publication.signed_prekey.id,
+        one_time_prekey_identifier: Some(bob_one_time_prekey.id),
+    };
 
     let session_key = ProtocolStateKey::session(SessionId::from_bytes([0x22; 16]));
     let initial = alice
-        .initiate_session_with_relay_route(
+        .initiate_session_with_transport_binding(
             SessionInitiation {
                 session_key: session_key.clone(),
                 responder_identity_key: bob_identity.output.identity_key_bundle().unwrap(),
@@ -58,13 +56,13 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
                 sender_signature: b"alice signature",
                 plaintext: b"hello bob",
             },
-            &route,
+            &transport_binding,
         )
         .unwrap();
     let replacement_signed_prekey = bob.prepare_rotate_signed_prekey_now().unwrap();
     assert_eq!(
         replacement_signed_prekey.output.id,
-        route.prekey_reference().unwrap().signed_prekey_id + 1
+        prekey_selection.signed_prekey_identifier + 1
     );
     finalize(&bob, &replacement_signed_prekey);
     let input = || SessionAcceptance {
@@ -80,56 +78,63 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         ))
     ));
     let accepted = bob
-        .prepare_accept_session_with_relay_route(input(), &route)
+        .prepare_accept_session_with_transport_binding(
+            input(),
+            &transport_binding,
+            prekey_selection,
+        )
         .unwrap();
     let stale = bob
-        .prepare_accept_session_with_relay_route(input(), &route)
+        .prepare_accept_session_with_transport_binding(
+            input(),
+            &transport_binding,
+            prekey_selection,
+        )
         .unwrap();
     assert_eq!(&*accepted.output.plaintext, b"hello bob");
 
-    let rerouted = RelayRoute::initial(
-        2,
-        *route.recipient_signing_key(),
-        route.prekey_reference().unwrap(),
-    );
+    let changed_transport_binding =
+        TransportBinding::new(b"consumer-owned changed binding".to_vec()).unwrap();
     assert!(
-        bob.prepare_accept_session_with_relay_route(
+        bob.prepare_accept_session_with_transport_binding(
             SessionAcceptance {
                 session_key: session_key.clone(),
                 initiator_identity_key: Some(alice_identity.output.identity_key_bundle().unwrap()),
                 message: &initial.message,
             },
-            &rerouted
+            &changed_transport_binding,
+            prekey_selection,
         )
         .is_err()
     );
-    let selected_prekeys = route.prekey_reference().unwrap();
-    let wrong_signed_prekey = RelayRoute::initial(
-        1,
-        *route.recipient_signing_key(),
-        RelayPreKeyReference {
-            signed_prekey_id: selected_prekeys.signed_prekey_id + 1,
-            one_time_prekey_id: selected_prekeys.one_time_prekey_id,
-        },
-    );
+    let wrong_signed_prekey = PreKeySelection {
+        signed_prekey_identifier: prekey_selection.signed_prekey_identifier + 1,
+        ..prekey_selection
+    };
     assert!(matches!(
-        bob.prepare_accept_session_with_relay_route(input(), &wrong_signed_prekey),
+        bob.prepare_accept_session_with_transport_binding(
+            input(),
+            &transport_binding,
+            wrong_signed_prekey,
+        ),
         Err(SessionEstablishmentError::SignedPreKey(
             SignedPreKeyError::NotFound
         ))
     ));
-    let wrong_one_time_prekey = RelayRoute::initial(
-        1,
-        *route.recipient_signing_key(),
-        RelayPreKeyReference {
-            signed_prekey_id: selected_prekeys.signed_prekey_id,
-            one_time_prekey_id: selected_prekeys.one_time_prekey_id.map(|id| id + 1),
-        },
-    );
+    let wrong_one_time_prekey = PreKeySelection {
+        one_time_prekey_identifier: prekey_selection
+            .one_time_prekey_identifier
+            .map(|identifier| identifier + 1),
+        ..prekey_selection
+    };
     assert!(matches!(
-        bob.prepare_accept_session_with_relay_route(input(), &wrong_one_time_prekey),
-        Err(SessionEstablishmentError::RelayRoute(
-            RelayRouteError::PreKeyReferenceMismatch
+        bob.prepare_accept_session_with_transport_binding(
+            input(),
+            &transport_binding,
+            wrong_one_time_prekey,
+        ),
+        Err(SessionEstablishmentError::Crypto(
+            aether_crypto::CryptoError::OneTimePreKeyMismatch
         ))
     ));
 
@@ -142,7 +147,11 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
     ));
     bob.abort_operation(stale.operation.identifier).unwrap();
     assert!(
-        bob.prepare_accept_session_with_relay_route(input(), &route)
-            .is_err()
+        bob.prepare_accept_session_with_transport_binding(
+            input(),
+            &transport_binding,
+            prekey_selection,
+        )
+        .is_err()
     );
 }

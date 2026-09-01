@@ -1,13 +1,14 @@
 use super::KeyStore;
 use crate::{
     DiscoveryKeyError, IdentityError, KeyStoreOperationError, Message, MessageError,
-    OneTimePreKeyError, PreparedKeyStoreOperation, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateUpdate, RelayPreKeyReference, RelayRoute, RelayRouteError, SignedPreKeyError,
+    OneTimePreKeyError, PreKeySelection, PreparedKeyStoreOperation, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateUpdate, SignedPreKeyError, TransportBinding,
 };
 use aether_crypto::{
     CryptoError, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, PreKeyBundle,
-    SenderIdentityMaterial, Signature, accept_with_associated_data, initiate_with_associated_data,
-    initiator_identity_hint_with_associated_data, verify_discovery_to_identity_binding,
+    SealedFramePreKeyReference, SenderIdentityMaterial, Signature, accept_with_associated_data,
+    initiate_with_associated_data, initiator_identity_hint_with_associated_data,
+    verify_discovery_to_identity_binding,
 };
 use rand::rngs::OsRng;
 use std::error::Error;
@@ -89,8 +90,6 @@ pub enum SessionEstablishmentError {
     Operation(KeyStoreOperationError),
     /// Encoding install updates failed.
     ProtocolState(ProtocolStateError),
-    /// Relay route metadata does not match the Session operation or selected prekeys.
-    RelayRoute(RelayRouteError),
     /// Loading local signed-prekey state failed.
     SignedPreKey(SignedPreKeyError),
 }
@@ -105,7 +104,6 @@ impl fmt::Display for SessionEstablishmentError {
             Self::OneTimePreKey(e) => write!(f, "session establishment one-time pre-key: {e}"),
             Self::Operation(e) => write!(f, "session establishment prepared operation: {e}"),
             Self::ProtocolState(e) => write!(f, "session establishment protocol state: {e}"),
-            Self::RelayRoute(e) => write!(f, "session establishment relay route: {e}"),
             Self::SignedPreKey(e) => write!(f, "session establishment signed pre-key: {e}"),
         }
     }
@@ -121,7 +119,6 @@ impl Error for SessionEstablishmentError {
             Self::OneTimePreKey(e) => Some(e),
             Self::Operation(e) => Some(e),
             Self::ProtocolState(e) => Some(e),
-            Self::RelayRoute(e) => Some(e),
             Self::SignedPreKey(e) => Some(e),
         }
     }
@@ -169,12 +166,6 @@ impl From<ProtocolStateError> for SessionEstablishmentError {
     }
 }
 
-impl From<RelayRouteError> for SessionEstablishmentError {
-    fn from(e: RelayRouteError) -> Self {
-        Self::RelayRoute(e)
-    }
-}
-
 impl From<SignedPreKeyError> for SessionEstablishmentError {
     fn from(e: SignedPreKeyError) -> Self {
         Self::SignedPreKey(e)
@@ -202,10 +193,28 @@ impl KeyStore {
         self.initiate_session_inner(input, None)
     }
 
-    /// Starts a new Session and authenticates the canonical initial Relay route.
-    /// The caller must retain the exact route with the returned first Message for retransmission.
+    /// Starts a new Session while authenticating a caller-owned Transport Binding.
+    /// The caller must retain the exact binding with the returned first Message for retransmission.
     /// As with [`Self::initiate_session`], the returned Message and state updates must be committed
     /// atomically before the Message is handed to transport.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{
+    ///     KeyStore, SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
+    ///     TransportBinding,
+    /// };
+    ///
+    /// fn start_bound_session(
+    ///     store: &KeyStore,
+    ///     input: SessionInitiation<'_>,
+    ///     binding: TransportBinding,
+    /// ) -> Result<(SessionInitiationResult, TransportBinding), SessionEstablishmentError> {
+    ///     let result = store.initiate_session_with_transport_binding(input, &binding)?;
+    ///     // Persist `result.state_updates`, `result.message`, and `binding` atomically before send.
+    ///     Ok((result, binding))
+    /// }
+    /// ```
     ///
     /// # Errors
     /// - [`SessionEstablishmentError::Crypto`] if X3DH initiation or frame encoding fails.
@@ -215,20 +224,18 @@ impl KeyStore {
     ///   Core Message.
     /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
     /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
-    /// - [`SessionEstablishmentError::RelayRoute`] if the route does not match the responder
-    ///   publication.
-    pub fn initiate_session_with_relay_route(
+    pub fn initiate_session_with_transport_binding(
         &self,
         input: SessionInitiation<'_>,
-        route: &RelayRoute,
+        transport_binding: &TransportBinding,
     ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
-        self.initiate_session_inner(input, Some(route))
+        self.initiate_session_inner(input, Some(transport_binding))
     }
 
     fn initiate_session_inner(
         &self,
         input: SessionInitiation<'_>,
-        route: Option<&RelayRoute>,
+        transport_binding: Option<&TransportBinding>,
     ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -243,26 +250,7 @@ impl KeyStore {
             &input.responder_prekey_bundle.discovery_key.verifying_key,
             &input.responder_discovery_to_identity,
         )?;
-        let route_associated_data = if let Some(route) = route {
-            route.validate_initial(
-                input
-                    .responder_prekey_bundle
-                    .discovery_key
-                    .verifying_key
-                    .as_bytes(),
-                RelayPreKeyReference {
-                    signed_prekey_id: input.responder_prekey_bundle.signed_prekey.id,
-                    one_time_prekey_id: input
-                        .responder_prekey_bundle
-                        .one_time_prekey
-                        .as_ref()
-                        .map(|prekey| prekey.id),
-                },
-            )?;
-            route.associated_data()
-        } else {
-            Vec::new()
-        };
+        let transport_binding = transport_binding.map_or(&[][..], TransportBinding::as_bytes);
 
         let identity = self.0.identity.load_identity()?;
         let identity_key = identity.identity_key_bundle()?;
@@ -279,7 +267,7 @@ impl KeyStore {
                 sender_signature: input.sender_signature,
                 plaintext: input.plaintext,
             },
-            &route_associated_data,
+            transport_binding,
         )?;
         let message = message_from_handshake_envelope(envelope)?;
         let engine = crate::ProtocolStateEngine::new();
@@ -324,34 +312,34 @@ impl KeyStore {
         self.initiator_identity_hint_inner(message, None)
     }
 
-    /// Reads the initiator identity while authenticating the supplied initial Relay route.
+    /// Reads the initiator identity while authenticating a caller-owned Transport Binding.
     ///
-    /// Route authentication does not authenticate the claimed initiator. The returned identity
-    /// remains a sender claim until [`Self::prepare_accept_session_with_relay_route`] checks it
-    /// against the sealed envelope's authenticated copy.
+    /// Transport Binding authentication does not authenticate the claimed initiator. The returned
+    /// identity remains a sender claim until
+    /// [`Self::prepare_accept_session_with_transport_binding`] checks it against the sealed
+    /// envelope's authenticated copy.
     ///
     /// # Errors
     /// - [`SessionEstablishmentError::Crypto`] if the Message is not an initial, is not sealed to
-    ///   this Discovery Key and route, or names an invalid identity.
+    ///   this Discovery Key and Transport Binding, or names an invalid identity.
     /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
     /// - [`SessionEstablishmentError::Message`] if the Message cannot be encoded.
     /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
-    /// - [`SessionEstablishmentError::RelayRoute`] if the route kind, recipient, or prekey
-    ///   reference does not match the Message.
     /// - [`SessionEstablishmentError::SignedPreKey`] if the referenced signed pre-key is absent,
     ///   malformed, expired, or blocked pending inbox rotation.
-    pub fn initiator_identity_hint_with_relay_route(
+    pub fn initiator_identity_hint_with_transport_binding(
         &self,
         message: &Message,
-        route: &RelayRoute,
+        transport_binding: &TransportBinding,
+        prekey_selection: PreKeySelection,
     ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
-        self.initiator_identity_hint_inner(message, Some(route))
+        self.initiator_identity_hint_inner(message, Some((transport_binding, prekey_selection)))
     }
 
     fn initiator_identity_hint_inner(
         &self,
         message: &Message,
-        route: Option<&RelayRoute>,
+        transport_binding: Option<(&TransportBinding, PreKeySelection)>,
     ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -360,28 +348,22 @@ impl KeyStore {
         let prekey_reference = envelope
             .prekey_reference
             .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
-        let route_associated_data = if let Some(route) = route {
-            let route_reference = route.prekey_reference().ok_or(RelayRouteError::WrongKind)?;
-            route.validate_initial(
-                discovery_key.verifying_key().as_bytes(),
-                RelayPreKeyReference {
-                    signed_prekey_id: route_reference.signed_prekey_id,
-                    one_time_prekey_id: prekey_reference.one_time_prekey_id,
-                },
-            )?;
-            self.0.signed_prekey.prekey_for_reference(
-                prekey_reference.discovery_epoch,
-                route_reference.signed_prekey_id,
-                &prekey_reference.signed_prekey_public_key,
-            )?;
-            route.associated_data()
-        } else {
-            Vec::new()
-        };
+        let transport_binding =
+            if let Some((transport_binding, prekey_selection)) = transport_binding {
+                validate_prekey_selection(&prekey_reference, prekey_selection)?;
+                self.0.signed_prekey.prekey_for_reference(
+                    prekey_reference.discovery_epoch,
+                    prekey_selection.signed_prekey_identifier,
+                    &prekey_reference.signed_prekey_public_key,
+                )?;
+                transport_binding.as_bytes()
+            } else {
+                &[]
+            };
         Ok(initiator_identity_hint_with_associated_data(
             &envelope,
             &discovery_key,
-            &route_associated_data,
+            transport_binding,
         )?)
     }
 
@@ -429,9 +411,9 @@ impl KeyStore {
         self.prepare_operation(move |staged| staged.accept_session_eager(input, None))
     }
 
-    /// Prepares Session acceptance while authenticating the supplied initial Relay route.
-    /// For a retained superseded signed prekey, the caller must first validate that Relay admitted
-    /// the item before supersession.
+    /// Prepares Session acceptance while authenticating a caller-owned Transport Binding.
+    /// For a retained superseded signed prekey, the caller must first validate that its transport
+    /// accepted the item before supersession.
     ///
     /// As with [`Self::prepare_accept_session`], one-time-prekey consumption remains staged until
     /// finalization. Commit the operation, atomically persist the returned state updates and
@@ -449,22 +431,23 @@ impl KeyStore {
     /// - [`SessionEstablishmentError::Operation`] if staging fails or a committed operation needs
     ///   recovery.
     /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
-    /// - [`SessionEstablishmentError::RelayRoute`] if the route kind, recipient, or prekey
-    ///   reference does not match the Message.
     /// - [`SessionEstablishmentError::SignedPreKey`] if the referenced signed pre-key is absent,
     ///   malformed, expired, or blocked pending inbox rotation.
-    pub fn prepare_accept_session_with_relay_route(
+    pub fn prepare_accept_session_with_transport_binding(
         &self,
         input: SessionAcceptance<'_>,
-        route: &RelayRoute,
+        transport_binding: &TransportBinding,
+        prekey_selection: PreKeySelection,
     ) -> Result<PreparedKeyStoreOperation<SessionAcceptanceResult>, SessionEstablishmentError> {
-        self.prepare_operation(move |staged| staged.accept_session_eager(input, Some(route)))
+        self.prepare_operation(move |staged| {
+            staged.accept_session_eager(input, Some((transport_binding, prekey_selection)))
+        })
     }
 
     fn accept_session_eager(
         &self,
         input: SessionAcceptance<'_>,
-        route: Option<&RelayRoute>,
+        transport_binding: Option<(&TransportBinding, PreKeySelection)>,
     ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         let identity = self.0.identity.load_identity()?;
@@ -474,32 +457,26 @@ impl KeyStore {
         let prekey_reference = envelope
             .prekey_reference
             .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
-        let (signed_prekey, route_associated_data) = if let Some(route) = route {
-            let route_reference = route.prekey_reference().ok_or(RelayRouteError::WrongKind)?;
-            route.validate_initial(
-                discovery_key.verifying_key().as_bytes(),
-                RelayPreKeyReference {
-                    signed_prekey_id: route_reference.signed_prekey_id,
-                    one_time_prekey_id: prekey_reference.one_time_prekey_id,
-                },
-            )?;
-            (
-                self.0.signed_prekey.prekey_for_reference(
-                    prekey_reference.discovery_epoch,
-                    route_reference.signed_prekey_id,
-                    &prekey_reference.signed_prekey_public_key,
-                )?,
-                route.associated_data(),
-            )
-        } else {
-            (
-                self.0.signed_prekey.current_prekey_for_public_key(
-                    prekey_reference.discovery_epoch,
-                    &prekey_reference.signed_prekey_public_key,
-                )?,
-                Vec::new(),
-            )
-        };
+        let (signed_prekey, transport_binding) =
+            if let Some((transport_binding, prekey_selection)) = transport_binding {
+                validate_prekey_selection(&prekey_reference, prekey_selection)?;
+                (
+                    self.0.signed_prekey.prekey_for_reference(
+                        prekey_reference.discovery_epoch,
+                        prekey_selection.signed_prekey_identifier,
+                        &prekey_reference.signed_prekey_public_key,
+                    )?,
+                    transport_binding.as_bytes(),
+                )
+            } else {
+                (
+                    self.0.signed_prekey.current_prekey_for_public_key(
+                        prekey_reference.discovery_epoch,
+                        &prekey_reference.signed_prekey_public_key,
+                    )?,
+                    &[][..],
+                )
+            };
         let one_time_prekey = match (
             prekey_reference.one_time_prekey_id,
             prekey_reference.one_time_prekey_public_key,
@@ -525,7 +502,7 @@ impl KeyStore {
             &discovery_key,
             &signed_prekey,
             one_time_prekey,
-            &route_associated_data,
+            transport_binding,
         )?;
         if let Some(id) = prekey_reference.one_time_prekey_id {
             self.0
@@ -578,6 +555,16 @@ fn handshake_envelope_from_message(
 ) -> Result<HandshakeEnvelope, SessionEstablishmentError> {
     let bytes = message.to_bytes()?;
     Ok(HandshakeEnvelope::from_bytes(&bytes)?)
+}
+
+fn validate_prekey_selection(
+    reference: &SealedFramePreKeyReference,
+    selection: PreKeySelection,
+) -> Result<(), CryptoError> {
+    if reference.one_time_prekey_id != selection.one_time_prekey_identifier {
+        return Err(CryptoError::OneTimePreKeyMismatch);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

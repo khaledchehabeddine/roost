@@ -21,8 +21,8 @@ use crate::records::{
     DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
     SignedPreKeyBundle, fixed_16, fixed_32,
 };
-use crate::relay_route::RelayRoute;
 use crate::storage::SecureStorageAdapter;
+use crate::transport_binding::{PreKeySelection, TransportBinding};
 use aether_core::{
     AcknowledgmentProcessing, InboundSenderCertificateValidation, KeyStore as CoreKeyStore,
     MessageDecryption, MessageEncryption, MessageId,
@@ -928,16 +928,15 @@ impl KeyStore {
         })
     }
 
-    /// Starts a new Session while authenticating an initial Relay Route.
+    /// Starts a new Session while authenticating a caller-owned Transport Binding.
     ///
-    /// Build `route` from the responder publication's Discovery Key verifying key and stable
-    /// signed- and one-time-prekey identifiers. Commit the returned state updates atomically with
-    /// the returned Message and retain the exact route for transport retry.
+    /// Commit the returned state updates atomically with the returned Message and retain the exact
+    /// binding for transport retry. Aether does not interpret, transmit, or store the binding.
     ///
     /// # Examples
     /// ```
     /// use aether::{
-    ///     AetherError, Identity, KeyStore, OneTimePreKeyBundle, PublicationBundle, RelayRoute,
+    ///     AetherError, Identity, KeyStore, OneTimePreKeyBundle, PublicationBundle, TransportBinding,
     ///     SessionInitiationResult,
     /// };
     ///
@@ -946,9 +945,9 @@ impl KeyStore {
     ///     responder_identity: Identity,
     ///     responder_publication: PublicationBundle,
     ///     responder_one_time_prekey: Option<OneTimePreKeyBundle>,
-    ///     route: RelayRoute,
+    ///     transport_binding: TransportBinding,
     /// ) -> Result<SessionInitiationResult, AetherError> {
-    ///     store.initiate_session_with_relay_route(
+    ///     store.initiate_session_with_transport_binding(
     ///         vec![0x11; 16],
     ///         responder_identity,
     ///         responder_publication,
@@ -956,7 +955,7 @@ impl KeyStore {
     ///         Vec::new(),
     ///         Vec::new(),
     ///         b"hello".to_vec(),
-    ///         route,
+    ///         transport_binding,
     ///     )
     /// }
     /// ```
@@ -967,12 +966,11 @@ impl KeyStore {
     /// - [`AetherError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
-    /// - [`AetherError::InvalidData`] if key, Message, certificate, prekey, or route inputs are
-    ///   malformed.
+    /// - [`AetherError::InvalidData`] if key, Message, certificate, prekey, or Transport Binding
+    ///   inputs are malformed.
     /// - [`AetherError::NotFound`] if local Identity or Discovery Key material is missing.
     /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if install state cannot be encoded.
-    /// - [`AetherError::RelayRouteRejected`] if the route does not match the responder publication.
     /// - [`AetherError::Storage`] on platform storage failure.
     /// - [`AetherError::UnsupportedVersion`] if a prekey bundle, Message, or stored key version is
     ///   unsupported.
@@ -980,7 +978,7 @@ impl KeyStore {
         clippy::too_many_arguments,
         reason = "flat UniFFI export preserves generated binding shape"
     )]
-    pub fn initiate_session_with_relay_route(
+    pub fn initiate_session_with_transport_binding(
         &self,
         session_key: Vec<u8>,
         responder_identity: Identity,
@@ -989,13 +987,13 @@ impl KeyStore {
         sender_certificate: Vec<u8>,
         sender_signature: Vec<u8>,
         plaintext: Vec<u8>,
-        route: RelayRoute,
+        transport_binding: TransportBinding,
     ) -> Result<SessionInitiationResult, AetherError> {
         let sender_certificate = Zeroizing::new(sender_certificate);
         let sender_signature = Zeroizing::new(sender_signature);
         let plaintext = Zeroizing::new(plaintext);
-        let route = route.to_core()?;
-        let result = self.inner.initiate_session_with_relay_route(
+        let transport_binding = transport_binding.into_core()?;
+        let result = self.inner.initiate_session_with_transport_binding(
             SessionInitiation {
                 session_key: ProtocolStateKey::from_bytes(session_key)?,
                 responder_identity_key: responder_identity.to_core()?,
@@ -1007,7 +1005,7 @@ impl KeyStore {
                 sender_signature: &sender_signature,
                 plaintext: &plaintext,
             },
-            &route,
+            &transport_binding,
         )?;
         Ok(SessionInitiationResult {
             message: Message::from_core(result.message),
@@ -1045,49 +1043,56 @@ impl KeyStore {
         })
     }
 
-    /// Reads who sent an X3DH first Message while authenticating its initial Relay Route.
+    /// Reads who sent an X3DH first Message while authenticating its Transport Binding.
     ///
-    /// This operation consumes no one-time prekey. Pass the same route to
-    /// [`Self::prepare_accept_session_with_relay_route`] after deriving the host Session key.
+    /// This operation consumes no one-time prekey. Pass the same binding and prekey selection to
+    /// [`Self::prepare_accept_session_with_transport_binding`] after deriving the host Session key.
     ///
     /// # Examples
     /// ```
-    /// use aether::{AetherError, Identity, KeyStore, Message, RelayRoute};
+    /// use aether::{AetherError, Identity, KeyStore, Message, PreKeySelection, TransportBinding};
     ///
     /// fn inspect_sender(
     ///     store: &KeyStore,
     ///     message: Message,
-    ///     route: RelayRoute,
+    ///     transport_binding: TransportBinding,
+    ///     prekey_selection: PreKeySelection,
     /// ) -> Result<Identity, AetherError> {
-    ///     store.initiator_identity_hint_with_relay_route(message, route)
+    ///     store.initiator_identity_hint_with_transport_binding(
+    ///         message,
+    ///         transport_binding,
+    ///         prekey_selection,
+    ///     )
     /// }
     /// ```
     ///
     /// # Errors
-    /// - [`AetherError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key or
-    ///   the named identity's binding signature does not verify.
+    /// - [`AetherError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key
+    ///   and Transport Binding, the selected one-time-prekey identifier does not match the
+    ///   Message, or the named identity's binding signature does not verify.
     /// - [`AetherError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
     /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
-    /// - [`AetherError::InvalidData`] if the Message or route is malformed.
+    /// - [`AetherError::InvalidData`] if the Message or Transport Binding is malformed.
     /// - [`AetherError::NotFound`] if local Discovery Key or referenced signed-prekey material is
     ///   missing.
     /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`AetherError::RelayRouteRejected`] if the route kind, recipient, or prekey reference does
-    ///   not match the Message.
     /// - [`AetherError::Storage`] on platform storage failure.
     /// - [`AetherError::UnsupportedVersion`] if the Message or stored prekey version is unsupported.
-    pub fn initiator_identity_hint_with_relay_route(
+    pub fn initiator_identity_hint_with_transport_binding(
         &self,
         message: Message,
-        route: RelayRoute,
+        transport_binding: TransportBinding,
+        prekey_selection: PreKeySelection,
     ) -> Result<Identity, AetherError> {
         let core_message = message.to_core()?;
-        let route = route.to_core()?;
-        let bundle = self
-            .inner
-            .initiator_identity_hint_with_relay_route(&core_message, &route)?;
+        let transport_binding = transport_binding.into_core()?;
+        let bundle = self.inner.initiator_identity_hint_with_transport_binding(
+            &core_message,
+            &transport_binding,
+            prekey_selection.to_core(),
+        )?;
         Ok(Identity {
             x25519_public_key: bundle.public_key.as_bytes().to_vec(),
             ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
@@ -1121,7 +1126,7 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`AetherError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
-    ///   fails.
+    ///   fails, or the selected one-time-prekey identifier does not match the Message.
     /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InvalidData`] if the message, key, or prekey inputs are malformed.
     /// - [`AetherError::NotFound`] if required local identity, Discovery Key, signed-prekey, or
@@ -1158,23 +1163,33 @@ impl KeyStore {
         })
     }
 
-    /// Prepares responder-side Session acceptance while authenticating an initial Relay Route.
+    /// Prepares responder-side Session acceptance while authenticating a Transport Binding.
     ///
-    /// For a retained superseded signed prekey, the host must validate that the Relay admitted the
-    /// item before supersession. Commit the operation, atomically persist the returned state
-    /// updates and operation identifier, then finalize SecureStorage.
+    /// For a retained superseded signed prekey, the host must first validate that its transport
+    /// accepted the item before supersession. Commit the operation, atomically persist the returned
+    /// state updates and operation identifier, then finalize SecureStorage.
     ///
     /// # Examples
     /// ```
-    /// use aether::{AetherError, KeyStore, Message, PreparedSessionAcceptance, RelayRoute};
+    /// use aether::{
+    ///     AetherError, KeyStore, Message, PreKeySelection, PreparedSessionAcceptance,
+    ///     TransportBinding,
+    /// };
     ///
     /// fn prepare_acceptance(
     ///     store: &KeyStore,
     ///     session_key: Vec<u8>,
     ///     message: Message,
-    ///     route: RelayRoute,
+    ///     transport_binding: TransportBinding,
+    ///     prekey_selection: PreKeySelection,
     /// ) -> Result<PreparedSessionAcceptance, AetherError> {
-    ///     store.prepare_accept_session_with_relay_route(session_key, None, message, route)
+    ///     store.prepare_accept_session_with_transport_binding(
+    ///         session_key,
+    ///         None,
+    ///         message,
+    ///         transport_binding,
+    ///         prekey_selection,
+    ///     )
     /// }
     /// ```
     ///
@@ -1186,36 +1201,37 @@ impl KeyStore {
     /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning or operation identifier
     ///   generation failure.
-    /// - [`AetherError::InvalidData`] if the Message, key, prekey, or route inputs are malformed.
+    /// - [`AetherError::InvalidData`] if the Message, key, prekey, or Transport Binding inputs are
+    ///   malformed.
     /// - [`AetherError::NotFound`] if required local Identity, Discovery Key, signed-prekey, or
     ///   one-time-prekey material is missing.
     /// - [`AetherError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
     /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if install state cannot be encoded.
-    /// - [`AetherError::RelayRouteRejected`] if the route kind, recipient, or prekey reference does
-    ///   not match the Message.
     /// - [`AetherError::Storage`] on platform storage failure.
     /// - [`AetherError::UnsupportedVersion`] if the Message, stored prekey, or protocol-state
     ///   version is unsupported.
-    pub fn prepare_accept_session_with_relay_route(
+    pub fn prepare_accept_session_with_transport_binding(
         &self,
         session_key: Vec<u8>,
         initiator_identity: Option<Identity>,
         message: Message,
-        route: RelayRoute,
+        transport_binding: TransportBinding,
+        prekey_selection: PreKeySelection,
     ) -> Result<PreparedSessionAcceptance, AetherError> {
         let core_message = message.to_core()?;
         let initiator_identity_key = initiator_identity
             .map(|identity| identity.to_core())
             .transpose()?;
-        let route = route.to_core()?;
-        let prepared = self.inner.prepare_accept_session_with_relay_route(
+        let transport_binding = transport_binding.into_core()?;
+        let prepared = self.inner.prepare_accept_session_with_transport_binding(
             SessionAcceptance {
                 session_key: ProtocolStateKey::from_bytes(session_key)?,
                 initiator_identity_key,
                 message: &core_message,
             },
-            &route,
+            &transport_binding,
+            prekey_selection.to_core(),
         )?;
         let (operation, acceptance) = self.convert_prepared(prepared, |result| {
             let state_updates = updates_from_core_absent(result.state_updates)?;
@@ -1279,25 +1295,25 @@ impl KeyStore {
         )
     }
 
-    /// Encrypts an established-session Message while authenticating a Relay Route.
+    /// Encrypts an established-session Message while authenticating a Transport Binding.
     ///
     /// Commit the returned state updates atomically with the returned Message and retain the exact
-    /// route for retransmission.
+    /// binding for retransmission.
     ///
     /// # Examples
     /// ```
     /// use aether::{
     ///     AetherError, IdentityKey, KeyStore, OutboundMessageResult, ProtocolStateEntry,
-    ///     RelayRoute,
+    ///     TransportBinding,
     /// };
     ///
     /// fn encrypt(
     ///     store: &KeyStore,
     ///     snapshot: Vec<ProtocolStateEntry>,
     ///     contact: IdentityKey,
-    ///     route: RelayRoute,
+    ///     transport_binding: TransportBinding,
     /// ) -> Result<OutboundMessageResult, AetherError> {
-    ///     store.encrypt_message_with_relay_route(
+    ///     store.encrypt_message_with_transport_binding(
     ///         snapshot,
     ///         vec![0x11; 16],
     ///         vec![0x22; 16],
@@ -1307,7 +1323,7 @@ impl KeyStore {
     ///         Vec::new(),
     ///         Vec::new(),
     ///         b"hello".to_vec(),
-    ///         route,
+    ///         transport_binding,
     ///     )
     /// }
     /// ```
@@ -1316,20 +1332,18 @@ impl KeyStore {
     /// - [`AetherError::BlockedContact`] if the contact is locally blocked.
     /// - [`AetherError::Corrupt`] if stored Identity material is incomplete.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
-    /// - [`AetherError::InvalidData`] if Message identifiers, keys, Message fields, or the route are
-    ///   malformed.
+    /// - [`AetherError::InvalidData`] if Message identifiers, keys, Message fields, or the
+    ///   Transport Binding are malformed.
     /// - [`AetherError::NotFound`] if local Identity material is missing.
     /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`AetherError::RelayRouteRejected`] if the route is not established or names a different
-    ///   contact Identity Key.
     /// - [`AetherError::Storage`] on platform storage failure.
     /// - [`AetherError::UnsupportedVersion`] if a stored protocol-state version is unsupported.
     #[expect(
         clippy::too_many_arguments,
         reason = "flat UniFFI export preserves generated binding shape"
     )]
-    pub fn encrypt_message_with_relay_route(
+    pub fn encrypt_message_with_transport_binding(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         session_key: Vec<u8>,
@@ -1340,16 +1354,16 @@ impl KeyStore {
         sender_certificate: Vec<u8>,
         sender_signature: Vec<u8>,
         plaintext: Vec<u8>,
-        route: RelayRoute,
+        transport_binding: TransportBinding,
     ) -> Result<OutboundMessageResult, AetherError> {
         let sender_certificate = Zeroizing::new(sender_certificate);
         let sender_signature = Zeroizing::new(sender_signature);
         let plaintext = Zeroizing::new(plaintext);
         let snapshot = snapshot_input_from_entries(snapshot)?;
-        let route = route.to_core()?;
+        let transport_binding = transport_binding.into_core()?;
         OutboundMessageResult::from_core(
             &snapshot,
-            self.inner.encrypt_message_with_relay_route(
+            self.inner.encrypt_message_with_transport_binding(
                 MessageEncryption {
                     snapshot: &snapshot.snapshot,
                     session_key: protocol_key(session_key)?,
@@ -1361,7 +1375,7 @@ impl KeyStore {
                     sender_signature: &sender_signature,
                     plaintext: &plaintext,
                 },
-                &route,
+                &transport_binding,
             )?,
         )
     }
@@ -1450,27 +1464,27 @@ impl KeyStore {
         )
     }
 
-    /// Decrypts an established-session Message while authenticating its route and acknowledgment
-    /// route.
+    /// Decrypts an established-session Message while authenticating its Transport Binding and the
+    /// binding used for the returned acknowledgment.
     ///
     /// Unique Messages require `sender_certificate_validation`; duplicates can return before
-    /// validation because they surface no plaintext. Retain `acknowledgment_route` with any returned
-    /// acknowledgment Message.
+    /// validation because they surface no plaintext. Retain `acknowledgment_transport_binding`
+    /// with any returned acknowledgment Message.
     ///
     /// # Examples
     /// ```
     /// use aether::{
-    ///     AetherError, InboundMessageOutcome, KeyStore, Message, ProtocolStateEntry, RelayRoute,
+    ///     AetherError, InboundMessageOutcome, KeyStore, Message, ProtocolStateEntry, TransportBinding,
     /// };
     ///
     /// fn decrypt(
     ///     store: &KeyStore,
     ///     snapshot: Vec<ProtocolStateEntry>,
     ///     message: Message,
-    ///     message_route: RelayRoute,
-    ///     acknowledgment_route: RelayRoute,
+    ///     message_transport_binding: TransportBinding,
+    ///     acknowledgment_transport_binding: TransportBinding,
     /// ) -> Result<InboundMessageOutcome, AetherError> {
-    ///     store.decrypt_message_with_relay_routes(
+    ///     store.decrypt_message_with_transport_bindings(
     ///         snapshot,
     ///         vec![0x11; 16],
     ///         b"deduplication".to_vec(),
@@ -1481,8 +1495,8 @@ impl KeyStore {
     ///         Vec::new(),
     ///         Vec::new(),
     ///         None,
-    ///         message_route,
-    ///         acknowledgment_route,
+    ///         message_transport_binding,
+    ///         acknowledgment_transport_binding,
     ///     )
     /// }
     /// ```
@@ -1494,13 +1508,11 @@ impl KeyStore {
     /// - [`AetherError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
-    /// - [`AetherError::InvalidData`] if Message identifiers, keys, Message fields, or either route
-    ///   are malformed.
+    /// - [`AetherError::InvalidData`] if Message identifiers, keys, Message fields, or either
+    ///   Transport Binding is malformed.
     /// - [`AetherError::NotFound`] if local Identity or Discovery Key material is missing.
     /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`AetherError::RelayRouteRejected`] if either route is not established or names a different
-    ///   Identity Key.
     /// - [`AetherError::Storage`] on platform storage failure.
     /// - [`AetherError::UnsupportedVersion`] if the Message or a stored protocol-state version is
     ///   unsupported.
@@ -1508,7 +1520,7 @@ impl KeyStore {
         clippy::too_many_arguments,
         reason = "flat UniFFI export preserves generated binding shape"
     )]
-    pub fn decrypt_message_with_relay_routes(
+    pub fn decrypt_message_with_transport_bindings(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         session_key: Vec<u8>,
@@ -1520,15 +1532,15 @@ impl KeyStore {
         acknowledgment_sender_certificate: Vec<u8>,
         acknowledgment_sender_signature: Vec<u8>,
         sender_certificate_validation: Option<SenderCertificateValidation>,
-        message_route: RelayRoute,
-        acknowledgment_route: RelayRoute,
+        message_transport_binding: TransportBinding,
+        acknowledgment_transport_binding: TransportBinding,
     ) -> Result<InboundMessageOutcome, AetherError> {
         let acknowledgment_sender_certificate = Zeroizing::new(acknowledgment_sender_certificate);
         let acknowledgment_sender_signature = Zeroizing::new(acknowledgment_sender_signature);
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let message = message.to_core()?;
-        let message_route = message_route.to_core()?;
-        let acknowledgment_route = acknowledgment_route.to_core()?;
+        let message_transport_binding = message_transport_binding.into_core()?;
+        let acknowledgment_transport_binding = acknowledgment_transport_binding.into_core()?;
 
         let validation_storage = if let Some(validation) = &sender_certificate_validation {
             Some((
@@ -1558,7 +1570,7 @@ impl KeyStore {
 
         InboundMessageOutcome::from_core(
             &snapshot,
-            self.inner.decrypt_message_with_relay_routes(
+            self.inner.decrypt_message_with_transport_bindings(
                 MessageDecryption {
                     snapshot: &snapshot.snapshot,
                     session_key: protocol_key(session_key)?,
@@ -1577,8 +1589,8 @@ impl KeyStore {
                     acknowledgment_sender_signature: &acknowledgment_sender_signature,
                     sender_certificate_validation: core_validation,
                 },
-                &message_route,
-                &acknowledgment_route,
+                &message_transport_binding,
+                &acknowledgment_transport_binding,
             )?,
         )
     }
@@ -1613,27 +1625,27 @@ impl KeyStore {
         )
     }
 
-    /// Processes an encrypted acknowledgment while authenticating its Relay Route.
+    /// Processes an encrypted acknowledgment while authenticating its Transport Binding.
     ///
     /// Commit returned updates before clearing local transport retry state.
     ///
     /// # Examples
     /// ```
     /// use aether::{
-    ///     AcknowledgmentOutcome, AetherError, KeyStore, Message, ProtocolStateEntry, RelayRoute,
+    ///     AcknowledgmentOutcome, AetherError, KeyStore, Message, ProtocolStateEntry, TransportBinding,
     /// };
     ///
     /// fn process(
     ///     store: &KeyStore,
     ///     snapshot: Vec<ProtocolStateEntry>,
     ///     message: Message,
-    ///     route: RelayRoute,
+    ///     transport_binding: TransportBinding,
     /// ) -> Result<AcknowledgmentOutcome, AetherError> {
-    ///     store.process_acknowledgment_with_relay_route(
+    ///     store.process_acknowledgment_with_transport_binding(
     ///         snapshot,
     ///         vec![0x11; 16],
     ///         message,
-    ///         route,
+    ///         transport_binding,
     ///     )
     /// }
     /// ```
@@ -1644,34 +1656,32 @@ impl KeyStore {
     /// - [`AetherError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
-    /// - [`AetherError::InvalidData`] if Message fields or the route are malformed.
+    /// - [`AetherError::InvalidData`] if Message fields or the Transport Binding are malformed.
     /// - [`AetherError::NotFound`] if local Identity or Discovery Key material is missing.
     /// - [`AetherError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`AetherError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`AetherError::RelayRouteRejected`] if the route is not established or names a different
-    ///   local Identity Key.
     /// - [`AetherError::Storage`] on platform storage failure.
     /// - [`AetherError::UnsupportedVersion`] if the Message or a stored protocol-state version is
     ///   unsupported.
-    pub fn process_acknowledgment_with_relay_route(
+    pub fn process_acknowledgment_with_transport_binding(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         session_key: Vec<u8>,
         message: Message,
-        route: RelayRoute,
+        transport_binding: TransportBinding,
     ) -> Result<AcknowledgmentOutcome, AetherError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let message = message.to_core()?;
-        let route = route.to_core()?;
+        let transport_binding = transport_binding.into_core()?;
         AcknowledgmentOutcome::from_core(
             &snapshot,
-            self.inner.process_acknowledgment_with_relay_route(
+            self.inner.process_acknowledgment_with_transport_binding(
                 AcknowledgmentProcessing {
                     snapshot: &snapshot.snapshot,
                     session_key: protocol_key(session_key)?,
                     message: &message,
                 },
-                &route,
+                &transport_binding,
             )?,
         )
     }

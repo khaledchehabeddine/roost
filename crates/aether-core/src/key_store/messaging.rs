@@ -3,7 +3,8 @@ use crate::{
     AcknowledgmentOutcome, DiscoveryKeyError, IdentityError, InboundAcknowledgmentMessage,
     InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation,
     KeyStoreOperationError, Message, MessageId, OutboundAcknowledgment, OutboundMessageResult,
-    OutboundPlaintext, ProtocolStateError, ProtocolStateKey, ProtocolStateSnapshot, RelayRoute,
+    OutboundPlaintext, ProtocolStateError, ProtocolStateKey, ProtocolStateSnapshot,
+    TransportBinding,
 };
 use aether_crypto::SenderIdentityMaterial;
 use std::error::Error;
@@ -139,26 +140,44 @@ impl KeyStore {
         self.encrypt_message_inner(input, None)
     }
 
-    /// Encrypts an established-session Message while authenticating a Relay route.
-    /// The caller must retain the exact route with the returned Message for retransmission.
+    /// Encrypts an established-session Message while authenticating a Transport Binding.
+    /// The caller must retain the exact binding with the returned Message for retransmission.
+    ///
+    /// # Examples
+    /// ```
+    /// use aether_core::{
+    ///     KeyStore, MessageEncryption, MessageOperationError, OutboundMessageResult,
+    ///     TransportBinding,
+    /// };
+    ///
+    /// fn encrypt_bound_message(
+    ///     store: &KeyStore,
+    ///     input: MessageEncryption<'_>,
+    ///     binding: TransportBinding,
+    /// ) -> Result<(OutboundMessageResult, TransportBinding), MessageOperationError> {
+    ///     let result = store.encrypt_message_with_transport_binding(input, &binding)?;
+    ///     // Persist `result.state_updates`, `result.message`, and `binding` atomically before send.
+    ///     Ok((result, binding))
+    /// }
+    /// ```
     ///
     /// # Errors
     /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
     /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if the route names the wrong recipient Identity
-    ///   Key, or if state loading, contact gating, encryption, or update encoding fails.
-    pub fn encrypt_message_with_relay_route(
+    /// - [`MessageOperationError::ProtocolState`] if state loading, contact gating, encryption, or
+    ///   update encoding fails.
+    pub fn encrypt_message_with_transport_binding(
         &self,
         input: MessageEncryption<'_>,
-        route: &RelayRoute,
+        transport_binding: &TransportBinding,
     ) -> Result<OutboundMessageResult, MessageOperationError> {
-        self.encrypt_message_inner(input, Some(route))
+        self.encrypt_message_inner(input, Some(transport_binding))
     }
 
     fn encrypt_message_inner(
         &self,
         input: MessageEncryption<'_>,
-        route: Option<&RelayRoute>,
+        transport_binding: Option<&TransportBinding>,
     ) -> Result<OutboundMessageResult, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -175,12 +194,12 @@ impl KeyStore {
             plaintext: input.plaintext,
         };
         let engine = crate::ProtocolStateEngine::new();
-        Ok(if let Some(route) = route {
-            engine.encrypt_message_with_relay_route(
+        Ok(if let Some(transport_binding) = transport_binding {
+            engine.encrypt_message_with_transport_binding(
                 input.snapshot,
                 input.session_key,
                 plaintext,
-                route,
+                transport_binding,
             )?
         } else {
             engine.encrypt_message(input.snapshot, input.session_key, plaintext)?
@@ -203,31 +222,33 @@ impl KeyStore {
         self.decrypt_message_inner(input, None)
     }
 
-    /// Decrypts an established-session Message and authenticates both its Relay route and the
-    /// route used for the returned acknowledgment.
-    /// The caller must retain `acknowledgment_route` with the returned acknowledgment artifact.
+    /// Decrypts an established-session Message and authenticates its Transport Binding plus the
+    /// binding used for the returned acknowledgment.
+    /// The caller must retain `acknowledgment_transport_binding` with that acknowledgment.
     ///
     /// # Errors
     /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
     ///   malformed.
     /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
     /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if either route names the wrong Identity Key, or
-    ///   if deduplication, decryption, sender-certificate validation, acknowledgment encryption,
-    ///   or update encoding fails.
-    pub fn decrypt_message_with_relay_routes(
+    /// - [`MessageOperationError::ProtocolState`] if deduplication, decryption,
+    ///   sender-certificate validation, acknowledgment encryption, or update encoding fails.
+    pub fn decrypt_message_with_transport_bindings(
         &self,
         input: MessageDecryption<'_>,
-        route: &RelayRoute,
-        acknowledgment_route: &RelayRoute,
+        message_transport_binding: &TransportBinding,
+        acknowledgment_transport_binding: &TransportBinding,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
-        self.decrypt_message_inner(input, Some((route, acknowledgment_route)))
+        self.decrypt_message_inner(
+            input,
+            Some((message_transport_binding, acknowledgment_transport_binding)),
+        )
     }
 
     fn decrypt_message_inner(
         &self,
         input: MessageDecryption<'_>,
-        routes: Option<(&RelayRoute, &RelayRoute)>,
+        transport_bindings: Option<(&TransportBinding, &TransportBinding)>,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -255,14 +276,15 @@ impl KeyStore {
             sender_certificate_validation: input.sender_certificate_validation,
         };
         let engine = crate::ProtocolStateEngine::new();
-        Ok(match routes {
-            Some((route, acknowledgment_route)) => engine.decrypt_message_with_relay_routes(
-                &mut rng,
-                input.snapshot,
-                inbound,
-                route,
-                acknowledgment_route,
-            )?,
+        Ok(match transport_bindings {
+            Some((message_transport_binding, acknowledgment_transport_binding)) => engine
+                .decrypt_message_with_transport_bindings(
+                    &mut rng,
+                    input.snapshot,
+                    inbound,
+                    message_transport_binding,
+                    acknowledgment_transport_binding,
+                )?,
             None => engine.decrypt_message(&mut rng, input.snapshot, inbound)?,
         })
     }
@@ -283,27 +305,27 @@ impl KeyStore {
         self.process_acknowledgment_inner(input, None)
     }
 
-    /// Processes an encrypted acknowledgment while authenticating its Relay route.
+    /// Processes an encrypted acknowledgment while authenticating its Transport Binding.
     ///
     /// # Errors
     /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
     ///   malformed.
     /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
     /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if the route names the wrong local Identity Key,
-    ///   or if state loading, decryption, or update encoding fails.
-    pub fn process_acknowledgment_with_relay_route(
+    /// - [`MessageOperationError::ProtocolState`] if state loading, decryption, or update encoding
+    ///   fails.
+    pub fn process_acknowledgment_with_transport_binding(
         &self,
         input: AcknowledgmentProcessing<'_>,
-        route: &RelayRoute,
+        transport_binding: &TransportBinding,
     ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
-        self.process_acknowledgment_inner(input, Some(route))
+        self.process_acknowledgment_inner(input, Some(transport_binding))
     }
 
     fn process_acknowledgment_inner(
         &self,
         input: AcknowledgmentProcessing<'_>,
-        route: Option<&RelayRoute>,
+        transport_binding: Option<&TransportBinding>,
     ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -317,12 +339,12 @@ impl KeyStore {
             recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
         };
         let engine = crate::ProtocolStateEngine::new();
-        Ok(if let Some(route) = route {
-            engine.process_acknowledgment_with_relay_route(
+        Ok(if let Some(transport_binding) = transport_binding {
+            engine.process_acknowledgment_with_transport_binding(
                 &mut rng,
                 input.snapshot,
                 inbound,
-                route,
+                transport_binding,
             )?
         } else {
             engine.process_acknowledgment(&mut rng, input.snapshot, inbound)?

@@ -85,11 +85,11 @@ mod message;
 mod one_time_prekey;
 mod prekey_state;
 mod protocol_state;
-mod relay_route;
 mod safety_number;
 mod sender_certificate;
 mod signed_prekey;
 mod storage;
+mod transport_binding;
 
 pub use aether_crypto::SenderIdentityMaterial;
 pub use contact::{
@@ -133,7 +133,6 @@ pub use protocol_state::{
     RetryInstruction, RetryInstructionResult, SessionEvent, SessionId, SessionUnrecoverableReason,
     SessionUnrecoverableResult,
 };
-pub use relay_route::{RelayPreKeyReference, RelayRoute, RelayRouteError};
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 #[cfg(feature = "development-certificates")]
 pub use sender_certificate::{
@@ -146,6 +145,7 @@ pub use sender_certificate::{
 };
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
+pub use transport_binding::{PreKeySelection, TransportBinding, TransportBindingError};
 
 #[cfg(fuzzing)]
 #[doc(hidden)]

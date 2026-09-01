@@ -62,8 +62,8 @@ impl Identity {
 /// ```
 #[derive(Clone, uniffi::Record)]
 pub struct SignedPreKeyBundle {
-    /// Stable unsigned identifier within the discovery-key epoch. The Relay route, not the
-    /// signed-prekey signature, authenticates this lookup value.
+    /// Stable unsigned identifier within the discovery-key epoch. A host that needs this lookup
+    /// value authenticated as transport metadata must include it in its Transport Binding.
     pub identifier: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,

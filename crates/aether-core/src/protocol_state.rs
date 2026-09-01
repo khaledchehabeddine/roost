@@ -28,7 +28,7 @@ use crate::sender_certificate::{
     DomainSigningKey, RevocationState, SenderCertificateValidationError,
     SenderCertificateValidationInput, validate_sender_certificate,
 };
-use crate::{Message, MessageError, MessageId, PayloadKind, RelayRoute, RelayRouteError};
+use crate::{Message, MessageError, MessageId, PayloadKind, TransportBinding};
 use aether_crypto::{
     DiscoveryKey, DiscoveryKeyBundle, Header, IdentityKeyBundle, PublicKey, RatchetState,
     RecipientDeliveryCapability, SenderIdentityMaterial, Signature, SigningKeyPair,
@@ -1278,8 +1278,8 @@ impl ProtocolStateEngine {
         self.encrypt_message_inner(snapshot, key, plaintext, None)
     }
 
-    /// Encrypts plaintext while authenticating an established Relay route.
-    /// The caller must retain the exact route with the returned Message for retransmission.
+    /// Encrypts plaintext while authenticating a caller-owned Transport Binding.
+    /// The caller must retain the exact binding with the returned Message for retransmission.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session or pending-acknowledgment blob
@@ -1294,16 +1294,15 @@ impl ProtocolStateEngine {
     /// - [`ProtocolStateError::MessageEncode`] if the produced Message fails to encode.
     /// - [`ProtocolStateError::MissingRequiredState`] if required Session or acknowledgment state
     ///   is absent.
-    /// - [`ProtocolStateError::RelayRoute`] if `route` does not name the contact Identity Key.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a required blob version is unsupported.
-    pub fn encrypt_message_with_relay_route(
+    pub fn encrypt_message_with_transport_binding(
         &self,
         snapshot: &ProtocolStateSnapshot,
         key: ProtocolStateKey,
         plaintext: OutboundPlaintext<'_>,
-        route: &RelayRoute,
+        transport_binding: &TransportBinding,
     ) -> Result<OutboundMessageResult, ProtocolStateError> {
-        self.encrypt_message_inner(snapshot, key, plaintext, Some(route))
+        self.encrypt_message_inner(snapshot, key, plaintext, Some(transport_binding))
     }
 
     fn encrypt_message_inner(
@@ -1311,19 +1310,14 @@ impl ProtocolStateEngine {
         snapshot: &ProtocolStateSnapshot,
         key: ProtocolStateKey,
         plaintext: OutboundPlaintext<'_>,
-        route: Option<&RelayRoute>,
+        transport_binding: Option<&TransportBinding>,
     ) -> Result<OutboundMessageResult, ProtocolStateError> {
         let pending_address = pending_acknowledgment_address(key.clone());
         let address = ratchet_address(key);
         let loaded = load_session_state(snapshot, &address, self.limits)?;
         let contact_identity_key =
             session_contact_identity_key(&address, &loaded, plaintext.contact_identity_key)?;
-        let route_associated_data = if let Some(route) = route {
-            route.validate_established(&contact_identity_key.ed25519_verifying_key)?;
-            route.associated_data()
-        } else {
-            Vec::new()
-        };
+        let transport_binding_bytes = transport_binding.map_or(&[][..], TransportBinding::as_bytes);
         ensure_contact_allows_outbound(
             snapshot,
             contact_identity_key,
@@ -1370,7 +1364,7 @@ impl ProtocolStateEngine {
             &recipient_public_key,
             None,
             &frame_plaintext,
-            &route_associated_data,
+            transport_binding_bytes,
         )?;
         let message = Message::from_frame(frame);
         message
@@ -1450,9 +1444,9 @@ impl ProtocolStateEngine {
         self.decrypt_message_inner(rng, snapshot, inbound, None, None)
     }
 
-    /// Receives a Message while authenticating its established Relay route and the route used for
-    /// the returned acknowledgment.
-    /// The caller must retain `acknowledgment_route` with the returned acknowledgment artifact.
+    /// Receives a Message while authenticating its Transport Binding and the binding used for the
+    /// returned acknowledgment.
+    /// The caller must retain `acknowledgment_transport_binding` with the returned acknowledgment.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if the deduplication-set or ratchet/session blob fails
@@ -1468,24 +1462,23 @@ impl ProtocolStateEngine {
     ///   without validation inputs.
     /// - [`ProtocolStateError::MissingRequiredState`] if required deduplication or Session state is
     ///   absent.
-    /// - [`ProtocolStateError::RelayRoute`] if either route names the wrong Identity Key.
     /// - [`ProtocolStateError::SenderCertificateValidation`] if sender-certificate validation
     ///   rejects the sealed certificate.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a required blob version is unsupported.
-    pub fn decrypt_message_with_relay_routes<R: RngCore + CryptoRng>(
+    pub fn decrypt_message_with_transport_bindings<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
         snapshot: &ProtocolStateSnapshot,
         inbound: InboundEncryptedMessage<'_>,
-        route: &RelayRoute,
-        acknowledgment_route: &RelayRoute,
+        message_transport_binding: &TransportBinding,
+        acknowledgment_transport_binding: &TransportBinding,
     ) -> Result<InboundMessageOutcome, ProtocolStateError> {
         self.decrypt_message_inner(
             rng,
             snapshot,
             inbound,
-            Some(route),
-            Some(acknowledgment_route),
+            Some(message_transport_binding),
+            Some(acknowledgment_transport_binding),
         )
     }
 
@@ -1494,15 +1487,11 @@ impl ProtocolStateEngine {
         rng: &mut R,
         snapshot: &ProtocolStateSnapshot,
         inbound: InboundEncryptedMessage<'_>,
-        route: Option<&RelayRoute>,
-        acknowledgment_route: Option<&RelayRoute>,
+        message_transport_binding: Option<&TransportBinding>,
+        acknowledgment_transport_binding: Option<&TransportBinding>,
     ) -> Result<InboundMessageOutcome, ProtocolStateError> {
-        let route_associated_data = if let Some(route) = route {
-            route.validate_established(&inbound.recipient_identity_verifying_key)?;
-            route.associated_data()
-        } else {
-            Vec::new()
-        };
+        let message_transport_binding_bytes =
+            message_transport_binding.map_or(&[][..], TransportBinding::as_bytes);
         let deduplication_address = deduplication_address(inbound.deduplication_key);
         let encoded = inbound
             .message
@@ -1510,8 +1499,11 @@ impl ProtocolStateEngine {
             .map_err(ProtocolStateError::MessageEncode)?;
         let mut deduplication =
             load_deduplication_set(snapshot, &deduplication_address, self.limits)?;
-        let digest =
-            deduplication_digest(&deduplication.digest_key, &route_associated_data, &encoded);
+        let digest = deduplication_digest(
+            &deduplication.digest_key,
+            message_transport_binding_bytes,
+            &encoded,
+        );
         if contains_digest(&deduplication.digests, &digest) {
             return Ok(InboundMessageOutcome::Duplicate);
         }
@@ -1568,7 +1560,7 @@ impl ProtocolStateEngine {
         let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
             inbound.recipient_discovery_key,
             &message.to_frame(),
-            &route_associated_data,
+            message_transport_binding_bytes,
         )?;
         let frame_plaintext = decode_message_frame_plaintext(&frame_plaintext)?;
         if frame_plaintext.payload_kind != PayloadKind::EncryptedText {
@@ -1651,7 +1643,7 @@ impl ProtocolStateEngine {
             &session_key_bytes,
             AcknowledgmentEncryptionInput {
                 acknowledgment: &inbound.acknowledgment,
-                route: acknowledgment_route,
+                transport_binding: acknowledgment_transport_binding,
             },
             &decoded.sender_identity.identity_verifying_key,
             frame_plaintext.id,
@@ -1804,7 +1796,7 @@ impl ProtocolStateEngine {
         self.process_acknowledgment_inner(rng, snapshot, inbound, None)
     }
 
-    /// Processes an acknowledgment while authenticating its established Relay route.
+    /// Processes an acknowledgment while authenticating its Transport Binding.
     ///
     /// # Errors
     /// - [`ProtocolStateError::BlobDecode`] if Session or pending-acknowledgment state fails to
@@ -1815,16 +1807,15 @@ impl ProtocolStateEngine {
     ///   invalid.
     /// - [`ProtocolStateError::MessageEncode`] if the acknowledgment fails canonical encoding.
     /// - [`ProtocolStateError::MissingRequiredState`] if required state is absent.
-    /// - [`ProtocolStateError::RelayRoute`] if `route` names the wrong local Identity Key.
     /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a required blob version is unsupported.
-    pub fn process_acknowledgment_with_relay_route<R: RngCore + CryptoRng>(
+    pub fn process_acknowledgment_with_transport_binding<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
         snapshot: &ProtocolStateSnapshot,
         inbound: InboundAcknowledgmentMessage<'_>,
-        route: &RelayRoute,
+        transport_binding: &TransportBinding,
     ) -> Result<AcknowledgmentOutcome, ProtocolStateError> {
-        self.process_acknowledgment_inner(rng, snapshot, inbound, Some(route))
+        self.process_acknowledgment_inner(rng, snapshot, inbound, Some(transport_binding))
     }
 
     fn process_acknowledgment_inner<R: RngCore + CryptoRng>(
@@ -1832,20 +1823,15 @@ impl ProtocolStateEngine {
         rng: &mut R,
         snapshot: &ProtocolStateSnapshot,
         inbound: InboundAcknowledgmentMessage<'_>,
-        route: Option<&RelayRoute>,
+        transport_binding: Option<&TransportBinding>,
     ) -> Result<AcknowledgmentOutcome, ProtocolStateError> {
-        let route_associated_data = if let Some(route) = route {
-            route.validate_established(&inbound.recipient_identity_verifying_key)?;
-            route.associated_data()
-        } else {
-            Vec::new()
-        };
+        let transport_binding_bytes = transport_binding.map_or(&[][..], TransportBinding::as_bytes);
         let pending_address = pending_acknowledgment_address(inbound.session_key.clone());
         let encoded = inbound
             .message
             .to_bytes_with_hardening_limits(self.limits)
             .map_err(ProtocolStateError::MessageEncode)?;
-        let digest = acknowledgment_digest(&route_associated_data, &encoded);
+        let digest = acknowledgment_digest(transport_binding_bytes, &encoded);
         if pending_acknowledgment_digest_seen(snapshot, &pending_address, digest, self.limits)? {
             return Ok(AcknowledgmentOutcome::Duplicate);
         }
@@ -1903,7 +1889,7 @@ impl ProtocolStateEngine {
         let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
             inbound.recipient_discovery_key,
             &message.to_frame(),
-            &route_associated_data,
+            transport_binding_bytes,
         )?;
         let frame_plaintext = decode_message_frame_plaintext(&frame_plaintext)?;
         if frame_plaintext.payload_kind != PayloadKind::Acknowledgment {
@@ -2004,8 +1990,6 @@ pub enum ProtocolStateError {
     },
     /// A cryptographic operation failed.
     Crypto(aether_crypto::CryptoError),
-    /// Relay route metadata does not match the Message operation or recipient.
-    RelayRoute(RelayRouteError),
     /// Sender-certificate validation failed during receive.
     SenderCertificateValidation(SenderCertificateValidationError),
     /// A unique encrypted receive was attempted without sender-certificate validation inputs.
@@ -2081,7 +2065,6 @@ impl fmt::Display for ProtocolStateError {
                 )
             }
             Self::Crypto(e) => write!(f, "protocol-state crypto operation failed: {e}"),
-            Self::RelayRoute(e) => write!(f, "protocol-state relay route: {e}"),
             Self::SenderCertificateValidation(e) => {
                 write!(f, "sender certificate validation failed: {e}")
             }
@@ -2132,7 +2115,6 @@ impl Error for ProtocolStateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Crypto(e) => Some(e),
-            Self::RelayRoute(e) => Some(e),
             Self::SenderCertificateValidation(e) => Some(e),
             Self::MessageEncode(e) => Some(e),
             Self::BlobDecode { .. }
@@ -2152,12 +2134,6 @@ impl Error for ProtocolStateError {
 impl From<aether_crypto::CryptoError> for ProtocolStateError {
     fn from(e: aether_crypto::CryptoError) -> Self {
         Self::Crypto(e)
-    }
-}
-
-impl From<RelayRouteError> for ProtocolStateError {
-    fn from(e: RelayRouteError) -> Self {
-        Self::RelayRoute(e)
     }
 }
 
@@ -3838,18 +3814,18 @@ fn contact_identity_keys_match(left: &ContactIdentityKey, right: &ContactIdentit
 
 fn deduplication_digest(
     digest_key: &[u8; DEDUPLICATION_KEY_LEN],
-    route_associated_data: &[u8],
+    transport_binding_bytes: &[u8],
     encoded_message: &[u8],
 ) -> [u8; DEDUPLICATION_DIGEST_LEN] {
-    if route_associated_data.is_empty() {
+    if transport_binding_bytes.is_empty() {
         let hash = blake3::keyed_hash(digest_key, encoded_message);
         let mut digest = [0u8; DEDUPLICATION_DIGEST_LEN];
         digest.copy_from_slice(&hash.as_bytes()[..DEDUPLICATION_DIGEST_LEN]);
         return digest;
     }
     let mut hasher = blake3::Hasher::new_keyed(digest_key);
-    hasher.update(&(route_associated_data.len() as u32).to_be_bytes());
-    hasher.update(route_associated_data);
+    hasher.update(&(transport_binding_bytes.len() as u32).to_be_bytes());
+    hasher.update(transport_binding_bytes);
     hasher.update(encoded_message);
     let hash = hasher.finalize();
     let mut digest = [0u8; DEDUPLICATION_DIGEST_LEN];
@@ -3911,18 +3887,18 @@ fn record_pending_acknowledgment(
 }
 
 fn acknowledgment_digest(
-    route_associated_data: &[u8],
+    transport_binding_bytes: &[u8],
     encoded_message: &[u8],
 ) -> [u8; ACKNOWLEDGMENT_DIGEST_LEN] {
-    if route_associated_data.is_empty() {
+    if transport_binding_bytes.is_empty() {
         let hash = blake3::hash(encoded_message);
         let mut digest = [0u8; ACKNOWLEDGMENT_DIGEST_LEN];
         digest.copy_from_slice(&hash.as_bytes()[..ACKNOWLEDGMENT_DIGEST_LEN]);
         return digest;
     }
     let mut hasher = blake3::Hasher::new();
-    hasher.update(&(route_associated_data.len() as u32).to_be_bytes());
-    hasher.update(route_associated_data);
+    hasher.update(&(transport_binding_bytes.len() as u32).to_be_bytes());
+    hasher.update(transport_binding_bytes);
     hasher.update(encoded_message);
     let hash = hasher.finalize();
     let mut digest = [0u8; ACKNOWLEDGMENT_DIGEST_LEN];
@@ -4234,7 +4210,7 @@ fn receive_state_updates(
 
 struct AcknowledgmentEncryptionInput<'input, 'material> {
     acknowledgment: &'input OutboundAcknowledgment<'material>,
-    route: Option<&'input RelayRoute>,
+    transport_binding: Option<&'input TransportBinding>,
 }
 
 fn encrypt_acknowledgment(
@@ -4247,12 +4223,9 @@ fn encrypt_acknowledgment(
     limits: ProtocolHardeningLimits,
 ) -> Result<Message, ProtocolStateError> {
     let acknowledgment = input.acknowledgment;
-    let route_associated_data = if let Some(route) = input.route {
-        route.validate_established(recipient_identity_verifying_key)?;
-        route.associated_data()
-    } else {
-        Vec::new()
-    };
+    let transport_binding_bytes = input
+        .transport_binding
+        .map_or(&[][..], TransportBinding::as_bytes);
     validate_sender_identity(acknowledgment.sender_identity, limits)?;
     let plaintext = encode_acknowledgment_plaintext(acknowledged_message_id)?;
     let padded_plaintext = pad_sealed_payload(&plaintext)?;
@@ -4290,7 +4263,7 @@ fn encrypt_acknowledgment(
         &recipient_public_key,
         None,
         &frame_plaintext,
-        &route_associated_data,
+        transport_binding_bytes,
     )?;
     let message = Message::from_frame(frame);
     message
@@ -4497,7 +4470,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_route_preserves_legacy_message_and_acknowledgment_digests() {
+    fn empty_transport_binding_preserves_legacy_message_and_acknowledgment_digests() {
         let encoded_message = b"encoded encrypted message";
         let digest_key = [1u8; DEDUPLICATION_KEY_LEN];
         let expected_message = blake3::keyed_hash(&digest_key, encoded_message);
@@ -4514,12 +4487,13 @@ mod tests {
     }
 
     #[test]
-    fn same_encrypted_bytes_under_different_routes_have_different_digests() {
+    fn same_encrypted_bytes_under_different_transport_bindings_have_different_digests() {
         let encoded_message = b"encoded encrypted message";
         let digest_key = [1u8; DEDUPLICATION_KEY_LEN];
 
-        let first = deduplication_digest(&digest_key, b"relay-route-v1:first", encoded_message);
-        let second = deduplication_digest(&digest_key, b"relay-route-v1:second", encoded_message);
+        let first = deduplication_digest(&digest_key, b"transport-binding:first", encoded_message);
+        let second =
+            deduplication_digest(&digest_key, b"transport-binding:second", encoded_message);
 
         assert_ne!(first, second);
     }

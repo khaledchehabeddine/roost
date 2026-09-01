@@ -9,21 +9,21 @@ An encrypted Message with `PayloadKind::Acknowledgment` that proves the receiver
 Message. Core returns it to the consumer for transport; Core never transmits it.
 Avoid: receipt, delivery callback, network ack
 
-**Caller-Owned Transport** (one host-selected route per send):
+**Caller-Owned Transport** (one host-selected path per send):
 The host application's network and authentication boundary for sending encoded Messages,
 Acknowledgment Artifacts, and Retry Instructions. Core produces or consumes opaque protocol bytes
 and caller-supplied signing inputs, but it does not select transports, define transport headers, or
-perform network IO. Route-bound operations authenticate only the minimal Relay Route; Relay
-admission, authorization, and all other transport-envelope fields remain host-owned.
+perform network IO. A bound operation authenticates only the exact Transport Binding bytes supplied
+by the host; admission, authorization, encoding, and all transport-envelope fields remain
+host-owned.
 Avoid: Core network, transport session, library-owned routing
 
-**Relay Route** (one caller-supplied value per Relay Message send or receive):
-The canonical public metadata authenticated as additional associated data by a route-bound
-sealed-sender operation. Every route binds a Relay protocol version, route kind, and recipient
-Ed25519 signing key; an X3DH initial also binds its stable signed- and optional one-time-prekey
-identifiers. Core neither transmits nor stores the route, so the host retains the exact value for
-receive and retransmission.
-Avoid: transport envelope, delivery capability, Relay admission proof
+**Transport Binding** (one caller-supplied value per bound Message operation):
+Opaque, non-empty public bytes authenticated as sealed-frame external associated data and included
+in pre-decryption deduplication. Core limits the value to 1 KiB but never interprets, transmits, or
+stores it. The host owns a canonical encoding, retains the exact bytes with an outbound Message,
+and supplies them again for receive or retransmission.
+Avoid: transport envelope, route record, delivery capability
 
 **Blocking** (one local verdict per Contact Identity):
 An IK-keyed local suppression rule. Blocking is independent of Trust State and distinct from
@@ -58,9 +58,9 @@ A self-contained public view of one Library Instance's current state, bound to i
 Avoid: cache, checkpoint
 
 **Deduplication Digest** (one per received encrypted Message):
-A keyed, truncated digest of the encoded sealed-sender frame and, for a route-bound receive, the
-canonical Relay Route bytes. It is computed before decryption and used only to detect identical
-receive retries for one local Identity. Decrypted Message IDs are not part of the digest input.
+A keyed, truncated digest of the encoded sealed-sender frame and, for a bound receive, the exact
+Transport Binding bytes. It is computed before decryption and used only to detect identical receive
+retries for one local Identity. Decrypted Message IDs are not part of the digest input.
 Avoid: message hash, replay token
 
 **Deduplication Set** (one per local Identity):
@@ -204,11 +204,18 @@ Protocol State Blob; malformed prekey corpora exercise KeyStore secure-storage d
 Avoid: protocol state blob, in-memory prekey cache, automatic publication rotation
 
 **PreKey Identifier** (one stable `u64` per prekey within one Epoch):
-The Core-allocated lookup value published beside a signed or one-time prekey and bound into an
-initial Relay Route. Signed- and one-time-prekey sequences are independent; identifiers may repeat
-across those kinds or after Discovery Key rotation, so the Epoch and prekey kind remain part of the
-lookup context.
+The Core-allocated lookup value published beside a signed or one-time prekey. Signed- and
+one-time-prekey sequences are independent; identifiers may repeat across those kinds or after
+Discovery Key rotation, so the Epoch and prekey kind remain part of the lookup context. A host that
+needs the identifiers authenticated as transport metadata includes them in its Transport Binding.
 Avoid: database row ID, key fingerprint, global sequence
+
+**PreKey Selection** (one caller-supplied value per bound X3DH receive):
+The stable signed- and optional one-time-prekey identifiers the host selected from a recipient
+publication. Core uses the signed identifier to locate retained state and checks the resulting
+public key plus optional one-time identifier against the authenticated initial Message. The value
+does not define or decode Transport Binding bytes.
+Avoid: route, prekey reference, transport metadata
 
 **Protocol State Blob** (many per Identity or Session):
 An opaque byte value produced by Core and committed by the consumer's durable store. Core may load
@@ -255,8 +262,8 @@ Avoid: sender header, clear sender metadata
 **Sealed Sender Frame** (one per Message or X3DH initial):
 The transport-visible, versioned frame that wraps sealed-sender ciphertext. It carries the recipient
 Discovery Key X25519 public key, an optional X3DH prekey reference, a per-message ephemeral public
-key, and ciphertext; all sender and message metadata stays encrypted. Route-bound operations also
-authenticate a caller-supplied Relay Route without encoding it into the frame.
+key, and ciphertext; all sender and message metadata stays encrypted. Bound operations also
+authenticate caller-supplied Transport Binding bytes without encoding them into the frame.
 Avoid: transport envelope, sender-visible message
 
 **Sealed Payload Padding** (one per sealed plaintext):

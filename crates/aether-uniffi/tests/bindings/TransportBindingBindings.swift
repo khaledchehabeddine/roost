@@ -1,6 +1,6 @@
 import Foundation
 
-private final class RelayRouteMemoryStorage: SecureStorage, @unchecked Sendable {
+private final class TransportBindingMemoryStorage: SecureStorage, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: Data] = [:]
 
@@ -25,58 +25,93 @@ private final class RelayRouteMemoryStorage: SecureStorage, @unchecked Sendable 
 }
 
 @main
-struct RelayRouteBindings {
+struct TransportBindingBindings {
     static func main() throws {
-        try exerciseRouteEncodingBoundaries()
-
-        let alice = KeyStore(storage: RelayRouteMemoryStorage())
-        let bob = KeyStore(storage: RelayRouteMemoryStorage())
+        let alice = KeyStore(storage: TransportBindingMemoryStorage())
+        let bob = KeyStore(storage: TransportBindingMemoryStorage())
         let aliceIdentity = try generateIdentity(alice)
         let bobIdentity = try generateIdentity(bob)
         try rotateSignedPrekey(alice)
         try rotateSignedPrekey(bob)
         let bobPublication = try bob.currentPublicationBundle()
         let bobOneTimePrekey = try replenishOneTimePrekeys(bob)[0]
-        let initialRoute = RelayRoute(
-            protocolVersion: 1,
-            kind: .initial,
-            recipientSigningKey: bobPublication.discoveryKey.verifyingKey,
-            prekeyReference: RelayPreKeyReference(
-                signedPrekeyIdentifier: bobPublication.signedPrekey.identifier,
-                oneTimePrekeyIdentifier: bobOneTimePrekey.identifier
-            )
+        let initialBinding = TransportBinding(bytes: Data("consumer-owned initial metadata".utf8))
+        let prekeySelection = PreKeySelection(
+            signedPrekeyIdentifier: bobPublication.signedPrekey.identifier,
+            oneTimePrekeyIdentifier: bobOneTimePrekey.identifier
         )
         let sessionKey = Data(repeating: 0x58, count: 16)
-        let initiation = try alice.initiateSessionWithRelayRoute(
+        expectInvalidData("empty Transport Binding") {
+            _ = try alice.initiateSessionWithTransportBinding(
+                sessionKey: sessionKey,
+                responderIdentity: bobIdentity,
+                responderPublication: bobPublication,
+                responderOneTimePrekey: bobOneTimePrekey,
+                senderCertificate: Data("alice certificate".utf8),
+                senderSignature: Data("alice signature".utf8),
+                plaintext: Data("rejected".utf8),
+                transportBinding: TransportBinding(bytes: Data())
+            )
+        }
+        expectInvalidData("oversized Transport Binding") {
+            _ = try alice.initiateSessionWithTransportBinding(
+                sessionKey: sessionKey,
+                responderIdentity: bobIdentity,
+                responderPublication: bobPublication,
+                responderOneTimePrekey: bobOneTimePrekey,
+                senderCertificate: Data("alice certificate".utf8),
+                senderSignature: Data("alice signature".utf8),
+                plaintext: Data("rejected".utf8),
+                transportBinding: TransportBinding(bytes: Data(repeating: 0x41, count: 1_025))
+            )
+        }
+        let initiation = try alice.initiateSessionWithTransportBinding(
             sessionKey: sessionKey,
             responderIdentity: bobIdentity,
             responderPublication: bobPublication,
             responderOneTimePrekey: bobOneTimePrekey,
             senderCertificate: Data("alice certificate".utf8),
             senderSignature: Data("alice signature".utf8),
-            plaintext: Data("route-bound hello".utf8),
-            route: initialRoute
+            plaintext: Data("transport-bound hello".utf8),
+            transportBinding: initialBinding
         )
-        let hint = try bob.initiatorIdentityHintWithRelayRoute(
+        let hint = try bob.initiatorIdentityHintWithTransportBinding(
             message: initiation.message,
-            route: initialRoute
+            transportBinding: initialBinding,
+            prekeySelection: prekeySelection
         )
         require(
             hint.ed25519VerifyingKey == aliceIdentity.ed25519VerifyingKey,
-            "route-bound initiator identity hint"
+            "transport-bound initiator identity hint"
         )
 
-        expectRejectedRoute(bob, message: initiation.message, route: initialRoute)
+        expectMismatchedPrekeySelection(
+            bob,
+            message: initiation.message,
+            transportBinding: initialBinding,
+            prekeySelection: prekeySelection
+        )
+        expectAuthenticationFailed("maximum unsigned prekey identifiers") {
+            _ = try bob.initiatorIdentityHintWithTransportBinding(
+                message: initiation.message,
+                transportBinding: initialBinding,
+                prekeySelection: PreKeySelection(
+                    signedPrekeyIdentifier: UInt64.max,
+                    oneTimePrekeyIdentifier: UInt64.max
+                )
+            )
+        }
 
-        let prepared = try bob.prepareAcceptSessionWithRelayRoute(
+        let prepared = try bob.prepareAcceptSessionWithTransportBinding(
             sessionKey: sessionKey,
             initiatorIdentity: nil,
             message: initiation.message,
-            route: initialRoute
+            transportBinding: initialBinding,
+            prekeySelection: prekeySelection
         )
         _ = try bob.commitOperation(identifier: prepared.operation.identifier)
         _ = try bob.finalizeOperation(identifier: prepared.operation.identifier)
-        require(prepared.acceptance.plaintext == Data("route-bound hello".utf8), "route-bound Session acceptance")
+        require(prepared.acceptance.plaintext == Data("transport-bound hello".utf8), "transport-bound Session acceptance")
 
         var aliceSnapshot: [ProtocolStateEntry] = []
         apply(&aliceSnapshot, updates: initiation.stateUpdates)
@@ -95,7 +130,7 @@ struct RelayRouteBindings {
         apply(&aliceSnapshot, updates: acceptedContact.stateUpdates)
 
         let authority = try DevelopmentCertificateAuthority(
-            signingKeyIdentifier: Data("route-bindings".utf8),
+            signingKeyIdentifier: Data("transport-bindings".utf8),
             relayDomain: Data("relay.test".utf8)
         )
         let aliceCertificate = try authority.issue(identity: aliceIdentity, expiresAtSecs: 1_800_000_000)
@@ -104,39 +139,11 @@ struct RelayRouteBindings {
             referenceTimestampSecs: 1_700_000_000,
             graceWindowSecs: 0
         )
-        let messageRoute = RelayRoute(
-            protocolVersion: 1,
-            kind: .established,
-            recipientSigningKey: bobIdentity.ed25519VerifyingKey,
-            prekeyReference: nil
+        let messageBinding = TransportBinding(bytes: Data("consumer-owned message metadata".utf8))
+        let acknowledgmentBinding = TransportBinding(
+            bytes: Data("consumer-owned acknowledgment metadata".utf8)
         )
-        let acknowledgmentRoute = RelayRoute(
-            protocolVersion: 1,
-            kind: .established,
-            recipientSigningKey: aliceIdentity.ed25519VerifyingKey,
-            prekeyReference: nil
-        )
-        let wrongMessageRecipientRoute = RelayRoute(
-            protocolVersion: 1,
-            kind: .established,
-            recipientSigningKey: Data(repeating: 0x60, count: 32),
-            prekeyReference: nil
-        )
-        expectRelayRouteRejected("established encryption with the wrong recipient") {
-            _ = try alice.encryptMessageWithRelayRoute(
-                snapshot: aliceSnapshot,
-                sessionKey: sessionKey,
-                messageId: Data(repeating: 0x61, count: 16),
-                contactIdentityKey: identityKey(bobIdentity),
-                recipientPublicKey: bobPublication.discoveryKey.publicKey,
-                timestampMillis: 1_700_000_000_099,
-                senderCertificate: aliceCertificate.certificate,
-                senderSignature: aliceCertificate.signature,
-                plaintext: Data("wrong route".utf8),
-                route: wrongMessageRecipientRoute
-            )
-        }
-        let outbound = try alice.encryptMessageWithRelayRoute(
+        let outbound = try alice.encryptMessageWithTransportBinding(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             messageId: Data(repeating: 0x59, count: 16),
@@ -145,23 +152,20 @@ struct RelayRouteBindings {
             timestampMillis: 1_700_000_000_100,
             senderCertificate: aliceCertificate.certificate,
             senderSignature: aliceCertificate.signature,
-            plaintext: Data("route-bound follow-up".utf8),
-            route: messageRoute
+            plaintext: Data("transport-bound follow-up".utf8),
+            transportBinding: messageBinding
         )
         apply(&aliceSnapshot, updates: outbound.stateUpdates)
-        let deduplicationKey = Data("route-dedup".utf8)
+        let deduplicationKey = Data("binding-dedup".utf8)
         apply(
             &bobSnapshot,
             updates: [try engine.initializeDeduplicationSet(key: deduplicationKey)]
         )
-        let changedMessageVersionRoute = RelayRoute(
-            protocolVersion: 2,
-            kind: .established,
-            recipientSigningKey: bobIdentity.ed25519VerifyingKey,
-            prekeyReference: nil
+        let changedMessageBinding = TransportBinding(
+            bytes: Data("changed consumer-owned message metadata".utf8)
         )
-        expectAuthenticationFailed("established decryption with a changed route version") {
-            _ = try bob.decryptMessageWithRelayRoutes(
+        expectAuthenticationFailed("established decryption with changed binding bytes") {
+            _ = try bob.decryptMessageWithTransportBindings(
                 snapshot: bobSnapshot,
                 sessionKey: sessionKey,
                 deduplicationKey: deduplicationKey,
@@ -172,11 +176,11 @@ struct RelayRouteBindings {
                 acknowledgmentSenderCertificate: bobCertificate.certificate,
                 acknowledgmentSenderSignature: bobCertificate.signature,
                 senderCertificateValidation: validation,
-                messageRoute: changedMessageVersionRoute,
-                acknowledgmentRoute: acknowledgmentRoute
+                messageTransportBinding: changedMessageBinding,
+                acknowledgmentTransportBinding: acknowledgmentBinding
             )
         }
-        let inbound = try bob.decryptMessageWithRelayRoutes(
+        let inbound = try bob.decryptMessageWithTransportBindings(
             snapshot: bobSnapshot,
             sessionKey: sessionKey,
             deduplicationKey: deduplicationKey,
@@ -187,126 +191,63 @@ struct RelayRouteBindings {
             acknowledgmentSenderCertificate: bobCertificate.certificate,
             acknowledgmentSenderSignature: bobCertificate.signature,
             senderCertificateValidation: validation,
-            messageRoute: messageRoute,
-            acknowledgmentRoute: acknowledgmentRoute
+            messageTransportBinding: messageBinding,
+            acknowledgmentTransportBinding: acknowledgmentBinding
         )
-        require(inbound.kind == .accepted, "route-bound Message acceptance")
-        require(inbound.plaintext == Data("route-bound follow-up".utf8), "route-bound Message plaintext")
+        require(inbound.kind == .accepted, "transport-bound Message acceptance")
+        require(inbound.plaintext == Data("transport-bound follow-up".utf8), "transport-bound Message plaintext")
         guard let acknowledgment = inbound.acknowledgment else {
             fail("accepted Message should return an acknowledgment")
         }
-        let wrongAcknowledgmentRecipientRoute = RelayRoute(
-            protocolVersion: 1,
-            kind: .established,
-            recipientSigningKey: Data(repeating: 0x62, count: 32),
-            prekeyReference: nil
+        let changedAcknowledgmentBinding = TransportBinding(
+            bytes: Data("changed consumer-owned acknowledgment metadata".utf8)
         )
-        expectRelayRouteRejected("acknowledgment with the wrong recipient") {
-            _ = try alice.processAcknowledgmentWithRelayRoute(
+        expectAuthenticationFailed("acknowledgment with changed binding bytes") {
+            _ = try alice.processAcknowledgmentWithTransportBinding(
                 snapshot: aliceSnapshot,
                 sessionKey: sessionKey,
                 message: acknowledgment,
-                route: wrongAcknowledgmentRecipientRoute
+                transportBinding: changedAcknowledgmentBinding
             )
         }
-        let changedAcknowledgmentVersionRoute = RelayRoute(
-            protocolVersion: 2,
-            kind: .established,
-            recipientSigningKey: aliceIdentity.ed25519VerifyingKey,
-            prekeyReference: nil
-        )
-        expectAuthenticationFailed("acknowledgment with a changed route version") {
-            _ = try alice.processAcknowledgmentWithRelayRoute(
-                snapshot: aliceSnapshot,
-                sessionKey: sessionKey,
-                message: acknowledgment,
-                route: changedAcknowledgmentVersionRoute
-            )
-        }
-        let acknowledgmentOutcome = try alice.processAcknowledgmentWithRelayRoute(
+        let acknowledgmentOutcome = try alice.processAcknowledgmentWithTransportBinding(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             message: acknowledgment,
-            route: acknowledgmentRoute
+            transportBinding: acknowledgmentBinding
         )
-        require(acknowledgmentOutcome.kind == .cleared, "route-bound acknowledgment clearing")
+        require(acknowledgmentOutcome.kind == .cleared, "transport-bound acknowledgment clearing")
 
-        print("Swift Relay Route binding coverage passed")
+        print("Swift Transport Binding coverage passed")
     }
 
-    private static func exerciseRouteEncodingBoundaries() throws {
-        let route = RelayRoute(
-            protocolVersion: UInt16.max,
-            kind: .initial,
-            recipientSigningKey: Data(repeating: 0x44, count: 32),
-            prekeyReference: RelayPreKeyReference(
-                signedPrekeyIdentifier: UInt64.max,
-                oneTimePrekeyIdentifier: UInt64.max
-            )
-        )
-        let associatedData = try encodeRelayRouteAssociatedData(route: route)
-        require(associatedData.count == 68, "maximum route encoded length")
-        require(associatedData[51..<59] == Data(repeating: 0xff, count: 8), "maximum signed prekey identifier")
-        require(associatedData[60..<68] == Data(repeating: 0xff, count: 8), "maximum one-time prekey identifier")
-        try verifyRelayRouteAssociatedData(route: route, associatedData: associatedData)
-
-        var tampered = associatedData
-        tampered[tampered.startIndex] ^= 0x01
-        do {
-            try verifyRelayRouteAssociatedData(route: route, associatedData: tampered)
-            fail("tampered associated data should reject")
-        } catch let error as AetherError {
-            guard case .RelayRouteRejected(_) = error else {
-                fail("unexpected tampered-route error \(error)")
-            }
-        }
-
-        let malformed = RelayRoute(
-            protocolVersion: 1,
-            kind: .established,
-            recipientSigningKey: Data(repeating: 0x44, count: 32),
-            prekeyReference: RelayPreKeyReference(
-                signedPrekeyIdentifier: 0,
-                oneTimePrekeyIdentifier: nil
-            )
-        )
-        do {
-            _ = try encodeRelayRouteAssociatedData(route: malformed)
-            fail("malformed established route should reject")
-        } catch let error as AetherError {
-            guard case .InvalidData(_) = error else {
-                fail("unexpected malformed-route error \(error)")
-            }
-        }
-    }
-
-    private static func expectRejectedRoute(
+    private static func expectMismatchedPrekeySelection(
         _ store: KeyStore,
         message: Message,
-        route: RelayRoute
+        transportBinding: TransportBinding,
+        prekeySelection: PreKeySelection
     ) {
-        let mismatched = RelayRoute(
-            protocolVersion: route.protocolVersion,
-            kind: route.kind,
-            recipientSigningKey: route.recipientSigningKey,
-            prekeyReference: RelayPreKeyReference(
-                signedPrekeyIdentifier: route.prekeyReference!.signedPrekeyIdentifier,
-                oneTimePrekeyIdentifier: route.prekeyReference!.oneTimePrekeyIdentifier! + 1
-            )
+        let mismatched = PreKeySelection(
+            signedPrekeyIdentifier: prekeySelection.signedPrekeyIdentifier,
+            oneTimePrekeyIdentifier: prekeySelection.oneTimePrekeyIdentifier! + 1
         )
         do {
-            _ = try store.initiatorIdentityHintWithRelayRoute(message: message, route: mismatched)
+            _ = try store.initiatorIdentityHintWithTransportBinding(
+                message: message,
+                transportBinding: transportBinding,
+                prekeySelection: mismatched
+            )
             fail("mismatched one-time-prekey identifier should reject")
         } catch let error as AetherError {
-            guard case .RelayRouteRejected(_) = error else {
-                fail("unexpected mismatched-route error \(error)")
+            guard case .AuthenticationFailed(_) = error else {
+                fail("unexpected prekey-selection error \(error)")
             }
         } catch {
-            fail("unexpected mismatched-route error \(error)")
+            fail("unexpected prekey-selection error \(error)")
         }
     }
 
-    private static func expectRelayRouteRejected(
+    private static func expectInvalidData(
         _ message: String,
         operation: () throws -> Void
     ) {
@@ -314,7 +255,7 @@ struct RelayRouteBindings {
             try operation()
             fail("\(message) should reject")
         } catch let error as AetherError {
-            guard case .RelayRouteRejected(_) = error else {
+            guard case .InvalidData(_) = error else {
                 fail("unexpected \(message) error \(error)")
             }
         } catch {
@@ -402,7 +343,7 @@ struct RelayRouteBindings {
     }
 
     private static func fail(_ message: String) -> Never {
-        fputs("Relay Route binding coverage failed: \(message)\n", stderr)
+        fputs("Transport Binding coverage failed: \(message)\n", stderr)
         exit(1)
     }
 }

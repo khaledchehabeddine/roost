@@ -13,12 +13,6 @@ fun main() {
     requireReplay(report.sealedSenderSessionCases.size == 1, "sealed-sender session fixture count")
     requireReplay(report.initialHandshakeCases.size == 1, "initial handshake fixture count")
     requireReplay(report.protocolStateBlobCases.size == 16, "protocol-state blob fixture count")
-    requireReplay(report.relayRouteCases.size == 3, "Relay Route fixture count")
-    val initialRoute = report.relayRouteCases.first {
-        it.name == "initial route consuming a one-time prekey"
-    }
-    requireReplay(initialRoute.route.prekeyReference?.signedPrekeyIdentifier == 7uL, "signed prekey identifier")
-    requireReplay(initialRoute.route.prekeyReference?.oneTimePrekeyIdentifier == 4_242uL, "one-time prekey identifier")
     requireReplay(
         report.protocolStateBlobCases.any { it.name == "deduplication_set_identity_with_duplicate_message" },
         "duplicate message blob fixture",
