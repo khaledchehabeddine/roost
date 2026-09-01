@@ -1068,6 +1068,7 @@ impl KeyStore {
     ///   the named identity's binding signature does not verify.
     /// - [`AetherError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if the Message or route is malformed.
     /// - [`AetherError::NotFound`] if local Discovery Key or referenced signed-prekey material is

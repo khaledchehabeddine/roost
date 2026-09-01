@@ -172,7 +172,34 @@ pub struct BlobReplayCase {
     pub reencoded_hex: String,
 }
 
-/// One checked-in Relay Route vector replayed through the Binding Surface.
+/// Replay evidence for one checked-in Core Relay Route vector.
+///
+/// The fixture harness returns these records so generated Swift and Kotlin consumers can compare
+/// a typed route with its canonical associated-data bytes without reimplementing the encoding.
+/// The bytes are public test evidence, not a transport-owned copy of production route state.
+///
+/// # Examples
+/// ```
+/// use aether::{
+///     AetherError, RelayRoute, RelayRouteKind, RelayRouteReplayCase,
+///     encode_relay_route_associated_data,
+/// };
+///
+/// let route = RelayRoute {
+///     protocol_version: 1,
+///     kind: RelayRouteKind::Established,
+///     recipient_signing_key: vec![0x44; 32],
+///     prekey_reference: None,
+/// };
+/// let associated_data = encode_relay_route_associated_data(route.clone())?;
+/// let case = RelayRouteReplayCase {
+///     name: "established-session route".into(),
+///     route,
+///     associated_data,
+/// };
+/// assert_eq!(case.route.kind, RelayRouteKind::Established);
+/// # Ok::<(), AetherError>(())
+/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct RelayRouteReplayCase {
     /// Fixture case name.

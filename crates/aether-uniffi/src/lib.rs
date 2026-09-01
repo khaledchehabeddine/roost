@@ -73,6 +73,8 @@ pub use events::{
     ContactEventStreamItem, ContactEventStreamItemKind,
 };
 pub use evidence::{EvidenceProfile, VerifiedEvidenceBundle, verify_evidence_bundle};
+#[cfg(feature = "fixture-replay")]
+pub use fixture_replay::RelayRouteReplayCase;
 pub use key_store::{KeyStore, SessionAcceptanceResult, SessionInitiationResult};
 pub use key_store_operation::{
     KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
