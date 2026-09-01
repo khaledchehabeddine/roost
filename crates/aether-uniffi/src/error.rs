@@ -63,6 +63,8 @@ pub enum AetherError {
         /// Description of what was invalid for logging only.
         reason: String,
     },
+    /// A restored identity must rotate its inbox before using prekeys.
+    InboxRotationRequired,
     /// Requested identity, discovery-key, or signed-pre-key material is not stored.
     NotFound,
     /// The requested prepared-operation transition conflicts with its durable state.
@@ -130,6 +132,9 @@ impl std::fmt::Display for AetherError {
             AetherError::EventLag { missed } => write!(f, "event stream observer lagged: {missed}"),
             AetherError::InternalError { reason } => write!(f, "internal error: {reason}"),
             AetherError::InvalidData { reason } => write!(f, "invalid data: {reason}"),
+            AetherError::InboxRotationRequired => {
+                write!(f, "inbox rotation required after backup restore")
+            }
             AetherError::NotFound => write!(f, "key material not found"),
             AetherError::OperationConflict { reason } => {
                 write!(f, "prepared-operation conflict: {reason}")
@@ -195,6 +200,7 @@ impl From<SignedPreKeyError> for AetherError {
             },
             SignedPreKeyError::Corrupt => AetherError::Corrupt,
             SignedPreKeyError::Discovery(e) => e.into(),
+            SignedPreKeyError::InboxRotationRequired => AetherError::InboxRotationRequired,
             SignedPreKeyError::InvalidData(reason) if reason.contains("unsupported") => {
                 AetherError::UnsupportedVersion { reason }
             }
@@ -215,6 +221,7 @@ impl From<OneTimePreKeyError> for AetherError {
                 reason: "system clock is before Unix epoch".into(),
             },
             OneTimePreKeyError::Discovery(e) => e.into(),
+            OneTimePreKeyError::InboxRotationRequired => AetherError::InboxRotationRequired,
             OneTimePreKeyError::InvalidData(reason) if reason.contains("unsupported") => {
                 AetherError::UnsupportedVersion { reason }
             }
@@ -380,7 +387,8 @@ impl From<ProtocolStateError> for AetherError {
             | ProtocolStateError::InvalidHardeningLimit { .. }
             | ProtocolStateError::InvalidMessage { .. }
             | ProtocolStateError::InvalidStateKey { .. }
-            | ProtocolStateError::MessageEncode(_) => AetherError::InvalidData {
+            | ProtocolStateError::MessageEncode(_)
+            | ProtocolStateError::RelayRoute(_) => AetherError::InvalidData {
                 reason: e.to_string(),
             },
             ProtocolStateError::InvalidStateBinding { reason, .. }
@@ -448,6 +456,9 @@ impl From<SessionEstablishmentError> for AetherError {
             SessionEstablishmentError::OneTimePreKey(e) => e.into(),
             SessionEstablishmentError::Operation(e) => e.into(),
             SessionEstablishmentError::ProtocolState(e) => e.into(),
+            SessionEstablishmentError::RelayRoute(e) => AetherError::InvalidData {
+                reason: e.to_string(),
+            },
             SessionEstablishmentError::SignedPreKey(e) => e.into(),
         }
     }

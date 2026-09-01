@@ -40,7 +40,7 @@ fn replay_fixture(fixture: &Fixture) {
     let signing_key = SigningKeyPair::from_signing_bytes(hex_array(&fixture.signing_key_seed_hex));
     let secret = hex_array(&fixture.signed_prekey_secret_hex);
     let unsigned =
-        SignedPreKey::from_secret_bytes(secret, [0u8; 64], fixture.epoch, fixture.created_at);
+        SignedPreKey::from_secret_bytes(secret, [0u8; 64], 0, fixture.epoch, fixture.created_at);
     let signed_bytes = signed_prekey_signed_bytes(
         unsigned.public().as_bytes(),
         fixture.epoch,
@@ -63,6 +63,7 @@ fn replay_fixture(fixture: &Fixture) {
     let signed_prekey = SignedPreKey::from_secret_bytes(
         secret,
         hex_array(&fixture.signature_hex),
+        0,
         fixture.epoch,
         fixture.created_at,
     );

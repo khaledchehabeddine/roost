@@ -287,14 +287,22 @@ fn discovery_key_payload(
 /// Generates a signed pre-key signed by `discovery_key`.
 ///
 /// This keeps the discovery signing key private while producing a signed pre-key that verifies
-/// with [`DiscoveryKey::verifying_key`].
+/// with [`DiscoveryKey::verifying_key`]. The caller allocates `id` uniquely within this discovery
+/// key's epoch.
 #[must_use]
 pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
     rng: &mut R,
     discovery_key: &DiscoveryKey,
+    id: u64,
     created_at: u64,
 ) -> SignedPreKey {
-    generate_signed_prekey(rng, &discovery_key.signing, discovery_key.epoch, created_at)
+    generate_signed_prekey(
+        rng,
+        &discovery_key.signing,
+        id,
+        discovery_key.epoch,
+        created_at,
+    )
 }
 
 #[cfg(test)]
@@ -573,6 +581,7 @@ mod tests {
         let signed_prekey = generate_signed_prekey_for_discovery_key(
             &mut setup.rng,
             &setup.discovery_key,
+            0,
             FIXED_CREATED_AT,
         );
         let bundle = signed_prekey.bundle();

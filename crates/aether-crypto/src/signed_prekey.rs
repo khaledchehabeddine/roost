@@ -22,12 +22,19 @@ pub struct SignedPreKey {
     #[zeroize(skip)]
     signature: Signature,
     #[zeroize(skip)]
+    id: u64,
+    #[zeroize(skip)]
     epoch: u32,
     #[zeroize(skip)]
     created_at: u64,
 }
 
 impl SignedPreKey {
+    /// Returns the stable identifier allocated within the discovery-key epoch.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Returns the X25519 public key.
     pub fn public(&self) -> &PublicKey {
         &self.public_key
@@ -66,6 +73,7 @@ impl SignedPreKey {
     pub fn from_secret_bytes(
         secret: [u8; 32],
         signature: [u8; 64],
+        id: u64,
         epoch: u32,
         created_at: u64,
     ) -> Self {
@@ -76,6 +84,7 @@ impl SignedPreKey {
             secret_key,
             public_key,
             signature,
+            id,
             epoch,
             created_at,
         }
@@ -86,6 +95,7 @@ impl SignedPreKey {
         SignedPreKeyBundle {
             public_key: self.public_key,
             signature: self.signature,
+            id: self.id,
             epoch: self.epoch,
             created_at: self.created_at,
         }
@@ -104,6 +114,11 @@ pub struct SignedPreKeyBundle {
     /// `public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()` under the signed
     /// pre-key signature context.
     pub signature: Signature,
+    /// Stable unsigned identifier allocated within [`Self::epoch`].
+    ///
+    /// The identifier is lookup metadata and is not covered by [`Self::signature`]. Route
+    /// associated data binds it to the encrypted initial message that selected this pre-key.
+    pub id: u64,
     /// Discovery-key epoch this signed pre-key was produced under.
     pub epoch: u32,
     /// Unix timestamp in seconds covered by [`Self::signature`].
@@ -114,7 +129,8 @@ impl SignedPreKeyBundle {
     /// Builds a bundle from received wire bytes.
     ///
     /// This validates byte lengths only. Call [`verify_signed_prekey_bundle`] with the discovery
-    /// verifying key to authenticate the parsed fields.
+    /// verifying key to authenticate the public key, epoch, and creation time. The identifier is
+    /// authenticated separately by the initial Relay route.
     ///
     /// # Errors
     /// - [`CryptoError::InvalidKeyEncoding`] when the public key or signature has the wrong
@@ -122,6 +138,7 @@ impl SignedPreKeyBundle {
     pub fn from_bytes(
         public_key: &[u8],
         signature: &[u8],
+        id: u64,
         epoch: u32,
         created_at: u64,
     ) -> Result<Self, CryptoError> {
@@ -137,17 +154,23 @@ impl SignedPreKeyBundle {
         Ok(Self {
             public_key: PublicKey::from(public_key_bytes),
             signature: Signature::from_bytes(&signature_bytes),
+            id,
             epoch,
             created_at,
         })
     }
 }
 
-/// Generates a signed pre-key with the supplied Ed25519 signing key.
+/// Generates a signed pre-key with the supplied Ed25519 signing key and caller-allocated
+/// identifier.
+///
+/// `id` is stable lookup metadata within one discovery-key epoch. It is not part of the signature
+/// payload; a route-bound caller authenticates it as associated data with the encrypted initial.
 #[must_use]
 pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     signing_key: &SigningKeyPair,
+    id: u64,
     epoch: u32,
     created_at: u64,
 ) -> SignedPreKey {
@@ -161,6 +184,7 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
         secret_key,
         public_key,
         signature,
+        id,
         epoch,
         created_at,
     }
@@ -200,6 +224,7 @@ mod tests {
 
     const FIXED_CREATED_AT: u64 = 1_700_000_000;
     const FIXED_EPOCH: u32 = 7;
+    const FIXED_ID: u64 = 11;
 
     fn seeded_rng() -> ChaCha20Rng {
         ChaCha20Rng::from_seed([4u8; 32])
@@ -209,8 +234,13 @@ mod tests {
     fn generate_and_verify_round_trip() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let bundle = signed_prekey.bundle();
         assert!(verify_signed_prekey_bundle(&bundle, &signing_key.verifying).is_ok());
     }
@@ -219,8 +249,13 @@ mod tests {
     fn bundle_fields_match_signed_prekey() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let bundle = signed_prekey.bundle();
         assert_eq!(
             bundle.public_key.as_bytes(),
@@ -230,6 +265,7 @@ mod tests {
             bundle.signature.to_bytes(),
             signed_prekey.signature().to_bytes()
         );
+        assert_eq!(bundle.id, signed_prekey.id());
         assert_eq!(bundle.epoch, signed_prekey.epoch());
         assert_eq!(bundle.created_at, signed_prekey.created_at());
     }
@@ -238,8 +274,13 @@ mod tests {
     fn verify_rejects_tampered_public_key() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let mut bundle = signed_prekey.bundle();
         let mut public_key_bytes = *bundle.public_key.as_bytes();
         public_key_bytes[0] ^= 0x01;
@@ -254,14 +295,20 @@ mod tests {
     fn verify_rejects_tampered_signature() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let bundle = signed_prekey.bundle();
         let mut signature_bytes = bundle.signature.to_bytes();
         signature_bytes[0] ^= 0x01;
         let tampered = SignedPreKeyBundle {
             public_key: bundle.public_key,
             signature: Signature::from_bytes(&signature_bytes),
+            id: bundle.id,
             epoch: bundle.epoch,
             created_at: bundle.created_at,
         };
@@ -276,8 +323,13 @@ mod tests {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
         let wrong_signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let bundle = signed_prekey.bundle();
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &wrong_signing_key.verifying),
@@ -289,12 +341,18 @@ mod tests {
     fn verify_rejects_tampered_epoch() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let bundle = signed_prekey.bundle();
         let tampered = SignedPreKeyBundle {
             public_key: bundle.public_key,
             signature: bundle.signature,
+            id: bundle.id,
             epoch: bundle.epoch + 1,
             created_at: bundle.created_at,
         };
@@ -308,12 +366,18 @@ mod tests {
     fn verify_rejects_tampered_created_at() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let bundle = signed_prekey.bundle();
         let tampered = SignedPreKeyBundle {
             public_key: bundle.public_key,
             signature: bundle.signature,
+            id: bundle.id,
             epoch: bundle.epoch,
             created_at: bundle.created_at + 1,
         };
@@ -332,6 +396,7 @@ mod tests {
         let bundle = SignedPreKeyBundle {
             public_key: key_pair.public,
             signature: bare_signature,
+            id: FIXED_ID,
             epoch: FIXED_EPOCH,
             created_at: FIXED_CREATED_AT,
         };
@@ -345,13 +410,19 @@ mod tests {
     fn bundle_from_bytes_round_trip_preserves_fields() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let signed_prekey = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let bundle = signed_prekey.bundle();
 
         let parsed = SignedPreKeyBundle::from_bytes(
             bundle.public_key.as_bytes(),
             &bundle.signature.to_bytes(),
+            bundle.id,
             bundle.epoch,
             bundle.created_at,
         )
@@ -359,6 +430,7 @@ mod tests {
 
         assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
         assert_eq!(parsed.signature.to_bytes(), bundle.signature.to_bytes());
+        assert_eq!(parsed.id, bundle.id);
         assert_eq!(parsed.epoch, bundle.epoch);
         assert_eq!(parsed.created_at, bundle.created_at);
     }
@@ -366,11 +438,23 @@ mod tests {
     #[test]
     fn bundle_from_bytes_rejects_wrong_lengths() {
         assert!(matches!(
-            SignedPreKeyBundle::from_bytes(&[0u8; 31], &[0u8; 64], FIXED_EPOCH, FIXED_CREATED_AT),
+            SignedPreKeyBundle::from_bytes(
+                &[0u8; 31],
+                &[0u8; 64],
+                FIXED_ID,
+                FIXED_EPOCH,
+                FIXED_CREATED_AT,
+            ),
             Err(CryptoError::InvalidKeyEncoding)
         ));
         assert!(matches!(
-            SignedPreKeyBundle::from_bytes(&[0u8; 32], &[0u8; 63], FIXED_EPOCH, FIXED_CREATED_AT),
+            SignedPreKeyBundle::from_bytes(
+                &[0u8; 32],
+                &[0u8; 63],
+                FIXED_ID,
+                FIXED_EPOCH,
+                FIXED_CREATED_AT,
+            ),
             Err(CryptoError::InvalidKeyEncoding)
         ));
     }
@@ -379,11 +463,17 @@ mod tests {
     fn from_secret_bytes_round_trip() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let original =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let original = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
+            original.id(),
             original.epoch(),
             original.created_at(),
         );
@@ -393,6 +483,7 @@ mod tests {
             original.signature().to_bytes()
         );
         assert_eq!(restored.epoch(), original.epoch());
+        assert_eq!(restored.id(), original.id());
         assert_eq!(restored.created_at(), original.created_at());
         assert_eq!(*restored.to_secret_bytes(), *original.to_secret_bytes());
     }
@@ -401,11 +492,17 @@ mod tests {
     fn from_secret_bytes_restores_diffie_hellman_secret() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
-        let original =
-            generate_signed_prekey(&mut rng, &signing_key, FIXED_EPOCH, FIXED_CREATED_AT);
+        let original = generate_signed_prekey(
+            &mut rng,
+            &signing_key,
+            FIXED_ID,
+            FIXED_EPOCH,
+            FIXED_CREATED_AT,
+        );
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
+            original.id(),
             original.epoch(),
             original.created_at(),
         );

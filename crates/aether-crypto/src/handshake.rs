@@ -9,9 +9,11 @@ use crate::keys::{
 };
 use crate::one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle};
 use crate::ratchet::RootKey;
+#[cfg(test)]
+use crate::sealed_frame::seal_frame_with_ephemeral_key;
 use crate::sealed_frame::{
-    SealedFrame, SealedFramePreKeyReference, open_frame_for_discovery_key,
-    seal_frame_with_ephemeral_key,
+    SealedFrame, SealedFramePreKeyReference, open_frame_for_discovery_key_with_associated_data,
+    seal_frame_with_ephemeral_key_and_associated_data,
 };
 use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_signed_prekey_bundle};
 use hkdf::Hkdf;
@@ -256,6 +258,49 @@ pub fn initiate<R: RngCore + CryptoRng>(
     responder_prekey_bundle: &PreKeyBundle,
     message: InitialPlaintext<'_>,
 ) -> Result<(RatchetState, HandshakeEnvelope), CryptoError> {
+    initiate_with_associated_data(
+        rng,
+        initiator_discovery_key,
+        initiator_identity_key,
+        responder_identity_key,
+        responder_prekey_bundle,
+        message,
+        &[],
+    )
+}
+
+/// Starts a handshake and authenticates caller-supplied transport associated data in the outer
+/// sealed frame.
+///
+/// The responder must pass identical bytes to [`accept_with_associated_data`] or
+/// [`initiator_identity_hint_with_associated_data`].
+///
+/// # Errors
+/// - [`CryptoError::Aead`] when first-message or outer-frame encryption fails.
+/// - [`CryptoError::HandshakeEnvelopeEncode`] when the first-message content or envelope exceeds
+///   local caps or fails to encode.
+/// - [`CryptoError::HkdfExpand`] when a root, ratchet, frame, or proof derivation fails.
+/// - [`CryptoError::InvalidHmacKey`] when the ratchet chain-key derivation rejects its input.
+/// - [`CryptoError::InvalidKeyEncoding`] when either Identity Key bundle is not canonical.
+/// - [`CryptoError::InvalidState`] when ratchet seeding or first-message encryption observes an
+///   invalid state.
+/// - [`CryptoError::NonContributorySharedSecret`] when an X25519 peer key produces a
+///   non-contributory shared secret.
+/// - [`CryptoError::SealedFrameEncode`] when frame fields, ciphertext, or additional associated
+///   data exceed local caps.
+/// - [`CryptoError::SignatureInvalid`] when an Identity Key, Discovery Key, or signed-prekey
+///   signature does not verify.
+/// - [`CryptoError::StalePreKey`] when bundled prekeys do not match the Discovery Key epoch.
+/// - [`CryptoError::UnsupportedPreKeyBundleVersion`] when the bundle version is unsupported.
+pub fn initiate_with_associated_data<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    initiator_discovery_key: &DiscoveryKey,
+    initiator_identity_key: &IdentityKeyBundle,
+    responder_identity_key: &IdentityKeyBundle,
+    responder_prekey_bundle: &PreKeyBundle,
+    message: InitialPlaintext<'_>,
+    additional_associated_data: &[u8],
+) -> Result<(RatchetState, HandshakeEnvelope), CryptoError> {
     verify_identity_key_bundle(initiator_identity_key)?;
     verify_identity_key_bundle(responder_identity_key)?;
     if responder_prekey_bundle.version != PREKEY_BUNDLE_VERSION {
@@ -346,11 +391,12 @@ pub fn initiate<R: RngCore + CryptoRng>(
             .as_ref()
             .map(|prekey| *prekey.public_key.as_bytes()),
     };
-    let frame = seal_frame_with_ephemeral_key(
+    let frame = seal_frame_with_ephemeral_key_and_associated_data(
         &initiator_ephemeral_key,
         &responder_prekey_bundle.discovery_key.public_key,
         Some(prekey_reference),
         &frame_plaintext,
+        additional_associated_data,
     )?;
     let envelope = HandshakeEnvelope::from_frame(frame);
     envelope.to_bytes()?;
@@ -383,9 +429,38 @@ pub fn initiator_identity_hint(
     envelope: &HandshakeEnvelope,
     responder_discovery_key: &DiscoveryKey,
 ) -> Result<IdentityKeyBundle, CryptoError> {
+    initiator_identity_hint_with_associated_data(envelope, responder_discovery_key, &[])
+}
+
+/// Reads the claimed initiator identity while authenticating caller-supplied transport associated
+/// data in the outer sealed frame.
+///
+/// Associated-data authentication does not authenticate the claimed initiator. The returned bundle
+/// remains a sender claim until [`accept_with_associated_data`] checks it against the sealed
+/// envelope's authenticated copy.
+///
+/// # Errors
+/// - [`CryptoError::Aead`] if the frame or associated data does not authenticate.
+/// - [`CryptoError::HandshakeEnvelopeDecode`] if the frame is not an initial or its plaintext is
+///   malformed.
+/// - [`CryptoError::HkdfExpand`] if frame key derivation fails.
+/// - [`CryptoError::InvalidKeyEncoding`] if the named identity is not canonical.
+/// - [`CryptoError::NonContributorySharedSecret`] if the ephemeral key yields a low-order
+///   agreement.
+/// - [`CryptoError::SealedFrameDecode`] if frame fields are malformed, target another Discovery
+///   Key, or additional associated data exceeds the local cap.
+/// - [`CryptoError::SignatureInvalid`] if the named identity's binding signature does not verify.
+pub fn initiator_identity_hint_with_associated_data(
+    envelope: &HandshakeEnvelope,
+    responder_discovery_key: &DiscoveryKey,
+    additional_associated_data: &[u8],
+) -> Result<IdentityKeyBundle, CryptoError> {
     validate_envelope_public_fields(&envelope.to_frame())?;
-    let frame_plaintext =
-        open_frame_for_discovery_key(responder_discovery_key, &envelope.to_frame())?;
+    let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
+        responder_discovery_key,
+        &envelope.to_frame(),
+        additional_associated_data,
+    )?;
     let decoded = decode_handshake_frame_plaintext(&frame_plaintext)?;
     verify_identity_key_bundle(&decoded.sender_identity_hint)?;
     Ok(decoded.sender_identity_hint)
@@ -436,6 +511,65 @@ pub fn accept<R: RngCore + CryptoRng>(
     responder_signed_prekey: &SignedPreKey,
     responder_one_time_prekey: Option<OneTimePreKey>,
 ) -> Result<(RatchetState, AcceptedInitialMessage), CryptoError> {
+    accept_with_associated_data(
+        rng,
+        envelope,
+        expected_initiator_identity_key,
+        responder_identity_key,
+        responder_discovery_key,
+        responder_signed_prekey,
+        responder_one_time_prekey,
+        &[],
+    )
+}
+
+/// Accepts a handshake while authenticating caller-supplied transport associated data in the
+/// outer sealed frame.
+///
+/// As with [`accept`], this verifies that the envelope targets `responder_signed_prekey` and checks
+/// the sender key-possession proof, but it does not verify the signed-prekey signature or validate
+/// the sender certificate.
+///
+/// # Errors
+/// - [`CryptoError::Aead`] when outer-frame or first-message authentication fails.
+/// - [`CryptoError::HandshakeEnvelopeDecode`] when the sealed first Message is malformed,
+///   unsupported, or exceeds local caps.
+/// - [`CryptoError::HandshakeSignedPreKeyMismatch`] when the envelope names another signed
+///   pre-key.
+/// - [`CryptoError::HkdfExpand`] when root, frame, or ratchet derivation fails.
+/// - [`CryptoError::InvalidHmacKey`] when ratchet chain-key derivation rejects its input.
+/// - [`CryptoError::InvalidKeyEncoding`] when the responder or expected initiator Identity Key is
+///   not canonical.
+/// - [`CryptoError::InvalidState`] when ratchet decryption observes an invalid state.
+/// - [`CryptoError::MaxSkipExceeded`] when the authenticated first Message asks to skip too many
+///   ratchet messages.
+/// - [`CryptoError::MissingOneTimePreKey`] when the envelope names a one-time pre-key but none is
+///   supplied.
+/// - [`CryptoError::NonContributorySharedSecret`] when an X25519 peer key yields a low-order
+///   agreement.
+/// - [`CryptoError::OneTimePreKeyMismatch`] when the supplied one-time pre-key does not match the
+///   envelope.
+/// - [`CryptoError::SealedFrameDecode`] when frame fields are malformed, target another Discovery
+///   Key, or additional associated data exceeds the local cap.
+/// - [`CryptoError::SenderIdentityMismatch`] when the sealed sender identity differs from the
+///   expected or hinted initiator.
+/// - [`CryptoError::SignatureInvalid`] when an Identity Key binding or sender proof fails.
+/// - [`CryptoError::StalePreKey`] when the envelope or local prekeys do not match the Discovery Key
+///   epoch.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "route binding adds one explicit input to the established X3DH acceptance seam"
+)]
+pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    envelope: &HandshakeEnvelope,
+    expected_initiator_identity_key: Option<&IdentityKeyBundle>,
+    responder_identity_key: &IdentityKeyBundle,
+    responder_discovery_key: &DiscoveryKey,
+    responder_signed_prekey: &SignedPreKey,
+    responder_one_time_prekey: Option<OneTimePreKey>,
+    additional_associated_data: &[u8],
+) -> Result<(RatchetState, AcceptedInitialMessage), CryptoError> {
     verify_identity_key_bundle(responder_identity_key)?;
     let prekey_reference = envelope_prekey_reference(envelope)?;
     if prekey_reference.discovery_epoch != responder_discovery_key.epoch()
@@ -469,8 +603,11 @@ pub fn accept<R: RngCore + CryptoRng>(
     // point: this layer is sealed to the responder's own Discovery Key, so it
     // is readable without knowing the sender, and it names the sender the root
     // key needs. Deriving first would require already knowing the answer.
-    let frame_plaintext =
-        open_frame_for_discovery_key(responder_discovery_key, &envelope.to_frame())?;
+    let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
+        responder_discovery_key,
+        &envelope.to_frame(),
+        additional_associated_data,
+    )?;
     let frame_plaintext = decode_handshake_frame_plaintext(&frame_plaintext)?;
 
     // A caller that names an expected initiator pins it; one that does not —
@@ -1083,7 +1220,7 @@ mod tests {
         let bob_identity_key = generated_identity_key_bundle(&mut rng, &bob_identity);
         let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_TS);
         let bob_signed_prekey =
-            generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, FIXED_TS);
+            generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, FIXED_TS);
         let bob_one_time_prekey =
             generate_one_time_prekey(&mut rng, 9, bob_discovery_key.epoch(), FIXED_TS);
         let setup = FullX3dhSetup {
@@ -1215,7 +1352,7 @@ mod tests {
         let bob_discovery_key =
             DiscoveryKey::from_secret_bytes([0x31u8; 32], [0x72u8; 32], 3, FIXED_TS, [0u8; 64]);
         let bob_signed_prekey =
-            SignedPreKey::from_secret_bytes([0x41u8; 32], [0u8; 64], 3, FIXED_TS);
+            SignedPreKey::from_secret_bytes([0x41u8; 32], [0u8; 64], 0, 3, FIXED_TS);
         let bob_one_time_prekey = OneTimePreKey::from_secret_bytes(9, [0x51u8; 32], 3, FIXED_TS);
 
         let initiator_root_key = derive_root_key_initiator(

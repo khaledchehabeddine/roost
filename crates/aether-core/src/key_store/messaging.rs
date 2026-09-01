@@ -3,7 +3,7 @@ use crate::{
     AcknowledgmentOutcome, DiscoveryKeyError, IdentityError, InboundAcknowledgmentMessage,
     InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation,
     KeyStoreOperationError, Message, MessageId, OutboundAcknowledgment, OutboundMessageResult,
-    OutboundPlaintext, ProtocolStateError, ProtocolStateKey, ProtocolStateSnapshot,
+    OutboundPlaintext, ProtocolStateError, ProtocolStateKey, ProtocolStateSnapshot, RelayRoute,
 };
 use aether_crypto::SenderIdentityMaterial;
 use std::error::Error;
@@ -136,24 +136,55 @@ impl KeyStore {
         &self,
         input: MessageEncryption<'_>,
     ) -> Result<OutboundMessageResult, MessageOperationError> {
+        self.encrypt_message_inner(input, None)
+    }
+
+    /// Encrypts an established-session Message while authenticating a Relay route.
+    /// The caller must retain the exact route with the returned Message for retransmission.
+    ///
+    /// # Errors
+    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
+    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
+    /// - [`MessageOperationError::ProtocolState`] if the route names the wrong recipient Identity
+    ///   Key, or if state loading, contact gating, encryption, or update encoding fails.
+    pub fn encrypt_message_with_relay_route(
+        &self,
+        input: MessageEncryption<'_>,
+        route: &RelayRoute,
+    ) -> Result<OutboundMessageResult, MessageOperationError> {
+        self.encrypt_message_inner(input, Some(route))
+    }
+
+    fn encrypt_message_inner(
+        &self,
+        input: MessageEncryption<'_>,
+        route: Option<&RelayRoute>,
+    ) -> Result<OutboundMessageResult, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         let identity = self.0.identity.load_identity()?;
         let sender_identity =
             sender_identity_material(&identity, input.sender_certificate, input.sender_signature)?;
-        Ok(crate::ProtocolStateEngine::new().encrypt_message(
-            input.snapshot,
-            input.session_key,
-            OutboundPlaintext {
-                id: input.message_id,
-                sender_identity: &sender_identity,
-                sender_identity_signing_key: identity.signing_key_pair(),
-                contact_identity_key: input.contact_identity_key,
-                recipient_public_key: input.recipient_public_key,
-                timestamp_millis: input.timestamp_millis,
-                plaintext: input.plaintext,
-            },
-        )?)
+        let plaintext = OutboundPlaintext {
+            id: input.message_id,
+            sender_identity: &sender_identity,
+            sender_identity_signing_key: identity.signing_key_pair(),
+            contact_identity_key: input.contact_identity_key,
+            recipient_public_key: input.recipient_public_key,
+            timestamp_millis: input.timestamp_millis,
+            plaintext: input.plaintext,
+        };
+        let engine = crate::ProtocolStateEngine::new();
+        Ok(if let Some(route) = route {
+            engine.encrypt_message_with_relay_route(
+                input.snapshot,
+                input.session_key,
+                plaintext,
+                route,
+            )?
+        } else {
+            engine.encrypt_message(input.snapshot, input.session_key, plaintext)?
+        })
     }
 
     /// Decrypts an established-session Message using stored local discovery and identity material.
@@ -169,6 +200,35 @@ impl KeyStore {
         &self,
         input: MessageDecryption<'_>,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
+        self.decrypt_message_inner(input, None)
+    }
+
+    /// Decrypts an established-session Message and authenticates both its Relay route and the
+    /// route used for the returned acknowledgment.
+    /// The caller must retain `acknowledgment_route` with the returned acknowledgment artifact.
+    ///
+    /// # Errors
+    /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
+    ///   malformed.
+    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
+    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
+    /// - [`MessageOperationError::ProtocolState`] if either route names the wrong Identity Key, or
+    ///   if deduplication, decryption, sender-certificate validation, acknowledgment encryption,
+    ///   or update encoding fails.
+    pub fn decrypt_message_with_relay_routes(
+        &self,
+        input: MessageDecryption<'_>,
+        route: &RelayRoute,
+        acknowledgment_route: &RelayRoute,
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+        self.decrypt_message_inner(input, Some((route, acknowledgment_route)))
+    }
+
+    fn decrypt_message_inner(
+        &self,
+        input: MessageDecryption<'_>,
+        routes: Option<(&RelayRoute, &RelayRoute)>,
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         let identity = self.0.identity.load_identity()?;
@@ -179,25 +239,32 @@ impl KeyStore {
             input.acknowledgment_sender_signature,
         )?;
         let mut rng = rand::rngs::OsRng;
-        Ok(crate::ProtocolStateEngine::new().decrypt_message(
-            &mut rng,
-            input.snapshot,
-            InboundEncryptedMessage {
-                session_key: input.session_key,
-                deduplication_key: input.deduplication_key,
-                message: input.message,
-                recipient_discovery_key: &discovery_key,
-                recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
-                acknowledgment: OutboundAcknowledgment {
-                    id: input.acknowledgment_id,
-                    sender_identity: &sender_identity,
-                    sender_identity_signing_key: identity.signing_key_pair(),
-                    recipient_public_key: input.acknowledgment_recipient_public_key,
-                    timestamp_millis: input.acknowledgment_timestamp_millis,
-                },
-                sender_certificate_validation: input.sender_certificate_validation,
+        let inbound = InboundEncryptedMessage {
+            session_key: input.session_key,
+            deduplication_key: input.deduplication_key,
+            message: input.message,
+            recipient_discovery_key: &discovery_key,
+            recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
+            acknowledgment: OutboundAcknowledgment {
+                id: input.acknowledgment_id,
+                sender_identity: &sender_identity,
+                sender_identity_signing_key: identity.signing_key_pair(),
+                recipient_public_key: input.acknowledgment_recipient_public_key,
+                timestamp_millis: input.acknowledgment_timestamp_millis,
             },
-        )?)
+            sender_certificate_validation: input.sender_certificate_validation,
+        };
+        let engine = crate::ProtocolStateEngine::new();
+        Ok(match routes {
+            Some((route, acknowledgment_route)) => engine.decrypt_message_with_relay_routes(
+                &mut rng,
+                input.snapshot,
+                inbound,
+                route,
+                acknowledgment_route,
+            )?,
+            None => engine.decrypt_message(&mut rng, input.snapshot, inbound)?,
+        })
     }
 
     /// Processes an encrypted acknowledgment using stored local discovery and identity material.
@@ -213,21 +280,53 @@ impl KeyStore {
         &self,
         input: AcknowledgmentProcessing<'_>,
     ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
+        self.process_acknowledgment_inner(input, None)
+    }
+
+    /// Processes an encrypted acknowledgment while authenticating its Relay route.
+    ///
+    /// # Errors
+    /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
+    ///   malformed.
+    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
+    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
+    /// - [`MessageOperationError::ProtocolState`] if the route names the wrong local Identity Key,
+    ///   or if state loading, decryption, or update encoding fails.
+    pub fn process_acknowledgment_with_relay_route(
+        &self,
+        input: AcknowledgmentProcessing<'_>,
+        route: &RelayRoute,
+    ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
+        self.process_acknowledgment_inner(input, Some(route))
+    }
+
+    fn process_acknowledgment_inner(
+        &self,
+        input: AcknowledgmentProcessing<'_>,
+        route: Option<&RelayRoute>,
+    ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         let identity = self.0.identity.load_identity()?;
         let discovery_key = self.0.discovery.current()?;
         let mut rng = rand::rngs::OsRng;
-        Ok(crate::ProtocolStateEngine::new().process_acknowledgment(
-            &mut rng,
-            input.snapshot,
-            InboundAcknowledgmentMessage {
-                session_key: input.session_key,
-                message: input.message,
-                recipient_discovery_key: &discovery_key,
-                recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
-            },
-        )?)
+        let inbound = InboundAcknowledgmentMessage {
+            session_key: input.session_key,
+            message: input.message,
+            recipient_discovery_key: &discovery_key,
+            recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
+        };
+        let engine = crate::ProtocolStateEngine::new();
+        Ok(if let Some(route) = route {
+            engine.process_acknowledgment_with_relay_route(
+                &mut rng,
+                input.snapshot,
+                inbound,
+                route,
+            )?
+        } else {
+            engine.process_acknowledgment(&mut rng, input.snapshot, inbound)?
+        })
     }
 }
 

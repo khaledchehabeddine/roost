@@ -1147,7 +1147,7 @@ fn session_setup() -> Result<SessionSetup, AetherError> {
     let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
     let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, CREATED_AT);
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT);
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
     let prekey_bundle = PreKeyBundle {
@@ -1208,6 +1208,7 @@ fn prepare_initial_handshake(
     let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
         &mut rng,
         &bob_discovery_key,
+        0,
         transcript.created_at,
     );
     let bob_one_time_prekey = generate_one_time_prekey(

@@ -319,6 +319,8 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored blob is malformed.
+    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
+    ///   inbox rotation.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key is stored.
     /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
@@ -361,6 +363,8 @@ impl KeyStore {
     ///   against the current discovery key.
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
     ///   malformed.
+    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
+    ///   inbox rotation.
     /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key has been created.
     /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
@@ -493,6 +497,8 @@ impl KeyStore {
     ///   unverifiable, or absent.
     /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
     ///   malformed or the requested batch exceeds capacity.
+    /// - [`KeyStoreError::OneTimePreKey`] (`InboxRotationRequired`) after backup restore and
+    ///   before inbox rotation.
     /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_generate_one_time_prekeys(
@@ -540,6 +546,8 @@ impl KeyStore {
     ///   unverifiable, or absent.
     /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
     ///   malformed.
+    /// - [`KeyStoreError::OneTimePreKey`] (`InboxRotationRequired`) after backup restore and
+    ///   before inbox rotation.
     /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_replenish_one_time_prekeys(
@@ -650,6 +658,8 @@ impl KeyStore {
     ///   fails.
     /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
     ///   malformed.
+    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
+    ///   inbox rotation.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_rotate_signed_prekey_if_stale(
@@ -693,6 +703,8 @@ impl KeyStore {
     /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
     /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key
     ///   fails.
+    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
+    ///   inbox rotation.
     /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
     /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_rotate_signed_prekey_now(
@@ -738,7 +750,9 @@ impl KeyStore {
     /// identity before staging changes, so a wrong passphrase or malformed blob leaves existing
     /// material untouched. Commit this operation, atomically wipe or replace host-owned Session,
     /// deduplication, and pending-acknowledgment state, then finalize. The restored identity keeps
-    /// the discovery-key epoch lineage from the backup and has no prekeys.
+    /// the discovery-key epoch lineage from the backup, but prekey generation and publication stay
+    /// blocked until [`Self::prepare_rotate_inbox_now`] advances to a fresh generation. This avoids
+    /// reusing prekey identifiers that the backed-up generation may already have published.
     ///
     /// # Examples
     /// ```
@@ -770,10 +784,10 @@ impl KeyStore {
     ///   below-floor Argon2id parameters.
     /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on identity delete or commit
     ///   failure.
-    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on one-time-pre-key delete
-    ///   failure.
-    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
-    ///   failure.
+    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) when writing the
+    ///   inbox-rotation-required marker fails.
+    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) when writing the
+    ///   inbox-rotation-required marker fails.
     /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_import_encrypted_backup(
         &self,
@@ -792,8 +806,8 @@ impl KeyStore {
         let (identity_key, dk_blob) = self.0.identity.decrypt_backup(data, passphrase)?;
         // Validate the restored key graph before clearing any existing material.
         DiscoveryKeyManager::validate_blob_for_identity(&dk_blob, &identity_key)?;
-        self.0.one_time_prekey.reset()?;
-        self.0.signed_prekey.reset()?;
+        self.0.one_time_prekey.mark_inbox_rotation_required()?;
+        self.0.signed_prekey.mark_inbox_rotation_required()?;
         self.0.discovery.reset()?;
         self.0.identity.reset()?;
         self.0.identity.store_decrypted_identity(&identity_key)?;
@@ -1321,7 +1335,7 @@ mod tests {
     }
 
     #[test]
-    fn import_encrypted_backup_clears_stale_one_time_prekey_pool() {
+    fn import_encrypted_backup_blocks_one_time_prekeys_until_inbox_rotation() {
         let destination_store = store();
         destination_store.generate_identity().unwrap();
         destination_store.replenish_one_time_prekeys().unwrap();
@@ -1336,8 +1350,19 @@ mod tests {
                 .0
                 .one_time_prekey
                 .consume_one_time_prekey(0, 0),
-            Err(OneTimePreKeyError::NotFound)
+            Err(OneTimePreKeyError::InboxRotationRequired)
         ));
+        assert!(matches!(
+            destination_store.replenish_one_time_prekeys(),
+            Err(KeyStoreError::OneTimePreKey(
+                OneTimePreKeyError::InboxRotationRequired
+            ))
+        ));
+
+        let rotation = destination_store.rotate_inbox_now().unwrap().publication;
+        let one_time_prekeys = destination_store.replenish_one_time_prekeys().unwrap();
+        assert_eq!(one_time_prekeys[0].epoch, rotation.discovery_key.epoch);
+        assert_eq!(one_time_prekeys[0].id, 0);
     }
 
     #[test]
@@ -1401,7 +1426,7 @@ mod tests {
             key_store
                 .0
                 .signed_prekey
-                .prekey_for_public_key(first_epoch, first_prekey.public_key.as_bytes()),
+                .current_prekey_for_public_key(first_epoch, first_prekey.public_key.as_bytes()),
             Err(SignedPreKeyError::NotFound)
         ));
     }
@@ -1464,12 +1489,19 @@ mod tests {
             }
         });
         let prekey_thread = std::thread::spawn(move || {
+            let mut rotations = 0;
             for _ in 0..8 {
-                rotate_prekey.rotate_signed_prekey_now().unwrap();
+                match rotate_prekey.rotate_signed_prekey_now() {
+                    Ok(_) => rotations += 1,
+                    Err(KeyStoreError::SignedPreKey(SignedPreKeyError::InvalidData(reason)))
+                        if reason.contains("capacity") => {}
+                    Err(error) => panic!("unexpected signed pre-key rotation failure: {error}"),
+                }
             }
+            rotations
         });
         discovery_thread.join().unwrap();
-        prekey_thread.join().unwrap();
+        assert!(prekey_thread.join().unwrap() > 0);
 
         let discovery = key_store.current_discovery_key_bundle().unwrap();
         let prekey = key_store.current_signed_prekey_bundle().unwrap();
@@ -1679,7 +1711,7 @@ mod tests {
     }
 
     #[test]
-    fn import_encrypted_backup_clears_stale_signed_prekey() {
+    fn import_encrypted_backup_blocks_signed_prekeys_until_inbox_rotation() {
         let destination_store = store();
         destination_store.generate_identity().unwrap();
         destination_store.rotate_signed_prekey_if_stale().unwrap();
@@ -1693,12 +1725,20 @@ mod tests {
             .unwrap();
         assert!(matches!(
             destination_store.current_signed_prekey_bundle(),
-            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
+            Err(KeyStoreError::SignedPreKey(
+                SignedPreKeyError::InboxRotationRequired
+            ))
+        ));
+        assert!(matches!(
+            destination_store.rotate_signed_prekey_if_stale(),
+            Err(KeyStoreError::SignedPreKey(
+                SignedPreKeyError::InboxRotationRequired
+            ))
         ));
     }
 
     #[test]
-    fn import_then_rotate_yields_signed_prekey_signed_by_imported_discovery_key() {
+    fn import_then_inbox_rotation_uses_fresh_epoch_and_signed_prekey_identifier() {
         let destination_store = store();
         destination_store.generate_identity().unwrap();
         destination_store.rotate_signed_prekey_if_stale().unwrap();
@@ -1706,14 +1746,18 @@ mod tests {
         let source_store = store();
         source_store.generate_identity().unwrap();
         let backup = source_store.export_encrypted_backup("pass").unwrap();
+        let backed_up_epoch = source_store.current_discovery_key_bundle().unwrap().epoch;
         destination_store
             .import_encrypted_backup(&backup, "pass")
             .unwrap();
-        destination_store.rotate_signed_prekey_if_stale().unwrap();
+        let rotation = destination_store.rotate_inbox_now().unwrap().publication;
 
         let rotated_bundle = destination_store.current_signed_prekey_bundle().unwrap();
         let imported_identity = destination_store.load_identity().unwrap();
         let discovery_bundle = destination_store.current_discovery_key_bundle().unwrap();
+        assert_eq!(discovery_bundle.epoch, backed_up_epoch + 1);
+        assert_eq!(rotation.signed_prekey.id, 0);
+        assert_eq!(rotated_bundle.id, 0);
         assert!(
             verify_discovery_key_bundle(&discovery_bundle, imported_identity.verifying_key())
                 .is_ok()

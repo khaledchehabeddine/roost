@@ -12,9 +12,18 @@ Avoid: receipt, delivery callback, network ack
 **Caller-Owned Transport** (one host-selected route per send):
 The host application's network and authentication boundary for sending encoded Messages,
 Acknowledgment Artifacts, and Retry Instructions. Core produces or consumes opaque protocol bytes
-and caller-supplied signing inputs, but it does not select transports, define transport headers,
-perform network IO, or authenticate a transport envelope.
+and caller-supplied signing inputs, but it does not select transports, define transport headers, or
+perform network IO. Route-bound operations authenticate only the minimal Relay Route; Relay
+admission, authorization, and all other transport-envelope fields remain host-owned.
 Avoid: Core network, transport session, library-owned routing
+
+**Relay Route** (one caller-supplied value per Relay Message send or receive):
+The canonical public metadata authenticated as additional associated data by a route-bound
+sealed-sender operation. Every route binds a Relay protocol version, route kind, and recipient
+Ed25519 signing key; an X3DH initial also binds its stable signed- and optional one-time-prekey
+identifiers. Core neither transmits nor stores the route, so the host retains the exact value for
+receive and retransmission.
+Avoid: transport envelope, delivery capability, Relay admission proof
 
 **Blocking** (one local verdict per Contact Identity):
 An IK-keyed local suppression rule. Blocking is independent of Trust State and distinct from
@@ -26,7 +35,7 @@ Avoid: revocation, distrust, remote blocklist
 
 **Clock** (one per KeyStore):
 The injected source of wall-clock time for caller-invoked prekey lifecycle checks, such as deciding
-whether a superseded signed pre-key remains inside its grace window. `SystemClock` in production; a
+whether a superseded signed pre-key remains inside its retention window. `SystemClock` in production; a
 virtual clock in tests makes lifecycle decisions reproducible.
 Avoid: timer, time source
 
@@ -49,9 +58,9 @@ A self-contained public view of the producer's current state, tagged with the la
 Avoid: cache, checkpoint
 
 **Deduplication Digest** (one per received encrypted Message):
-A keyed, truncated digest of the encoded sealed-sender frame bytes, computed before decryption and
-used only to detect byte-identical receive retries for one local Identity. Decrypted Message IDs are
-not part of the digest input.
+A keyed, truncated digest of the encoded sealed-sender frame and, for a route-bound receive, the
+canonical Relay Route bytes. It is computed before decryption and used only to detect identical
+receive retries for one local Identity. Decrypted Message IDs are not part of the digest input.
 Avoid: message hash, replay token
 
 **Deduplication Set** (one per local Identity):
@@ -88,7 +97,7 @@ A rotatable keypair — an Ed25519 signing key plus X25519 key-agreement key —
 Avoid: prekey, ephemeral key
 
 **Epoch** (one per Discovery Key generation):
-The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup preserves the backed-up Discovery Key and its Epoch, so use the signed `created_at` timestamp to compare freshness across restored lineages.
+The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup preserves the backed-up Discovery Key and its Epoch for validation, but prekey use stays blocked until inbox rotation advances the generation; use the signed `created_at` timestamp to compare freshness across restored lineages.
 Avoid: window, generation
 
 **Event** (many per Event Stream):
@@ -177,11 +186,21 @@ Avoid: database transaction, eager key mutation, deferred write
 
 **PreKey State** (one persisted lifecycle surface per local Identity):
 The `prekey/*` secure-storage records managed by KeyStore: the current Discovery Key, current and
-immediately superseded signed pre-key, and one-time pre-key pool for the current Epoch. Publication
-uses caller-created material; rotating the Discovery Key advances the Epoch and immediately destroys
-prior-Epoch signed and one-time prekey secrets. PreKey State is not a Protocol State Blob; malformed
-prekey corpora exercise KeyStore secure-storage decoders.
+up to five unexpired superseded signed pre-keys, and one-time pre-key pool for the current Epoch.
+Signed and one-time prekeys have separate stable unsigned 64-bit identifier sequences that restart
+at zero per Epoch. Rotating the Discovery Key advances the Epoch and immediately destroys
+prior-Epoch signed and one-time prekey secrets; normal signed-prekey rotation retains superseded
+secrets for 30 days. Backup restore replaces both prekey records with an inbox-rotation-required
+marker so identifiers cannot restart under the restored Discovery Key. PreKey State is not a
+Protocol State Blob; malformed prekey corpora exercise KeyStore secure-storage decoders.
 Avoid: protocol state blob, in-memory prekey cache, automatic publication rotation
+
+**PreKey Identifier** (one stable `u64` per prekey within one Epoch):
+The Core-allocated lookup value published beside a signed or one-time prekey and bound into an
+initial Relay Route. Signed- and one-time-prekey sequences are independent; identifiers may repeat
+across those kinds or after Discovery Key rotation, so the Epoch and prekey kind remain part of the
+lookup context.
+Avoid: database row ID, key fingerprint, global sequence
 
 **Protocol State Blob** (many per Identity or Session):
 An opaque byte value produced by Core and committed by the consumer's durable store. Core may load
@@ -228,7 +247,8 @@ Avoid: sender header, clear sender metadata
 **Sealed Sender Frame** (one per Message or X3DH initial):
 The transport-visible, versioned frame that wraps sealed-sender ciphertext. It carries the recipient
 Discovery Key X25519 public key, an optional X3DH prekey reference, a per-message ephemeral public
-key, and ciphertext; all sender and message metadata stays encrypted.
+key, and ciphertext; all sender and message metadata stays encrypted. Route-bound operations also
+authenticate a caller-supplied Relay Route without encoding it into the frame.
 Avoid: transport envelope, sender-visible message
 
 **Sealed Payload Padding** (one per sealed plaintext):

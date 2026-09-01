@@ -1,13 +1,53 @@
 //! Verifies the shared sealed-sender frame used by session, acknowledgment, and X3DH wires.
 
 use aether_crypto::{
-    CryptoError, KeyPair, SealedFrame, SealedFramePreKeyReference, open_frame, seal_frame,
+    CryptoError, KeyPair, SealedFrame, SealedFramePreKeyReference, generate_discovery_key,
+    generate_signing_key_pair, open_frame, open_frame_for_discovery_key_with_associated_data,
+    seal_frame, seal_frame_with_associated_data,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
 fn recipient_key() -> KeyPair {
     KeyPair::from_secret_bytes([0x42; 32])
+}
+
+#[test]
+fn sealed_frame_authenticates_external_associated_data() {
+    let mut rng = ChaCha20Rng::from_seed([0x10; 32]);
+    let signing_key = generate_signing_key_pair(&mut rng);
+    let recipient = generate_discovery_key(&mut rng, &signing_key, 1, 1_700_000_000);
+    let frame = seal_frame_with_associated_data(
+        &mut rng,
+        recipient.public_key(),
+        None,
+        b"route-bound payload",
+        b"relay-route-v1:expected",
+    )
+    .unwrap();
+
+    assert_eq!(
+        open_frame_for_discovery_key_with_associated_data(
+            &recipient,
+            &frame,
+            b"relay-route-v1:expected",
+        )
+        .unwrap()
+        .as_slice(),
+        b"route-bound payload"
+    );
+    assert!(matches!(
+        open_frame_for_discovery_key_with_associated_data(
+            &recipient,
+            &frame,
+            b"relay-route-v1:rerouted",
+        ),
+        Err(CryptoError::Aead)
+    ));
+    assert!(matches!(
+        open_frame_for_discovery_key_with_associated_data(&recipient, &frame, &[]),
+        Err(CryptoError::Aead)
+    ));
 }
 
 fn prekey_reference() -> SealedFramePreKeyReference {

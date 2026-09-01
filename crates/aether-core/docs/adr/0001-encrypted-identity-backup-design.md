@@ -17,7 +17,9 @@ inputs restore the same Identity material. Host applications own passphrase-stre
 calling export; the library enforces only format, KDF floor, authentication, and canonical key
 encoding. Restore rewinds Identity material only: callers must wipe or replace Protocol State
 Blobs, Sessions, pending acknowledgments, and related host state before session recovery or
-re-handshake.
+re-handshake. Restored prekey state is unusable until inbox rotation advances the backed-up
+Discovery Key generation; otherwise a stale or cloned backup could restart signed- and
+one-time-prekey identifiers inside a generation that already published those values.
 
 ## Considered Options
 
@@ -36,6 +38,7 @@ re-handshake.
 - Backup import cannot prove host passphrase quality; consumers must apply product policy before
   invoking export.
 - Restored Identities require explicit protocol-state cleanup and fresh session recovery paths.
+- Restored Identities require an inbox rotation before prekey generation or publication.
 
 ## Verification Evidence
 

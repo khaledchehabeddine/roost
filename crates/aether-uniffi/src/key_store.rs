@@ -468,6 +468,7 @@ impl KeyStore {
     /// ```
     ///
     /// # Errors
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning.
     /// - [`AetherError::InvalidData`] if the stored blob has the wrong length or unsupported
     ///   version.
@@ -543,6 +544,7 @@ impl KeyStore {
     ///
     /// # Errors
     /// - [`AetherError::Corrupt`] if stored key material does not verify as a chain.
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored discovery-key, signed-pre-key, or identity bytes
     ///   are malformed.
@@ -598,6 +600,7 @@ impl KeyStore {
     /// ```
     ///
     /// # Errors
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored one-time-pre-key data is malformed or the batch
     ///   exceeds capacity.
@@ -642,6 +645,7 @@ impl KeyStore {
     /// ```
     ///
     /// # Errors
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored one-time-prekey data is malformed.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
@@ -744,6 +748,7 @@ impl KeyStore {
     /// # Errors
     /// - [`AetherError::Corrupt`] if the discovery key does not verify or identity keys are
     ///   incomplete.
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored signed-pre-key, discovery-key, or identity bytes are
     ///   malformed.
@@ -794,6 +799,7 @@ impl KeyStore {
     /// # Errors
     /// - [`AetherError::Corrupt`] if the discovery key does not verify or identity keys are
     ///   incomplete.
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`AetherError::InvalidData`] if stored discovery-key or identity bytes are malformed.
     /// - [`AetherError::NotFound`] if no identity or discovery key is stored.
@@ -978,6 +984,7 @@ impl KeyStore {
     /// # Errors
     /// - [`AetherError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
     ///   fails.
+    /// - [`AetherError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`AetherError::InvalidData`] if the message, key, or prekey inputs are malformed.
     /// - [`AetherError::NotFound`] if required local identity, Discovery Key, signed-prekey, or
     ///   one-time-prekey material is missing.
@@ -1224,9 +1231,10 @@ impl KeyStore {
     /// The backup is decrypted and the restored discovery key is validated against the restored
     /// identity before staging changes, so a wrong passphrase or malformed blob leaves the
     /// existing identity untouched. Commit the operation, atomically wipe or replace host-owned
-    /// Session, deduplication, and pending-acknowledgment state, then finalize. The restored
-    /// identity keeps the discovery-key epoch lineage from the backup and has no prekeys. Prepare
-    /// a signed-prekey rotation before publishing.
+    /// Session, deduplication, and pending-acknowledgment state, then finalize. Prekey use stays
+    /// blocked until [`Self::prepare_rotate_inbox_now`] advances the restored identity to a fresh
+    /// inbox generation. This prevents reuse of prekey identifiers that the backed-up generation
+    /// may already have published.
     ///
     /// # Examples
     /// ```
@@ -1250,6 +1258,10 @@ impl KeyStore {
     /// destination_store.commit_operation(operation.identifier.clone())?;
     /// // Atomically wipe host-owned protocol state here.
     /// destination_store.finalize_operation(operation.identifier)?;
+    /// let rotation = destination_store.prepare_rotate_inbox_now()?;
+    /// destination_store.commit_operation(rotation.operation.identifier.clone())?;
+    /// // Publish `rotation.rotation.publication` and persist the identifier atomically.
+    /// destination_store.finalize_operation(rotation.operation.identifier)?;
     /// # Ok::<(), AetherError>(())
     /// ```
     ///
@@ -1735,6 +1747,7 @@ mod tests {
 
     fn signed_prekey_bundle(bundle: &FfiSignedPreKeyBundle) -> CryptoSignedPreKeyBundle {
         CryptoSignedPreKeyBundle {
+            id: bundle.id,
             public_key: PublicKey::from(
                 <[u8; 32]>::try_from(bundle.public_key.as_slice()).unwrap(),
             ),
