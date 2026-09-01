@@ -140,6 +140,10 @@ Payload is exactly 44 bytes. Source:
 Verification uses `DiscoveryKey::verifying_key()`. A signed pre-key does **not** verify under the
 identity key — see `discovery_signed_prekey_verifies_under_discovery_key_only`.
 
+The stable signed-prekey `u64` identifier is deliberately not part of this signature payload. It is
+Core-allocated lookup metadata within one Discovery Key Epoch and is authenticated with the
+selected key by the initial `relay-route-v1` associated data below.
+
 ### `AetherMessageTranscript-v1:`
 
 Message transcript signature. Source:
@@ -211,6 +215,35 @@ nothing. `validate_sender_certificate` requires `expected_relay_domain` for exac
 
 Digest context for the protocol-state commit. Source:
 [`aether-uniffi/src/protocol.rs`](../crates/aether-uniffi/src/protocol.rs).
+
+### `relay-route-v1`
+
+Canonical Relay Route bytes supplied separately from a Message and authenticated as outer
+sealed-frame associated data. Source:
+[`relay_route.rs`](../crates/aether-core/src/relay_route.rs).
+
+Every route starts with:
+
+| Field | Size | Notes |
+|---|---|---|
+| domain tag | 14 | ASCII `relay-route-v1` |
+| protocol version | 2 | `u16` big-endian |
+| route kind | 1 | `0x01` initial, `0x02` established |
+| recipient signing key | 32 | initial: DK Ed25519; established: IK Ed25519 |
+
+An established route ends there at 49 bytes. An initial route appends:
+
+| Field | Size | Notes |
+|---|---|---|
+| prekey block length | 2 | `u16` big-endian value `17` |
+| signed-prekey identifier | 8 | `u64` big-endian, stable within the DK Epoch |
+| one-time-prekey presence | 1 | exactly `0` or `1` |
+| one-time-prekey identifier | 8 | `u64` big-endian when present; all zero when absent |
+
+An initial route is exactly 68 bytes. Wrong kinds, lengths, presence values, key sizes, or nonzero
+absent-value padding are not canonical and must reject. Capabilities and Relay admission proofs are
+excluded because they authorize delivery rather than identify the cryptographic recipient or
+selected prekeys.
 
 ## Hash domain strings
 
@@ -321,8 +354,19 @@ the prefix-freedom requirement above applies to signature contexts, not to HKDF 
 | String | Use |
 |---|---|
 | `AetherRatchetedPayload-v1:` | Prefix of the ratcheted-payload associated data |
+| `AetherSealedFrame-v1:external-ad` | Length-framed suffix that binds caller-supplied associated data to a sealed frame |
+| `relay-route-v1` | Canonical external associated data for route-bound Relay operations |
 
-Source: [`protocol_state.rs`](../crates/aether-core/src/protocol_state.rs).
+The sealed-frame input is its canonical Postcard-encoded public fields followed, when external data
+is nonempty, by:
+
+```text
+"AetherSealedFrame-v1:external-ad" || u32be(external_ad_len) || external_ad
+```
+
+The suffix is omitted for empty external data so existing transport-agnostic frame vectors remain
+stable. Sources: [`sealed_frame.rs`](../crates/aether-crypto/src/sealed_frame.rs),
+[`protocol_state.rs`](../crates/aether-core/src/protocol_state.rs).
 
 ## Excluded
 

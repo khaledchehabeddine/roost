@@ -42,7 +42,7 @@ fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
     let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT);
     let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, CREATED_AT);
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT);
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT);
     (

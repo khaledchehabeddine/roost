@@ -28,7 +28,7 @@
 //! verify_discovery_key_bundle(&discovery_bundle, &identity.verifying)?;
 //!
 //! let signed_prekey =
-//!     generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, 1_700_000_000);
+//!     generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, 0, 1_700_000_000);
 //! verify_signed_prekey_bundle(&signed_prekey.bundle(), &discovery_bundle.verifying_key)?;
 //! # Ok::<(), aether_crypto::CryptoError>(())
 //! ```
@@ -106,8 +106,9 @@ pub use error::CryptoError;
 pub use handshake::{
     AcceptedInitialMessage, HandshakeEnvelope, InitialPlaintext,
     PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM, PREKEY_BUNDLE_VERSION, PreKeyBundle,
-    SenderIdentityMaterial, X3DH_ADDITIVE_SHARED_SECRET_HEADROOM, accept, initial_associated_data,
-    initiate, initiator_identity_hint,
+    SenderIdentityMaterial, X3DH_ADDITIVE_SHARED_SECRET_HEADROOM, accept,
+    accept_with_associated_data, initial_associated_data, initiate, initiate_with_associated_data,
+    initiator_identity_hint, initiator_identity_hint_with_associated_data,
 };
 pub use keys::{
     IdentityKeyBundle, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
@@ -116,7 +117,8 @@ pub use keys::{
 };
 pub use one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
 pub use sealed_frame::{
-    SealedFrame, SealedFramePreKeyReference, open_frame, open_frame_for_discovery_key, seal_frame,
+    SealedFrame, SealedFramePreKeyReference, open_frame, open_frame_for_discovery_key,
+    open_frame_for_discovery_key_with_associated_data, seal_frame, seal_frame_with_associated_data,
 };
 pub use signed_prekey::{
     SignedPreKey, SignedPreKeyBundle, generate_signed_prekey, verify_signed_prekey_bundle,

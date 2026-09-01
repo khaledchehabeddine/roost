@@ -1,11 +1,13 @@
 # UniFFI API Coverage
 
-This note maps issues 122, 219, and 221 to source surfaces and binding harness coverage. It is audit
+This note maps issues 122, 217, 219, and 221 to source surfaces and binding harness coverage. It is audit
 metadata, not runtime policy; code and tests remain authoritative.
 
 ## Source Surfaces
 
 - Identity, backup, discovery-key, signed-prekey, and one-time-prekey lifecycle: `KeyStore`.
+  Signed- and one-time-prekey records preserve Core's stable unsigned 64-bit identifiers without
+  narrowing at the FFI boundary.
 - Recoverable SecureStorage mutations: `KeyStoreOperation`, the concrete `Prepared*` result
   records, `commit_operation`, `finalize_operation`, `abort_operation`, and
   `unfinished_operations`. Operation identifiers and preconditions cross UniFFI; staged secrets do

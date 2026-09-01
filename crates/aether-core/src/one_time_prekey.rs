@@ -1,5 +1,6 @@
 use crate::clock::Clock;
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
+use crate::prekey_state::INBOX_ROTATION_REQUIRED_MARKER;
 use crate::storage::{SecureStorage, StorageError};
 use aether_crypto::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
 use rand::{CryptoRng, RngCore};
@@ -28,6 +29,8 @@ pub enum OneTimePreKeyError {
     Clock,
     /// Loading the discovery key returned a [`DiscoveryKeyError`].
     Discovery(DiscoveryKeyError),
+    /// Backup restoration requires a new inbox generation before prekeys may be used.
+    InboxRotationRequired,
     /// Stored one-time-pre-key pool data is malformed.
     InvalidData(String),
     /// The internal storage lock was poisoned by a panicked thread.
@@ -45,6 +48,12 @@ impl fmt::Display for OneTimePreKeyError {
         match self {
             OneTimePreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
             OneTimePreKeyError::Discovery(e) => write!(f, "discovery key: {e}"),
+            OneTimePreKeyError::InboxRotationRequired => {
+                write!(
+                    f,
+                    "inbox rotation required before using restored pre-key state"
+                )
+            }
             OneTimePreKeyError::InvalidData(reason) => {
                 write!(f, "invalid one-time pre-key data: {reason}")
             }
@@ -218,6 +227,11 @@ impl OneTimePreKeyManager {
         Ok(storage.delete(ONE_TIME_PREKEY_POOL_KEY)?)
     }
 
+    pub(crate) fn mark_inbox_rotation_required(&self) -> Result<(), OneTimePreKeyError> {
+        let mut storage = self.lock_storage()?;
+        Ok(storage.store(ONE_TIME_PREKEY_POOL_KEY, INBOX_ROTATION_REQUIRED_MARKER)?)
+    }
+
     fn lock_storage(&self) -> Result<MutexGuard<'_, Box<dyn SecureStorage>>, OneTimePreKeyError> {
         self.storage
             .lock()
@@ -304,6 +318,9 @@ fn encode_pool(pool: &OneTimePreKeyPool) -> Zeroizing<Vec<u8>> {
 }
 
 fn decode_pool(raw: &[u8]) -> Result<OneTimePreKeyPool, OneTimePreKeyError> {
+    if raw == INBOX_ROTATION_REQUIRED_MARKER {
+        return Err(OneTimePreKeyError::InboxRotationRequired);
+    }
     if raw.len() < ONE_TIME_PREKEY_POOL_HEADER_LEN {
         return Err(OneTimePreKeyError::InvalidData(format!(
             "expected at least {ONE_TIME_PREKEY_POOL_HEADER_LEN} bytes, got {}",
@@ -508,6 +525,36 @@ mod tests {
                 .unwrap()
                 .id(),
             0
+        );
+    }
+
+    #[test]
+    fn generate_batch_rejects_identifier_overflow_without_mutating_pool() {
+        let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
+        let epoch = discovery.current().unwrap().epoch();
+        let mut raw = encoded_pool_header(u64::MAX, 0);
+        raw[1..5].copy_from_slice(&epoch.to_be_bytes());
+        manager
+            .storage
+            .lock()
+            .unwrap()
+            .store(ONE_TIME_PREKEY_POOL_KEY, &raw)
+            .unwrap();
+
+        assert!(matches!(
+            manager.generate_batch(&mut OsRng, 1),
+            Err(OneTimePreKeyError::InvalidData(reason)) if reason.contains("overflow")
+        ));
+        assert_eq!(
+            manager
+                .storage
+                .lock()
+                .unwrap()
+                .load(ONE_TIME_PREKEY_POOL_KEY)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            raw
         );
     }
 

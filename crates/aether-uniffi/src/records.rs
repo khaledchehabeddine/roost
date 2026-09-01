@@ -48,9 +48,12 @@ impl Identity {
 /// Verify this bundle with the matching discovery-key verifying key.
 #[derive(Clone, uniffi::Record)]
 pub struct SignedPreKeyBundle {
+    /// Stable unsigned identifier within the discovery-key epoch. The Relay route, not the
+    /// signed-prekey signature, authenticates this lookup value.
+    pub id: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
-    /// Ed25519 signature over `public_key`. Always 64 bytes.
+    /// Ed25519 signature over `public_key`, `epoch`, and `created_at`. Always 64 bytes.
     pub signature: Vec<u8>,
     /// Discovery-key epoch this signed pre-key is bound to.
     pub epoch: u32,
@@ -61,6 +64,7 @@ pub struct SignedPreKeyBundle {
 impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
     fn from(b: CoreSignedPreKeyBundle) -> Self {
         SignedPreKeyBundle {
+            id: b.id,
             public_key: b.public_key.as_bytes().to_vec(),
             signature: b.signature.to_bytes().to_vec(),
             epoch: b.epoch,
@@ -72,6 +76,7 @@ impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
 impl SignedPreKeyBundle {
     pub(crate) fn to_core(&self) -> Result<CoreSignedPreKeyBundle, AetherError> {
         Ok(CoreSignedPreKeyBundle {
+            id: self.id,
             public_key: public_key_from_vec(&self.public_key)?,
             signature: signature_from_vec(&self.signature)?,
             epoch: self.epoch,
@@ -260,4 +265,34 @@ fn public_key_from_vec(bytes: &[u8]) -> Result<PublicKey, AetherError> {
 
 fn signature_from_vec(bytes: &[u8]) -> Result<Signature, AetherError> {
     Ok(Signature::from_bytes(&fixed_64(bytes, "signature")?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_crypto::KeyPair;
+
+    #[test]
+    fn prekey_records_preserve_unsigned_identifier_boundaries() {
+        let public_key = KeyPair::from_secret_bytes([0x42; 32])
+            .public
+            .as_bytes()
+            .to_vec();
+        let signed = SignedPreKeyBundle {
+            id: u64::MAX,
+            public_key: public_key.clone(),
+            signature: vec![0; 64],
+            epoch: u32::MAX,
+            created_at: u64::MAX,
+        };
+        let one_time = OneTimePreKeyBundle {
+            id: u64::MAX,
+            public_key,
+            epoch: u32::MAX,
+            created_at: u64::MAX,
+        };
+
+        assert_eq!(signed.to_core().unwrap().id, u64::MAX);
+        assert_eq!(one_time.to_core().unwrap().id, u64::MAX);
+    }
 }

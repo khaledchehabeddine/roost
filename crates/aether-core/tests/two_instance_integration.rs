@@ -8,8 +8,9 @@ use aether_core::{
     EventStreamItem, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
     InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment,
     OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RevocationState,
-    SenderCertificateIdentityKey, SenderIdentityMaterial, SessionId,
+    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RelayRoute,
+    RelayRouteError, RevocationState, SenderCertificateIdentityKey, SenderIdentityMaterial,
+    SessionId,
 };
 use aether_crypto::{
     DiscoveryKey, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey,
@@ -95,7 +96,7 @@ fn setup() -> Setup {
     let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
     let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, CREATED_AT);
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT);
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
     let prekey_bundle = PreKeyBundle {
@@ -218,9 +219,17 @@ fn recipient_sender_identity() -> SenderIdentityMaterial {
 }
 
 fn accepted_contact_identity() -> ContactIdentity {
-    let identity = sender_identity_signing_key(0xa1);
-    let identity_key_pair = test_identity_key_pair(0xa1);
-    let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
+    contact_identity(0xa1, 0x71)
+}
+
+fn acknowledgment_recipient_identity() -> ContactIdentity {
+    contact_identity(0xa2, 0x72)
+}
+
+fn contact_identity(identity_tag: u8, discovery_seed: u8) -> ContactIdentity {
+    let identity = sender_identity_signing_key(identity_tag);
+    let identity_key_pair = test_identity_key_pair(identity_tag);
+    let mut rng = ChaCha20Rng::from_seed([discovery_seed; 32]);
     let discovery_key = generate_discovery_key(&mut rng, identity, 0, CREATED_AT);
     ContactIdentity {
         identity_key: ContactIdentityKey {
@@ -246,6 +255,11 @@ fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
     generate_discovery_key(&mut rng, sender_identity_signing_key(0xa1), 0, CREATED_AT)
 }
 
+fn route_acknowledgment_recipient_discovery_key() -> DiscoveryKey {
+    let mut rng = ChaCha20Rng::from_seed([0x72; 32]);
+    generate_discovery_key(&mut rng, sender_identity_signing_key(0xa2), 0, CREATED_AT)
+}
+
 fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
     Box::leak(Box::new(acknowledgment_recipient_discovery_key()))
 }
@@ -267,9 +281,12 @@ impl ValidatedSender {
 }
 
 fn validated_sender() -> ValidatedSender {
-    let mut rng = ChaCha20Rng::from_seed([0x90; 32]);
+    validated_sender_for_contact(accepted_contact_identity(), 0x90)
+}
+
+fn validated_sender_for_contact(contact: ContactIdentity, domain_seed: u8) -> ValidatedSender {
+    let mut rng = ChaCha20Rng::from_seed([domain_seed; 32]);
     let domain_signing_key = generate_signing_key_pair(&mut rng);
-    let contact = accepted_contact_identity();
     let domain_identifier = b"test-domain".to_vec();
     let certificate = sender_certificate_bytes(&domain_identifier, contact, CERTIFICATE_EXPIRES_AT);
     let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
@@ -424,8 +441,11 @@ fn emit_event(stream: &InstanceEventStream, event: InstanceEvent) {
     stream.emit(event, state).unwrap();
 }
 
-fn install_accepted_contact(engine: &ProtocolStateEngine, store: &mut ConsumerStore) {
-    let contact = accepted_contact_identity();
+fn install_accepted_contact_identity(
+    engine: &ProtocolStateEngine,
+    store: &mut ConsumerStore,
+    contact: ContactIdentity,
+) {
     let created = engine.record_contact(&store.snapshot(), contact).unwrap();
     store.apply_all(created.state_updates);
     let accepted = engine
@@ -449,6 +469,26 @@ fn initialize_stores(
     alice_sender: &SenderIdentityMaterial,
     bob_sender: &SenderIdentityMaterial,
 ) -> (ConsumerStore, ConsumerStore) {
+    initialize_stores_with_contacts(
+        engine,
+        session_key,
+        deduplication_key,
+        alice_sender,
+        bob_sender,
+        accepted_contact_identity(),
+        accepted_contact_identity(),
+    )
+}
+
+fn initialize_stores_with_contacts(
+    engine: &ProtocolStateEngine,
+    session_key: ProtocolStateKey,
+    deduplication_key: ProtocolStateKey,
+    alice_sender: &SenderIdentityMaterial,
+    bob_sender: &SenderIdentityMaterial,
+    alice_contact: ContactIdentity,
+    bob_contact: ContactIdentity,
+) -> (ConsumerStore, ConsumerStore) {
     let setup = setup();
     let mut alice = ConsumerStore::default();
     let mut bob = ConsumerStore::default();
@@ -467,7 +507,7 @@ fn initialize_stores(
             .initialize_pending_acknowledgments(session_key.clone())
             .unwrap(),
     );
-    install_accepted_contact(engine, &mut alice);
+    install_accepted_contact_identity(engine, &mut alice, bob_contact);
     bob.apply(
         engine
             .set_session_state_with_peer_identity(
@@ -485,8 +525,151 @@ fn initialize_stores(
             )
             .unwrap(),
     );
-    install_accepted_contact(engine, &mut bob);
+    install_accepted_contact_identity(engine, &mut bob, alice_contact);
     (alice, bob)
+}
+
+#[test]
+fn established_relay_route_is_authenticated_for_messages_and_acknowledgments() {
+    let engine = ProtocolStateEngine::new();
+    let session_key = session_key();
+    let deduplication_key = deduplication_key();
+    let alice_contact = acknowledgment_recipient_identity();
+    let alice = validated_sender_for_contact(alice_contact, 0x91);
+    let alice_domain_keys = [alice.domain_signing_key()];
+    let revoked = [];
+    let bob_contact = accepted_contact_identity();
+    let bob_sender = recipient_sender_identity();
+    let (mut alice_store, bob_store) = initialize_stores_with_contacts(
+        &engine,
+        session_key.clone(),
+        deduplication_key.clone(),
+        &alice.sender_identity,
+        &bob_sender,
+        alice_contact,
+        bob_contact,
+    );
+    let message_route = RelayRoute::established(1, bob_contact.identity_key.ed25519_verifying_key);
+    let acknowledgment_route =
+        RelayRoute::established(1, alice_contact.identity_key.ed25519_verifying_key);
+    let wrong_message_version =
+        RelayRoute::established(2, bob_contact.identity_key.ed25519_verifying_key);
+    let wrong_acknowledgment_version =
+        RelayRoute::established(2, alice_contact.identity_key.ed25519_verifying_key);
+    let wrong_recipient = RelayRoute::established(1, [0x99; 32]);
+
+    let outbound = engine
+        .encrypt_message_with_relay_route(
+            &alice_store.snapshot(),
+            session_key.clone(),
+            outbound(0x41, b"route bound", &alice.sender_identity),
+            &message_route,
+        )
+        .unwrap();
+    let outbound_message_id = outbound.message_id;
+    alice_store.apply_all(outbound.state_updates);
+
+    let alice_discovery_key = route_acknowledgment_recipient_discovery_key();
+    let receive = |route: &RelayRoute, acknowledgment_route: &RelayRoute| {
+        engine.decrypt_message_with_relay_routes(
+            &mut ChaCha20Rng::from_seed([0x42; 32]),
+            &bob_store.snapshot(),
+            InboundEncryptedMessage {
+                session_key: session_key.clone(),
+                deduplication_key: deduplication_key.clone(),
+                message: &outbound.message,
+                recipient_discovery_key: accepted_contact_discovery_key_ref(),
+                recipient_identity_verifying_key: bob_contact.identity_key.ed25519_verifying_key,
+                acknowledgment: OutboundAcknowledgment {
+                    id: MessageId::from_bytes([0x42; 16]),
+                    sender_identity: &bob_sender,
+                    sender_identity_signing_key: sender_identity_signing_key_for_material(
+                        &bob_sender,
+                    ),
+                    recipient_public_key: *alice_discovery_key.public_key().as_bytes(),
+                    timestamp_millis: 1_700_000_100_042,
+                },
+                sender_certificate_validation: Some(InboundSenderCertificateValidation {
+                    expected_relay_domain: TEST_RELAY_DOMAIN,
+                    domain_signing_keys: &alice_domain_keys,
+                    revocation_state: RevocationState::Available(&revoked),
+                    reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
+                    grace_window_secs: 0,
+                }),
+            },
+            route,
+            acknowledgment_route,
+        )
+    };
+    assert!(matches!(
+        receive(&wrong_recipient, &acknowledgment_route),
+        Err(ProtocolStateError::RelayRoute(
+            RelayRouteError::RecipientMismatch
+        ))
+    ));
+    assert!(matches!(
+        receive(&wrong_message_version, &acknowledgment_route),
+        Err(ProtocolStateError::Crypto(aether_crypto::CryptoError::Aead))
+    ));
+    assert!(matches!(
+        receive(&message_route, &message_route),
+        Err(ProtocolStateError::RelayRoute(
+            RelayRouteError::RecipientMismatch
+        ))
+    ));
+
+    let received = accepted(receive(&message_route, &acknowledgment_route).unwrap());
+    assert_eq!(received.plaintext.as_slice(), b"route bound");
+    let acknowledgment = received.acknowledgment;
+
+    assert!(matches!(
+        engine.process_acknowledgment_with_relay_route(
+            &mut ChaCha20Rng::from_seed([0x43; 32]),
+            &alice_store.snapshot(),
+            InboundAcknowledgmentMessage {
+                session_key: session_key.clone(),
+                message: &acknowledgment,
+                recipient_discovery_key: &alice_discovery_key,
+                recipient_identity_verifying_key: alice_contact.identity_key.ed25519_verifying_key,
+            },
+            &wrong_acknowledgment_version,
+        ),
+        Err(ProtocolStateError::Crypto(aether_crypto::CryptoError::Aead))
+    ));
+    assert!(matches!(
+        engine.process_acknowledgment_with_relay_route(
+            &mut ChaCha20Rng::from_seed([0x44; 32]),
+            &alice_store.snapshot(),
+            InboundAcknowledgmentMessage {
+                session_key: session_key.clone(),
+                message: &acknowledgment,
+                recipient_discovery_key: &alice_discovery_key,
+                recipient_identity_verifying_key: alice_contact.identity_key.ed25519_verifying_key,
+            },
+            &message_route,
+        ),
+        Err(ProtocolStateError::RelayRoute(
+            RelayRouteError::RecipientMismatch
+        ))
+    ));
+    let outcome = engine
+        .process_acknowledgment_with_relay_route(
+            &mut ChaCha20Rng::from_seed([0x44; 32]),
+            &alice_store.snapshot(),
+            InboundAcknowledgmentMessage {
+                session_key,
+                message: &acknowledgment,
+                recipient_discovery_key: &alice_discovery_key,
+                recipient_identity_verifying_key: alice_contact.identity_key.ed25519_verifying_key,
+            },
+            &acknowledgment_route,
+        )
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        AcknowledgmentOutcome::Cleared(ref cleared)
+            if cleared.acknowledged_message_id == outbound_message_id
+    ));
 }
 
 #[test]

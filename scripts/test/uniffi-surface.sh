@@ -29,10 +29,15 @@ cd "$(dirname "$0")/../.."
 # Keep it explicit rather than pattern-matched: `fuzz_*` could have been one
 # glob, but then a real method named `fuzz_something` would be skipped without
 # anyone choosing that.
-ALLOWED=$(
-    cat <<'EOF'
+ALLOWED=
+# Avoid a here-document inside command substitution: macOS Bash 3.2 reparses quoted heredoc bodies
+# there and can treat literal apostrophes as shell syntax.
+IFS= read -r -d '' ALLOWED <<'EOF' || true
+associated_data                        RelayRoute canonical encoder; UniFFI exposure and binding replay belong to Relay binding integration
 delivered_inbox_authorization           read used by the core's own redistribution pass; mobile drives that through record_/peer_ instead
+decrypt_message_with_relay_routes        route-bound Core seam; UniFFI exposure and binding replay belong to Relay binding integration
 diffie_hellman                          raw primitive; the bindings expose the protocol operations built on it, never the operation itself
+encrypt_message_with_relay_route         route-bound Core seam; UniFFI exposure and binding replay belong to Relay binding integration
 from_bytes_with_hardening_limits        decode-limit variant used by the fuzz targets; the bindings take the default limits
 fuzz_decode_discovery_key_blob          fuzz target entry point
 fuzz_decode_one_time_prekey_pool        fuzz target entry point
@@ -41,12 +46,17 @@ fuzz_decode_sealed_sender_envelope      fuzz target entry point
 fuzz_decode_signed_prekey_blob          fuzz target entry point
 fuzz_deduplication_digest               fuzz target entry point
 fuzz_unpad_sealed_payload               fuzz target entry point
+initiate_session_with_relay_route        route-bound Core seam; UniFFI exposure and binding replay belong to Relay binding integration
+initiator_identity_hint_with_relay_route route-bound Core seam; UniFFI exposure and binding replay belong to Relay binding integration
 prekey_bundle_lookup_key                internal index key; callers pass the bundle, not its key
+prepare_accept_session_with_relay_route  route-bound Core seam; UniFFI exposure and binding replay belong to Relay binding integration
+process_acknowledgment_with_relay_route  route-bound Core seam; UniFFI exposure and binding replay belong to Relay binding integration
+recipient_signing_key                   RelayRoute field accessor; UniFFI exposure and binding replay belong to Relay binding integration
 set_session_state_with_peer_identity_key lower-level variant; key_store/session.rs calls it, the bindings take the checked wrapper
 to_bytes_with_hardening_limits          encode-limit variant, pairs with from_bytes_with_hardening_limits
 with_hardening_limits                   builder for the two above
+verify_associated_data                  RelayRoute receive verifier; UniFFI exposure and binding replay belong to Relay binding integration
 EOF
-)
 
 allowed_names=$(echo "$ALLOWED" | awk 'NF {print $1}' | sort -u)
 

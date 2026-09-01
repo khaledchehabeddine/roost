@@ -83,7 +83,9 @@ mod key_encoding;
 mod key_store;
 mod message;
 mod one_time_prekey;
+mod prekey_state;
 mod protocol_state;
+mod relay_route;
 mod safety_number;
 mod sender_certificate;
 mod signed_prekey;
@@ -131,6 +133,7 @@ pub use protocol_state::{
     RetryInstruction, RetryInstructionResult, SessionEvent, SessionId, SessionUnrecoverableReason,
     SessionUnrecoverableResult,
 };
+pub use relay_route::{RelayPreKeyReference, RelayRoute, RelayRouteError};
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 #[cfg(feature = "development-certificates")]
 pub use sender_certificate::{

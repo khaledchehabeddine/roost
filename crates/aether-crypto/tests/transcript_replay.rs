@@ -119,6 +119,7 @@ fn recorded_session_transcript_reaches_expected_state() {
     let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
         &mut rng,
         &bob_discovery_key,
+        0,
         transcript.created_at,
     );
     let bob_one_time_prekey = generate_one_time_prekey(
@@ -255,6 +256,7 @@ fn regenerate_session_transcript_handshake_fields() {
     let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
         &mut rng,
         &bob_discovery_key,
+        0,
         transcript.created_at,
     );
     let bob_one_time_prekey = generate_one_time_prekey(
