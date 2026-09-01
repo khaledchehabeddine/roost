@@ -166,12 +166,18 @@ struct Issue122Coverage {
             snapshot: [],
             contactIdentity: contactIdentity(identity: bobIdentity, publication: bobPublication)
         )
+        try protocolStore.commit(updates: recorded.stateUpdates)
         apply(&aliceSnapshot, recorded.stateUpdates)
         let acceptedContact = try engine.acceptContact(
             snapshot: aliceSnapshot,
             identityKey: identityKey(bobIdentity)
         )
+        try protocolStore.commit(updates: acceptedContact.stateUpdates)
         apply(&aliceSnapshot, acceptedContact.stateUpdates)
+        guard let contactUpdate = acceptedContact.stateUpdates.first else {
+            fail("accepted contact should produce a state update")
+        }
+        let contactAddress = ProtocolStateAddress(kind: contactUpdate.kind, key: contactUpdate.key)
 
         let outbound = try alice.encryptMessage(
             snapshot: aliceSnapshot,
@@ -210,7 +216,12 @@ struct Issue122Coverage {
             alicePublication: alicePublication
         )
 
-        try exerciseEvents(contact: acceptedContact.contact)
+        try exerciseEvents(
+            engine: engine,
+            store: protocolStore,
+            address: contactAddress,
+            contact: acceptedContact.contact
+        )
         try expectCertificateRejection()
         expectInvalidMessageKey()
         print("Swift issue 122 coverage passed")
@@ -292,7 +303,12 @@ struct Issue122Coverage {
         }
     }
 
-    private static func exerciseEvents(contact: ContactState) throws {
+    private static func exerciseEvents(
+        engine: ProtocolStateEngine,
+        store: MemoryProtocolStateStore,
+        address: ProtocolStateAddress,
+        contact: ContactState
+    ) throws {
         let stream = try ContactEventStream.withObserverCapacity(initialState: [contact], observerCapacity: 1)
         let observer = try stream.subscribe()
         let event = ContactEvent(kind: .changed, contact: contact)
@@ -301,6 +317,64 @@ struct Issue122Coverage {
         let item = try observer.pollNext()
         require(item?.kind == .lagged, "event lag")
         try observer.resumeAfter(snapshot: stream.currentState())
+
+        let otherStream = try ContactEventStream.withObserverCapacity(
+            initialState: [contact],
+            observerCapacity: 1
+        )
+        _ = try otherStream.emit(event: event, nextState: [contact])
+        _ = try otherStream.emit(event: event, nextState: [contact])
+        _ = try otherStream.emit(event: event, nextState: [contact])
+        _ = try stream.emit(event: event, nextState: [contact])
+        do {
+            try observer.resumeAfter(snapshot: otherStream.currentState())
+            fail("another stream's snapshot should reject")
+        } catch let error as AetherError {
+            guard case .ForeignEventSnapshot = error else {
+                fail("unexpected foreign-snapshot error \(error)")
+            }
+        }
+        let preserved = try observer.pollNext()
+        require(preserved?.event?.id == 3, "foreign snapshot preserves local events")
+
+        let extensionEngine = ProtocolStateEngine()
+        let extensionSnapshot = try extensionEngine.loadSnapshot(store: store, addresses: [address])
+        let blocked = try extensionEngine.blockContact(
+            snapshot: extensionSnapshot,
+            identityKey: contact.identity.identityKey
+        )
+        try store.commit(updates: blocked.stateUpdates)
+        let reloaded = try engine.loadSnapshot(store: store, addresses: [address])
+        let rebuilt = try engine.contactStates(snapshot: reloaded)
+        require(rebuilt.count == 1 && rebuilt[0].blocked, "rebuilds committed extension state")
+        let firstImport = try stream.importCurrentState(state: rebuilt)
+        require(firstImport.eventId() == 3, "state import preserves local event ID")
+        require(firstImport.stateRevision() == 1, "state import revision")
+        let importedState = firstImport.state()
+        require(importedState.count == 1 && importedState[0].blocked, "imported snapshot state")
+        let firstStaleItem = try observer.pollNext()
+        require(firstStaleItem?.kind == .stale, "state import marks observer stale")
+
+        let secondImport = try stream.importCurrentState(state: rebuilt)
+        do {
+            try observer.resumeAfter(snapshot: firstImport)
+            fail("stale imported snapshot should reject")
+        } catch let error as AetherError {
+            guard case .StaleEventSnapshot(_, _) = error else {
+                fail("unexpected stale-snapshot error \(error)")
+            }
+        }
+        let secondStaleItem = try observer.pollNext()
+        require(secondStaleItem?.kind == .stale, "repeated import stays explicit")
+        try observer.resumeAfter(snapshot: secondImport)
+
+        let restarted = try ContactEventStream.withObserverCapacity(
+            initialState: rebuilt,
+            observerCapacity: 1
+        )
+        let restartSnapshot = try restarted.currentState()
+        require(restartSnapshot.eventId() == 0, "restart uses a new local event sequence")
+        require(restartSnapshot.stateRevision() == 0, "restart uses a new local state revision")
     }
 
     private static func expectBackupFailure(_ store: KeyStore) {

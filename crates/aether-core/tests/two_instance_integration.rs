@@ -4,13 +4,13 @@ use std::collections::BTreeMap;
 
 use aether_core::{
     AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, ContactDiscoveryKey,
-    ContactIdentity, ContactIdentityKey, DomainSigningKey, DomainSigningKeyStatus, EventStream,
-    EventStreamItem, InboundAcknowledgmentMessage, InboundEncryptedMessage, InboundMessageOutcome,
-    InboundSenderCertificateValidation, Message, MessageId, OutboundAcknowledgment,
-    OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, RelayRoute,
-    RelayRouteError, RevocationState, SenderCertificateIdentityKey, SenderIdentityMaterial,
-    SessionId,
+    ContactEventStream, ContactIdentity, ContactIdentityKey, ContactTrustState, DomainSigningKey,
+    DomainSigningKeyStatus, EventStream, EventStreamItem, InboundAcknowledgmentMessage,
+    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation, Message,
+    MessageId, OutboundAcknowledgment, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, RelayRoute, RelayRouteError, RevocationState,
+    SenderCertificateIdentityKey, SenderIdentityMaterial, SessionId,
 };
 use aether_crypto::{
     DiscoveryKey, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey,
@@ -436,7 +436,7 @@ fn blocked(outcome: InboundMessageOutcome) -> aether_core::BlockedInboundMessage
 }
 
 fn emit_event(stream: &InstanceEventStream, event: InstanceEvent) {
-    let mut state = stream.current_state().unwrap().into_state();
+    let mut state = stream.current_state().unwrap().state().clone();
     state.push(event.clone());
     stream.emit(event, state).unwrap();
 }
@@ -527,6 +527,99 @@ fn initialize_stores_with_contacts(
     );
     install_accepted_contact_identity(engine, &mut bob, alice_contact);
     (alice, bob)
+}
+
+#[test]
+fn app_instance_rebuilds_current_state_after_extension_commits_without_importing_event_ids() {
+    let app_instance = ProtocolStateEngine::new();
+    let extension_instance = ProtocolStateEngine::new();
+    let first_contact = accepted_contact_identity();
+    let second_contact = acknowledgment_recipient_identity();
+    let mut store = ConsumerStore::default();
+    let events = ContactEventStream::with_observer_capacity(Vec::new(), 1).unwrap();
+    let observer = events.subscribe().unwrap();
+
+    let created = app_instance
+        .record_contact(&store.snapshot(), first_contact)
+        .unwrap();
+    let created_event = created.event.unwrap();
+    store.apply_all(created.state_updates);
+    let app_state = app_instance.contact_states(&store.snapshot()).unwrap();
+    let local_event = events.emit(created_event, app_state).unwrap();
+    assert_eq!(local_event.id().as_u64(), 1);
+
+    let accepted = extension_instance
+        .accept_contact(&store.snapshot(), first_contact.identity_key)
+        .unwrap();
+    store.apply_all(accepted.state_updates);
+    let created_by_extension = extension_instance
+        .record_contact(&store.snapshot(), second_contact)
+        .unwrap();
+    store.apply_all(created_by_extension.state_updates);
+
+    let stale = events.current_state().unwrap();
+    assert_eq!(stale.event_id().as_u64(), 1);
+    assert_eq!(stale.state().len(), 1);
+    assert_eq!(stale.state()[0].trust_state, ContactTrustState::Pending);
+
+    let rebuilt = app_instance.contact_states(&store.snapshot()).unwrap();
+    assert_eq!(rebuilt.len(), 2);
+    assert_eq!(
+        rebuilt
+            .iter()
+            .find(|contact| contact.identity.identity_key == first_contact.identity_key)
+            .unwrap()
+            .trust_state,
+        ContactTrustState::Unverified
+    );
+    let imported = events.import_current_state(rebuilt).unwrap();
+    assert_eq!(imported.event_id().as_u64(), 1);
+    assert_eq!(imported.state_revision(), 1);
+    assert_eq!(observer.poll_next().unwrap(), Some(EventStreamItem::Stale));
+
+    let accepted = app_instance
+        .accept_contact(&store.snapshot(), second_contact.identity_key)
+        .unwrap();
+    let accepted_event = accepted.event.unwrap();
+    store.apply_all(accepted.state_updates);
+    events
+        .emit(
+            accepted_event,
+            app_instance.contact_states(&store.snapshot()).unwrap(),
+        )
+        .unwrap();
+    let blocked = app_instance
+        .block_contact(&store.snapshot(), second_contact.identity_key)
+        .unwrap();
+    let blocked_event = blocked.event.unwrap();
+    store.apply_all(blocked.state_updates);
+    events
+        .emit(
+            blocked_event,
+            app_instance.contact_states(&store.snapshot()).unwrap(),
+        )
+        .unwrap();
+
+    observer.resume_after(&imported).unwrap();
+    assert_eq!(
+        observer.poll_next().unwrap(),
+        Some(EventStreamItem::Lagged { missed: 1 })
+    );
+    let recovered = events.current_state().unwrap();
+    assert_eq!(recovered.event_id().as_u64(), 3);
+    assert_eq!(recovered.state_revision(), 1);
+    observer.resume_after(&recovered).unwrap();
+    assert_eq!(observer.poll_next().unwrap(), None);
+
+    let reconstructed = ProtocolStateEngine::new()
+        .contact_states(&store.snapshot())
+        .unwrap();
+    assert_eq!(reconstructed, *recovered.state());
+    let restarted = ContactEventStream::new(reconstructed);
+    let restart_snapshot = restarted.current_state().unwrap();
+    assert_eq!(restart_snapshot.event_id().as_u64(), 0);
+    assert_eq!(restart_snapshot.state_revision(), 0);
+    assert_eq!(restart_snapshot.state(), recovered.state());
 }
 
 #[test]

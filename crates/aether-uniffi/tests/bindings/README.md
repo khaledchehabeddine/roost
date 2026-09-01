@@ -5,7 +5,9 @@ Swift and Kotlin harnesses in this directory exercise UniFFI bindings built with
 - `FixtureReplay.*`: canonical message, handshake, and protocol-state fixture replay.
 - `Issue122Coverage.*`: generated API coverage for identity, backup, protocol-state store,
   sessions, messages, contacts/blocking, events, delivery retry, prekey replenishment, and negative
-  binding-visible errors.
+  binding-visible errors. Event coverage commits through a second instance, reloads the shared
+  store, imports rebuilt current state, preserves local Event IDs, rejects foreign and stale
+  snapshots, and reconstructs state after restart.
 - `Issue219PreparedOperations.*`: generated prepared-operation lifecycle coverage for provisional
   outputs, stable identifiers, orphan recovery, idempotent transitions, recovery gating, and stale
   SecureStorage preconditions.

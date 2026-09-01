@@ -164,9 +164,14 @@ fun main() {
     val aliceSnapshot = mutableListOf<ProtocolStateEntry>()
     applyUpdates(aliceSnapshot, initiation.stateUpdates)
     val recorded = engine.recordContact(emptyList(), contactIdentity(bobIdentity, bobPublication))
+    protocolStore.commit(recorded.stateUpdates)
     applyUpdates(aliceSnapshot, recorded.stateUpdates)
     val acceptedContact = engine.acceptContact(aliceSnapshot.toList(), identityKey(bobIdentity))
+    protocolStore.commit(acceptedContact.stateUpdates)
     applyUpdates(aliceSnapshot, acceptedContact.stateUpdates)
+    val contactUpdate = acceptedContact.stateUpdates.firstOrNull()
+        ?: failCoverage("accepted contact should produce a state update")
+    val contactAddress = ProtocolStateAddress(contactUpdate.kind, contactUpdate.key)
 
     val outbound = alice.encryptMessage(
         aliceSnapshot.toList(),
@@ -201,7 +206,7 @@ fun main() {
         alicePublication,
     )
 
-    exerciseEvents(acceptedContact.contact)
+    exerciseEvents(engine, protocolStore, contactAddress, acceptedContact.contact)
     expectCertificateRejection()
     expectInvalidMessageKey()
     println("Kotlin issue 122 coverage passed")
@@ -238,7 +243,12 @@ private fun expectStaleProtocolStateCommit(store: MemoryProtocolStateStore, upda
     }
 }
 
-private fun exerciseEvents(contact: ContactState) {
+private fun exerciseEvents(
+    engine: ProtocolStateEngine,
+    store: MemoryProtocolStateStore,
+    address: ProtocolStateAddress,
+    contact: ContactState,
+) {
     val stream = ContactEventStream.withObserverCapacity(listOf(contact), 1uL)
     val observer = stream.subscribe()
     val event = ContactEvent(ContactEventKind.CHANGED, contact)
@@ -247,6 +257,55 @@ private fun exerciseEvents(contact: ContactState) {
     val item = observer.pollNext()
     requireCoverage(item?.kind == ContactEventStreamItemKind.LAGGED, "event lag")
     observer.resumeAfter(stream.currentState())
+
+    val otherStream = ContactEventStream.withObserverCapacity(listOf(contact), 1uL)
+    otherStream.emit(event, listOf(contact))
+    otherStream.emit(event, listOf(contact))
+    otherStream.emit(event, listOf(contact))
+    stream.emit(event, listOf(contact))
+    try {
+        observer.resumeAfter(otherStream.currentState())
+        failCoverage("another stream's snapshot should reject")
+    } catch (error: AetherException.ForeignEventSnapshot) {
+    }
+    requireCoverage(observer.pollNext()?.event?.id == 3uL, "foreign snapshot preserves local events")
+
+    val extensionEngine = ProtocolStateEngine()
+    val extensionSnapshot = extensionEngine.loadSnapshot(store, listOf(address))
+    val blocked = extensionEngine.blockContact(extensionSnapshot, contact.identity.identityKey)
+    store.commit(blocked.stateUpdates)
+    val reloaded = engine.loadSnapshot(store, listOf(address))
+    val rebuilt = engine.contactStates(reloaded)
+    requireCoverage(rebuilt.size == 1 && rebuilt[0].blocked, "rebuilds committed extension state")
+    val firstImport = stream.importCurrentState(rebuilt)
+    requireCoverage(firstImport.eventId() == 3uL, "state import preserves local event ID")
+    requireCoverage(firstImport.stateRevision() == 1uL, "state import revision")
+    requireCoverage(firstImport.state().single().blocked, "imported snapshot state")
+    requireCoverage(
+        observer.pollNext()?.kind == ContactEventStreamItemKind.STALE,
+        "state import marks observer stale",
+    )
+
+    val secondImport = stream.importCurrentState(rebuilt)
+    try {
+        observer.resumeAfter(firstImport)
+        failCoverage("stale imported snapshot should reject")
+    } catch (error: AetherException.StaleEventSnapshot) {
+        requireCoverage(
+            error.snapshotRevision == 1uL && error.currentRevision == 2uL,
+            "stale imported snapshot revisions",
+        )
+    }
+    requireCoverage(
+        observer.pollNext()?.kind == ContactEventStreamItemKind.STALE,
+        "repeated import stays explicit",
+    )
+    observer.resumeAfter(secondImport)
+
+    val restarted = ContactEventStream.withObserverCapacity(rebuilt, 1uL)
+    val restartSnapshot = restarted.currentState()
+    requireCoverage(restartSnapshot.eventId() == 0uL, "restart uses a new local event sequence")
+    requireCoverage(restartSnapshot.stateRevision() == 0uL, "restart uses a new local state revision")
 }
 
 private fun expectBackupFailure(store: KeyStore) {
