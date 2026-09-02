@@ -38,7 +38,7 @@ jobs:
       - name: Install Supply Chain Tools
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit,cargo-deny,cargo-geiger
+          tool: cargo-audit,cargo-cyclonedx,cargo-deny,cargo-geiger
 
       - name: Cargo deny
         run: cargo deny check
@@ -77,6 +77,12 @@ jobs:
 
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Verify mobile release packet contract
+        run: scripts/test/mobile-release-packet.sh
+
+      - name: Verify reproducible SBOM
+        run: scripts/test/sbom-reproducibility.sh
 
       - name: Enforce no first-party unsafe
         run: |

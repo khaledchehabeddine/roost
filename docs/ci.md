@@ -33,7 +33,7 @@ their own workflows, not by sanitizer jobs.
 
 ## Constrained Decryption Budget
 
-The v1.0.0 constrained decryption release gate runs the optimized Core budget harness:
+The v0.15.0 constrained decryption release gate runs the optimized Core budget harness:
 
 ```bash
 scripts/ci/constrained-decryption-budget.sh
@@ -66,10 +66,15 @@ the release jobs:
 - `Aether-v<version>.xcframework.zip`
 - `aether-<version>.aar`
 
-The signed-release job imports the OpenPGP release key from repository secrets, writes detached
-`.asc` signatures and `.sha256` checksum sidecars, exports the public release key, and runs
-`scripts/test/release-artifact-verification.sh`. That test covers iOS and Android happy paths plus
-signature-mismatch, checksum-mismatch, and fingerprint-mismatch failures for both artifacts.
+The signed-release job imports the OpenPGP release key from repository secrets, then assembles one
+packet from the reproducible iOS and Android outputs, Android publication metadata, SBOM, and gate
+evidence. Each evidence record names the successful command, source revision and epoch, and the
+shared GitHub Actions run identity. The packet has detached `.asc` signatures and pinned `.sha256`
+sidecars for both mobile binaries, the public release key, a source record, and a signed
+`SHA256SUMS` manifest covering every payload file. The verifier also proves that the Swift Package
+and Maven bundle contain the same binary and POM bytes published separately, verifies every primary
+file in a signed Maven bundle against the same release key, and validates ZIP members before
+extraction.
 
 Required secrets:
 
@@ -81,10 +86,11 @@ The Android AAR distribution job also enables Gradle publication signing on rele
 Maven Central bundle contains Maven `.asc` signatures. Non-tag workflow runs keep producing
 unsigned release-candidate artifacts.
 
-On non-tag release-verification runs, CI signs copied release-candidate artifacts with an ephemeral
-CI-only OpenPGP key and runs the same fail-closed verification script. This proves the AE-FFI-03
-signature, checksum, and public-key verification flow before final publication, but it does not
-publish release assets or create a public trust root.
+On non-tag release-verification runs, CI assembles the same packet shape with an ephemeral CI-only
+OpenPGP key and an unsigned Maven Central candidate. It runs the same completeness and provenance
+checks plus signature, checksum, checksum-filename, fingerprint, gate-evidence, hostile-ZIP, and
+tamper failures. This proves the release flow before final publication but does not publish assets
+or create a public trust root.
 
 The release-preflight job runs `scripts/release/verify-release-gates.sh` early for fail-fast tag
 checks, and the signed-release job runs the same gate again immediately before signed asset upload
@@ -103,6 +109,7 @@ The supply-chain workflow runs on pull requests, `main`, and release tags. It en
 - a negative cargo-deny license-policy dry run that must fail
 - `cargo audit --deny warnings`
 - `cargo geiger` reports for each workspace package
+- mobile release packet contract and cross-checkout SBOM reproducibility tests
 - no first-party `unsafe` in `crates/**/*.rs`
 
 `cargo-audit` is an advisory backstop for the RustSec database. `cargo-geiger` records the unsafe

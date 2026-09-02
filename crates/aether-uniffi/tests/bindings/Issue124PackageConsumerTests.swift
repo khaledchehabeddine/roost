@@ -31,14 +31,16 @@ final class Issue124PackageConsumerTests: XCTestCase {
     func testPackageConsumerExercisesIdentitySessionBackupAndMessagePath() throws {
         let engine = ProtocolStateEngine()
         let domainSigner = Curve25519.Signing.PrivateKey()
-        let domainIdentifier = Data("issue-124-domain".utf8)
+        let signingKeyIdentifier = Data("issue-124-domain".utf8)
+        let relayDomain = Data("relay.test".utf8)
         let domainKey = DomainSigningKey(
-            identifier: domainIdentifier,
+            identifier: signingKeyIdentifier,
             verifyingKey: domainSigner.publicKey.rawRepresentation,
             status: .trusted
         )
         let validation = SenderCertificateValidation(
             domainSigningKeys: [domainKey],
+            expectedRelayDomain: relayDomain,
             revocationState: RevocationState(available: true, revokedIdentityKeys: []),
             referenceTimestampSecs: 1_700_000_000,
             graceWindowSecs: 0
@@ -56,20 +58,21 @@ final class Issue124PackageConsumerTests: XCTestCase {
 
         let aliceCertificate = try signedCertificate(
             identity: aliceIdentity,
-            publication: alicePublication,
-            identifier: domainIdentifier,
+            signingKeyIdentifier: signingKeyIdentifier,
+            relayDomain: relayDomain,
             signer: domainSigner
         )
         let bobCertificate = try signedCertificate(
             identity: bobIdentity,
-            publication: bobPublication,
-            identifier: domainIdentifier,
+            signingKeyIdentifier: signingKeyIdentifier,
+            relayDomain: relayDomain,
             signer: domainSigner
         )
         let validated = try validateSenderCertificate(
             certificate: aliceCertificate.bytes,
             signature: aliceCertificate.signature,
             domainSigningKeys: [domainKey],
+            expectedRelayDomain: validation.expectedRelayDomain,
             revocationState: validation.revocationState,
             referenceTimestampSecs: validation.referenceTimestampSecs,
             graceWindowSecs: validation.graceWindowSecs
@@ -231,6 +234,8 @@ private func exerciseCheckedInReceiveFixtures() throws {
     let duplicateBlob = try XCTUnwrap(
         blobFile.fixtures.first { $0.name == "deduplication_set_identity_with_duplicate_message" }
     )
+    let duplicateReplay = try XCTUnwrap(duplicateBlob.replay)
+    let duplicateMessage = try decodeMessage(bytes: Data(hex: duplicateReplay.encodedMessageHex))
 
     let encoded = try Data(hex: fixture.encodedHex)
     let message = try decodeMessage(bytes: encoded)
@@ -246,6 +251,7 @@ private func exerciseCheckedInReceiveFixtures() throws {
         certificate: try Data(hex: fixture.postDecryption.senderCertificateHex),
         signature: try Data(hex: fixture.postDecryption.senderSignatureHex),
         domainSigningKeys: validation.domainSigningKeys,
+        expectedRelayDomain: validation.expectedRelayDomain,
         revocationState: validation.revocationState,
         referenceTimestampSecs: validation.referenceTimestampSecs,
         graceWindowSecs: validation.graceWindowSecs
@@ -268,9 +274,9 @@ private func exerciseCheckedInReceiveFixtures() throws {
         ],
         sessionKey: try Data(hex: sessionFile.sessionKeyHex),
         deduplicationKey: try Data(hex: duplicateBlob.keyHex),
-        message: message,
+        message: duplicateMessage,
         acknowledgmentId: Data(repeating: 0x31, count: 16),
-        acknowledgmentRecipientPublicKey: message.recipientPublicKey,
+        acknowledgmentRecipientPublicKey: duplicateMessage.recipientPublicKey,
         acknowledgmentTimestampMillis: 1_700_000_001_004,
         acknowledgmentSenderCertificate: Data("duplicate ack certificate".utf8),
         acknowledgmentSenderSignature: Data("duplicate ack signature".utf8),
@@ -288,18 +294,17 @@ private struct SignedCertificate {
 
 private func signedCertificate(
     identity: Identity,
-    publication: PublicationBundle,
-    identifier: Data,
+    signingKeyIdentifier: Data,
+    relayDomain: Data,
     signer: Curve25519.Signing.PrivateKey
 ) throws -> SignedCertificate {
-    var bytes = Data("AetherSenderCertificate-v1:".utf8)
-    bytes.append(contentsOf: [1, UInt8(identifier.count)])
-    bytes.append(identifier)
+    var bytes = Data("AetherSenderCertificate-v2:".utf8)
+    bytes.append(contentsOf: [2, UInt8(signingKeyIdentifier.count)])
+    bytes.append(signingKeyIdentifier)
+    bytes.append(UInt8(relayDomain.count))
+    bytes.append(relayDomain)
     bytes.append(identity.x25519PublicKey)
     bytes.append(identity.ed25519VerifyingKey)
-    bytes.append(publication.discoveryKey.publicKey)
-    bytes.append(publication.discoveryKey.verifyingKey)
-    bytes.appendBigEndian(publication.discoveryKey.epoch)
     bytes.appendBigEndian(UInt64(1_700_100_000))
     return SignedCertificate(bytes: bytes, signature: try signer.signature(for: bytes))
 }
@@ -341,6 +346,7 @@ private struct SessionFixtureFile: Decodable {
 
 private struct CertificateValidationFixture: Decodable {
     let domainSigningKeys: [DomainSigningKeyFixture]
+    let relayDomain: String
     let revokedIdentityKeys: [IdentityKeyFixture]
     let referenceTimestampSecs: UInt64
     let graceWindowSecs: UInt64
@@ -387,6 +393,11 @@ private struct BlobFixture: Decodable {
     let kind: String
     let keyHex: String
     let currentEncodedHex: String
+    let replay: BlobReplayFixture?
+}
+
+private struct BlobReplayFixture: Decodable {
+    let encodedMessageHex: String
 }
 
 private enum FixtureError: Error {
@@ -411,6 +422,7 @@ private func senderCertificateValidation(_ fixture: CertificateValidationFixture
                 status: try domainSigningKeyStatus(key.status)
             )
         },
+        expectedRelayDomain: Data(fixture.relayDomain.utf8),
         revocationState: RevocationState(
             available: true,
             revokedIdentityKeys: try fixture.revokedIdentityKeys.map { key in
@@ -461,11 +473,6 @@ private extension Data {
             append(contentsOf: [byte])
             index = next
         }
-    }
-
-    mutating func appendBigEndian(_ value: UInt32) {
-        var value = value.bigEndian
-        Swift.withUnsafeBytes(of: &value) { append(contentsOf: $0) }
     }
 
     mutating func appendBigEndian(_ value: UInt64) {

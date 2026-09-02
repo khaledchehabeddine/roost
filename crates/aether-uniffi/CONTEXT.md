@@ -58,6 +58,13 @@ The release-published checksum generated after the final artifact bytes are fixe
 it together with the OpenPGP signature before their host build consumes the artifact.
 Avoid: reproducibility manifest, CI scratch hash, trust root
 
+**Mobile Release Packet** (one per candidate source revision):
+The complete version-matched set of Signed Release Artifacts, package metadata, SBOM, public key,
+source record, successful release-gate evidence, and signed payload manifest. Every producer and
+gate record names the same source revision and source date epoch; CI records also name one GitHub
+Actions run.
+Avoid: build directory, unrelated CI artifacts, release-candidate hashes
+
 ## Example
 
 **Dev:** Does Aether store private keys directly in the iOS Keychain?

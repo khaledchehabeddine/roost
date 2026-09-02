@@ -10,12 +10,13 @@ VERSION="${PKGID##*#}"
 DIST="$ROOT/target/ios-distribution"
 PACKAGE="$DIST/aether-ios-v$VERSION"
 ZIP="$DIST/Aether-v$VERSION.xcframework.zip"
+PACKAGE_ZIP="$DIST/Aether-v$VERSION.swift-package.zip"
 
 cd "$ROOT"
 
 scripts/build/xcframework.sh
 
-rm -rf "$PACKAGE" "$ZIP"
+rm -rf "$PACKAGE" "$ZIP" "$PACKAGE_ZIP"
 mkdir -p "$PACKAGE/Artifacts" "$PACKAGE/Sources/Aether"
 
 cp -R "$ROOT/target/xcframework/Aether.xcframework" "$PACKAGE/Artifacts/Aether.xcframework"
@@ -54,5 +55,11 @@ find "$PACKAGE" -exec touch -h -t "$stamp" {} +
     find Aether.xcframework -type f | LC_ALL=C sort | zip -X -q "$ZIP" -@
 )
 
+(
+    cd "$DIST"
+    find "aether-ios-v$VERSION" -type f | LC_ALL=C sort | zip -X -q "$PACKAGE_ZIP" -@
+)
+
 echo "iOS package written to $PACKAGE"
 echo "xcframework archive written to $ZIP"
+echo "Swift Package archive written to $PACKAGE_ZIP"

@@ -1,26 +1,34 @@
 #!/usr/bin/env bash
 #
-# Verify release-candidate artifacts with ephemeral signatures and pinned checksums.
+# Assemble and verify a complete release-candidate packet with an ephemeral signing key.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 IOS_ARTIFACT_DIR="${1:-}"
 ANDROID_ARTIFACT_DIR="${2:-}"
-OUT="${3:-$ROOT/target/release-candidate-verification/evidence}"
+ANDROID_DISTRIBUTION_DIR="${3:-}"
+SBOM_DIR="${4:-}"
+EVIDENCE_DIR="${5:-}"
+OUT="${6:-$ROOT/target/release-candidate-verification/evidence}"
 
 usage() {
-    echo "usage: $0 <ios-artifact-dir> <android-artifact-dir> [evidence-dir]" >&2
+    echo "usage: $0 <ios-artifacts> <android-artifacts> <android-distribution> <sbom> <gate-evidence> [output]" >&2
 }
 
-if [[ $# -lt 2 || $# -gt 3 ]]; then
+if [[ $# -lt 5 || $# -gt 6 ]]; then
     usage
     exit 2
 fi
 
-for dir in "$IOS_ARTIFACT_DIR" "$ANDROID_ARTIFACT_DIR"; do
+for dir in \
+    "$IOS_ARTIFACT_DIR" \
+    "$ANDROID_ARTIFACT_DIR" \
+    "$ANDROID_DISTRIBUTION_DIR" \
+    "$SBOM_DIR" \
+    "$EVIDENCE_DIR"; do
     if [[ ! -d "$dir" ]]; then
-        echo "missing artifact directory: $dir" >&2
+        echo "missing release-candidate input directory: $dir" >&2
         exit 2
     fi
 done
@@ -32,54 +40,34 @@ require_tool() {
     fi
 }
 
-one_match() {
-    local label="$1"
-    shift
-    local matches
-    local count
-    local result
-
-    matches="$(mktemp)"
-    "$@" | LC_ALL=C sort > "$matches"
-    count="$(wc -l < "$matches" | tr -d '[:space:]')"
-    if [[ "$count" -ne 1 ]]; then
-        echo "expected exactly one $label, found $count" >&2
-        cat "$matches" >&2
-        rm -f "$matches"
-        exit 1
-    fi
-    result="$(sed -n '1p' "$matches")"
-    rm -f "$matches"
-    printf '%s\n' "$result"
-}
-
 artifact_hash() {
     shasum -a 256 "$1" | awk '{ print $1 }'
 }
 
 require_tool awk
-require_tool cargo
 require_tool gpg
 require_tool shasum
-require_tool tr
 
-VERSION="$(cargo pkgid --manifest-path "$ROOT/crates/aether-uniffi/Cargo.toml")"
-VERSION="${VERSION##*#}"
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
+REVISION="${AETHER_RELEASE_SOURCE_REVISION:-$(git -C "$ROOT" rev-parse HEAD)}"
+REVISION="$(printf '%s' "$REVISION" | tr '[:upper:]' '[:lower:]')"
 
-IOS_ZIP="$(one_match "iOS release-candidate artifact for v$VERSION" \
-    find "$IOS_ARTIFACT_DIR" -type f -name "Aether-v$VERSION.xcframework.zip")"
-ANDROID_AAR="$(one_match "Android release-candidate AAR for v$VERSION" \
-    find "$ANDROID_ARTIFACT_DIR" -type f \
-        \( -path "*/com/aurelion/aether/$VERSION/aether-$VERSION.aar" \
-        -o -name "aether-$VERSION.aar" \))"
+case "$OUT" in
+    "" | / | . | .. | */. | */..)
+        echo "unsafe release-candidate evidence output: $OUT" >&2
+        exit 2
+        ;;
+esac
 
-rm -rf "$OUT"
-mkdir -p "$OUT/artifacts"
+OUTPUT_ROOT="$(cd "$ROOT/target" && pwd -P)"
+OUTPUT_PARENT="$(cd "$(dirname "$OUT")" && pwd -P)"
+if [[ "$OUTPUT_PARENT" != "$OUTPUT_ROOT" && "$OUTPUT_PARENT" != "$OUTPUT_ROOT/"* ]]; then
+    echo "release-candidate evidence output must stay beneath $OUTPUT_ROOT" >&2
+    exit 2
+fi
 
-IOS_COPY="$OUT/artifacts/$(basename "$IOS_ZIP")"
-ANDROID_COPY="$OUT/artifacts/$(basename "$ANDROID_AAR")"
-cp "$IOS_ZIP" "$IOS_COPY"
-cp "$ANDROID_AAR" "$ANDROID_COPY"
+rm -rf "${OUT:?}"
+mkdir -p "$OUT"
 
 TMP="$(mktemp -d)"
 cleanup() {
@@ -105,37 +93,50 @@ Expire-Date: 1d
 KEY
 
 gpg --batch --generate-key "$TMP/key.conf" >/dev/null
-FINGERPRINT="$(
+AETHER_RELEASE_GPG_FINGERPRINT="$(
     gpg --batch --list-secret-keys --with-colons |
         awk -F: '/^fpr:/ { print $10; exit }'
 )"
+export AETHER_RELEASE_GPG_FINGERPRINT
 
-if [[ -z "$FINGERPRINT" ]]; then
+if [[ -z "$AETHER_RELEASE_GPG_FINGERPRINT" ]]; then
     echo "could not determine ephemeral release-candidate key fingerprint" >&2
     exit 1
 fi
 
-PUBLIC_KEY="$OUT/aether-v$VERSION-release-candidate-test-key.asc"
-gpg --batch --armor --export "$FINGERPRINT" > "$PUBLIC_KEY"
+PACKET="$OUT/mobile-release-packet"
+AETHER_RELEASE_SOURCE_REVISION="$REVISION" \
+    "$ROOT/scripts/release/assemble-mobile-release-packet.sh" \
+    "$IOS_ARTIFACT_DIR" \
+    "$ANDROID_ARTIFACT_DIR" \
+    "$ANDROID_DISTRIBUTION_DIR" \
+    "$SBOM_DIR" \
+    "$EVIDENCE_DIR" \
+    "$PACKET"
 
-export AETHER_RELEASE_GPG_FINGERPRINT="$FINGERPRINT"
-"$ROOT/scripts/release/sign-artifact.sh" "$IOS_COPY"
-"$ROOT/scripts/release/sign-artifact.sh" "$ANDROID_COPY"
-"$ROOT/scripts/test/release-artifact-verification.sh" "$IOS_COPY" "$ANDROID_COPY" "$PUBLIC_KEY"
+IOS_ARTIFACT="$PACKET/Aether-v$VERSION.xcframework.zip"
+ANDROID_ARTIFACT="$PACKET/aether-$VERSION.aar"
+PUBLIC_KEY="$PACKET/aether-v$VERSION-release-key.asc"
+
+"$ROOT/scripts/test/release-artifact-verification.sh" \
+    "$IOS_ARTIFACT" \
+    "$ANDROID_ARTIFACT" \
+    "$PUBLIC_KEY"
 
 {
     echo "# Release Candidate Artifact Verification Evidence"
     echo
     printf 'version=%s\n' "$VERSION"
-    printf 'command=%s\n' "scripts/test/release-candidate-artifact-verification.sh <ios-artifact-dir> <android-artifact-dir>"
-    printf 'commit=%s\n' "$(git -C "$ROOT" rev-parse HEAD)"
-    printf 'test_key_fingerprint=%s\n' "$FINGERPRINT"
-    printf 'ios_artifact=%s\n' "$(basename "$IOS_COPY")"
-    printf 'ios_sha256=%s\n' "$(artifact_hash "$IOS_COPY")"
-    printf 'android_artifact=%s\n' "$(basename "$ANDROID_COPY")"
-    printf 'android_sha256=%s\n' "$(artifact_hash "$ANDROID_COPY")"
-    echo "verification=happy path plus signature mismatch, checksum mismatch, and fingerprint mismatch"
+    printf 'source_revision=%s\n' "$REVISION"
+    printf 'command=%s\n' \
+        "scripts/test/release-candidate-artifact-verification.sh <ios-artifacts> <android-artifacts> <android-distribution> <sbom> <gate-evidence>"
+    printf 'test_key_fingerprint=%s\n' "$AETHER_RELEASE_GPG_FINGERPRINT"
+    printf 'ios_artifact=%s\n' "$(basename "$IOS_ARTIFACT")"
+    printf 'ios_sha256=%s\n' "$(artifact_hash "$IOS_ARTIFACT")"
+    printf 'android_artifact=%s\n' "$(basename "$ANDROID_ARTIFACT")"
+    printf 'android_sha256=%s\n' "$(artifact_hash "$ANDROID_ARTIFACT")"
+    echo "verification=packet completeness and provenance plus happy and fail-closed artifact paths"
     echo "publication=release-candidate evidence only; final signatures and checksums are tag-gated"
 } > "$OUT/EVIDENCE.md"
 
-echo "release-candidate artifact verification evidence written to $OUT"
+echo "release-candidate verification evidence written to $OUT"

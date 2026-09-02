@@ -53,11 +53,20 @@ if [[ -z "$EXPECTED_FINGERPRINT" ]]; then
     exit 2
 fi
 
-EXPECTED="$(awk 'NF >= 1 { print $1; exit }' "$CHECKSUM")"
+CHECKSUM_LINES="$(awk 'NF { count += 1 } END { print count + 0 }' "$CHECKSUM")"
+CHECKSUM_FIELDS="$(awk 'NF { print NF; exit }' "$CHECKSUM")"
+EXPECTED="$(awk 'NF { print $1; exit }' "$CHECKSUM")"
+PINNED_NAME="$(awk 'NF { print $2; exit }' "$CHECKSUM")"
+PINNED_NAME="${PINNED_NAME#\*}"
 ACTUAL="$(shasum -a 256 "$ARTIFACT" | awk '{ print $1 }')"
 
-if [[ -z "$EXPECTED" ]]; then
-    echo "empty checksum file: $CHECKSUM" >&2
+if [[ "$CHECKSUM_LINES" -ne 1 || "$CHECKSUM_FIELDS" -ne 2 || -z "$EXPECTED" ]]; then
+    echo "invalid checksum file: $CHECKSUM" >&2
+    exit 1
+fi
+
+if [[ "$PINNED_NAME" != "$(basename "$ARTIFACT")" ]]; then
+    echo "checksum filename mismatch for $ARTIFACT" >&2
     exit 1
 fi
 

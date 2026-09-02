@@ -61,7 +61,7 @@ build_artifacts() {
         export CARGO_INCREMENTAL=0
         export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$workdir=/aether-source"
 
-        cargo metadata --locked >/dev/null
+        cargo metadata --locked --format-version 1 >/dev/null
 
         case "$MODE" in
             android)
@@ -85,10 +85,13 @@ package_version() {
 copy_artifacts() {
     local workdir="$1"
     local artifact_dir="$2"
+    local version
 
     mkdir -p "$artifact_dir"
-    printf 'archive_ref=%s\narchive_object=%s\nsource_date_epoch=%s\n' \
-        "$ARCHIVE_REF" "$ARCHIVE_OBJECT" "$SOURCE_DATE_EPOCH" > "$artifact_dir/SOURCE"
+    version="$(package_version "$workdir")"
+    printf 'version=%s\nsource_revision=%s\nsource_date_epoch=%s\narchive_ref=%s\narchive_object=%s\n' \
+        "$version" "$ARCHIVE_COMMIT" "$SOURCE_DATE_EPOCH" "$ARCHIVE_REF" "$ARCHIVE_OBJECT" \
+        > "$artifact_dir/SOURCE"
 
     case "$MODE" in
         android)
@@ -107,9 +110,6 @@ copy_artifacts() {
             mkdir -p "$artifact_dir/android"
             cp -R "$workdir/target/android/kotlin" "$artifact_dir/android/kotlin"
 
-            local version
-            version="$(package_version "$workdir")"
-
             local maven_artifact_dir
             maven_artifact_dir="$workdir/target/android/maven/com/aurelion/aether/$version"
 
@@ -118,9 +118,6 @@ copy_artifacts() {
             cp "$maven_artifact_dir/aether-$version.pom" "$artifact_dir/android-aar/"
             ;;
         ios)
-            local version
-            version="$(package_version "$workdir")"
-
             cp -R "$workdir/target/xcframework/Aether.xcframework" \
                 "$artifact_dir/Aether.xcframework"
             cp -R "$workdir/target/xcframework/Sources" "$artifact_dir/Sources"
@@ -128,6 +125,8 @@ copy_artifacts() {
                 "$artifact_dir/aether-ios-v$version"
             cp "$workdir/target/ios-distribution/Aether-v$version.xcframework.zip" \
                 "$artifact_dir/Aether-v$version.xcframework.zip"
+            cp "$workdir/target/ios-distribution/Aether-v$version.swift-package.zip" \
+                "$artifact_dir/Aether-v$version.swift-package.zip"
             ;;
     esac
 }
@@ -212,13 +211,21 @@ SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(commit_timestamp)}"
 export SOURCE_DATE_EPOCH
 ARCHIVE_OBJECT="$(archive_object)"
 ARCHIVE_COMMIT="$(archive_commit)"
+PINNED_REVISION="${AETHER_RELEASE_SOURCE_REVISION:-$ARCHIVE_COMMIT}"
+PINNED_REVISION="$(printf '%s' "$PINNED_REVISION" | tr '[:upper:]' '[:lower:]')"
+
+if [[ "$PINNED_REVISION" != "$ARCHIVE_COMMIT" ]]; then
+    echo "release source revision mismatch: $PINNED_REVISION, archived $ARCHIVE_COMMIT" >&2
+    exit 2
+fi
+export AETHER_RELEASE_SOURCE_REVISION="$ARCHIVE_COMMIT"
 
 if [[ -n "${GITHUB_ACTIONS:-}" && "$ARCHIVE_REF" != "HEAD" ]]; then
     echo "AETHER_REPRO_ARCHIVE_REF is local-only and must not be set in GitHub Actions" >&2
     exit 2
 fi
 
-rm -rf "$OUT/$MODE"
+rm -rf "${OUT:?}/$MODE"
 echo "$MODE archive object: $ARCHIVE_OBJECT"
 
 run_pass 1
