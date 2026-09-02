@@ -76,14 +76,15 @@ To assemble the generated Swift Package binary distribution:
 ./scripts/build/ios-package.sh
 ```
 
-The package is written under `target/ios-distribution/aether-ios-v<version>/` with product
-`Aether`, generated Swift source target `Aether`, and binary target `AetherFFI`.
+The package is written under `target/ios-distribution/aether-ios-v<version>/` and archived as
+`target/ios-distribution/Aether-v<version>.swift-package.zip`. It contains product `Aether`,
+generated Swift source target `Aether`, and binary target `AetherFFI`.
 
 Verify the package with an iOS Simulator consumer:
 
 ```bash
 version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
-scripts/test/ios-package-consumer.sh "target/ios-distribution/aether-ios-v$version"
+scripts/test/ios-package-consumer.sh "target/ios-distribution/Aether-v$version.swift-package.zip"
 ```
 
 Release consumers must verify the final xcframework archive signature and pinned checksum before
@@ -128,10 +129,14 @@ cache; do not commit them to this repository.
 
 ## iOS Artifact Verification
 
-Release-candidate CI uploads `Aether-v<version>.xcframework.zip`, the local Swift Package, and
-`SHA256SUMS` from the same build. Release-tag CI publishes the final OpenPGP signature, pinned
-checksum, and public release key for the xcframework archive. Treat release-candidate hashes as
-reproducibility evidence, not as the distribution trust root. Final publication remains Relay-gated.
+Release-candidate CI uploads `Aether-v<version>.xcframework.zip`,
+`Aether-v<version>.swift-package.zip`, and `SHA256SUMS` from the same build. Release-tag CI puts the
+Swift Package archive in the signed mobile release packet beside the xcframework signature, pinned
+checksum, public release key, package metadata, SBOM, source record, release-gate evidence, and
+signed packet manifest. Packet and package verification validate bounded portable ZIP members
+before extraction.
+Treat release-candidate hashes as reproducibility evidence, not as the distribution trust root.
+Final publication remains Relay-gated.
 
 ## Binding Surface
 

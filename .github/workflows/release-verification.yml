@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  AETHER_RELEASE_SOURCE_REVISION: ${{ github.sha }}
+
 jobs:
   release-preflight:
     name: Release Preflight
@@ -36,6 +39,8 @@ jobs:
   sbom:
     name: SBOM
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -53,6 +58,15 @@ jobs:
       - name: Generate SBOM
         run: scripts/release/sbom.sh
 
+      - name: Verify reproducible SBOM
+        run: scripts/test/sbom-reproducibility.sh
+
+      - name: Record SBOM reproducibility evidence
+        run: |
+          scripts/release/write-mobile-gate-evidence.sh \
+            target/sbom/sbom-reproducibility.evidence \
+            sbom-reproducibility
+
       - name: Resolve Workspace Version
         id: version
         run: |
@@ -63,7 +77,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: aether-uniffi-v${{ steps.version.outputs.version }}-sbom
-          path: target/sbom/aether-uniffi-v${{ steps.version.outputs.version }}-sbom.json
+          path: target/sbom/*
           if-no-files-found: error
 
   constrained-decryption-budget:
@@ -121,6 +135,12 @@ jobs:
 
       - name: Verify Android reproducibility
         run: scripts/release/reproducible-mobile-artifacts.sh android
+
+      - name: Record Android reproducibility evidence
+        run: |
+          scripts/release/write-mobile-gate-evidence.sh \
+            target/release-verification/reproducible-mobile/android/pass-1/artifacts/android-reproducibility.evidence \
+            android-reproducibility
 
       - name: Upload Android artifacts
         uses: actions/upload-artifact@v4
@@ -196,6 +216,12 @@ jobs:
       - name: Verify Android AAR consumer path
         run: scripts/test/android-aar-consumer.sh
 
+      - name: Record Android package consumer evidence
+        run: |
+          scripts/release/write-mobile-gate-evidence.sh \
+            target/android/android-package-consumer.evidence \
+            android-package-consumer
+
       - name: Upload Android AAR artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -203,6 +229,8 @@ jobs:
           path: |
             target/android/maven/**
             target/android/central/*.zip
+            target/android/central/*.source
+            target/android/android-package-consumer.evidence
           if-no-files-found: error
 
   ios-reproducible:
@@ -220,11 +248,23 @@ jobs:
       - name: Verify iOS reproducibility
         run: scripts/release/reproducible-mobile-artifacts.sh ios
 
+      - name: Record iOS reproducibility evidence
+        run: |
+          scripts/release/write-mobile-gate-evidence.sh \
+            target/release-verification/reproducible-mobile/ios/pass-1/artifacts/ios-reproducibility.evidence \
+            ios-reproducibility
+
       - name: Verify iOS package consumer
         run: |
           pkgid="$(cargo pkgid --manifest-path crates/aether-uniffi/Cargo.toml)"
           version="${pkgid##*#}"
-          scripts/test/ios-package-consumer.sh "target/release-verification/reproducible-mobile/ios/pass-1/artifacts/aether-ios-v$version"
+          scripts/test/ios-package-consumer.sh "target/release-verification/reproducible-mobile/ios/pass-1/artifacts/Aether-v$version.swift-package.zip"
+
+      - name: Record iOS package consumer evidence
+        run: |
+          scripts/release/write-mobile-gate-evidence.sh \
+            target/release-verification/reproducible-mobile/ios/pass-1/artifacts/ios-package-consumer.evidence \
+            ios-package-consumer
 
       - name: Upload iOS artifacts
         uses: actions/upload-artifact@v4
@@ -242,6 +282,7 @@ jobs:
       - android-reproducible
       - android-aar-distribution
       - ios-reproducible
+      - sbom
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     steps:
       - uses: actions/checkout@v4
@@ -261,11 +302,35 @@ jobs:
           name: android-release-artifacts
           path: target/release-candidate-verification/input/android
 
+      - name: Download Android distribution
+        uses: actions/download-artifact@v4
+        with:
+          name: android-aar-distribution
+          path: target/release-candidate-verification/input/android-distribution
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: aether-uniffi-v${{ needs.sbom.outputs.version }}-sbom
+          path: target/release-candidate-verification/input/sbom
+
+      - name: Verify mobile release packet failure paths
+        run: |
+          scripts/test/mobile-release-packet.sh
+          scripts/release/write-mobile-gate-evidence.sh \
+            target/release-candidate-verification/input/evidence/mobile-release-packet.evidence \
+            mobile-release-packet
+
       - name: Verify release-candidate artifact signatures and checksums
+        env:
+          AETHER_REQUIRE_GITHUB_GATE_EVIDENCE: "true"
         run: |
           scripts/test/release-candidate-artifact-verification.sh \
             target/release-candidate-verification/input/ios \
-            target/release-candidate-verification/input/android
+            target/release-candidate-verification/input/android \
+            target/release-candidate-verification/input/android-distribution \
+            target/release-candidate-verification/input/sbom \
+            target/release-candidate-verification/input
 
       - name: Upload release-candidate verification evidence
         uses: actions/upload-artifact@v4
@@ -296,13 +361,32 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ios-release-artifacts
-          path: target/signed-release/ios
+          path: target/signed-release/input/ios
 
-      - name: Download Android artifacts
+      - name: Download reproducible Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: android-release-artifacts
+          path: target/signed-release/input/android
+
+      - name: Download Android distribution
         uses: actions/download-artifact@v4
         with:
           name: android-aar-distribution
-          path: target/signed-release/android
+          path: target/signed-release/input/android-distribution
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: aether-uniffi-v${{ needs.sbom.outputs.version }}-sbom
+          path: target/signed-release/input/sbom
+
+      - name: Verify mobile release packet failure paths
+        run: |
+          scripts/test/mobile-release-packet.sh
+          scripts/release/write-mobile-gate-evidence.sh \
+            target/signed-release/input/evidence/mobile-release-packet.evidence \
+            mobile-release-packet
 
       - name: Import release signing key
         env:
@@ -318,13 +402,13 @@ jobs:
           printf '%s' "$AETHER_RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
           echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
 
-      - name: Sign and verify release artifacts
+      - name: Assemble signed mobile release packet
         env:
           AETHER_RELEASE_GPG_FINGERPRINT: ${{ secrets.AETHER_RELEASE_GPG_FINGERPRINT }}
           AETHER_RELEASE_GPG_PASSPHRASE: ${{ secrets.AETHER_RELEASE_GPG_PASSPHRASE }}
+          AETHER_REQUIRE_SIGNED_MAVEN_PUBLICATION: "true"
+          AETHER_REQUIRE_GITHUB_GATE_EVIDENCE: "true"
         run: |
-          set -euo pipefail
-
           if [ -z "$AETHER_RELEASE_GPG_FINGERPRINT" ]; then
             echo "missing AETHER_RELEASE_GPG_FINGERPRINT" >&2
             exit 2
@@ -333,48 +417,25 @@ jobs:
             echo "missing AETHER_RELEASE_GPG_PASSPHRASE" >&2
             exit 2
           fi
-          release_fingerprint="$(printf '%s' "$AETHER_RELEASE_GPG_FINGERPRINT" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
 
-          one_match() {
-            local label="$1"
-            shift
-            local matches
-            local count
-            matches="$(mktemp)"
-            "$@" | LC_ALL=C sort > "$matches"
-            count="$(wc -l < "$matches" | tr -d '[:space:]')"
-            if [ "$count" -ne 1 ]; then
-              echo "expected exactly one $label, found $count" >&2
-              cat "$matches" >&2
-              rm -f "$matches"
-              exit 1
-            fi
-            sed -n '1p' "$matches"
-            rm -f "$matches"
-          }
+          scripts/release/assemble-mobile-release-packet.sh \
+            target/signed-release/input/ios \
+            target/signed-release/input/android \
+            target/signed-release/input/android-distribution \
+            target/signed-release/input/sbom \
+            target/signed-release/input \
+            target/signed-release/release-assets
 
+      - name: Verify final artifact failure paths
+        env:
+          AETHER_RELEASE_GPG_FINGERPRINT: ${{ secrets.AETHER_RELEASE_GPG_FINGERPRINT }}
+        run: |
           version="${GITHUB_REF_NAME#v}"
-          ios_zip="$(one_match "iOS release artifact for v$version" \
-            find target/signed-release/ios -type f -name "Aether-v$version.xcframework.zip")"
-          android_aar="$(one_match "Android AAR artifact for v$version" \
-            find target/signed-release/android -type f -path "*/com/aurelion/aether/$version/aether-$version.aar")"
-          central_zip="$(one_match "signed Android Maven Central bundle for v$version" \
-            find target/signed-release/android -type f -name "aether-$version-maven-central-signed.zip")"
-
-          scripts/release/sign-artifact.sh "$ios_zip"
-          scripts/release/sign-artifact.sh "$android_aar"
-
-          public_key="target/signed-release/aether-v$version-release-key.asc"
-          gpg --batch --armor --export "$release_fingerprint" > "$public_key"
-
-          AETHER_RELEASE_GPG_FINGERPRINT="$release_fingerprint" \
-            scripts/test/release-artifact-verification.sh "$ios_zip" "$android_aar" "$public_key"
-
-          release_assets="target/signed-release/release-assets"
-          mkdir -p "$release_assets"
-          cp "$ios_zip" "$ios_zip.asc" "$ios_zip.sha256" "$release_assets/"
-          cp "$android_aar" "$android_aar.asc" "$android_aar.sha256" "$release_assets/"
-          cp "$public_key" "$central_zip" "$release_assets/"
+          packet="target/signed-release/release-assets"
+          scripts/test/release-artifact-verification.sh \
+            "$packet/Aether-v$version.xcframework.zip" \
+            "$packet/aether-$version.aar" \
+            "$packet/aether-v$version-release-key.asc"
 
       - name: Verify release gates
         env:

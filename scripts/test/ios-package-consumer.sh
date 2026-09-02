@@ -9,9 +9,10 @@ PACKAGE_INPUT="${1:-}"
 WORK="$ROOT/target/ios-package-consumer"
 TEST_SOURCE="$ROOT/crates/aether-uniffi/tests/bindings/Issue124PackageConsumerTests.swift"
 FIXTURES="$ROOT/crates/aether-core/tests/fixtures"
+SAFE_EXTRACT="$ROOT/scripts/release/extract-zip-safely.sh"
 
 usage() {
-    echo "usage: $0 <path-to-generated-ios-package>" >&2
+    echo "usage: $0 <path-to-generated-ios-package-or-archive>" >&2
 }
 
 if [[ $# -ne 1 ]]; then
@@ -19,7 +20,19 @@ if [[ $# -ne 1 ]]; then
     exit 2
 fi
 
-PACKAGE_DIR="$(cd "$PACKAGE_INPUT" && pwd -P)"
+if [[ -d "$PACKAGE_INPUT" ]]; then
+    PACKAGE_DIR="$(cd "$PACKAGE_INPUT" && pwd -P)"
+elif [[ -f "$PACKAGE_INPUT" ]]; then
+    VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
+    ARCHIVE="$(cd "$(dirname "$PACKAGE_INPUT")" && pwd -P)/$(basename "$PACKAGE_INPUT")"
+    ARCHIVE_ROOT="$WORK/archive-input"
+    rm -rf "${ARCHIVE_ROOT:?}"
+    "$SAFE_EXTRACT" "$ARCHIVE" "$ARCHIVE_ROOT"
+    PACKAGE_DIR="$ARCHIVE_ROOT/aether-ios-v$VERSION"
+else
+    echo "missing generated iOS package or archive: $PACKAGE_INPUT" >&2
+    exit 2
+fi
 
 if [[ ! -d "$PACKAGE_DIR/Artifacts/Aether.xcframework" ]]; then
     echo "missing Aether.xcframework in package artifacts: $PACKAGE_DIR" >&2

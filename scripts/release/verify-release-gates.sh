@@ -5,10 +5,10 @@
 set -euo pipefail
 
 REPO="${AETHER_GITHUB_REPO:-RelayNet/aether}"
-TAG="${AETHER_RELEASE_TAG:-v1.0.0}"
-EXPECTED_TAG="v1.0.0"
-# #128 is the umbrella closeout and #189 delivers this script; gate only prerequisite evidence.
-REQUIRED_ISSUES=(129 130 131 132 133)
+TAG="${AETHER_RELEASE_TAG:-v0.15.0}"
+EXPECTED_TAG="v0.15.0"
+# #223 performs the human-authorized publication; gate the completed implementation work.
+REQUIRED_ISSUES=(217 218 219 220 221 222)
 
 usage() {
     echo "usage: $0" >&2

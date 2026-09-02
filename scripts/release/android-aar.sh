@@ -13,6 +13,8 @@ GRADLE_BIN="${GRADLE_BIN:-gradle}"
 SIGN_PUBLICATION="${AETHER_ANDROID_SIGN_PUBLICATION:-false}"
 SIGNING_KEY=""
 SIGNING_PASSWORD=""
+SOURCE_REVISION="${AETHER_RELEASE_SOURCE_REVISION:-}"
+SOURCE_EPOCH="${SOURCE_DATE_EPOCH:-}"
 
 if [[ -z "$VERSION" ]]; then
     VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
@@ -22,6 +24,24 @@ if [[ -z "$VERSION" ]]; then
     echo "could not determine workspace version" >&2
     exit 2
 fi
+
+if [[ -z "$SOURCE_REVISION" ]]; then
+    SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+fi
+SOURCE_REVISION="$(printf '%s' "$SOURCE_REVISION" | tr '[:upper:]' '[:lower:]')"
+if [[ ! "$SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "invalid release source revision: $SOURCE_REVISION" >&2
+    exit 2
+fi
+
+if [[ -z "$SOURCE_EPOCH" ]]; then
+    SOURCE_EPOCH="$(git -C "$ROOT" show -s --format=%ct HEAD)"
+fi
+if [[ ! "$SOURCE_EPOCH" =~ ^[0-9]+$ ]]; then
+    echo "invalid source date epoch: $SOURCE_EPOCH" >&2
+    exit 2
+fi
+export SOURCE_DATE_EPOCH="$SOURCE_EPOCH"
 
 require_tool() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -183,5 +203,10 @@ fi
     jar cf "$CENTRAL_ZIP" com
 )
 
+SOURCE_RECORD="$CENTRAL_DIR/$ARTIFACT_ID-$VERSION-maven-central.source"
+printf 'version=%s\nsource_revision=%s\nsource_date_epoch=%s\n' \
+    "$VERSION" "$SOURCE_REVISION" "$SOURCE_EPOCH" > "$SOURCE_RECORD"
+
 echo "Android AAR published to $AAR"
 echo "Maven Central bundle written to $CENTRAL_ZIP"
+echo "Android distribution source record written to $SOURCE_RECORD"

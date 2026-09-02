@@ -62,11 +62,15 @@ expect_failure() {
 
 signature_mismatch_fails() {
     local artifact="$1"
-    local bad="$TMP/$(basename "$artifact").signature-mismatch"
+    local bad
+    local hash
+
+    bad="$TMP/$(basename "$artifact").signature-mismatch"
 
     cp "$artifact" "$bad"
     printf 'tamper' >> "$bad"
-    shasum -a 256 "$bad" > "$bad.sha256"
+    hash="$(shasum -a 256 "$bad" | awk '{ print $1 }')"
+    printf '%s  %s\n' "$hash" "$(basename "$bad")" > "$bad.sha256"
 
     expect_failure "signature mismatch for $(basename "$artifact")" \
         "$VERIFY" "$bad" "$artifact.asc" "$bad.sha256" "$PUBLIC_KEY"
@@ -74,12 +78,28 @@ signature_mismatch_fails() {
 
 checksum_mismatch_fails() {
     local artifact="$1"
-    local bad_checksum="$TMP/$(basename "$artifact").checksum-mismatch.sha256"
+    local bad_checksum
+
+    bad_checksum="$TMP/$(basename "$artifact").checksum-mismatch.sha256"
 
     printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' \
         "$(basename "$artifact")" > "$bad_checksum"
 
     expect_failure "checksum mismatch for $(basename "$artifact")" \
+        "$VERIFY" "$artifact" "$artifact.asc" "$bad_checksum" "$PUBLIC_KEY"
+}
+
+checksum_filename_mismatch_fails() {
+    local artifact="$1"
+    local bad_checksum
+    local hash
+
+    bad_checksum="$TMP/$(basename "$artifact").filename-mismatch.sha256"
+
+    hash="$(shasum -a 256 "$artifact" | awk '{ print $1 }')"
+    printf '%s  substituted-artifact\n' "$hash" > "$bad_checksum"
+
+    expect_failure "checksum filename mismatch for $(basename "$artifact")" \
         "$VERIFY" "$artifact" "$artifact.asc" "$bad_checksum" "$PUBLIC_KEY"
 }
 
@@ -96,6 +116,7 @@ for artifact in "$IOS_ARTIFACT" "$ANDROID_ARTIFACT"; do
     "$VERIFY" "$artifact" "$artifact.asc" "$artifact.sha256" "$PUBLIC_KEY"
     signature_mismatch_fails "$artifact"
     checksum_mismatch_fails "$artifact"
+    checksum_filename_mismatch_fails "$artifact"
     fingerprint_mismatch_fails "$artifact"
 done
 

@@ -1,6 +1,6 @@
 # Release Verification
 
-Release verification applies to artifacts produced from the exact release commit. For v1.0.0, the
+Release verification applies to artifacts produced from the exact release commit. For v0.15.0, the
 release-candidate and final-release artifacts are the mobile UniFFI outputs built by the existing
 scripts:
 
@@ -13,8 +13,11 @@ scripts:
 - iOS Swift sources under `target/xcframework/Sources/`
 - iOS Swift Package under `target/ios-distribution/aether-ios-v<version>/`
 - iOS xcframework archive `target/ios-distribution/Aether-v<version>.xcframework.zip`
+- iOS Swift Package archive `target/ios-distribution/Aether-v<version>.swift-package.zip`
 - detached OpenPGP signatures and pinned SHA-256 checksums for the final iOS xcframework archive
   and Android AAR
+- a signed packet manifest, public release key, Android POM and Maven Central bundle, CycloneDX
+  SBOM, and successful release-gate evidence tied to the same source revision and CI run
 
 Release-candidate hashes and local build outputs are reproducibility evidence, not the distribution
 trust root. Final consumer trust is attached to the fixed iOS xcframework archive and Android AAR
@@ -35,9 +38,10 @@ Each command builds the selected artifact set twice from `git archive HEAD`, set
 released files, and fails if the two hash manifests differ.
 
 Each reproducibility pass records release-candidate evidence alongside its `SHA256SUMS`: command,
-tool and runner environment, archive reference, commit object, `SOURCE_DATE_EPOCH`, and artifact
-hashes. The Android reproducibility pass covers the local Maven AAR and POM metadata in addition
-to generated Kotlin and ABI-specific shared libraries.
+tool and runner environment, source revision, archive reference, commit object,
+`SOURCE_DATE_EPOCH`, and artifact hashes. The Android pass covers the local Maven AAR and POM
+metadata in addition to generated Kotlin and ABI-specific shared libraries. The iOS pass covers
+both the xcframework archive and the complete Swift Package archive.
 
 Runner requirements match the underlying build scripts:
 
@@ -58,12 +62,12 @@ The package exposes product `Aether`, generated Swift target `Aether`, and binar
 
 ```bash
 version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
-scripts/test/ios-package-consumer.sh "target/ios-distribution/aether-ios-v$version"
+scripts/test/ios-package-consumer.sh "target/ios-distribution/Aether-v$version.swift-package.zip"
 ```
 
-CI uploads the package, `Aether-v<version>.xcframework.zip`, and `SHA256SUMS` from the same
-release-candidate run. Release-tag CI signs the final xcframework archive and publishes its pinned
-checksum.
+CI uploads the package, `Aether-v<version>.swift-package.zip`,
+`Aether-v<version>.xcframework.zip`, and `SHA256SUMS` from the same release-candidate run.
+Release-tag CI signs the final xcframework archive and publishes its pinned checksum.
 
 ## Android AAR Distribution
 
@@ -142,16 +146,70 @@ scripts/test/release-artifact-verification.sh \
 ```
 
 It verifies happy paths and negative paths for iOS and Android signature mismatch, checksum
-mismatch, and fingerprint mismatch.
+mismatch, checksum filename substitution, and fingerprint mismatch.
 
-## v1.0.0 Final Gates
+## Mobile release packet
 
-Do not create the `v1.0.0` tag or publish the GitHub Release from the Aether-side release-candidate
-work. Both remain blocked until Relay tests, checks, and functionality criteria pass.
+Assemble the final files only after both platform reproducibility passes, both package-consumer
+checks, the packet failure-path suite, the Android distribution build, and reproducible SBOM
+generation succeed. CI writes one `.evidence` file immediately after each gate:
 
-Before treating `v1.0.0` as publishable, verify that GitHub issues #129, #130, #131, #132, and
-#133 are closed. Issue #128 is the umbrella release-candidate closeout, and issue #189 completes
-release-facing docs and draft notes; both are intentionally outside the pre-tag prerequisite script.
+```bash
+export AETHER_RELEASE_SOURCE_REVISION="$(git rev-parse HEAD)"
+export AETHER_REQUIRE_SIGNED_MAVEN_PUBLICATION=true
+scripts/release/assemble-mobile-release-packet.sh \
+  target/release-verification/reproducible-mobile/ios/pass-1/artifacts \
+  target/release-verification/reproducible-mobile/android/pass-1/artifacts \
+  target/android \
+  target/sbom \
+  target/mobile-release-evidence \
+  target/mobile-release-packet
+```
+
+The command rejects inputs whose source revision, version, or `SOURCE_DATE_EPOCH` differs. The
+packet contains the signed xcframework archive and AAR with their pinned checksum sidecars, the
+Swift Package archive, Android POM and Maven Central bundle, CycloneDX SBOM, public key, `SOURCE`
+record, and evidence for these gates:
+
+- Android reproducibility
+- Android package consumption, including missing-AAR rejection
+- iOS reproducibility
+- iOS package consumption
+- mobile packet happy and failure paths
+- SBOM reproducibility
+
+Each evidence record contains its command, pass result, source revision and epoch, and CI identity.
+The signed `SHA256SUMS` manifest covers every evidence file and other packet payload. Final packets
+require all evidence to come from one `RelayNet/aether` GitHub Actions run. Local candidate packets
+may use local evidence. Set `AETHER_RELEASE_OUTPUT_ROOT` only when writing outside the default
+`target/` root; the output must be a child of that explicit root.
+
+Verify a packet from the matching source checkout with the expected signing-key fingerprint and
+source revision:
+
+```bash
+export AETHER_RELEASE_GPG_FINGERPRINT="<trusted fingerprint>"
+export AETHER_RELEASE_SOURCE_REVISION="<full commit SHA>"
+scripts/release/verify-mobile-release-packet.sh target/mobile-release-packet
+```
+
+Verification fails if a file is missing or extra, if gate evidence differs by revision, epoch, run,
+or expected job, if package metadata has the wrong version, if the POM or Swift Package wraps
+different binary bytes, if a signed Maven bundle omits or mismatches an internal artifact signature,
+if SBOM provenance differs, or if any manifest, signature, checksum, or trusted fingerprint check
+fails. Before extraction, `scripts/release/extract-zip-safely.sh` also rejects non-portable or unsafe
+member paths, links and special files, duplicate or case-colliding paths, more than 50,000 entries,
+or more than 2 GiB of declared expanded data. Verification requires Info-ZIP `zipinfo` and `unzip`.
+
+## v0.15.0 final gates
+
+Do not create the `v0.15.0` tag or publish the GitHub Release from the Aether-side release-candidate
+work. Both remain blocked until Relay tests, checks, and functionality criteria pass and Khaled
+explicitly approves publication in issue #223.
+
+Before treating `v0.15.0` as publishable, verify that GitHub issues #217 through #222 are closed.
+Issue #223 performs the human-authorized tag and release publication, so it stays outside the
+pre-tag prerequisite script.
 
 Run the prerequisite gate before tagging:
 
@@ -165,7 +223,7 @@ upload or GitHub prerelease publication.
 
 ## Constrained Decryption Profile
 
-The v1.0.0 release gate measures the real spec-v1.0 encrypted Message receive path in an optimized
+The v0.15.0 release gate measures the real spec-v1.0 encrypted Message receive path in an optimized
 Rust test binary:
 
 ```bash
@@ -191,17 +249,21 @@ Generate the release SBOM with:
 scripts/release/sbom.sh
 ```
 
-The output is:
+The outputs are:
 
 ```text
 target/sbom/aether-uniffi-v<version>-sbom.json
+target/sbom/aether-uniffi-v<version>-sbom.source
 ```
 
 The SBOM is CycloneDX JSON generated from `crates/aether-uniffi/Cargo.toml` with all Cargo targets
-described. Release verification uploads this file as a CI artifact.
+described. Generation normalizes checkout paths and records `aether:source:revision`, so the JSON is
+byte-identical across clean checkout locations for the same revision and `SOURCE_DATE_EPOCH`. The
+source sidecar records the version, revision, and epoch consumed by packet assembly.
 
 To verify an uploaded SBOM, check out the same commit, rerun `scripts/release/sbom.sh`, and compare
-the SHA-256 hash of `target/sbom/aether-uniffi-v<version>-sbom.json` with the uploaded artifact.
+the SHA-256 hash of `target/sbom/aether-uniffi-v<version>-sbom.json` with the uploaded artifact. Run
+`scripts/test/sbom-reproducibility.sh` to verify generation across two clean checkout paths.
 
 ## Malformed-Input Fuzz Campaigns
 
