@@ -4,9 +4,11 @@
 
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 REPO="${AETHER_GITHUB_REPO:-RelayNet/aether}"
 TAG="${AETHER_RELEASE_TAG:-v0.15.0}"
 EXPECTED_TAG="v0.15.0"
+RELEASE_NOTES="$ROOT/docs/release-notes/$TAG.md"
 # #223 performs the human-authorized publication; gate the completed implementation work.
 REQUIRED_ISSUES=(217 218 219 220 221 222)
 
@@ -42,6 +44,11 @@ if [[ -n "${GITHUB_REF_NAME:-}" && "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]]; the
     exit 2
 fi
 
+if [[ ! -f "$RELEASE_NOTES" ]]; then
+    echo "missing release notes: $RELEASE_NOTES" >&2
+    exit 1
+fi
+
 for issue in "${REQUIRED_ISSUES[@]}"; do
     state="$(issue_state "$issue")"
     if [[ "$state" != "CLOSED" ]]; then
@@ -50,4 +57,4 @@ for issue in "${REQUIRED_ISSUES[@]}"; do
     fi
 done
 
-echo "$TAG release prerequisite issues are closed"
+echo "$TAG release prerequisites are satisfied"

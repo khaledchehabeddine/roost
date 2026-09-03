@@ -211,15 +211,20 @@ Before treating `v0.15.0` as publishable, verify that GitHub issues #217 through
 Issue #223 performs the human-authorized tag and release publication, so it stays outside the
 pre-tag prerequisite script.
 
-Run the prerequisite gate before tagging:
+Run the prerequisite gate before tagging. It requires the version-matched release-notes file and
+closed GitHub issues #217 through #222:
 
 ```bash
 scripts/release/verify-release-gates.sh
 ```
 
+Enable immutable releases in the GitHub repository before publication. Tag CI creates the final
+release once with `--verify-tag`, refuses to edit or replace an existing release, and fails unless
+GitHub reports the published release as immutable.
+
 The command requires GitHub CLI access to `RelayNet/aether`; in CI, the signed-release workflow
 provides `GH_TOKEN`. The workflow runs the same gate at preflight and again before signed asset
-upload or GitHub prerelease publication.
+upload or final GitHub Release publication.
 
 ## Constrained Decryption Profile
 

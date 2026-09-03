@@ -94,8 +94,9 @@ or create a public trust root.
 
 The release-preflight job runs `scripts/release/verify-release-gates.sh` early for fail-fast tag
 checks, and the signed-release job runs the same gate again immediately before signed asset upload
-or GitHub prerelease publication. Both jobs pass `GH_TOKEN` from `github.token` so the GitHub CLI
-can read issue state.
+or final GitHub Release publication. The publication step creates the release once, refuses to edit
+or replace an existing release, and verifies GitHub reports it as immutable. Both jobs pass
+`GH_TOKEN` from `github.token` so the GitHub CLI can read issue and release state.
 
 ## Supply Chain
 
@@ -110,6 +111,7 @@ The supply-chain workflow runs on pull requests, `main`, and release tags. It en
 - `cargo audit --deny warnings`
 - `cargo geiger` reports for each workspace package
 - mobile release packet contract and cross-checkout SBOM reproducibility tests
+- v0.15.0 release preflight and immutable publication contract tests
 - no first-party `unsafe` in `crates/**/*.rs`
 
 `cargo-audit` is an advisory backstop for the RustSec database. `cargo-geiger` records the unsafe
