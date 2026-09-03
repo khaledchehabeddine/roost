@@ -25,9 +25,11 @@ jobs:
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
         run: echo "release preflight is tag-only"
 
-      - name: Verify release notes
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: test -f "docs/release-notes/$GITHUB_REF_NAME.md"
+      - name: Verify release preflight contract
+        run: scripts/test/release-gates.sh
+
+      - name: Verify immutable publication contract
+        run: scripts/test/release-publication.sh
 
       - name: Verify release gates
         if: startsWith(github.ref, 'refs/tags/v')
@@ -350,6 +352,7 @@ jobs:
       - android-aar-distribution
       - ios-reproducible
     if: startsWith(github.ref, 'refs/tags/v')
+    environment: release
     permissions:
       contents: write
       actions: read
@@ -450,29 +453,10 @@ jobs:
           path: target/signed-release/release-assets/**
           if-no-files-found: error
 
-      - name: Publish GitHub prerelease
+      - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          tag="$GITHUB_REF_NAME"
-          title="$GITHUB_REF_NAME"
-          notes="docs/release-notes/$GITHUB_REF_NAME.md"
-          if [ ! -f "$notes" ]; then
-            echo "missing release notes: $notes" >&2
-            exit 1
-          fi
-
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" \
-              --title "$title" \
-              --notes-file "$notes" \
-              --prerelease
-            gh release upload "$tag" target/signed-release/release-assets/* --clobber
-          else
-            gh release create "$tag" target/signed-release/release-assets/* \
-              --title "$title" \
-              --notes-file "$notes" \
-              --prerelease
-          fi
+          AETHER_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.AETHER_RELEASE_ADMIN_READ_TOKEN }}
+          AETHER_RELEASE_GPG_FINGERPRINT: ${{ secrets.AETHER_RELEASE_GPG_FINGERPRINT }}
+          AETHER_RELEASE_TAG: ${{ github.ref_name }}
+        run: scripts/release/publish-github-release.sh target/signed-release/release-assets

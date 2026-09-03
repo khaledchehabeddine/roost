@@ -81,6 +81,12 @@ jobs:
       - name: Verify mobile release packet contract
         run: scripts/test/mobile-release-packet.sh
 
+      - name: Verify release preflight contract
+        run: scripts/test/release-gates.sh
+
+      - name: Verify immutable publication contract
+        run: scripts/test/release-publication.sh
+
       - name: Verify reproducible SBOM
         run: scripts/test/sbom-reproducibility.sh
 

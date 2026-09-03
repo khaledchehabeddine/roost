@@ -211,15 +211,47 @@ Before treating `v0.15.0` as publishable, verify that GitHub issues #217 through
 Issue #223 performs the human-authorized tag and release publication, so it stays outside the
 pre-tag prerequisite script.
 
-Run the prerequisite gate before tagging:
+Run the prerequisite gate before tagging. It requires the version-matched release-notes file and
+closed GitHub issues #217 through #222:
 
 ```bash
 scripts/release/verify-release-gates.sh
 ```
 
-The command requires GitHub CLI access to `RelayNet/aether`; in CI, the signed-release workflow
-provides `GH_TOKEN`. The workflow runs the same gate at preflight and again before signed asset
-upload or GitHub prerelease publication.
+Before the first release tag, configure these GitHub settings:
+
+- Enable immutable releases for `RelayNet/aether`.
+- Create an active tag ruleset for `refs/tags/v0.15.0` that restricts updates and deletions, with no
+  bypass actors. It must allow creation of the approved tag. Confirm this control before tagging;
+  it prevents the tag from changing while GitHub CLI uploads assets to its temporary draft.
+- Configure the `release` environment with Khaled as a required reviewer and disable protection-rule
+  bypass. The workflow references this environment but does not create its review rules.
+- Store `AETHER_RELEASE_ADMIN_READ_TOKEN` in that environment. Use a fine-grained token limited to
+  `RelayNet/aether` with Administration read permission. The token only checks the immutable-release
+  setting; the normal Actions token publishes the release.
+
+GitHub requires Administration read permission for the
+[repository immutability check](https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository).
+The signed-release job waits for the configured
+[environment review](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#required-reviewers)
+before it can use the environment secret.
+The tag ruleset closes the upload interval because
+[GitHub CLI stages a draft before publication](https://cli.github.com/manual/gh_release_create#immutable-releases).
+The runtime token stays read-only for administration; the release operator must verify the ruleset
+and its bypass list separately.
+
+Publication is fixed to `github.com/RelayNet/aether`. The script rejects repository overrides,
+missing or unexpected packet files, symlinks, and a packet source record that differs from
+`AETHER_RELEASE_SOURCE_REVISION`. It re-verifies the signed packet manifest, artifacts, and GitHub
+gate evidence before contacting GitHub. Before creation it requires immutable releases to be enabled,
+proves the source revision is on remote `main`, and resolves the remote release tag to that exact
+revision, including annotated tags. It creates the release once with `--verify-tag`, refuses to edit
+or replace an existing release, then checks both immutability and the locked tag revision again.
+
+The prerequisite command requires GitHub CLI access to `github.com/RelayNet/aether`; in CI, the
+signed-release workflow provides `GH_TOKEN`. The workflow runs the same gate at preflight and again
+before signed asset upload or final GitHub Release publication. Do not create the tag until the
+environment, token, tag ruleset, and immutable-release settings are in place.
 
 ## Constrained Decryption Profile
 
