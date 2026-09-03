@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-REPO="${AETHER_GITHUB_REPO:-RelayNet/aether}"
+REPO="github.com/RelayNet/aether"
 TAG="${AETHER_RELEASE_TAG:-v0.15.0}"
 EXPECTED_TAG="v0.15.0"
 RELEASE_NOTES="$ROOT/docs/release-notes/$TAG.md"
@@ -33,6 +33,11 @@ issue_state() {
 }
 
 require_tool gh
+
+if [[ "${AETHER_GITHUB_REPO+x}" == x ]]; then
+    echo "AETHER_GITHUB_REPO is not supported; repository is fixed to $REPO" >&2
+    exit 2
+fi
 
 if [[ "$TAG" != "$EXPECTED_TAG" ]]; then
     echo "unsupported release tag: $TAG, expected $EXPECTED_TAG" >&2

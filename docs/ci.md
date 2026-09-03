@@ -66,7 +66,8 @@ the release jobs:
 - `Aether-v<version>.xcframework.zip`
 - `aether-<version>.aar`
 
-The signed-release job imports the OpenPGP release key from repository secrets, then assembles one
+The signed-release job waits for the `release` environment's required review, imports the OpenPGP
+release key from repository secrets, then assembles one
 packet from the reproducible iOS and Android outputs, Android publication metadata, SBOM, and gate
 evidence. Each evidence record names the successful command, source revision and epoch, and the
 shared GitHub Actions run identity. The packet has detached `.asc` signatures and pinned `.sha256`
@@ -82,6 +83,16 @@ Required secrets:
 - `AETHER_RELEASE_GPG_PASSPHRASE`
 - `AETHER_RELEASE_GPG_FINGERPRINT`
 
+Publication also requires the `release` environment secret `AETHER_RELEASE_ADMIN_READ_TOKEN`, a
+fine-grained token limited to `RelayNet/aether` with Administration read permission. It reads the
+repository's immutable-release setting only. The normal `github.token` retains the separate
+contents-write permission used for release creation. Configure the environment's required reviewer
+and disable protection-rule bypass before creating a release tag; the YAML reference alone does not
+install those rules.
+An active tag ruleset must also prohibit updates and deletions of `refs/tags/v0.15.0` without bypass
+actors. The release operator verifies this pre-tag control; it keeps the source revision fixed
+while GitHub CLI stages and uploads the draft before publication.
+
 The Android AAR distribution job also enables Gradle publication signing on release tags so the
 Maven Central bundle contains Maven `.asc` signatures. Non-tag workflow runs keep producing
 unsigned release-candidate artifacts.
@@ -94,9 +105,12 @@ or create a public trust root.
 
 The release-preflight job runs `scripts/release/verify-release-gates.sh` early for fail-fast tag
 checks, and the signed-release job runs the same gate again immediately before signed asset upload
-or final GitHub Release publication. The publication step creates the release once, refuses to edit
-or replace an existing release, and verifies GitHub reports it as immutable. Both jobs pass
-`GH_TOKEN` from `github.token` so the GitHub CLI can read issue and release state.
+or final GitHub Release publication. The publication step pins `github.com/RelayNet/aether`, checks
+the exact Mobile Release Packet file set and source revision, verifies repository immutability is
+enabled, and proves the remote tag resolves to that revision on `main`. It creates the release once,
+refuses to edit or replace an existing release, and checks the published release's immutability and
+locked tag revision. Both jobs pass `GH_TOKEN` from `github.token` so the GitHub CLI can read issue
+and release state.
 
 ## Supply Chain
 

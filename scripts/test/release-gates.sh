@@ -7,6 +7,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
 
+# GitHub Actions sets this to the branch or pull-request merge ref. The test
+# exercises the tag-only gate in isolation.
+unset GITHUB_REF_NAME AETHER_RELEASE_TAG AETHER_GITHUB_REPO
+
 cleanup() {
     rm -rf "$TMP"
 }
@@ -24,7 +28,7 @@ set -euo pipefail
 if [[ "$1" == "issue" && "$2" == "view" ]]; then
     if [[ $# -ne 9 \
         || "$4" != "--repo" \
-        || "$5" != "RelayNet/aether" \
+        || "$5" != "github.com/RelayNet/aether" \
         || "$6" != "--json" \
         || "$7" != "state" \
         || "$8" != "--jq" \
@@ -56,6 +60,19 @@ exit 2
 SH
 chmod +x "$MOCK_BIN/gh"
 export MOCK_GH_LOG="$TMP/gh.log"
+
+if AETHER_GITHUB_REPO="example.invalid/other/repository" PATH="$MOCK_BIN:$PATH" \
+    "$CHECKOUT/scripts/release/verify-release-gates.sh" \
+    > "$TMP/repository-override.log" 2>&1; then
+    echo "expected a repository override to fail the release gate" >&2
+    exit 1
+fi
+grep -F "repository is fixed to github.com/RelayNet/aether" \
+    "$TMP/repository-override.log" >/dev/null
+if [[ -e "$MOCK_GH_LOG" ]]; then
+    echo "repository override reached GitHub" >&2
+    exit 1
+fi
 
 if PATH="$MOCK_BIN:$PATH" "$CHECKOUT/scripts/release/verify-release-gates.sh" \
     > "$TMP/missing-notes.log" 2>&1; then

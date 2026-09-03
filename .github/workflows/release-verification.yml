@@ -352,6 +352,7 @@ jobs:
       - android-aar-distribution
       - ios-reproducible
     if: startsWith(github.ref, 'refs/tags/v')
+    environment: release
     permissions:
       contents: write
       actions: read
@@ -455,5 +456,7 @@ jobs:
       - name: Publish immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          AETHER_RELEASE_ADMIN_READ_TOKEN: ${{ secrets.AETHER_RELEASE_ADMIN_READ_TOKEN }}
+          AETHER_RELEASE_GPG_FINGERPRINT: ${{ secrets.AETHER_RELEASE_GPG_FINGERPRINT }}
           AETHER_RELEASE_TAG: ${{ github.ref_name }}
         run: scripts/release/publish-github-release.sh target/signed-release/release-assets
