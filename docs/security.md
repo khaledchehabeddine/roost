@@ -49,7 +49,7 @@ callers on constrained hosts may lower supported limits through the public Rust 
 
 Default ceilings:
 
-- encoded Message: the sealed-frame encoded limit from `aether-crypto`
+- encoded Message: the sealed-frame encoded limit from `roost-crypto`
 - Message ciphertext payload: 128 KiB
 - Transport Binding / sealed-frame external associated data: 1 KiB
 - Protocol State Blob: 64 KiB for ratchet/session, deduplication, and contact blobs

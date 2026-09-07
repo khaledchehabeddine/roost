@@ -1,0 +1,44 @@
+[package]
+name = "roost-client"
+edition.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib", "staticlib"]
+name = "roost_client"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "uniffi-bindgen-swift.rs"
+
+[features]
+default = []
+development-certificates = ["roost-core/development-certificates"]
+fixture-replay = ["roost-core/test-support", "dep:hex", "dep:rand_chacha", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+# Local
+roost-core.workspace = true
+roost-protocol.workspace = true
+# Utility
+blake3.workspace = true
+hex = { workspace = true, optional = true }
+rand.workspace = true
+rand_chacha = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+uniffi = { version = "0.31.1", features = ["cli"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+roost-core = { workspace = true, features = ["test-support"] }
+# Utility
+hex.workspace = true
+
+[lints]
+workspace = true

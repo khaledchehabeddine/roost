@@ -13,53 +13,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-core"
-version = "0.15.0"
-dependencies = [
- "aether-crypto",
- "argon2",
- "blake3",
- "chacha20poly1305",
- "curve25519-dalek",
- "postcard",
- "rand",
- "serde",
- "subtle",
- "unicode-normalization",
- "zeroize",
-]
-
-[[package]]
-name = "aether-crypto"
-version = "0.15.0"
-dependencies = [
- "chacha20poly1305",
- "curve25519-dalek",
- "ed25519-dalek",
- "hkdf",
- "hmac",
- "postcard",
- "rand",
- "serde",
- "sha2",
- "subtle",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "aether-fuzz"
-version = "0.0.0"
-dependencies = [
- "aether-core",
- "aether-crypto",
- "hex",
- "libfuzzer-sys",
- "rand",
- "rand_chacha",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -524,6 +477,67 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+]
+
+[[package]]
+name = "roost-core"
+version = "0.16.0"
+dependencies = [
+ "argon2",
+ "blake3",
+ "chacha20poly1305",
+ "postcard",
+ "rand",
+ "roost-crypto",
+ "roost-protocol",
+ "serde",
+ "subtle",
+ "unicode-normalization",
+ "zeroize",
+]
+
+[[package]]
+name = "roost-crypto"
+version = "0.16.0"
+dependencies = [
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "hkdf",
+ "hmac",
+ "postcard",
+ "rand",
+ "roost-protocol",
+ "serde",
+ "sha2",
+ "subtle",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "roost-fuzz"
+version = "0.0.0"
+dependencies = [
+ "hex",
+ "libfuzzer-sys",
+ "rand",
+ "rand_chacha",
+ "roost-core",
+ "roost-crypto",
+ "roost-protocol",
+]
+
+[[package]]
+name = "roost-protocol"
+version = "0.16.0"
+dependencies = [
+ "blake3",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "postcard",
+ "serde",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

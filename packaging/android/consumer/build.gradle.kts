@@ -8,7 +8,7 @@ plugins {
 
 val aetherVersion = rootProject.extensions.extraProperties["aetherVersion"] as String
 val issue122CoverageSource = rootProject.layout.projectDirectory
-    .file("../../crates/aether-uniffi/tests/bindings/Issue122Coverage.kt")
+    .file("../../crates/roost-client/tests/bindings/Issue122Coverage.kt")
 val generatedCoverageDir = layout.buildDirectory.dir("generated/androidTest/kotlin")
 
 android {

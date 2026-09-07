@@ -2,11 +2,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-PKGID="$(cargo pkgid --manifest-path "$ROOT/crates/aether-uniffi/Cargo.toml")"
+PKGID="$(cargo pkgid --manifest-path "$ROOT/crates/roost-client/Cargo.toml")"
 VERSION="${PKGID##*#}"
-NAME="aether-uniffi-v$VERSION-sbom"
+NAME="roost-client-v$VERSION-sbom"
 OUTPUT="$ROOT/target/sbom/$NAME.json"
-GENERATED="$ROOT/crates/aether-uniffi/$NAME.json"
+GENERATED="$ROOT/crates/roost-client/$NAME.json"
 SOURCE_OUTPUT="$ROOT/target/sbom/$NAME.source"
 SOURCE_REVISION="${AETHER_RELEASE_SOURCE_REVISION:-}"
 
@@ -30,7 +30,7 @@ cargo metadata --locked --format-version 1 >/dev/null
 
 # The default crate mode writes one SBOM with Cargo targets as subcomponents.
 cargo cyclonedx \
-    --manifest-path crates/aether-uniffi/Cargo.toml \
+    --manifest-path crates/roost-client/Cargo.toml \
     --format json \
     --spec-version 1.5 \
     --target all \

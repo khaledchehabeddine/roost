@@ -61,6 +61,6 @@ for the same sender Identity Key.
 - Unknown envelope versions and profile mismatches reject before body interpretation. Malformed,
   oversized, noncanonical-key, over-grace, cross-relay, expired-at-acceptance, and
   signature-invalid bundles reject with stable typed categories.
-- [`evidence_bundles_v1.json`](../../crates/aether-core/tests/fixtures/evidence_bundles_v1.json)
+- [`evidence_bundles_v1.json`](../../crates/roost-protocol/tests/fixtures/evidence_bundles_v1.json)
   pins the Rust encoding and rejection vectors; generated Swift and Kotlin harnesses replay the
   same valid bytes and independently verify both Ed25519 signatures with CryptoKit and the JDK.

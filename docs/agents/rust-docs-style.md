@@ -2,8 +2,8 @@
 
 ## Tiers
 
-- T1 — UniFFI-exposed APIs in `crates/aether-uniffi/`, read by SDK consumers via the generated bindings
-- T2 — Cross-crate `pub` items in `aether-core` and `aether-crypto`, read by Rust contributors wiring the crates together
+- T1 — UniFFI-exposed APIs in `crates/roost-client/`, read by SDK consumers via the generated bindings
+- T2 — Cross-crate `pub` items in `roost-server`, `roost-core`, `roost-crypto`, and `roost-protocol`, read by Rust consumers and contributors wiring the crates together
 - T3 — `pub(crate)` or private items in any crate, read by contributors editing the crate itself
 
 ## Per-tier content

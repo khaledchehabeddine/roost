@@ -34,7 +34,7 @@ ASSET_NAMES=(
     aether-0.15.0.aar.sha256
     aether-0.15.0.pom
     aether-0.15.0-maven-central-signed.zip
-    aether-uniffi-v0.15.0-sbom.json
+    roost-client-v0.15.0-sbom.json
     aether-v0.15.0-release-key.asc
     ios-package-consumer.evidence
     ios-reproducibility.evidence

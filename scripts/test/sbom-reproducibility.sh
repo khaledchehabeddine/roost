@@ -28,8 +28,8 @@ for pass in 1 2; do
     )
 done
 
-SBOM_NAME="aether-uniffi-v$VERSION-sbom.json"
-SOURCE_NAME="aether-uniffi-v$VERSION-sbom.source"
+SBOM_NAME="roost-client-v$VERSION-sbom.json"
+SOURCE_NAME="roost-client-v$VERSION-sbom.source"
 FIRST="$TMP/checkout-1/target/sbom"
 SECOND="$TMP/checkout-2/target/sbom"
 

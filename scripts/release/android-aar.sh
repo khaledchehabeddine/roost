@@ -70,9 +70,9 @@ verify_aar() {
     fi
 
     for entry in \
-        "jni/arm64-v8a/libaether.so" \
-        "jni/armeabi-v7a/libaether.so" \
-        "jni/x86_64/libaether.so"; do
+        "jni/arm64-v8a/libroost_client.so" \
+        "jni/armeabi-v7a/libroost_client.so" \
+        "jni/x86_64/libroost_client.so"; do
         unzip -l "$aar" "$entry" | grep -q "$entry"
     done
 }

@@ -5,8 +5,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-CRATE="aether-uniffi"
-LIB="libaether"
+CRATE="roost-client"
+LIB="libroost_client"
 OUT="$ROOT/target/xcframework"
 SYSROOT="$(rustc --print sysroot)"
 IOS_DEPLOYMENT_TARGET="${AETHER_IOS_DEPLOYMENT_TARGET:-13.0}"

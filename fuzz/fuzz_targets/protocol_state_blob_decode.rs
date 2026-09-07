@@ -1,7 +1,7 @@
 #![no_main]
 
-use aether_core::fuzzing::fuzz_decode_protocol_state_blob;
-use aether_core::{ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind};
+use roost_core::fuzzing::fuzz_decode_protocol_state_blob;
+use roost_core::{ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind};
 use libfuzzer_sys::fuzz_target;
 
 mod support;

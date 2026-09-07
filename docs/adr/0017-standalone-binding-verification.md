@@ -5,7 +5,7 @@
 `verify_identity_key_binding` and `verify_discovery_to_identity_binding` are exported as two free
 functions taking public material only, so a caller can check both halves of the mutual IK/DK binding
 (AE-KEY-04) before any session or contact record exists. Both directions were already implemented
-and correct in `aether-crypto`, but the only exported paths that reached them were `initiate_session`
+and correct in `roost-crypto`, but the only exported paths that reached them were `initiate_session`
 — which needs a live publication bundle and a session — and `record_contact`, which covers IK→DK
 alone. Adding a contact from a typed discovery key happens before either, so the check that decides
 whether a relay-supplied identity is the one that discovery key vouches for had no Aether-side
@@ -37,7 +37,7 @@ answer, and the client wrote a second Ed25519 implementation of it.
   off-the-shelf Ed25519 library. Nothing here can be pointed at `AetherDK-v1:`, `AetherSPK-v1:`,
   `AetherMessageTranscript-v1:`, or a sender certificate, because none of those payloads is
   constructible through these signatures.
-- `aether_crypto::parse_ed25519_verifying_key_bytes` becomes public. A caller verifying a bare
+- `roost_protocol::parse_ed25519_verifying_key_bytes` supplies shared canonical validation. A caller verifying a bare
   signature under a bare key has no bundle to parse the key for it, and `VerifyingKey::from_bytes`
   alone accepts non-canonical encodings and small-order points — a weak discovery key would report a
   binding that binds nothing. The strict parser every bundle constructor already uses is now

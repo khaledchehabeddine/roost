@@ -21,9 +21,9 @@ parallel session, acknowledgment, and X3DH envelopes.
 
 ## Verification Evidence
 
-- `crates/aether-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins the
+- `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins the
   transport-visible frame fields and post-decryption sender material for session Messages.
-- `crates/aether-core/docs/adr/0006-postcard-message-wire-format.md` records that old
+- `crates/roost-core/docs/adr/0006-postcard-message-wire-format.md` records that old
   sender-visible and pre-frame layouts reject instead of decoding as current Messages.
 - `fuzz/README.md` and `fuzz/fuzz_targets/sealed_frame_envelope_decode.rs` cover malformed
   sealed-frame envelope decode inputs.

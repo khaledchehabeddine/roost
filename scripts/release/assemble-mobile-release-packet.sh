@@ -234,9 +234,9 @@ CENTRAL_SOURCE="$(one_match "Android distribution source record" \
     find "$ANDROID_DISTRIBUTION_INPUT" -type f \
         -name "aether-$VERSION-maven-central.source")"
 SBOM="$(one_match "SBOM for v$VERSION" \
-    find "$SBOM_INPUT" -type f -name "aether-uniffi-v$VERSION-sbom.json")"
+    find "$SBOM_INPUT" -type f -name "roost-client-v$VERSION-sbom.json")"
 SBOM_SOURCE="$(one_match "SBOM source record" \
-    find "$SBOM_INPUT" -type f -name "aether-uniffi-v$VERSION-sbom.source")"
+    find "$SBOM_INPUT" -type f -name "roost-client-v$VERSION-sbom.source")"
 
 EVIDENCE_GATES=(
     android-package-consumer
@@ -326,7 +326,7 @@ cp "$IOS_PACKAGE" "$STAGE/Aether-v$VERSION.swift-package.zip"
 cp "$ANDROID_ARTIFACT" "$STAGE/aether-$VERSION.aar"
 cp "$ANDROID_POM" "$STAGE/aether-$VERSION.pom"
 cp "$CENTRAL_BUNDLE" "$STAGE/"
-cp "$SBOM" "$STAGE/aether-uniffi-v$VERSION-sbom.json"
+cp "$SBOM" "$STAGE/roost-client-v$VERSION-sbom.json"
 for index in "${!EVIDENCE_GATES[@]}"; do
     cp "${EVIDENCE_FILES[$index]}" "$STAGE/${EVIDENCE_GATES[$index]}.evidence"
 done

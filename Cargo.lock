@@ -13,66 +13,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-core"
-version = "0.15.0"
-dependencies = [
- "aether-crypto",
- "argon2",
- "blake3",
- "chacha20poly1305",
- "curve25519-dalek",
- "hex",
- "postcard",
- "proptest",
- "rand",
- "rand_chacha",
- "serde",
- "serde_json",
- "stats_alloc",
- "subtle",
- "unicode-normalization",
- "zeroize",
-]
-
-[[package]]
-name = "aether-crypto"
-version = "0.15.0"
-dependencies = [
- "chacha20poly1305",
- "curve25519-dalek",
- "ed25519-dalek",
- "hex",
- "hkdf",
- "hmac",
- "postcard",
- "proptest",
- "rand",
- "rand_chacha",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "x25519-dalek",
- "zeroize",
-]
-
-[[package]]
-name = "aether-uniffi"
-version = "0.15.0"
-dependencies = [
- "aether-core",
- "aether-crypto",
- "blake3",
- "hex",
- "rand",
- "rand_chacha",
- "serde",
- "serde_json",
- "uniffi",
- "zeroize",
-]
-
-[[package]]
 name = "anstyle"
 version = "1.0.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -883,6 +823,93 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "roost-client"
+version = "0.16.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "rand",
+ "rand_chacha",
+ "roost-core",
+ "roost-protocol",
+ "serde",
+ "serde_json",
+ "uniffi",
+ "zeroize",
+]
+
+[[package]]
+name = "roost-core"
+version = "0.16.0"
+dependencies = [
+ "argon2",
+ "blake3",
+ "chacha20poly1305",
+ "hex",
+ "postcard",
+ "proptest",
+ "rand",
+ "rand_chacha",
+ "roost-crypto",
+ "roost-protocol",
+ "serde",
+ "serde_json",
+ "stats_alloc",
+ "subtle",
+ "unicode-normalization",
+ "zeroize",
+]
+
+[[package]]
+name = "roost-crypto"
+version = "0.16.0"
+dependencies = [
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "hex",
+ "hkdf",
+ "hmac",
+ "postcard",
+ "proptest",
+ "rand",
+ "rand_chacha",
+ "roost-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
+name = "roost-protocol"
+version = "0.16.0"
+dependencies = [
+ "blake3",
+ "curve25519-dalek",
+ "ed25519-dalek",
+ "hex",
+ "postcard",
+ "rand",
+ "rand_chacha",
+ "serde",
+ "serde_json",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "roost-server"
+version = "0.16.0"
+dependencies = [
+ "hex",
+ "roost-protocol",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "rustc-hash"

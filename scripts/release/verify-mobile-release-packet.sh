@@ -292,7 +292,7 @@ IOS_ARTIFACT="$PACKET/Aether-v$VERSION.xcframework.zip"
 IOS_PACKAGE="$PACKET/Aether-v$VERSION.swift-package.zip"
 ANDROID_ARTIFACT="$PACKET/aether-$VERSION.aar"
 ANDROID_POM="$PACKET/aether-$VERSION.pom"
-SBOM="$PACKET/aether-uniffi-v$VERSION-sbom.json"
+SBOM="$PACKET/roost-client-v$VERSION-sbom.json"
 PUBLIC_KEY="$PACKET/aether-v$VERSION-release-key.asc"
 SOURCE="$PACKET/SOURCE"
 MANIFEST="$PACKET/SHA256SUMS"
@@ -346,7 +346,7 @@ MANIFEST_FILES="$TMP/manifest-files"
         "aether-$VERSION.aar.sha256" \
         "aether-$VERSION.pom" \
         "$(basename "$CENTRAL_BUNDLE")" \
-        "aether-uniffi-v$VERSION-sbom.json" \
+        "roost-client-v$VERSION-sbom.json" \
         "aether-v$VERSION-release-key.asc" \
         "ios-package-consumer.evidence" \
         "ios-reproducibility.evidence" \
@@ -423,12 +423,12 @@ done
 
 if ! jq -e --arg version "$VERSION" --arg revision "$EXPECTED_REVISION" '
     .bomFormat == "CycloneDX"
-    and .metadata.component.name == "aether-uniffi"
+    and .metadata.component.name == "roost-client"
     and .metadata.component.version == $version
     and any(.metadata.properties[]?;
         .name == "aether:source:revision" and .value == $revision)
-    and any(.components[]?; .name == "aether-core" and .version == $version)
-    and any(.components[]?; .name == "aether-crypto" and .version == $version)
+    and any(.components[]?; .name == "roost-core" and .version == $version)
+    and any(.components[]?; .name == "roost-crypto" and .version == $version)
 ' "$SBOM" >/dev/null; then
     echo "SBOM does not describe the v$VERSION mobile binding dependency graph" >&2
     exit 1

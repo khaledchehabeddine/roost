@@ -1,6 +1,6 @@
 ---
 name: api-reviewer
-description: Rust public API and UniFFI binding reviewer for semver risk, FFI compatibility, naming, and type design. Use proactively after modifying cross-crate `pub` items or `crates/aether-uniffi/`.
+description: Rust public API and UniFFI binding reviewer for semver risk, FFI compatibility, naming, and type design. Use proactively after modifying cross-crate `pub` items or `crates/roost-client/`.
 tools: Glob, Grep, Read
 memory: local
 color: cyan

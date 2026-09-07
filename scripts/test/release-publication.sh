@@ -39,7 +39,7 @@ for name in \
     android-package-consumer.evidence android-reproducibility.evidence \
     aether-0.15.0.aar aether-0.15.0.aar.asc aether-0.15.0.aar.sha256 \
     aether-0.15.0.pom aether-0.15.0-maven-central-signed.zip \
-    aether-uniffi-v0.15.0-sbom.json aether-v0.15.0-release-key.asc \
+    roost-client-v0.15.0-sbom.json aether-v0.15.0-release-key.asc \
     ios-package-consumer.evidence ios-reproducibility.evidence \
     mobile-release-packet.evidence sbom-reproducibility.evidence; do
     echo "fixture" > "$ASSETS/$name"
@@ -153,7 +153,7 @@ if [[ "$1" == "release" && "$2" == "create" ]]; then
         android-package-consumer.evidence android-reproducibility.evidence \
         aether-0.15.0.aar aether-0.15.0.aar.asc aether-0.15.0.aar.sha256 \
         aether-0.15.0.pom aether-0.15.0-maven-central-signed.zip \
-        aether-uniffi-v0.15.0-sbom.json aether-v0.15.0-release-key.asc \
+        roost-client-v0.15.0-sbom.json aether-v0.15.0-release-key.asc \
         ios-package-consumer.evidence ios-reproducibility.evidence \
         mobile-release-packet.evidence sbom-reproducibility.evidence; do
         if [[ "$1" != "$MOCK_ASSET_DIR/$name" ]]; then

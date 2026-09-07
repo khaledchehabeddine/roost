@@ -106,17 +106,17 @@ back to an unsigned, checksum-mismatched, or wrong-key-signed artifact.
 ## Manual Bindings
 
 ```bash
-cargo build -p aether-uniffi
+cargo build -p roost-client
 
 # Kotlin
 cargo run --bin uniffi-bindgen -- generate \
-    target/debug/libaether.dylib \
+    target/debug/libroost_client.dylib \
     --language kotlin \
     --out-dir target/bindings/kotlin
 
 # Swift (headers + sources)
 cargo run --bin uniffi-bindgen-swift -- \
-    target/debug/libaether.dylib \
+    target/debug/libroost_client.dylib \
     target/bindings/swift \
     --swift-sources --headers
 ```

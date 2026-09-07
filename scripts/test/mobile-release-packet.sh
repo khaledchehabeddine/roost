@@ -199,14 +199,14 @@ cp "$PACKET/aether-$VERSION.pom" "$ANDROID_STAGE/"
         zip -X -q "$PACKET/aether-$VERSION-maven-central-unsigned.zip" -@
 )
 
-cat > "$PACKET/aether-uniffi-v$VERSION-sbom.json" <<SBOM
+cat > "$PACKET/roost-client-v$VERSION-sbom.json" <<SBOM
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "metadata": {
     "component": {
       "type": "application",
-      "name": "aether-uniffi",
+      "name": "roost-client",
       "version": "$VERSION"
     },
     "properties": [
@@ -214,8 +214,8 @@ cat > "$PACKET/aether-uniffi-v$VERSION-sbom.json" <<SBOM
     ]
   },
   "components": [
-    {"type": "library", "name": "aether-core", "version": "$VERSION"},
-    {"type": "library", "name": "aether-crypto", "version": "$VERSION"}
+    {"type": "library", "name": "roost-core", "version": "$VERSION"},
+    {"type": "library", "name": "roost-crypto", "version": "$VERSION"}
   ]
 }
 SBOM
@@ -390,8 +390,8 @@ jq '
     .metadata.properties = [
         {"name": "aether:source:revision", "value": "0000000000000000000000000000000000000000"}
     ]
-' "$WRONG_SBOM/aether-uniffi-v$VERSION-sbom.json" > "$WRONG_SBOM_TEMP"
-mv "$WRONG_SBOM_TEMP" "$WRONG_SBOM/aether-uniffi-v$VERSION-sbom.json"
+' "$WRONG_SBOM/roost-client-v$VERSION-sbom.json" > "$WRONG_SBOM_TEMP"
+mv "$WRONG_SBOM_TEMP" "$WRONG_SBOM/roost-client-v$VERSION-sbom.json"
 write_packet_manifest "$WRONG_SBOM"
 expect_failure "SBOM source revision mismatch" \
     env AETHER_RELEASE_SOURCE_REVISION="$REVISION" "$VERIFY" "$WRONG_SBOM"
@@ -452,8 +452,8 @@ cp "$PACKET/SOURCE" "$ANDROID_INPUT/SOURCE"
 cp "$PACKET/aether-$VERSION-maven-central-unsigned.zip" "$ANDROID_DISTRIBUTION_INPUT/"
 cp "$PACKET/SOURCE" \
     "$ANDROID_DISTRIBUTION_INPUT/aether-$VERSION-maven-central.source"
-cp "$PACKET/aether-uniffi-v$VERSION-sbom.json" "$SBOM_INPUT/"
-cp "$PACKET/SOURCE" "$SBOM_INPUT/aether-uniffi-v$VERSION-sbom.source"
+cp "$PACKET/roost-client-v$VERSION-sbom.json" "$SBOM_INPUT/"
+cp "$PACKET/SOURCE" "$SBOM_INPUT/roost-client-v$VERSION-sbom.source"
 cp "$PACKET"/*.evidence "$EVIDENCE_INPUT/"
 
 mkdir -p "$ASSEMBLED"
@@ -473,10 +473,10 @@ AETHER_RELEASE_SOURCE_REVISION="$REVISION" "$VERIFY" "$ASSEMBLED"
 
 MIXED_SBOM_INPUT="$TMP/input/mixed-sbom"
 mkdir -p "$MIXED_SBOM_INPUT"
-cp "$SBOM_INPUT/aether-uniffi-v$VERSION-sbom.json" "$MIXED_SBOM_INPUT/"
+cp "$SBOM_INPUT/roost-client-v$VERSION-sbom.json" "$MIXED_SBOM_INPUT/"
 printf 'version=%s\nsource_revision=%040d\nsource_date_epoch=%s\n' \
     "$VERSION" 0 "$SOURCE_DATE_EPOCH" \
-    > "$MIXED_SBOM_INPUT/aether-uniffi-v$VERSION-sbom.source"
+    > "$MIXED_SBOM_INPUT/roost-client-v$VERSION-sbom.source"
 expect_failure "mixed source revisions" \
     env \
     AETHER_RELEASE_SOURCE_REVISION="$REVISION" \

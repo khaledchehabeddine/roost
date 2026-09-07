@@ -11,10 +11,10 @@ X3DH session derivation binds both parties' canonical Identity Key encodings int
 
 ## Verification Evidence
 
-- `crates/aether-crypto/docs/adr/0004-x3dh-handshake.md` records X3DH root-key identity binding and
+- `crates/roost-crypto/docs/adr/0004-x3dh-handshake.md` records X3DH root-key identity binding and
   first-contact sender-material sealing.
-- `crates/aether-crypto/docs/adr/0008-sender-proof-transcript.md` records the private sender
+- `crates/roost-crypto/docs/adr/0008-sender-proof-transcript.md` records the private sender
   key-possession proof that prevents first-message field splicing without making the proof a
   third-party-verifiable signature.
-- `crates/aether-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins post-decryption
+- `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins post-decryption
   sender identity material and transport-visible field boundaries for established Messages.

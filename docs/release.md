@@ -284,17 +284,17 @@ scripts/release/sbom.sh
 The outputs are:
 
 ```text
-target/sbom/aether-uniffi-v<version>-sbom.json
-target/sbom/aether-uniffi-v<version>-sbom.source
+target/sbom/roost-client-v<version>-sbom.json
+target/sbom/roost-client-v<version>-sbom.source
 ```
 
-The SBOM is CycloneDX JSON generated from `crates/aether-uniffi/Cargo.toml` with all Cargo targets
+The SBOM is CycloneDX JSON generated from `crates/roost-client/Cargo.toml` with all Cargo targets
 described. Generation normalizes checkout paths and records `aether:source:revision`, so the JSON is
 byte-identical across clean checkout locations for the same revision and `SOURCE_DATE_EPOCH`. The
 source sidecar records the version, revision, and epoch consumed by packet assembly.
 
 To verify an uploaded SBOM, check out the same commit, rerun `scripts/release/sbom.sh`, and compare
-the SHA-256 hash of `target/sbom/aether-uniffi-v<version>-sbom.json` with the uploaded artifact. Run
+the SHA-256 hash of `target/sbom/roost-client-v<version>-sbom.json` with the uploaded artifact. Run
 `scripts/test/sbom-reproducibility.sh` to verify generation across two clean checkout paths.
 
 ## Malformed-Input Fuzz Campaigns

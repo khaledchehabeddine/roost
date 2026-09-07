@@ -1,9 +1,6 @@
 #![no_main]
 
-use aether_core::{
-    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateIdentityKey,
-    SenderCertificateValidationInput, validate_sender_certificate,
-};
+use roost_protocol::{DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateIdentityKey, SenderCertificateValidationInput, validate_sender_certificate};
 use libfuzzer_sys::fuzz_target;
 
 mod support;

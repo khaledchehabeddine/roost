@@ -1,5 +1,5 @@
 name = "api-reviewer"
-description = "Rust public API and UniFFI binding reviewer for semver risk, FFI compatibility, naming, and type design. Use proactively after modifying cross-crate pub items or crates/aether-uniffi/."
+description = "Rust public API and UniFFI binding reviewer for semver risk, FFI compatibility, naming, and type design. Use proactively after modifying cross-crate pub items or crates/roost-client/."
 sandbox_mode = "read-only"
 developer_instructions = """
 You are a Rust API design reviewer for public surface stability, FFI compatibility, and ergonomics for clients via UniFFI.

@@ -6,19 +6,19 @@ mobile artifacts that ship from a commit.
 
 ## Runtime Verification
 
-Miri runs on nightly for `aether-crypto` and `aether-core` library tests:
+Miri runs on nightly for `roost-protocol`, `roost-crypto`, and `roost-core` library tests:
 
 ```bash
 scripts/ci/miri-test.sh
 ```
 
-The Miri subset runs `aether-core` with `--features blake3/pure` so the run stays in Rust code that
-Miri can interpret. `aether-crypto` has no BLAKE3 feature, so its library tests run without that
-feature flag. The subset intentionally excludes `aether-uniffi`, generated Swift/Kotlin bindings,
+The Miri subset runs `roost-protocol` and `roost-core` with `--features blake3/pure` so the run stays in Rust code that
+Miri can interpret. `roost-crypto` has no BLAKE3 feature, so its library tests run without that
+feature flag. The subset intentionally excludes `roost-client`, generated Swift/Kotlin bindings,
 Android, and iOS artifacts because those paths cross FFI, dynamic libraries, or platform toolchains
 that Miri does not model.
 
-AddressSanitizer and MemorySanitizer run on nightly Linux for the same Rust packages:
+AddressSanitizer and MemorySanitizer run on nightly Linux for those packages and the Server verifier:
 
 ```bash
 scripts/ci/sanitizer-test.sh address
@@ -26,7 +26,7 @@ scripts/ci/sanitizer-test.sh memory
 ```
 
 The sanitizer subset targets `x86_64-unknown-linux-gnu` and runs library plus integration tests for
-`aether-crypto` and `aether-core` with `-Z build-std`. The sanitizer jobs also use
+`roost-protocol`, `roost-server`, `roost-crypto`, and `roost-core` with `-Z build-std`. The sanitizer jobs also use
 `--features blake3/pure` to avoid native BLAKE3 C/assembly code that would otherwise fall outside
 the Rust-instrumented test surface. UniFFI binding replay and mobile target builds remain covered by
 their own workflows, not by sanitizer jobs.

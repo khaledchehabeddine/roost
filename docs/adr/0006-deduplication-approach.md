@@ -24,4 +24,4 @@ The deduplication set capacity is consumer-supplied, defaults to 1024 digests, h
 ## Verification Evidence
 
 - `docs/protocol-state-invariant-tests.md` records replay and duplicate-delivery scenarios for the persisted deduplication set.
-- `crates/aether-core/tests/fixtures/protocol_state_blobs_v1.md` pins empty and non-empty deduplication-set blobs and duplicate replay outcomes.
+- `crates/roost-core/tests/fixtures/protocol_state_blobs_v1.md` pins empty and non-empty deduplication-set blobs and duplicate replay outcomes.
