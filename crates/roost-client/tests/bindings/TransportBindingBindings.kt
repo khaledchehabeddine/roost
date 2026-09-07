@@ -174,13 +174,12 @@ fun main() {
         messageBinding,
         acknowledgmentBinding,
     )
-    requireCoverage(inbound.kind == InboundMessageOutcomeKind.ACCEPTED, "transport-bound Message acceptance")
+    val accepted = (inbound as? InboundMessageOutcome.Accepted)?.result ?: failCoverage("expected accepted Message")
     requireCoverage(
-        inbound.plaintext?.contentEquals("transport-bound follow-up".encodeToByteArray()) == true,
+        accepted.plaintext.contentEquals("transport-bound follow-up".encodeToByteArray()) == true,
         "transport-bound Message plaintext",
     )
-    val acknowledgment = inbound.acknowledgment
-        ?: failCoverage("accepted Message should return an acknowledgment")
+    val acknowledgment = accepted.acknowledgment
     val changedAcknowledgmentBinding =
         TransportBinding("changed consumer-owned acknowledgment metadata".encodeToByteArray())
     expectAuthenticationFailed("acknowledgment with changed binding bytes") {
@@ -198,7 +197,7 @@ fun main() {
         acknowledgmentBinding,
     )
     requireCoverage(
-        acknowledgmentOutcome.kind == AcknowledgmentOutcomeKind.CLEARED,
+        acknowledgmentOutcome is AcknowledgmentOutcome.Cleared,
         "transport-bound acknowledgment clearing",
     )
 

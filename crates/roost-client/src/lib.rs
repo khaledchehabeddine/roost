@@ -48,7 +48,6 @@ mod certificate;
 #[cfg(feature = "development-certificates")]
 mod development_certificate;
 mod error;
-mod events;
 mod evidence;
 #[cfg(feature = "fixture-replay")]
 mod fixture_replay;
@@ -68,10 +67,6 @@ pub use certificate::{
 #[cfg(feature = "development-certificates")]
 pub use development_certificate::{DevelopmentCertificateAuthority, DevelopmentSenderCertificate};
 pub use error::ClientError;
-pub use events::{
-    ContactEventEnvelope, ContactEventObserver, ContactEventSnapshot, ContactEventStream,
-    ContactEventStreamItem, ContactEventStreamItemKind,
-};
 pub use evidence::{EvidenceProfile, VerifiedEvidenceBundle, verify_evidence_bundle};
 pub use key_store::{KeyStore, SessionAcceptanceResult, SessionInitiationResult};
 pub use key_store_operation::{
@@ -81,15 +76,15 @@ pub use key_store_operation::{
 };
 pub use message::{FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial};
 pub use protocol::{
-    AcknowledgmentOutcome, AcknowledgmentOutcomeKind, BlockedContactAcknowledgmentPolicy,
-    ContactDiscoveryKey, ContactEvent, ContactEventKind, ContactIdentity,
-    ContactSafetyNumberConfirmation, ContactSafetyNumberConfirmationKind, ContactState,
-    ContactStateChange, ContactTrustState, IdentityKey, InboundMessageOutcome,
-    InboundMessageOutcomeKind, OutboundMessageResult, PendingAcknowledgment,
-    ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateCommitCheck, ProtocolStateEngine,
-    ProtocolStateEntry, ProtocolStateKind, ProtocolStateStore, ProtocolStateUpdate,
-    RetryInstruction, RetryInstructionResult, SafetyNumber, SessionEvent,
-    SessionUnrecoverableReason, derive_safety_number, protocol_state_blob_digest,
+    AcknowledgmentOutcome, AcknowledgmentResult, BlockedContactAcknowledgmentPolicy,
+    BlockedInboundMessageResult, ContactDiscoveryKey, ContactEvent, ContactEventKind,
+    ContactIdentity, ContactSafetyNumberConfirmation, ContactSafetyNumberConfirmationKind,
+    ContactState, ContactStateChange, ContactTrustState, IdentityKey, InboundMessageOutcome,
+    InboundMessageResult, OutboundMessageResult, PendingAcknowledgment, ProtocolHardeningLimits,
+    ProtocolStateAddress, ProtocolStateCommitCheck, ProtocolStateEngine, ProtocolStateEntry,
+    ProtocolStateKind, ProtocolStateUpdate, RetryInstruction, RetryInstructionResult, SafetyNumber,
+    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, derive_safety_number,
+    protocol_state_blob_digest,
 };
 pub use records::{
     DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,

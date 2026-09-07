@@ -43,6 +43,8 @@ const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
 /// Errors returned by signed-pre-key operations.
 #[derive(Debug)]
 pub enum SignedPreKeyError {
+    /// Stored data uses an unsupported format version.
+    UnsupportedVersion(u8),
     /// The system clock is before the Unix epoch.
     Clock,
     /// The stored signed pre-key's signature does not verify against the current discovery key.
@@ -64,6 +66,9 @@ pub enum SignedPreKeyError {
 impl fmt::Display for SignedPreKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SignedPreKeyError::UnsupportedVersion(version) => {
+                write!(f, "unsupported stored format version: {version}")
+            }
             SignedPreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
             SignedPreKeyError::Corrupt => {
                 write!(
@@ -172,17 +177,6 @@ impl SignedPreKeyManager {
                     .iter()
                     .find_map(|retained| matching_prekey(&retained.prekey, epoch, id, public_key))
             })
-            .ok_or(SignedPreKeyError::NotFound)
-    }
-
-    pub(crate) fn current_prekey_for_public_key(
-        &self,
-        epoch: u32,
-        public_key: &[u8; 32],
-    ) -> Result<SignedPreKey, SignedPreKeyError> {
-        let now = self.now_secs()?;
-        let store = self.load_store(now)?;
-        matching_prekey_public_key(&store.current, epoch, public_key)
             .ok_or(SignedPreKeyError::NotFound)
     }
 
@@ -344,16 +338,6 @@ fn matching_prekey(
     (matches_epoch && matches_id && matches_public_key).then(|| prekey.clone_for_storage())
 }
 
-fn matching_prekey_public_key(
-    prekey: &SignedPreKey,
-    epoch: u32,
-    public_key: &[u8; 32],
-) -> Option<SignedPreKey> {
-    let matches_epoch = prekey.epoch() == epoch;
-    let matches_public_key: bool = prekey.public().as_bytes().ct_eq(public_key).into();
-    (matches_epoch && matches_public_key).then(|| prekey.clone_for_storage())
-}
-
 fn retained_prekey_expired(retained: &RetainedSignedPreKey, now: u64) -> bool {
     if retained.superseded_at > now.saturating_add(FUTURE_TIMESTAMP_TOLERANCE_SECS) {
         return true;
@@ -422,9 +406,7 @@ fn decode_signed_prekey_store(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedP
         Some(SIGNED_PREKEY_VERSION_V2) => decode_signed_prekey_store_v2(raw),
         Some(SIGNED_PREKEY_VERSION_V3) => decode_signed_prekey_store_v3(raw),
         Some(SIGNED_PREKEY_VERSION) => decode_signed_prekey_store_v4(raw),
-        Some(version) => Err(SignedPreKeyError::InvalidData(format!(
-            "unsupported signed pre-key format version: {version}"
-        ))),
+        Some(version) => Err(SignedPreKeyError::UnsupportedVersion(version)),
         None => Err(SignedPreKeyError::InvalidData(
             "expected signed pre-key version byte, got empty blob".into(),
         )),
@@ -727,7 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn current_returns_invalid_data_for_corrupt_blob() {
+    fn current_rejects_unsupported_stored_version() {
         let manager = setup_with_discovery_key().manager;
         manager
             .storage
@@ -737,7 +719,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             manager.current(),
-            Err(SignedPreKeyError::InvalidData(_))
+            Err(SignedPreKeyError::UnsupportedVersion(0xaa))
         ));
     }
 
@@ -996,7 +978,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             manager.rotate_if_stale(&mut OsRng),
-            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
+            Err(SignedPreKeyError::UnsupportedVersion(_))
         ));
     }
 
@@ -1154,7 +1136,7 @@ mod tests {
     #[test]
     fn checked_blob_rejects_short_blob() {
         assert!(matches!(
-            checked_blob(&[0u8; 50]),
+            checked_blob(&[SIGNED_PREKEY_VERSION; 50]),
             Err(SignedPreKeyError::InvalidData(_))
         ));
     }
@@ -1162,7 +1144,7 @@ mod tests {
     #[test]
     fn checked_blob_rejects_long_blob() {
         assert!(matches!(
-            checked_blob(&[0u8; 200]),
+            checked_blob(&[SIGNED_PREKEY_VERSION; 200]),
             Err(SignedPreKeyError::InvalidData(_))
         ));
     }
@@ -1173,7 +1155,7 @@ mod tests {
         blob[0] = 99;
         assert!(matches!(
             checked_blob(&blob),
-            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("version")
+            Err(SignedPreKeyError::UnsupportedVersion(_))
         ));
     }
 }

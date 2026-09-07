@@ -22,6 +22,8 @@ const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 /// Errors returned by identity operations.
 #[derive(Debug)]
 pub enum IdentityError {
+    /// Stored data uses an unsupported format version.
+    UnsupportedVersion(u8),
     /// An identity is already stored.
     AlreadyExists,
     /// Encrypted backup creation failed during randomness, key derivation, or encryption.
@@ -43,6 +45,9 @@ pub enum IdentityError {
 impl fmt::Display for IdentityError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            IdentityError::UnsupportedVersion(version) => {
+                write!(f, "unsupported stored format version: {version}")
+            }
             IdentityError::AlreadyExists => write!(f, "identity already exists"),
             IdentityError::BackupFailed(reason) => write!(f, "backup failed: {reason}"),
             IdentityError::Corrupt => write!(f, "identity data is corrupt"),
@@ -249,10 +254,7 @@ fn decode_identity_key_blob(raw: &[u8]) -> Result<IdentityKeyBytes, IdentityErro
         ))
     })?;
     if blob[0] != IDENTITY_KEY_BLOB_VERSION {
-        return Err(IdentityError::InvalidData(format!(
-            "unsupported identity key format version: {}",
-            blob[0]
-        )));
+        return Err(IdentityError::UnsupportedVersion(blob[0]));
     }
 
     let mut x25519 = [0u8; 32];

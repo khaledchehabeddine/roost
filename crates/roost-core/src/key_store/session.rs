@@ -173,29 +173,9 @@ impl From<SignedPreKeyError> for SessionEstablishmentError {
 }
 
 impl KeyStore {
-    /// Starts a new Session as the X3DH initiator.
-    ///
-    /// The returned first Message and state updates must be committed atomically by the consumer
-    /// before the Message is handed to transport.
-    ///
-    /// # Errors
-    /// - [`SessionEstablishmentError::Crypto`] if X3DH initiation or frame encoding fails.
-    /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
-    /// - [`SessionEstablishmentError::Identity`] if local Identity state cannot be loaded.
-    /// - [`SessionEstablishmentError::Message`] if the produced frame cannot be represented as a
-    ///   Core Message.
-    /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
-    /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
-    pub fn initiate_session(
-        &self,
-        input: SessionInitiation<'_>,
-    ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
-        self.initiate_session_inner(input, None)
-    }
-
     /// Starts a new Session while authenticating a caller-owned Transport Binding.
     /// The caller must retain the exact binding with the returned first Message for retransmission.
-    /// As with [`Self::initiate_session`], the returned Message and state updates must be committed
+    /// The returned Message and state updates must be committed
     /// atomically before the Message is handed to transport.
     ///
     /// # Examples
@@ -229,14 +209,6 @@ impl KeyStore {
         input: SessionInitiation<'_>,
         transport_binding: &TransportBinding,
     ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
-        self.initiate_session_inner(input, Some(transport_binding))
-    }
-
-    fn initiate_session_inner(
-        &self,
-        input: SessionInitiation<'_>,
-        transport_binding: Option<&TransportBinding>,
-    ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
 
@@ -250,7 +222,7 @@ impl KeyStore {
             &input.responder_prekey_bundle.discovery_key.verifying_key,
             &input.responder_discovery_to_identity,
         )?;
-        let transport_binding = transport_binding.map_or(&[][..], TransportBinding::as_bytes);
+        let transport_binding = transport_binding.as_bytes();
 
         let identity = self.0.identity.load_identity()?;
         let identity_key = identity.identity_key_bundle()?;
@@ -286,32 +258,6 @@ impl KeyStore {
         })
     }
 
-    /// Reads who sent an X3DH first message, without accepting it.
-    ///
-    /// A caller addresses session state by a key derived from both identities,
-    /// so it needs the sender before it can accept. [`Self::prepare_accept_session`] stages
-    /// consumption of the referenced one-time prekey, so it should not be run merely to find out.
-    /// This opens only the layer sealed to this device's own Discovery Key and consumes nothing.
-    ///
-    /// The returned identity is the sender's *claim*, carrying its own verified
-    /// binding signature. It is what `prepare_accept_session` then checks against the
-    /// sealed envelope's authenticated copy; on its own it proves only that
-    /// someone who could reach this inbox named this identity.
-    ///
-    /// # Errors
-    /// - [`SessionEstablishmentError::Crypto`] if the message is not an initial,
-    ///   is not sealed to this Discovery Key, or names an identity whose binding
-    ///   does not verify.
-    /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
-    /// - [`SessionEstablishmentError::Message`] if the Message cannot be encoded.
-    /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
-    pub fn initiator_identity_hint(
-        &self,
-        message: &Message,
-    ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
-        self.initiator_identity_hint_inner(message, None)
-    }
-
     /// Reads the initiator identity while authenticating a caller-owned Transport Binding.
     ///
     /// Transport Binding authentication does not authenticate the claimed initiator. The returned
@@ -333,14 +279,6 @@ impl KeyStore {
         transport_binding: &TransportBinding,
         prekey_selection: PreKeySelection,
     ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
-        self.initiator_identity_hint_inner(message, Some((transport_binding, prekey_selection)))
-    }
-
-    fn initiator_identity_hint_inner(
-        &self,
-        message: &Message,
-        transport_binding: Option<(&TransportBinding, PreKeySelection)>,
-    ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         let discovery_key = self.0.discovery.current()?;
@@ -348,18 +286,13 @@ impl KeyStore {
         let prekey_reference = envelope
             .prekey_reference
             .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
-        let transport_binding =
-            if let Some((transport_binding, prekey_selection)) = transport_binding {
-                validate_prekey_selection(&prekey_reference, prekey_selection)?;
-                self.0.signed_prekey.prekey_for_reference(
-                    prekey_reference.discovery_epoch,
-                    prekey_selection.signed_prekey_identifier,
-                    &prekey_reference.signed_prekey_public_key,
-                )?;
-                transport_binding.as_bytes()
-            } else {
-                &[]
-            };
+        validate_prekey_selection(&prekey_reference, prekey_selection)?;
+        self.0.signed_prekey.prekey_for_reference(
+            prekey_reference.discovery_epoch,
+            prekey_selection.signed_prekey_identifier,
+            &prekey_reference.signed_prekey_public_key,
+        )?;
+        let transport_binding = transport_binding.as_bytes();
         Ok(initiator_identity_hint_with_associated_data(
             &envelope,
             &discovery_key,
@@ -367,55 +300,11 @@ impl KeyStore {
         )?)
     }
 
-    /// Accepts a new Session as the X3DH responder.
-    ///
-    /// A referenced one-time pre-key is staged for consumption only after the first Message
-    /// authenticates and the new Session state has been produced. It remains authoritative until
-    /// the prepared operation is finalized.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{KeyStore, SessionAcceptance};
-    ///
-    /// fn accept_session(
-    ///     store: &KeyStore,
-    ///     input: SessionAcceptance<'_>,
-    /// ) -> Result<(), Box<dyn std::error::Error>> {
-    ///     let prepared = store.prepare_accept_session(input)?;
-    ///     store.commit_operation(prepared.operation.identifier)?;
-    ///     // Persist `prepared.output.state_updates` and the identifier atomically.
-    ///     store.finalize_operation(prepared.operation.identifier)?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    /// - [`SessionEstablishmentError::Crypto`] if X3DH acceptance, sender proof validation, or
-    ///   frame decoding fails.
-    /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
-    /// - [`SessionEstablishmentError::Identity`] if local Identity state cannot be loaded.
-    /// - [`SessionEstablishmentError::Message`] if the received Message cannot be encoded for
-    ///   handshake validation.
-    /// - [`SessionEstablishmentError::OneTimePreKey`] if a referenced one-time pre-key is absent,
-    ///   stale, already consumed, blocked pending inbox rotation, or cannot be consumed after
-    ///   acceptance.
-    /// - [`SessionEstablishmentError::Operation`] if staging fails or a committed operation needs
-    ///   recovery.
-    /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
-    /// - [`SessionEstablishmentError::SignedPreKey`] if the referenced signed pre-key is absent,
-    ///   blocked pending inbox rotation, or cannot be loaded.
-    pub fn prepare_accept_session(
-        &self,
-        input: SessionAcceptance<'_>,
-    ) -> Result<PreparedKeyStoreOperation<SessionAcceptanceResult>, SessionEstablishmentError> {
-        self.prepare_operation(move |staged| staged.accept_session_eager(input, None))
-    }
-
     /// Prepares Session acceptance while authenticating a caller-owned Transport Binding.
     /// For a retained superseded signed prekey, the caller must first validate that its transport
     /// accepted the item before supersession.
     ///
-    /// As with [`Self::prepare_accept_session`], one-time-prekey consumption remains staged until
+    /// One-time-prekey consumption remains staged until
     /// finalization. Commit the operation, atomically persist the returned state updates and
     /// operation identifier, then finalize the secure-storage mutation.
     ///
@@ -440,14 +329,15 @@ impl KeyStore {
         prekey_selection: PreKeySelection,
     ) -> Result<PreparedKeyStoreOperation<SessionAcceptanceResult>, SessionEstablishmentError> {
         self.prepare_operation(move |staged| {
-            staged.accept_session_eager(input, Some((transport_binding, prekey_selection)))
+            staged.accept_session_eager(input, transport_binding, prekey_selection)
         })
     }
 
     fn accept_session_eager(
         &self,
         input: SessionAcceptance<'_>,
-        transport_binding: Option<(&TransportBinding, PreKeySelection)>,
+        transport_binding: &TransportBinding,
+        prekey_selection: PreKeySelection,
     ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         let identity = self.0.identity.load_identity()?;
@@ -457,26 +347,13 @@ impl KeyStore {
         let prekey_reference = envelope
             .prekey_reference
             .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
-        let (signed_prekey, transport_binding) =
-            if let Some((transport_binding, prekey_selection)) = transport_binding {
-                validate_prekey_selection(&prekey_reference, prekey_selection)?;
-                (
-                    self.0.signed_prekey.prekey_for_reference(
-                        prekey_reference.discovery_epoch,
-                        prekey_selection.signed_prekey_identifier,
-                        &prekey_reference.signed_prekey_public_key,
-                    )?,
-                    transport_binding.as_bytes(),
-                )
-            } else {
-                (
-                    self.0.signed_prekey.current_prekey_for_public_key(
-                        prekey_reference.discovery_epoch,
-                        &prekey_reference.signed_prekey_public_key,
-                    )?,
-                    &[][..],
-                )
-            };
+        validate_prekey_selection(&prekey_reference, prekey_selection)?;
+        let signed_prekey = self.0.signed_prekey.prekey_for_reference(
+            prekey_reference.discovery_epoch,
+            prekey_selection.signed_prekey_identifier,
+            &prekey_reference.signed_prekey_public_key,
+        )?;
+        let transport_binding = transport_binding.as_bytes();
         let one_time_prekey = match (
             prekey_reference.one_time_prekey_id,
             prekey_reference.one_time_prekey_public_key,
@@ -534,7 +411,21 @@ impl KeyStore {
         &self,
         input: SessionAcceptance<'_>,
     ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
-        self.accept_session_eager(input, None)
+        {
+            let selection = PreKeySelection {
+                signed_prekey_identifier: self.0.signed_prekey.current_bundle()?.id,
+                one_time_prekey_identifier: input
+                    .message
+                    .prekey_reference
+                    .as_ref()
+                    .and_then(|p| p.one_time_prekey_id),
+            };
+            self.accept_session_eager(
+                input,
+                &TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                selection,
+            )
+        }
     }
 }
 
@@ -604,20 +495,23 @@ mod tests {
         // Mallory's DK→IK signature: valid bytes over the wrong identity.
         let mallory_publication = mallory.current_publication_bundle().unwrap();
 
-        let result = alice.initiate_session(SessionInitiation {
-            session_key: ProtocolStateKey::session(SessionId::from_bytes([0x24; 16])),
-            responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
-            responder_discovery_to_identity: mallory_publication.discovery_to_identity,
-            responder_prekey_bundle: roost_crypto::PreKeyBundle {
-                version: bob_publication.version,
-                discovery_key: bob_publication.discovery_key,
-                signed_prekey: bob_publication.signed_prekey,
-                one_time_prekey: None,
+        let result = alice.initiate_session_with_transport_binding(
+            SessionInitiation {
+                session_key: ProtocolStateKey::session(SessionId::from_bytes([0x24; 16])),
+                responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                responder_discovery_to_identity: mallory_publication.discovery_to_identity,
+                responder_prekey_bundle: roost_crypto::PreKeyBundle {
+                    version: bob_publication.version,
+                    discovery_key: bob_publication.discovery_key,
+                    signed_prekey: bob_publication.signed_prekey,
+                    one_time_prekey: None,
+                },
+                sender_certificate: b"alice certificate",
+                sender_signature: b"alice signature",
+                plaintext: b"hello bob",
             },
-            sender_certificate: b"alice certificate",
-            sender_signature: b"alice signature",
-            plaintext: b"hello bob",
-        });
+            &crate::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        );
 
         assert!(
             result.is_err(),
@@ -637,20 +531,23 @@ mod tests {
 
         let session_key = ProtocolStateKey::session(SessionId::from_bytes([0x22; 16]));
         let initiation = alice
-            .initiate_session(SessionInitiation {
-                session_key: session_key.clone(),
-                responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
-                responder_discovery_to_identity: bob_publication.discovery_to_identity,
-                responder_prekey_bundle: roost_crypto::PreKeyBundle {
-                    version: bob_publication.version,
-                    discovery_key: bob_publication.discovery_key,
-                    signed_prekey: bob_publication.signed_prekey,
-                    one_time_prekey: Some(bob_one_time_prekey.clone()),
+            .initiate_session_with_transport_binding(
+                SessionInitiation {
+                    session_key: session_key.clone(),
+                    responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                    responder_discovery_to_identity: bob_publication.discovery_to_identity,
+                    responder_prekey_bundle: roost_crypto::PreKeyBundle {
+                        version: bob_publication.version,
+                        discovery_key: bob_publication.discovery_key,
+                        signed_prekey: bob_publication.signed_prekey,
+                        one_time_prekey: Some(bob_one_time_prekey.clone()),
+                    },
+                    sender_certificate: b"alice certificate",
+                    sender_signature: b"alice signature",
+                    plaintext: b"hello bob",
                 },
-                sender_certificate: b"alice certificate",
-                sender_signature: b"alice signature",
-                plaintext: b"hello bob",
-            })
+                &crate::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            )
             .unwrap();
 
         assert!(initiation.message.prekey_reference.is_some());
@@ -695,20 +592,23 @@ mod tests {
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
 
         let initiation = alice
-            .initiate_session(SessionInitiation {
-                session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
-                responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
-                responder_discovery_to_identity: bob_publication.discovery_to_identity,
-                responder_prekey_bundle: roost_crypto::PreKeyBundle {
-                    version: bob_publication.version,
-                    discovery_key: bob_publication.discovery_key,
-                    signed_prekey: bob_publication.signed_prekey,
-                    one_time_prekey: Some(bob_one_time_prekey),
+            .initiate_session_with_transport_binding(
+                SessionInitiation {
+                    session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
+                    responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                    responder_discovery_to_identity: bob_publication.discovery_to_identity,
+                    responder_prekey_bundle: roost_crypto::PreKeyBundle {
+                        version: bob_publication.version,
+                        discovery_key: bob_publication.discovery_key,
+                        signed_prekey: bob_publication.signed_prekey,
+                        one_time_prekey: Some(bob_one_time_prekey),
+                    },
+                    sender_certificate: b"alice certificate",
+                    sender_signature: b"alice signature",
+                    plaintext: b"hello bob",
                 },
-                sender_certificate: b"alice certificate",
-                sender_signature: b"alice signature",
-                plaintext: b"hello bob",
-            })
+                &crate::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            )
             .unwrap();
 
         bob.accept_session(SessionAcceptance {

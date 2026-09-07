@@ -22,13 +22,11 @@ host-owned per-identity actor or lock spans that lifecycle across every KeyStore
 process sharing the identity namespace.
 Avoid: platform transaction, background task, eager KeyStore call
 
-**ProtocolStateStore** (one durable host transaction boundary):
-The UniFFI trait or host-side adapter shape that loads and commits opaque Protocol State Blobs by
-Protocol State Kind and key. Rust returns state updates and output values together; the host commits
-those updates atomically with any outbox, event, or retry side effect it owns. Commit
-implementations enforce each update's absent/digest/unchecked precondition to reject stale
-concurrent writes.
-Avoid: decoded protocol model, ratchet cache, SDK database
+**Host State Transaction** (one durable commit boundary per operation):
+The host loads opaque Protocol State Blobs and passes them to Roost. Roost returns typed updates
+with absent or digest conditions and provisional effects. The host checks those conditions and
+commits the updates and effects atomically under its per-identity serializer.
+Avoid: Rust storage callback, decoded protocol model, SDK database
 
 **Binding Surface** (generated API, not checked-in generated source):
 The Rust `#[uniffi::export]` objects, records, enums, and foreign traits that generate Swift and

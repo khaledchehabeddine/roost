@@ -588,7 +588,7 @@ fn replay_sealed_sender_session_fixture(
     )?;
     let mut decrypted = accepted(
         ProtocolStateEngine::new()
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
                 &recipient_snapshot,
                 inbound(
@@ -603,6 +603,8 @@ fn replay_sealed_sender_session_fixture(
                     validation.reference_timestamp_secs,
                     validation.grace_window_secs,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .map_err(|e| {
                 replay_failure(format!(
@@ -626,15 +628,14 @@ fn replay_sealed_sender_session_fixture(
         &fixture.name,
     )?;
     let post_decryption = sender_identity_report(&decrypted.sender_identity);
-    recipient_snapshot.apply_all(std::mem::take(&mut decrypted.state_updates));
-    let binding_snapshot = crate::protocol::snapshot_input_from_entries(Vec::new())?;
+    recipient_snapshot.apply_all(std::mem::take(&mut decrypted.state_updates))?;
     let binding_outcome = crate::protocol::InboundMessageOutcome::from_core(
-        &binding_snapshot,
         InboundMessageOutcome::Accepted(Box::new(decrypted)),
     )?;
-    let evidence_bundle = binding_outcome.evidence_bundle.ok_or_else(|| {
-        replay_failure("accepted sealed session fixture omitted its Evidence Bundle")
-    })?;
+    let crate::InboundMessageOutcome::Accepted { result } = binding_outcome else {
+        return Err(replay_failure("expected accepted sealed session fixture"));
+    };
+    let evidence_bundle = result.evidence_bundle;
     assert_sender_state_fixture_matches(blob_file, &fixture.sender_state_fixture)?;
     let tampered_ciphertext_rejected = session_tamper_rejects_without_sender(
         blob_file,
@@ -774,10 +775,14 @@ fn replay_protocol_state_blob_fixture(
                 "deduplication fixture kind mismatch",
             )?;
             assert_duplicate_inbound_blob_replay(fixture, &encoded, key.clone())?;
-            Ok(ProtocolStateUpdate::set(
-                ProtocolStateAddress::new(kind, key),
-                ProtocolStateBlob::from_bytes(encoded.clone()),
-            ))
+            return Ok(BlobReplayCase {
+                name: fixture.name.clone(),
+                kind: fixture.kind.clone(),
+                key_hex: fixture.key_hex.clone(),
+                major,
+                minor,
+                reencoded_hex: hex::encode(encoded),
+            });
         }
         "pending_acknowledgments_session" => {
             ensure(
@@ -792,10 +797,14 @@ fn replay_protocol_state_blob_fixture(
                 "pending acknowledgment fixture kind mismatch",
             )?;
             assert_duplicate_acknowledgment_blob_replay(fixture, &encoded, key.clone())?;
-            Ok(ProtocolStateUpdate::set(
-                ProtocolStateAddress::new(kind, key),
-                ProtocolStateBlob::from_bytes(encoded.clone()),
-            ))
+            return Ok(BlobReplayCase {
+                name: fixture.name.clone(),
+                kind: fixture.kind.clone(),
+                key_hex: fixture.key_hex.clone(),
+                major,
+                minor,
+                reencoded_hex: hex::encode(encoded),
+            });
         }
         "contact_pending"
         | "contact_unverified"
@@ -882,7 +891,8 @@ fn assert_duplicate_inbound_blob_replay(
     )?;
     let mut digest_key = [0u8; 32];
     ChaCha20Rng::from_seed(DEDUPLICATION_REPLAY_RNG_SEED).fill_bytes(&mut digest_key);
-    let digest = blake3::keyed_hash(&digest_key, &encoded_message);
+    let framed = framed_replay_message(&encoded_message);
+    let digest = blake3::keyed_hash(&digest_key, &framed);
     ensure(
         hex::encode(&digest.as_bytes()[..16]) == replay.digest_hex,
         format!("blob fixture {} replay digest mismatch", fixture.name),
@@ -896,12 +906,12 @@ fn assert_duplicate_inbound_blob_replay(
     snapshot.set(
         address,
         ProtocolStateBlob::from_bytes(encoded_blob.to_vec()),
-    );
+    )?;
     let acknowledgment_sender_identity = acknowledgment_sender_identity()?;
     let acknowledgment_sender_signing_key =
         sender_identity_signing_key(&acknowledgment_sender_identity)?;
     let outcome = ProtocolStateEngine::new()
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
             &snapshot,
             InboundEncryptedMessage {
@@ -918,6 +928,8 @@ fn assert_duplicate_inbound_blob_replay(
                 ),
                 sender_certificate_validation: None,
             },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map_err(|e| replay_failure(format!("blob fixture {} replay failed: {e}", fixture.name)))?;
     ensure(
@@ -949,7 +961,8 @@ fn assert_duplicate_acknowledgment_blob_replay(
             fixture.name
         ),
     )?;
-    let digest = blake3::hash(&encoded_message);
+    let framed = framed_replay_message(&encoded_message);
+    let digest = blake3::hash(&framed);
     ensure(
         hex::encode(&digest.as_bytes()[..16]) == replay.digest_hex,
         format!("blob fixture {} replay digest mismatch", fixture.name),
@@ -963,9 +976,9 @@ fn assert_duplicate_acknowledgment_blob_replay(
     snapshot.set(
         address,
         ProtocolStateBlob::from_bytes(encoded_blob.to_vec()),
-    );
+    )?;
     let outcome = ProtocolStateEngine::new()
-        .process_acknowledgment(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
             &snapshot,
             InboundAcknowledgmentMessage {
@@ -976,6 +989,7 @@ fn assert_duplicate_acknowledgment_blob_replay(
                     .identity_key
                     .ed25519_verifying_key,
             },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map_err(|e| replay_failure(format!("blob fixture {} replay failed: {e}", fixture.name)))?;
     ensure(
@@ -1044,7 +1058,7 @@ fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolSta
     if name == "contact_pending" {
         return contact_fixture_state_update(pending, contact.identity_key);
     }
-    snapshot.apply_all(pending.state_updates);
+    snapshot.apply_all(pending.state_updates)?;
     if name == "contact_blocked_pending" {
         let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
         return contact_fixture_state_update(blocked, contact.identity_key);
@@ -1054,7 +1068,7 @@ fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolSta
     if name == "contact_unverified" {
         return contact_fixture_state_update(unverified, contact.identity_key);
     }
-    snapshot.apply_all(unverified.state_updates);
+    snapshot.apply_all(unverified.state_updates)?;
     if name == "contact_blocked_unverified" {
         let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
         return contact_fixture_state_update(blocked, contact.identity_key);
@@ -1066,7 +1080,7 @@ fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolSta
     }
     if name == "contact_dk_rotated_blocked" {
         let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
-        snapshot.apply_all(blocked.state_updates);
+        snapshot.apply_all(blocked.state_updates)?;
         let update = engine.record_contact(&snapshot, rotated_contact)?;
         return contact_fixture_state_update(update, contact.identity_key);
     }
@@ -1100,14 +1114,14 @@ fn contact_fixture_update(name: &str) -> Result<ProtocolStateUpdate, ProtocolSta
     if name == "contact_verified" {
         return contact_fixture_state_update(verified, contact.identity_key);
     }
-    snapshot.apply_all(verified.state_updates);
+    snapshot.apply_all(verified.state_updates)?;
     if name == "contact_blocked_verified" {
         let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
         return contact_fixture_state_update(blocked, contact.identity_key);
     }
     if name == "contact_unblocked_restored_state" {
         let blocked = engine.block_contact(&snapshot, contact.identity_key)?;
-        snapshot.apply_all(blocked.state_updates);
+        snapshot.apply_all(blocked.state_updates)?;
         let unblocked = engine.unblock_contact(&snapshot, contact.identity_key)?;
         return contact_fixture_state_update(unblocked, contact.identity_key);
     }
@@ -1380,7 +1394,7 @@ fn insert_blob_fixture(
     snapshot.set(
         ProtocolStateAddress::new(protocol_state_kind(&fixture.kind)?, key.clone()),
         ProtocolStateBlob::from_bytes(decode_hex(&fixture.current_encoded_hex, name)?),
-    );
+    )?;
     Ok(())
 }
 
@@ -1878,7 +1892,7 @@ fn session_tamper_rejects_without_sender(
     let acknowledgment_sender_signing_key =
         sender_identity_signing_key(&acknowledgment_sender_identity)?;
     Ok(ProtocolStateEngine::new()
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
             &snapshot,
             inbound(
@@ -1893,6 +1907,8 @@ fn session_tamper_rejects_without_sender(
                 validation.reference_timestamp_secs,
                 validation.grace_window_secs,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .is_err())
 }
@@ -1969,7 +1985,7 @@ fn unsupported_blob_major_rejected() -> Result<bool, ClientError> {
     snapshot.set(
         address.clone(),
         ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
-    );
+    )?;
     Ok(matches!(
         engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
         Err(ProtocolStateError::UnsupportedBlobVersion {
@@ -1988,7 +2004,7 @@ fn malformed_blob_rejected() -> Result<bool, ClientError> {
     snapshot.set(
         address.clone(),
         ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    )?;
     Ok(matches!(
         engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
         Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
@@ -2061,6 +2077,14 @@ fn replay_failure(reason: impl Into<String>) -> ClientError {
     ClientError::InternalError {
         reason: reason.into(),
     }
+}
+
+fn framed_replay_message(encoded: &[u8]) -> Vec<u8> {
+    let binding = b"test-route";
+    let mut framed = (binding.len() as u32).to_be_bytes().to_vec();
+    framed.extend_from_slice(binding);
+    framed.extend_from_slice(encoded);
+    framed
 }
 
 #[cfg(test)]

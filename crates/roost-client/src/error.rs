@@ -42,17 +42,12 @@ pub enum ClientError {
         /// Diagnostic context for logging only.
         reason: String,
     },
+    /// A contact must be accepted before sending.
+    ContactNotAccepted,
     /// Stored identity, discovery key, or signed pre-key material is corrupt or incomplete.
     Corrupt,
     /// Backup decryption failed because the passphrase or backup bytes did not authenticate.
     DecryptionFailed,
-    /// An event observer is no longer registered.
-    EventStreamClosed,
-    /// An event observer lagged and must recover from a snapshot.
-    EventLag {
-        /// Number of missed events.
-        missed: u64,
-    },
     /// Internal failure that does not expose a more specific failure category.
     InternalError {
         /// Diagnostic context for logging only.
@@ -107,15 +102,6 @@ pub enum ClientError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// A contact-event snapshot belongs to another event stream.
-    ForeignEventSnapshot,
-    /// A contact-event snapshot predates the latest imported current state.
-    StaleEventSnapshot {
-        /// State revision carried by the rejected snapshot.
-        snapshot_revision: u64,
-        /// Latest state revision held by the stream.
-        current_revision: u64,
-    },
 }
 
 impl std::error::Error for ClientError {}
@@ -135,20 +121,9 @@ impl std::fmt::Display for ClientError {
             ClientError::CertificateRejected { reason } => {
                 write!(f, "certificate rejected: {reason}")
             }
+            ClientError::ContactNotAccepted => write!(f, "contact is not accepted"),
             ClientError::Corrupt => write!(f, "stored key material is corrupt"),
             ClientError::DecryptionFailed => write!(f, "decryption failed"),
-            ClientError::EventStreamClosed => write!(f, "event stream observer is closed"),
-            ClientError::EventLag { missed } => write!(f, "event stream observer lagged: {missed}"),
-            ClientError::ForeignEventSnapshot => {
-                write!(f, "event snapshot belongs to another stream")
-            }
-            ClientError::StaleEventSnapshot {
-                snapshot_revision,
-                current_revision,
-            } => write!(
-                f,
-                "stale event snapshot revision {snapshot_revision}; current revision is {current_revision}"
-            ),
             ClientError::InternalError { reason } => write!(f, "internal error: {reason}"),
             ClientError::InvalidData { reason } => write!(f, "invalid data: {reason}"),
             ClientError::InboxRotationRequired => {
@@ -194,9 +169,9 @@ impl From<IdentityError> for ClientError {
         match e {
             IdentityError::AlreadyExists => ClientError::AlreadyExists,
             IdentityError::BackupFailed(reason) => ClientError::BackupFailed { reason },
-            IdentityError::InvalidData(reason) if reason.contains("unsupported") => {
-                ClientError::UnsupportedVersion { reason }
-            }
+            IdentityError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+                reason: format!("unsupported stored format version: {version}"),
+            },
             IdentityError::Corrupt => ClientError::Corrupt,
             IdentityError::DecryptionFailed => ClientError::DecryptionFailed,
             IdentityError::InvalidData(reason) => ClientError::InvalidData { reason },
@@ -220,9 +195,9 @@ impl From<SignedPreKeyError> for ClientError {
             SignedPreKeyError::Corrupt => ClientError::Corrupt,
             SignedPreKeyError::Discovery(e) => e.into(),
             SignedPreKeyError::InboxRotationRequired => ClientError::InboxRotationRequired,
-            SignedPreKeyError::InvalidData(reason) if reason.contains("unsupported") => {
-                ClientError::UnsupportedVersion { reason }
-            }
+            SignedPreKeyError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+                reason: format!("unsupported stored format version: {version}"),
+            },
             SignedPreKeyError::InvalidData(reason) => ClientError::InvalidData { reason },
             SignedPreKeyError::LockPoisoned => ClientError::InternalError {
                 reason: "internal lock poisoned".into(),
@@ -241,9 +216,9 @@ impl From<OneTimePreKeyError> for ClientError {
             },
             OneTimePreKeyError::Discovery(e) => e.into(),
             OneTimePreKeyError::InboxRotationRequired => ClientError::InboxRotationRequired,
-            OneTimePreKeyError::InvalidData(reason) if reason.contains("unsupported") => {
-                ClientError::UnsupportedVersion { reason }
-            }
+            OneTimePreKeyError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+                reason: format!("unsupported stored format version: {version}"),
+            },
             OneTimePreKeyError::InvalidData(reason) => ClientError::InvalidData { reason },
             OneTimePreKeyError::LockPoisoned => ClientError::InternalError {
                 reason: "internal lock poisoned".into(),
@@ -265,9 +240,9 @@ impl From<DiscoveryKeyError> for ClientError {
             },
             DiscoveryKeyError::Corrupt => ClientError::Corrupt,
             DiscoveryKeyError::Identity(e) => e.into(),
-            DiscoveryKeyError::InvalidData(reason) if reason.contains("unsupported") => {
-                ClientError::UnsupportedVersion { reason }
-            }
+            DiscoveryKeyError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+                reason: format!("unsupported stored format version: {version}"),
+            },
             DiscoveryKeyError::InvalidData(reason) => ClientError::InvalidData { reason },
             DiscoveryKeyError::LockPoisoned => ClientError::InternalError {
                 reason: "internal lock poisoned".into(),
@@ -347,11 +322,15 @@ impl From<CryptoError> for ClientError {
             | CryptoError::UnsupportedRatchetVersion(_) => ClientError::UnsupportedVersion {
                 reason: e.to_string(),
             },
-            CryptoError::HandshakeEnvelopeDecode
-            | CryptoError::HandshakeEnvelopeEncode
-            | CryptoError::SealedFrameDecode
+            CryptoError::HandshakeEnvelopeEncode
             | CryptoError::SealedFrameEncode
             | CryptoError::InvalidHmacKey
+            | CryptoError::RatchetStateEncode
+            | CryptoError::HkdfExpand => ClientError::InternalError {
+                reason: e.to_string(),
+            },
+            CryptoError::HandshakeEnvelopeDecode
+            | CryptoError::SealedFrameDecode
             | CryptoError::InvalidKeyEncoding
             | CryptoError::InvalidSignatureContext
             | CryptoError::InvalidState(_)
@@ -359,12 +338,10 @@ impl From<CryptoError> for ClientError {
             | CryptoError::MaxSkippedKeysExceeded
             | CryptoError::MissingOneTimePreKey
             | CryptoError::RatchetStateDecode
-            | CryptoError::RatchetStateEncode
-            | CryptoError::StalePreKey
-            | CryptoError::HkdfExpand => ClientError::InvalidData {
+            | CryptoError::StalePreKey => ClientError::InvalidData {
                 reason: e.to_string(),
             },
-            _ => ClientError::InvalidData {
+            _ => ClientError::InternalError {
                 reason: e.to_string(),
             },
         }
@@ -379,9 +356,10 @@ impl From<MessageError> for ClientError {
                     reason: e.to_string(),
                 }
             }
-            MessageError::Decode
+            // Encoding also validates caller-supplied public keys.
+            MessageError::Encode
+            | MessageError::Decode
             | MessageError::EncodedTooLarge
-            | MessageError::Encode
             | MessageError::InvalidPublicKey
             | MessageError::PayloadTooLarge => ClientError::InvalidData {
                 reason: e.to_string(),
@@ -392,7 +370,7 @@ impl From<MessageError> for ClientError {
 
 impl From<ProtocolStateError> for ClientError {
     fn from(e: ProtocolStateError) -> Self {
-        match &e {
+        match e {
             ProtocolStateError::SenderCertificateValidation(source) => {
                 ClientError::CertificateRejected {
                     reason: source.to_string(),
@@ -405,18 +383,24 @@ impl From<ProtocolStateError> for ClientError {
             | ProtocolStateError::InvalidDeduplicationCapacity { .. }
             | ProtocolStateError::InvalidHardeningLimit { .. }
             | ProtocolStateError::InvalidMessage { .. }
-            | ProtocolStateError::InvalidStateKey { .. }
-            | ProtocolStateError::MessageEncode(_) => ClientError::InvalidData {
+            | ProtocolStateError::InvalidStateKey { .. } => ClientError::InvalidData {
                 reason: e.to_string(),
             },
-            ProtocolStateError::InvalidStateBinding { reason, .. }
-                if reason.contains("blocked contact") =>
-            {
-                ClientError::BlockedContact {
-                    reason: e.to_string(),
-                }
-            }
-            ProtocolStateError::Crypto(source) => ClientError::from(source.clone_for_mapping()),
+            ProtocolStateError::BlockedContact => ClientError::BlockedContact {
+                reason: e.to_string(),
+            },
+            ProtocolStateError::ContactNotAccepted => ClientError::ContactNotAccepted,
+            ProtocolStateError::SessionUnrecoverable => ClientError::TerminalSessionRecovery {
+                reason: e.to_string(),
+            },
+            ProtocolStateError::BlobEncode { .. } => ClientError::InternalError {
+                reason: e.to_string(),
+            },
+            ProtocolStateError::MessageEncode(source) => source.into(),
+            ProtocolStateError::SnapshotCapacityExceeded => ClientError::InvalidData {
+                reason: e.to_string(),
+            },
+            ProtocolStateError::Crypto(source) => ClientError::from(source),
             _ => ClientError::ProtocolStateFault {
                 reason: e.to_string(),
             },
@@ -498,50 +482,23 @@ impl From<TransportBindingError> for ClientError {
     }
 }
 
-trait CloneCryptoForMapping {
-    fn clone_for_mapping(&self) -> CryptoError;
-}
-
-impl CloneCryptoForMapping for CryptoError {
-    fn clone_for_mapping(&self) -> CryptoError {
-        match self {
-            CryptoError::Aead => CryptoError::Aead,
-            CryptoError::HandshakeEnvelopeDecode => CryptoError::HandshakeEnvelopeDecode,
-            CryptoError::HandshakeEnvelopeEncode => CryptoError::HandshakeEnvelopeEncode,
-            CryptoError::SealedFrameDecode => CryptoError::SealedFrameDecode,
-            CryptoError::SealedFrameEncode => CryptoError::SealedFrameEncode,
-            CryptoError::HandshakeSignedPreKeyMismatch => {
-                CryptoError::HandshakeSignedPreKeyMismatch
-            }
-            CryptoError::HkdfExpand => CryptoError::HkdfExpand,
-            CryptoError::InvalidHmacKey => CryptoError::InvalidHmacKey,
-            CryptoError::InvalidSignatureContext => CryptoError::InvalidSignatureContext,
-            CryptoError::InvalidKeyEncoding => CryptoError::InvalidKeyEncoding,
-            CryptoError::NonContributorySharedSecret => CryptoError::NonContributorySharedSecret,
-            CryptoError::InvalidState(reason) => CryptoError::InvalidState(reason),
-            CryptoError::MaxSkipExceeded => CryptoError::MaxSkipExceeded,
-            CryptoError::MaxSkippedKeysExceeded => CryptoError::MaxSkippedKeysExceeded,
-            CryptoError::MissingOneTimePreKey => CryptoError::MissingOneTimePreKey,
-            CryptoError::OneTimePreKeyMismatch => CryptoError::OneTimePreKeyMismatch,
-            CryptoError::SenderIdentityMismatch => CryptoError::SenderIdentityMismatch,
-            CryptoError::RatchetStateDecode => CryptoError::RatchetStateDecode,
-            CryptoError::RatchetStateEncode => CryptoError::RatchetStateEncode,
-            CryptoError::SignatureInvalid => CryptoError::SignatureInvalid,
-            CryptoError::StalePreKey => CryptoError::StalePreKey,
-            CryptoError::UnsupportedRatchetVersion(version) => {
-                CryptoError::UnsupportedRatchetVersion(*version)
-            }
-            CryptoError::UnsupportedPreKeyBundleVersion(version) => {
-                CryptoError::UnsupportedPreKeyBundleVersion(*version)
-            }
-            _ => CryptoError::InvalidState("unknown crypto error"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_input_rejections_remain_invalid_data_across_protocol_error_boundary() {
+        for error in [
+            MessageError::PayloadTooLarge,
+            MessageError::EncodedTooLarge,
+            MessageError::Encode,
+        ] {
+            assert!(matches!(
+                ClientError::from(ProtocolStateError::MessageEncode(error)),
+                ClientError::InvalidData { .. }
+            ));
+        }
+    }
 
     #[test]
     fn decryption_failed_error_formats_are_redacted() {

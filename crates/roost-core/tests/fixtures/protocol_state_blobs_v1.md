@@ -9,13 +9,13 @@ Fixture bytes are deterministic test-only material generated from a fixed RNG se
 
 Together with the Message wire fixtures, these blobs lock the sealed-sender session shape: sender identity material stays inside encrypted payloads, while blobs remain opaque consumer storage values.
 
-The current ratchet/session body wraps Double Ratchet bytes and an optional expected peer sender
-identity key. The unbound fixture leaves that binding empty because it pins outbound state; the
+Session body version 4 tags contact-unbound, contact-bound, and unrecoverable states in one
+representation, retaining the optional expected peer sender identity key. The unbound fixture leaves that binding empty because it pins outbound state; the
 bound fixture pins key-only peer identity storage.
 
 The current deduplication-set body wraps the configured capacity, the per-Identity keyed BLAKE3
 secret, and the ordered digest window. Fixtures pin both an initialized empty window and a
-non-empty window whose replay Message must return `InboundMessageOutcome::Duplicate`.
+non-empty window whose replay authenticates the exact `test-route` binding and must return `InboundMessageOutcome::Duplicate`.
 
 The current pending-acknowledgment body wraps pending outbound Messages and processed
 acknowledgment digests. Fixtures pin both initialized empty state and a non-empty digest window
@@ -32,6 +32,6 @@ Supported version:
 
 - `1.0` is the current Core envelope. Wrapped session-state bodies are current.
 
-Old pre-release blobs are not supported. Current-version blobs with stale body shapes fail as malformed current blobs, except contact-state body v1, which decodes as unblocked and rewrites to body v2 on the next contact update. Non-current envelope versions fail as unsupported versions.
+Old pre-release blobs are not supported. Current-version blobs with stale body shapes fail as malformed current blobs. Contact body version 2 is the only contact representation. Non-current envelope versions fail as unsupported versions.
 
 The bytes are opaque consumer storage values. Fixture tests may decode them to verify current-format invariants, but consumers must persist and return them by kind/key without inspecting their contents.

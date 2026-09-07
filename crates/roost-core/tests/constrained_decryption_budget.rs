@@ -197,7 +197,7 @@ fn maximum_size_precheck_rejects_before_state_access() {
     let revoked = [];
 
     let measured = assert_within_budget("maximum-size-precheck", constrained_budget(), || {
-        tight_engine.decrypt_message(
+        tight_engine.decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x80; 32]),
             &ProtocolStateSnapshot::new(),
             inbound_with_certificate_validation(
@@ -208,6 +208,8 @@ fn maximum_size_precheck_rejects_before_state_access() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
     });
     let result = measured.value;
@@ -234,7 +236,7 @@ fn budget_harness_reports_too_small_memory_budget() {
 
     let result = measure_budget("too-small-memory-budget", budget, || {
         engine
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([0x90; 32]),
                 &read.snapshot,
                 inbound_with_certificate_validation(
@@ -245,6 +247,8 @@ fn budget_harness_reports_too_small_memory_budget() {
                     &domain_keys,
                     &revoked,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap()
     });
@@ -266,7 +270,7 @@ fn budget_harness_reports_too_small_wall_clock_budget() {
 
     let result = measure_budget("too-small-wall-clock-budget", budget, || {
         engine
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([0xa0; 32]),
                 &read.snapshot,
                 inbound_with_certificate_validation(
@@ -277,6 +281,8 @@ fn budget_harness_reports_too_small_wall_clock_budget() {
                     &domain_keys,
                     &revoked,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap()
     });
@@ -304,7 +310,7 @@ fn decrypt_and_commit(
     let revoked = [];
     let measured = assert_within_budget(label, budget, || {
         engine
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([rng_seed; 32]),
                 &read.snapshot,
                 inbound_with_certificate_validation(
@@ -315,6 +321,8 @@ fn decrypt_and_commit(
                     &domain_keys,
                     &revoked,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap()
     });

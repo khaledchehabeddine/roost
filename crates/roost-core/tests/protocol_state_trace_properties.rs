@@ -79,7 +79,7 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                         vec![1, 0, 0xaa],
                     );
                     let duplicate = engine
-                        .decrypt_message(
+                        .decrypt_message_with_transport_bindings(
                             &mut ChaCha20Rng::from_seed([0x90; 32]),
                             &corrupt_store.read().snapshot,
                             inbound_duplicate(
@@ -88,6 +88,8 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                                 &message.message,
                                 &fixture.bob_sender,
                             ),
+                            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
                         )
                         .unwrap();
                     prop_assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));

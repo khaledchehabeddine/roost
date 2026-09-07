@@ -47,12 +47,14 @@ fn store_with_contact() -> (KeyStore, ProtocolStateSnapshot, ContactIdentityKey)
     let engine = ProtocolStateEngine::new();
     let contact = peer_contact();
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.apply_all(
-        engine
-            .record_contact(&snapshot, contact)
-            .unwrap()
-            .state_updates,
-    );
+    snapshot
+        .apply_all(
+            engine
+                .record_contact(&snapshot, contact)
+                .unwrap()
+                .state_updates,
+        )
+        .unwrap();
     (key_store, snapshot, contact.identity_key)
 }
 
@@ -89,7 +91,7 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
             .prepare_block_contact(&snapshot, identity_key)
             .unwrap(),
     );
-    snapshot.apply_all(first.contact.state_updates);
+    snapshot.apply_all(first.contact.state_updates).unwrap();
     let generation_after_first = key_store.current_discovery_key_bundle().unwrap().epoch;
 
     let second = complete(

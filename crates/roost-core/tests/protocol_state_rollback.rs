@@ -29,7 +29,7 @@ fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
     let revoked = [];
     let interrupted_read = fixture.bob_store.read();
     let interrupted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x53; 32]),
             &interrupted_read.snapshot,
             inbound_with_certificate_validation(
@@ -40,6 +40,8 @@ fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -58,7 +60,7 @@ fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
     );
 
     let duplicate_first = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x54; 32]),
             &fixture.bob_store.read().snapshot,
             inbound_duplicate(
@@ -67,12 +69,14 @@ fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
                 &first.message,
                 &fixture.bob_sender,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert!(matches!(duplicate_first, InboundMessageOutcome::Duplicate));
 
     let retried_second = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x55; 32]),
             &fixture.bob_store.read().snapshot,
             inbound_with_certificate_validation(
@@ -83,6 +87,8 @@ fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();

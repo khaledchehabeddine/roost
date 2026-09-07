@@ -26,6 +26,8 @@ const FIRST_INBOX_GENERATION: u32 = 1;
 /// Errors returned by discovery-key operations.
 #[derive(Debug)]
 pub enum DiscoveryKeyError {
+    /// Stored data uses an unsupported format version.
+    UnsupportedVersion(u8),
     /// The system clock is before the Unix epoch.
     Clock,
     /// The stored discovery key's signature does not verify against the identity key.
@@ -46,6 +48,9 @@ pub enum DiscoveryKeyError {
 impl fmt::Display for DiscoveryKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DiscoveryKeyError::UnsupportedVersion(version) => {
+                write!(f, "unsupported stored format version: {version}")
+            }
             DiscoveryKeyError::Clock => write!(f, "system clock is before Unix epoch"),
             DiscoveryKeyError::Corrupt => {
                 write!(
@@ -269,10 +274,7 @@ fn checked_blob(raw: &[u8]) -> Result<&[u8; DISCOVERY_KEY_BLOB_LEN], DiscoveryKe
         ))
     })?;
     if blob[0] != DISCOVERY_KEY_VERSION {
-        return Err(DiscoveryKeyError::InvalidData(format!(
-            "unsupported discovery key format version: {}",
-            blob[0]
-        )));
+        return Err(DiscoveryKeyError::UnsupportedVersion(blob[0]));
     }
     Ok(blob)
 }

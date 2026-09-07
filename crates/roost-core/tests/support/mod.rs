@@ -9,7 +9,7 @@ use roost_core::{
     InboundMessageOutcome, InboundSenderCertificateValidation, Message, OutboundAcknowledgment,
     OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
-    SenderIdentityMaterial, SessionId, SessionUnrecoverableReason, SessionUnrecoverableResult,
+    SenderIdentityMaterial, SessionId, SessionUnrecoverableResult,
 };
 use roost_crypto::{
     DiscoveryKey, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, PublicKey,
@@ -21,7 +21,6 @@ use roost_protocol::{
     DomainSigningKey, DomainSigningKeyStatus, MessageId, RevocationState,
     SenderCertificateIdentityKey,
 };
-use serde::Serialize;
 use zeroize::Zeroizing;
 
 pub const CREATED_AT: u64 = 1_700_000_000;
@@ -53,6 +52,7 @@ pub struct HostRead {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum HostCommitError {
+    StaleCondition,
     StaleRead { expected: u64, actual: u64 },
 }
 
@@ -74,18 +74,9 @@ pub struct ValidatedSender {
     domain_verifying_key: Vec<u8>,
 }
 
-struct Setup {
-    alice_state: RatchetState,
-    bob_state: RatchetState,
-}
-
-#[derive(Serialize)]
-struct DeadSessionWire {
-    version: u8,
-    reason: SessionUnrecoverableReason,
-    event_emitted: bool,
-    peer_sender_identity_key: Option<[u8; 32]>,
-    contact_identity_key: Option<()>,
+pub struct Setup {
+    pub alice_state: RatchetState,
+    pub bob_state: RatchetState,
 }
 
 impl HostStore {
@@ -99,10 +90,12 @@ impl HostStore {
     pub fn snapshot(&self) -> ProtocolStateSnapshot {
         let mut snapshot = ProtocolStateSnapshot::new();
         for (address, blob) in &self.blobs {
-            snapshot.set(
-                address.clone(),
-                ProtocolStateBlob::from_bytes(blob.as_slice().to_vec()),
-            );
+            snapshot
+                .set(
+                    address.clone(),
+                    ProtocolStateBlob::from_bytes(blob.as_slice().to_vec()),
+                )
+                .unwrap();
         }
         snapshot
     }
@@ -153,6 +146,14 @@ impl HostStore {
                 expected: self.revision,
                 actual: token,
             });
+        }
+        let snapshot = self.snapshot();
+        if updates.iter().any(|update| {
+            !update
+                .commit_condition()
+                .is_satisfied_by(snapshot.get(update.address()))
+        }) {
+            return Err(HostCommitError::StaleCondition);
         }
         self.apply_all(updates);
         if let Some(record) = outbox {
@@ -240,10 +241,11 @@ impl ProtocolFixture {
     ) -> StoredMessage {
         let read = self.alice_store.read();
         let encrypted = engine
-            .encrypt_message(
+            .encrypt_message_with_transport_binding(
                 &read.snapshot,
                 self.session_key.clone(),
                 sequenced_outbound(sequence, plaintext, &self.alice_sender.sender_identity),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap();
         self.alice_store
@@ -271,7 +273,7 @@ impl ProtocolFixture {
         let domain_keys = [self.alice_sender.domain_signing_key()];
         let revoked = [];
         let mut decrypted = engine
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([rng_seed; 32]),
                 &read.snapshot,
                 inbound_with_certificate_validation(
@@ -282,6 +284,8 @@ impl ProtocolFixture {
                     &domain_keys,
                     &revoked,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .map(accepted)
             .unwrap();
@@ -405,19 +409,14 @@ pub fn dead_session_blob(
     event_emitted: bool,
     peer_sender_identity_key: [u8; 32],
 ) -> ProtocolStateBlob {
-    let wire = DeadSessionWire {
-        version: 3,
-        reason: SessionUnrecoverableReason::SkippedKeyLimitExceeded,
-        event_emitted,
-        peer_sender_identity_key: Some(peer_sender_identity_key),
-        contact_identity_key: None,
-    };
-    let mut bytes = vec![1, 0];
-    bytes.extend_from_slice(&postcard::to_stdvec(&wire).unwrap());
+    // Envelope 1.0, session body 4, Unrecoverable variant 2, reason 0,
+    // recovery flag, absent contact binding, present peer identity.
+    let mut bytes = vec![1, 0, 4, 2, 0, u8::from(event_emitted), 0, 1];
+    bytes.extend_from_slice(&peer_sender_identity_key);
     ProtocolStateBlob::from_bytes(bytes)
 }
 
-fn setup(seed: [u8; 32]) -> Setup {
+pub fn setup(seed: [u8; 32]) -> Setup {
     let mut rng = ChaCha20Rng::from_seed(seed);
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
@@ -635,11 +634,11 @@ fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
     Box::leak(Box::new(accepted_contact_discovery_key()))
 }
 
-fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
+pub fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
     let mut rng = ChaCha20Rng::from_seed([0xc2; 32]);
     generate_discovery_key(
         &mut rng,
-        test_sender_identity_signing_key(0xa1),
+        test_sender_identity_signing_key(0xa2),
         0,
         CREATED_AT,
     )

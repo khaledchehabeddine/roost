@@ -41,12 +41,14 @@ fn setup() -> Setup {
     let alice = peer_contact(31);
     let bob = peer_contact(32);
     for contact in [alice, bob] {
-        snapshot.apply_all(
-            engine
-                .record_contact(&snapshot, contact)
-                .unwrap()
-                .state_updates,
-        );
+        snapshot
+            .apply_all(
+                engine
+                    .record_contact(&snapshot, contact)
+                    .unwrap()
+                    .state_updates,
+            )
+            .unwrap();
     }
     Setup {
         engine,
@@ -66,12 +68,15 @@ fn a_contact_needs_authorization_until_the_current_generation_is_delivered() {
         .unwrap();
     assert_eq!(stale, vec![setup.alice], "never delivered means stale");
 
-    setup.snapshot.apply_all(
-        setup
-            .engine
-            .record_inbox_authorization_delivered(&setup.snapshot, setup.alice, 5)
-            .unwrap(),
-    );
+    setup
+        .snapshot
+        .apply_all(
+            setup
+                .engine
+                .record_inbox_authorization_delivered(&setup.snapshot, setup.alice, 5)
+                .unwrap(),
+        )
+        .unwrap();
 
     assert!(
         setup
@@ -95,13 +100,16 @@ fn a_contact_needs_authorization_until_the_current_generation_is_delivered() {
 #[test]
 fn a_blocked_contact_is_never_listed_for_re_key() {
     let mut setup = setup();
-    setup.snapshot.apply_all(
-        setup
-            .engine
-            .block_contact(&setup.snapshot, setup.bob)
-            .unwrap()
-            .state_updates,
-    );
+    setup
+        .snapshot
+        .apply_all(
+            setup
+                .engine
+                .block_contact(&setup.snapshot, setup.bob)
+                .unwrap()
+                .state_updates,
+        )
+        .unwrap();
 
     let stale = setup
         .engine
@@ -118,12 +126,15 @@ fn a_blocked_contact_is_never_listed_for_re_key() {
 #[test]
 fn delivering_an_older_generation_does_not_move_the_record_backwards() {
     let mut setup = setup();
-    setup.snapshot.apply_all(
-        setup
-            .engine
-            .record_inbox_authorization_delivered(&setup.snapshot, setup.alice, 7)
-            .unwrap(),
-    );
+    setup
+        .snapshot
+        .apply_all(
+            setup
+                .engine
+                .record_inbox_authorization_delivered(&setup.snapshot, setup.alice, 7)
+                .unwrap(),
+        )
+        .unwrap();
 
     let updates = setup
         .engine

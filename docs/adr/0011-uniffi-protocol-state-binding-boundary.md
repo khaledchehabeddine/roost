@@ -3,7 +3,7 @@
 **Status:** Accepted
 
 The UniFFI API exposes protocol-state persistence as opaque blobs addressed by Protocol State Kind
-and key. Host apps provide durable load and commit behavior for those blobs; Rust remains
+and key. Host apps load snapshots directly and pass opaque entries to Rust; Rust remains
 authoritative for every protocol transition and returns the complete set of state updates together
 with any produced Message, Acknowledgment Artifact, Event, retry instruction, or recovery signal.
 Generated Swift and Kotlin bindings are artifacts of the Rust UniFFI surface, not checked-in SDK
@@ -16,9 +16,10 @@ remain byte-opaque across the boundary; Swift and Kotlin may store, replace, or 
 address, but they never inspect ratchet, deduplication, pending-acknowledgment, or contact-state
 payloads.
 
-Each `ProtocolStateUpdate` carries a binding-level commit check. New-state updates require the
-address to be absent, snapshot-derived updates carry the digest of the blob Rust loaded, and wipe
-updates are explicitly unchecked. Host commits must enforce those checks inside the same durable
+Core computes each `ProtocolStateUpdate` commit condition. New-state updates require the
+address to be absent; snapshot-derived updates, including deletion, carry the digest of the
+loaded blob. UniFFI translates the typed absent/digest enum without reconstructing conditions.
+There is no `ProtocolStateStore` callback. Host commits must enforce those checks inside the same durable
 transaction as the replacement/delete. This prevents stale concurrent ratchet commits from silently
 overwriting one another after two operations started from the same snapshot.
 
@@ -31,7 +32,7 @@ at adapter boundaries before Core operations use them.
 ## Scope Boundary
 
 This record fixes the binding ownership and atomicity contract. Existing protocol ADRs remain the
-source of truth for sealed-sender framing, deduplication, contacts, blocking, event streams, backup,
+source of truth for sealed-sender framing, deduplication, contacts, blocking, app-owned observation, backup,
 and prekey lifecycle behavior.
 
 ## Considered Options
@@ -47,9 +48,8 @@ and prekey lifecycle behavior.
 
 ## Verification Evidence
 
-- `crates/roost-client/docs/api-coverage.md` maps issue 122 surfaces to generated Swift/Kotlin
-  fixture replay and records opaque state, atomic mutation outputs, commit checks, and FFI error
-  mappings.
+- `crates/roost-core/tests/protocol_state_host_store.rs` verifies Core-computed absent and digest
+  conditions and rejects stale updates before committing state or outbox effects.
 - `scripts/test/binding-fixture-replay.sh` exercises generated bindings through the fixture replay
   harness.
 - `crates/roost-core/tests/fixtures/protocol_state_blobs_v1.md` records that consumers persist

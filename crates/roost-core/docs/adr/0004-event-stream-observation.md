@@ -1,5 +1,8 @@
-# Event-Stream Observation
+# App-owned observation
 
-**Status:** Accepted
+**Status:** Superseded for v0.16.0
 
-State changes are observed through a per-instance event stream of immutable, self-contained values, because each event carries a complete snapshot of what changed and so an observer never needs to query back into the library — this eliminates the race window between an event firing and the observer reading it that a query-back pattern would create. Events emit in a single total order fixed at the same commit point that mutated state, each tagged with a monotonically increasing identifier, and each observer holds an independent cursor over the same stream so observation is concurrent across observers without bottlenecking on a single reader. An observer that overflows its bounded buffer is told it lagged and by how many events, then recovers by querying for a state snapshot tagged with the identifier of the last event the snapshot reflects, so the observer resumes from exactly that point with no gap and no replay — this is chosen over silent drop or unbounded retention because either would either lose state or leak memory under sustained back-pressure.
+The [system observation decision](../../../../docs/adr/0004-per-instance-event-stream.md) replaces
+the per-instance Event Stream. Core returns typed change data and recovery signals with conditional
+state updates. Hosts commit required effects durably and observe their stores through platform
+facilities. There are no Rust observer buffers, cursors, or snapshot-resume objects.

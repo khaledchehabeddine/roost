@@ -53,12 +53,8 @@ evidence for the profiled path, not a guarantee for every host extension configu
 compromised endpoint.
 Avoid: production SLA, memory proof, endpoint guarantee
 
-**Current State Snapshot** (one per Event Stream query):
-A self-contained public view of one Library Instance's current state, bound to its Event Stream and tagged with that stream's last local Event ID and current State Revision. Lagged or stale Observers replace their local view from it, then resume without replaying already-reflected Events. An Observer rejects a snapshot bound to another Event Stream.
-Avoid: cache, checkpoint
-
 **Deduplication Digest** (one per received encrypted Message):
-A keyed, truncated digest of the encoded sealed-sender frame and, for a bound receive, the exact
+A keyed, truncated digest of the encoded sealed-sender frame and the exact
 Transport Binding bytes. It is computed before decryption and used only to detect identical receive
 retries for one local Identity. Decrypted Message IDs are not part of the digest input.
 Avoid: message hash, replay token
@@ -87,21 +83,10 @@ Avoid: prekey, ephemeral key
 The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup preserves the backed-up Discovery Key and its Epoch for validation, but prekey use stays blocked until inbox rotation advances the generation; use the signed `created_at` timestamp to compare freshness across restored lineages.
 Avoid: window, generation
 
-**Event** (many per Event Stream):
-An immutable public value describing one committed state change. Each Event carries the complete public snapshot of what changed for its producer; future trust-change Events wait until trust state exists.
+**Event** (one optional change value per operation):
+An immutable public value describing a state change. It remains provisional until the host commits
+the associated updates. Hosts retain required recovery effects and observe their committed stores.
 Avoid: notification, callback
-
-**Event ID** (one per Event):
-The monotonic identifier assigned when an Event is committed to an Event Stream. Event IDs are local to the producing Library Instance and are never imported; ID 0 is reserved for its initial Current State Snapshot.
-Avoid: sequence number, offset
-
-**State Revision** (one per Current State Snapshot):
-The monotonic local tag advanced when a Library Instance imports rebuilt current state without emitting an Event. It distinguishes snapshots that share the same last Event ID and is neither persisted nor transferred between Library Instances.
-Avoid: event ID, protocol-state version
-
-**Event Stream** (one per library instance state surface):
-The in-process, per-library-instance feed of committed public state changes. It serves Observers in one total order, but it is not a cross-instance delivery channel; changes from another library instance arrive through shared Protocol State Blobs.
-Avoid: bus, broker, transport
 
 **Hardening Limits** (one configured set per Protocol State Engine):
 Consumer-selected ceilings that bound externally influenced Message, Sealed Sender Envelope,
@@ -126,16 +111,8 @@ Avoid: account backup, protocol-state backup, session restore
 The versioned local secure-storage payload that commits both permanent Identity Key secret halves together. It is the durable private form of the Identity Key and replaces the pre-release two-entry `identity/x25519` plus `identity/ed25519` encoding.
 Avoid: key pair cache, backup blob
 
-**Lag Signal** (one per Observer overrun):
-An explicit Event Stream item reporting how many Events an Observer missed after its bounded buffer overflowed. Producers do not wait indefinitely for slow Observers; the Observer must recover through a Current State Snapshot.
-Avoid: drop, overflow
-
-**Stale State Signal** (one per Observer after current-state import):
-An explicit Event Stream item reporting that a Library Instance imported current state rebuilt from committed Protocol State Blobs. It carries no Event or foreign Event ID; the Observer must recover through a fresh Current State Snapshot.
-Avoid: cross-instance event, lag signal
-
 **Library Instance** (one in-process Core object graph):
-A live Core object graph in one process, such as one Event Stream and its producers. It is not a Device and does not define durable ownership; durable cross-instance coordination goes through the consumer-held Protocol State Blobs.
+A live Core object graph in one process. It is not a Device and does not define durable ownership; durable cross-instance coordination goes through the consumer-held Protocol State Blobs.
 Avoid: Device, client
 
 **Message** (many per Session):
@@ -148,14 +125,6 @@ Avoid: payload, packet
 **MessageID** (one per Message):
 The UUID-shaped 16-byte identifier that addresses one Message within a Session.
 Avoid: uuid, packet id
-
-**Observer** (many per Event Stream):
-A subscriber with its own bounded Event buffer and Observer Cursor. New Observers receive only Events committed after subscription.
-Avoid: listener, subscriber
-
-**Observer Cursor** (one per Observer):
-The last Event ID reflected by that Observer. It advances when the Observer consumes an Event or resumes after a Current State Snapshot.
-Avoid: bookmark, token
 
 **Pending Acknowledgment** (one per unacknowledged outbound Message):
 The persisted record of an outbound Message waiting for an Acknowledgment Artifact. It is stored in
