@@ -21,8 +21,7 @@ impl TransportBinding {
     /// Creates a non-empty Transport Binding within the supported size limit.
     ///
     /// # Errors
-    /// - [`TransportBindingError::Empty`] if `bytes` is empty. Use the operation without a
-    ///   Transport Binding instead.
+    /// - [`TransportBindingError::Empty`] if `bytes` is empty.
     /// - [`TransportBindingError::TooLong`] if `bytes` exceeds [`Self::MAX_LEN`].
     pub fn new(bytes: Vec<u8>) -> Result<Self, TransportBindingError> {
         if bytes.is_empty() {

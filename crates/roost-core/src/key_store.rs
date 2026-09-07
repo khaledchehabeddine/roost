@@ -1423,10 +1423,11 @@ mod tests {
         key_store.rotate_inbox_now().unwrap();
 
         assert!(matches!(
-            key_store
-                .0
-                .signed_prekey
-                .current_prekey_for_public_key(first_epoch, first_prekey.public_key.as_bytes()),
+            key_store.0.signed_prekey.prekey_for_reference(
+                first_epoch,
+                first_prekey.id,
+                first_prekey.public_key.as_bytes()
+            ),
             Err(SignedPreKeyError::NotFound)
         ));
     }

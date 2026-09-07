@@ -126,20 +126,6 @@ impl From<ProtocolStateError> for MessageOperationError {
 }
 
 impl KeyStore {
-    /// Encrypts an established-session Message using stored local identity signing material.
-    ///
-    /// # Errors
-    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
-    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if state loading, contact gating, encryption, or
-    ///   update encoding fails.
-    pub fn encrypt_message(
-        &self,
-        input: MessageEncryption<'_>,
-    ) -> Result<OutboundMessageResult, MessageOperationError> {
-        self.encrypt_message_inner(input, None)
-    }
-
     /// Encrypts an established-session Message while authenticating a Transport Binding.
     /// The caller must retain the exact binding with the returned Message for retransmission.
     ///
@@ -171,14 +157,6 @@ impl KeyStore {
         input: MessageEncryption<'_>,
         transport_binding: &TransportBinding,
     ) -> Result<OutboundMessageResult, MessageOperationError> {
-        self.encrypt_message_inner(input, Some(transport_binding))
-    }
-
-    fn encrypt_message_inner(
-        &self,
-        input: MessageEncryption<'_>,
-        transport_binding: Option<&TransportBinding>,
-    ) -> Result<OutboundMessageResult, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         let identity = self.0.identity.load_identity()?;
@@ -194,32 +172,12 @@ impl KeyStore {
             plaintext: input.plaintext,
         };
         let engine = crate::ProtocolStateEngine::new();
-        Ok(if let Some(transport_binding) = transport_binding {
-            engine.encrypt_message_with_transport_binding(
-                input.snapshot,
-                input.session_key,
-                plaintext,
-                transport_binding,
-            )?
-        } else {
-            engine.encrypt_message(input.snapshot, input.session_key, plaintext)?
-        })
-    }
-
-    /// Decrypts an established-session Message using stored local discovery and identity material.
-    ///
-    /// # Errors
-    /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
-    ///   malformed.
-    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
-    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if deduplication, decryption, sender-certificate
-    ///   validation, acknowledgment encryption, or update encoding fails.
-    pub fn decrypt_message(
-        &self,
-        input: MessageDecryption<'_>,
-    ) -> Result<InboundMessageOutcome, MessageOperationError> {
-        self.decrypt_message_inner(input, None)
+        Ok(engine.encrypt_message_with_transport_binding(
+            input.snapshot,
+            input.session_key,
+            plaintext,
+            transport_binding,
+        )?)
     }
 
     /// Decrypts an established-session Message and authenticates its Transport Binding plus the
@@ -238,17 +196,6 @@ impl KeyStore {
         input: MessageDecryption<'_>,
         message_transport_binding: &TransportBinding,
         acknowledgment_transport_binding: &TransportBinding,
-    ) -> Result<InboundMessageOutcome, MessageOperationError> {
-        self.decrypt_message_inner(
-            input,
-            Some((message_transport_binding, acknowledgment_transport_binding)),
-        )
-    }
-
-    fn decrypt_message_inner(
-        &self,
-        input: MessageDecryption<'_>,
-        transport_bindings: Option<(&TransportBinding, &TransportBinding)>,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -276,33 +223,13 @@ impl KeyStore {
             sender_certificate_validation: input.sender_certificate_validation,
         };
         let engine = crate::ProtocolStateEngine::new();
-        Ok(match transport_bindings {
-            Some((message_transport_binding, acknowledgment_transport_binding)) => engine
-                .decrypt_message_with_transport_bindings(
-                    &mut rng,
-                    input.snapshot,
-                    inbound,
-                    message_transport_binding,
-                    acknowledgment_transport_binding,
-                )?,
-            None => engine.decrypt_message(&mut rng, input.snapshot, inbound)?,
-        })
-    }
-
-    /// Processes an encrypted acknowledgment using stored local discovery and identity material.
-    ///
-    /// # Errors
-    /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
-    ///   malformed.
-    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
-    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if state loading, decryption, or update encoding
-    ///   fails.
-    pub fn process_acknowledgment(
-        &self,
-        input: AcknowledgmentProcessing<'_>,
-    ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
-        self.process_acknowledgment_inner(input, None)
+        Ok(engine.decrypt_message_with_transport_bindings(
+            &mut rng,
+            input.snapshot,
+            inbound,
+            message_transport_binding,
+            acknowledgment_transport_binding,
+        )?)
     }
 
     /// Processes an encrypted acknowledgment while authenticating its Transport Binding.
@@ -319,14 +246,6 @@ impl KeyStore {
         input: AcknowledgmentProcessing<'_>,
         transport_binding: &TransportBinding,
     ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
-        self.process_acknowledgment_inner(input, Some(transport_binding))
-    }
-
-    fn process_acknowledgment_inner(
-        &self,
-        input: AcknowledgmentProcessing<'_>,
-        transport_binding: Option<&TransportBinding>,
-    ) -> Result<AcknowledgmentOutcome, MessageOperationError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         let identity = self.0.identity.load_identity()?;
@@ -339,16 +258,12 @@ impl KeyStore {
             recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
         };
         let engine = crate::ProtocolStateEngine::new();
-        Ok(if let Some(transport_binding) = transport_binding {
-            engine.process_acknowledgment_with_transport_binding(
-                &mut rng,
-                input.snapshot,
-                inbound,
-                transport_binding,
-            )?
-        } else {
-            engine.process_acknowledgment(&mut rng, input.snapshot, inbound)?
-        })
+        Ok(engine.process_acknowledgment_with_transport_binding(
+            &mut rng,
+            input.snapshot,
+            inbound,
+            transport_binding,
+        )?)
     }
 }
 

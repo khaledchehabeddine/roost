@@ -1,5 +1,7 @@
 //! Exercises the public protocol-state API over consumer-held opaque blobs.
 
+mod support;
+
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
@@ -16,8 +18,8 @@ use roost_crypto::{
     CryptoError, DiscoveryKey, Header, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle,
     PublicKey, RatchetState, SealedFramePreKeyReference, SigningKeyPair, accept,
     generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate, seal_frame,
-    sign_identity_key_binding,
+    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
+    seal_frame_with_associated_data, sign_identity_key_binding,
 };
 use roost_protocol::{
     DomainSigningKey, DomainSigningKeyStatus, EvidenceProfile, EvidenceVerificationInput,
@@ -25,6 +27,7 @@ use roost_protocol::{
     SenderCertificateIdentityKey, SenderCertificateValidationError, verify_evidence_bundle,
 };
 use serde::{Deserialize, Serialize};
+use support::dead_session_blob;
 
 const CREATED_AT: u64 = 1_700_000_000;
 const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
@@ -385,14 +388,14 @@ fn block_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnaps
     let blocked = engine
         .block_contact(snapshot, contact.identity_key)
         .unwrap();
-    snapshot.apply_all(blocked.state_updates);
+    snapshot.apply_all(blocked.state_updates).unwrap();
 }
 
 fn rotate_blocked_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
     let rotated = engine
         .record_contact(snapshot, rotated_contact_identity())
         .unwrap();
-    snapshot.apply_all(rotated.state_updates);
+    snapshot.apply_all(rotated.state_updates).unwrap();
 }
 
 fn install_accepted_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
@@ -406,11 +409,11 @@ fn install_accepted_contact_identity(
     contact: ContactIdentity,
 ) {
     let created = engine.record_contact(snapshot, contact).unwrap();
-    snapshot.apply_all(created.state_updates);
+    snapshot.apply_all(created.state_updates).unwrap();
     let accepted = engine
         .accept_contact(snapshot, contact.identity_key)
         .unwrap();
-    snapshot.apply_all(accepted.state_updates);
+    snapshot.apply_all(accepted.state_updates).unwrap();
 }
 
 fn snapshot_with_state(
@@ -419,7 +422,9 @@ fn snapshot_with_state(
     state: &RatchetState,
 ) -> ProtocolStateSnapshot {
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.apply(engine.set_session_state(key.clone(), state).unwrap());
+    snapshot
+        .apply(engine.set_session_state(key.clone(), state).unwrap())
+        .unwrap();
     install_pending_acknowledgments(engine, &mut snapshot, key);
     install_accepted_contact(engine, &mut snapshot);
     snapshot
@@ -431,11 +436,13 @@ fn install_deduplication_set(
     key: ProtocolStateKey,
     seed: u8,
 ) {
-    snapshot.apply(
-        engine
-            .initialize_deduplication_set(&mut ChaCha20Rng::from_seed([seed; 32]), key)
-            .unwrap(),
-    );
+    snapshot
+        .apply(
+            engine
+                .initialize_deduplication_set(&mut ChaCha20Rng::from_seed([seed; 32]), key)
+                .unwrap(),
+        )
+        .unwrap();
 }
 
 fn install_pending_acknowledgments(
@@ -443,7 +450,9 @@ fn install_pending_acknowledgments(
     snapshot: &mut ProtocolStateSnapshot,
     key: ProtocolStateKey,
 ) {
-    snapshot.apply(engine.initialize_pending_acknowledgments(key).unwrap());
+    snapshot
+        .apply(engine.initialize_pending_acknowledgments(key).unwrap())
+        .unwrap();
 }
 
 fn snapshot_with_state_and_peer_identity(
@@ -453,11 +462,13 @@ fn snapshot_with_state_and_peer_identity(
     peer_sender_identity: &SenderIdentityMaterial,
 ) -> ProtocolStateSnapshot {
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.apply(
-        engine
-            .set_session_state_with_peer_identity(key.clone(), state, peer_sender_identity)
-            .unwrap(),
-    );
+    snapshot
+        .apply(
+            engine
+                .set_session_state_with_peer_identity(key.clone(), state, peer_sender_identity)
+                .unwrap(),
+        )
+        .unwrap();
     install_pending_acknowledgments(engine, &mut snapshot, key);
     install_accepted_contact(engine, &mut snapshot);
     snapshot
@@ -567,31 +578,6 @@ fn inbound<'a>(
     }
 }
 
-fn remap_session_updates(
-    updates: Vec<roost_core::ProtocolStateUpdate>,
-    key: ProtocolStateKey,
-) -> Vec<roost_core::ProtocolStateUpdate> {
-    updates
-        .into_iter()
-        .map(|update| {
-            let kind = update.address().kind();
-            let address = match kind {
-                ProtocolStateKind::RatchetSession | ProtocolStateKind::PendingAcknowledgments => {
-                    ProtocolStateAddress::new(kind, key.clone())
-                }
-                _ => update.address().clone(),
-            };
-            match update.blob() {
-                Some(blob) => roost_core::ProtocolStateUpdate::set(
-                    address,
-                    ProtocolStateBlob::from_bytes(blob.as_bytes().to_vec()),
-                ),
-                None => roost_core::ProtocolStateUpdate::delete(address),
-            }
-        })
-        .collect()
-}
-
 fn inbound_acknowledgment<'a>(
     session_key: ProtocolStateKey,
     message: &'a Message,
@@ -631,7 +617,7 @@ fn acknowledgment_processing_setup(
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(
@@ -639,11 +625,12 @@ fn acknowledgment_processing_setup(
                 b"acknowledgment recipient validation",
                 &sender.sender_identity,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    alice_snapshot.apply_all(encrypted.state_updates);
+    alice_snapshot.apply_all(encrypted.state_updates).unwrap();
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([id; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -654,6 +641,8 @@ fn acknowledgment_processing_setup(
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -664,7 +653,7 @@ fn acknowledgment_processing_setup(
             acknowledgment_sender_identity.identity_key,
         )
         .unwrap();
-    alice_snapshot.apply(bound);
+    alice_snapshot.apply(bound).unwrap();
     (engine, key, alice_snapshot, decrypted.acknowledgment)
 }
 
@@ -707,28 +696,6 @@ fn ratcheted_payload(header: &Header, ciphertext: &[u8]) -> Vec<u8> {
     payload.extend_from_slice(&header.message_number.to_be_bytes());
     payload.extend_from_slice(ciphertext);
     payload
-}
-
-#[derive(Serialize)]
-struct DeadSessionWire {
-    version: u8,
-    reason: SessionUnrecoverableReason,
-    event_emitted: bool,
-    peer_sender_identity_key: Option<[u8; 32]>,
-    contact_identity_key: Option<()>,
-}
-
-fn dead_session_blob(event_emitted: bool, peer_sender_identity_key: [u8; 32]) -> ProtocolStateBlob {
-    let wire = DeadSessionWire {
-        version: 3,
-        reason: SessionUnrecoverableReason::SkippedKeyLimitExceeded,
-        event_emitted,
-        peer_sender_identity_key: Some(peer_sender_identity_key),
-        contact_identity_key: None,
-    };
-    let mut bytes = vec![1, 0];
-    bytes.extend_from_slice(&postcard::to_stdvec(&wire).unwrap());
-    ProtocolStateBlob::from_bytes(bytes)
 }
 
 fn ratchet_associated_data(
@@ -800,10 +767,11 @@ fn outbound_message_and_advanced_state_return_together() {
     let sender_identity = sender_identity(1);
 
     let result = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &snapshot,
             key.clone(),
             outbound(1, b"second", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
@@ -837,20 +805,27 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
     );
 
     let encrypted = engine
-        .encrypt_message(&alice_snapshot, key.clone(), {
-            let contact = accepted_contact_identity();
-            OutboundPlaintext {
-                id: MessageId::from_bytes([8; 16]),
-                sender_identity: &sender.sender_identity,
-                sender_identity_signing_key: sender_identity_signing_key(&sender.sender_identity),
-                contact_identity_key: contact.identity_key,
-                recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-                timestamp_millis: 1_700_000_000_888,
-                plaintext: b"sealed sender",
-            }
-        })
+        .encrypt_message_with_transport_binding(
+            &alice_snapshot,
+            key.clone(),
+            {
+                let contact = accepted_contact_identity();
+                OutboundPlaintext {
+                    id: MessageId::from_bytes([8; 16]),
+                    sender_identity: &sender.sender_identity,
+                    sender_identity_signing_key: sender_identity_signing_key(
+                        &sender.sender_identity,
+                    ),
+                    contact_identity_key: contact.identity_key,
+                    recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
+                    timestamp_millis: 1_700_000_000_888,
+                    plaintext: b"sealed sender",
+                }
+            },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        )
         .unwrap();
-    alice_snapshot.apply_all(encrypted.state_updates);
+    alice_snapshot.apply_all(encrypted.state_updates).unwrap();
 
     let encoded = encrypted.message.to_bytes().unwrap();
     assert!(
@@ -860,7 +835,7 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
     );
 
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([12u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -871,10 +846,12 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
 
     assert_eq!(decrypted.plaintext.as_slice(), b"sealed sender");
     assert_eq!(
@@ -910,10 +887,11 @@ fn sealed_frame_hides_message_metadata_until_decrypt() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x42, b"hidden metadata", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
@@ -929,7 +907,7 @@ fn sealed_frame_hides_message_metadata_until_decrypt() {
     assert!(!encrypted.message.ciphertext.is_empty());
 
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x42; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -940,6 +918,8 @@ fn sealed_frame_hides_message_metadata_until_decrypt() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -976,13 +956,14 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     );
 
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x31, b"ack me", &alice.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    alice_snapshot.apply_all(encrypted.state_updates);
+    alice_snapshot.apply_all(encrypted.state_updates).unwrap();
     let pending = engine
         .pending_acknowledgments(&alice_snapshot, key.clone())
         .unwrap();
@@ -990,7 +971,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     assert_eq!(pending[0].message_id, encrypted.message_id);
 
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x31; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -1001,10 +982,12 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
                 &alice_domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
 
     assert_eq!(decrypted.plaintext.as_slice(), b"ack me");
     assert!(decrypted.acknowledgment.prekey_reference.is_none());
@@ -1016,10 +999,11 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     );
 
     let cleared = engine
-        .process_acknowledgment(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x41; 32]),
             &alice_snapshot,
             inbound_acknowledgment(key.clone(), &decrypted.acknowledgment),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
@@ -1030,7 +1014,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
         cleared.sender_identity.identity_key,
         bob_sender.identity_key
     );
-    alice_snapshot.apply_all(cleared.state_updates);
+    alice_snapshot.apply_all(cleared.state_updates).unwrap();
 
     assert!(
         engine
@@ -1039,19 +1023,21 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
             .is_empty()
     );
     let duplicate = engine
-        .process_acknowledgment(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x42; 32]),
             &alice_snapshot,
             inbound_acknowledgment(key.clone(), &decrypted.acknowledgment),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert!(matches!(duplicate, AcknowledgmentOutcome::Duplicate));
     for seed in 0x43..0x47 {
         let repeated = engine
-            .process_acknowledgment(
+            .process_acknowledgment_with_transport_binding(
                 &mut ChaCha20Rng::from_seed([seed; 32]),
                 &alice_snapshot,
                 inbound_acknowledgment(key.clone(), &decrypted.acknowledgment),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap();
         assert!(matches!(repeated, AcknowledgmentOutcome::Duplicate));
@@ -1073,16 +1059,19 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     let mut malformed_pending_blob = pending_blob[..2].to_vec();
     malformed_pending_blob.extend(postcard::to_stdvec(&wire).unwrap());
     let mut duplicate_snapshot = ProtocolStateSnapshot::new();
-    duplicate_snapshot.set(
-        pending_address,
-        ProtocolStateBlob::from_bytes(malformed_pending_blob),
-    );
+    duplicate_snapshot
+        .set(
+            pending_address,
+            ProtocolStateBlob::from_bytes(malformed_pending_blob),
+        )
+        .unwrap();
 
     let duplicate = engine
-        .process_acknowledgment(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x47; 32]),
             &duplicate_snapshot,
             inbound_acknowledgment(key, &decrypted.acknowledgment),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert!(matches!(duplicate, AcknowledgmentOutcome::Duplicate));
@@ -1113,19 +1102,20 @@ fn unknown_acknowledgment_is_non_fatal_miss() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x32, b"ack missing pending", &alice.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     for update in encrypted.state_updates {
         if update.address().kind() == ProtocolStateKind::RatchetSession {
-            alice_snapshot.apply(update);
+            alice_snapshot.apply(update).unwrap();
         }
     }
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x32; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -1136,15 +1126,18 @@ fn unknown_acknowledgment_is_non_fatal_miss() {
                 &alice_domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
 
     let miss = engine
-        .process_acknowledgment(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x43; 32]),
             &alice_snapshot,
             inbound_acknowledgment(key, &decrypted.acknowledgment),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
@@ -1162,20 +1155,25 @@ fn retry_instructions_are_windowed_and_persisted() {
     install_pending_acknowledgments(&engine, &mut snapshot, key.clone());
 
     let encrypted = engine
-        .encrypt_message(&snapshot, key.clone(), {
-            let contact = accepted_contact_identity();
-            OutboundPlaintext {
-                id: MessageId::from_bytes([0x33; 16]),
-                sender_identity: &sender_identity,
-                sender_identity_signing_key: sender_identity_signing_key(&sender_identity),
-                contact_identity_key: contact.identity_key,
-                recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-                timestamp_millis: sent_at,
-                plaintext: b"retry later",
-            }
-        })
+        .encrypt_message_with_transport_binding(
+            &snapshot,
+            key.clone(),
+            {
+                let contact = accepted_contact_identity();
+                OutboundPlaintext {
+                    id: MessageId::from_bytes([0x33; 16]),
+                    sender_identity: &sender_identity,
+                    sender_identity_signing_key: sender_identity_signing_key(&sender_identity),
+                    contact_identity_key: contact.identity_key,
+                    recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
+                    timestamp_millis: sent_at,
+                    plaintext: b"retry later",
+                }
+            },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        )
         .unwrap();
-    snapshot.apply_all(encrypted.state_updates);
+    snapshot.apply_all(encrypted.state_updates).unwrap();
 
     let early = engine
         .retry_instructions(&snapshot, key.clone(), sent_at + 999, 1_000)
@@ -1188,7 +1186,7 @@ fn retry_instructions_are_windowed_and_persisted() {
         .unwrap();
     assert_eq!(due.instructions.len(), 1);
     assert_eq!(due.instructions[0].message_id, encrypted.message_id);
-    snapshot.apply_all(due.state_updates);
+    snapshot.apply_all(due.state_updates).unwrap();
 
     let repeated = ProtocolStateEngine::new()
         .retry_instructions(&snapshot, key.clone(), sent_at + 1_000, 1_000)
@@ -1212,24 +1210,28 @@ fn pending_acknowledgment_state_faults_on_bad_blobs() {
     let address = pending_acknowledgment_address(key.clone());
     let sender_identity = sender_identity(0xa1);
     let mut corrupt_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
-    corrupt_snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    corrupt_snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+        )
+        .unwrap();
     assert!(matches!(
-        engine.encrypt_message(
-            &corrupt_snapshot,
-            key.clone(),
-            outbound(0x34, b"corrupt pending", &sender_identity),
-        ),
-        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
-    ));
+            engine.encrypt_message_with_transport_binding(
+                &corrupt_snapshot,
+                key.clone(),
+                outbound(0x34, b"corrupt pending", &sender_identity), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+        ));
 
     let mut unsupported_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
-    unsupported_snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
-    );
+    unsupported_snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
+        )
+        .unwrap();
     assert!(matches!(
         engine.pending_acknowledgments(&unsupported_snapshot, key),
         Err(ProtocolStateError::UnsupportedBlobVersion {
@@ -1249,10 +1251,11 @@ fn pending_acknowledgment_state_rejects_x3dh_frame_retries() {
     let sender_identity = sender_identity(0xa1);
     let snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &snapshot,
             key.clone(),
             outbound(0x35, b"retry wrong frame", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     let pending_update = encrypted
@@ -1279,7 +1282,9 @@ fn pending_acknowledgment_state_rejects_x3dh_frame_retries() {
     let mut corrupt_blob = pending_blob[..2].to_vec();
     corrupt_blob.extend(postcard::to_stdvec(&wire).unwrap());
     let mut corrupt_snapshot = ProtocolStateSnapshot::new();
-    corrupt_snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(corrupt_blob));
+    corrupt_snapshot
+        .set(address.clone(), ProtocolStateBlob::from_bytes(corrupt_blob))
+        .unwrap();
 
     assert!(matches!(
         engine.pending_acknowledgments(&corrupt_snapshot, key),
@@ -1334,10 +1339,11 @@ fn oversized_inbound_message_rejects_before_state_load() {
         deduplication_key.clone(),
     );
     let encrypted = default_engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x36, b"oversized before state", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -1350,16 +1356,20 @@ fn oversized_inbound_message_rejects_before_state_load() {
     let ratchet_address = ratchet_address(key.clone());
     let deduplication_address = deduplication_address(deduplication_key.clone());
     let corrupt = vec![1, 0, 0xaa];
-    bob_snapshot.set(
-        ratchet_address.clone(),
-        ProtocolStateBlob::from_bytes(corrupt.clone()),
-    );
-    bob_snapshot.set(
-        deduplication_address.clone(),
-        ProtocolStateBlob::from_bytes(corrupt.clone()),
-    );
+    bob_snapshot
+        .set(
+            ratchet_address.clone(),
+            ProtocolStateBlob::from_bytes(corrupt.clone()),
+        )
+        .unwrap();
+    bob_snapshot
+        .set(
+            deduplication_address.clone(),
+            ProtocolStateBlob::from_bytes(corrupt.clone()),
+        )
+        .unwrap();
 
-    let result = rejecting_engine.decrypt_message(
+    let result = rejecting_engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x36; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -1370,6 +1380,8 @@ fn oversized_inbound_message_rejects_before_state_load() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -1403,10 +1415,11 @@ fn configured_blob_limit_rejects_decode_before_restore() {
     };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
-    let result = engine.encrypt_message(
+    let result = engine.encrypt_message_with_transport_binding(
         &snapshot,
         key,
         outbound(0x37, b"blob limit", &sender_identity),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -1453,10 +1466,11 @@ fn configured_payload_limit_rejects_before_state_load() {
         deduplication_key.clone(),
     );
     let encrypted = default_engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x38, b"payload limit", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -1467,12 +1481,14 @@ fn configured_payload_limit_rejects_before_state_load() {
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
     let deduplication_address = deduplication_address(deduplication_key.clone());
     let corrupt = vec![1, 0, 0xaa];
-    bob_snapshot.set(
-        deduplication_address.clone(),
-        ProtocolStateBlob::from_bytes(corrupt.clone()),
-    );
+    bob_snapshot
+        .set(
+            deduplication_address.clone(),
+            ProtocolStateBlob::from_bytes(corrupt.clone()),
+        )
+        .unwrap();
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x38; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -1483,6 +1499,8 @@ fn configured_payload_limit_rejects_before_state_load() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -1516,10 +1534,11 @@ fn configured_sender_material_limits_reject_without_state_updates() {
         deduplication_key.clone(),
     );
     let encrypted = default_engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x39, b"certificate limit", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -1541,7 +1560,7 @@ fn configured_sender_material_limits_reject_without_state_updates() {
     };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x39; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -1552,6 +1571,8 @@ fn configured_sender_material_limits_reject_without_state_updates() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -1572,7 +1593,7 @@ fn configured_sender_material_limits_reject_without_state_updates() {
         ..ProtocolHardeningLimits::default()
     };
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x3b; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -1583,6 +1604,8 @@ fn configured_sender_material_limits_reject_without_state_updates() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -1610,10 +1633,11 @@ fn configured_boundary_limits_accept_exact_sizes() {
         deduplication_key.clone(),
     );
     let encrypted = default_engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x3a, b"exact limits", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -1627,7 +1651,7 @@ fn configured_boundary_limits_accept_exact_sizes() {
     let engine = ProtocolStateEngine::with_hardening_limits(limits).unwrap();
 
     let result = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x3a; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -1638,6 +1662,8 @@ fn configured_boundary_limits_accept_exact_sizes() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -1676,16 +1702,17 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
         .as_bytes()
         .to_vec();
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(10, b"accept once", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([19u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -1696,6 +1723,8 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -1712,10 +1741,10 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
         decrypted.state_updates[1].blob().unwrap().as_bytes(),
         prior_deduplication
     );
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
 
     let duplicate = ProtocolStateEngine::new()
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([20u8; 32]),
             &bob_snapshot,
             inbound(
@@ -1724,6 +1753,8 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
                 &encrypted,
                 &acknowledgment_sender_identity,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
@@ -1748,15 +1779,16 @@ fn replay_storm_returns_duplicate_without_state_churn() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x3c, b"replay storm", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x3c; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -1767,10 +1799,12 @@ fn replay_storm_returns_duplicate_without_state_churn() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
     let ratchet_address = ratchet_address(key.clone());
     let deduplication_address = deduplication_address(deduplication_key.clone());
     let ratchet_after_accept = bob_snapshot
@@ -1786,7 +1820,7 @@ fn replay_storm_returns_duplicate_without_state_churn() {
 
     for seed in 0x3d..0x45 {
         let duplicate = engine
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([seed; 32]),
                 &bob_snapshot,
                 inbound(
@@ -1795,6 +1829,8 @@ fn replay_storm_returns_duplicate_without_state_churn() {
                     &encrypted,
                     &acknowledgment_sender_identity,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap();
         assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));
@@ -1833,18 +1869,19 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
         let mut last = None;
         for _ in 0..=100 {
             let encrypted = engine
-                .encrypt_message(
+                .encrypt_message_with_transport_binding(
                     &alice_snapshot,
                     key.clone(),
                     sequenced_outbound(sequence, b"skipped fill", &sender.sender_identity),
+                    &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
                 )
                 .unwrap();
-            alice_snapshot.apply_all(encrypted.state_updates);
+            alice_snapshot.apply_all(encrypted.state_updates).unwrap();
             last = Some(encrypted.message);
             sequence += 1;
         }
         let decrypted = engine
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([batch as u8; 32]),
                 &bob_snapshot,
                 inbound_with_certificate_validation(
@@ -1855,28 +1892,31 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
                     &domain_keys,
                     &revoked,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .map(accepted)
             .unwrap();
-        bob_snapshot.apply_all(decrypted.state_updates);
+        bob_snapshot.apply_all(decrypted.state_updates).unwrap();
     }
 
     let mut terminal = None;
     for _ in 0..=100 {
         let encrypted = engine
-            .encrypt_message(
+            .encrypt_message_with_transport_binding(
                 &alice_snapshot,
                 key.clone(),
                 sequenced_outbound(sequence, b"terminal overflow", &sender.sender_identity),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap();
-        alice_snapshot.apply_all(encrypted.state_updates);
+        alice_snapshot.apply_all(encrypted.state_updates).unwrap();
         terminal = Some(encrypted.message);
         sequence += 1;
     }
     let terminal = terminal.unwrap();
 
-    let overflow = engine.decrypt_message(
+    let overflow = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0xf0; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -1887,6 +1927,8 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
     assert!(matches!(
         overflow,
@@ -1895,7 +1937,7 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
         ))
     ));
 
-    let repeated = engine.decrypt_message(
+    let repeated = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0xf1; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -1906,6 +1948,8 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
     assert!(matches!(
         repeated,
@@ -1916,9 +1960,8 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
 }
 
 #[test]
-fn dead_session_marker_reports_once_and_replacement_allows_messages() {
+fn dead_session_marker_reports_once_without_reset() {
     let initial_setup = setup();
-    let replacement = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
     let deduplication_key = deduplication_key();
@@ -1926,7 +1969,7 @@ fn dead_session_marker_reports_once_and_replacement_allows_messages() {
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
     let acknowledgment_sender_identity = acknowledgment_sender_identity();
-    let mut alice_snapshot = snapshot_with_state(&engine, key.clone(), &initial_setup.alice_state);
+    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &initial_setup.alice_state);
     let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
         &engine,
         key.clone(),
@@ -1936,20 +1979,23 @@ fn dead_session_marker_reports_once_and_replacement_allows_messages() {
     );
     let address = ratchet_address(key.clone());
     let dead_message = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             sequenced_outbound(0x80, b"dead marker probe", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
-    bob_snapshot.apply(roost_core::ProtocolStateUpdate::set(
-        address.clone(),
-        dead_session_blob(false, sender.sender_identity.identity_key),
-    ));
+    bob_snapshot
+        .set(
+            address.clone(),
+            dead_session_blob(false, sender.sender_identity.identity_key),
+        )
+        .unwrap();
 
     let unrecoverable = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0xe0; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -1960,6 +2006,8 @@ fn dead_session_marker_reports_once_and_replacement_allows_messages() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(session_unrecoverable)
         .unwrap();
@@ -1977,10 +2025,10 @@ fn dead_session_marker_reports_once_and_replacement_allows_messages() {
             ..
         })
     ));
-    bob_snapshot.apply_all(unrecoverable.state_updates);
+    bob_snapshot.apply_all(unrecoverable.state_updates).unwrap();
 
     let repeated = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0xe1; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -1991,47 +2039,13 @@ fn dead_session_marker_reports_once_and_replacement_allows_messages() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(session_unrecoverable)
         .unwrap();
     assert!(repeated.event.is_none());
     assert!(repeated.state_updates.is_empty());
-
-    bob_snapshot.apply(
-        engine
-            .set_session_state_with_peer_identity(
-                key.clone(),
-                &replacement.bob_state,
-                &sender.sender_identity,
-            )
-            .unwrap(),
-    );
-    alice_snapshot = snapshot_with_state(&engine, key.clone(), &replacement.alice_state);
-
-    let encrypted = engine
-        .encrypt_message(
-            &alice_snapshot,
-            key.clone(),
-            sequenced_outbound(9_000, b"after replacement", &sender.sender_identity),
-        )
-        .unwrap();
-    let decrypted = engine
-        .decrypt_message(
-            &mut ChaCha20Rng::from_seed([0xf2; 32]),
-            &bob_snapshot,
-            inbound_with_certificate_validation(
-                key,
-                deduplication_key,
-                &encrypted.message,
-                &acknowledgment_sender_identity,
-                &domain_keys,
-                &revoked,
-            ),
-        )
-        .map(accepted)
-        .unwrap();
-
-    assert_eq!(decrypted.plaintext.as_slice(), b"after replacement");
 }
 
 #[test]
@@ -2053,10 +2067,11 @@ fn transient_aead_failure_does_not_mark_session_unrecoverable() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             sequenced_outbound(0x70, b"valid after tamper", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -2064,7 +2079,7 @@ fn transient_aead_failure_does_not_mark_session_unrecoverable() {
     *tampered.ciphertext.last_mut().unwrap() ^= 0x01;
 
     assert!(matches!(
-        engine.decrypt_message(
+        engine.decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x70; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2075,12 +2090,14 @@ fn transient_aead_failure_does_not_mark_session_unrecoverable() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         ),
         Err(ProtocolStateError::Crypto(roost_crypto::CryptoError::Aead))
     ));
 
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x71; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2091,6 +2108,8 @@ fn transient_aead_failure_does_not_mark_session_unrecoverable() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -2115,15 +2134,16 @@ fn receive_without_certificate_validation_rejects_before_plaintext_is_surfaced()
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x4f, b"must validate", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x4f; 32]),
         &bob_snapshot,
         inbound(
@@ -2132,6 +2152,8 @@ fn receive_without_certificate_validation_rejects_before_plaintext_is_surfaced()
             &encrypted,
             &acknowledgment_sender_identity,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2161,15 +2183,16 @@ fn validated_receive_persists_contact_identity_key_into_session_update() {
     );
     install_accepted_contact_identity(&engine, &mut bob_snapshot, other_contact);
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x50, b"bind contact", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x50; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2180,12 +2203,14 @@ fn validated_receive_persists_contact_identity_key_into_session_update() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
 
-    let result = engine.encrypt_message(
+    let result = engine.encrypt_message_with_transport_binding(
         &bob_snapshot,
         key.clone(),
         OutboundPlaintext {
@@ -2199,6 +2224,7 @@ fn validated_receive_persists_contact_identity_key_into_session_update() {
             timestamp_millis: 1_700_000_000_500,
             plaintext: b"wrong contact",
         },
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2227,15 +2253,16 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(11, b"no duplicate effect", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([21u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2246,18 +2273,22 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
     let ratchet_address = ratchet_address(key.clone());
-    bob_snapshot.set(
-        ratchet_address,
-        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    bob_snapshot
+        .set(
+            ratchet_address,
+            ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+        )
+        .unwrap();
 
     let duplicate = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([22u8; 32]),
             &bob_snapshot,
             inbound(
@@ -2266,6 +2297,8 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
                 &encrypted,
                 &acknowledgment_sender_identity,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
@@ -2304,16 +2337,17 @@ fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_wi
         .as_bytes()
         .to_vec();
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x51, b"blocked text", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
     let blocked = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x51; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2324,6 +2358,8 @@ fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_wi
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(blocked)
         .unwrap();
@@ -2365,7 +2401,7 @@ fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
     );
     block_contact(&engine, &mut bob_snapshot);
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(
@@ -2373,6 +2409,7 @@ fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
                 b"blocked outside evidence grace",
                 &sender.sender_identity,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -2391,10 +2428,12 @@ fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
         .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
 
     let blocked = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5f; 32]),
             &bob_snapshot,
             inbound,
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(blocked)
         .unwrap();
@@ -2427,16 +2466,17 @@ fn blocked_inbound_message_under_silent_receipt_policy_returns_acknowledgment_wi
     let ratchet_address = ratchet_address(key.clone());
     let deduplication_address = deduplication_address(deduplication_key.clone());
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x54, b"blocked but receipted", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
     let blocked = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x54; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2447,6 +2487,8 @@ fn blocked_inbound_message_under_silent_receipt_policy_returns_acknowledgment_wi
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(blocked)
         .unwrap();
@@ -2484,16 +2526,17 @@ fn blocked_acknowledgment_policy_controls_sending_chain_advance() {
     block_contact(&unreachable, &mut bob_snapshot);
     let ratchet_address = ratchet_address(key.clone());
     let encrypted = unreachable
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x55, b"chain advance", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
     let suppressed = unreachable
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x55; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2504,11 +2547,13 @@ fn blocked_acknowledgment_policy_controls_sending_chain_advance() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(blocked)
         .unwrap();
     let receipted = silent_receipt
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x55; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2519,6 +2564,8 @@ fn blocked_acknowledgment_policy_controls_sending_chain_advance() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(blocked)
         .unwrap();
@@ -2554,15 +2601,16 @@ fn duplicate_blocked_inbound_message_does_not_load_or_advance_ratchet_state() {
     );
     block_contact(&engine, &mut bob_snapshot);
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x52, b"blocked once", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
     let first = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x52; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2573,17 +2621,21 @@ fn duplicate_blocked_inbound_message_does_not_load_or_advance_ratchet_state() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(blocked)
         .unwrap();
-    bob_snapshot.apply_all(first.state_updates);
-    bob_snapshot.set(
-        ratchet_address(key.clone()),
-        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    bob_snapshot.apply_all(first.state_updates).unwrap();
+    bob_snapshot
+        .set(
+            ratchet_address(key.clone()),
+            ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+        )
+        .unwrap();
 
     let duplicate = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x53; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2594,6 +2646,8 @@ fn duplicate_blocked_inbound_message_does_not_load_or_advance_ratchet_state() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
@@ -2621,16 +2675,17 @@ fn discovery_key_rotation_does_not_bypass_blocked_inbound_message() {
     block_contact(&engine, &mut bob_snapshot);
     rotate_blocked_contact(&engine, &mut bob_snapshot);
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x54, b"rotated blocked", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
     let outcome = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x54; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2641,6 +2696,8 @@ fn discovery_key_rotation_does_not_bypass_blocked_inbound_message() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
@@ -2667,15 +2724,16 @@ fn revoked_certificate_rejects_before_local_block_handling() {
     );
     block_contact(&engine, &mut bob_snapshot);
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x55, b"revoked blocked", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x55; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -2686,6 +2744,8 @@ fn revoked_certificate_rejects_before_local_block_handling() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2715,15 +2775,16 @@ fn validated_once_then_missing_validation_rejects_for_blocked_sender() {
         deduplication_key.clone(),
     );
     let first = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x5b, b"validated first", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    alice_snapshot.apply_all(first.state_updates);
+    alice_snapshot.apply_all(first.state_updates).unwrap();
     let accepted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5b; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -2734,20 +2795,23 @@ fn validated_once_then_missing_validation_rejects_for_blocked_sender() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(accepted.state_updates);
+    bob_snapshot.apply_all(accepted.state_updates).unwrap();
     block_contact(&engine, &mut bob_snapshot);
     let second = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x5c, b"missing validation", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x5c; 32]),
         &bob_snapshot,
         inbound(
@@ -2756,6 +2820,8 @@ fn validated_once_then_missing_validation_rejects_for_blocked_sender() {
             &second.message,
             &acknowledgment_sender_identity,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2782,15 +2848,16 @@ fn unavailable_revocation_state_rejects_before_plaintext_is_surfaced() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x56, b"revocation unavailable", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x56; 32]),
         &bob_snapshot,
         InboundEncryptedMessage {
@@ -2807,6 +2874,8 @@ fn unavailable_revocation_state_rejects_before_plaintext_is_surfaced() {
                 RevocationState::Unavailable,
             )),
         },
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2836,15 +2905,16 @@ fn untrusted_signing_key_rejects_before_plaintext_is_surfaced() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x59, b"untrusted domain", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x59; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -2855,6 +2925,8 @@ fn untrusted_signing_key_rejects_before_plaintext_is_surfaced() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2887,15 +2959,16 @@ fn expired_certificate_rejects_before_plaintext_is_surfaced() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x5a, b"expired domain", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x5a; 32]),
         &bob_snapshot,
         inbound_with_certificate_validation(
@@ -2906,6 +2979,8 @@ fn expired_certificate_rejects_before_plaintext_is_surfaced() {
             &domain_keys,
             &revoked,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2938,10 +3013,11 @@ fn unblocked_message_outside_evidence_grace_is_rejected() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x5d, b"outside evidence grace", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -2959,10 +3035,12 @@ fn unblocked_message_outside_evidence_grace_is_rejected() {
         .unwrap()
         .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x5d; 32]),
         &bob_snapshot,
         inbound,
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -2995,10 +3073,11 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x5e, b"at evidence grace", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -3017,10 +3096,12 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
         .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS;
 
     let accepted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5e; 32]),
             &bob_snapshot,
             inbound,
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -3065,15 +3146,16 @@ fn certificate_identity_key_must_match_bound_session_contact() {
         deduplication_key.clone(),
     );
     let first = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x57, b"bind alice contact session", &alice.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    alice_snapshot.apply_all(first.state_updates);
+    alice_snapshot.apply_all(first.state_updates).unwrap();
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x57; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -3084,35 +3166,38 @@ fn certificate_identity_key_must_match_bound_session_contact() {
                 &alice_domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
     let reply = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &bob_snapshot,
             key.clone(),
             outbound(0x58, b"mismatched certificate", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    bob_snapshot.apply_all(reply.state_updates);
+    bob_snapshot.apply_all(reply.state_updates).unwrap();
 
     assert!(matches!(
-        engine.decrypt_message(
-            &mut ChaCha20Rng::from_seed([0x58; 32]),
-            &alice_snapshot,
-            inbound_with_certificate_validation(
-                key,
-                deduplication_key,
-                &reply.message,
-                &acknowledgment_sender_identity,
-                &domain_keys,
-                &revoked,
-            ),
-        ),
-        Err(ProtocolStateError::InvalidMessage { reason })
-            if reason == "sender certificate identity key does not match session contact"
-    ));
+            engine.decrypt_message_with_transport_bindings(
+                &mut ChaCha20Rng::from_seed([0x58; 32]),
+                &alice_snapshot,
+                inbound_with_certificate_validation(
+                    key,
+                    deduplication_key,
+                    &reply.message,
+                    &acknowledgment_sender_identity,
+                    &domain_keys,
+                    &revoked,
+                ), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::InvalidMessage { reason })
+                if reason == "sender certificate identity key does not match session contact"
+        ));
 }
 
 #[test]
@@ -3135,15 +3220,16 @@ fn unblocked_contact_resumes_existing_session_without_new_handshake() {
     );
     block_contact(&engine, &mut bob_snapshot);
     let first = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x56, b"blocked before unblock", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    alice_snapshot.apply_all(first.state_updates);
+    alice_snapshot.apply_all(first.state_updates).unwrap();
     let blocked = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x56; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -3154,24 +3240,27 @@ fn unblocked_contact_resumes_existing_session_without_new_handshake() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(blocked)
         .unwrap();
-    bob_snapshot.apply_all(blocked.state_updates);
+    bob_snapshot.apply_all(blocked.state_updates).unwrap();
     let unblocked = engine
         .unblock_contact(&bob_snapshot, sender.contact.identity_key)
         .unwrap();
-    bob_snapshot.apply_all(unblocked.state_updates);
+    bob_snapshot.apply_all(unblocked.state_updates).unwrap();
     let second = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x57, b"after unblock", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
 
     let accepted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x57; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -3182,6 +3271,8 @@ fn unblocked_contact_resumes_existing_session_without_new_handshake() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -3224,15 +3315,16 @@ fn in_band_messages_and_acknowledgments_do_not_verify_contact() {
     );
 
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(12, b"in band is not verification", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    alice_snapshot.apply_all(encrypted.state_updates);
+    alice_snapshot.apply_all(encrypted.state_updates).unwrap();
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([23u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -3243,10 +3335,12 @@ fn in_band_messages_and_acknowledgments_do_not_verify_contact() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
-    bob_snapshot.apply_all(decrypted.state_updates);
+    bob_snapshot.apply_all(decrypted.state_updates).unwrap();
 
     assert_eq!(
         engine
@@ -3258,16 +3352,17 @@ fn in_band_messages_and_acknowledgments_do_not_verify_contact() {
     );
 
     let cleared = engine
-        .process_acknowledgment(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([24u8; 32]),
             &alice_snapshot,
             inbound_acknowledgment(key, &decrypted.acknowledgment),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     let AcknowledgmentOutcome::Cleared(cleared) = cleared else {
         panic!("acknowledgment did not clear pending state");
     };
-    alice_snapshot.apply_all(cleared.state_updates);
+    alice_snapshot.apply_all(cleared.state_updates).unwrap();
 
     assert_eq!(
         engine
@@ -3290,10 +3385,11 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
     let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(12, b"bad dedup state", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -3305,18 +3401,18 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
         &sender_identity,
     );
     assert!(matches!(
-        engine.decrypt_message(
-            &mut ChaCha20Rng::from_seed([23u8; 32]),
-            &missing_snapshot,
-            inbound(
-                key.clone(),
-                deduplication_key.clone(),
-                &encrypted,
-                &acknowledgment_sender_identity,
-            ),
-        ),
-        Err(ProtocolStateError::MissingRequiredState { address }) if address == deduplication_address
-    ));
+            engine.decrypt_message_with_transport_bindings(
+                &mut ChaCha20Rng::from_seed([23u8; 32]),
+                &missing_snapshot,
+                inbound(
+                    key.clone(),
+                    deduplication_key.clone(),
+                    &encrypted,
+                    &acknowledgment_sender_identity,
+                ), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::MissingRequiredState { address }) if address == deduplication_address
+        ));
 
     let mut corrupt_snapshot = snapshot_with_state_and_peer_identity(
         &engine,
@@ -3324,23 +3420,25 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
         &setup.bob_state,
         &sender_identity,
     );
-    corrupt_snapshot.set(
-        deduplication_address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    corrupt_snapshot
+        .set(
+            deduplication_address.clone(),
+            ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+        )
+        .unwrap();
     assert!(matches!(
-        engine.decrypt_message(
-            &mut ChaCha20Rng::from_seed([24u8; 32]),
-            &corrupt_snapshot,
-            inbound(
-                key.clone(),
-                deduplication_key.clone(),
-                &encrypted,
-                &acknowledgment_sender_identity,
-            ),
-        ),
-        Err(ProtocolStateError::BlobDecode { address, .. }) if address == deduplication_address
-    ));
+            engine.decrypt_message_with_transport_bindings(
+                &mut ChaCha20Rng::from_seed([24u8; 32]),
+                &corrupt_snapshot,
+                inbound(
+                    key.clone(),
+                    deduplication_key.clone(),
+                    &encrypted,
+                    &acknowledgment_sender_identity,
+                ), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::BlobDecode { address, .. }) if address == deduplication_address
+        ));
 
     let mut unsupported_snapshot = snapshot_with_state_and_peer_identity(
         &engine,
@@ -3348,22 +3446,24 @@ fn deduplication_receive_rejects_bad_state_and_capacity() {
         &setup.bob_state,
         &sender_identity,
     );
-    unsupported_snapshot.set(
-        deduplication_address.clone(),
-        ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
-    );
+    unsupported_snapshot
+        .set(
+            deduplication_address.clone(),
+            ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
+        )
+        .unwrap();
     assert!(matches!(
-        engine.decrypt_message(
-            &mut ChaCha20Rng::from_seed([25u8; 32]),
-            &unsupported_snapshot,
-            inbound(key, deduplication_key, &encrypted, &acknowledgment_sender_identity),
-        ),
-        Err(ProtocolStateError::UnsupportedBlobVersion {
-            address,
-            major: 2,
-            minor: 0
-        }) if address == deduplication_address
-    ));
+            engine.decrypt_message_with_transport_bindings(
+                &mut ChaCha20Rng::from_seed([25u8; 32]),
+                &unsupported_snapshot,
+                inbound(key, deduplication_key, &encrypted, &acknowledgment_sender_identity), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::UnsupportedBlobVersion {
+                address,
+                major: 2,
+                minor: 0
+            }) if address == deduplication_address
+        ));
 
     assert!(matches!(
         ProtocolStateEngine::with_deduplication_capacity(MIN_DEDUPLICATION_CAPACITY - 1),
@@ -3400,19 +3500,20 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
 
     for index in 0..=MIN_DEDUPLICATION_CAPACITY {
         let encrypted = engine
-            .encrypt_message(
+            .encrypt_message_with_transport_binding(
                 &alice_snapshot,
                 key.clone(),
                 outbound(index as u8, b"fills window", &sender.sender_identity),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .unwrap();
         let message = encrypted.message;
-        alice_snapshot.apply_all(encrypted.state_updates);
+        alice_snapshot.apply_all(encrypted.state_updates).unwrap();
         if index == 0 {
             first_message = Some(copy_message(&message));
         }
         let decrypted = engine
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([26u8; 32]),
                 &bob_snapshot,
                 inbound_with_certificate_validation(
@@ -3423,13 +3524,15 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
                     &domain_keys,
                     &revoked,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .map(accepted)
             .unwrap();
-        bob_snapshot.apply_all(decrypted.state_updates);
+        bob_snapshot.apply_all(decrypted.state_updates).unwrap();
     }
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([27u8; 32]),
         &bob_snapshot,
         inbound(
@@ -3438,6 +3541,8 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
             &first_message.unwrap(),
             &acknowledgment_sender_identity,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
@@ -3455,28 +3560,31 @@ fn set_session_state_with_peer_identity_key_allows_key_only_install() {
     let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = ProtocolStateSnapshot::new();
-    bob_snapshot.apply(
-        engine
-            .set_session_state_with_peer_identity_key(
-                key.clone(),
-                &setup.bob_state,
-                sender.sender_identity.identity_key,
-            )
-            .unwrap(),
-    );
+    bob_snapshot
+        .apply(
+            engine
+                .set_session_state_with_peer_identity_key(
+                    key.clone(),
+                    &setup.bob_state,
+                    sender.sender_identity.identity_key,
+                )
+                .unwrap(),
+        )
+        .unwrap();
     install_deduplication_set(&engine, &mut bob_snapshot, deduplication_key.clone(), 0x44);
 
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(7, b"key-only install", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([18u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -3487,6 +3595,8 @@ fn set_session_state_with_peer_identity_key_allows_key_only_install() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -3522,20 +3632,21 @@ fn bind_session_state_peer_identity_key_allows_existing_blob_to_decrypt() {
         .unwrap();
     assert_eq!(bind_update.address(), &address);
     assert_ne!(bind_update.blob().unwrap().as_bytes(), unbound_blob);
-    bob_snapshot.apply(bind_update);
+    bob_snapshot.apply(bind_update).unwrap();
     install_deduplication_set(&engine, &mut bob_snapshot, deduplication_key.clone(), 0x44);
 
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(2, b"bound by key", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([17u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -3546,6 +3657,8 @@ fn bind_session_state_peer_identity_key_allows_existing_blob_to_decrypt() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -3603,33 +3716,42 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
     let acknowledgment_sender_identity = acknowledgment_sender_identity();
     let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let mut bob_snapshot = ProtocolStateSnapshot::new();
-    bob_snapshot.apply(
-        engine
-            .set_session_state_with_peer_identity(
-                key.clone(),
-                &setup.bob_state,
-                &expected_sender_identity,
-            )
-            .unwrap(),
-    );
+    bob_snapshot
+        .apply(
+            engine
+                .set_session_state_with_peer_identity(
+                    key.clone(),
+                    &setup.bob_state,
+                    &expected_sender_identity,
+                )
+                .unwrap(),
+        )
+        .unwrap();
     install_deduplication_set(&engine, &mut bob_snapshot, deduplication_key.clone(), 0x44);
 
     let encrypted = engine
-        .encrypt_message(&alice_snapshot, key.clone(), {
-            let contact = accepted_contact_identity();
-            OutboundPlaintext {
-                id: MessageId::from_bytes([9; 16]),
-                sender_identity: &actual_sender_identity,
-                sender_identity_signing_key: sender_identity_signing_key(&actual_sender_identity),
-                contact_identity_key: contact.identity_key,
-                recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-                timestamp_millis: 1_700_000_000_999,
-                plaintext: b"wrong sender",
-            }
-        })
+        .encrypt_message_with_transport_binding(
+            &alice_snapshot,
+            key.clone(),
+            {
+                let contact = accepted_contact_identity();
+                OutboundPlaintext {
+                    id: MessageId::from_bytes([9; 16]),
+                    sender_identity: &actual_sender_identity,
+                    sender_identity_signing_key: sender_identity_signing_key(
+                        &actual_sender_identity,
+                    ),
+                    contact_identity_key: contact.identity_key,
+                    recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
+                    timestamp_millis: 1_700_000_000_999,
+                    plaintext: b"wrong sender",
+                }
+            },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        )
         .unwrap();
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([15u8; 32]),
         &bob_snapshot,
         inbound(
@@ -3638,6 +3760,8 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
             &encrypted.message,
             &acknowledgment_sender_identity,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -3663,17 +3787,18 @@ fn tampered_ciphertext_exposes_no_sender_identity() {
         deduplication_key.clone(),
     );
     let mut encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(3, b"secret", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
     let last = encrypted.ciphertext.last_mut().unwrap();
     *last ^= 0x01;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([13u8; 32]),
         &bob_snapshot,
         inbound(
@@ -3682,6 +3807,8 @@ fn tampered_ciphertext_exposes_no_sender_identity() {
             &encrypted,
             &acknowledgment_sender_identity,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
@@ -3704,10 +3831,11 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(5, b"metadata-bound", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -3720,7 +3848,7 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
     wrong_ephemeral.ephemeral_public_key =
         *KeyPair::from_secret_bytes([0x55; 32]).public.as_bytes();
     for message in [wrong_recipient, wrong_ephemeral] {
-        let result = engine.decrypt_message(
+        let result = engine.decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([16u8; 32]),
             &bob_snapshot,
             inbound(
@@ -3729,6 +3857,8 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
                 &message,
                 &acknowledgment_sender_identity,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         );
         assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
     }
@@ -3753,15 +3883,16 @@ fn message_transcript_signature_rejects_session_key_transplant() {
     );
 
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key,
             outbound(0x19, b"wrong session key", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x19; 32]),
         &bob_snapshot,
         inbound(
@@ -3770,6 +3901,8 @@ fn message_transcript_signature_rejects_session_key_transplant() {
             &encrypted,
             &acknowledgment_sender_identity,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
@@ -3792,10 +3925,11 @@ fn decrypt_message_rejects_recipient_identity_discovery_mismatch() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x1a, b"wrong recipient identity", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -3809,10 +3943,12 @@ fn decrypt_message_rejects_recipient_identity_discovery_mismatch() {
         .verifying
         .to_bytes();
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x1a; 32]),
         &bob_snapshot,
         inbound,
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -3839,10 +3975,11 @@ fn decrypt_message_rejects_noncanonical_recipient_identity_key() {
         deduplication_key.clone(),
     );
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x1b, b"invalid recipient identity", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
         .message;
@@ -3854,10 +3991,12 @@ fn decrypt_message_rejects_noncanonical_recipient_identity_key() {
     );
     inbound.recipient_identity_verifying_key = [0xff; 32];
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x1b; 32]),
         &bob_snapshot,
         inbound,
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -3888,18 +4027,23 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
     );
 
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(0x1a, b"ack wrong session key", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
-    alice_snapshot.apply_all(remap_session_updates(
-        encrypted.state_updates,
-        other_key.clone(),
-    ));
+    for update in encrypted.state_updates {
+        alice_snapshot
+            .set(
+                ProtocolStateAddress::new(update.address().kind(), other_key.clone()),
+                ProtocolStateBlob::from_bytes(update.blob().unwrap().as_bytes().to_vec()),
+            )
+            .unwrap();
+    }
     let decrypted = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x1a; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -3910,6 +4054,8 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
@@ -3920,9 +4066,9 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
             acknowledgment_sender_identity.identity_key,
         )
         .unwrap();
-    alice_snapshot.apply(bound);
+    alice_snapshot.apply(bound).unwrap();
 
-    let result = engine.process_acknowledgment(
+    let result = engine.process_acknowledgment_with_transport_binding(
         &mut ChaCha20Rng::from_seed([0x1b; 32]),
         &alice_snapshot,
         InboundAcknowledgmentMessage {
@@ -3933,6 +4079,7 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
                 .identity_key
                 .ed25519_verifying_key,
         },
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
@@ -3946,8 +4093,12 @@ fn process_acknowledgment_rejects_recipient_identity_discovery_mismatch() {
         .verifying
         .to_bytes();
 
-    let result =
-        engine.process_acknowledgment(&mut ChaCha20Rng::from_seed([0x1c; 32]), &snapshot, inbound);
+    let result = engine.process_acknowledgment_with_transport_binding(
+        &mut ChaCha20Rng::from_seed([0x1c; 32]),
+        &snapshot,
+        inbound,
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    );
 
     assert!(matches!(
         result,
@@ -3962,8 +4113,12 @@ fn process_acknowledgment_rejects_noncanonical_recipient_identity_key() {
     let mut inbound = inbound_acknowledgment(key, &acknowledgment);
     inbound.recipient_identity_verifying_key = [0xff; 32];
 
-    let result =
-        engine.process_acknowledgment(&mut ChaCha20Rng::from_seed([0x1d; 32]), &snapshot, inbound);
+    let result = engine.process_acknowledgment_with_transport_binding(
+        &mut ChaCha20Rng::from_seed([0x1d; 32]),
+        &snapshot,
+        inbound,
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    );
 
     assert!(matches!(
         result,
@@ -4003,11 +4158,12 @@ fn malformed_sealed_sender_envelope_is_rejected() {
         &ratcheted_payload,
     );
     let mut rng = ChaCha20Rng::from_seed([0x14; 32]);
-    let frame = seal_frame(
+    let frame = seal_frame_with_associated_data(
         &mut rng,
         &PublicKey::from(recipient_public_key),
         None,
         &frame_plaintext,
+        b"test-route",
     )
     .unwrap();
     let message = Message {
@@ -4018,7 +4174,7 @@ fn malformed_sealed_sender_envelope_is_rejected() {
         ciphertext: frame.ciphertext,
     };
 
-    let result = engine.decrypt_message(
+    let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([14u8; 32]),
         &bob_snapshot,
         inbound(
@@ -4027,6 +4183,8 @@ fn malformed_sealed_sender_envelope_is_rejected() {
             &message,
             &acknowledgment_sender_identity,
         ),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -4045,15 +4203,16 @@ fn large_valid_outbound_message_persists_pending_acknowledgment() {
     let large_plaintext = vec![0u8; 65_180];
 
     let result = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &snapshot,
             key.clone(),
             outbound(1, &large_plaintext, &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert!(result.message.to_bytes().unwrap().len() > 64 * 1024);
     let message_id = result.message_id;
-    snapshot.apply_all(result.state_updates);
+    snapshot.apply_all(result.state_updates).unwrap();
 
     let pending = engine.pending_acknowledgments(&snapshot, key).unwrap();
 
@@ -4072,10 +4231,11 @@ fn oversized_outbound_message_does_not_return_advanced_state() {
     let oversized_plaintext = vec![0u8; 64 * 1024];
     let sender_identity = sender_identity(1);
 
-    let result = engine.encrypt_message(
+    let result = engine.encrypt_message_with_transport_binding(
         &snapshot,
         key,
         outbound(1, &oversized_plaintext, &sender_identity),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
     assert!(matches!(
@@ -4106,27 +4266,29 @@ fn two_instances_alternate_against_latest_consumer_blobs() {
     );
 
     let first = first_instance
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(1, b"from first", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     let first_message = first.message;
-    alice_snapshot.apply_all(first.state_updates);
+    alice_snapshot.apply_all(first.state_updates).unwrap();
 
     let second = second_instance
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
             outbound(2, b"from second", &sender.sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     let second_message = second.message;
-    alice_snapshot.apply_all(second.state_updates);
+    alice_snapshot.apply_all(second.state_updates).unwrap();
 
     let first_decrypt = first_instance
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([10u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -4137,13 +4299,15 @@ fn two_instances_alternate_against_latest_consumer_blobs() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
     let first_plaintext = first_decrypt.plaintext.to_vec();
-    bob_snapshot.apply_all(first_decrypt.state_updates);
+    bob_snapshot.apply_all(first_decrypt.state_updates).unwrap();
     let second_decrypt = second_instance
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([11u8; 32]),
             &bob_snapshot,
             inbound_with_certificate_validation(
@@ -4154,11 +4318,15 @@ fn two_instances_alternate_against_latest_consumer_blobs() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(accepted)
         .unwrap();
     let second_plaintext = second_decrypt.plaintext.to_vec();
-    bob_snapshot.apply_all(second_decrypt.state_updates);
+    bob_snapshot
+        .apply_all(second_decrypt.state_updates)
+        .unwrap();
 
     assert_eq!(first_plaintext, b"from first");
     assert_eq!(second_plaintext, b"from second");
@@ -4182,13 +4350,15 @@ fn wipe_removes_all_state_kinds_for_key() {
     assert_eq!(ProtocolStateKind::all(), active_kinds.as_slice());
 
     for kind in active_kinds {
-        snapshot.set(
-            ProtocolStateAddress::new(kind, key.clone()),
-            ProtocolStateBlob::from_bytes(vec![kind as u8, 7]),
-        );
+        snapshot
+            .set(
+                ProtocolStateAddress::new(kind, key.clone()),
+                ProtocolStateBlob::from_bytes(vec![kind as u8, 7]),
+            )
+            .unwrap();
     }
 
-    let updates = engine.wipe(key.clone());
+    let updates = engine.wipe(&snapshot, key.clone());
     assert_eq!(
         updates
             .iter()
@@ -4196,7 +4366,7 @@ fn wipe_removes_all_state_kinds_for_key() {
             .collect::<Vec<_>>(),
         active_kinds
     );
-    snapshot.apply_all(updates);
+    snapshot.apply_all(updates).unwrap();
 
     for kind in active_kinds {
         assert!(
@@ -4214,16 +4384,19 @@ fn corrupt_ratchet_blob_is_a_decode_fault() {
     let address = ratchet_address(key.clone());
     let sender_identity = sender_identity(1);
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+        )
+        .unwrap();
     install_accepted_contact(&engine, &mut snapshot);
 
     assert!(matches!(
-        engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity)),
-        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
-    ));
+            engine.encrypt_message_with_transport_binding(&snapshot, key, outbound(1, b"lost", &sender_identity), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+        ));
 }
 
 #[test]
@@ -4233,16 +4406,19 @@ fn oversized_ratchet_blob_is_a_decode_fault_before_restore() {
     let address = ratchet_address(key.clone());
     let sender_identity = sender_identity(1);
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1; 128 * 1024]),
-    );
+    snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![1; 128 * 1024]),
+        )
+        .unwrap();
     install_accepted_contact(&engine, &mut snapshot);
 
     assert!(matches!(
-        engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity)),
-        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
-    ));
+            engine.encrypt_message_with_transport_binding(&snapshot, key, outbound(1, b"lost", &sender_identity), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+        ));
 }
 
 #[test]
@@ -4252,13 +4428,20 @@ fn corrupt_ratchet_blob_does_not_silently_reinitialize_state() {
     let address = ratchet_address(key.clone());
     let sender_identity = sender_identity(1);
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+        )
+        .unwrap();
     install_accepted_contact(&engine, &mut snapshot);
 
-    let result = engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity));
+    let result = engine.encrypt_message_with_transport_binding(
+        &snapshot,
+        key,
+        outbound(1, b"lost", &sender_identity),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    );
 
     assert!(matches!(result, Err(ProtocolStateError::BlobDecode { .. })));
     assert_eq!(snapshot.get(&address).unwrap().as_bytes(), &[1, 0, 0xaa]);
@@ -4274,9 +4457,10 @@ fn missing_required_state_is_an_explicit_failure() {
     install_accepted_contact(&engine, &mut snapshot);
 
     assert!(matches!(
-        engine.encrypt_message(&snapshot, key, outbound(1, b"lost", &sender_identity)),
-        Err(ProtocolStateError::MissingRequiredState { address: actual }) if actual == address
-    ));
+            engine.encrypt_message_with_transport_binding(&snapshot, key, outbound(1, b"lost", &sender_identity), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::MissingRequiredState { address: actual }) if actual == address
+        ));
 }
 
 #[test]
@@ -4286,25 +4470,35 @@ fn after_wipe_session_operation_requires_explicit_restore() {
     let key = key();
     let mut snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
     let sender_identity = sender_identity(1);
-    snapshot.apply_all(engine.wipe(key.clone()));
+    snapshot
+        .apply_all(engine.wipe(&snapshot, key.clone()))
+        .unwrap();
 
     assert!(matches!(
-        engine.encrypt_message(
+        engine.encrypt_message_with_transport_binding(
             &snapshot,
             key.clone(),
             outbound(1, b"after wipe", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         ),
         Err(ProtocolStateError::MissingRequiredState { .. })
     ));
 
-    snapshot.apply(
-        engine
-            .set_session_state(key.clone(), &setup.alice_state)
-            .unwrap(),
-    );
+    snapshot
+        .apply(
+            engine
+                .set_session_state(key.clone(), &setup.alice_state)
+                .unwrap(),
+        )
+        .unwrap();
     install_pending_acknowledgments(&engine, &mut snapshot, key.clone());
     let result = engine
-        .encrypt_message(&snapshot, key, outbound(2, b"restored", &sender_identity))
+        .encrypt_message_with_transport_binding(
+            &snapshot,
+            key,
+            outbound(2, b"restored", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        )
         .unwrap();
     assert_eq!(result.payload_kind, PayloadKind::EncryptedText);
 }

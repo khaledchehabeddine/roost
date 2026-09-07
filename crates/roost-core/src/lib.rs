@@ -77,7 +77,6 @@ mod contact;
 #[cfg(feature = "development-certificates")]
 mod development_certificate;
 mod discovery_key;
-mod events;
 mod hardening;
 mod identity;
 mod key_store;
@@ -93,7 +92,7 @@ mod transport_binding;
 use roost_protocol::{MessageId, PayloadKind};
 
 pub use contact::{
-    ContactDiscoveryKey, ContactEvent, ContactEventStream, ContactIdentity, ContactIdentityKey,
+    ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
     PeerInboxAuthorization,
 };
@@ -102,10 +101,6 @@ pub use development_certificate::{
     DevelopmentCertificateAuthority, DevelopmentCertificateError, DevelopmentSenderCertificate,
 };
 pub use discovery_key::DiscoveryKeyError;
-pub use events::{
-    DEFAULT_OBSERVER_CAPACITY, EventEnvelope, EventId, EventObserver, EventStream,
-    EventStreamError, EventStreamItem, EventStreamSnapshot, MAX_OBSERVER_CAPACITY,
-};
 pub use hardening::{
     DEFAULT_DEDUPLICATION_CAPACITY, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
     ProtocolHardeningLimits,
@@ -126,11 +121,12 @@ pub use protocol_state::{
     AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
     ClearedAcknowledgment, InboundAcknowledgmentMessage, InboundEncryptedMessage,
     InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
-    OutboundAcknowledgment, OutboundMessageResult, OutboundPlaintext, PendingAcknowledgment,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
-    RetryInstruction, RetryInstructionResult, SessionEvent, SessionId, SessionUnrecoverableReason,
-    SessionUnrecoverableResult,
+    MAX_PROTOCOL_STATE_ENTRIES, OutboundAcknowledgment, OutboundMessageResult, OutboundPlaintext,
+    PendingAcknowledgment, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition,
+    ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, ProtocolStateUpdate, RetryInstruction, RetryInstructionResult,
+    SessionEvent, SessionId, SessionUnrecoverableReason, SessionUnrecoverableResult,
+    protocol_state_blob_digest,
 };
 pub use roost_crypto::{
     CryptoError, DiscoveryKeyBundle, IdentityKeyBundle, OneTimePreKeyBundle, PreKeyBundle,

@@ -1,6 +1,5 @@
 //! Contact identity and trust-state records.
 
-use crate::events::EventStream;
 use crate::safety_number::IdentityKey;
 use roost_crypto::{DiscoveryKeyBundle, RecipientDeliveryCapability};
 use roost_protocol::PUBLIC_KEY_LEN;
@@ -109,7 +108,7 @@ pub enum ContactSafetyNumberConfirmation {
 ///
 /// Held per contact and supplied by that contact inside an encrypted Message (AE-CON-05). The
 /// capability is the peer's bearer secret, so this deliberately does not live in [`ContactState`],
-/// which is mirrored to every event-stream observer.
+/// which is available through public contact queries.
 ///
 /// `generation` is the peer's inbox generation the capability belongs to. It exists so a replayed
 /// older authorization can be recognized and refused rather than silently rolling a contact back to
@@ -120,6 +119,3 @@ pub struct PeerInboxAuthorization {
     /// The peer's recipient delivery capability for that generation.
     pub capability: RecipientDeliveryCapability,
 }
-
-/// Per-instance Contact Event Stream.
-pub type ContactEventStream = EventStream<ContactEvent, Vec<ContactState>>;

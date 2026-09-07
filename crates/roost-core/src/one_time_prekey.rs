@@ -25,6 +25,8 @@ const ONE_TIME_PREKEY_ENTRY_LEN: usize = 8 + 32 + 8;
 /// Errors returned by one-time-pre-key operations.
 #[derive(Debug)]
 pub enum OneTimePreKeyError {
+    /// Stored data uses an unsupported format version.
+    UnsupportedVersion(u8),
     /// The system clock is before the Unix epoch.
     Clock,
     /// Loading the discovery key returned a [`DiscoveryKeyError`].
@@ -46,6 +48,9 @@ pub enum OneTimePreKeyError {
 impl fmt::Display for OneTimePreKeyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            OneTimePreKeyError::UnsupportedVersion(version) => {
+                write!(f, "unsupported stored format version: {version}")
+            }
             OneTimePreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
             OneTimePreKeyError::Discovery(e) => write!(f, "discovery key: {e}"),
             OneTimePreKeyError::InboxRotationRequired => {
@@ -328,10 +333,7 @@ fn decode_pool(raw: &[u8]) -> Result<OneTimePreKeyPool, OneTimePreKeyError> {
         )));
     }
     if raw[0] != ONE_TIME_PREKEY_POOL_VERSION {
-        return Err(OneTimePreKeyError::InvalidData(format!(
-            "unsupported one-time pre-key pool format version: {}",
-            raw[0]
-        )));
+        return Err(OneTimePreKeyError::UnsupportedVersion(raw[0]));
     }
     let mut count_bytes = [0u8; 2];
     count_bytes.copy_from_slice(&raw[13..15]);

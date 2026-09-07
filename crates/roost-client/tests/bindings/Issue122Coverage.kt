@@ -16,38 +16,33 @@ private class MemorySecureStorage : SecureStorage {
 
 private data class StateAddress(val kind: ProtocolStateKind, val key: List<Byte>)
 
-private class MemoryProtocolStateStore : ProtocolStateStore {
-    private val values = mutableMapOf<StateAddress, ByteArray>()
+private class MemoryProtocolStateStore {
+    private var values = mutableMapOf<StateAddress, ByteArray>()
 
-    override fun load(kind: ProtocolStateKind, key: ByteArray): ByteArray? =
-        values[StateAddress(kind, key.toList())]?.copyOf()
+    fun snapshot(addresses: List<ProtocolStateAddress>): List<ProtocolStateEntry> =
+        addresses.mapNotNull { address ->
+            values[StateAddress(address.kind, address.key.toList())]?.let {
+                ProtocolStateEntry(address.kind, address.key, it.copyOf())
+            }
+        }
 
-    override fun commit(updates: List<ProtocolStateUpdate>) {
+    fun commit(updates: List<ProtocolStateUpdate>) {
+        val next = values.toMutableMap()
         for (update in updates) {
             val address = StateAddress(update.kind, update.key.toList())
             val current = values[address]
-            when (update.commitCheck) {
-                ProtocolStateCommitCheck.ABSENT -> {
-                    if (current != null) {
-                        throw ClientException.ProtocolStateFault("stale protocol-state commit")
-                    }
+            when (val check = update.commitCheck) {
+                is ProtocolStateCommitCheck.Absent -> if (current != null) {
+                    throw ClientException.ProtocolStateFault("stale protocol-state commit")
                 }
-                ProtocolStateCommitCheck.DIGEST -> {
-                    val expected = update.expectedBlobDigest
-                    if (current == null || expected == null || !protocolStateBlobDigest(current).contentEquals(expected)) {
-                        throw ClientException.ProtocolStateFault("stale protocol-state commit")
-                    }
-                }
-                ProtocolStateCommitCheck.UNCHECKED -> {
+                is ProtocolStateCommitCheck.Digest -> if (current == null || !protocolStateBlobDigest(current).contentEquals(check.expectedBlobDigest)) {
+                    throw ClientException.ProtocolStateFault("stale protocol-state commit")
                 }
             }
             val blob = update.blob
-            if (blob == null) {
-                values.remove(address)
-            } else {
-                values[address] = blob.copyOf()
-            }
+            if (blob == null) next.remove(address) else next[address] = blob.copyOf()
         }
+        values = next
     }
 }
 
@@ -91,8 +86,7 @@ fun main() {
             ProtocolStateUpdate(
                 ProtocolStateKind.DEDUPLICATION_SET,
                 digestKey,
-                ProtocolStateCommitCheck.ABSENT,
-                null,
+                ProtocolStateCommitCheck.Absent,
                 byteArrayOf(0x01),
             ),
         ),
@@ -102,13 +96,11 @@ fun main() {
         ProtocolStateUpdate(
             ProtocolStateKind.DEDUPLICATION_SET,
             digestKey,
-            ProtocolStateCommitCheck.DIGEST,
-            protocolStateBlobDigest(byteArrayOf(0x02)),
+            ProtocolStateCommitCheck.Digest(protocolStateBlobDigest(byteArrayOf(0x02))),
             byteArrayOf(0x03),
         ),
     )
-    val loaded = engine.loadSnapshot(
-        protocolStore,
+    val loaded = protocolStore.snapshot(
         listOf(ProtocolStateAddress(ProtocolStateKind.DEDUPLICATION_SET, dedupKey)),
     )
     requireCoverage(loaded.size == 1, "protocol state store load")
@@ -134,7 +126,7 @@ fun main() {
     expectBackupFailure(restored)
 
     val sessionKey = ByteArray(16) { 0x45 }
-    val initiation = alice.initiateSession(
+    val initiation = alice.initiateSessionWithTransportBinding(
         sessionKey,
         bobIdentity,
         bobPublication,
@@ -142,12 +134,15 @@ fun main() {
         "alice certificate".encodeToByteArray(),
         "alice signature".encodeToByteArray(),
         "hello bob".encodeToByteArray(),
-    )
+            TransportBinding("test-route".encodeToByteArray())
+)
     val decodedInitial = decodeMessage(encodeMessage(initiation.message))
     // The stranger path: read who sent it before accepting, because the session
     // key is derived from both identities and acceptance stages one-time-prekey
     // consumption, so it should not be run merely to find out.
-    val hinted = bob.initiatorIdentityHint(decodedInitial)
+    val hinted = bob.initiatorIdentityHintWithTransportBinding(decodedInitial,
+            TransportBinding("test-route".encodeToByteArray()), PreKeySelection(bobPublication.signedPrekey.identifier, bobOneTimePrekey.identifier)
+)
     requireCoverage(
         hinted.x25519PublicKey.contentEquals(aliceIdentity.x25519PublicKey) &&
             hinted.ed25519VerifyingKey.contentEquals(aliceIdentity.ed25519VerifyingKey) &&
@@ -155,7 +150,9 @@ fun main() {
         "initiator identity hint",
     )
 
-    val acceptancePreparation = bob.prepareAcceptSession(sessionKey, null, decodedInitial)
+    val acceptancePreparation = bob.prepareAcceptSessionWithTransportBinding(sessionKey, null, decodedInitial,
+            TransportBinding("test-route".encodeToByteArray()), PreKeySelection(bobPublication.signedPrekey.identifier, bobOneTimePrekey.identifier)
+)
     bob.commitOperation(acceptancePreparation.operation.identifier)
     val acceptance = acceptancePreparation.acceptance
     val bobSnapshot = mutableListOf<ProtocolStateEntry>()
@@ -171,11 +168,9 @@ fun main() {
     val acceptedContact = engine.acceptContact(aliceSnapshot.toList(), identityKey(bobIdentity))
     protocolStore.commit(acceptedContact.stateUpdates)
     applyUpdates(aliceSnapshot, acceptedContact.stateUpdates)
-    val contactUpdate = acceptedContact.stateUpdates.firstOrNull()
         ?: failCoverage("accepted contact should produce a state update")
-    val contactAddress = ProtocolStateAddress(contactUpdate.kind, contactUpdate.key)
 
-    val outbound = alice.encryptMessage(
+    val outbound = alice.encryptMessageWithTransportBinding(
         aliceSnapshot.toList(),
         sessionKey,
         ByteArray(16) { 0x46 },
@@ -185,7 +180,8 @@ fun main() {
         "alice certificate".encodeToByteArray(),
         "alice signature".encodeToByteArray(),
         "follow-up".encodeToByteArray(),
-    )
+            TransportBinding("test-route".encodeToByteArray())
+)
     applyUpdates(aliceSnapshot, outbound.stateUpdates)
     requireCoverage(engine.pendingAcknowledgments(aliceSnapshot.toList(), sessionKey).size == 1, "pending ack")
     requireCoverage(
@@ -208,7 +204,6 @@ fun main() {
         alicePublication,
     )
 
-    exerciseEvents(engine, protocolStore, contactAddress, acceptedContact.contact)
     expectCertificateRejection()
     expectInvalidMessageKey()
     println("Kotlin issue 122 coverage passed")
@@ -245,70 +240,6 @@ private fun expectStaleProtocolStateCommit(store: MemoryProtocolStateStore, upda
     }
 }
 
-private fun exerciseEvents(
-    engine: ProtocolStateEngine,
-    store: MemoryProtocolStateStore,
-    address: ProtocolStateAddress,
-    contact: ContactState,
-) {
-    val stream = ContactEventStream.withObserverCapacity(listOf(contact), 1uL)
-    val observer = stream.subscribe()
-    val event = ContactEvent(ContactEventKind.CHANGED, contact)
-    stream.emit(event, listOf(contact))
-    stream.emit(event, listOf(contact))
-    val item = observer.pollNext()
-    requireCoverage(item?.kind == ContactEventStreamItemKind.LAGGED, "event lag")
-    observer.resumeAfter(stream.currentState())
-
-    val otherStream = ContactEventStream.withObserverCapacity(listOf(contact), 1uL)
-    otherStream.emit(event, listOf(contact))
-    otherStream.emit(event, listOf(contact))
-    otherStream.emit(event, listOf(contact))
-    stream.emit(event, listOf(contact))
-    try {
-        observer.resumeAfter(otherStream.currentState())
-        failCoverage("another stream's snapshot should reject")
-    } catch (error: ClientException.ForeignEventSnapshot) {
-    }
-    requireCoverage(observer.pollNext()?.event?.id == 3uL, "foreign snapshot preserves local events")
-
-    val extensionEngine = ProtocolStateEngine()
-    val extensionSnapshot = extensionEngine.loadSnapshot(store, listOf(address))
-    val blocked = extensionEngine.blockContact(extensionSnapshot, contact.identity.identityKey)
-    store.commit(blocked.stateUpdates)
-    val reloaded = engine.loadSnapshot(store, listOf(address))
-    val rebuilt = engine.contactStates(reloaded)
-    requireCoverage(rebuilt.size == 1 && rebuilt[0].blocked, "rebuilds committed extension state")
-    val firstImport = stream.importCurrentState(rebuilt)
-    requireCoverage(firstImport.eventId() == 3uL, "state import preserves local event ID")
-    requireCoverage(firstImport.stateRevision() == 1uL, "state import revision")
-    requireCoverage(firstImport.state().single().blocked, "imported snapshot state")
-    requireCoverage(
-        observer.pollNext()?.kind == ContactEventStreamItemKind.STALE,
-        "state import marks observer stale",
-    )
-
-    val secondImport = stream.importCurrentState(rebuilt)
-    try {
-        observer.resumeAfter(firstImport)
-        failCoverage("stale imported snapshot should reject")
-    } catch (error: ClientException.StaleEventSnapshot) {
-        requireCoverage(
-            error.snapshotRevision == 1uL && error.currentRevision == 2uL,
-            "stale imported snapshot revisions",
-        )
-    }
-    requireCoverage(
-        observer.pollNext()?.kind == ContactEventStreamItemKind.STALE,
-        "repeated import stays explicit",
-    )
-    observer.resumeAfter(secondImport)
-
-    val restarted = ContactEventStream.withObserverCapacity(rebuilt, 1uL)
-    val restartSnapshot = restarted.currentState()
-    requireCoverage(restartSnapshot.eventId() == 0uL, "restart uses a new local event sequence")
-    requireCoverage(restartSnapshot.stateRevision() == 0uL, "restart uses a new local state revision")
-}
 
 private fun expectBackupFailure(store: KeyStore) {
     try {
@@ -329,7 +260,7 @@ private fun expectBlockedSend(
     bobPublication: PublicationBundle,
 ) {
     try {
-        alice.encryptMessage(
+        alice.encryptMessageWithTransportBinding(
             snapshot,
             sessionKey,
             ByteArray(16) { 0x47 },
@@ -339,7 +270,8 @@ private fun expectBlockedSend(
             "alice certificate".encodeToByteArray(),
             "alice signature".encodeToByteArray(),
             "blocked".encodeToByteArray(),
-        )
+            TransportBinding("test-route".encodeToByteArray())
+)
         failCoverage("blocked contact should reject send")
     } catch (error: ClientException.BlockedContact) {
     }
@@ -354,7 +286,7 @@ private fun expectMissingCertificateValidation(
     alicePublication: PublicationBundle,
 ) {
     try {
-        bob.decryptMessage(
+        bob.decryptMessageWithTransportBindings(
             snapshot,
             sessionKey,
             dedupKey,
@@ -365,7 +297,8 @@ private fun expectMissingCertificateValidation(
             "bob certificate".encodeToByteArray(),
             "bob signature".encodeToByteArray(),
             null,
-        )
+            TransportBinding("test-route".encodeToByteArray()), TransportBinding("test-route".encodeToByteArray())
+)
         failCoverage("missing certificate validation should reject receive")
     } catch (error: ClientException.InvalidData) {
     }

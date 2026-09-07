@@ -194,11 +194,9 @@ struct TransportBindingBindings {
             messageTransportBinding: messageBinding,
             acknowledgmentTransportBinding: acknowledgmentBinding
         )
-        require(inbound.kind == .accepted, "transport-bound Message acceptance")
+        guard case .accepted(let inbound) = inbound else { fail("expected accepted Message") }
         require(inbound.plaintext == Data("transport-bound follow-up".utf8), "transport-bound Message plaintext")
-        guard let acknowledgment = inbound.acknowledgment else {
-            fail("accepted Message should return an acknowledgment")
-        }
+        let acknowledgment = inbound.acknowledgment
         let changedAcknowledgmentBinding = TransportBinding(
             bytes: Data("changed consumer-owned acknowledgment metadata".utf8)
         )
@@ -216,7 +214,7 @@ struct TransportBindingBindings {
             message: acknowledgment,
             transportBinding: acknowledgmentBinding
         )
-        require(acknowledgmentOutcome.kind == .cleared, "transport-bound acknowledgment clearing")
+        guard case .cleared = acknowledgmentOutcome else { fail("expected cleared acknowledgment") }
 
         print("Swift Transport Binding coverage passed")
     }

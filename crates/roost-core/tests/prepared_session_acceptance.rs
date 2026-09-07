@@ -71,12 +71,6 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         message: &initial.message,
     };
 
-    assert!(matches!(
-        bob.prepare_accept_session(input()),
-        Err(SessionEstablishmentError::SignedPreKey(
-            SignedPreKeyError::NotFound
-        ))
-    ));
     let accepted = bob
         .prepare_accept_session_with_transport_binding(
             input(),

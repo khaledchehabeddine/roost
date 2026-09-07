@@ -67,6 +67,7 @@ struct ReplayFixture {
 #[derive(Serialize)]
 struct TestSessionStateWire<'a> {
     version: u8,
+    status: u8,
     ratchet_state: &'a [u8],
     peer_sender_identity_key: Option<[u8; 32]>,
 }
@@ -227,7 +228,7 @@ fn expected_contact_fixture(
     if name == "contact_pending" {
         return pending.state_updates.into_iter().next().unwrap();
     }
-    snapshot.apply_all(pending.state_updates);
+    snapshot.apply_all(pending.state_updates).unwrap();
     if name == "contact_blocked_pending" {
         return engine
             .block_contact(&snapshot, contact.identity_key)
@@ -244,7 +245,7 @@ fn expected_contact_fixture(
     if name == "contact_unverified" {
         return unverified.state_updates.into_iter().next().unwrap();
     }
-    snapshot.apply_all(unverified.state_updates);
+    snapshot.apply_all(unverified.state_updates).unwrap();
     if name == "contact_blocked_unverified" {
         return engine
             .block_contact(&snapshot, contact.identity_key)
@@ -268,7 +269,7 @@ fn expected_contact_fixture(
         let blocked = engine
             .block_contact(&snapshot, contact.identity_key)
             .unwrap();
-        snapshot.apply_all(blocked.state_updates);
+        snapshot.apply_all(blocked.state_updates).unwrap();
         return engine
             .record_contact(&snapshot, rotated_contact)
             .unwrap()
@@ -294,7 +295,7 @@ fn expected_contact_fixture(
     if name == "contact_verified" {
         return verified.state_updates.into_iter().next().unwrap();
     }
-    snapshot.apply_all(verified.state_updates);
+    snapshot.apply_all(verified.state_updates).unwrap();
     if name == "contact_blocked_verified" {
         return engine
             .block_contact(&snapshot, contact.identity_key)
@@ -308,7 +309,7 @@ fn expected_contact_fixture(
         let blocked = engine
             .block_contact(&snapshot, contact.identity_key)
             .unwrap();
-        snapshot.apply_all(blocked.state_updates);
+        snapshot.apply_all(blocked.state_updates).unwrap();
         return engine
             .unblock_contact(&snapshot, contact.identity_key)
             .unwrap()
@@ -408,11 +409,11 @@ fn contact_fixture_names() -> &'static [&'static str] {
 fn install_accepted_contact(engine: &ProtocolStateEngine, snapshot: &mut ProtocolStateSnapshot) {
     let contact = accepted_contact_identity();
     let created = engine.record_contact(snapshot, contact).unwrap();
-    snapshot.apply_all(created.state_updates);
+    snapshot.apply_all(created.state_updates).unwrap();
     let accepted = engine
         .accept_contact(snapshot, contact.identity_key)
         .unwrap();
-    snapshot.apply_all(accepted.state_updates);
+    snapshot.apply_all(accepted.state_updates).unwrap();
 }
 
 fn outbound<'a>(
@@ -488,31 +489,37 @@ fn current_version_fixture_matches_decoded_state_expectations() {
     );
 
     let mut fixture_snapshot = ProtocolStateSnapshot::new();
-    fixture_snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+    fixture_snapshot
+        .set(address.clone(), ProtocolStateBlob::from_bytes(current))
+        .unwrap();
     insert_pending_acknowledgment_fixture(&mut fixture_snapshot, &fixture_file, key.clone());
     install_accepted_contact(&engine, &mut fixture_snapshot);
 
     let mut expected_snapshot = ProtocolStateSnapshot::new();
-    expected_snapshot.apply(expected);
-    expected_snapshot.apply(
-        engine
-            .initialize_pending_acknowledgments(key.clone())
-            .unwrap(),
-    );
+    expected_snapshot.apply(expected).unwrap();
+    expected_snapshot
+        .apply(
+            engine
+                .initialize_pending_acknowledgments(key.clone())
+                .unwrap(),
+        )
+        .unwrap();
     install_accepted_contact(&engine, &mut expected_snapshot);
     let sender_identity = sender_identity();
     let fixture_result = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &fixture_snapshot,
             key.clone(),
             outbound(b"fixture", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     let expected_result = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &expected_snapshot,
             key,
             outbound(b"fixture", &sender_identity),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert_eq!(fixture_result.message_id, expected_result.message_id);
@@ -558,7 +565,9 @@ fn bound_peer_identity_fixture_matches_decoded_state_expectations() {
     );
 
     let mut fixture_snapshot = ProtocolStateSnapshot::new();
-    fixture_snapshot.set(address, ProtocolStateBlob::from_bytes(current));
+    fixture_snapshot
+        .set(address, ProtocolStateBlob::from_bytes(current))
+        .unwrap();
     let update = engine
         .bind_session_state_peer_identity_key(&fixture_snapshot, key, sender_identity.identity_key)
         .unwrap();
@@ -597,7 +606,9 @@ fn deduplication_set_fixture_matches_decoded_state_expectations() {
     );
 
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+    snapshot
+        .set(address.clone(), ProtocolStateBlob::from_bytes(current))
+        .unwrap();
     assert!(snapshot.get(&address).is_some());
 }
 
@@ -627,7 +638,9 @@ fn pending_acknowledgments_fixture_matches_decoded_state_expectations() {
     );
 
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+    snapshot
+        .set(address.clone(), ProtocolStateBlob::from_bytes(current))
+        .unwrap();
     assert!(snapshot.get(&address).is_some());
 }
 
@@ -653,7 +666,9 @@ fn deduplication_replay_fixture_rejects_duplicate_message() {
     );
 
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address, ProtocolStateBlob::from_bytes(current));
+    snapshot
+        .set(address, ProtocolStateBlob::from_bytes(current))
+        .unwrap();
     assert_duplicate_inbound_replay(&engine, &snapshot, fixture);
 }
 
@@ -676,7 +691,9 @@ fn pending_acknowledgment_replay_fixture_rejects_duplicate_acknowledgment() {
     assert_eq!(fixture.decoded.acknowledgment_digest_count, Some(1));
 
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address, ProtocolStateBlob::from_bytes(current));
+    snapshot
+        .set(address, ProtocolStateBlob::from_bytes(current))
+        .unwrap();
     assert_duplicate_acknowledgment_replay(&engine, &snapshot, fixture);
 }
 
@@ -701,7 +718,7 @@ fn assert_duplicate_inbound_replay(
 
     let acknowledgment_sender = sender_identity();
     let outcome = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x55; 32]),
             snapshot,
             InboundEncryptedMessage {
@@ -715,6 +732,8 @@ fn assert_duplicate_inbound_replay(
                 acknowledgment: acknowledgment(&acknowledgment_sender),
                 sender_certificate_validation: None,
             },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert!(matches!(outcome, InboundMessageOutcome::Duplicate));
@@ -738,7 +757,7 @@ fn assert_duplicate_acknowledgment_replay(
     );
 
     let outcome = engine
-        .process_acknowledgment(
+        .process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x56; 32]),
             snapshot,
             InboundAcknowledgmentMessage {
@@ -749,18 +768,29 @@ fn assert_duplicate_acknowledgment_replay(
                     .identity_key
                     .ed25519_verifying_key,
             },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     assert!(matches!(outcome, AcknowledgmentOutcome::Duplicate));
 }
 
+fn framed_replay_message(encoded: &[u8]) -> Vec<u8> {
+    let binding = b"test-route";
+    let mut framed = (binding.len() as u32).to_be_bytes().to_vec();
+    framed.extend_from_slice(binding);
+    framed.extend_from_slice(encoded);
+    framed
+}
+
 fn keyed_digest_hex(key: &[u8; 32], encoded: &[u8]) -> String {
-    let hash = blake3::keyed_hash(key, encoded);
+    let input = framed_replay_message(encoded);
+    let hash = blake3::keyed_hash(key, &input);
     hex::encode(&hash.as_bytes()[..16])
 }
 
 fn digest_hex(encoded: &[u8]) -> String {
-    let hash = blake3::hash(encoded);
+    let input = framed_replay_message(encoded);
+    let hash = blake3::hash(&input);
     hex::encode(&hash.as_bytes()[..16])
 }
 
@@ -809,7 +839,9 @@ fn contact_state_fixtures_match_decoded_state_expectations() {
         );
 
         let mut snapshot = ProtocolStateSnapshot::new();
-        snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(current));
+        snapshot
+            .set(address.clone(), ProtocolStateBlob::from_bytes(current))
+            .unwrap();
         let contact = engine
             .contact_state(&snapshot, accepted_contact_identity().identity_key)
             .unwrap()
@@ -827,42 +859,6 @@ fn contact_state_fixtures_match_decoded_state_expectations() {
     }
 }
 
-#[test]
-fn legacy_contact_state_v1_decodes_unblocked_and_rewrites_to_current_body_version() {
-    let fixture_file = fixture_file();
-    let pending = contact_fixture(&fixture_file, "contact_pending");
-    let unverified = contact_fixture(&fixture_file, "contact_unverified");
-    let engine = ProtocolStateEngine::new();
-    let contact = accepted_contact_identity();
-    let contact_key =
-        ProtocolStateKey::from_bytes(contact.identity_key.canonical_encoding().to_vec()).unwrap();
-    let address = ProtocolStateAddress::new(ProtocolStateKind::ContactState, contact_key);
-    let mut legacy_bytes = hex::decode(&pending.current_encoded_hex).unwrap();
-    legacy_bytes[2] = 1;
-    legacy_bytes.pop();
-
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address, ProtocolStateBlob::from_bytes(legacy_bytes));
-    let decoded = engine
-        .contact_state(&snapshot, contact.identity_key)
-        .unwrap()
-        .unwrap();
-    assert_eq!(decoded.trust_state, ContactTrustState::Pending);
-    assert!(!decoded.blocked);
-
-    let accepted = engine
-        .accept_contact(&snapshot, contact.identity_key)
-        .unwrap()
-        .state_updates
-        .into_iter()
-        .next()
-        .unwrap();
-    assert_eq!(
-        hex::encode(accepted.blob().unwrap().as_bytes()),
-        unverified.current_encoded_hex
-    );
-}
-
 fn insert_pending_acknowledgment_fixture(
     snapshot: &mut ProtocolStateSnapshot,
     fixture_file: &FixtureFile,
@@ -873,10 +869,12 @@ fn insert_pending_acknowledgment_fixture(
         .iter()
         .find(|fixture| fixture.name == "pending_acknowledgments_session")
         .unwrap();
-    snapshot.set(
-        pending_acknowledgment_address(key),
-        ProtocolStateBlob::from_bytes(hex::decode(&fixture.current_encoded_hex).unwrap()),
-    );
+    snapshot
+        .set(
+            pending_acknowledgment_address(key),
+            ProtocolStateBlob::from_bytes(hex::decode(&fixture.current_encoded_hex).unwrap()),
+        )
+        .unwrap();
 }
 
 #[test]
@@ -888,7 +886,9 @@ fn flat_ratchet_state_blob_is_rejected_as_malformed_current_blob() {
     let mut flat_blob = vec![1, 0];
     flat_blob.extend_from_slice(&setup.alice_state.to_bytes().unwrap());
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(flat_blob));
+    snapshot
+        .set(address.clone(), ProtocolStateBlob::from_bytes(flat_blob))
+        .unwrap();
 
     assert!(matches!(
         engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
@@ -902,10 +902,12 @@ fn unsupported_major_version_is_a_fault() {
     let key = session_key();
     let address = session_address(key.clone());
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
-    );
+    snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
+        )
+        .unwrap();
 
     assert!(matches!(
         engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
@@ -923,10 +925,12 @@ fn lower_pre_release_version_is_a_fault() {
     let key = session_key();
     let address = session_address(key.clone());
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![0, 1, 0xaa]),
-    );
+    snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![0, 1, 0xaa]),
+        )
+        .unwrap();
 
     assert!(matches!(
         engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
@@ -944,10 +948,12 @@ fn unsupported_minor_version_is_a_fault() {
     let key = session_key();
     let address = session_address(key.clone());
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 1, 0xaa]),
-    );
+    snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![1, 1, 0xaa]),
+        )
+        .unwrap();
 
     assert!(matches!(
         engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
@@ -965,10 +971,12 @@ fn malformed_current_blob_is_a_fault() {
     let key = session_key();
     let address = session_address(key.clone());
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(
-        address.clone(),
-        ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
-    );
+    snapshot
+        .set(
+            address.clone(),
+            ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa]),
+        )
+        .unwrap();
 
     assert!(matches!(
         engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
@@ -984,7 +992,8 @@ fn nested_ratchet_decode_failure_does_not_echo_state_bytes() {
     let key = session_key();
     let address = session_address(key.clone());
     let payload = postcard::to_stdvec(&TestSessionStateWire {
-        version: 1,
+        version: 4,
+        status: 0,
         ratchet_state: &[SECRET_DERIVED_BYTE],
         peer_sender_identity_key: None,
     })
@@ -992,7 +1001,9 @@ fn nested_ratchet_decode_failure_does_not_echo_state_bytes() {
     let mut blob = vec![1, 0];
     blob.extend_from_slice(&payload);
     let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot.set(address.clone(), ProtocolStateBlob::from_bytes(blob));
+    snapshot
+        .set(address.clone(), ProtocolStateBlob::from_bytes(blob))
+        .unwrap();
 
     let err = match engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]) {
         Ok(_) => panic!("malformed nested ratchet state decoded"),

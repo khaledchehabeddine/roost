@@ -15,7 +15,7 @@ use crate::message::{Message, SenderIdentityMaterial};
 use crate::protocol::{
     AcknowledgmentOutcome, ContactStateChange, IdentityKey as FfiIdentityKey,
     InboundMessageOutcome, OutboundMessageResult, ProtocolStateEntry, ProtocolStateUpdate,
-    protocol_key, snapshot_input_from_entries, updates_from_core_absent,
+    protocol_key, snapshot_input_from_entries, updates_from_core,
 };
 use crate::records::{
     DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
@@ -872,61 +872,14 @@ impl KeyStore {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let prepared = self
             .inner
-            .prepare_block_contact(&snapshot.snapshot, identity_key.to_core()?)?;
+            .prepare_block_contact(&snapshot, identity_key.to_core()?)?;
         let (operation, block) = self.convert_prepared(prepared, |blocked| {
             Ok(ContactBlock {
-                contact: ContactStateChange::from_core(&snapshot, blocked.contact)?,
+                contact: ContactStateChange::from_core(blocked.contact)?,
                 rotation: blocked.rotation.map(inbox_rotation_from_core),
             })
         })?;
         Ok(PreparedContactBlock { operation, block })
-    }
-
-    /// Starts a new Session as the initiator.
-    ///
-    /// Commit the returned state updates atomically with the returned Message before transport
-    /// send. `session_key` is the host-chosen Session protocol-state key.
-    ///
-    /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
-    ///   fails.
-    /// - [`ClientError::InvalidData`] if key, message, certificate, or prekey inputs are malformed.
-    /// - [`ClientError::NotFound`] if local identity or Discovery Key material is missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if install state cannot be encoded.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "flat UniFFI export preserves generated binding shape"
-    )]
-    pub fn initiate_session(
-        &self,
-        session_key: Vec<u8>,
-        responder_identity: Identity,
-        responder_publication: PublicationBundle,
-        responder_one_time_prekey: Option<OneTimePreKeyBundle>,
-        sender_certificate: Vec<u8>,
-        sender_signature: Vec<u8>,
-        plaintext: Vec<u8>,
-    ) -> Result<SessionInitiationResult, ClientError> {
-        let sender_certificate = Zeroizing::new(sender_certificate);
-        let sender_signature = Zeroizing::new(sender_signature);
-        let plaintext = Zeroizing::new(plaintext);
-        let result = self.inner.initiate_session(SessionInitiation {
-            session_key: ProtocolStateKey::from_bytes(session_key)?,
-            responder_identity_key: responder_identity.to_core()?,
-            responder_discovery_to_identity: responder_publication
-                .discovery_to_identity_signature()?,
-            responder_prekey_bundle: responder_publication
-                .to_prekey_bundle(responder_one_time_prekey)?,
-            sender_certificate: &sender_certificate,
-            sender_signature: &sender_signature,
-            plaintext: &plaintext,
-        })?;
-        Ok(SessionInitiationResult {
-            message: Message::from_core(result.message),
-            state_updates: updates_from_core_absent(result.state_updates)?,
-        })
     }
 
     /// Starts a new Session while authenticating a caller-owned Transport Binding.
@@ -1010,37 +963,7 @@ impl KeyStore {
         )?;
         Ok(SessionInitiationResult {
             message: Message::from_core(result.message),
-            state_updates: updates_from_core_absent(result.state_updates)?,
-        })
-    }
-
-    /// Reads who sent an X3DH first message, without accepting it.
-    ///
-    /// Call this before [`Self::prepare_accept_session`] when the sender is not already known. A host
-    /// addresses Session state by a key derived from both identities, so it needs the sender
-    /// before it can accept. Acceptance stages consumption of the referenced one-time prekey, so
-    /// it should not be run merely to discover the sender.
-    ///
-    /// Opens only the layer sealed to this device's own Discovery Key: it consumes nothing and
-    /// is readable by nobody else. The returned identity is the sender's *claim*, carrying its
-    /// own verified binding signature; `prepare_accept_session` then checks it against the sealed
-    /// envelope's authenticated copy, so on its own it proves only that whoever reached this
-    /// inbox named this identity.
-    ///
-    /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key,
-    ///   or the named identity's binding signature does not verify.
-    /// - [`ClientError::InvalidData`] if the message is not an X3DH initial or does not decode.
-    /// - [`ClientError::NotFound`] if local Discovery Key material is missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn initiator_identity_hint(&self, message: Message) -> Result<Identity, ClientError> {
-        let core_message = message.to_core()?;
-        let bundle = self.inner.initiator_identity_hint(&core_message)?;
-        Ok(Identity {
-            x25519_public_key: bundle.public_key.as_bytes().to_vec(),
-            ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
-            identity_binding_signature: bundle.binding_signature.to_bytes().to_vec(),
+            state_updates: updates_from_core(result.state_updates)?,
         })
     }
 
@@ -1098,69 +1021,6 @@ impl KeyStore {
             x25519_public_key: bundle.public_key.as_bytes().to_vec(),
             ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
             identity_binding_signature: bundle.binding_signature.to_bytes().to_vec(),
-        })
-    }
-
-    /// Prepares responder-side Session acceptance and one-time-prekey consumption.
-    ///
-    /// The output contains provisional protocol-state updates and authenticated plaintext. Commit
-    /// the operation, atomically persist those updates, then finalize SecureStorage. The referenced
-    /// one-time prekey remains authoritative until finalization.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_client::{ClientError, Identity, KeyStore, Message};
-    ///
-    /// fn accept(
-    ///     store: &KeyStore,
-    ///     session_key: Vec<u8>,
-    ///     initiator: Option<Identity>,
-    ///     message: Message,
-    /// ) -> Result<(), ClientError> {
-    ///     let prepared = store.prepare_accept_session(session_key, initiator, message)?;
-    ///     store.commit_operation(prepared.operation.identifier.clone())?;
-    ///     // Persist `prepared.acceptance.state_updates` and the identifier atomically.
-    ///     store.finalize_operation(prepared.operation.identifier)?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
-    ///   fails, or the selected one-time-prekey identifier does not match the Message.
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InvalidData`] if the message, key, or prekey inputs are malformed.
-    /// - [`ClientError::NotFound`] if required local identity, Discovery Key, signed-prekey, or
-    ///   one-time-prekey material is missing.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if install state cannot be encoded.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_accept_session(
-        &self,
-        session_key: Vec<u8>,
-        initiator_identity: Option<Identity>,
-        message: Message,
-    ) -> Result<PreparedSessionAcceptance, ClientError> {
-        let core_message = message.to_core()?;
-        let initiator_identity_key = initiator_identity
-            .map(|identity| identity.to_core())
-            .transpose()?;
-        let prepared = self.inner.prepare_accept_session(SessionAcceptance {
-            session_key: ProtocolStateKey::from_bytes(session_key)?,
-            initiator_identity_key,
-            message: &core_message,
-        })?;
-        let (operation, acceptance) = self.convert_prepared(prepared, |result| {
-            Ok(SessionAcceptanceResult {
-                plaintext: result.plaintext.to_vec(),
-                sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                state_updates: updates_from_core_absent(result.state_updates)?,
-            })
-        })?;
-        Ok(PreparedSessionAcceptance {
-            operation,
-            acceptance,
         })
     }
 
@@ -1235,7 +1095,7 @@ impl KeyStore {
             prekey_selection.to_core(),
         )?;
         let (operation, acceptance) = self.convert_prepared(prepared, |result| {
-            let state_updates = updates_from_core_absent(result.state_updates)?;
+            let state_updates = updates_from_core(result.state_updates)?;
             Ok(SessionAcceptanceResult {
                 plaintext: result.plaintext.to_vec(),
                 sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
@@ -1246,54 +1106,6 @@ impl KeyStore {
             operation,
             acceptance,
         })
-    }
-
-    /// Encrypts an established-session Message using stored local identity signing material.
-    ///
-    /// Commit the returned state updates atomically with the returned Message before transport
-    /// send.
-    ///
-    /// # Errors
-    /// - [`ClientError::BlockedContact`] if the contact is locally blocked.
-    /// - [`ClientError::InvalidData`] if message IDs, keys, or message fields are malformed.
-    /// - [`ClientError::NotFound`] if local identity material is missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "flat UniFFI export preserves generated binding shape"
-    )]
-    pub fn encrypt_message(
-        &self,
-        snapshot: Vec<ProtocolStateEntry>,
-        session_key: Vec<u8>,
-        message_id: Vec<u8>,
-        contact_identity_key: FfiIdentityKey,
-        recipient_public_key: Vec<u8>,
-        timestamp_millis: u64,
-        sender_certificate: Vec<u8>,
-        sender_signature: Vec<u8>,
-        plaintext: Vec<u8>,
-    ) -> Result<OutboundMessageResult, ClientError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let sender_certificate = Zeroizing::new(sender_certificate);
-        let sender_signature = Zeroizing::new(sender_signature);
-        let plaintext = Zeroizing::new(plaintext);
-        OutboundMessageResult::from_core(
-            &snapshot,
-            self.inner.encrypt_message(MessageEncryption {
-                snapshot: &snapshot.snapshot,
-                session_key: protocol_key(session_key)?,
-                message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
-                contact_identity_key: contact_identity_key.to_core()?,
-                recipient_public_key: fixed_32(&recipient_public_key, "recipient public key")?,
-                timestamp_millis,
-                sender_certificate: &sender_certificate,
-                sender_signature: &sender_signature,
-                plaintext: &plaintext,
-            })?,
-        )
     }
 
     /// Encrypts an established-session Message while authenticating a Transport Binding.
@@ -1330,6 +1142,8 @@ impl KeyStore {
     /// ```
     ///
     /// # Errors
+    /// - [`ClientError::ContactNotAccepted`] if the peer contact is still pending.
+    /// - [`ClientError::TerminalSessionRecovery`] if the Session requires replacement.
     /// - [`ClientError::BlockedContact`] if the contact is locally blocked.
     /// - [`ClientError::Corrupt`] if stored Identity material is incomplete.
     /// - [`ClientError::InternalError`] on storage lock poisoning.
@@ -1362,107 +1176,20 @@ impl KeyStore {
         let plaintext = Zeroizing::new(plaintext);
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let transport_binding = transport_binding.into_core()?;
-        OutboundMessageResult::from_core(
-            &snapshot,
-            self.inner.encrypt_message_with_transport_binding(
-                MessageEncryption {
-                    snapshot: &snapshot.snapshot,
-                    session_key: protocol_key(session_key)?,
-                    message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
-                    contact_identity_key: contact_identity_key.to_core()?,
-                    recipient_public_key: fixed_32(&recipient_public_key, "recipient public key")?,
-                    timestamp_millis,
-                    sender_certificate: &sender_certificate,
-                    sender_signature: &sender_signature,
-                    plaintext: &plaintext,
-                },
-                &transport_binding,
-            )?,
-        )
-    }
-
-    /// Decrypts an established-session Message and optionally returns an acknowledgment Message.
-    ///
-    /// Unique Messages require `sender_certificate_validation`; duplicates can return before
-    /// validation because they surface no plaintext.
-    ///
-    /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
-    ///   authentication fails.
-    /// - [`ClientError::CertificateRejected`] if sender-certificate validation rejects the sender.
-    /// - [`ClientError::InvalidData`] if message IDs, keys, or message fields are malformed.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "flat UniFFI export preserves generated binding shape"
-    )]
-    pub fn decrypt_message(
-        &self,
-        snapshot: Vec<ProtocolStateEntry>,
-        session_key: Vec<u8>,
-        deduplication_key: Vec<u8>,
-        message: Message,
-        acknowledgment_id: Vec<u8>,
-        acknowledgment_recipient_public_key: Vec<u8>,
-        acknowledgment_timestamp_millis: u64,
-        acknowledgment_sender_certificate: Vec<u8>,
-        acknowledgment_sender_signature: Vec<u8>,
-        sender_certificate_validation: Option<SenderCertificateValidation>,
-    ) -> Result<InboundMessageOutcome, ClientError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let message = message.to_core()?;
-        let acknowledgment_sender_certificate = Zeroizing::new(acknowledgment_sender_certificate);
-        let acknowledgment_sender_signature = Zeroizing::new(acknowledgment_sender_signature);
-
-        let validation_storage = if let Some(validation) = &sender_certificate_validation {
-            Some((
-                domain_signing_keys_to_core(&validation.domain_signing_keys)?,
-                revoked_identity_keys_to_core(&validation.revocation_state)?,
-            ))
-        } else {
-            None
-        };
-        let core_validation = sender_certificate_validation
-            .as_ref()
-            .zip(validation_storage.as_ref())
-            .map(
-                |(validation, (domain_signing_keys, revoked_identity_keys))| {
-                    InboundSenderCertificateValidation {
-                        domain_signing_keys,
-                        expected_relay_domain: &validation.expected_relay_domain,
-                        revocation_state: revocation_state_to_core(
-                            &validation.revocation_state,
-                            revoked_identity_keys,
-                        ),
-                        reference_timestamp_secs: validation.reference_timestamp_secs,
-                        grace_window_secs: validation.grace_window_secs,
-                    }
-                },
-            );
-
-        InboundMessageOutcome::from_core(
-            &snapshot,
-            self.inner.decrypt_message(MessageDecryption {
-                snapshot: &snapshot.snapshot,
+        OutboundMessageResult::from_core(self.inner.encrypt_message_with_transport_binding(
+            MessageEncryption {
+                snapshot: &snapshot,
                 session_key: protocol_key(session_key)?,
-                deduplication_key: protocol_key(deduplication_key)?,
-                message: &message,
-                acknowledgment_id: MessageId::from_bytes(fixed_16(
-                    &acknowledgment_id,
-                    "acknowledgment id",
-                )?),
-                acknowledgment_recipient_public_key: fixed_32(
-                    &acknowledgment_recipient_public_key,
-                    "acknowledgment recipient public key",
-                )?,
-                acknowledgment_timestamp_millis,
-                acknowledgment_sender_certificate: &acknowledgment_sender_certificate,
-                acknowledgment_sender_signature: &acknowledgment_sender_signature,
-                sender_certificate_validation: core_validation,
-            })?,
-        )
+                message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
+                contact_identity_key: contact_identity_key.to_core()?,
+                recipient_public_key: fixed_32(&recipient_public_key, "recipient public key")?,
+                timestamp_millis,
+                sender_certificate: &sender_certificate,
+                sender_signature: &sender_signature,
+                plaintext: &plaintext,
+            },
+            &transport_binding,
+        )?)
     }
 
     /// Decrypts an established-session Message while authenticating its Transport Binding and the
@@ -1569,61 +1296,28 @@ impl KeyStore {
                 },
             );
 
-        InboundMessageOutcome::from_core(
-            &snapshot,
-            self.inner.decrypt_message_with_transport_bindings(
-                MessageDecryption {
-                    snapshot: &snapshot.snapshot,
-                    session_key: protocol_key(session_key)?,
-                    deduplication_key: protocol_key(deduplication_key)?,
-                    message: &message,
-                    acknowledgment_id: MessageId::from_bytes(fixed_16(
-                        &acknowledgment_id,
-                        "acknowledgment id",
-                    )?),
-                    acknowledgment_recipient_public_key: fixed_32(
-                        &acknowledgment_recipient_public_key,
-                        "acknowledgment recipient public key",
-                    )?,
-                    acknowledgment_timestamp_millis,
-                    acknowledgment_sender_certificate: &acknowledgment_sender_certificate,
-                    acknowledgment_sender_signature: &acknowledgment_sender_signature,
-                    sender_certificate_validation: core_validation,
-                },
-                &message_transport_binding,
-                &acknowledgment_transport_binding,
-            )?,
-        )
-    }
-
-    /// Processes an encrypted acknowledgment Message.
-    ///
-    /// Commit returned updates before clearing local transport retry state.
-    ///
-    /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
-    ///   authentication fails.
-    /// - [`ClientError::InvalidData`] if message fields are malformed.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn process_acknowledgment(
-        &self,
-        snapshot: Vec<ProtocolStateEntry>,
-        session_key: Vec<u8>,
-        message: Message,
-    ) -> Result<AcknowledgmentOutcome, ClientError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let message = message.to_core()?;
-        AcknowledgmentOutcome::from_core(
-            &snapshot,
-            self.inner
-                .process_acknowledgment(AcknowledgmentProcessing {
-                    snapshot: &snapshot.snapshot,
-                    session_key: protocol_key(session_key)?,
-                    message: &message,
-                })?,
-        )
+        InboundMessageOutcome::from_core(self.inner.decrypt_message_with_transport_bindings(
+            MessageDecryption {
+                snapshot: &snapshot,
+                session_key: protocol_key(session_key)?,
+                deduplication_key: protocol_key(deduplication_key)?,
+                message: &message,
+                acknowledgment_id: MessageId::from_bytes(fixed_16(
+                    &acknowledgment_id,
+                    "acknowledgment id",
+                )?),
+                acknowledgment_recipient_public_key: fixed_32(
+                    &acknowledgment_recipient_public_key,
+                    "acknowledgment recipient public key",
+                )?,
+                acknowledgment_timestamp_millis,
+                acknowledgment_sender_certificate: &acknowledgment_sender_certificate,
+                acknowledgment_sender_signature: &acknowledgment_sender_signature,
+                sender_certificate_validation: core_validation,
+            },
+            &message_transport_binding,
+            &acknowledgment_transport_binding,
+        )?)
     }
 
     /// Processes an encrypted acknowledgment while authenticating its Transport Binding.
@@ -1674,17 +1368,14 @@ impl KeyStore {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let message = message.to_core()?;
         let transport_binding = transport_binding.into_core()?;
-        AcknowledgmentOutcome::from_core(
-            &snapshot,
-            self.inner.process_acknowledgment_with_transport_binding(
-                AcknowledgmentProcessing {
-                    snapshot: &snapshot.snapshot,
-                    session_key: protocol_key(session_key)?,
-                    message: &message,
-                },
-                &transport_binding,
-            )?,
-        )
+        AcknowledgmentOutcome::from_core(self.inner.process_acknowledgment_with_transport_binding(
+            AcknowledgmentProcessing {
+                snapshot: &snapshot,
+                session_key: protocol_key(session_key)?,
+                message: &message,
+            },
+            &transport_binding,
+        )?)
     }
 
     /// Exports the current identity and discovery key as a passphrase-encrypted blob.
@@ -1944,7 +1635,22 @@ impl KeyStore {
         initiator_identity: Option<Identity>,
         message: Message,
     ) -> Result<SessionAcceptanceResult, ClientError> {
-        let prepared = self.prepare_accept_session(session_key, initiator_identity, message)?;
+        let selection = crate::PreKeySelection {
+            signed_prekey_identifier: self.current_signed_prekey_bundle()?.identifier,
+            one_time_prekey_identifier: message
+                .prekey_reference
+                .as_ref()
+                .and_then(|p| p.one_time_prekey_identifier),
+        };
+        let prepared = self.prepare_accept_session_with_transport_binding(
+            session_key,
+            initiator_identity,
+            message,
+            crate::TransportBinding {
+                bytes: b"test-route".to_vec(),
+            },
+            selection,
+        )?;
         self.complete_prepared(prepared.operation, prepared.acceptance)
     }
 }
@@ -2428,7 +2134,7 @@ mod tests {
     fn wipe_returns_only_active_protocol_state_kinds() {
         let engine = ProtocolStateEngine::new();
 
-        let updates = engine.wipe(vec![0x44; 16]).unwrap();
+        let updates = engine.wipe(Vec::new(), vec![0x44; 16]).unwrap();
 
         assert_eq!(updates.len(), 6);
         assert_protocol_state_kind(updates[0].kind, ProtocolStateKind::RatchetSession);
@@ -2551,7 +2257,7 @@ mod tests {
 
         let session_key = vec![0x44; 16];
         let initiation = alice
-            .initiate_session(
+            .initiate_session_with_transport_binding(
                 session_key.clone(),
                 bob_identity,
                 bob_publication,
@@ -2559,6 +2265,9 @@ mod tests {
                 b"alice certificate".to_vec(),
                 b"alice signature".to_vec(),
                 b"hello bob".to_vec(),
+                crate::TransportBinding {
+                    bytes: b"test-route".to_vec(),
+                },
             )
             .unwrap();
 
@@ -2588,7 +2297,7 @@ mod tests {
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
         let session_key = vec![0x55; 16];
         let initiation = alice
-            .initiate_session(
+            .initiate_session_with_transport_binding(
                 session_key.clone(),
                 bob_identity.clone(),
                 bob_publication.clone(),
@@ -2596,6 +2305,9 @@ mod tests {
                 b"alice certificate".to_vec(),
                 b"alice signature".to_vec(),
                 b"hello bob".to_vec(),
+                crate::TransportBinding {
+                    bytes: b"test-route".to_vec(),
+                },
             )
             .unwrap();
         let acceptance = bob
@@ -2622,7 +2334,7 @@ mod tests {
         apply_updates(&mut alice_snapshot, accepted.state_updates);
 
         let outbound = alice
-            .encrypt_message(
+            .encrypt_message_with_transport_binding(
                 copy_snapshot(&alice_snapshot),
                 session_key.clone(),
                 vec![0x77; 16],
@@ -2632,6 +2344,9 @@ mod tests {
                 b"alice certificate".to_vec(),
                 b"alice signature".to_vec(),
                 b"follow-up".to_vec(),
+                crate::TransportBinding {
+                    bytes: b"test-route".to_vec(),
+                },
             )
             .unwrap();
 
@@ -2658,7 +2373,7 @@ mod tests {
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
         let session_key = vec![0x66; 16];
         let initiation = alice
-            .initiate_session(
+            .initiate_session_with_transport_binding(
                 session_key.clone(),
                 bob_identity.clone(),
                 bob_publication.clone(),
@@ -2666,6 +2381,9 @@ mod tests {
                 b"alice certificate".to_vec(),
                 b"alice signature".to_vec(),
                 b"hello bob".to_vec(),
+                crate::TransportBinding {
+                    bytes: b"test-route".to_vec(),
+                },
             )
             .unwrap();
         let acceptance = bob
@@ -2691,7 +2409,7 @@ mod tests {
             .unwrap();
         apply_updates(&mut alice_snapshot, accepted.state_updates);
         let outbound = alice
-            .encrypt_message(
+            .encrypt_message_with_transport_binding(
                 alice_snapshot,
                 session_key.clone(),
                 vec![0x88; 16],
@@ -2701,6 +2419,9 @@ mod tests {
                 b"alice certificate".to_vec(),
                 b"alice signature".to_vec(),
                 b"follow-up".to_vec(),
+                crate::TransportBinding {
+                    bytes: b"test-route".to_vec(),
+                },
             )
             .unwrap();
 
@@ -2715,7 +2436,7 @@ mod tests {
                     .unwrap(),
             ],
         );
-        let result = bob.decrypt_message(
+        let result = bob.decrypt_message_with_transport_bindings(
             bob_snapshot,
             session_key,
             deduplication_key,
@@ -2726,6 +2447,12 @@ mod tests {
             b"bob certificate".to_vec(),
             b"bob signature".to_vec(),
             None,
+            crate::TransportBinding {
+                bytes: b"test-route".to_vec(),
+            },
+            crate::TransportBinding {
+                bytes: b"test-route".to_vec(),
+            },
         );
 
         match result {

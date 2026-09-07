@@ -25,20 +25,20 @@ fn corrupt_committed_blobs_surface_faults_without_reinitialization() {
     let mut corrupt_ratchet = fixture.bob_store.clone();
     corrupt_ratchet.set_raw(ratchet_address.clone(), vec![1, 0, 0xaa]);
     assert!(matches!(
-        engine.decrypt_message(
-            &mut ChaCha20Rng::from_seed([0x57; 32]),
-            &corrupt_ratchet.read().snapshot,
-            inbound_with_certificate_validation(
-                fixture.session_key.clone(),
-                fixture.deduplication_key.clone(),
-                &message.message,
-                &fixture.bob_sender,
-                &domain_keys,
-                &revoked,
-            ),
-        ),
-        Err(ProtocolStateError::BlobDecode { address, .. }) if address == ratchet_address
-    ));
+            engine.decrypt_message_with_transport_bindings(
+                &mut ChaCha20Rng::from_seed([0x57; 32]),
+                &corrupt_ratchet.read().snapshot,
+                inbound_with_certificate_validation(
+                    fixture.session_key.clone(),
+                    fixture.deduplication_key.clone(),
+                    &message.message,
+                    &fixture.bob_sender,
+                    &domain_keys,
+                    &revoked,
+                ), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::BlobDecode { address, .. }) if address == ratchet_address
+        ));
     assert_eq!(
         corrupt_ratchet.blob_bytes(&ratchet_address).unwrap(),
         vec![1, 0, 0xaa]
@@ -48,20 +48,20 @@ fn corrupt_committed_blobs_surface_faults_without_reinitialization() {
     let mut corrupt_deduplication = fixture.bob_store.clone();
     corrupt_deduplication.set_raw(deduplication_address.clone(), vec![1, 0, 0xaa]);
     assert!(matches!(
-        engine.decrypt_message(
-            &mut ChaCha20Rng::from_seed([0x58; 32]),
-            &corrupt_deduplication.read().snapshot,
-            inbound_with_certificate_validation(
-                fixture.session_key.clone(),
-                fixture.deduplication_key.clone(),
-                &message.message,
-                &fixture.bob_sender,
-                &domain_keys,
-                &revoked,
-            ),
-        ),
-        Err(ProtocolStateError::BlobDecode { address, .. }) if address == deduplication_address
-    ));
+            engine.decrypt_message_with_transport_bindings(
+                &mut ChaCha20Rng::from_seed([0x58; 32]),
+                &corrupt_deduplication.read().snapshot,
+                inbound_with_certificate_validation(
+                    fixture.session_key.clone(),
+                    fixture.deduplication_key.clone(),
+                    &message.message,
+                    &fixture.bob_sender,
+                    &domain_keys,
+                    &revoked,
+                ), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(), &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    ),
+            Err(ProtocolStateError::BlobDecode { address, .. }) if address == deduplication_address
+        ));
     assert_eq!(
         corrupt_deduplication
             .blob_bytes(&deduplication_address)

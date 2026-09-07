@@ -85,19 +85,25 @@ final class Issue124PackageConsumerTests: XCTestCase {
         XCTAssertTrue(try restored.hasIdentity())
 
         let sessionKey = Data(repeating: 0x24, count: 16)
-        let initiation = try alice.initiateSession(
+        let initiation = try alice.initiateSessionWithTransportBinding(
             sessionKey: sessionKey,
             responderIdentity: bobIdentity,
             responderPublication: bobPublication,
             responderOneTimePrekey: bobOneTimePrekey,
             senderCertificate: aliceCertificate.bytes,
             senderSignature: aliceCertificate.signature,
-            plaintext: Data("hello bob".utf8)
+            plaintext: Data("hello bob".utf8),
+            transportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
-        let acceptancePreparation = try bob.prepareAcceptSession(
+        let acceptancePreparation = try bob.prepareAcceptSessionWithTransportBinding(
             sessionKey: sessionKey,
             initiatorIdentity: aliceIdentity,
-            message: initiation.message
+            message: initiation.message,
+            transportBinding: TransportBinding(bytes: Data("test-route".utf8)),
+            prekeySelection: PreKeySelection(
+                signedPrekeyIdentifier: bobPublication.signedPrekey.identifier,
+                oneTimePrekeyIdentifier: bobOneTimePrekey.identifier
+            )
         )
         _ = try bob.commitOperation(identifier: acceptancePreparation.operation.identifier)
         let acceptance = acceptancePreparation.acceptance
@@ -119,7 +125,7 @@ final class Issue124PackageConsumerTests: XCTestCase {
         )
         apply(&aliceSnapshot, acceptedContact.stateUpdates)
 
-        let outbound = try alice.encryptMessage(
+        let outbound = try alice.encryptMessageWithTransportBinding(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             messageId: Data(repeating: 0x25, count: 16),
@@ -128,7 +134,8 @@ final class Issue124PackageConsumerTests: XCTestCase {
             timestampMillis: 1_700_000_001_000,
             senderCertificate: aliceCertificate.bytes,
             senderSignature: aliceCertificate.signature,
-            plaintext: Data("package message".utf8)
+            plaintext: Data("package message".utf8),
+            transportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
         XCTAssertEqual(outbound.payloadKind, .encryptedText)
         apply(&aliceSnapshot, outbound.stateUpdates)
@@ -146,7 +153,7 @@ final class Issue124PackageConsumerTests: XCTestCase {
         let deduplicationKey = Data("bob-dedup".utf8)
         apply(&bobSnapshot, [try engine.initializeDeduplicationSet(key: deduplicationKey)])
 
-        let inbound = try bob.decryptMessage(
+        let inbound = try bob.decryptMessageWithTransportBindings(
             snapshot: bobSnapshot,
             sessionKey: sessionKey,
             deduplicationKey: deduplicationKey,
@@ -156,9 +163,11 @@ final class Issue124PackageConsumerTests: XCTestCase {
             acknowledgmentTimestampMillis: 1_700_000_001_002,
             acknowledgmentSenderCertificate: bobCertificate.bytes,
             acknowledgmentSenderSignature: bobCertificate.signature,
-            senderCertificateValidation: validation
+            senderCertificateValidation: validation,
+            messageTransportBinding: TransportBinding(bytes: Data("test-route".utf8)),
+            acknowledgmentTransportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
-        XCTAssertEqual(inbound.kind, .accepted)
+        guard case .accepted(let inbound) = inbound else { return XCTFail("expected accepted Message") }
         XCTAssertEqual(inbound.payloadKind, .encryptedText)
         XCTAssertEqual(inbound.plaintext, Data("package message".utf8))
         XCTAssertNotNil(inbound.acknowledgment)
@@ -166,7 +175,7 @@ final class Issue124PackageConsumerTests: XCTestCase {
         XCTAssertTrue(inbound.stateUpdates.contains { $0.kind == .deduplicationSet })
         apply(&bobSnapshot, inbound.stateUpdates)
 
-        let duplicate = try bob.decryptMessage(
+        let duplicate = try bob.decryptMessageWithTransportBindings(
             snapshot: bobSnapshot,
             sessionKey: sessionKey,
             deduplicationKey: deduplicationKey,
@@ -176,21 +185,11 @@ final class Issue124PackageConsumerTests: XCTestCase {
             acknowledgmentTimestampMillis: 1_700_000_001_003,
             acknowledgmentSenderCertificate: bobCertificate.bytes,
             acknowledgmentSenderSignature: bobCertificate.signature,
-            senderCertificateValidation: nil
+            senderCertificateValidation: nil,
+            messageTransportBinding: TransportBinding(bytes: Data("test-route".utf8)),
+            acknowledgmentTransportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
-        XCTAssertEqual(duplicate.kind, .duplicate)
-        XCTAssertNil(duplicate.plaintext)
-        XCTAssertTrue(duplicate.stateUpdates.isEmpty)
-
-        let stream = try ContactEventStream.withObserverCapacity(
-            initialState: [acceptedContact.contact],
-            observerCapacity: 1
-        )
-        let observer = try stream.subscribe()
-        let event = ContactEvent(kind: .changed, contact: acceptedContact.contact)
-        let envelope = try stream.emit(event: event, nextState: [acceptedContact.contact])
-        XCTAssertEqual(envelope.id, 1)
-        XCTAssertEqual(try XCTUnwrap(try observer.pollNext()).kind, .event)
+        guard case .duplicate = duplicate else { return XCTFail("expected duplicate Message") }
 
         try exerciseCheckedInReceiveFixtures()
     }
@@ -264,7 +263,7 @@ private func exerciseCheckedInReceiveFixtures() throws {
 
     let store = KeyStore(storage: MemorySecureStorage())
     _ = try generateIdentity(store)
-    let duplicate = try store.decryptMessage(
+    let duplicate = try store.decryptMessageWithTransportBindings(
         snapshot: [
             ProtocolStateEntry(
                 kind: try protocolStateKind(duplicateBlob.kind),
@@ -280,11 +279,11 @@ private func exerciseCheckedInReceiveFixtures() throws {
         acknowledgmentTimestampMillis: 1_700_000_001_004,
         acknowledgmentSenderCertificate: Data("duplicate ack certificate".utf8),
         acknowledgmentSenderSignature: Data("duplicate ack signature".utf8),
-        senderCertificateValidation: nil
+        senderCertificateValidation: nil,
+        messageTransportBinding: TransportBinding(bytes: Data("test-route".utf8)),
+            acknowledgmentTransportBinding: TransportBinding(bytes: Data("test-route".utf8))
     )
-    XCTAssertEqual(duplicate.kind, .duplicate)
-    XCTAssertNil(duplicate.acknowledgment)
-    XCTAssertTrue(duplicate.stateUpdates.isEmpty)
+    guard case .duplicate = duplicate else { return XCTFail("expected duplicate Message") }
 }
 
 private struct SignedCertificate {

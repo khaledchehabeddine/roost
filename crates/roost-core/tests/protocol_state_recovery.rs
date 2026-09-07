@@ -27,7 +27,7 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
 
     let first_read = fixture.bob_store.read();
     let first = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5a; 32]),
             &first_read.snapshot,
             inbound_with_certificate_validation(
@@ -38,6 +38,8 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(session_unrecoverable)
         .unwrap();
@@ -58,7 +60,7 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
         .unwrap();
 
     let repeated = engine
-        .decrypt_message(
+        .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5b; 32]),
             &fixture.bob_store.read().snapshot,
             inbound_with_certificate_validation(
@@ -69,15 +71,57 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
                 &domain_keys,
                 &revoked,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .map(session_unrecoverable)
         .unwrap();
     assert!(repeated.event.is_none());
     assert!(repeated.state_updates.is_empty());
 
-    let replacement = ProtocolFixture::new([0x60; 32]);
-    fixture.alice_store = replacement.alice_store;
-    fixture.bob_store = replacement.bob_store;
+    let replacement = support::setup([0x60; 32]);
+    for (host, state, peer) in [
+        (
+            &mut fixture.alice_store,
+            &replacement.alice_state,
+            &fixture.bob_sender,
+        ),
+        (
+            &mut fixture.bob_store,
+            &replacement.bob_state,
+            &fixture.alice_sender.sender_identity,
+        ),
+    ] {
+        let initialize = || {
+            engine
+                .set_session_state_with_peer_identity(fixture.session_key.clone(), state, peer)
+                .unwrap()
+        };
+        let read = host.read();
+        // A new handshake cannot silently overwrite an existing live or dead Session.
+        assert_eq!(
+            host.commit(read.token, vec![initialize()]),
+            Err(support::HostCommitError::StaleCondition)
+        );
+        let read = host.read();
+        host.commit(
+            read.token,
+            engine.wipe(&read.snapshot, fixture.session_key.clone()),
+        )
+        .unwrap();
+        assert!(host.blob_bytes(&address).is_none());
+        let read = host.read();
+        host.commit(
+            read.token,
+            vec![
+                initialize(),
+                engine
+                    .initialize_pending_acknowledgments(fixture.session_key.clone())
+                    .unwrap(),
+            ],
+        )
+        .unwrap();
+    }
     let recovered = fixture.encrypt_from_alice(&engine, 2, b"after replacement");
     let recovered = fixture.decrypt_for_bob(&engine, &recovered, 0x61);
     assert_eq!(recovered.plaintext.as_slice(), b"after replacement");

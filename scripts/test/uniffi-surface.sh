@@ -43,6 +43,7 @@ fuzz_decode_sealed_sender_envelope      fuzz target entry point
 fuzz_decode_signed_prekey_blob          fuzz target entry point
 fuzz_deduplication_digest               fuzz target entry point
 fuzz_unpad_sealed_payload               fuzz target entry point
+is_satisfied_by                        Rust host transaction helper; native hosts enforce exported commit checks with protocol_state_blob_digest
 prekey_bundle_lookup_key                internal index key; callers pass the bundle, not its key
 set_session_state_with_peer_identity_key lower-level variant; key_store/session.rs calls it, the bindings take the checked wrapper
 to_bytes_with_hardening_limits          encode-limit variant, pairs with from_bytes_with_hardening_limits

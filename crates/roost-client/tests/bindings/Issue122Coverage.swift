@@ -29,45 +29,34 @@ private struct StateAddress: Hashable {
     let key: Data
 }
 
-private final class MemoryProtocolStateStore: ProtocolStateStore, @unchecked Sendable {
-    private let lock = NSLock()
+private final class MemoryProtocolStateStore {
     private var values: [StateAddress: Data] = [:]
 
-    func load(kind: ProtocolStateKind, key: Data) throws -> Data? {
-        lock.lock()
-        let value = values[StateAddress(kind: kind, key: key)]
-        lock.unlock()
-        return value
+    func snapshot(addresses: [ProtocolStateAddress]) -> [ProtocolStateEntry] {
+        addresses.compactMap { address in
+            values[StateAddress(kind: address.kind, key: address.key)].map {
+                ProtocolStateEntry(kind: address.kind, key: address.key, blob: $0)
+            }
+        }
     }
 
     func commit(updates: [ProtocolStateUpdate]) throws {
-        lock.lock()
-        defer { lock.unlock() }
+        var next = values
         for update in updates {
             let address = StateAddress(kind: update.kind, key: update.key)
-            let current = values[address]
             switch update.commitCheck {
             case .absent:
-                if current != nil {
+                guard values[address] == nil else {
                     throw ClientError.ProtocolStateFault(reason: "stale protocol-state commit")
                 }
-            case .digest:
-                guard
-                    let expected = update.expectedBlobDigest,
-                    let current,
-                    protocolStateBlobDigest(blob: current) == expected
-                else {
+            case .digest(let expected):
+                guard let current = values[address], protocolStateBlobDigest(blob: current) == expected else {
                     throw ClientError.ProtocolStateFault(reason: "stale protocol-state commit")
                 }
-            case .unchecked:
-                break
             }
-            if let blob = update.blob {
-                values[address] = blob
-            } else {
-                values.removeValue(forKey: address)
-            }
+            next[address] = update.blob
         }
+        values = next
     }
 }
 
@@ -87,7 +76,6 @@ struct Issue122Coverage {
             kind: .deduplicationSet,
             key: digestKey,
             commitCheck: .absent,
-            expectedBlobDigest: nil,
             blob: Data([0x01])
         )
         try protocolStore.commit(updates: [digestSeed])
@@ -96,13 +84,11 @@ struct Issue122Coverage {
             update: ProtocolStateUpdate(
                 kind: .deduplicationSet,
                 key: digestKey,
-                commitCheck: .digest,
-                expectedBlobDigest: protocolStateBlobDigest(blob: Data([0x02])),
+                commitCheck: .digest(expectedBlobDigest: protocolStateBlobDigest(blob: Data([0x02]))),
                 blob: Data([0x03])
             )
         )
-        let loaded = try engine.loadSnapshot(
-            store: protocolStore,
+        let loaded = protocolStore.snapshot(
             addresses: [ProtocolStateAddress(kind: .deduplicationSet, key: dedupKey)]
         )
         require(loaded.count == 1, "protocol state store load")
@@ -129,20 +115,28 @@ struct Issue122Coverage {
         expectBackupFailure(restored)
 
         let sessionKey = Data(repeating: 0x45, count: 16)
-        let initiation = try alice.initiateSession(
+        let initiation = try alice.initiateSessionWithTransportBinding(
             sessionKey: sessionKey,
             responderIdentity: bobIdentity,
             responderPublication: bobPublication,
             responderOneTimePrekey: bobOneTimePrekey,
             senderCertificate: Data("alice certificate".utf8),
             senderSignature: Data("alice signature".utf8),
-            plaintext: Data("hello bob".utf8)
+            plaintext: Data("hello bob".utf8),
+            transportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
         let decodedInitial = try decodeMessage(bytes: try encodeMessage(message: initiation.message))
         // The stranger path: read who sent it before accepting, because the
         // session key is derived from both identities and acceptance stages
         // one-time-prekey consumption, so it should not be run just to find out.
-        let hinted = try bob.initiatorIdentityHint(message: decodedInitial)
+        let hinted = try bob.initiatorIdentityHintWithTransportBinding(
+            message: decodedInitial,
+            transportBinding: TransportBinding(bytes: Data("test-route".utf8)),
+            prekeySelection: PreKeySelection(
+                signedPrekeyIdentifier: bobPublication.signedPrekey.identifier,
+                oneTimePrekeyIdentifier: bobOneTimePrekey.identifier
+            )
+        )
         require(
             hinted.x25519PublicKey == aliceIdentity.x25519PublicKey
                 && hinted.ed25519VerifyingKey == aliceIdentity.ed25519VerifyingKey
@@ -150,10 +144,15 @@ struct Issue122Coverage {
             "initiator identity hint"
         )
 
-        let acceptancePreparation = try bob.prepareAcceptSession(
+        let acceptancePreparation = try bob.prepareAcceptSessionWithTransportBinding(
             sessionKey: sessionKey,
             initiatorIdentity: nil,
-            message: decodedInitial
+            message: decodedInitial,
+            transportBinding: TransportBinding(bytes: Data("test-route".utf8)),
+            prekeySelection: PreKeySelection(
+                signedPrekeyIdentifier: bobPublication.signedPrekey.identifier,
+                oneTimePrekeyIdentifier: bobOneTimePrekey.identifier
+            )
         )
         _ = try bob.commitOperation(identifier: acceptancePreparation.operation.identifier)
         let acceptance = acceptancePreparation.acceptance
@@ -176,12 +175,7 @@ struct Issue122Coverage {
         )
         try protocolStore.commit(updates: acceptedContact.stateUpdates)
         apply(&aliceSnapshot, acceptedContact.stateUpdates)
-        guard let contactUpdate = acceptedContact.stateUpdates.first else {
-            fail("accepted contact should produce a state update")
-        }
-        let contactAddress = ProtocolStateAddress(kind: contactUpdate.kind, key: contactUpdate.key)
-
-        let outbound = try alice.encryptMessage(
+        let outbound = try alice.encryptMessageWithTransportBinding(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             messageId: Data(repeating: 0x46, count: 16),
@@ -190,7 +184,8 @@ struct Issue122Coverage {
             timestampMillis: 42,
             senderCertificate: Data("alice certificate".utf8),
             senderSignature: Data("alice signature".utf8),
-            plaintext: Data("follow-up".utf8)
+            plaintext: Data("follow-up".utf8),
+            transportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
         apply(&aliceSnapshot, outbound.stateUpdates)
         let pending = try engine.pendingAcknowledgments(snapshot: aliceSnapshot, key: sessionKey)
@@ -218,12 +213,6 @@ struct Issue122Coverage {
             alicePublication: alicePublication
         )
 
-        try exerciseEvents(
-            engine: engine,
-            store: protocolStore,
-            address: contactAddress,
-            contact: acceptedContact.contact
-        )
         try expectCertificateRejection()
         expectInvalidMessageKey()
         print("Swift issue 122 coverage passed")
@@ -305,79 +294,6 @@ struct Issue122Coverage {
         }
     }
 
-    private static func exerciseEvents(
-        engine: ProtocolStateEngine,
-        store: MemoryProtocolStateStore,
-        address: ProtocolStateAddress,
-        contact: ContactState
-    ) throws {
-        let stream = try ContactEventStream.withObserverCapacity(initialState: [contact], observerCapacity: 1)
-        let observer = try stream.subscribe()
-        let event = ContactEvent(kind: .changed, contact: contact)
-        _ = try stream.emit(event: event, nextState: [contact])
-        _ = try stream.emit(event: event, nextState: [contact])
-        let item = try observer.pollNext()
-        require(item?.kind == .lagged, "event lag")
-        try observer.resumeAfter(snapshot: stream.currentState())
-
-        let otherStream = try ContactEventStream.withObserverCapacity(
-            initialState: [contact],
-            observerCapacity: 1
-        )
-        _ = try otherStream.emit(event: event, nextState: [contact])
-        _ = try otherStream.emit(event: event, nextState: [contact])
-        _ = try otherStream.emit(event: event, nextState: [contact])
-        _ = try stream.emit(event: event, nextState: [contact])
-        do {
-            try observer.resumeAfter(snapshot: otherStream.currentState())
-            fail("another stream's snapshot should reject")
-        } catch let error as ClientError {
-            guard case .ForeignEventSnapshot = error else {
-                fail("unexpected foreign-snapshot error \(error)")
-            }
-        }
-        let preserved = try observer.pollNext()
-        require(preserved?.event?.id == 3, "foreign snapshot preserves local events")
-
-        let extensionEngine = ProtocolStateEngine()
-        let extensionSnapshot = try extensionEngine.loadSnapshot(store: store, addresses: [address])
-        let blocked = try extensionEngine.blockContact(
-            snapshot: extensionSnapshot,
-            identityKey: contact.identity.identityKey
-        )
-        try store.commit(updates: blocked.stateUpdates)
-        let reloaded = try engine.loadSnapshot(store: store, addresses: [address])
-        let rebuilt = try engine.contactStates(snapshot: reloaded)
-        require(rebuilt.count == 1 && rebuilt[0].blocked, "rebuilds committed extension state")
-        let firstImport = try stream.importCurrentState(state: rebuilt)
-        require(firstImport.eventId() == 3, "state import preserves local event ID")
-        require(firstImport.stateRevision() == 1, "state import revision")
-        let importedState = firstImport.state()
-        require(importedState.count == 1 && importedState[0].blocked, "imported snapshot state")
-        let firstStaleItem = try observer.pollNext()
-        require(firstStaleItem?.kind == .stale, "state import marks observer stale")
-
-        let secondImport = try stream.importCurrentState(state: rebuilt)
-        do {
-            try observer.resumeAfter(snapshot: firstImport)
-            fail("stale imported snapshot should reject")
-        } catch let error as ClientError {
-            guard case .StaleEventSnapshot(_, _) = error else {
-                fail("unexpected stale-snapshot error \(error)")
-            }
-        }
-        let secondStaleItem = try observer.pollNext()
-        require(secondStaleItem?.kind == .stale, "repeated import stays explicit")
-        try observer.resumeAfter(snapshot: secondImport)
-
-        let restarted = try ContactEventStream.withObserverCapacity(
-            initialState: rebuilt,
-            observerCapacity: 1
-        )
-        let restartSnapshot = try restarted.currentState()
-        require(restartSnapshot.eventId() == 0, "restart uses a new local event sequence")
-        require(restartSnapshot.stateRevision() == 0, "restart uses a new local state revision")
-    }
 
     private static func expectBackupFailure(_ store: KeyStore) {
         do {
@@ -403,7 +319,7 @@ struct Issue122Coverage {
         bobPublication: PublicationBundle
     ) {
         do {
-            _ = try alice.encryptMessage(
+            _ = try alice.encryptMessageWithTransportBinding(
                 snapshot: snapshot,
                 sessionKey: sessionKey,
                 messageId: Data(repeating: 0x47, count: 16),
@@ -412,7 +328,8 @@ struct Issue122Coverage {
                 timestampMillis: 44,
                 senderCertificate: Data("alice certificate".utf8),
                 senderSignature: Data("alice signature".utf8),
-                plaintext: Data("blocked".utf8)
+                plaintext: Data("blocked".utf8),
+                transportBinding: TransportBinding(bytes: Data("test-route".utf8))
             )
             fail("blocked contact should reject send")
         } catch let error as ClientError {
@@ -434,7 +351,7 @@ struct Issue122Coverage {
         alicePublication: PublicationBundle
     ) {
         do {
-            _ = try bob.decryptMessage(
+            _ = try bob.decryptMessageWithTransportBindings(
                 snapshot: snapshot,
                 sessionKey: sessionKey,
                 deduplicationKey: dedupKey,
@@ -444,7 +361,9 @@ struct Issue122Coverage {
                 acknowledgmentTimestampMillis: 45,
                 acknowledgmentSenderCertificate: Data("bob certificate".utf8),
                 acknowledgmentSenderSignature: Data("bob signature".utf8),
-                senderCertificateValidation: nil
+                senderCertificateValidation: nil,
+                messageTransportBinding: TransportBinding(bytes: Data("test-route".utf8)),
+                acknowledgmentTransportBinding: TransportBinding(bytes: Data("test-route".utf8))
             )
             fail("missing certificate validation should reject receive")
         } catch let error as ClientError {

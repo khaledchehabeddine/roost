@@ -172,7 +172,7 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
             deduplication_key.clone(),
         );
         let decrypted = ProtocolStateEngine::new()
-            .decrypt_message(
+            .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
                 &snapshot,
                 inbound(
@@ -186,6 +186,8 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
                     validation.reference_timestamp_secs,
                     validation.grace_window_secs,
                 ),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             )
             .map(accepted)
             .unwrap();
@@ -200,7 +202,7 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
 
         let mut tampered = copy_message(&message);
         *tampered.ciphertext.last_mut().unwrap() ^= 0x01;
-        let tampered_result = ProtocolStateEngine::new().decrypt_message(
+        let tampered_result = ProtocolStateEngine::new().decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed(SESSION_REPLAY_RNG_SEED),
             &snapshot,
             inbound(
@@ -214,6 +216,8 @@ fn checked_in_session_message_fixtures_decrypt_after_transport_replay() {
                 validation.reference_timestamp_secs,
                 validation.grace_window_secs,
             ),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         );
         assert!(
             matches!(tampered_result, Err(ProtocolStateError::Crypto(_))),
@@ -251,10 +255,12 @@ fn insert_blob(
         .iter()
         .find(|fixture| fixture.name == fixture_name)
         .unwrap();
-    snapshot.set(
-        ProtocolStateAddress::new(protocol_state_kind(&fixture.kind), key),
-        ProtocolStateBlob::from_bytes(hex::decode(&fixture.current_encoded_hex).unwrap()),
-    );
+    snapshot
+        .set(
+            ProtocolStateAddress::new(protocol_state_kind(&fixture.kind), key),
+            ProtocolStateBlob::from_bytes(hex::decode(&fixture.current_encoded_hex).unwrap()),
+        )
+        .unwrap();
 }
 
 fn deduplication_key() -> ProtocolStateKey {
@@ -607,18 +613,20 @@ fn regenerate_sealed_sender_session_message_fixtures() {
         SENDER_STATE_FIXTURE,
         session_key.clone(),
     );
-    snapshot.apply(
-        engine
-            .initialize_pending_acknowledgments(session_key.clone())
-            .unwrap(),
-    );
+    snapshot
+        .apply(
+            engine
+                .initialize_pending_acknowledgments(session_key.clone())
+                .unwrap(),
+        )
+        .unwrap();
     let contact = fixture_contact_identity();
     let recorded = engine.record_contact(&snapshot, contact).unwrap();
-    snapshot.apply_all(recorded.state_updates);
+    snapshot.apply_all(recorded.state_updates).unwrap();
     let accepted = engine
         .accept_contact(&snapshot, contact.identity_key)
         .unwrap();
-    snapshot.apply_all(accepted.state_updates);
+    snapshot.apply_all(accepted.state_updates).unwrap();
 
     let domain_signing_key = fixture_domain_signing_key();
     let certificate = fixture_sender_certificate(DOMAIN_IDENTIFIER, SENDER_TAG, EXPIRES_AT_SECS);
@@ -626,7 +634,7 @@ fn regenerate_sealed_sender_session_message_fixtures() {
     let sender_identity = sender_identity_with_material(SENDER_TAG, certificate, signature);
 
     let encrypted = engine
-        .encrypt_message(
+        .encrypt_message_with_transport_binding(
             &snapshot,
             session_key,
             OutboundPlaintext {
@@ -638,6 +646,7 @@ fn regenerate_sealed_sender_session_message_fixtures() {
                 timestamp_millis: TIMESTAMP_MILLIS,
                 plaintext: PLAINTEXT,
             },
+            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
     let message = &encrypted.message;
@@ -651,7 +660,7 @@ fn regenerate_sealed_sender_session_message_fixtures() {
     // alphabetically and would rewrite every line of the file on each regeneration.
     let emitted = format!(
         r#"{{
-  "provenance": "test-only bytes generated from deterministic protocol-state blob fixtures; the sealed-frame ephemeral key is pinned from one local fixture generation",
+  "provenance": "test-only bytes generated from deterministic protocol-state blob fixtures; the sealed-frame ephemeral key is pinned from one local fixture generation; Transport Binding bytes are hex 746573742d726f757465",
   "session_key_hex": "09090909090909090909090909090909",
   "sender_certificate_validation": {{
     "domain_signing_keys": [

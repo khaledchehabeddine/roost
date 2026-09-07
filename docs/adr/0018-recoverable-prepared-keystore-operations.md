@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 
-Every production KeyStore mutation returns a Prepared KeyStore Operation instead of changing
+Every production mutation of SecureStorage returns a Prepared KeyStore Operation instead of changing
 authoritative key entries eagerly. Core stages secret mutations in a bounded, Core-owned journal
 inside SecureStorage and returns a stable identifier, SecureStorage preconditions, and provisional
 output; the host asks Core to commit, atomically persists related Protocol State Blob updates and
@@ -24,6 +24,12 @@ SecureStorage and the host database, while staged secrets must not cross into ho
   key material outside the platform secret-store boundary.
 
 ## Consequences
+
+- Ordinary protocol-state operations use snapshots and conditional host commits without a secure
+  journal lifecycle. Prepared operations remain necessary when secret-store state is involved.
+- An uncertain host commit leaves the operation reserved. After restart, the host checks its
+  durable operation identifier record and finalizes only if that transaction committed. It aborts
+  only after proving that transaction did not commit.
 
 - A committed or finalizing operation blocks ordinary KeyStore work until recovery finalizes or
   aborts it. One host-owned per-identity actor or lock must serialize the entire prepare through
