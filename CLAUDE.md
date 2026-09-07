@@ -34,5 +34,12 @@ Domain docs are multi-context; before exploring a crate or proposing terminology
 
 ## Workflow
 
+- Carry authorized work through implementation and verification; preserve the task's scope across follow-ups
+- Resolve routine choices from context. Reuse supplied answers and approvals; ask when an unresolved decision materially affects the result
+- Explicit user instructions take precedence over skill guidelines. Before a skill causes a pause, complete independent authorized work, then link its `SKILL.md` and quote the blocking instruction
+- Keep code, diffs, and secrets off external tools without approval. Commit and push only through the `commit-push` skill when requested
+- Invoke configured reviewers for their documented change types; run independent reviews in parallel
+- Complete required checks. Broaden or repeat verification only for new changes, failures, or unresolved concerns; use file validation for documentation and configuration edits unless project checks require more
+- Report the result, verification, and material limitations in concise plain English; use lists when they aid comparison or sequencing
 - See `CONTRIBUTING.md` for branches, commits, and PR conventions
 - After a non-obvious project-specific discovery or workaround worth keeping, suggest a `CLAUDE.md` update
