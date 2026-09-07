@@ -1,0 +1,510 @@
+import Foundation
+
+private final class MemorySecureStorage: SecureStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Data] = [:]
+
+    func store(key: String, value: Data) throws {
+        lock.lock()
+        values[key] = value
+        lock.unlock()
+    }
+
+    func load(key: String) throws -> Data? {
+        lock.lock()
+        let value = values[key]
+        lock.unlock()
+        return value
+    }
+
+    func delete(key: String) throws {
+        lock.lock()
+        values.removeValue(forKey: key)
+        lock.unlock()
+    }
+}
+
+private struct StateAddress: Hashable {
+    let kind: ProtocolStateKind
+    let key: Data
+}
+
+private final class MemoryProtocolStateStore: ProtocolStateStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [StateAddress: Data] = [:]
+
+    func load(kind: ProtocolStateKind, key: Data) throws -> Data? {
+        lock.lock()
+        let value = values[StateAddress(kind: kind, key: key)]
+        lock.unlock()
+        return value
+    }
+
+    func commit(updates: [ProtocolStateUpdate]) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        for update in updates {
+            let address = StateAddress(kind: update.kind, key: update.key)
+            let current = values[address]
+            switch update.commitCheck {
+            case .absent:
+                if current != nil {
+                    throw ClientError.ProtocolStateFault(reason: "stale protocol-state commit")
+                }
+            case .digest:
+                guard
+                    let expected = update.expectedBlobDigest,
+                    let current,
+                    protocolStateBlobDigest(blob: current) == expected
+                else {
+                    throw ClientError.ProtocolStateFault(reason: "stale protocol-state commit")
+                }
+            case .unchecked:
+                break
+            }
+            if let blob = update.blob {
+                values[address] = blob
+            } else {
+                values.removeValue(forKey: address)
+            }
+        }
+    }
+}
+
+@main
+struct Issue122Coverage {
+    static func main() throws {
+        let engine = ProtocolStateEngine()
+        let limits = engine.hardeningLimits()
+        require(limits.maxEncodedMessageLen > 0, "hardening limits")
+
+        let protocolStore = MemoryProtocolStateStore()
+        let dedupKey = Data("dedup".utf8)
+        try protocolStore.commit(updates: [try engine.initializeDeduplicationSet(key: dedupKey)])
+        expectStaleProtocolStateCommit(protocolStore, update: try engine.initializeDeduplicationSet(key: dedupKey))
+        let digestKey = Data("digest".utf8)
+        let digestSeed = ProtocolStateUpdate(
+            kind: .deduplicationSet,
+            key: digestKey,
+            commitCheck: .absent,
+            expectedBlobDigest: nil,
+            blob: Data([0x01])
+        )
+        try protocolStore.commit(updates: [digestSeed])
+        expectStaleProtocolStateCommit(
+            protocolStore,
+            update: ProtocolStateUpdate(
+                kind: .deduplicationSet,
+                key: digestKey,
+                commitCheck: .digest,
+                expectedBlobDigest: protocolStateBlobDigest(blob: Data([0x02])),
+                blob: Data([0x03])
+            )
+        )
+        let loaded = try engine.loadSnapshot(
+            store: protocolStore,
+            addresses: [ProtocolStateAddress(kind: .deduplicationSet, key: dedupKey)]
+        )
+        require(loaded.count == 1, "protocol state store load")
+
+        let alice = KeyStore(storage: MemorySecureStorage())
+        let bob = KeyStore(storage: MemorySecureStorage())
+        let aliceIdentity = try generateIdentity(alice)
+        let bobIdentity = try generateIdentity(bob)
+        try rotateSignedPrekeyNow(alice)
+        try rotateSignedPrekeyNow(bob)
+        let alicePublication = try alice.currentPublicationBundle()
+        let bobPublication = try bob.currentPublicationBundle()
+        let replenished = try replenishOneTimePrekeys(bob)
+        require(replenished.count == 100, "prekey replenishment")
+        let bobOneTimePrekey = replenished[0]
+        require(bobPublication.signedPrekey.identifier == 0, "published signed prekey identifier")
+        require(bobOneTimePrekey.identifier == 0, "published one-time prekey identifier")
+
+        let backup = try alice.exportEncryptedBackup(passphrase: "passphrase")
+        let restored = KeyStore(storage: MemorySecureStorage())
+        try importEncryptedBackup(restored, data: backup, passphrase: "passphrase")
+        let restoredHasIdentity = try restored.hasIdentity()
+        require(restoredHasIdentity, "backup import")
+        expectBackupFailure(restored)
+
+        let sessionKey = Data(repeating: 0x45, count: 16)
+        let initiation = try alice.initiateSession(
+            sessionKey: sessionKey,
+            responderIdentity: bobIdentity,
+            responderPublication: bobPublication,
+            responderOneTimePrekey: bobOneTimePrekey,
+            senderCertificate: Data("alice certificate".utf8),
+            senderSignature: Data("alice signature".utf8),
+            plaintext: Data("hello bob".utf8)
+        )
+        let decodedInitial = try decodeMessage(bytes: try encodeMessage(message: initiation.message))
+        // The stranger path: read who sent it before accepting, because the
+        // session key is derived from both identities and acceptance stages
+        // one-time-prekey consumption, so it should not be run just to find out.
+        let hinted = try bob.initiatorIdentityHint(message: decodedInitial)
+        require(
+            hinted.x25519PublicKey == aliceIdentity.x25519PublicKey
+                && hinted.ed25519VerifyingKey == aliceIdentity.ed25519VerifyingKey
+                && hinted.identityBindingSignature == aliceIdentity.identityBindingSignature,
+            "initiator identity hint"
+        )
+
+        let acceptancePreparation = try bob.prepareAcceptSession(
+            sessionKey: sessionKey,
+            initiatorIdentity: nil,
+            message: decodedInitial
+        )
+        _ = try bob.commitOperation(identifier: acceptancePreparation.operation.identifier)
+        let acceptance = acceptancePreparation.acceptance
+        var bobSnapshot: [ProtocolStateEntry] = []
+        apply(&bobSnapshot, acceptance.stateUpdates)
+        _ = try bob.finalizeOperation(identifier: acceptancePreparation.operation.identifier)
+        require(acceptance.plaintext == Data("hello bob".utf8), "session accept plaintext")
+
+        var aliceSnapshot: [ProtocolStateEntry] = []
+        apply(&aliceSnapshot, initiation.stateUpdates)
+        let recorded = try engine.recordContact(
+            snapshot: [],
+            contactIdentity: contactIdentity(identity: bobIdentity, publication: bobPublication)
+        )
+        try protocolStore.commit(updates: recorded.stateUpdates)
+        apply(&aliceSnapshot, recorded.stateUpdates)
+        let acceptedContact = try engine.acceptContact(
+            snapshot: aliceSnapshot,
+            identityKey: identityKey(bobIdentity)
+        )
+        try protocolStore.commit(updates: acceptedContact.stateUpdates)
+        apply(&aliceSnapshot, acceptedContact.stateUpdates)
+        guard let contactUpdate = acceptedContact.stateUpdates.first else {
+            fail("accepted contact should produce a state update")
+        }
+        let contactAddress = ProtocolStateAddress(kind: contactUpdate.kind, key: contactUpdate.key)
+
+        let outbound = try alice.encryptMessage(
+            snapshot: aliceSnapshot,
+            sessionKey: sessionKey,
+            messageId: Data(repeating: 0x46, count: 16),
+            contactIdentityKey: identityKey(bobIdentity),
+            recipientPublicKey: bobPublication.discoveryKey.publicKey,
+            timestampMillis: 42,
+            senderCertificate: Data("alice certificate".utf8),
+            senderSignature: Data("alice signature".utf8),
+            plaintext: Data("follow-up".utf8)
+        )
+        apply(&aliceSnapshot, outbound.stateUpdates)
+        let pending = try engine.pendingAcknowledgments(snapshot: aliceSnapshot, key: sessionKey)
+        require(pending.count == 1, "pending ack")
+        let retry = try engine.retryInstructions(
+            snapshot: aliceSnapshot,
+            key: sessionKey,
+            nowMillis: 43,
+            retryWindowMillis: 0
+        )
+        require(retry.instructions.count == 1, "retry instruction")
+
+        let blocked = try engine.blockContact(snapshot: aliceSnapshot, identityKey: identityKey(bobIdentity))
+        var blockedSnapshot = aliceSnapshot
+        apply(&blockedSnapshot, blocked.stateUpdates)
+        expectBlockedSend(alice, snapshot: blockedSnapshot, sessionKey: sessionKey, bobIdentity: bobIdentity, bobPublication: bobPublication)
+
+        apply(&bobSnapshot, [try engine.initializeDeduplicationSet(key: dedupKey)])
+        expectMissingCertificateValidation(
+            bob,
+            snapshot: bobSnapshot,
+            sessionKey: sessionKey,
+            dedupKey: dedupKey,
+            message: outbound.message,
+            alicePublication: alicePublication
+        )
+
+        try exerciseEvents(
+            engine: engine,
+            store: protocolStore,
+            address: contactAddress,
+            contact: acceptedContact.contact
+        )
+        try expectCertificateRejection()
+        expectInvalidMessageKey()
+        print("Swift issue 122 coverage passed")
+    }
+
+    private static func complete(_ store: KeyStore, _ operation: KeyStoreOperation) throws {
+        _ = try store.commitOperation(identifier: operation.identifier)
+        _ = try store.finalizeOperation(identifier: operation.identifier)
+    }
+
+    private static func generateIdentity(_ store: KeyStore) throws -> Identity {
+        let prepared = try store.prepareGenerateIdentity()
+        try complete(store, prepared.operation)
+        return prepared.identity
+    }
+
+    private static func rotateSignedPrekeyNow(_ store: KeyStore) throws {
+        let prepared = try store.prepareRotateSignedPrekeyNow()
+        try complete(store, prepared.operation)
+    }
+
+    private static func replenishOneTimePrekeys(_ store: KeyStore) throws -> [OneTimePreKeyBundle] {
+        let prepared = try store.prepareReplenishOneTimePrekeys()
+        try complete(store, prepared.operation)
+        return prepared.oneTimePrekeys
+    }
+
+    private static func importEncryptedBackup(
+        _ store: KeyStore,
+        data: Data,
+        passphrase: String
+    ) throws {
+        let operation = try store.prepareImportEncryptedBackup(data: data, passphrase: passphrase)
+        try complete(store, operation)
+    }
+
+    private static func identityKey(_ identity: Identity) -> IdentityKey {
+        IdentityKey(
+            x25519PublicKey: identity.x25519PublicKey,
+            ed25519VerifyingKey: identity.ed25519VerifyingKey
+        )
+    }
+
+    private static func contactIdentity(identity: Identity, publication: PublicationBundle) -> ContactIdentity {
+        ContactIdentity(
+            identityKey: identityKey(identity),
+            discoveryKey: ContactDiscoveryKey(
+                x25519PublicKey: publication.discoveryKey.publicKey,
+                ed25519VerifyingKey: publication.discoveryKey.verifyingKey,
+                epoch: publication.discoveryKey.epoch,
+                createdAt: publication.discoveryKey.createdAt,
+                identitySignature: publication.discoveryKey.signature
+            )
+        )
+    }
+
+    private static func apply(_ snapshot: inout [ProtocolStateEntry], _ updates: [ProtocolStateUpdate]) {
+        for update in updates {
+            snapshot.removeAll { $0.kind == update.kind && $0.key == update.key }
+            if let blob = update.blob {
+                snapshot.append(ProtocolStateEntry(kind: update.kind, key: update.key, blob: blob))
+            }
+        }
+    }
+
+    private static func expectStaleProtocolStateCommit(
+        _ store: MemoryProtocolStateStore,
+        update: ProtocolStateUpdate
+    ) {
+        do {
+            try store.commit(updates: [update])
+            fail("stale protocol-state commit should reject")
+        } catch let error as ClientError {
+            guard case .ProtocolStateFault(_) = error else {
+                fail("unexpected stale-commit error \(error)")
+            }
+        } catch {
+            fail("unexpected stale-commit error \(error)")
+        }
+    }
+
+    private static func exerciseEvents(
+        engine: ProtocolStateEngine,
+        store: MemoryProtocolStateStore,
+        address: ProtocolStateAddress,
+        contact: ContactState
+    ) throws {
+        let stream = try ContactEventStream.withObserverCapacity(initialState: [contact], observerCapacity: 1)
+        let observer = try stream.subscribe()
+        let event = ContactEvent(kind: .changed, contact: contact)
+        _ = try stream.emit(event: event, nextState: [contact])
+        _ = try stream.emit(event: event, nextState: [contact])
+        let item = try observer.pollNext()
+        require(item?.kind == .lagged, "event lag")
+        try observer.resumeAfter(snapshot: stream.currentState())
+
+        let otherStream = try ContactEventStream.withObserverCapacity(
+            initialState: [contact],
+            observerCapacity: 1
+        )
+        _ = try otherStream.emit(event: event, nextState: [contact])
+        _ = try otherStream.emit(event: event, nextState: [contact])
+        _ = try otherStream.emit(event: event, nextState: [contact])
+        _ = try stream.emit(event: event, nextState: [contact])
+        do {
+            try observer.resumeAfter(snapshot: otherStream.currentState())
+            fail("another stream's snapshot should reject")
+        } catch let error as ClientError {
+            guard case .ForeignEventSnapshot = error else {
+                fail("unexpected foreign-snapshot error \(error)")
+            }
+        }
+        let preserved = try observer.pollNext()
+        require(preserved?.event?.id == 3, "foreign snapshot preserves local events")
+
+        let extensionEngine = ProtocolStateEngine()
+        let extensionSnapshot = try extensionEngine.loadSnapshot(store: store, addresses: [address])
+        let blocked = try extensionEngine.blockContact(
+            snapshot: extensionSnapshot,
+            identityKey: contact.identity.identityKey
+        )
+        try store.commit(updates: blocked.stateUpdates)
+        let reloaded = try engine.loadSnapshot(store: store, addresses: [address])
+        let rebuilt = try engine.contactStates(snapshot: reloaded)
+        require(rebuilt.count == 1 && rebuilt[0].blocked, "rebuilds committed extension state")
+        let firstImport = try stream.importCurrentState(state: rebuilt)
+        require(firstImport.eventId() == 3, "state import preserves local event ID")
+        require(firstImport.stateRevision() == 1, "state import revision")
+        let importedState = firstImport.state()
+        require(importedState.count == 1 && importedState[0].blocked, "imported snapshot state")
+        let firstStaleItem = try observer.pollNext()
+        require(firstStaleItem?.kind == .stale, "state import marks observer stale")
+
+        let secondImport = try stream.importCurrentState(state: rebuilt)
+        do {
+            try observer.resumeAfter(snapshot: firstImport)
+            fail("stale imported snapshot should reject")
+        } catch let error as ClientError {
+            guard case .StaleEventSnapshot(_, _) = error else {
+                fail("unexpected stale-snapshot error \(error)")
+            }
+        }
+        let secondStaleItem = try observer.pollNext()
+        require(secondStaleItem?.kind == .stale, "repeated import stays explicit")
+        try observer.resumeAfter(snapshot: secondImport)
+
+        let restarted = try ContactEventStream.withObserverCapacity(
+            initialState: rebuilt,
+            observerCapacity: 1
+        )
+        let restartSnapshot = try restarted.currentState()
+        require(restartSnapshot.eventId() == 0, "restart uses a new local event sequence")
+        require(restartSnapshot.stateRevision() == 0, "restart uses a new local state revision")
+    }
+
+    private static func expectBackupFailure(_ store: KeyStore) {
+        do {
+            _ = try store.prepareImportEncryptedBackup(data: Data([0x01]), passphrase: "bad")
+            fail("backup import should fail")
+        } catch let error as ClientError {
+            switch error {
+            case .InvalidData(_), .UnsupportedVersion(_), .DecryptionFailed, .BackupImportFailed(_):
+                return
+            default:
+                fail("unexpected backup error \(error)")
+            }
+        } catch {
+            fail("unexpected backup error \(error)")
+        }
+    }
+
+    private static func expectBlockedSend(
+        _ alice: KeyStore,
+        snapshot: [ProtocolStateEntry],
+        sessionKey: Data,
+        bobIdentity: Identity,
+        bobPublication: PublicationBundle
+    ) {
+        do {
+            _ = try alice.encryptMessage(
+                snapshot: snapshot,
+                sessionKey: sessionKey,
+                messageId: Data(repeating: 0x47, count: 16),
+                contactIdentityKey: identityKey(bobIdentity),
+                recipientPublicKey: bobPublication.discoveryKey.publicKey,
+                timestampMillis: 44,
+                senderCertificate: Data("alice certificate".utf8),
+                senderSignature: Data("alice signature".utf8),
+                plaintext: Data("blocked".utf8)
+            )
+            fail("blocked contact should reject send")
+        } catch let error as ClientError {
+            guard case .BlockedContact(_) = error else {
+                fail("unexpected blocked-contact error \(error)")
+            }
+            return
+        } catch {
+            fail("unexpected blocked-contact error \(error)")
+        }
+    }
+
+    private static func expectMissingCertificateValidation(
+        _ bob: KeyStore,
+        snapshot: [ProtocolStateEntry],
+        sessionKey: Data,
+        dedupKey: Data,
+        message: Message,
+        alicePublication: PublicationBundle
+    ) {
+        do {
+            _ = try bob.decryptMessage(
+                snapshot: snapshot,
+                sessionKey: sessionKey,
+                deduplicationKey: dedupKey,
+                message: message,
+                acknowledgmentId: Data(repeating: 0x48, count: 16),
+                acknowledgmentRecipientPublicKey: alicePublication.discoveryKey.publicKey,
+                acknowledgmentTimestampMillis: 45,
+                acknowledgmentSenderCertificate: Data("bob certificate".utf8),
+                acknowledgmentSenderSignature: Data("bob signature".utf8),
+                senderCertificateValidation: nil
+            )
+            fail("missing certificate validation should reject receive")
+        } catch let error as ClientError {
+            guard case .InvalidData(_) = error else {
+                fail("unexpected receive error \(error)")
+            }
+            return
+        } catch {
+            fail("unexpected receive error \(error)")
+        }
+    }
+
+    private static func expectCertificateRejection() throws {
+        do {
+            _ = try validateSenderCertificate(
+                certificate: Data([0x01]),
+                signature: Data(),
+                domainSigningKeys: [],
+                expectedRelayDomain: Data("relay.test".utf8),
+                revocationState: RevocationState(available: true, revokedIdentityKeys: []),
+                referenceTimestampSecs: 0,
+                graceWindowSecs: 0
+            )
+            fail("malformed certificate should reject")
+        } catch let error as ClientError {
+            guard case .CertificateRejected(_) = error else {
+                fail("unexpected certificate error \(error)")
+            }
+            return
+        }
+    }
+
+    private static func expectInvalidMessageKey() {
+        do {
+            _ = try encodeMessage(message: Message(
+                version: 1,
+                recipientPublicKey: Data(repeating: 0x01, count: 31),
+                prekeyReference: nil,
+                ephemeralPublicKey: Data(repeating: 0x02, count: 32),
+                ciphertext: Data()
+            ))
+            fail("invalid public key should reject")
+        } catch let error as ClientError {
+            guard case .InvalidData(_) = error else {
+                fail("unexpected message error \(error)")
+            }
+            return
+        } catch {
+            fail("unexpected message error \(error)")
+        }
+    }
+
+    private static func require(_ condition: @autoclosure () -> Bool, _ message: String) {
+        if !condition() {
+            fail(message)
+        }
+    }
+
+    private static func fail(_ message: String) -> Never {
+        fputs("issue 122 coverage failed: \(message)\n", stderr)
+        exit(1)
+    }
+}

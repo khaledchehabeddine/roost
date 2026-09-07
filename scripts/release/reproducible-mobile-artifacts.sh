@@ -78,7 +78,7 @@ package_version() {
     local workdir="$1"
     local pkgid
 
-    pkgid="$(cargo pkgid --manifest-path "$workdir/crates/aether-uniffi/Cargo.toml")"
+    pkgid="$(cargo pkgid --manifest-path "$workdir/crates/roost-client/Cargo.toml")"
     echo "${pkgid##*#}"
 }
 
@@ -103,8 +103,8 @@ copy_artifacts() {
 
             for target in "${targets[@]}"; do
                 mkdir -p "$artifact_dir/android-libs/$target"
-                cp "$workdir/target/$target/release/libaether.so" \
-                    "$artifact_dir/android-libs/$target/libaether.so"
+                cp "$workdir/target/$target/release/libroost_client.so" \
+                    "$artifact_dir/android-libs/$target/libroost_client.so"
             done
 
             mkdir -p "$artifact_dir/android"

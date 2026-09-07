@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Every public `aether-core` method is either reachable through the bindings or
+# Every public `roost-core` method is either reachable through the bindings or
 # deliberately listed here as not being.
 #
 # The UniFFI layer is a hand-written translation, and `cargo test` says nothing
-# about it: every Rust test exercises `aether-core` directly, where the
+# about it: every Rust test exercises `roost-core` directly, where the
 # behaviour is correct. That is how four identity methods shipped with zero
 # wrappers — generated Kotlin and Swift could name the new state kind but could
 # not persist a capability received from a peer — and no green run anywhere
 # reported it.
 #
 # So this does not check that a wrapper is *correct*; the binding harnesses in
-# `crates/aether-uniffi/tests/bindings/` do that, and a wrapper without one is
+# `crates/roost-client/tests/bindings/` do that, and a wrapper without one is
 # still untested. This checks the cheaper, earlier property: that adding a
 # capability to the core cannot silently leave mobile unable to reach it. A new
 # name here is a decision to be made rather than an omission to be discovered
 # two releases later.
 #
 # The match is deliberately by name and deliberately loose — anywhere in
-# `aether-uniffi/src`, not only as a `pub fn` — because a core method reached by
+# `roost-client/src`, not only as a `pub fn` — because a core method reached by
 # a differently-named wrapper is still reached. Loose here means the failures it
 # reports are worth reading: it only fires when a name appears nowhere at all.
 set -euo pipefail
@@ -52,26 +52,26 @@ EOF
 allowed_names=$(echo "$ALLOWED" | awk 'NF {print $1}' | sort -u)
 
 core_names=$(
-    grep -rhoE "^[[:space:]]*pub (async )?fn [a-z_0-9]+" crates/aether-core/src --include='*.rs' |
+    grep -rhoE "^[[:space:]]*pub (async )?fn [a-z_0-9]+" crates/roost-core/src --include='*.rs' |
         sed -E 's/.*fn //' | sort -u
 )
 
 # Every identifier in the binding crate, not just its own `pub fn` names: a
 # core method called through a renamed wrapper is still reachable.
-binding_names=$(grep -rhoE "[a-z_0-9]+" crates/aether-uniffi/src --include='*.rs' | sort -u)
+binding_names=$(grep -rhoE "[a-z_0-9]+" crates/roost-client/src --include='*.rs' | sort -u)
 
 unreachable=$(comm -23 <(echo "$core_names") <(echo "$binding_names"))
 unexplained=$(comm -23 <(echo "$unreachable" | sort -u) <(echo "$allowed_names"))
 
 if [ -n "$unexplained" ]; then
-    echo "aether-core methods that no binding reaches, and that this script does not explain:" >&2
+    echo "roost-core methods that no binding reaches, and that this script does not explain:" >&2
     echo "$unexplained" | sed 's/^/  /' >&2
     cat >&2 <<'EOF'
 
 Each one is a capability the core has and Kotlin and Swift do not. Either:
 
-  - wrap it in crates/aether-uniffi/src, and cover it from a harness in
-    crates/aether-uniffi/tests/bindings/ — a wrapper no harness calls is the
+  - wrap it in crates/roost-client/src, and cover it from a harness in
+    crates/roost-client/tests/bindings/ — a wrapper no harness calls is the
     same blind spot one layer further in; or
   - add it to ALLOWED in this script with the reason it stays internal.
 
@@ -85,7 +85,7 @@ fi
 # chose.
 stale=$(comm -13 <(echo "$core_names") <(echo "$allowed_names"))
 if [ -n "$stale" ]; then
-    echo "ALLOWED names in $0 that are no longer public methods of aether-core:" >&2
+    echo "ALLOWED names in $0 that are no longer public methods of roost-core:" >&2
     echo "$stale" | sed 's/^/  /' >&2
     echo >&2
     echo "Remove them, so the list keeps describing the code it is about." >&2

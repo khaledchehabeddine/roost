@@ -60,7 +60,7 @@ jobs:
       - name: Cargo geiger
         run: |
           mkdir -p target/geiger
-          for crate in aether-crypto aether-core aether-uniffi; do
+          for crate in roost-protocol roost-crypto roost-core roost-client roost-server; do
             cargo geiger \
               --manifest-path "$PWD/crates/$crate/Cargo.toml" \
               --all-dependencies \

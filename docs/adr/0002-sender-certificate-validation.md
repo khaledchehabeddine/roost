@@ -13,9 +13,9 @@ plaintext or sender identity and does not advance ratchet/session state.
 
 ## Verification Evidence
 
-- `crates/aether-core/tests/sender_certificate_fixtures.rs` replays trusted, untrusted, revoked,
+- `crates/roost-protocol/tests/sender_certificate_fixtures.rs` replays trusted, untrusted, revoked,
   expired, malformed, and signature-failure certificate cases.
-- `crates/aether-core/tests/fixtures/sealed_sender_session_messages_v1.md` records that sender
+- `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` records that sender
   certificate material appears only after decrypt.
-- `crates/aether-uniffi/docs/api-coverage.md` records binding coverage for certificate validation
+- `crates/roost-client/docs/api-coverage.md` records binding coverage for certificate validation
   and rejected certificate inputs.

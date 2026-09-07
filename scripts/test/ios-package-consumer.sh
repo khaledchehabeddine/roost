@@ -7,8 +7,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PACKAGE_INPUT="${1:-}"
 WORK="$ROOT/target/ios-package-consumer"
-TEST_SOURCE="$ROOT/crates/aether-uniffi/tests/bindings/Issue124PackageConsumerTests.swift"
-FIXTURES="$ROOT/crates/aether-core/tests/fixtures"
+TEST_SOURCE="$ROOT/crates/roost-client/tests/bindings/Issue124PackageConsumerTests.swift"
+FIXTURES="$ROOT/crates/roost-core/tests/fixtures"
 SAFE_EXTRACT="$ROOT/scripts/release/extract-zip-safely.sh"
 
 usage() {

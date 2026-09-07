@@ -72,13 +72,13 @@ jobs:
       - name: Resolve Workspace Version
         id: version
         run: |
-          pkgid="$(cargo pkgid --manifest-path crates/aether-uniffi/Cargo.toml)"
+          pkgid="$(cargo pkgid --manifest-path crates/roost-client/Cargo.toml)"
           echo "version=${pkgid##*#}" >> "$GITHUB_OUTPUT"
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
-          name: aether-uniffi-v${{ steps.version.outputs.version }}-sbom
+          name: roost-client-v${{ steps.version.outputs.version }}-sbom
           path: target/sbom/*
           if-no-files-found: error
 
@@ -258,7 +258,7 @@ jobs:
 
       - name: Verify iOS package consumer
         run: |
-          pkgid="$(cargo pkgid --manifest-path crates/aether-uniffi/Cargo.toml)"
+          pkgid="$(cargo pkgid --manifest-path crates/roost-client/Cargo.toml)"
           version="${pkgid##*#}"
           scripts/test/ios-package-consumer.sh "target/release-verification/reproducible-mobile/ios/pass-1/artifacts/Aether-v$version.swift-package.zip"
 
@@ -313,7 +313,7 @@ jobs:
       - name: Download SBOM
         uses: actions/download-artifact@v4
         with:
-          name: aether-uniffi-v${{ needs.sbom.outputs.version }}-sbom
+          name: roost-client-v${{ needs.sbom.outputs.version }}-sbom
           path: target/release-candidate-verification/input/sbom
 
       - name: Verify mobile release packet failure paths
@@ -381,7 +381,7 @@ jobs:
       - name: Download SBOM
         uses: actions/download-artifact@v4
         with:
-          name: aether-uniffi-v${{ needs.sbom.outputs.version }}-sbom
+          name: roost-client-v${{ needs.sbom.outputs.version }}-sbom
           path: target/signed-release/input/sbom
 
       - name: Verify mobile release packet failure paths

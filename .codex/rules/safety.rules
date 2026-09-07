@@ -2,7 +2,7 @@ prefix_rule(
     pattern = ["cargo", "publish"],
     decision = "prompt",
     justification = "Publishing crates to crates.io requires maintainer review.",
-    match = ["cargo publish", "cargo publish -p aether-crypto"],
+    match = ["cargo publish", "cargo publish -p roost-crypto"],
     not_match = ["cargo test", "cargo build"],
 )
 
@@ -66,7 +66,7 @@ prefix_rule(
     pattern = ["cargo", "yank"],
     decision = "forbidden",
     justification = "cargo yank withdraws a published version from crates.io and breaks downstream consumers. Coordinate manually instead.",
-    match = ["cargo yank --vers 0.3.0", "cargo yank --version 0.3.0 aether-crypto"],
+    match = ["cargo yank --vers 0.3.0", "cargo yank --version 0.3.0 roost-crypto"],
     not_match = ["cargo test", "cargo publish"],
 )
 

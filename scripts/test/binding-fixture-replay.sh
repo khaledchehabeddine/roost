@@ -6,16 +6,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OUT="$ROOT/target/bindings/fixture-replay"
-HARNESS="$ROOT/crates/aether-uniffi/tests/bindings"
+HARNESS="$ROOT/crates/roost-client/tests/bindings"
 JNA_VERSION="5.18.1"
 
 case "$(uname -s)" in
     Darwin)
-        LIB_NAME="libaether.dylib"
+        LIB_NAME="libroost_client.dylib"
         export DYLD_LIBRARY_PATH="$ROOT/target/debug:${DYLD_LIBRARY_PATH:-}"
         ;;
     Linux)
-        LIB_NAME="libaether.so"
+        LIB_NAME="libroost_client.so"
         export LD_LIBRARY_PATH="$ROOT/target/debug:${LD_LIBRARY_PATH:-}"
         ;;
     *)
@@ -44,7 +44,7 @@ run_swift_harness() {
         -L "$ROOT/target/debug" \
         -Xlinker -rpath \
         -Xlinker "$ROOT/target/debug" \
-        -laether \
+        -lroost_client \
         "$swift_out/Aether.swift" \
         "$HARNESS/$source" \
         -o "$swift_out/$name"
@@ -104,7 +104,7 @@ run_kotlin_harness() {
     local jna="$4"
 
     kotlinc \
-        "$kotlin_out/com/aurelion/aether/aether.kt" \
+        "$kotlin_out/com/aurelion/aether/roost_client.kt" \
         "$HARNESS/$source" \
         -cp "$jna" \
         -include-runtime \
@@ -167,7 +167,7 @@ run_kotlin() {
 }
 
 need_tool cargo
-cargo build -p aether-uniffi --features fixture-replay,development-certificates
+cargo build -p roost-client --features fixture-replay,development-certificates
 
 case "${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" in
     swift)

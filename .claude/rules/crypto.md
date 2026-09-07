@@ -1,7 +1,7 @@
 ---
 paths:
-  - "crates/aether-core/**/*.rs"
-  - "crates/aether-crypto/**/*.rs"
+  - "crates/roost-core/**/*.rs"
+  - "crates/roost-crypto/**/*.rs"
 ---
 
 # Crypto Rules

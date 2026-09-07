@@ -1,12 +1,17 @@
-# Context Map
+# Context map
 
 ## Contexts
 
-- [Crypto](crates/aether-crypto/CONTEXT.md) — cryptographic primitives, key derivation, and protocol mechanics
-- [Core](crates/aether-core/CONTEXT.md) — high-level entity types and orchestration for Sessions, Identities, Devices, and Messages
-- [UniFFI](crates/aether-uniffi/CONTEXT.md) — platform FFI bindings that expose the Core API to host apps
+- [Client](crates/roost-client/CONTEXT.md), mobile bindings and platform integration
+- [Server](crates/roost-server/CONTEXT.md), backend evidence verification
+- [Core](crates/roost-core/CONTEXT.md), identity lifecycle, messaging, contacts, state transitions, and storage recovery
+- [Crypto](crates/roost-crypto/CONTEXT.md), keys, X3DH, Double Ratchet, and encryption
+- [Protocol](crates/roost-protocol/CONTEXT.md), shared encodings and authenticity evidence
 
 ## Relationships
 
-- **Crypto → Core**: Crypto provides primitives (AEAD, HKDF, Ratchet, X3DH) and the types they produce (key bundles, ratchet state). Core composes them into Session, Identity, Device, and Message lifecycle operations.
-- **Core → UniFFI**: Core exports the high-level API and any host-implemented traits (e.g., `SecureStorage`). UniFFI surfaces them as platform bindings.
+- Client consumes Core operations and Protocol's stateless verification through one mobile binding contract.
+- Server exposes Protocol's stateless evidence verdict to backends.
+- Core coordinates Crypto operations and Protocol encodings with caller-owned storage.
+- Crypto uses Protocol's canonical key validation and signature framing.
+- Protocol depends on no other Roost context and owns no device, session, or storage lifecycle.

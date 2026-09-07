@@ -1,6 +1,6 @@
-# Aether
+# Roost
 
-The shared cryptographic and networking core for a private, end-to-end encrypted cloud messaging system.
+The shared cryptographic core for a private, end-to-end encrypted cloud messaging system.
 
 ## Setup
 
@@ -26,11 +26,22 @@ cargo doc --workspace --open
 
 ## Architecture
 
-Ports-and-adapters layout. Crate dependencies (`A → B` means "A depends on B"):
+Only `roost-client` and `roost-server` are supported consumer entry crates. Swift and Kotlin
+use Client's UniFFI bindings. Rust backends use Server's stateless Evidence Bundle verifier.
+Core, Crypto, and Protocol are implementation dependencies, not separate SDKs or release products.
+All five crates share one workspace version and remain unpublished on crates.io.
 
-- `aether-crypto`
-- `aether-core` → `aether-crypto`
-- `aether-uniffi` → `aether-core`, `aether-crypto`
+| Crate | Owns | Direct Roost dependencies |
+| --- | --- | --- |
+| `roost-client` | Mobile UniFFI declarations and adapters | `roost-core`, `roost-protocol` |
+| `roost-server` | Stateless evidence verifier and required types | `roost-protocol` |
+| `roost-core` | Identity lifecycle, messaging, contacts, state transitions, storage recovery | `roost-crypto`, `roost-protocol` |
+| `roost-crypto` | Keys, X3DH, Double Ratchet, encryption | `roost-protocol` |
+| `roost-protocol` | Shared encodings, certificates, canonical key validation, transcripts, padding, evidence | None |
+
+The v0.16.0 Rust cutover is breaking. Consumers adopt matching libraries and bindings together.
+The v0.15.0 release records and artifacts remain immutable. Mobile distribution identities and
+consumer adoption follow the approved package prerequisite and mobile cutover tickets.
 
 ## Docs
 

@@ -39,6 +39,6 @@ operation over an unrestricted preimage from doubling as an oracle for Aether's 
   cannot satisfy an Aether verifier, not that a caller's two purposes are separated from each other.
 - Transcripts are capped at 4096 bytes, so the export cannot be used as a general document signer.
   A relay authentication transcript is 159 bytes (HTTP) or 120 (WebSocket).
-- `aether_core::Identity::sign` stays unrestricted for Rust callers inside the workspace, which
+- `roost_core::Identity::sign` stays unrestricted for Rust callers inside the workspace, which
   build their contexts deliberately. The refusal sits at the FFI boundary because that is where
   externally influenced bytes arrive.

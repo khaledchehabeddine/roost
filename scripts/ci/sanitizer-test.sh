@@ -40,8 +40,10 @@ cargo +nightly test \
     --locked \
     -Z build-std \
     --target "$TARGET" \
-    -p aether-crypto \
-    -p aether-core \
+    -p roost-protocol \
+    -p roost-server \
+    -p roost-crypto \
+    -p roost-core \
     --features blake3/pure \
     --lib \
     --tests

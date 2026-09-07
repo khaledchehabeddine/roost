@@ -32,20 +32,20 @@ jobs:
       - name: Cache Dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build aether-uniffi
-        run: cargo build -p aether-uniffi
+      - name: Build roost-client
+        run: cargo build -p roost-client
 
       - name: Generate Kotlin Bindings
         run: |
           cargo run --bin uniffi-bindgen -- generate \
-            target/debug/libaether.dylib \
+            target/debug/libroost_client.dylib \
             --language kotlin \
             --out-dir target/bindings/kotlin
 
       - name: Generate Swift Bindings
         run: |
           cargo run --bin uniffi-bindgen-swift -- \
-            target/debug/libaether.dylib \
+            target/debug/libroost_client.dylib \
             target/bindings/swift \
             --swift-sources --headers
 
@@ -54,7 +54,7 @@ jobs:
 
       # Compilation verification requires Gradle + UniFFI runtime; verify generation only
       - name: Verify Kotlin Generated
-        run: test -s target/bindings/kotlin/com/aurelion/aether/aether.kt
+        run: test -s target/bindings/kotlin/com/aurelion/aether/roost_client.kt
 
   fixture-replay:
     name: Binding Fixture Replay

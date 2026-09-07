@@ -1,7 +1,7 @@
 #![no_main]
 
-use aether_core::fuzzing::fuzz_decode_sealed_sender_envelope;
-use aether_crypto::{
+use roost_core::fuzzing::fuzz_decode_sealed_sender_envelope;
+use roost_crypto::{
     HandshakeEnvelope, KeyPair, PublicKey, SealedFrame, SealedFramePreKeyReference, open_frame,
     seal_frame,
 };

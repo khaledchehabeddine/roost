@@ -1,5 +1,5 @@
 [package]
-name = "aether-fuzz"
+name = "roost-fuzz"
 edition = "2024"
 publish = false
 version = "0.0.0"
@@ -8,8 +8,9 @@ version = "0.0.0"
 cargo-fuzz = true
 
 [dependencies]
-aether-core = { path = "../crates/aether-core" }
-aether-crypto = { path = "../crates/aether-crypto" }
+roost-protocol = { path = "../crates/roost-protocol" }
+roost-core = { path = "../crates/roost-core" }
+roost-crypto = { path = "../crates/roost-crypto" }
 hex = "0.4.3"
 libfuzzer-sys = "0.4.12"
 rand = "0.8.6"

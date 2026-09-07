@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-PKGID="$(cargo pkgid --manifest-path "$ROOT/crates/aether-uniffi/Cargo.toml")"
+PKGID="$(cargo pkgid --manifest-path "$ROOT/crates/roost-client/Cargo.toml")"
 VERSION="${PKGID##*#}"
 DIST="$ROOT/target/ios-distribution"
 PACKAGE="$DIST/aether-ios-v$VERSION"

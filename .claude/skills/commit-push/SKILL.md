@@ -23,7 +23,7 @@ When committing and pushing changes:
    - Dispatch `rust-code-reviewer` and `security-auditor` in parallel — one message, two `Agent` calls — with the pending diff
    - Also dispatch `api-reviewer` in the same parallel batch when either holds:
      - A new cross-crate public item is added or modified: `git diff HEAD | grep -E '^\+pub [a-z]'` returns output
-     - The diff touches `crates/aether-uniffi/**`
+     - The diff touches `crates/roost-client/**`
    - Findings handling:
      - `critical` findings block — surface the finding and proposed fix; do not proceed until the user confirms resolution
      - `improvement` and `learning` findings are advisory

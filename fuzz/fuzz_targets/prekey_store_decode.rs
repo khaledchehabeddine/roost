@@ -1,6 +1,6 @@
 #![no_main]
 
-use aether_core::fuzzing::{
+use roost_core::fuzzing::{
     fuzz_decode_discovery_key_blob, fuzz_decode_one_time_prekey_pool,
     fuzz_decode_signed_prekey_blob,
 };

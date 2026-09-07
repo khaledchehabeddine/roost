@@ -4,8 +4,8 @@
 
 set -euo pipefail
 
-CRATE="aether-uniffi"
-LIB="libaether"
+CRATE="roost-client"
+LIB="libroost_client"
 OUT="target/android"
 FEATURES="${AETHER_CARGO_FEATURES:-}"
 

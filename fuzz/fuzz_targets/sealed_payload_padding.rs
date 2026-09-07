@@ -1,6 +1,6 @@
 #![no_main]
 
-use aether_core::fuzzing::{fuzz_deduplication_digest, fuzz_unpad_sealed_payload};
+use roost_core::fuzzing::{fuzz_deduplication_digest, fuzz_unpad_sealed_payload};
 use libfuzzer_sys::fuzz_target;
 
 mod support;

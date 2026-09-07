@@ -10,5 +10,5 @@ cargo clippy --quiet -- -D warnings
 # a binding carries it. Text-only, so it costs nothing to run first.
 "$(dirname "$0")/../test/uniffi-surface.sh"
 cargo llvm-cov --workspace --no-report --quiet
-cargo llvm-cov report -p aether-core --fail-under-lines 80 --quiet
-cargo llvm-cov report -p aether-crypto --fail-under-lines 80 --quiet
+cargo llvm-cov report -p roost-core --fail-under-lines 80 --quiet
+cargo llvm-cov report -p roost-crypto --fail-under-lines 80 --quiet

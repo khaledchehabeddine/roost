@@ -107,10 +107,10 @@ behavior. It does not require Rust implementation in the decision-record change.
 
 ## Verification Evidence
 
-- `crates/aether-core/tests/fixtures/protocol_state_blobs_v1.md` pins Contact State blobs for
+- `crates/roost-core/tests/fixtures/protocol_state_blobs_v1.md` pins Contact State blobs for
   Pending, Unverified, Verified, blocked, DK-rotated, and unblocked restored-state contacts.
-- `crates/aether-core/tests/protocol_state.rs` covers blocked inbound unreachable and
+- `crates/roost-core/tests/protocol_state.rs` covers blocked inbound unreachable and
   silent-receipt acknowledgment behavior, duplicate blocked Messages, DK rotation while blocked,
   and unblock-without-handshake recovery.
-- `crates/aether-uniffi/docs/api-coverage.md` records binding coverage for contact trust,
+- `crates/roost-client/docs/api-coverage.md` records binding coverage for contact trust,
   blocking, blocked-contact negative paths, and stale protocol-state commits.

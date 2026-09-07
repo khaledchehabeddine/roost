@@ -14,7 +14,7 @@ Applies to: **Aether v0.15.0**. Update on any change and note the affected relea
 
 `SigningKeyPair::sign_with_context(context, message)` signs the plain concatenation
 `context || message` — no separator byte, no length prefix
-([`keys/signing.rs`](../crates/aether-crypto/src/keys/signing.rs)). `verify_with_context` recomputes
+([`keys/signing.rs`](../crates/roost-crypto/src/keys/signing.rs)). `verify_with_context` recomputes
 the same bytes. An empty context is rejected with `CryptoError::InvalidSignatureContext`.
 
 Because composition is bare concatenation, **the set of signature contexts must be prefix-free**. If
@@ -40,7 +40,7 @@ Identity key self-binding — the IK's Ed25519 half signing its own X25519 half 
 | `ik_ed25519` | 32 | IK verifying key |
 
 Payload is exactly 64 bytes. Source:
-[`keys/identity.rs`](../crates/aether-crypto/src/keys/identity.rs) `identity_key_binding_payload`.
+[`keys/identity.rs`](../crates/roost-crypto/src/keys/identity.rs) `identity_key_binding_payload`.
 
 Reachable from a binding as `verify_identity_key_binding`, which takes public material only. Prefer
 it to reimplementing the preimage — the two identity contexts below cover identical bytes, so an
@@ -59,7 +59,7 @@ IK→DK direction).
 | `created_at` | 8 | `u64` big-endian, Unix seconds |
 
 Payload is exactly 76 bytes. Source:
-[`discovery_key.rs`](../crates/aether-crypto/src/discovery_key.rs) `discovery_key_payload`. A
+[`discovery_key.rs`](../crates/roost-crypto/src/discovery_key.rs) `discovery_key_payload`. A
 known-answer vector is in that file's test module (`discovery_key_signing_known_answer`).
 
 The epoch and timestamp are present because the IK is permanent: without them the signature would
@@ -77,7 +77,7 @@ for (AE-KEY-04, DK→IK direction). Populates
 | `ik_ed25519` | 32 | IK verifying key |
 
 Payload is exactly 64 bytes; the full preimage including the 16-byte context is 80 bytes. Source:
-[`discovery_key.rs`](../crates/aether-crypto/src/discovery_key.rs)
+[`discovery_key.rs`](../crates/roost-crypto/src/discovery_key.rs)
 `DiscoveryKey::sign_identity_binding`, verified by `verify_discovery_to_identity_binding` — which is
 also the name of the UniFFI export, so a client checking a discovery-key lookup before any session
 exists calls Aether rather than rebuilding this preimage.
@@ -86,7 +86,7 @@ exists calls Aether rather than rebuilding this preimage.
 discovery keys over its lifetime and needs the epoch to disambiguate them; a discovery key is minted
 fresh per inbox generation and so already identifies its own generation. Freshness is enforced by
 the relay's inbox registry (Relay REL-RLY-72, REL-RLY-76), not by this signature. Rationale in
-[ADR 0009](../crates/aether-crypto/docs/adr/0009-discovery-to-identity-binding.md).
+[ADR 0009](../crates/roost-crypto/docs/adr/0009-discovery-to-identity-binding.md).
 
 Note this payload is byte-identical to `AetherIKBinding-v1:` above — **only the context distinguishes
 them.** An implementation that drops or substitutes the context will silently accept a signature made
@@ -97,7 +97,7 @@ so they cannot drift.
 
 Derived from the RFC 8032 reference implementation, which shares no code with the `ed25519-dalek`
 used in production, per
-[ADR 0005](../crates/aether-crypto/docs/adr/0005-cryptographic-test-vector-derivation.md).
+[ADR 0005](../crates/roost-crypto/docs/adr/0005-cryptographic-test-vector-derivation.md).
 
 | Input | Value |
 |---|---|
@@ -134,7 +134,7 @@ Signed pre-key — signed by the *discovery* key's Ed25519 half, not the identit
 | `created_at` | 8 | `u64` big-endian, Unix seconds |
 
 Payload is exactly 44 bytes. Source:
-[`signed_prekey.rs`](../crates/aether-crypto/src/signed_prekey.rs) `signed_prekey_payload`.
+[`signed_prekey.rs`](../crates/roost-crypto/src/signed_prekey.rs) `signed_prekey_payload`.
 
 Verification uses `DiscoveryKey::verifying_key()`. A signed pre-key does **not** verify under the
 identity key — see `discovery_signed_prekey_verifies_under_discovery_key_only`.
@@ -148,7 +148,7 @@ Binding encoding.
 ### `AetherMessageTranscript-v1:`
 
 Message transcript signature. Source:
-[`message.rs`](../crates/aether-core/src/message.rs) `message_transcript`.
+[`message.rs`](../crates/roost-core/src/message.rs) `message_transcript`.
 
 The context is prepended by `sign_with_context`. The transcript itself is encoded as:
 
@@ -179,18 +179,18 @@ them at the stated position.
 
 Prefix of the canonical identity-key encoding: `"AetherIK-v1:" || ik_x25519 || ik_ed25519`, 76 bytes
 total. Consumed by the safety-number derivation and the sender certificate. Source:
-[`keys/identity.rs`](../crates/aether-crypto/src/keys/identity.rs)
+[`keys/identity.rs`](../crates/roost-crypto/src/keys/identity.rs)
 `IdentityKeyBundle::canonical_encoding`.
 
 ### `AetherSafetyNumber-v1:`
 
 First input to the safety-number hash. Source:
-[`safety_number.rs`](../crates/aether-core/src/safety_number.rs).
+[`safety_number.rs`](../crates/roost-core/src/safety_number.rs).
 
 ### `AetherSenderCertificate-v2:`
 
 Prefix of the sender-certificate byte encoding, signed as a whole by a domain-signing key. Source:
-[`sender_certificate.rs`](../crates/aether-core/src/sender_certificate.rs).
+[`sender_certificate.rs`](../crates/roost-protocol/src/sender_certificate.rs).
 
 | Field | Size | Notes |
 |---|---|---|
@@ -215,7 +215,7 @@ nothing. `validate_sender_certificate` requires `expected_relay_domain` for exac
 ### `AetherProtocolStateCommit-v1:`
 
 Digest context for the protocol-state commit. Source:
-[`aether-uniffi/src/protocol.rs`](../crates/aether-uniffi/src/protocol.rs).
+[`roost-client/src/protocol.rs`](../crates/roost-client/src/protocol.rs).
 
 ## Hash domain strings
 
@@ -237,7 +237,7 @@ identity = BLAKE3-DeriveKey(
 `message_transcript` includes its own `AetherMessageTranscript-v1:` signature context and every
 canonical transcript field, including the exact sender certificate. The sender Identity Key and
 Relay domain come from that verified certificate. Source:
-[`evidence.rs`](../crates/aether-core/src/evidence.rs).
+[`evidence.rs`](../crates/roost-protocol/src/evidence.rs).
 
 The version-one Evidence Bundle fixture produces:
 
@@ -261,7 +261,7 @@ The 32-byte digest crosses in operation metadata; the SecureStorage value does n
 protocol-state database. Secret values do cross into the trusted host-provided SecureStorage
 implementation, including when Core stores its operation journal, and its transient buffers must
 remain secret. Core compares the recomputed digest in constant time before committing. Source:
-[`key_store/operation.rs`](../crates/aether-core/src/key_store/operation.rs). The known-answer test
+[`key_store/operation.rs`](../crates/roost-core/src/key_store/operation.rs). The known-answer test
 `secure_storage_precondition_digest_known_answer` pins `b"fixture secure value"` to:
 
 ```
@@ -284,7 +284,7 @@ verifier = SHA-256( "aether-recipient-delivery-capability-v1" || 0x00 || capabil
 | capability | 32 | the bearer secret |
 
 Preimage is exactly 72 bytes; the verifier is 32. Source:
-[`delivery_capability.rs`](../crates/aether-crypto/src/delivery_capability.rs)
+[`delivery_capability.rs`](../crates/roost-crypto/src/delivery_capability.rs)
 `RecipientDeliveryCapability::verifier`.
 
 Note the convention differs from every signature context above: lowercase-kebab, no trailing colon,
@@ -315,7 +315,7 @@ Distinct `info` per call, as AE-KEY-02 and the crypto rules require.
 | `AetherSealedFrame-v1:key` | Sealed-frame AEAD key derivation |
 | `AetherSealedFrame-v1:nonce` | Sealed-frame AEAD nonce derivation |
 
-Source: [`sealed_frame.rs`](../crates/aether-crypto/src/sealed_frame.rs).
+Source: [`sealed_frame.rs`](../crates/roost-crypto/src/sealed_frame.rs).
 
 Note these two share the prefix `AetherSealedFrame-v1:`. That is safe here because HKDF `expand`
 takes `info` as a bounded, separately-framed argument rather than concatenating it with a message —
@@ -340,11 +340,11 @@ is nonempty, by:
 ```
 
 The suffix is omitted for empty external data so existing transport-agnostic frame vectors remain
-stable. Sources: [`sealed_frame.rs`](../crates/aether-crypto/src/sealed_frame.rs),
-[`protocol_state.rs`](../crates/aether-core/src/protocol_state.rs).
+stable. Sources: [`sealed_frame.rs`](../crates/roost-crypto/src/sealed_frame.rs),
+[`protocol_state.rs`](../crates/roost-core/src/protocol_state.rs).
 
 ## Excluded
 
 `AetherTest-v1:first` and `AetherTest-v1:second` appear in
-[`keys/signing.rs`](../crates/aether-crypto/src/keys/signing.rs) test modules only. They are not
+[`keys/signing.rs`](../crates/roost-crypto/src/keys/signing.rs) test modules only. They are not
 protocol values and must not be implemented.
