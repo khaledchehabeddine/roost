@@ -9,9 +9,9 @@ LIB="libroost_client"
 OUT="target/android"
 FEATURES="${AETHER_CARGO_FEATURES:-}"
 
-FEATURE_ARGS=()
+CARGO_ARGS=(--locked)
 if [[ -n "$FEATURES" ]]; then
-    FEATURE_ARGS=(--features "$FEATURES")
+    CARGO_ARGS+=(--features "$FEATURES")
 fi
 
 TARGETS=(
@@ -29,13 +29,13 @@ rustup target add "${RUST_TARGETS[@]}"
 
 for TARGET_PAIR in "${TARGETS[@]}"; do
     TARGET="${TARGET_PAIR%%:*}"
-    cargo ndk --target "$TARGET" build --release -p "$CRATE" "${FEATURE_ARGS[@]}"
+    cargo ndk --target "$TARGET" build --release -p "$CRATE" "${CARGO_ARGS[@]}"
 done
 
 rm -rf "$OUT/kotlin" "$OUT/jniLibs"
 mkdir -p "$OUT/kotlin" "$OUT/jniLibs"
 
-cargo run -p "$CRATE" --bin uniffi-bindgen "${FEATURE_ARGS[@]}" -- generate \
+cargo run -p "$CRATE" --bin uniffi-bindgen "${CARGO_ARGS[@]}" -- generate \
     "target/aarch64-linux-android/release/${LIB}.so" \
     --language kotlin \
     --out-dir "$OUT/kotlin"

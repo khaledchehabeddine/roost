@@ -41,8 +41,8 @@ struct KeyBindingVerification {
     private static let discoveryToIdentityContext = Data("AetherDKToIK-v1:".utf8)
 
     static func main() throws {
-        let store = KeyStore(storage: MemorySecureStorage())
-        let prepared = try store.prepareGenerateIdentity()
+        let store = Client(storage: MemorySecureStorage())
+        let prepared = try store.identity().prepareGenerateIdentity()
         _ = try store.commitOperation(identifier: prepared.operation.identifier)
         _ = try store.finalizeOperation(identifier: prepared.operation.identifier)
         let generated = prepared.identity

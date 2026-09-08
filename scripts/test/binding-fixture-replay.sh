@@ -45,7 +45,7 @@ run_swift_harness() {
         -Xlinker -rpath \
         -Xlinker "$ROOT/target/debug" \
         -lroost_client \
-        "$swift_out/Aether.swift" \
+        "$swift_out/Roost.swift" \
         "$HARNESS/$source" \
         -o "$swift_out/$name"
     "$swift_out/$name"
@@ -65,7 +65,7 @@ run_swift() {
     cargo run --features fixture-replay,development-certificates --bin uniffi-bindgen-swift -- \
         "$LIB_PATH" \
         "$swift_out" \
-        --modulemap --module-name AetherFFI --modulemap-filename module.modulemap
+        --modulemap --module-name RoostFFI --modulemap-filename module.modulemap
 
     mkdir -p "$swift_out/module-cache"
     run_swift_harness "FixtureReplay.swift" "fixture-replay" "$swift_out"
@@ -104,12 +104,12 @@ run_kotlin_harness() {
     local jna="$4"
 
     kotlinc \
-        "$kotlin_out/com/aurelion/aether/roost_client.kt" \
+        "$kotlin_out/io/github/relaynet/roost/roost_client.kt" \
         "$HARNESS/$source" \
         -cp "$jna" \
         -include-runtime \
         -d "$kotlin_out/$name.jar"
-    run_kotlin_class "$kotlin_out/$name.jar:$jna" "com.aurelion.aether.${name}Kt"
+    run_kotlin_class "$kotlin_out/$name.jar:$jna" "io.github.relaynet.roost.${name}Kt"
 }
 
 run_kotlin_class() {
@@ -169,7 +169,7 @@ run_kotlin() {
 need_tool cargo
 cargo build -p roost-client --features fixture-replay,development-certificates
 
-case "${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" in
+case "${ROOST_BINDING_REPLAY_LANGS:-swift,kotlin}" in
     swift)
         run_swift
         ;;
@@ -181,7 +181,7 @@ case "${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" in
         run_kotlin
         ;;
     *)
-        echo "unsupported AETHER_BINDING_REPLAY_LANGS value: ${AETHER_BINDING_REPLAY_LANGS:-swift,kotlin}" >&2
+        echo "unsupported ROOST_BINDING_REPLAY_LANGS value: ${ROOST_BINDING_REPLAY_LANGS:-swift,kotlin}" >&2
         exit 2
         ;;
 esac

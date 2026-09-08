@@ -8,39 +8,33 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PKGID="$(cargo pkgid --manifest-path "$ROOT/crates/roost-client/Cargo.toml")"
 VERSION="${PKGID##*#}"
 DIST="$ROOT/target/ios-distribution"
-PACKAGE="$DIST/aether-ios-v$VERSION"
-ZIP="$DIST/Aether-v$VERSION.xcframework.zip"
-PACKAGE_ZIP="$DIST/Aether-v$VERSION.swift-package.zip"
+PACKAGE="$DIST/roost-swift-v$VERSION"
+ZIP="$DIST/Roost-v$VERSION.xcframework.zip"
+PACKAGE_ZIP="$DIST/Roost-v$VERSION.swift-package.zip"
 
 cd "$ROOT"
 
 scripts/build/xcframework.sh
 
 rm -rf "$PACKAGE" "$ZIP" "$PACKAGE_ZIP"
-mkdir -p "$PACKAGE/Artifacts" "$PACKAGE/Sources/Aether"
+mkdir -p "$PACKAGE/Artifacts"
 
-cp -R "$ROOT/target/xcframework/Aether.xcframework" "$PACKAGE/Artifacts/Aether.xcframework"
-cp "$ROOT"/target/xcframework/Sources/*.swift "$PACKAGE/Sources/Aether/"
+cp -R "$ROOT/target/xcframework/Roost.xcframework" "$PACKAGE/Artifacts/Roost.xcframework"
 
 cat > "$PACKAGE/Package.swift" <<'PACKAGE'
 // swift-tools-version: 5.9
 import PackageDescription
 
 let package = Package(
-    name: "AetherIOS",
+    name: "Roost",
     platforms: [.iOS(.v13)],
     products: [
-        .library(name: "Aether", targets: ["Aether"]),
+        .library(name: "Roost", targets: ["Roost"]),
     ],
     targets: [
-        .target(
-            name: "Aether",
-            dependencies: ["AetherFFI"],
-            path: "Sources/Aether"
-        ),
         .binaryTarget(
-            name: "AetherFFI",
-            path: "Artifacts/Aether.xcframework"
+            name: "Roost",
+            path: "Artifacts/Roost.xcframework"
         ),
     ]
 )
@@ -52,12 +46,12 @@ find "$PACKAGE" -exec touch -h -t "$stamp" {} +
 
 (
     cd "$PACKAGE/Artifacts"
-    find Aether.xcframework -type f | LC_ALL=C sort | zip -X -q "$ZIP" -@
+    find Roost.xcframework -type f | LC_ALL=C sort | zip -X -q "$ZIP" -@
 )
 
 (
     cd "$DIST"
-    find "aether-ios-v$VERSION" -type f | LC_ALL=C sort | zip -X -q "$PACKAGE_ZIP" -@
+    find "roost-swift-v$VERSION" -type f | LC_ALL=C sort | zip -X -q "$PACKAGE_ZIP" -@
 )
 
 echo "iOS package written to $PACKAGE"

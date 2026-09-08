@@ -5,7 +5,7 @@ use roost_core::{SecureStorage as CoreSecureStorage, StorageError};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
-/// Platform secure-storage boundary used by [`KeyStore`](crate::KeyStore).
+/// Platform secure-storage boundary used by [`Client`](crate::Client).
 ///
 /// Implementations must persist bytes in platform secure storage, not plain files or temporary
 /// process memory. Values returned from [`SecureStorage::load`] contain secret material and must

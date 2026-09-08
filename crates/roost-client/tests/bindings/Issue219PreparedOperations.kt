@@ -1,4 +1,4 @@
-package com.aurelion.aether
+package io.github.relaynet.roost
 
 private class MemorySecureStorage : SecureStorage {
     private val values = mutableMapOf<String, ByteArray>()
@@ -22,35 +22,35 @@ private fun checkCoverage(condition: Boolean, message: String) {
 
 fun main() {
     val storage = MemorySecureStorage()
-    var store: KeyStore? = KeyStore(storage)
+    var store: Client? = Client(storage)
 
-    val orphan = store!!.prepareGenerateIdentity()
+    val orphan = store!!.identity().prepareGenerateIdentity()
     checkCoverage(orphan.operation.identifier.size == 16, "operation identifier must be 16 bytes")
     checkCoverage(
         orphan.operation.secureStoragePreconditions.isNotEmpty(),
         "preparation must expose SecureStorage preconditions",
     )
-    checkCoverage(!store.hasIdentity(), "prepared identity must remain provisional")
+    checkCoverage(!store.identity().hasIdentity(), "prepared identity must remain provisional")
 
     store = null
-    val recovered = KeyStore(storage)
+    val recovered = Client(storage)
     val unfinished = recovered.unfinishedOperations()
     checkCoverage(
         unfinished.size == 1 &&
             unfinished[0].operation.identifier.contentEquals(orphan.operation.identifier),
-        "a new KeyStore instance must discover the orphaned stage",
+        "a new Client instance must discover the orphaned stage",
     )
     recovered.abortOperation(orphan.operation.identifier)
     recovered.abortOperation(orphan.operation.identifier)
     checkCoverage(recovered.unfinishedOperations().isEmpty(), "abort must clear recovery work")
 
-    val winner = recovered.prepareGenerateIdentity()
-    val stale = recovered.prepareGenerateIdentity()
+    val winner = recovered.identity().prepareGenerateIdentity()
+    val stale = recovered.identity().prepareGenerateIdentity()
     recovered.commitOperation(winner.operation.identifier)
     recovered.commitOperation(winner.operation.identifier)
     try {
-        recovered.hasIdentity()
-        checkCoverage(false, "ordinary KeyStore work must stop until committed recovery finishes")
+        recovered.identity().hasIdentity()
+        checkCoverage(false, "ordinary Client work must stop until committed recovery finishes")
     } catch (error: ClientException.OperationRecoveryRequired) {
         checkCoverage(
             error.operationIdentifier.contentEquals(winner.operation.identifier),
@@ -59,7 +59,7 @@ fun main() {
     }
     recovered.finalizeOperation(winner.operation.identifier)
     recovered.finalizeOperation(winner.operation.identifier)
-    checkCoverage(recovered.hasIdentity(), "finalization must make the identity authoritative")
+    checkCoverage(recovered.identity().hasIdentity(), "finalization must make the identity authoritative")
 
     try {
         recovered.commitOperation(stale.operation.identifier)
@@ -69,10 +69,10 @@ fun main() {
     }
     recovered.abortOperation(stale.operation.identifier)
 
-    val signedPreKey = recovered.prepareRotateSignedPrekeyNow()
+    val signedPreKey = recovered.identity().prepareRotateSignedPrekeyNow()
     recovered.commitOperation(signedPreKey.operation.identifier)
     recovered.finalizeOperation(signedPreKey.operation.identifier)
-    val noOp = recovered.prepareRotateSignedPrekeyIfStale()
+    val noOp = recovered.identity().prepareRotateSignedPrekeyIfStale()
     checkCoverage(noOp.signedPrekey == null, "fresh signed pre-key rotation must report no change")
     checkCoverage(
         recovered.unfinishedOperations().any {
@@ -85,10 +85,10 @@ fun main() {
 
     val cappedIdentifiers = mutableListOf<ByteArray>()
     repeat(16) {
-        cappedIdentifiers += recovered.prepareRotateSignedPrekeyIfStale().operation.identifier
+        cappedIdentifiers += recovered.identity().prepareRotateSignedPrekeyIfStale().operation.identifier
     }
     try {
-        recovered.prepareRotateSignedPrekeyIfStale()
+        recovered.identity().prepareRotateSignedPrekeyIfStale()
         checkCoverage(false, "the bounded unfinished-operation journal must reject a seventeenth operation")
     } catch (error: ClientException.TooManyUnfinishedOperations) {
         // Expected.

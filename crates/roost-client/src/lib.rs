@@ -1,7 +1,7 @@
 //! UniFFI bindings for the cryptographic core.
 //!
-//! This crate exposes the storage-backed [`KeyStore`] API and FFI-safe record types used by SDKs.
-//! Apps provide a platform [`SecureStorage`] implementation, then use one [`KeyStore`] for the app
+//! This crate exposes the storage-backed [`Client`] API and FFI-safe record types used by SDKs.
+//! Apps provide a platform [`SecureStorage`] implementation, then use one [`Client`] for the app
 //! lifetime to manage the local identity and publication keys.
 //!
 //! # Feature flags
@@ -14,7 +14,7 @@
 //!
 //! ```
 //! use roost_client::{
-//!     ClientError, InMemorySecureStorage, KeyStore, PublicationBundle, SecureStorage,
+//!     ClientError, InMemorySecureStorage, Client, PublicationBundle, SecureStorage,
 //! };
 //! use std::sync::Arc;
 //!
@@ -22,18 +22,18 @@
 //! #     Ok(())
 //! # }
 //! let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-//! let store = KeyStore::new(storage);
+//! let store = Client::new(storage);
 //!
-//! if !store.has_identity()? {
-//!     let identity = store.prepare_generate_identity()?;
+//! if !store.identity().has_identity()? {
+//!     let identity = store.identity().prepare_generate_identity()?;
 //!     store.commit_operation(identity.operation.identifier.clone())?;
 //!     store.finalize_operation(identity.operation.identifier)?;
 //! }
 //!
-//! let signed_prekey = store.prepare_rotate_signed_prekey_now()?;
+//! let signed_prekey = store.identity().prepare_rotate_signed_prekey_now()?;
 //! store.commit_operation(signed_prekey.operation.identifier.clone())?;
 //! store.finalize_operation(signed_prekey.operation.identifier)?;
-//! let publication = store.current_publication_bundle()?;
+//! let publication = store.identity().current_publication_bundle()?;
 //! publish(&publication)?;
 //! # Ok::<(), ClientError>(())
 //! ```
@@ -45,13 +45,13 @@ compile_error!("fixture-replay is test-only and must not be enabled for release 
 
 mod binding;
 mod certificate;
+mod client;
 #[cfg(feature = "development-certificates")]
 mod development_certificate;
 mod error;
 mod evidence;
 #[cfg(feature = "fixture-replay")]
 mod fixture_replay;
-mod key_store;
 mod key_store_operation;
 mod message;
 mod protocol;
@@ -64,11 +64,14 @@ pub use certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
     ValidatedSenderCertificate, validate_sender_certificate,
 };
+pub use client::{
+    Client, ClientConfiguration, Contacts, IdentityOperations, Messaging, SessionAcceptanceResult,
+    SessionInitiationResult,
+};
 #[cfg(feature = "development-certificates")]
 pub use development_certificate::{DevelopmentCertificateAuthority, DevelopmentSenderCertificate};
 pub use error::ClientError;
 pub use evidence::{EvidenceProfile, VerifiedEvidenceBundle, verify_evidence_bundle};
-pub use key_store::{KeyStore, SessionAcceptanceResult, SessionInitiationResult};
 pub use key_store_operation::{
     KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
     PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
@@ -81,9 +84,9 @@ pub use protocol::{
     ContactIdentity, ContactSafetyNumberConfirmation, ContactSafetyNumberConfirmationKind,
     ContactState, ContactStateChange, ContactTrustState, IdentityKey, InboundMessageOutcome,
     InboundMessageResult, OutboundMessageResult, PendingAcknowledgment, ProtocolHardeningLimits,
-    ProtocolStateAddress, ProtocolStateCommitCheck, ProtocolStateEngine, ProtocolStateEntry,
-    ProtocolStateKind, ProtocolStateUpdate, RetryInstruction, RetryInstructionResult, SafetyNumber,
-    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, derive_safety_number,
+    ProtocolStateAddress, ProtocolStateCommitCheck, ProtocolStateEntry, ProtocolStateKind,
+    ProtocolStateUpdate, RetryInstruction, RetryInstructionResult, SafetyNumber, SessionEvent,
+    SessionUnrecoverableReason, SessionUnrecoverableResult, derive_safety_number,
     protocol_state_blob_digest,
 };
 pub use records::{

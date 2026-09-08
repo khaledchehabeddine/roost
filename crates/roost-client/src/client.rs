@@ -1,4 +1,4 @@
-//! UniFFI keystore object exposing identity, discovery-key, and signed-pre-key operations.
+//! Identity-scoped Client and focused interfaces sharing one Core context.
 
 use crate::SecureStorage;
 use crate::certificate::{
@@ -26,8 +26,9 @@ use crate::transport_binding::{PreKeySelection, TransportBinding};
 use roost_core::{
     AcknowledgmentProcessing, InboundSenderCertificateValidation, KeyStore as CoreKeyStore,
     MessageDecryption, MessageEncryption,
-    PreparedKeyStoreOperation as CorePreparedKeyStoreOperation, ProtocolStateKey,
-    SessionAcceptance, SessionInitiation,
+    PreparedKeyStoreOperation as CorePreparedKeyStoreOperation,
+    ProtocolStateEngine as CoreProtocolStateEngine, ProtocolStateKey, SessionAcceptance,
+    SessionInitiation,
 };
 use roost_protocol::MessageId;
 use std::sync::Arc;
@@ -43,20 +44,106 @@ const MAX_AUTHENTICATION_TRANSCRIPT_LEN: usize = 4096;
 /// ASCII prefix reserved for preimages Aether signs or verifies itself.
 ///
 /// Every context and domain tag in `docs/domain-separation.md` starts with these bytes, so
-/// refusing them keeps [`KeyStore::sign_authentication_transcript`] disjoint from the whole
+/// refusing them keeps [`IdentityOperations::sign_authentication_transcript`] disjoint from the whole
 /// registry. Matched case-insensitively to cover the lowercase hash-domain convention as well.
 const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 
-/// Entry point for local identity, discovery-key, and signed-pre-key state.
+/// Identity-scoped entry point for Identity, Messaging, and Contact operations.
 ///
-/// Construct one keystore for the app and keep it for the process lifetime. Methods may be called
-/// concurrently, but the keystore serializes access to the underlying [`SecureStorage`]. If more
-/// than one `KeyStore` instance or process addresses the same identity namespace, the host must use
-/// one shared per-identity actor or lock. Hold it from before preparing an operation until that
-/// operation is finalized, aborted, or reconciled after an ambiguous host commit.
+/// Keep one Client for each identity namespace. All focused interfaces share its storage and
+/// immutable configuration. The host must serialize each identity's complete load, operation,
+/// and conditional host commit, including across app and extension processes. For prepared
+/// operations, hold that serialization until finalization, abort, or reconciliation after an
+/// ambiguous host commit.
+///
+/// # Examples
+/// ```
+/// # use roost_client::{Client, ClientError, InMemorySecureStorage};
+/// # use std::sync::Arc;
+/// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+/// assert!(!client.identity().has_identity()?);
+/// assert!(client.contacts().contact_states(Vec::new())?.is_empty());
+/// # Ok::<(), ClientError>(())
+/// ```
 #[derive(uniffi::Object)]
-pub struct KeyStore {
-    inner: CoreKeyStore,
+pub struct Client {
+    inner: Arc<CoreKeyStore>,
+}
+
+/// Identity lifecycle and public key material for one Client.
+///
+/// Obtain this handle from [`Client::identity`]. It retains the Client's context and uses its
+/// prepared-operation journal; constructing another storage adapter is unnecessary.
+///
+/// # Examples
+/// ```
+/// # use roost_client::{Client, ClientError, InMemorySecureStorage};
+/// # use std::sync::Arc;
+/// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+/// assert!(!client.identity().has_identity()?);
+/// # Ok::<(), ClientError>(())
+/// ```
+#[derive(uniffi::Object)]
+pub struct IdentityOperations {
+    pub(crate) inner: Arc<CoreKeyStore>,
+}
+
+/// Session, message, acknowledgment, and retry operations for one Client.
+///
+/// Obtain this handle from [`Client::messaging`]. The host supplies snapshots and exact Transport
+/// Binding bytes, then commits returned updates together with their associated application effects.
+///
+/// # Examples
+/// ```
+/// # use roost_client::{Client, InMemorySecureStorage};
+/// # use std::sync::Arc;
+/// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+/// let limits = client.messaging().hardening_limits();
+/// assert!(limits.deduplication_capacity > 0);
+/// ```
+#[derive(uniffi::Object)]
+pub struct Messaging {
+    pub(crate) inner: Arc<CoreKeyStore>,
+}
+
+/// Contact identity, trust, blocking, and inbox authorization for one Client.
+///
+/// Obtain this handle from [`Client::contacts`]. Queries project host-owned snapshots; state changes
+/// become visible when the host commits and refreshes its store.
+///
+/// # Examples
+/// ```
+/// # use roost_client::{Client, ClientError, InMemorySecureStorage};
+/// # use std::sync::Arc;
+/// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+/// assert!(client.contacts().contact_states(Vec::new())?.is_empty());
+/// # Ok::<(), ClientError>(())
+/// ```
+#[derive(uniffi::Object)]
+pub struct Contacts {
+    pub(crate) inner: Arc<CoreKeyStore>,
+}
+
+/// Immutable protocol policy shared by every interface of a Client.
+///
+/// Pass this record to [`Client::with_configuration`] before starting work. Prepared operations
+/// retain the same configuration while staging secure mutations.
+///
+/// # Examples
+/// ```
+/// # use roost_client::{BlockedContactAcknowledgmentPolicy, ClientConfiguration};
+/// let configuration = ClientConfiguration {
+///     deduplication_capacity: 64,
+///     blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::SilentReceipt,
+/// };
+/// assert_eq!(configuration.deduplication_capacity, 64);
+/// ```
+#[derive(uniffi::Record)]
+pub struct ClientConfiguration {
+    /// Number of received message digests retained for this identity, within Core's hard cap.
+    pub deduplication_capacity: u64,
+    /// Whether a blocked sender receives an acknowledgment.
+    pub blocked_contact_acknowledgment_policy: crate::BlockedContactAcknowledgmentPolicy,
 }
 
 /// Result of starting a Session through X3DH.
@@ -93,66 +180,127 @@ pub struct SessionAcceptanceResult {
 }
 
 #[uniffi::export]
-impl KeyStore {
-    /// Constructs a keystore backed by the given platform [`SecureStorage`].
+impl Client {
+    /// Creates one identity context backed by platform SecureStorage with the default policy.
     ///
-    /// No storage access or key generation occurs. Use [`Self::has_identity`] afterward to decide
-    /// whether to generate or import an identity.
+    /// Construction performs no storage I/O. Keep the Client and its interfaces for the identity's
+    /// lifetime. The host serializes operations and commits across every process sharing storage.
     ///
     /// # Examples
     /// ```
-    /// use roost_client::{InMemorySecureStorage, KeyStore, SecureStorage};
+    /// use roost_client::{Client, InMemorySecureStorage};
     /// use std::sync::Arc;
-    ///
-    /// let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// let store = KeyStore::new(storage);
+    /// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+    /// assert!(!client.identity().has_identity()?);
+    /// # Ok::<(), roost_client::ClientError>(())
     /// ```
     #[uniffi::constructor]
     pub fn new(storage: Arc<dyn SecureStorage>) -> Arc<Self> {
-        Arc::new(KeyStore {
-            inner: CoreKeyStore::new(Box::new(SecureStorageAdapter::new(storage))),
+        Arc::new(Self {
+            inner: Arc::new(CoreKeyStore::new(Box::new(SecureStorageAdapter::new(
+                storage,
+            )))),
         })
     }
 
-    /// Prepares fresh identity material without changing authoritative key entries.
+    /// Creates one identity context with immutable protocol configuration.
     ///
-    /// The secret material is staged in Core's recoverable [`SecureStorage`] journal. Commit the
-    /// operation, persist any host-owned output, then finalize it before using the identity.
+    /// Every interface and prepared operation uses this policy; callers never configure engines.
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, Identity, InMemorySecureStorage, KeyStore, SecureStorage};
-    /// # use std::sync::Arc;
-    /// # fn publish_identity(_identity: &Identity) -> Result<(), ClientError> { Ok(()) }
-    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// let prepared = store.prepare_generate_identity()?;
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
-    /// store.finalize_operation(prepared.operation.identifier.clone())?;
-    /// publish_identity(&prepared.identity)?;
-    /// # Ok::<(), ClientError>(())
+    /// use roost_client::{Client, ClientConfiguration, BlockedContactAcknowledgmentPolicy, InMemorySecureStorage};
+    /// use std::sync::Arc;
+    /// let client = Client::with_configuration(Arc::new(InMemorySecureStorage::new()), ClientConfiguration {
+    ///     deduplication_capacity: 64,
+    ///     blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::Unreachable,
+    /// })?;
+    /// # Ok::<(), roost_client::ClientError>(())
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::AlreadyExists`] if complete identity and discovery-key material already
-    ///   exist.
-    /// - [`ClientError::Corrupt`] if stored identity key material is incomplete.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored discovery-key or identity bytes are malformed.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] if platform storage returns an error.
-    pub fn prepare_generate_identity(&self) -> Result<PreparedIdentityGeneration, ClientError> {
-        let (operation, identity) = self
-            .convert_prepared(self.inner.prepare_generate_identity()?, |identity| {
-                Ok(Identity::from_core(identity)?)
-            })?;
-        Ok(PreparedIdentityGeneration {
-            operation,
-            identity,
+    /// - [`ClientError::InvalidData`] if the capacity cannot fit the platform's address space.
+    /// - [`ClientError::InvalidData`] if the capacity is outside Core's supported range.
+    #[uniffi::constructor]
+    pub fn with_configuration(
+        storage: Arc<dyn SecureStorage>,
+        configuration: ClientConfiguration,
+    ) -> Result<Arc<Self>, ClientError> {
+        let capacity = usize::try_from(configuration.deduplication_capacity).map_err(|_| {
+            ClientError::InvalidData {
+                reason: "deduplication capacity exceeds platform range".into(),
+            }
+        })?;
+        let engine = CoreProtocolStateEngine::with_deduplication_capacity(capacity)?
+            .with_blocked_contact_acknowledgment_policy(
+                configuration.blocked_contact_acknowledgment_policy.into(),
+            );
+        Ok(Arc::new(Self {
+            inner: Arc::new(CoreKeyStore::with_protocol_engine(
+                Box::new(SecureStorageAdapter::new(storage)),
+                engine,
+            )),
+        }))
+    }
+
+    /// Returns the identity interface sharing this Client's storage and lifecycle.
+    ///
+    /// The interface retains the context even after the root handle is released.
+    ///
+    /// # Examples
+    /// ```
+    /// # use roost_client::{Client, InMemorySecureStorage};
+    /// # use std::sync::Arc;
+    /// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+    /// let identity = client.identity();
+    /// assert!(!identity.has_identity()?);
+    /// # Ok::<(), roost_client::ClientError>(())
+    /// ```
+    pub fn identity(&self) -> Arc<IdentityOperations> {
+        Arc::new(IdentityOperations {
+            inner: Arc::clone(&self.inner),
         })
     }
 
+    /// Returns the messaging interface using this Client's identity and protocol policy.
+    ///
+    /// Pass committed host snapshots to operations and atomically persist updates and effects.
+    ///
+    /// # Examples
+    /// ```
+    /// # use roost_client::{Client, InMemorySecureStorage};
+    /// # use std::sync::Arc;
+    /// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+    /// let update = client.messaging().initialize_deduplication_set(vec![1; 16])?;
+    /// # Ok::<(), roost_client::ClientError>(())
+    /// ```
+    pub fn messaging(&self) -> Arc<Messaging> {
+        Arc::new(Messaging {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Returns the contacts interface sharing this Client's identity and protocol policy.
+    ///
+    /// Reload committed host snapshots for queries, including after another process commits.
+    ///
+    /// # Examples
+    /// ```
+    /// # use roost_client::{Client, InMemorySecureStorage};
+    /// # use std::sync::Arc;
+    /// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+    /// let contacts = client.contacts().contact_states(Vec::new())?;
+    /// # Ok::<(), roost_client::ClientError>(())
+    /// ```
+    pub fn contacts(&self) -> Arc<Contacts> {
+        Arc::new(Contacts {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+}
+
+#[uniffi::export]
+impl Client {
     /// Returns the durable status of a retained prepared operation.
     ///
     /// Use this after an ambiguous lifecycle call or while reconciling startup state. Terminal
@@ -161,11 +309,11 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use roost_client::{ClientError, InMemorySecureStorage, Client, KeyStoreOperationStatus, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// let prepared = store.prepare_generate_identity()?;
+    /// # let store = Client::new(storage);
+    /// let prepared = store.identity().prepare_generate_identity()?;
     /// let status = store.operation_status(prepared.operation.identifier)?;
     /// assert!(matches!(status, KeyStoreOperationStatus::Prepared));
     /// # Ok::<(), ClientError>(())
@@ -195,11 +343,11 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use roost_client::{ClientError, InMemorySecureStorage, Client, KeyStoreOperationStatus, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// let prepared = store.prepare_generate_identity()?;
+    /// # let store = Client::new(storage);
+    /// let prepared = store.identity().prepare_generate_identity()?;
     /// let status = store.commit_operation(prepared.operation.identifier.clone())?;
     /// assert!(matches!(status, KeyStoreOperationStatus::Committed));
     /// // Atomically persist host-owned output and the identifier here.
@@ -233,11 +381,11 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use roost_client::{ClientError, InMemorySecureStorage, Client, KeyStoreOperationStatus, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// let prepared = store.prepare_generate_identity()?;
+    /// # let store = Client::new(storage);
+    /// let prepared = store.identity().prepare_generate_identity()?;
     /// store.commit_operation(prepared.operation.identifier.clone())?;
     /// // The host transaction committed before finalization.
     /// let status = store.finalize_operation(prepared.operation.identifier)?;
@@ -268,11 +416,11 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use roost_client::{ClientError, InMemorySecureStorage, Client, KeyStoreOperationStatus, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// let prepared = store.prepare_generate_identity()?;
+    /// # let store = Client::new(storage);
+    /// let prepared = store.identity().prepare_generate_identity()?;
     /// let status = store.abort_operation(prepared.operation.identifier)?;
     /// assert!(matches!(status, KeyStoreOperationStatus::Aborted));
     /// # Ok::<(), ClientError>(())
@@ -301,11 +449,11 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage};
+    /// # use roost_client::{ClientError, InMemorySecureStorage, Client, KeyStoreOperationStatus, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// let prepared = store.prepare_generate_identity()?;
+    /// # let store = Client::new(storage);
+    /// let prepared = store.identity().prepare_generate_identity()?;
     /// let unfinished = store.unfinished_operations()?;
     /// assert_eq!(unfinished[0].operation.identifier, prepared.operation.identifier);
     /// assert!(matches!(unfinished[0].status, KeyStoreOperationStatus::Prepared));
@@ -323,18 +471,63 @@ impl KeyStore {
             .map(Into::into)
             .collect())
     }
+}
+
+#[uniffi::export]
+impl IdentityOperations {
+    /// Prepares fresh identity material without changing authoritative key entries.
+    ///
+    /// The secret material is staged in Core's recoverable [`SecureStorage`] journal. Commit the
+    /// operation, persist any host-owned output, then finalize it before using the identity.
+    ///
+    /// # Examples
+    /// ```
+    /// # use roost_client::{Client, ClientError, Identity, InMemorySecureStorage, IdentityOperations, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn publish_identity(_identity: &Identity) -> Result<(), ClientError> { Ok(()) }
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
+    /// let prepared = store.prepare_generate_identity()?;
+    /// client.commit_operation(prepared.operation.identifier.clone())?;
+    /// client.finalize_operation(prepared.operation.identifier.clone())?;
+    /// publish_identity(&prepared.identity)?;
+    /// # Ok::<(), ClientError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`ClientError::AlreadyExists`] if complete identity and discovery-key material already
+    ///   exist.
+    /// - [`ClientError::Corrupt`] if stored identity key material is incomplete.
+    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
+    /// - [`ClientError::InvalidData`] if stored discovery-key or identity bytes are malformed.
+    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
+    /// - [`ClientError::Storage`] if platform storage returns an error.
+    pub fn prepare_generate_identity(&self) -> Result<PreparedIdentityGeneration, ClientError> {
+        let (operation, identity) = convert_prepared(
+            &self.inner,
+            self.inner.prepare_generate_identity()?,
+            |identity| Ok(Identity::from_core(identity)?),
+        )?;
+        Ok(PreparedIdentityGeneration {
+            operation,
+            identity,
+        })
+    }
 
     /// Loads the stored identity's public material.
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let prepared = store.prepare_generate_identity()?;
-    /// # store.commit_operation(prepared.operation.identifier.clone())?;
-    /// # store.finalize_operation(prepared.operation.identifier)?;
+    /// # client.commit_operation(prepared.operation.identifier.clone())?;
+    /// # client.finalize_operation(prepared.operation.identifier)?;
     /// let identity = store.load_identity()?;
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -357,14 +550,15 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// if !store.has_identity()? {
     ///     let prepared = store.prepare_generate_identity()?;
-    ///     store.commit_operation(prepared.operation.identifier.clone())?;
-    ///     store.finalize_operation(prepared.operation.identifier)?;
+    ///     client.commit_operation(prepared.operation.identifier.clone())?;
+    ///     client.finalize_operation(prepared.operation.identifier)?;
     /// }
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -400,14 +594,15 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
     /// # use std::sync::Arc;
     /// # fn challenge_nonce() -> [u8; 32] { [0x22; 32] }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let prepared = store.prepare_generate_identity()?;
-    /// # store.commit_operation(prepared.operation.identifier.clone())?;
-    /// # store.finalize_operation(prepared.operation.identifier)?;
+    /// # client.commit_operation(prepared.operation.identifier.clone())?;
+    /// # client.finalize_operation(prepared.operation.identifier)?;
     /// let identity = store.load_identity()?;
     ///
     /// // The caller builds the whole preimage, context included.
@@ -449,21 +644,22 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{
-    /// #     ClientError, InMemorySecureStorage, KeyStore, SecureStorage, SignedPreKeyBundle,
+    /// # use roost_client::{Client,
+    /// #     ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage, SignedPreKeyBundle,
     /// # };
     /// # use std::sync::Arc;
     /// # fn send_bundle_to_peer(_bundle: &SignedPreKeyBundle) -> Result<(), ClientError> {
     /// #     Ok(())
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # store.commit_operation(identity.operation.identifier.clone())?;
-    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.identifier.clone())?;
+    /// # client.finalize_operation(identity.operation.identifier)?;
     /// # let signed_prekey = store.prepare_rotate_signed_prekey_if_stale()?;
-    /// # store.commit_operation(signed_prekey.operation.identifier.clone())?;
-    /// # store.finalize_operation(signed_prekey.operation.identifier)?;
+    /// # client.commit_operation(signed_prekey.operation.identifier.clone())?;
+    /// # client.finalize_operation(signed_prekey.operation.identifier)?;
     /// let bundle = store.current_signed_prekey_bundle()?;
     /// send_bundle_to_peer(&bundle)?;
     /// # Ok::<(), ClientError>(())
@@ -487,18 +683,19 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{
-    /// #     ClientError, DiscoveryKeyBundle, InMemorySecureStorage, KeyStore, SecureStorage
+    /// # use roost_client::{Client,
+    /// #     ClientError, DiscoveryKeyBundle, InMemorySecureStorage, IdentityOperations, SecureStorage
     /// # };
     /// # use std::sync::Arc;
     /// # fn send_to_peer(_bundle: &DiscoveryKeyBundle) -> Result<(), ClientError> {
     /// #     Ok(())
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let prepared = store.prepare_generate_identity()?;
-    /// # store.commit_operation(prepared.operation.identifier.clone())?;
-    /// # store.finalize_operation(prepared.operation.identifier)?;
+    /// # client.commit_operation(prepared.operation.identifier.clone())?;
+    /// # client.finalize_operation(prepared.operation.identifier)?;
     /// let bundle = store.current_discovery_key_bundle()?;
     /// send_to_peer(&bundle)?;
     /// # Ok::<(), ClientError>(())
@@ -524,21 +721,22 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{
-    /// #     ClientError, InMemorySecureStorage, KeyStore, PublicationBundle, SecureStorage
+    /// # use roost_client::{Client,
+    /// #     ClientError, InMemorySecureStorage, IdentityOperations, PublicationBundle, SecureStorage
     /// # };
     /// # use std::sync::Arc;
     /// # fn publish(_bundle: &PublicationBundle) -> Result<(), ClientError> {
     /// #     Ok(())
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # store.commit_operation(identity.operation.identifier.clone())?;
-    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.identifier.clone())?;
+    /// # client.finalize_operation(identity.operation.identifier)?;
     /// # let signed_prekey = store.prepare_rotate_signed_prekey_now()?;
-    /// # store.commit_operation(signed_prekey.operation.identifier.clone())?;
-    /// # store.finalize_operation(signed_prekey.operation.identifier)?;
+    /// # client.commit_operation(signed_prekey.operation.identifier.clone())?;
+    /// # client.finalize_operation(signed_prekey.operation.identifier)?;
     /// let publication = store.current_publication_bundle()?;
     /// publish(&publication)?;
     /// # Ok::<(), ClientError>(())
@@ -586,18 +784,19 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # store.commit_operation(identity.operation.identifier.clone())?;
-    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.identifier.clone())?;
+    /// # client.finalize_operation(identity.operation.identifier)?;
     /// let prepared = store.prepare_generate_one_time_prekeys(8)?;
     /// assert_eq!(prepared.one_time_prekeys.len(), 8);
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// client.commit_operation(prepared.operation.identifier.clone())?;
     /// // Atomically queue the public bundles and persist the identifier here.
-    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// client.finalize_operation(prepared.operation.identifier)?;
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
@@ -614,7 +813,8 @@ impl KeyStore {
         &self,
         batch_size: u32,
     ) -> Result<PreparedOneTimePreKeys, ClientError> {
-        let (operation, one_time_prekeys) = self.convert_prepared(
+        let (operation, one_time_prekeys) = convert_prepared(
+            &self.inner,
             self.inner
                 .prepare_generate_one_time_prekeys(batch_size as usize)?,
             |one_time_prekeys| Ok(one_time_prekeys.into_iter().map(Into::into).collect()),
@@ -632,17 +832,18 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
     /// # use std::sync::Arc;
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # store.commit_operation(identity.operation.identifier.clone())?;
-    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.identifier.clone())?;
+    /// # client.finalize_operation(identity.operation.identifier)?;
     /// let prepared = store.prepare_replenish_one_time_prekeys()?;
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// client.commit_operation(prepared.operation.identifier.clone())?;
     /// // Finalize even when `one_time_prekeys` is empty.
-    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// client.finalize_operation(prepared.operation.identifier)?;
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
@@ -657,7 +858,8 @@ impl KeyStore {
     pub fn prepare_replenish_one_time_prekeys(
         &self,
     ) -> Result<PreparedOneTimePreKeys, ClientError> {
-        let (operation, one_time_prekeys) = self.convert_prepared(
+        let (operation, one_time_prekeys) = convert_prepared(
+            &self.inner,
             self.inner.prepare_replenish_one_time_prekeys()?,
             |one_time_prekeys| Ok(one_time_prekeys.into_iter().map(Into::into).collect()),
         )?;
@@ -675,21 +877,22 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{
-    /// #     ClientError, PublicationBundle, InMemorySecureStorage, KeyStore, SecureStorage,
+    /// # use roost_client::{Client,
+    /// #     ClientError, PublicationBundle, InMemorySecureStorage, IdentityOperations, SecureStorage,
     /// # };
     /// # use std::sync::Arc;
     /// # fn publish_rotation(_bundle: &PublicationBundle) -> Result<(), ClientError> {
     /// #     Ok(())
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # store.commit_operation(identity.operation.identifier.clone())?;
-    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.identifier.clone())?;
+    /// # client.finalize_operation(identity.operation.identifier)?;
     /// let prepared = store.prepare_rotate_inbox_now()?;
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
-    /// store.finalize_operation(prepared.operation.identifier.clone())?;
+    /// client.commit_operation(prepared.operation.identifier.clone())?;
+    /// client.finalize_operation(prepared.operation.identifier.clone())?;
     /// publish_rotation(&prepared.rotation.publication)?;
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -704,10 +907,11 @@ impl KeyStore {
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`ClientError::Storage`] on platform storage failure.
     pub fn prepare_rotate_inbox_now(&self) -> Result<PreparedInboxRotation, ClientError> {
-        let (operation, rotation) = self
-            .convert_prepared(self.inner.prepare_rotate_inbox_now()?, |rotation| {
-                Ok(inbox_rotation_from_core(rotation))
-            })?;
+        let (operation, rotation) = convert_prepared(
+            &self.inner,
+            self.inner.prepare_rotate_inbox_now()?,
+            |rotation| Ok(inbox_rotation_from_core(rotation)),
+        )?;
         Ok(PreparedInboxRotation {
             operation,
             rotation,
@@ -726,21 +930,22 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{
-    /// #     ClientError, InMemorySecureStorage, KeyStore, SecureStorage, SignedPreKeyBundle,
+    /// # use roost_client::{Client,
+    /// #     ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage, SignedPreKeyBundle,
     /// # };
     /// # use std::sync::Arc;
     /// # fn publish_signed_prekey_bundle(_bundle: &SignedPreKeyBundle) -> Result<(), ClientError> {
     /// #     Ok(())
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # store.commit_operation(identity.operation.identifier.clone())?;
-    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.identifier.clone())?;
+    /// # client.finalize_operation(identity.operation.identifier)?;
     /// let prepared = store.prepare_rotate_signed_prekey_if_stale()?;
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
-    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// client.commit_operation(prepared.operation.identifier.clone())?;
+    /// client.finalize_operation(prepared.operation.identifier)?;
     /// if let Some(new_bundle) = prepared.signed_prekey {
     ///     publish_signed_prekey_bundle(&new_bundle)?;
     /// }
@@ -761,7 +966,8 @@ impl KeyStore {
     pub fn prepare_rotate_signed_prekey_if_stale(
         &self,
     ) -> Result<PreparedSignedPreKeyRotation, ClientError> {
-        let (operation, signed_prekey) = self.convert_prepared(
+        let (operation, signed_prekey) = convert_prepared(
+            &self.inner,
             self.inner.prepare_rotate_signed_prekey_if_stale()?,
             |signed_prekey| Ok(signed_prekey.map(Into::into)),
         )?;
@@ -777,21 +983,22 @@ impl KeyStore {
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{
-    /// #     ClientError, InMemorySecureStorage, KeyStore, SecureStorage, SignedPreKeyBundle,
+    /// # use roost_client::{Client,
+    /// #     ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage, SignedPreKeyBundle,
     /// # };
     /// # use std::sync::Arc;
     /// # fn publish_signed_prekey_bundle(_bundle: &SignedPreKeyBundle) -> Result<(), ClientError> {
     /// #     Ok(())
     /// # }
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # store.commit_operation(identity.operation.identifier.clone())?;
-    /// # store.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.identifier.clone())?;
+    /// # client.finalize_operation(identity.operation.identifier)?;
     /// let prepared = store.prepare_rotate_signed_prekey_now()?;
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
-    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// client.commit_operation(prepared.operation.identifier.clone())?;
+    /// client.finalize_operation(prepared.operation.identifier)?;
     /// if let Some(new_bundle) = prepared.signed_prekey {
     ///     publish_signed_prekey_bundle(&new_bundle)?;
     /// }
@@ -811,7 +1018,8 @@ impl KeyStore {
     pub fn prepare_rotate_signed_prekey_now(
         &self,
     ) -> Result<PreparedSignedPreKeyRotation, ClientError> {
-        let (operation, signed_prekey) = self.convert_prepared(
+        let (operation, signed_prekey) = convert_prepared(
+            &self.inner,
             self.inner.prepare_rotate_signed_prekey_now()?,
             |signed_prekey| Ok(Some(signed_prekey.into())),
         )?;
@@ -821,67 +1029,151 @@ impl KeyStore {
         })
     }
 
-    /// Prepares a contact block and inbox rotation so both cross one host commit boundary.
+    /// Exports the current identity and discovery key as a passphrase-encrypted blob.
     ///
-    /// [`crate::ProtocolStateEngine::block_contact`] changes local state only, which stops this
-    /// device sending and surfacing that contact's messages but leaves the contact holding a
-    /// working delivery capability — it can still reach the relay and queue messages. Rotating
-    /// invalidates that capability, at the cost of invalidating every *other* contact's copy too:
-    /// when `PreparedContactBlock.block.rotation` is present, each remaining contact must receive
-    /// the new capability before it can deliver again. [`crate::ProtocolStateEngine::
-    /// contacts_needing_inbox_authorization`] returns exactly that list, and excludes the blocked
-    /// contact.
+    /// The blob is portable across devices: pass it to another keystore's
+    /// [`Self::prepare_import_encrypted_backup`] with the same `passphrase` to restore the same identity
+    /// and discovery-epoch lineage.
     ///
-    /// Blocking an already-blocked contact performs no rotation, so repeating the call does not
-    /// churn every contact's capability. Its no-op operation must still be finalized or aborted.
-    ///
-    /// Commit the operation, atomically persist `PreparedContactBlock.block.contact` and any
-    /// host-owned publication work, then finalize the staged SecureStorage rotation. Abort only
-    /// after proving the host transaction did not commit.
+    /// Requires a stored discovery key; if it is missing, regenerate the identity with
+    /// [`Self::prepare_generate_identity`] (which repairs the discovery key) before exporting.
     ///
     /// # Examples
     /// ```
-    /// use roost_client::{ClientError, IdentityKey, KeyStore, ProtocolStateEntry};
-    ///
-    /// fn block(
-    ///     store: &KeyStore,
-    ///     snapshot: Vec<ProtocolStateEntry>,
-    ///     identity_key: IdentityKey,
-    /// ) -> Result<(), ClientError> {
-    ///     let prepared = store.prepare_block_contact(snapshot, identity_key)?;
-    ///     store.commit_operation(prepared.operation.identifier.clone())?;
-    ///     // Persist `prepared.block.contact`, publication work, and the identifier atomically.
-    ///     store.finalize_operation(prepared.operation.identifier)?;
-    ///     Ok(())
-    /// }
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # fn persist_backup_blob(_blob: &[u8]) -> Result<(), ClientError> { Ok(()) }
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
+    /// # let prepared = store.prepare_generate_identity()?;
+    /// # client.commit_operation(prepared.operation.identifier.clone())?;
+    /// # client.finalize_operation(prepared.operation.identifier)?;
+    /// let blob = store.export_encrypted_backup("strong passphrase".into())?;
+    /// persist_backup_blob(&blob)?;
+    /// # Ok::<(), ClientError>(())
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `identity_key` has the wrong length.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`ClientError::BackupFailed`] on randomness failure, Argon2id derivation error, or
+    ///   authenticated encryption failure.
+    /// - [`ClientError::Corrupt`] if identity keys are incomplete or the discovery key does not
+    ///   verify against the current identity.
+    /// - [`ClientError::InternalError`] on storage lock poisoning.
+    /// - [`ClientError::InvalidData`] if a stored identity key has the wrong byte length.
+    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if no contact is stored for `identity_key`, or its
-    ///   blob is malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_block_contact(
-        &self,
-        snapshot: Vec<ProtocolStateEntry>,
-        identity_key: FfiIdentityKey,
-    ) -> Result<PreparedContactBlock, ClientError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let prepared = self
-            .inner
-            .prepare_block_contact(&snapshot, identity_key.to_core()?)?;
-        let (operation, block) = self.convert_prepared(prepared, |blocked| {
-            Ok(ContactBlock {
-                contact: ContactStateChange::from_core(blocked.contact)?,
-                rotation: blocked.rotation.map(inbox_rotation_from_core),
-            })
-        })?;
-        Ok(PreparedContactBlock { operation, block })
+    /// - [`ClientError::Storage`] on platform storage failure when loading an identity.
+    ///
+    /// # Performance
+    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
+    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
+    /// hashing step using 64 MiB memory and 3 iterations.
+    pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, ClientError> {
+        let passphrase = Zeroizing::new(passphrase);
+        Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
 
+    /// Prepares restoration of an encrypted identity backup.
+    ///
+    /// The backup is decrypted and the restored discovery key is validated against the restored
+    /// identity before staging changes, so a wrong passphrase or malformed blob leaves the
+    /// existing identity untouched. Commit the operation, atomically wipe or replace host-owned
+    /// Session, deduplication, and pending-acknowledgment state, then finalize. Prekey use stays
+    /// blocked until [`Self::prepare_rotate_inbox_now`] advances the restored identity to a fresh
+    /// inbox generation. This prevents reuse of prekey identifiers that the backed-up generation
+    /// may already have published.
+    ///
+    /// # Examples
+    /// ```
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
+    /// # use std::sync::Arc;
+    /// // Source keystore: generate an identity and export an encrypted backup.
+    /// let source: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// let source_store = Client::new(source);
+    /// let identity = source_store.identity().prepare_generate_identity()?;
+    /// source_store.commit_operation(identity.operation.identifier.clone())?;
+    /// source_store.finalize_operation(identity.operation.identifier)?;
+    /// let blob = source_store.identity().export_encrypted_backup("strong passphrase".into())?;
+    ///
+    /// // Restored keystore: import the blob into a fresh store.
+    /// let destination: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// let destination_store = Client::new(destination);
+    /// let operation = destination_store.identity().prepare_import_encrypted_backup(
+    ///     blob,
+    ///     "strong passphrase".into(),
+    /// )?;
+    /// destination_store.commit_operation(operation.identifier.clone())?;
+    /// // Atomically wipe host-owned protocol state here.
+    /// destination_store.finalize_operation(operation.identifier)?;
+    /// let rotation = destination_store.identity().prepare_rotate_inbox_now()?;
+    /// destination_store.commit_operation(rotation.operation.identifier.clone())?;
+    /// // Publish `rotation.rotation.publication` and persist the identifier atomically.
+    /// destination_store.finalize_operation(rotation.operation.identifier)?;
+    /// # Ok::<(), ClientError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`ClientError::BackupFailed`] on Argon2id derivation failure.
+    /// - [`ClientError::DecryptionFailed`] on wrong passphrase or backup authentication failure.
+    /// - [`ClientError::InternalError`] on storage lock poisoning.
+    /// - [`ClientError::Corrupt`] if the backup's discovery key is not signed by the backup's
+    ///   identity key.
+    /// - [`ClientError::InvalidData`] on a malformed header, authenticated unsupported version,
+    ///   out-of-range Argon2id parameters, or a malformed discovery-key blob.
+    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
+    /// - [`ClientError::Storage`] on platform storage failure during commit.
+    ///
+    /// # Performance
+    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
+    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
+    /// hashing step using 64 MiB memory and 3 iterations.
+    pub fn prepare_import_encrypted_backup(
+        &self,
+        data: Vec<u8>,
+        passphrase: String,
+    ) -> Result<KeyStoreOperation, ClientError> {
+        let data = Zeroizing::new(data);
+        let passphrase = Zeroizing::new(passphrase);
+        Ok(self
+            .inner
+            .prepare_import_encrypted_backup(data.as_slice(), passphrase.as_str())?
+            .operation
+            .into())
+    }
+
+    /// Prepares deletion of all stored prekeys, discovery-key, and identity material.
+    ///
+    /// Commit the operation, atomically wipe host-owned protocol state, then finalize. Calling this
+    /// on an empty store still produces an idempotent recoverable operation.
+    ///
+    /// # Examples
+    /// ```
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage, IdentityOperations, SecureStorage};
+    /// # use std::sync::Arc;
+    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+    /// # let client = Client::new(storage);
+    /// let store = client.identity();
+    /// let operation = store.prepare_reset()?;
+    /// client.commit_operation(operation.identifier.clone())?;
+    /// // Atomically wipe host-owned protocol state here.
+    /// client.finalize_operation(operation.identifier)?;
+    /// # Ok::<(), ClientError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`ClientError::InternalError`] on storage lock poisoning.
+    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
+    /// - [`ClientError::Storage`] on platform storage failure.
+    pub fn prepare_reset(&self) -> Result<KeyStoreOperation, ClientError> {
+        Ok(self.inner.prepare_reset()?.operation.into())
+    }
+}
+
+#[uniffi::export]
+impl Messaging {
     /// Starts a new Session while authenticating a caller-owned Transport Binding.
     ///
     /// Commit the returned state updates atomically with the returned Message and retain the exact
@@ -890,18 +1182,18 @@ impl KeyStore {
     /// # Examples
     /// ```
     /// use roost_client::{
-    ///     ClientError, Identity, KeyStore, OneTimePreKeyBundle, PublicationBundle, TransportBinding,
+    ///     ClientError, Identity, Messaging, OneTimePreKeyBundle, PublicationBundle, TransportBinding,
     ///     SessionInitiationResult,
     /// };
     ///
     /// fn initiate(
-    ///     store: &KeyStore,
+    ///     store: &Messaging,
     ///     responder_identity: Identity,
     ///     responder_publication: PublicationBundle,
     ///     responder_one_time_prekey: Option<OneTimePreKeyBundle>,
     ///     transport_binding: TransportBinding,
     /// ) -> Result<SessionInitiationResult, ClientError> {
-    ///     store.initiate_session_with_transport_binding(
+    ///     store.initiate_session(
     ///         vec![0x11; 16],
     ///         responder_identity,
     ///         responder_publication,
@@ -932,7 +1224,7 @@ impl KeyStore {
         clippy::too_many_arguments,
         reason = "flat UniFFI export preserves generated binding shape"
     )]
-    pub fn initiate_session_with_transport_binding(
+    pub fn initiate_session(
         &self,
         session_key: Vec<u8>,
         responder_identity: Identity,
@@ -970,19 +1262,19 @@ impl KeyStore {
     /// Reads who sent an X3DH first Message while authenticating its Transport Binding.
     ///
     /// This operation consumes no one-time prekey. Pass the same binding and prekey selection to
-    /// [`Self::prepare_accept_session_with_transport_binding`] after deriving the host Session key.
+    /// [`Self::prepare_accept_session`] after deriving the host Session key.
     ///
     /// # Examples
     /// ```
-    /// use roost_client::{ClientError, Identity, KeyStore, Message, PreKeySelection, TransportBinding};
+    /// use roost_client::{ClientError, Identity, Messaging, Message, PreKeySelection, TransportBinding};
     ///
     /// fn inspect_sender(
-    ///     store: &KeyStore,
+    ///     store: &Messaging,
     ///     message: Message,
     ///     transport_binding: TransportBinding,
     ///     prekey_selection: PreKeySelection,
     /// ) -> Result<Identity, ClientError> {
-    ///     store.initiator_identity_hint_with_transport_binding(
+    ///     store.initiator_identity_hint(
     ///         message,
     ///         transport_binding,
     ///         prekey_selection,
@@ -1004,7 +1296,7 @@ impl KeyStore {
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`ClientError::Storage`] on platform storage failure.
     /// - [`ClientError::UnsupportedVersion`] if the Message or stored prekey version is unsupported.
-    pub fn initiator_identity_hint_with_transport_binding(
+    pub fn initiator_identity_hint(
         &self,
         message: Message,
         transport_binding: TransportBinding,
@@ -1033,18 +1325,18 @@ impl KeyStore {
     /// # Examples
     /// ```
     /// use roost_client::{
-    ///     ClientError, KeyStore, Message, PreKeySelection, PreparedSessionAcceptance,
+    ///     ClientError, Messaging, Message, PreKeySelection, PreparedSessionAcceptance,
     ///     TransportBinding,
     /// };
     ///
     /// fn prepare_acceptance(
-    ///     store: &KeyStore,
+    ///     store: &Messaging,
     ///     session_key: Vec<u8>,
     ///     message: Message,
     ///     transport_binding: TransportBinding,
     ///     prekey_selection: PreKeySelection,
     /// ) -> Result<PreparedSessionAcceptance, ClientError> {
-    ///     store.prepare_accept_session_with_transport_binding(
+    ///     store.prepare_accept_session(
     ///         session_key,
     ///         None,
     ///         message,
@@ -1072,7 +1364,7 @@ impl KeyStore {
     /// - [`ClientError::Storage`] on platform storage failure.
     /// - [`ClientError::UnsupportedVersion`] if the Message, stored prekey, or protocol-state
     ///   version is unsupported.
-    pub fn prepare_accept_session_with_transport_binding(
+    pub fn prepare_accept_session(
         &self,
         session_key: Vec<u8>,
         initiator_identity: Option<Identity>,
@@ -1094,7 +1386,7 @@ impl KeyStore {
             &transport_binding,
             prekey_selection.to_core(),
         )?;
-        let (operation, acceptance) = self.convert_prepared(prepared, |result| {
+        let (operation, acceptance) = convert_prepared(&self.inner, prepared, |result| {
             let state_updates = updates_from_core(result.state_updates)?;
             Ok(SessionAcceptanceResult {
                 plaintext: result.plaintext.to_vec(),
@@ -1116,17 +1408,17 @@ impl KeyStore {
     /// # Examples
     /// ```
     /// use roost_client::{
-    ///     ClientError, IdentityKey, KeyStore, OutboundMessageResult, ProtocolStateEntry,
+    ///     ClientError, IdentityKey, Messaging, OutboundMessageResult, ProtocolStateEntry,
     ///     TransportBinding,
     /// };
     ///
     /// fn encrypt(
-    ///     store: &KeyStore,
+    ///     store: &Messaging,
     ///     snapshot: Vec<ProtocolStateEntry>,
     ///     contact: IdentityKey,
     ///     transport_binding: TransportBinding,
     /// ) -> Result<OutboundMessageResult, ClientError> {
-    ///     store.encrypt_message_with_transport_binding(
+    ///     store.encrypt_message(
     ///         snapshot,
     ///         vec![0x11; 16],
     ///         vec![0x22; 16],
@@ -1158,7 +1450,7 @@ impl KeyStore {
         clippy::too_many_arguments,
         reason = "flat UniFFI export preserves generated binding shape"
     )]
-    pub fn encrypt_message_with_transport_binding(
+    pub fn encrypt_message(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         session_key: Vec<u8>,
@@ -1202,17 +1494,17 @@ impl KeyStore {
     /// # Examples
     /// ```
     /// use roost_client::{
-    ///     ClientError, InboundMessageOutcome, KeyStore, Message, ProtocolStateEntry, TransportBinding,
+    ///     ClientError, InboundMessageOutcome, Messaging, Message, ProtocolStateEntry, TransportBinding,
     /// };
     ///
     /// fn decrypt(
-    ///     store: &KeyStore,
+    ///     store: &Messaging,
     ///     snapshot: Vec<ProtocolStateEntry>,
     ///     message: Message,
     ///     message_transport_binding: TransportBinding,
     ///     acknowledgment_transport_binding: TransportBinding,
     /// ) -> Result<InboundMessageOutcome, ClientError> {
-    ///     store.decrypt_message_with_transport_bindings(
+    ///     store.decrypt_message(
     ///         snapshot,
     ///         vec![0x11; 16],
     ///         b"deduplication".to_vec(),
@@ -1248,7 +1540,7 @@ impl KeyStore {
         clippy::too_many_arguments,
         reason = "flat UniFFI export preserves generated binding shape"
     )]
-    pub fn decrypt_message_with_transport_bindings(
+    pub fn decrypt_message(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         session_key: Vec<u8>,
@@ -1327,16 +1619,16 @@ impl KeyStore {
     /// # Examples
     /// ```
     /// use roost_client::{
-    ///     AcknowledgmentOutcome, ClientError, KeyStore, Message, ProtocolStateEntry, TransportBinding,
+    ///     AcknowledgmentOutcome, ClientError, Messaging, Message, ProtocolStateEntry, TransportBinding,
     /// };
     ///
     /// fn process(
-    ///     store: &KeyStore,
+    ///     store: &Messaging,
     ///     snapshot: Vec<ProtocolStateEntry>,
     ///     message: Message,
     ///     transport_binding: TransportBinding,
     /// ) -> Result<AcknowledgmentOutcome, ClientError> {
-    ///     store.process_acknowledgment_with_transport_binding(
+    ///     store.process_acknowledgment(
     ///         snapshot,
     ///         vec![0x11; 16],
     ///         message,
@@ -1358,7 +1650,7 @@ impl KeyStore {
     /// - [`ClientError::Storage`] on platform storage failure.
     /// - [`ClientError::UnsupportedVersion`] if the Message or a stored protocol-state version is
     ///   unsupported.
-    pub fn process_acknowledgment_with_transport_binding(
+    pub fn process_acknowledgment(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         session_key: Vec<u8>,
@@ -1377,171 +1669,91 @@ impl KeyStore {
             &transport_binding,
         )?)
     }
+}
 
-    /// Exports the current identity and discovery key as a passphrase-encrypted blob.
+#[uniffi::export]
+impl Contacts {
+    /// Prepares a contact block and inbox rotation so both cross one host commit boundary.
     ///
-    /// The blob is portable across devices: pass it to another keystore's
-    /// [`Self::prepare_import_encrypted_backup`] with the same `passphrase` to restore the same identity
-    /// and discovery-epoch lineage.
+    /// Blocking stops this device sending and surfacing the contact's messages and rotates the
+    /// local inbox to invalidate the contact's delivery capability. Rotation also invalidates
+    /// every other contact's copy:
+    /// when `PreparedContactBlock.block.rotation` is present, each remaining contact must receive
+    /// the new capability before it can deliver again.
+    /// [`Self::contacts_needing_inbox_authorization`] returns that list and excludes the blocked
+    /// contact.
     ///
-    /// Requires a stored discovery key; if it is missing, regenerate the identity with
-    /// [`Self::prepare_generate_identity`] (which repairs the discovery key) before exporting.
+    /// Blocking an already-blocked contact performs no rotation, so repeating the call does not
+    /// churn every contact's capability. Its no-op operation must still be finalized or aborted.
+    ///
+    /// Commit the operation, atomically persist `PreparedContactBlock.block.contact` and any
+    /// host-owned publication work, then finalize the staged SecureStorage rotation. Abort only
+    /// after proving the host transaction did not commit.
     ///
     /// # Examples
     /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
-    /// # use std::sync::Arc;
-    /// # fn persist_backup_blob(_blob: &[u8]) -> Result<(), ClientError> { Ok(()) }
-    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// # let prepared = store.prepare_generate_identity()?;
-    /// # store.commit_operation(prepared.operation.identifier.clone())?;
-    /// # store.finalize_operation(prepared.operation.identifier)?;
-    /// let blob = store.export_encrypted_backup("strong passphrase".into())?;
-    /// persist_backup_blob(&blob)?;
-    /// # Ok::<(), ClientError>(())
+    /// use roost_client::{Client, ClientError, IdentityKey, Contacts, ProtocolStateEntry};
+    ///
+    /// fn block(
+    ///     client: &Client,
+    ///     snapshot: Vec<ProtocolStateEntry>,
+    ///     identity_key: IdentityKey,
+    /// ) -> Result<(), ClientError> {
+    ///     let prepared = client.contacts().prepare_block_contact(snapshot, identity_key)?;
+    ///     client.commit_operation(prepared.operation.identifier.clone())?;
+    ///     // Persist `prepared.block.contact`, publication work, and the identifier atomically.
+    ///     client.finalize_operation(prepared.operation.identifier)?;
+    ///     Ok(())
+    /// }
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::BackupFailed`] on randomness failure, Argon2id derivation error, or
-    ///   authenticated encryption failure.
-    /// - [`ClientError::Corrupt`] if identity keys are incomplete or the discovery key does not
-    ///   verify against the current identity.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if a stored identity key has the wrong byte length.
-    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure when loading an identity.
-    ///
-    /// # Performance
-    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
-    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
-    /// hashing step using 64 MiB memory and 3 iterations.
-    pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, ClientError> {
-        let passphrase = Zeroizing::new(passphrase);
-        Ok(self.inner.export_encrypted_backup(&passphrase)?)
-    }
-
-    /// Prepares restoration of an encrypted identity backup.
-    ///
-    /// The backup is decrypted and the restored discovery key is validated against the restored
-    /// identity before staging changes, so a wrong passphrase or malformed blob leaves the
-    /// existing identity untouched. Commit the operation, atomically wipe or replace host-owned
-    /// Session, deduplication, and pending-acknowledgment state, then finalize. Prekey use stays
-    /// blocked until [`Self::prepare_rotate_inbox_now`] advances the restored identity to a fresh
-    /// inbox generation. This prevents reuse of prekey identifiers that the backed-up generation
-    /// may already have published.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
-    /// # use std::sync::Arc;
-    /// // Source keystore: generate an identity and export an encrypted backup.
-    /// let source: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// let source_store = KeyStore::new(source);
-    /// let identity = source_store.prepare_generate_identity()?;
-    /// source_store.commit_operation(identity.operation.identifier.clone())?;
-    /// source_store.finalize_operation(identity.operation.identifier)?;
-    /// let blob = source_store.export_encrypted_backup("strong passphrase".into())?;
-    ///
-    /// // Restored keystore: import the blob into a fresh store.
-    /// let destination: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// let destination_store = KeyStore::new(destination);
-    /// let operation = destination_store.prepare_import_encrypted_backup(
-    ///     blob,
-    ///     "strong passphrase".into(),
-    /// )?;
-    /// destination_store.commit_operation(operation.identifier.clone())?;
-    /// // Atomically wipe host-owned protocol state here.
-    /// destination_store.finalize_operation(operation.identifier)?;
-    /// let rotation = destination_store.prepare_rotate_inbox_now()?;
-    /// destination_store.commit_operation(rotation.operation.identifier.clone())?;
-    /// // Publish `rotation.rotation.publication` and persist the identifier atomically.
-    /// destination_store.finalize_operation(rotation.operation.identifier)?;
-    /// # Ok::<(), ClientError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`ClientError::BackupFailed`] on Argon2id derivation failure.
-    /// - [`ClientError::DecryptionFailed`] on wrong passphrase or backup authentication failure.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::Corrupt`] if the backup's discovery key is not signed by the backup's
-    ///   identity key.
-    /// - [`ClientError::InvalidData`] on a malformed header, authenticated unsupported version,
-    ///   out-of-range Argon2id parameters, or a malformed discovery-key blob.
+    /// - [`ClientError::InvalidData`] if `identity_key` has the wrong length.
+    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure during commit.
-    ///
-    /// # Performance
-    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
-    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
-    /// hashing step using 64 MiB memory and 3 iterations.
-    pub fn prepare_import_encrypted_backup(
-        &self,
-        data: Vec<u8>,
-        passphrase: String,
-    ) -> Result<KeyStoreOperation, ClientError> {
-        let data = Zeroizing::new(data);
-        let passphrase = Zeroizing::new(passphrase);
-        Ok(self
-            .inner
-            .prepare_import_encrypted_backup(data.as_slice(), passphrase.as_str())?
-            .operation
-            .into())
-    }
-
-    /// Prepares deletion of all stored prekeys, discovery-key, and identity material.
-    ///
-    /// Commit the operation, atomically wipe host-owned protocol state, then finalize. Calling this
-    /// on an empty store still produces an idempotent recoverable operation.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, InMemorySecureStorage, KeyStore, SecureStorage};
-    /// # use std::sync::Arc;
-    /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// # let store = KeyStore::new(storage);
-    /// let operation = store.prepare_reset()?;
-    /// store.commit_operation(operation.identifier.clone())?;
-    /// // Atomically wipe host-owned protocol state here.
-    /// store.finalize_operation(operation.identifier)?;
-    /// # Ok::<(), ClientError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
+    /// - [`ClientError::ProtocolStateFault`] if no contact is stored for `identity_key`, or its
+    ///   blob is malformed.
     /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_reset(&self) -> Result<KeyStoreOperation, ClientError> {
-        Ok(self.inner.prepare_reset()?.operation.into())
-    }
-}
-
-impl KeyStore {
-    fn convert_prepared<T, U>(
+    pub fn prepare_block_contact(
         &self,
-        prepared: CorePreparedKeyStoreOperation<T>,
-        convert: impl FnOnce(T) -> Result<U, ClientError>,
-    ) -> Result<(KeyStoreOperation, U), ClientError> {
-        let identifier = prepared.operation.identifier;
-        let operation = prepared.operation.into();
-        match convert(prepared.output) {
-            Ok(output) => Ok((operation, output)),
-            Err(error) => match self.inner.abort_operation(identifier) {
-                Ok(_) => Err(error),
-                Err(abort_error) => Err(ClientError::OperationRecoveryRequired {
-                    operation_identifier: identifier.as_bytes().to_vec(),
-                    reason: format!(
-                        "prepared output conversion failed and cleanup also failed: {abort_error}"
-                    ),
-                }),
-            },
-        }
+        snapshot: Vec<ProtocolStateEntry>,
+        identity_key: FfiIdentityKey,
+    ) -> Result<PreparedContactBlock, ClientError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let prepared = self
+            .inner
+            .prepare_block_contact(&snapshot, identity_key.to_core()?)?;
+        let (operation, block) = convert_prepared(&self.inner, prepared, |blocked| {
+            Ok(ContactBlock {
+                contact: ContactStateChange::from_core(blocked.contact)?,
+                rotation: blocked.rotation.map(inbox_rotation_from_core),
+            })
+        })?;
+        Ok(PreparedContactBlock { operation, block })
     }
 }
 
+fn convert_prepared<T, U>(
+    store: &CoreKeyStore,
+    prepared: CorePreparedKeyStoreOperation<T>,
+    convert: impl FnOnce(T) -> Result<U, ClientError>,
+) -> Result<(KeyStoreOperation, U), ClientError> {
+    let identifier = prepared.operation.identifier;
+    let operation = prepared.operation.into();
+    match convert(prepared.output) {
+        Ok(output) => Ok((operation, output)),
+        Err(error) => match store.abort_operation(identifier) {
+            Ok(_) => Err(error),
+            Err(abort_error) => Err(ClientError::OperationRecoveryRequired {
+                operation_identifier: identifier.as_bytes().to_vec(),
+                reason: format!(
+                    "prepared output conversion failed and cleanup also failed: {abort_error}"
+                ),
+            }),
+        },
+    }
+}
 fn inbox_rotation_from_core(rotation: roost_core::InboxRotation) -> InboxRotation {
     InboxRotation {
         publication: rotation.publication.into(),
@@ -1578,7 +1790,7 @@ fn check_signable_transcript(transcript: &[u8]) -> Result<(), ClientError> {
 }
 
 #[cfg(test)]
-impl KeyStore {
+impl Client {
     fn complete_prepared<T>(
         &self,
         operation: KeyStoreOperation,
@@ -1590,7 +1802,7 @@ impl KeyStore {
     }
 
     pub(crate) fn generate_identity(&self) -> Result<Identity, ClientError> {
-        let prepared = self.prepare_generate_identity()?;
+        let prepared = self.identity().prepare_generate_identity()?;
         self.complete_prepared(prepared.operation, prepared.identity)
     }
 
@@ -1598,31 +1810,33 @@ impl KeyStore {
         &self,
         batch_size: u32,
     ) -> Result<Vec<OneTimePreKeyBundle>, ClientError> {
-        let prepared = self.prepare_generate_one_time_prekeys(batch_size)?;
+        let prepared = self
+            .identity()
+            .prepare_generate_one_time_prekeys(batch_size)?;
         self.complete_prepared(prepared.operation, prepared.one_time_prekeys)
     }
 
     pub(crate) fn replenish_one_time_prekeys(
         &self,
     ) -> Result<Vec<OneTimePreKeyBundle>, ClientError> {
-        let prepared = self.prepare_replenish_one_time_prekeys()?;
+        let prepared = self.identity().prepare_replenish_one_time_prekeys()?;
         self.complete_prepared(prepared.operation, prepared.one_time_prekeys)
     }
 
     pub(crate) fn rotate_inbox_now(&self) -> Result<InboxRotation, ClientError> {
-        let prepared = self.prepare_rotate_inbox_now()?;
+        let prepared = self.identity().prepare_rotate_inbox_now()?;
         self.complete_prepared(prepared.operation, prepared.rotation)
     }
 
     pub(crate) fn rotate_signed_prekey_if_stale(
         &self,
     ) -> Result<Option<SignedPreKeyBundle>, ClientError> {
-        let prepared = self.prepare_rotate_signed_prekey_if_stale()?;
+        let prepared = self.identity().prepare_rotate_signed_prekey_if_stale()?;
         self.complete_prepared(prepared.operation, prepared.signed_prekey)
     }
 
     pub(crate) fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, ClientError> {
-        let prepared = self.prepare_rotate_signed_prekey_now()?;
+        let prepared = self.identity().prepare_rotate_signed_prekey_now()?;
         let signed_prekey = prepared.signed_prekey.ok_or(ClientError::InternalError {
             reason: "forced signed-prekey rotation returned no bundle".into(),
         })?;
@@ -1636,13 +1850,13 @@ impl KeyStore {
         message: Message,
     ) -> Result<SessionAcceptanceResult, ClientError> {
         let selection = crate::PreKeySelection {
-            signed_prekey_identifier: self.current_signed_prekey_bundle()?.identifier,
+            signed_prekey_identifier: self.identity().current_signed_prekey_bundle()?.identifier,
             one_time_prekey_identifier: message
                 .prekey_reference
                 .as_ref()
                 .and_then(|p| p.one_time_prekey_identifier),
         };
-        let prepared = self.prepare_accept_session_with_transport_binding(
+        let prepared = self.messaging().prepare_accept_session(
             session_key,
             initiator_identity,
             message,
@@ -1657,12 +1871,12 @@ impl KeyStore {
 
 #[cfg(test)]
 mod tests {
-    use super::{KeyStore, KeyStoreOperationStatus, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
+    use super::{Client, KeyStoreOperationStatus, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
     use crate::{
         ClientError, InMemorySecureStorage, SecureStorage,
         protocol::{
-            ContactDiscoveryKey, ContactIdentity, IdentityKey, ProtocolStateEngine,
-            ProtocolStateEntry, ProtocolStateKind, ProtocolStateUpdate,
+            ContactDiscoveryKey, ContactIdentity, IdentityKey, ProtocolStateEntry,
+            ProtocolStateKind, ProtocolStateUpdate,
         },
         records::{
             DiscoveryKeyBundle as FfiDiscoveryKeyBundle, Identity as FfiIdentity,
@@ -1806,6 +2020,7 @@ mod tests {
         );
 
         let signature_bytes = store
+            .identity()
             .sign_authentication_transcript(transcript.clone())
             .unwrap();
 
@@ -1827,7 +2042,10 @@ mod tests {
         }
         // Ed25519 is deterministic, so a host retrying the same challenge resends the same proof.
         assert_eq!(
-            store.sign_authentication_transcript(transcript).unwrap(),
+            store
+                .identity()
+                .sign_authentication_transcript(transcript)
+                .unwrap(),
             signature_bytes
         );
     }
@@ -1845,7 +2063,7 @@ mod tests {
             let mut preimage = context.as_bytes().to_vec();
             preimage.extend_from_slice(&identity.x25519_public_key);
             preimage.extend_from_slice(&identity.ed25519_verifying_key);
-            match store.sign_authentication_transcript(preimage) {
+            match store.identity().sign_authentication_transcript(preimage) {
                 Err(ClientError::InvalidData { .. }) => {}
                 Err(error) => panic!("expected InvalidData for {context}, got {error}"),
                 Ok(_) => panic!("expected InvalidData for {context}"),
@@ -1858,18 +2076,21 @@ mod tests {
         let store = key_store();
         store.generate_identity().unwrap();
 
-        match store.sign_authentication_transcript(Vec::new()) {
+        match store.identity().sign_authentication_transcript(Vec::new()) {
             Err(ClientError::InvalidData { .. }) => {}
             other => panic!("expected InvalidData for an empty transcript, got {other:?}"),
         }
-        match store
-            .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN + 1])
-        {
+        match store.identity().sign_authentication_transcript(vec![
+            0x41;
+            MAX_AUTHENTICATION_TRANSCRIPT_LEN
+                + 1
+        ]) {
             Err(ClientError::InvalidData { .. }) => {}
             other => panic!("expected InvalidData past the length cap, got {other:?}"),
         }
         assert!(
             store
+                .identity()
                 .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN])
                 .is_ok()
         );
@@ -1879,21 +2100,24 @@ mod tests {
     fn sign_authentication_transcript_requires_a_stored_identity() {
         let store = key_store();
 
-        match store.sign_authentication_transcript(b"Relay-HTTP-Auth-v1".to_vec()) {
+        match store
+            .identity()
+            .sign_authentication_transcript(b"Relay-HTTP-Auth-v1".to_vec())
+        {
             Err(ClientError::NotFound) => {}
             other => panic!("expected NotFound without an identity, got {other:?}"),
         }
     }
 
-    fn key_store() -> Arc<KeyStore> {
+    fn key_store() -> Arc<Client> {
         let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-        KeyStore::new(storage)
+        Client::new(storage)
     }
 
     #[test]
     fn prepared_identity_lifecycle_crosses_the_uniffi_boundary() {
         let store = key_store();
-        let prepared = store.prepare_generate_identity().unwrap();
+        let prepared = store.identity().prepare_generate_identity().unwrap();
         let identifier = prepared.operation.identifier.clone();
 
         assert_eq!(identifier.len(), 16);
@@ -1902,14 +2126,14 @@ mod tests {
             store.operation_status(identifier.clone()).unwrap(),
             KeyStoreOperationStatus::Prepared
         ));
-        assert!(!store.has_identity().unwrap());
+        assert!(!store.identity().has_identity().unwrap());
 
         assert!(matches!(
             store.commit_operation(identifier.clone()).unwrap(),
             KeyStoreOperationStatus::Committed
         ));
         assert!(matches!(
-            store.has_identity(),
+            store.identity().has_identity(),
             Err(ClientError::OperationRecoveryRequired {
                 operation_identifier,
                 ..
@@ -1925,7 +2149,7 @@ mod tests {
             KeyStoreOperationStatus::Finalized
         ));
         assert_eq!(
-            store.load_identity().unwrap().x25519_public_key,
+            store.identity().load_identity().unwrap().x25519_public_key,
             prepared.identity.x25519_public_key
         );
     }
@@ -2025,8 +2249,8 @@ mod tests {
         key_store.generate_identity().unwrap();
         key_store.rotate_signed_prekey_now().unwrap();
 
-        let publication = key_store.current_publication_bundle().unwrap();
-        let capability = key_store.current_delivery_capability().unwrap();
+        let publication = key_store.identity().current_publication_bundle().unwrap();
+        let capability = key_store.identity().current_delivery_capability().unwrap();
 
         assert_eq!(publication.recipient_delivery_verifier.len(), 32);
         assert_eq!(capability.len(), 32);
@@ -2051,7 +2275,7 @@ mod tests {
         let identity = key_store.generate_identity().unwrap();
         key_store.rotate_signed_prekey_now().unwrap();
 
-        let publication = key_store.current_publication_bundle().unwrap();
+        let publication = key_store.identity().current_publication_bundle().unwrap();
 
         assert_eq!(publication.discovery_to_identity.len(), 64);
         assert_ne!(publication.discovery_to_identity, vec![0u8; 64]);
@@ -2132,7 +2356,7 @@ mod tests {
 
     #[test]
     fn wipe_returns_only_active_protocol_state_kinds() {
-        let engine = ProtocolStateEngine::new();
+        let engine = Client::new(Arc::new(InMemorySecureStorage::new())).messaging();
 
         let updates = engine.wipe(Vec::new(), vec![0x44; 16]).unwrap();
 
@@ -2178,7 +2402,7 @@ mod tests {
             .rotate_signed_prekey_if_stale()
             .unwrap()
             .expect("first rotate must produce a bundle");
-        let discovery = store.current_discovery_key_bundle().unwrap();
+        let discovery = store.identity().current_discovery_key_bundle().unwrap();
         let crypto_discovery = assert_discovery_key_verifies(&identity, &discovery);
         assert_signed_prekey_verifies(&signed_prekey, &crypto_discovery);
     }
@@ -2188,7 +2412,7 @@ mod tests {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
-        let publication = store.current_publication_bundle().unwrap();
+        let publication = store.identity().current_publication_bundle().unwrap();
         assert_publication_verifies(&identity, &publication);
     }
 
@@ -2196,7 +2420,7 @@ mod tests {
     fn generate_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        let discovery = store.current_discovery_key_bundle().unwrap();
+        let discovery = store.identity().current_discovery_key_bundle().unwrap();
         let bundles = store.generate_one_time_prekeys(3).unwrap();
 
         assert_eq!(bundles.len(), 3);
@@ -2216,7 +2440,7 @@ mod tests {
     fn rotate_inbox_now_advances_epoch_and_returns_verifiable_records() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        let initial_discovery = store.current_discovery_key_bundle().unwrap();
+        let initial_discovery = store.identity().current_discovery_key_bundle().unwrap();
         let rotation = store.rotate_inbox_now().unwrap();
         assert_eq!(
             rotation.publication.discovery_key.epoch,
@@ -2227,7 +2451,7 @@ mod tests {
         assert_eq!(rotation.capability.len(), 32);
         assert_eq!(
             rotation.capability,
-            store.current_delivery_capability().unwrap()
+            store.identity().current_delivery_capability().unwrap()
         );
     }
 
@@ -2235,7 +2459,7 @@ mod tests {
     fn replenish_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        let discovery = store.current_discovery_key_bundle().unwrap();
+        let discovery = store.identity().current_discovery_key_bundle().unwrap();
         let bundles = store.replenish_one_time_prekeys().unwrap();
 
         assert_eq!(bundles.len(), 100);
@@ -2252,12 +2476,13 @@ mod tests {
         let alice_identity = alice.generate_identity().unwrap();
         let bob_identity = bob.generate_identity().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_publication = bob.identity().current_publication_bundle().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
 
         let session_key = vec![0x44; 16];
         let initiation = alice
-            .initiate_session_with_transport_binding(
+            .messaging()
+            .initiate_session(
                 session_key.clone(),
                 bob_identity,
                 bob_publication,
@@ -2293,11 +2518,12 @@ mod tests {
         let alice_identity = alice.generate_identity().unwrap();
         let bob_identity = bob.generate_identity().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_publication = bob.identity().current_publication_bundle().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
         let session_key = vec![0x55; 16];
         let initiation = alice
-            .initiate_session_with_transport_binding(
+            .messaging()
+            .initiate_session(
                 session_key.clone(),
                 bob_identity.clone(),
                 bob_publication.clone(),
@@ -2318,23 +2544,26 @@ mod tests {
             )
             .unwrap();
 
-        let engine = ProtocolStateEngine::new();
+        let engine = Client::new(Arc::new(InMemorySecureStorage::new())).messaging();
         let mut alice_snapshot = Vec::new();
         apply_updates(&mut alice_snapshot, initiation.state_updates);
-        let change = engine
+        let change = alice
+            .contacts()
             .record_contact(
                 Vec::new(),
                 contact_identity(&bob_identity, &bob_publication),
             )
             .unwrap();
         apply_updates(&mut alice_snapshot, change.state_updates);
-        let accepted = engine
+        let accepted = alice
+            .contacts()
             .accept_contact(copy_snapshot(&alice_snapshot), identity_key(&bob_identity))
             .unwrap();
         apply_updates(&mut alice_snapshot, accepted.state_updates);
 
         let outbound = alice
-            .encrypt_message_with_transport_binding(
+            .messaging()
+            .encrypt_message(
                 copy_snapshot(&alice_snapshot),
                 session_key.clone(),
                 vec![0x77; 16],
@@ -2368,12 +2597,13 @@ mod tests {
         let bob_identity = bob.generate_identity().unwrap();
         alice.rotate_signed_prekey_now().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let alice_publication = alice.current_publication_bundle().unwrap();
-        let bob_publication = bob.current_publication_bundle().unwrap();
+        let alice_publication = alice.identity().current_publication_bundle().unwrap();
+        let bob_publication = bob.identity().current_publication_bundle().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
         let session_key = vec![0x66; 16];
         let initiation = alice
-            .initiate_session_with_transport_binding(
+            .messaging()
+            .initiate_session(
                 session_key.clone(),
                 bob_identity.clone(),
                 bob_publication.clone(),
@@ -2394,22 +2624,25 @@ mod tests {
             )
             .unwrap();
 
-        let engine = ProtocolStateEngine::new();
+        let engine = Client::new(Arc::new(InMemorySecureStorage::new())).messaging();
         let mut alice_snapshot = Vec::new();
         apply_updates(&mut alice_snapshot, initiation.state_updates);
-        let change = engine
+        let change = alice
+            .contacts()
             .record_contact(
                 Vec::new(),
                 contact_identity(&bob_identity, &bob_publication),
             )
             .unwrap();
         apply_updates(&mut alice_snapshot, change.state_updates);
-        let accepted = engine
+        let accepted = alice
+            .contacts()
             .accept_contact(copy_snapshot(&alice_snapshot), identity_key(&bob_identity))
             .unwrap();
         apply_updates(&mut alice_snapshot, accepted.state_updates);
         let outbound = alice
-            .encrypt_message_with_transport_binding(
+            .messaging()
+            .encrypt_message(
                 alice_snapshot,
                 session_key.clone(),
                 vec![0x88; 16],
@@ -2436,7 +2669,7 @@ mod tests {
                     .unwrap(),
             ],
         );
-        let result = bob.decrypt_message_with_transport_bindings(
+        let result = bob.messaging().decrypt_message(
             bob_snapshot,
             session_key,
             deduplication_key,

@@ -1,4 +1,4 @@
-package com.aurelion.aether
+package io.github.relaynet.roost
 
 import java.security.KeyFactory
 import java.security.MessageDigest
@@ -8,7 +8,7 @@ import java.security.spec.X509EncodedKeySpec
 // Exercises signAuthenticationTranscript through the generated Kotlin surface.
 //
 // This file exists because the identity key could sign nothing a caller
-// defined. Every KeyStore accessor returned public material and Identity
+// defined. Every Client accessor returned public material and Identity
 // carried a verifying key with no signing capability, so a relay authentication
 // transcript (REL-RLY-16) — Relay's construction, not Aether's — could not be
 // signed on either mobile platform. Rust tests could not catch that: roost-core
@@ -72,9 +72,9 @@ private fun verifies(identitySigningKey: ByteArray, message: ByteArray, signatur
     return verifier.verify(signature)
 }
 
-private fun checkInvalidData(store: KeyStore, transcript: ByteArray, message: String) {
+private fun checkInvalidData(store: Client, transcript: ByteArray, message: String) {
     try {
-        store.signAuthenticationTranscript(transcript)
+        store.identity().signAuthenticationTranscript(transcript)
         check(false, message)
     } catch (error: ClientException.InvalidData) {
         // Expected.
@@ -82,14 +82,14 @@ private fun checkInvalidData(store: KeyStore, transcript: ByteArray, message: St
 }
 
 fun main() {
-    val store = KeyStore(MemorySecureStorage())
-    val prepared = store.prepareGenerateIdentity()
+    val store = Client(MemorySecureStorage())
+    val prepared = store.identity().prepareGenerateIdentity()
     store.commitOperation(prepared.operation.identifier)
     store.finalizeOperation(prepared.operation.identifier)
     val identity = prepared.identity
     val transcript = httpTranscript(identity.ed25519VerifyingKey)
 
-    val signature = store.signAuthenticationTranscript(transcript)
+    val signature = store.identity().signAuthenticationTranscript(transcript)
     check(signature.size == 64, "an Ed25519 signature must cross as 64 bytes")
 
     check(
@@ -106,7 +106,7 @@ fun main() {
 
     // Ed25519 is deterministic; a retried challenge must resend the same proof.
     check(
-        store.signAuthenticationTranscript(transcript).contentEquals(signature),
+        store.identity().signAuthenticationTranscript(transcript).contentEquals(signature),
         "signing the same transcript twice must produce the same bytes",
     )
 

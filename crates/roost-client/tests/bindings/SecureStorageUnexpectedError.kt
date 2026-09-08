@@ -1,4 +1,4 @@
-package com.aurelion.aether
+package io.github.relaynet.roost
 
 private const val injectedReason = "injected foreign storage failure"
 
@@ -27,10 +27,10 @@ private fun requireRegression(condition: Boolean, message: String) {
 }
 
 fun main() {
-    val store = KeyStore(ThrowingSecureStorage())
+    val store = Client(ThrowingSecureStorage())
 
     try {
-        store.hasIdentity()
+        store.identity().hasIdentity()
         throw IllegalStateException("expected unexpected foreign storage exception")
     } catch (error: ClientException.Storage) {
         requireRegression(
@@ -39,6 +39,6 @@ fun main() {
         )
     }
 
-    requireRegression(!store.hasIdentity(), "storage mutex remains usable")
+    requireRegression(!store.identity().hasIdentity(), "storage mutex remains usable")
     println("Kotlin SecureStorage unexpected-error regression passed")
 }

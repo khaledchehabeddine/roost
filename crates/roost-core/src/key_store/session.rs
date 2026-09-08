@@ -242,7 +242,7 @@ impl KeyStore {
             transport_binding,
         )?;
         let message = message_from_handshake_envelope(envelope)?;
-        let engine = crate::ProtocolStateEngine::new();
+        let engine = &self.0.engine;
         let state_updates = vec![
             engine.set_session_state_with_peer_identity_key(
                 input.session_key.clone(),
@@ -387,7 +387,7 @@ impl KeyStore {
                 .consume_one_time_prekey(prekey_reference.discovery_epoch, id)?;
         }
 
-        let engine = crate::ProtocolStateEngine::new();
+        let engine = &self.0.engine;
         let state_updates = vec![
             engine.set_session_state_with_peer_identity(
                 input.session_key.clone(),

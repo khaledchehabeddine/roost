@@ -27,13 +27,13 @@ private final class TransportBindingMemoryStorage: SecureStorage, @unchecked Sen
 @main
 struct TransportBindingBindings {
     static func main() throws {
-        let alice = KeyStore(storage: TransportBindingMemoryStorage())
-        let bob = KeyStore(storage: TransportBindingMemoryStorage())
+        let alice = Client(storage: TransportBindingMemoryStorage())
+        let bob = Client(storage: TransportBindingMemoryStorage())
         let aliceIdentity = try generateIdentity(alice)
         let bobIdentity = try generateIdentity(bob)
         try rotateSignedPrekey(alice)
         try rotateSignedPrekey(bob)
-        let bobPublication = try bob.currentPublicationBundle()
+        let bobPublication = try bob.identity().currentPublicationBundle()
         let bobOneTimePrekey = try replenishOneTimePrekeys(bob)[0]
         let initialBinding = TransportBinding(bytes: Data("consumer-owned initial metadata".utf8))
         let prekeySelection = PreKeySelection(
@@ -42,7 +42,7 @@ struct TransportBindingBindings {
         )
         let sessionKey = Data(repeating: 0x58, count: 16)
         expectInvalidData("empty Transport Binding") {
-            _ = try alice.initiateSessionWithTransportBinding(
+            _ = try alice.messaging().initiateSession(
                 sessionKey: sessionKey,
                 responderIdentity: bobIdentity,
                 responderPublication: bobPublication,
@@ -54,7 +54,7 @@ struct TransportBindingBindings {
             )
         }
         expectInvalidData("oversized Transport Binding") {
-            _ = try alice.initiateSessionWithTransportBinding(
+            _ = try alice.messaging().initiateSession(
                 sessionKey: sessionKey,
                 responderIdentity: bobIdentity,
                 responderPublication: bobPublication,
@@ -65,7 +65,7 @@ struct TransportBindingBindings {
                 transportBinding: TransportBinding(bytes: Data(repeating: 0x41, count: 1_025))
             )
         }
-        let initiation = try alice.initiateSessionWithTransportBinding(
+        let initiation = try alice.messaging().initiateSession(
             sessionKey: sessionKey,
             responderIdentity: bobIdentity,
             responderPublication: bobPublication,
@@ -75,7 +75,7 @@ struct TransportBindingBindings {
             plaintext: Data("transport-bound hello".utf8),
             transportBinding: initialBinding
         )
-        let hint = try bob.initiatorIdentityHintWithTransportBinding(
+        let hint = try bob.messaging().initiatorIdentityHint(
             message: initiation.message,
             transportBinding: initialBinding,
             prekeySelection: prekeySelection
@@ -92,7 +92,7 @@ struct TransportBindingBindings {
             prekeySelection: prekeySelection
         )
         expectAuthenticationFailed("maximum unsigned prekey identifiers") {
-            _ = try bob.initiatorIdentityHintWithTransportBinding(
+            _ = try bob.messaging().initiatorIdentityHint(
                 message: initiation.message,
                 transportBinding: initialBinding,
                 prekeySelection: PreKeySelection(
@@ -102,7 +102,7 @@ struct TransportBindingBindings {
             )
         }
 
-        let prepared = try bob.prepareAcceptSessionWithTransportBinding(
+        let prepared = try bob.messaging().prepareAcceptSession(
             sessionKey: sessionKey,
             initiatorIdentity: nil,
             message: initiation.message,
@@ -117,13 +117,14 @@ struct TransportBindingBindings {
         apply(&aliceSnapshot, updates: initiation.stateUpdates)
         var bobSnapshot: [ProtocolStateEntry] = []
         apply(&bobSnapshot, updates: prepared.acceptance.stateUpdates)
-        let engine = ProtocolStateEngine()
-        let recorded = try engine.recordContact(
+        let contacts = alice.contacts()
+        let messaging = bob.messaging()
+        let recorded = try contacts.recordContact(
             snapshot: aliceSnapshot,
             contactIdentity: contactIdentity(identity: bobIdentity, publication: bobPublication)
         )
         apply(&aliceSnapshot, updates: recorded.stateUpdates)
-        let acceptedContact = try engine.acceptContact(
+        let acceptedContact = try contacts.acceptContact(
             snapshot: aliceSnapshot,
             identityKey: identityKey(bobIdentity)
         )
@@ -143,7 +144,7 @@ struct TransportBindingBindings {
         let acknowledgmentBinding = TransportBinding(
             bytes: Data("consumer-owned acknowledgment metadata".utf8)
         )
-        let outbound = try alice.encryptMessageWithTransportBinding(
+        let outbound = try alice.messaging().encryptMessage(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             messageId: Data(repeating: 0x59, count: 16),
@@ -159,19 +160,19 @@ struct TransportBindingBindings {
         let deduplicationKey = Data("binding-dedup".utf8)
         apply(
             &bobSnapshot,
-            updates: [try engine.initializeDeduplicationSet(key: deduplicationKey)]
+            updates: [try messaging.initializeDeduplicationSet(key: deduplicationKey)]
         )
         let changedMessageBinding = TransportBinding(
             bytes: Data("changed consumer-owned message metadata".utf8)
         )
         expectAuthenticationFailed("established decryption with changed binding bytes") {
-            _ = try bob.decryptMessageWithTransportBindings(
+            _ = try bob.messaging().decryptMessage(
                 snapshot: bobSnapshot,
                 sessionKey: sessionKey,
                 deduplicationKey: deduplicationKey,
                 message: outbound.message,
                 acknowledgmentId: Data(repeating: 0x5a, count: 16),
-                acknowledgmentRecipientPublicKey: (try alice.currentPublicationBundle()).discoveryKey.publicKey,
+                acknowledgmentRecipientPublicKey: (try alice.identity().currentPublicationBundle()).discoveryKey.publicKey,
                 acknowledgmentTimestampMillis: 1_700_000_000_101,
                 acknowledgmentSenderCertificate: bobCertificate.certificate,
                 acknowledgmentSenderSignature: bobCertificate.signature,
@@ -180,13 +181,13 @@ struct TransportBindingBindings {
                 acknowledgmentTransportBinding: acknowledgmentBinding
             )
         }
-        let inbound = try bob.decryptMessageWithTransportBindings(
+        let inbound = try bob.messaging().decryptMessage(
             snapshot: bobSnapshot,
             sessionKey: sessionKey,
             deduplicationKey: deduplicationKey,
             message: outbound.message,
             acknowledgmentId: Data(repeating: 0x5a, count: 16),
-            acknowledgmentRecipientPublicKey: (try alice.currentPublicationBundle()).discoveryKey.publicKey,
+            acknowledgmentRecipientPublicKey: (try alice.identity().currentPublicationBundle()).discoveryKey.publicKey,
             acknowledgmentTimestampMillis: 1_700_000_000_101,
             acknowledgmentSenderCertificate: bobCertificate.certificate,
             acknowledgmentSenderSignature: bobCertificate.signature,
@@ -201,14 +202,14 @@ struct TransportBindingBindings {
             bytes: Data("changed consumer-owned acknowledgment metadata".utf8)
         )
         expectAuthenticationFailed("acknowledgment with changed binding bytes") {
-            _ = try alice.processAcknowledgmentWithTransportBinding(
+            _ = try alice.messaging().processAcknowledgment(
                 snapshot: aliceSnapshot,
                 sessionKey: sessionKey,
                 message: acknowledgment,
                 transportBinding: changedAcknowledgmentBinding
             )
         }
-        let acknowledgmentOutcome = try alice.processAcknowledgmentWithTransportBinding(
+        let acknowledgmentOutcome = try alice.messaging().processAcknowledgment(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             message: acknowledgment,
@@ -220,7 +221,7 @@ struct TransportBindingBindings {
     }
 
     private static func expectMismatchedPrekeySelection(
-        _ store: KeyStore,
+        _ store: Client,
         message: Message,
         transportBinding: TransportBinding,
         prekeySelection: PreKeySelection
@@ -230,7 +231,7 @@ struct TransportBindingBindings {
             oneTimePrekeyIdentifier: prekeySelection.oneTimePrekeyIdentifier! + 1
         )
         do {
-            _ = try store.initiatorIdentityHintWithTransportBinding(
+            _ = try store.messaging().initiatorIdentityHint(
                 message: message,
                 transportBinding: transportBinding,
                 prekeySelection: mismatched
@@ -277,24 +278,24 @@ struct TransportBindingBindings {
         }
     }
 
-    private static func generateIdentity(_ store: KeyStore) throws -> Identity {
-        let prepared = try store.prepareGenerateIdentity()
+    private static func generateIdentity(_ store: Client) throws -> Identity {
+        let prepared = try store.identity().prepareGenerateIdentity()
         try complete(store, operation: prepared.operation)
         return prepared.identity
     }
 
-    private static func rotateSignedPrekey(_ store: KeyStore) throws {
-        let prepared = try store.prepareRotateSignedPrekeyNow()
+    private static func rotateSignedPrekey(_ store: Client) throws {
+        let prepared = try store.identity().prepareRotateSignedPrekeyNow()
         try complete(store, operation: prepared.operation)
     }
 
-    private static func replenishOneTimePrekeys(_ store: KeyStore) throws -> [OneTimePreKeyBundle] {
-        let prepared = try store.prepareReplenishOneTimePrekeys()
+    private static func replenishOneTimePrekeys(_ store: Client) throws -> [OneTimePreKeyBundle] {
+        let prepared = try store.identity().prepareReplenishOneTimePrekeys()
         try complete(store, operation: prepared.operation)
         return prepared.oneTimePrekeys
     }
 
-    private static func complete(_ store: KeyStore, operation: KeyStoreOperation) throws {
+    private static func complete(_ store: Client, operation: KeyStoreOperation) throws {
         _ = try store.commitOperation(identifier: operation.identifier)
         _ = try store.finalizeOperation(identifier: operation.identifier)
     }

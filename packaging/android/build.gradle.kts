@@ -12,10 +12,10 @@ val aetherMavenRepoProvider = providers.gradleProperty("aetherMavenRepo")
     .orElse(layout.projectDirectory.dir("../../target/android/maven").asFile.absolutePath)
 val aetherArtifactIdProvider = providers.gradleProperty("aetherArtifactId")
     .orElse(providers.environmentVariable("AETHER_ANDROID_ARTIFACT_ID"))
-    .orElse("aether")
+    .orElse("roost")
 
 allprojects {
-    group = "com.aurelion"
+    group = "io.github.relaynet"
     version = aetherVersionProvider.get()
 
     extensions.extraProperties["aetherVersion"] = aetherVersionProvider.get()

@@ -1,4 +1,4 @@
-package com.aurelion.aether
+package io.github.relaynet.roost
 
 import java.nio.ByteBuffer
 import java.security.KeyFactory

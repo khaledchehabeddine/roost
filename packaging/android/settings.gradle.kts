@@ -20,7 +20,7 @@ dependencyResolutionManagement {
                 }
             }
             filter {
-                includeGroup("com.aurelion")
+                includeGroup("io.github.relaynet")
             }
         }
         google()
@@ -28,7 +28,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "aether-android-distribution"
+rootProject.name = "roost-android-distribution"
 
-include(":aether")
+include(":roost")
 include(":consumer")

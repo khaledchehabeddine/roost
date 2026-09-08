@@ -12,7 +12,7 @@ val issue122CoverageSource = rootProject.layout.projectDirectory
 val generatedCoverageDir = layout.buildDirectory.dir("generated/androidTest/kotlin")
 
 android {
-    namespace = "com.aurelion.aether.consumer"
+    namespace = "io.github.relaynet.roost.consumer"
     compileSdk = 36
 
     // The smoke test uses the legacy android.test instrumentation framework, which moved out of
@@ -21,7 +21,7 @@ android {
     useLibrary("android.test.base")
 
     defaultConfig {
-        applicationId = "com.aurelion.aether.consumer"
+        applicationId = "io.github.relaynet.roost.consumer"
         minSdk = 36
         targetSdk = 36
         versionCode = 1
@@ -53,7 +53,7 @@ kotlin {
 }
 
 dependencies {
-    implementation("com.aurelion:aether:$aetherVersion")
+    implementation("io.github.relaynet:roost:$aetherVersion")
 }
 
 // The issue-122 regression coverage lives outside this Gradle project. Stage it into a

@@ -1,4 +1,4 @@
-package com.aurelion.aether
+package io.github.relaynet.roost
 
 import java.security.KeyFactory
 import java.security.KeyPair
@@ -108,8 +108,8 @@ private fun checkInvalidData(message: String, block: () -> Unit) {
 }
 
 fun main() {
-    val store = KeyStore(MemorySecureStorage())
-    val prepared = store.prepareGenerateIdentity()
+    val store = Client(MemorySecureStorage())
+    val prepared = store.identity().prepareGenerateIdentity()
     store.commitOperation(prepared.operation.identifier)
     store.finalizeOperation(prepared.operation.identifier)
     val generated = prepared.identity

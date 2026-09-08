@@ -1,4 +1,4 @@
-import Aether
+import Roost
 import CryptoKit
 import Foundation
 import XCTest
@@ -29,7 +29,8 @@ private final class MemorySecureStorage: SecureStorage, @unchecked Sendable {
 
 final class Issue124PackageConsumerTests: XCTestCase {
     func testPackageConsumerExercisesIdentitySessionBackupAndMessagePath() throws {
-        let engine = ProtocolStateEngine()
+        let contacts = alice.contacts()
+        let messaging = bob.messaging()
         let domainSigner = Curve25519.Signing.PrivateKey()
         let signingKeyIdentifier = Data("issue-124-domain".utf8)
         let relayDomain = Data("relay.test".utf8)
@@ -46,14 +47,14 @@ final class Issue124PackageConsumerTests: XCTestCase {
             graceWindowSecs: 0
         )
 
-        let alice = KeyStore(storage: MemorySecureStorage())
-        let bob = KeyStore(storage: MemorySecureStorage())
+        let alice = Client(storage: MemorySecureStorage())
+        let bob = Client(storage: MemorySecureStorage())
         let aliceIdentity = try generateIdentity(alice)
         let bobIdentity = try generateIdentity(bob)
         try rotateSignedPrekeyNow(alice)
         try rotateSignedPrekeyNow(bob)
-        let alicePublication = try alice.currentPublicationBundle()
-        let bobPublication = try bob.currentPublicationBundle()
+        let alicePublication = try alice.identity().currentPublicationBundle()
+        let bobPublication = try bob.identity().currentPublicationBundle()
         let bobOneTimePrekey = try XCTUnwrap(try replenishOneTimePrekeys(bob).first)
 
         let aliceCertificate = try signedCertificate(
@@ -79,13 +80,13 @@ final class Issue124PackageConsumerTests: XCTestCase {
         )
         XCTAssertEqual(validated.identityKey, identityKey(aliceIdentity))
 
-        let backup = try alice.exportEncryptedBackup(passphrase: "issue-124-passphrase")
-        let restored = KeyStore(storage: MemorySecureStorage())
+        let backup = try alice.identity().exportEncryptedBackup(passphrase: "issue-124-passphrase")
+        let restored = Client(storage: MemorySecureStorage())
         try importEncryptedBackup(restored, data: backup, passphrase: "issue-124-passphrase")
-        XCTAssertTrue(try restored.hasIdentity())
+        XCTAssertTrue(try restored.identity().hasIdentity())
 
         let sessionKey = Data(repeating: 0x24, count: 16)
-        let initiation = try alice.initiateSessionWithTransportBinding(
+        let initiation = try alice.messaging().initiateSession(
             sessionKey: sessionKey,
             responderIdentity: bobIdentity,
             responderPublication: bobPublication,
@@ -95,7 +96,7 @@ final class Issue124PackageConsumerTests: XCTestCase {
             plaintext: Data("hello bob".utf8),
             transportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
-        let acceptancePreparation = try bob.prepareAcceptSessionWithTransportBinding(
+        let acceptancePreparation = try bob.messaging().prepareAcceptSession(
             sessionKey: sessionKey,
             initiatorIdentity: aliceIdentity,
             message: initiation.message,
@@ -114,18 +115,18 @@ final class Issue124PackageConsumerTests: XCTestCase {
 
         var aliceSnapshot: [ProtocolStateEntry] = []
         apply(&aliceSnapshot, initiation.stateUpdates)
-        let recorded = try engine.recordContact(
+        let recorded = try contacts.recordContact(
             snapshot: [],
             contactIdentity: contactIdentity(identity: bobIdentity, publication: bobPublication)
         )
         apply(&aliceSnapshot, recorded.stateUpdates)
-        let acceptedContact = try engine.acceptContact(
+        let acceptedContact = try contacts.acceptContact(
             snapshot: aliceSnapshot,
             identityKey: identityKey(bobIdentity)
         )
         apply(&aliceSnapshot, acceptedContact.stateUpdates)
 
-        let outbound = try alice.encryptMessageWithTransportBinding(
+        let outbound = try alice.messaging().encryptMessage(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             messageId: Data(repeating: 0x25, count: 16),
@@ -139,9 +140,9 @@ final class Issue124PackageConsumerTests: XCTestCase {
         )
         XCTAssertEqual(outbound.payloadKind, .encryptedText)
         apply(&aliceSnapshot, outbound.stateUpdates)
-        XCTAssertEqual(try engine.pendingAcknowledgments(snapshot: aliceSnapshot, key: sessionKey).count, 1)
+        XCTAssertEqual(try messaging.pendingAcknowledgments(snapshot: aliceSnapshot, key: sessionKey).count, 1)
         XCTAssertEqual(
-            try engine.retryInstructions(
+            try messaging.retryInstructions(
                 snapshot: aliceSnapshot,
                 key: sessionKey,
                 nowMillis: 1_700_000_001_001,
@@ -151,9 +152,9 @@ final class Issue124PackageConsumerTests: XCTestCase {
         )
 
         let deduplicationKey = Data("bob-dedup".utf8)
-        apply(&bobSnapshot, [try engine.initializeDeduplicationSet(key: deduplicationKey)])
+        apply(&bobSnapshot, [try messaging.initializeDeduplicationSet(key: deduplicationKey)])
 
-        let inbound = try bob.decryptMessageWithTransportBindings(
+        let inbound = try bob.messaging().decryptMessage(
             snapshot: bobSnapshot,
             sessionKey: sessionKey,
             deduplicationKey: deduplicationKey,
@@ -175,7 +176,7 @@ final class Issue124PackageConsumerTests: XCTestCase {
         XCTAssertTrue(inbound.stateUpdates.contains { $0.kind == .deduplicationSet })
         apply(&bobSnapshot, inbound.stateUpdates)
 
-        let duplicate = try bob.decryptMessageWithTransportBindings(
+        let duplicate = try bob.messaging().decryptMessage(
             snapshot: bobSnapshot,
             sessionKey: sessionKey,
             deduplicationKey: deduplicationKey,
@@ -195,34 +196,34 @@ final class Issue124PackageConsumerTests: XCTestCase {
     }
 }
 
-private func complete(_ store: KeyStore, _ operation: KeyStoreOperation) throws {
+private func complete(_ store: Client, _ operation: KeyStoreOperation) throws {
     _ = try store.commitOperation(identifier: operation.identifier)
     _ = try store.finalizeOperation(identifier: operation.identifier)
 }
 
-private func generateIdentity(_ store: KeyStore) throws -> Identity {
-    let prepared = try store.prepareGenerateIdentity()
+private func generateIdentity(_ store: Client) throws -> Identity {
+    let prepared = try store.identity().prepareGenerateIdentity()
     try complete(store, prepared.operation)
     return prepared.identity
 }
 
-private func rotateSignedPrekeyNow(_ store: KeyStore) throws {
-    let prepared = try store.prepareRotateSignedPrekeyNow()
+private func rotateSignedPrekeyNow(_ store: Client) throws {
+    let prepared = try store.identity().prepareRotateSignedPrekeyNow()
     try complete(store, prepared.operation)
 }
 
-private func replenishOneTimePrekeys(_ store: KeyStore) throws -> [OneTimePreKeyBundle] {
-    let prepared = try store.prepareReplenishOneTimePrekeys()
+private func replenishOneTimePrekeys(_ store: Client) throws -> [OneTimePreKeyBundle] {
+    let prepared = try store.identity().prepareReplenishOneTimePrekeys()
     try complete(store, prepared.operation)
     return prepared.oneTimePrekeys
 }
 
 private func importEncryptedBackup(
-    _ store: KeyStore,
+    _ store: Client,
     data: Data,
     passphrase: String
 ) throws {
-    let operation = try store.prepareImportEncryptedBackup(data: data, passphrase: passphrase)
+    let operation = try store.identity().prepareImportEncryptedBackup(data: data, passphrase: passphrase)
     try complete(store, operation)
 }
 
@@ -261,9 +262,9 @@ private func exerciseCheckedInReceiveFixtures() throws {
         try Data(hex: fixture.postDecryption.senderIdentityVerifyingKeyHex)
     )
 
-    let store = KeyStore(storage: MemorySecureStorage())
+    let store = Client(storage: MemorySecureStorage())
     _ = try generateIdentity(store)
-    let duplicate = try store.decryptMessageWithTransportBindings(
+    let duplicate = try store.messaging().decryptMessage(
         snapshot: [
             ProtocolStateEntry(
                 kind: try protocolStateKind(duplicateBlob.kind),

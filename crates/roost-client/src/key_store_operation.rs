@@ -1,7 +1,7 @@
 //! UniFFI records for recoverable KeyStore mutations.
 
+use crate::client::{ContactBlock, SessionAcceptanceResult};
 use crate::error::ClientError;
-use crate::key_store::{ContactBlock, SessionAcceptanceResult};
 use crate::records::{Identity, InboxRotation, OneTimePreKeyBundle, SignedPreKeyBundle, fixed_16};
 use roost_core::{
     KeyStoreOperation as CoreKeyStoreOperation,
