@@ -1,127 +1,77 @@
 #!/usr/bin/env bash
-#
-# Build an xcframework and Swift bindings for iOS.
-
+# Compile the generated Swift API and Rust library into the Roost binary distribution.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-CRATE="roost-client"
-LIB="libroost_client"
 OUT="$ROOT/target/xcframework"
-SYSROOT="$(rustc --print sysroot)"
-IOS_DEPLOYMENT_TARGET="${AETHER_IOS_DEPLOYMENT_TARGET:-13.0}"
-
+VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
+MIN_IOS="${ROOST_IOS_DEPLOYMENT_TARGET:-13.0}"
 cd "$ROOT"
 
-ensure_rust_target() {
-    local target="$1"
-
-    if rustup target list --installed | grep -Fxq "$target"; then
-        return
+for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+    if [[ ! -d "$(rustc --print sysroot)/lib/rustlib/$target/lib" ]]; then
+        rustup target add "$target"
     fi
-    if [[ -d "$SYSROOT/lib/rustlib/$target/lib" ]]; then
-        return
-    fi
-    rustup target add "$target"
-}
-
-build_staticlib() {
-    local target="$1"
-    local min_version_flag="$2"
-
-    CFLAGS="${CFLAGS:-} $min_version_flag" \
-        IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
-        cargo build --release --target "$target" -p "$CRATE"
-}
-
-write_xcframework_info_plist() {
-    cat > "$OUT/Aether.xcframework/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>AvailableLibraries</key>
-	<array>
-		<dict>
-			<key>BinaryPath</key>
-			<string>${LIB}.a</string>
-			<key>HeadersPath</key>
-			<string>Headers</string>
-			<key>LibraryIdentifier</key>
-			<string>ios-arm64</string>
-			<key>LibraryPath</key>
-			<string>${LIB}.a</string>
-			<key>SupportedArchitectures</key>
-			<array>
-				<string>arm64</string>
-			</array>
-			<key>SupportedPlatform</key>
-			<string>ios</string>
-		</dict>
-		<dict>
-			<key>BinaryPath</key>
-			<string>${LIB}.a</string>
-			<key>HeadersPath</key>
-			<string>Headers</string>
-			<key>LibraryIdentifier</key>
-			<string>ios-arm64_x86_64-simulator</string>
-			<key>LibraryPath</key>
-			<string>${LIB}.a</string>
-			<key>SupportedArchitectures</key>
-			<array>
-				<string>arm64</string>
-				<string>x86_64</string>
-			</array>
-			<key>SupportedPlatform</key>
-			<string>ios</string>
-			<key>SupportedPlatformVariant</key>
-			<string>simulator</string>
-		</dict>
-	</array>
-	<key>CFBundlePackageType</key>
-	<string>XFWK</string>
-	<key>XCFrameworkFormatVersion</key>
-	<string>1.0</string>
-</dict>
-</plist>
-PLIST
-}
-
-ensure_rust_target aarch64-apple-ios
-ensure_rust_target aarch64-apple-ios-sim
-ensure_rust_target x86_64-apple-ios
-
-build_staticlib aarch64-apple-ios "-miphoneos-version-min=$IOS_DEPLOYMENT_TARGET"
-build_staticlib aarch64-apple-ios-sim "-mios-simulator-version-min=$IOS_DEPLOYMENT_TARGET"
-build_staticlib x86_64-apple-ios "-mios-simulator-version-min=$IOS_DEPLOYMENT_TARGET"
+    IPHONEOS_DEPLOYMENT_TARGET="$MIN_IOS" cargo build --locked --release --target "$target" -p roost-client
+done
 
 rm -rf "$OUT"
-mkdir -p "$OUT/Headers" "$OUT/Libraries/ios-simulator" "$OUT/Sources"
+mkdir -p "$OUT/generated"
+cargo run --locked --bin uniffi-bindgen-swift -- \
+    target/aarch64-apple-ios/release/libroost_client.a "$OUT/generated" --swift-sources --headers
 
-cargo run --bin uniffi-bindgen-swift -- \
-    "target/aarch64-apple-ios/release/${LIB}.a" \
-    "$OUT/Headers" --headers
+build_framework() {
+    local rust_target="$1" swift_target="$2" sdk_name="$3" identifier="$4"
+    local framework="$OUT/$identifier/Roost.framework"
+    local modules="$framework/Modules/Roost.swiftmodule"
+    local sdk module_target
+    sdk="$(xcrun --sdk "$sdk_name" --show-sdk-path)"
+    module_target="${swift_target/$MIN_IOS/}"
+    mkdir -p "$framework/Headers" "$modules"
+    cp "$OUT/generated/RoostFFI.h" "$framework/Headers/"
+    cat > "$framework/Modules/module.modulemap" <<'MODULE'
+framework module Roost {
+    umbrella header "RoostFFI.h"
+    export *
+    module * { export * }
+}
+MODULE
+    cat > "$framework/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>io.github.relaynet.roost</string>
+<key>CFBundleName</key><string>Roost</string>
+<key>CFBundleExecutable</key><string>Roost</string>
+<key>CFBundlePackageType</key><string>FMWK</string>
+<key>CFBundleShortVersionString</key><string>$VERSION</string>
+<key>CFBundleVersion</key><string>$VERSION</string>
+<key>MinimumOSVersion</key><string>$MIN_IOS</string>
+</dict></plist>
+PLIST
+    xcrun --sdk "$sdk_name" swiftc "$OUT/generated/Roost.swift" \
+        -target "$swift_target" -sdk "$sdk" -parse-as-library \
+        -module-name Roost -swift-version 5 -enable-library-evolution -import-underlying-module \
+        -F "$OUT/$identifier" -module-cache-path "$OUT/module-cache" \
+        -emit-library -emit-module \
+        -emit-module-path "$modules/$module_target.swiftmodule" \
+        -emit-module-interface-path "$modules/$module_target.swiftinterface" \
+        -Xlinker -force_load -Xlinker "$ROOT/target/$rust_target/release/libroost_client.a" \
+        -Xlinker -install_name -Xlinker "@rpath/Roost.framework/Roost" \
+        -o "$framework/Roost"
+}
 
-cargo run --bin uniffi-bindgen-swift -- \
-    "target/aarch64-apple-ios/release/${LIB}.a" \
-    "$OUT/Headers" --modulemap --module-name AetherFFI --modulemap-filename module.modulemap
+build_framework aarch64-apple-ios "arm64-apple-ios$MIN_IOS" iphoneos ios-arm64
+build_framework aarch64-apple-ios-sim "arm64-apple-ios$MIN_IOS-simulator" iphonesimulator sim-arm64
+build_framework x86_64-apple-ios "x86_64-apple-ios$MIN_IOS-simulator" iphonesimulator sim-x86_64
 
-cargo run --bin uniffi-bindgen-swift -- \
-    "target/aarch64-apple-ios/release/${LIB}.a" \
-    "$OUT/Sources" --swift-sources
-
-lipo -create \
-    "target/aarch64-apple-ios-sim/release/${LIB}.a" \
-    "target/x86_64-apple-ios/release/${LIB}.a" \
-    -output "$OUT/Libraries/ios-simulator/${LIB}.a"
-
+mkdir -p "$OUT/ios-arm64_x86_64-simulator"
+cp -R "$OUT/sim-arm64/Roost.framework" "$OUT/ios-arm64_x86_64-simulator/"
+cp "$OUT/sim-x86_64/Roost.framework/Modules/Roost.swiftmodule/"* \
+    "$OUT/ios-arm64_x86_64-simulator/Roost.framework/Modules/Roost.swiftmodule/"
+lipo -create "$OUT/sim-arm64/Roost.framework/Roost" "$OUT/sim-x86_64/Roost.framework/Roost" \
+    -output "$OUT/ios-arm64_x86_64-simulator/Roost.framework/Roost"
 xcodebuild -create-xcframework \
-    -library "target/aarch64-apple-ios/release/${LIB}.a" \
-    -headers "$OUT/Headers" \
-    -library "$OUT/Libraries/ios-simulator/${LIB}.a" \
-    -headers "$OUT/Headers" \
-    -output "$OUT/Aether.xcframework"
-write_xcframework_info_plist
-
-echo "xcframework written to $OUT/Aether.xcframework"
-echo "Swift sources written to $OUT/Sources/"
+    -framework "$OUT/ios-arm64/Roost.framework" \
+    -framework "$OUT/ios-arm64_x86_64-simulator/Roost.framework" \
+    -output "$OUT/Roost.xcframework"

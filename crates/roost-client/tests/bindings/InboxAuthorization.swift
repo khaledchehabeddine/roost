@@ -32,41 +32,41 @@ private final class MemorySecureStorage: SecureStorage, @unchecked Sendable {
 @main
 struct InboxAuthorization {
     static func main() throws {
-        let engine = ProtocolStateEngine()
-        let alice = KeyStore(storage: MemorySecureStorage())
-        let bob = KeyStore(storage: MemorySecureStorage())
-        let aliceIdentityPreparation = try alice.prepareGenerateIdentity()
+        let alice = Client(storage: MemorySecureStorage())
+        let bob = Client(storage: MemorySecureStorage())
+        let contacts = alice.contacts()
+        let aliceIdentityPreparation = try alice.identity().prepareGenerateIdentity()
         _ = try alice.commitOperation(identifier: aliceIdentityPreparation.operation.identifier)
         _ = try alice.finalizeOperation(identifier: aliceIdentityPreparation.operation.identifier)
-        let bobIdentityPreparation = try bob.prepareGenerateIdentity()
+        let bobIdentityPreparation = try bob.identity().prepareGenerateIdentity()
         _ = try bob.commitOperation(identifier: bobIdentityPreparation.operation.identifier)
         _ = try bob.finalizeOperation(identifier: bobIdentityPreparation.operation.identifier)
         let bobIdentity = bobIdentityPreparation.identity
-        let aliceSignedPrekey = try alice.prepareRotateSignedPrekeyNow()
+        let aliceSignedPrekey = try alice.identity().prepareRotateSignedPrekeyNow()
         _ = try alice.commitOperation(identifier: aliceSignedPrekey.operation.identifier)
         _ = try alice.finalizeOperation(identifier: aliceSignedPrekey.operation.identifier)
-        let bobSignedPrekey = try bob.prepareRotateSignedPrekeyNow()
+        let bobSignedPrekey = try bob.identity().prepareRotateSignedPrekeyNow()
         _ = try bob.commitOperation(identifier: bobSignedPrekey.operation.identifier)
         _ = try bob.finalizeOperation(identifier: bobSignedPrekey.operation.identifier)
-        let bobPublication = try bob.currentPublicationBundle()
+        let bobPublication = try bob.identity().currentPublicationBundle()
 
         var snapshot: [ProtocolStateEntry] = []
-        apply(&snapshot, try engine.recordContact(
+        apply(&snapshot, try contacts.recordContact(
             snapshot: [],
             contactIdentity: contactIdentity(identity: bobIdentity, publication: bobPublication)
         ).stateUpdates)
-        apply(&snapshot, try engine.acceptContact(
+        apply(&snapshot, try contacts.acceptContact(
             snapshot: snapshot,
             identityKey: identityKey(bobIdentity)
         ).stateUpdates)
 
         // Alice rotates. Bob has never been given an authorization, so he owes one.
-        let rotationPreparation = try alice.prepareRotateInboxNow()
+        let rotationPreparation = try alice.identity().prepareRotateInboxNow()
         _ = try alice.commitOperation(identifier: rotationPreparation.operation.identifier)
         _ = try alice.finalizeOperation(identifier: rotationPreparation.operation.identifier)
         let rotation = rotationPreparation.rotation
         let generation = rotation.publication.discoveryKey.epoch
-        let owing = try engine.contactsNeedingInboxAuthorization(
+        let owing = try contacts.contactsNeedingInboxAuthorization(
             snapshot: snapshot,
             currentGeneration: generation,
             candidates: [identityKey(bobIdentity)]
@@ -75,13 +75,13 @@ struct InboxAuthorization {
 
         // Recorded only after the update reaches transport, so an app killed
         // mid-re-key resumes instead of skipping the contact.
-        apply(&snapshot, try engine.recordInboxAuthorizationDelivered(
+        apply(&snapshot, try contacts.recordInboxAuthorizationDelivered(
             snapshot: snapshot,
             identityKey: identityKey(bobIdentity),
             generation: generation
         ))
         require(
-            try engine.contactsNeedingInboxAuthorization(
+            try contacts.contactsNeedingInboxAuthorization(
                 snapshot: snapshot,
                 currentGeneration: generation,
                 candidates: [identityKey(bobIdentity)]
@@ -91,21 +91,22 @@ struct InboxAuthorization {
 
         // The receiving side: Bob persists what Alice sent and reads it back to
         // submit to the relay.
+        let bobContacts = bob.contacts()
         var bobSnapshot: [ProtocolStateEntry] = []
-        let aliceIdentity = try alice.loadIdentity()
+        let aliceIdentity = try alice.identity().loadIdentity()
         let aliceIdentityKey = identityKey(aliceIdentity)
-        apply(&bobSnapshot, try engine.recordContact(
+        apply(&bobSnapshot, try bobContacts.recordContact(
             snapshot: [],
             contactIdentity: contactIdentity(identity: aliceIdentity, publication: rotation.publication)
         ).stateUpdates)
-        apply(&bobSnapshot, try engine.recordPeerInboxAuthorization(
+        apply(&bobSnapshot, try bobContacts.recordPeerInboxAuthorization(
             snapshot: bobSnapshot,
             identityKey: aliceIdentityKey,
             generation: generation,
             capability: rotation.capability
         ))
 
-        guard let stored = try engine.peerInboxAuthorization(
+        guard let stored = try bobContacts.peerInboxAuthorization(
             snapshot: bobSnapshot,
             identityKey: aliceIdentityKey
         ) else {
@@ -116,7 +117,7 @@ struct InboxAuthorization {
 
         // AE-BLK-08: replaying an older authorization must not restore a
         // capability the peer has rotated away from.
-        let replay = try engine.recordPeerInboxAuthorization(
+        let replay = try bobContacts.recordPeerInboxAuthorization(
             snapshot: bobSnapshot,
             identityKey: aliceIdentityKey,
             generation: generation - 1,
@@ -125,10 +126,8 @@ struct InboxAuthorization {
         require(replay.isEmpty, "an older generation must be refused")
 
         // Blocking must rotate, or the blocked contact keeps a working delivery
-        // capability and the block bites only on this device. The engine's
-        // blockContact is the local-only half; the keystore's is the one that
-        // makes the block reach the relay.
-        let blockPreparation = try alice.prepareBlockContact(
+        // capability until the host publishes the prepared inbox rotation.
+        let blockPreparation = try alice.contacts().prepareBlockContact(
             snapshot: snapshot,
             identityKey: identityKey(bobIdentity)
         )
@@ -140,7 +139,7 @@ struct InboxAuthorization {
             fail("blocking must rotate the inbox")
         }
         require(
-            try engine.contactsNeedingInboxAuthorization(
+            try contacts.contactsNeedingInboxAuthorization(
                 snapshot: snapshot,
                 currentGeneration: blockRotation.publication.discoveryKey.epoch,
                 candidates: [identityKey(bobIdentity)]
@@ -149,7 +148,7 @@ struct InboxAuthorization {
         )
 
         // Repeating the block must not churn every other contact's capability.
-        let repeatedBlock = try alice.prepareBlockContact(
+        let repeatedBlock = try alice.contacts().prepareBlockContact(
             snapshot: snapshot,
             identityKey: identityKey(bobIdentity)
         )

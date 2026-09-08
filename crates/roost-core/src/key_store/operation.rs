@@ -383,6 +383,7 @@ impl KeyStore {
         let staged_store = KeyStore::from_shared_storage(
             Arc::new(Mutex::new(Box::new(staging_storage))),
             Arc::clone(&self.0.clock),
+            self.0.engine,
         );
         let output = operation(&staged_store)?;
         let state = state

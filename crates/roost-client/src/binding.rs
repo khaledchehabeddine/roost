@@ -34,11 +34,11 @@ use roost_protocol::parse_ed25519_verifying_key_bytes;
 ///
 /// # Examples
 /// ```
-/// # use roost_client::{ClientError, IdentityKey, InMemorySecureStorage, KeyStore, SecureStorage};
+/// # use roost_client::{ClientError, IdentityKey, InMemorySecureStorage, Client, SecureStorage};
 /// # use std::sync::Arc;
 /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-/// # let store = KeyStore::new(storage);
-/// let prepared = store.prepare_generate_identity()?;
+/// # let store = Client::new(storage);
+/// let prepared = store.identity().prepare_generate_identity()?;
 /// store.commit_operation(prepared.operation.identifier.clone())?;
 /// store.finalize_operation(prepared.operation.identifier)?;
 /// let identity = prepared.identity;
@@ -140,9 +140,7 @@ fn binding_payload_bundle(identity: &IdentityKey) -> Result<CoreIdentityKeyBundl
 #[cfg(test)]
 mod tests {
     use super::{verify_discovery_to_identity_binding, verify_identity_key_binding};
-    use crate::{
-        ClientError, InMemorySecureStorage, KeyStore, SecureStorage, protocol::IdentityKey,
-    };
+    use crate::{Client, ClientError, InMemorySecureStorage, SecureStorage, protocol::IdentityKey};
     use roost_core::test_support::{SigningKeyPair, sign_identity_key_binding};
     use std::sync::Arc;
 
@@ -183,9 +181,9 @@ mod tests {
             .to_vec()
     }
 
-    fn key_store() -> Arc<KeyStore> {
+    fn key_store() -> Arc<Client> {
         let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-        KeyStore::new(storage)
+        Client::new(storage)
     }
 
     #[test]

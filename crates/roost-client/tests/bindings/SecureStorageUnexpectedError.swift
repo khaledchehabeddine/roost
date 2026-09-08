@@ -30,10 +30,10 @@ private final class ThrowingSecureStorage: SecureStorage, @unchecked Sendable {
 @main
 struct SecureStorageUnexpectedError {
     static func main() throws {
-        let store = KeyStore(storage: ThrowingSecureStorage())
+        let store = Client(storage: ThrowingSecureStorage())
 
         do {
-            _ = try store.hasIdentity()
+            _ = try store.identity().hasIdentity()
             fail("expected unexpected foreign storage exception")
         } catch let error as ClientError {
             guard case let .Storage(reason) = error else {
@@ -42,7 +42,7 @@ struct SecureStorageUnexpectedError {
             require(reason.contains("unexpected foreign callback failure"), "storage error reason")
         }
 
-        let hasIdentity = try store.hasIdentity()
+        let hasIdentity = try store.identity().hasIdentity()
         require(!hasIdentity, "storage mutex remains usable")
         print("Swift SecureStorage unexpected-error regression passed")
     }

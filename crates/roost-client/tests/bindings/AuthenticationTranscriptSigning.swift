@@ -39,14 +39,14 @@ struct AuthenticationTranscriptSigning {
     private static let httpContext = Data("Relay-HTTP-Auth-v1".utf8)
 
     static func main() throws {
-        let store = KeyStore(storage: MemorySecureStorage())
-        let prepared = try store.prepareGenerateIdentity()
+        let store = Client(storage: MemorySecureStorage())
+        let prepared = try store.identity().prepareGenerateIdentity()
         _ = try store.commitOperation(identifier: prepared.operation.identifier)
         _ = try store.finalizeOperation(identifier: prepared.operation.identifier)
         let identity = prepared.identity
         let transcript = httpTranscript(identitySigningKey: identity.ed25519VerifyingKey)
 
-        let signature = try store.signAuthenticationTranscript(transcript: transcript)
+        let signature = try store.identity().signAuthenticationTranscript(transcript: transcript)
         require(signature.count == 64, "an Ed25519 signature must cross as 64 bytes")
 
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: identity.ed25519VerifyingKey)
@@ -63,7 +63,7 @@ struct AuthenticationTranscriptSigning {
         )
 
         // Ed25519 is deterministic; a retried challenge must resend the same proof.
-        let resigned = try store.signAuthenticationTranscript(transcript: transcript)
+        let resigned = try store.identity().signAuthenticationTranscript(transcript: transcript)
         require(resigned == signature, "signing the same transcript twice must produce the same bytes")
 
         // The identity key is what signs Aether's own bindings and message
@@ -101,9 +101,9 @@ struct AuthenticationTranscriptSigning {
         transcript.append(field)
     }
 
-    private static func requireInvalidData(_ store: KeyStore, _ transcript: Data, _ message: String) {
+    private static func requireInvalidData(_ store: Client, _ transcript: Data, _ message: String) {
         do {
-            _ = try store.signAuthenticationTranscript(transcript: transcript)
+            _ = try store.identity().signAuthenticationTranscript(transcript: transcript)
             fail(message)
         } catch let error as ClientError {
             guard case .InvalidData(_) = error else {

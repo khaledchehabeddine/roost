@@ -66,20 +66,20 @@ impl DevelopmentCertificateAuthority {
 
     /// Issues a development certificate for initialized public identity and discovery material.
     ///
-    /// Callers should read both values from the same initialized [`KeyStore`](crate::KeyStore).
+    /// Callers should read both values from the same initialized [`Client`](crate::Client).
     /// The certificate expires at the caller-supplied Unix timestamp and is accepted only by
     /// validation input from this authority.
     ///
     /// # Examples
     /// ```
     /// use roost_client::{
-    ///     DevelopmentCertificateAuthority, InMemorySecureStorage, KeyStore, SecureStorage,
+    ///     DevelopmentCertificateAuthority, InMemorySecureStorage, Client, SecureStorage,
     /// };
     /// use std::sync::Arc;
     ///
     /// let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// let store = KeyStore::new(storage);
-    /// let prepared = store.prepare_generate_identity()?;
+    /// let store = Client::new(storage);
+    /// let prepared = store.identity().prepare_generate_identity()?;
     /// store.commit_operation(prepared.operation.identifier.clone())?;
     /// store.finalize_operation(prepared.operation.identifier)?;
     /// let identity = prepared.identity;
@@ -158,11 +158,11 @@ impl DevelopmentCertificateAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InMemorySecureStorage, KeyStore, validate_sender_certificate};
+    use crate::{Client, InMemorySecureStorage, validate_sender_certificate};
 
     #[test]
     fn issued_record_validates_through_uniffi_records() {
-        let store = KeyStore::new(Arc::new(InMemorySecureStorage::new()));
+        let store = Client::new(Arc::new(InMemorySecureStorage::new()));
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
         let authority = DevelopmentCertificateAuthority::new(

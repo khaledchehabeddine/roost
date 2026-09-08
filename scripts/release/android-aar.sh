@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 VERSION="${AETHER_ANDROID_VERSION:-}"
-ARTIFACT_ID="${AETHER_ANDROID_ARTIFACT_ID:-aether}"
+ARTIFACT_ID="${AETHER_ANDROID_ARTIFACT_ID:-roost}"
 MAVEN_REPO="${AETHER_ANDROID_MAVEN_REPO:-$ROOT/target/android/maven}"
 CENTRAL_DIR="${AETHER_ANDROID_CENTRAL_DIR:-$ROOT/target/android/central}"
 GRADLE_BIN="${GRADLE_BIN:-gradle}"
@@ -61,10 +61,10 @@ verify_aar() {
     grep -q "<version>$VERSION</version>" "$pom"
     grep -q "<artifactId>$ARTIFACT_ID</artifactId>" "$pom"
     unzip -q "$aar" classes.jar -d "$tmp"
-    jar tf "$tmp/classes.jar" | grep -q 'com/aurelion/aether/KeyStore.class'
-    if [[ "$ARTIFACT_ID" == "aether-development" ]]; then
-        jar tf "$tmp/classes.jar" | grep -q 'com/aurelion/aether/DevelopmentCertificateAuthority.class'
-    elif jar tf "$tmp/classes.jar" | grep -q 'com/aurelion/aether/DevelopmentCertificateAuthority.class'; then
+    jar tf "$tmp/classes.jar" | grep -q 'io/github/relaynet/roost/Client.class'
+    if [[ "$ARTIFACT_ID" == "roost-development" ]]; then
+        jar tf "$tmp/classes.jar" | grep -q 'io/github/relaynet/roost/DevelopmentCertificateAuthority.class'
+    elif jar tf "$tmp/classes.jar" | grep -q 'io/github/relaynet/roost/DevelopmentCertificateAuthority.class'; then
         echo "production AAR unexpectedly contains the development certificate authority" >&2
         return 1
     fi
@@ -93,17 +93,17 @@ case "$SIGN_PUBLICATION" in
 esac
 
 case "$ARTIFACT_ID" in
-    aether | aether-development)
+    roost | roost-development)
         ;;
     *)
-        echo "AETHER_ANDROID_ARTIFACT_ID must be aether or aether-development" >&2
+        echo "AETHER_ANDROID_ARTIFACT_ID must be roost or roost-development" >&2
         exit 2
         ;;
 esac
 
-if [[ "$ARTIFACT_ID" == "aether-development" \
+if [[ "$ARTIFACT_ID" == "roost-development" \
     && "${AETHER_CARGO_FEATURES:-}" != *development-certificates* ]]; then
-    echo "aether-development requires the development-certificates Cargo feature" >&2
+    echo "roost-development requires the development-certificates Cargo feature" >&2
     exit 2
 fi
 
@@ -131,7 +131,7 @@ unset \
 cd "$ROOT"
 scripts/build/android.sh
 
-rm -rf "$MAVEN_REPO/com/aurelion/$ARTIFACT_ID/$VERSION"
+rm -rf "$MAVEN_REPO/io/github/relaynet/$ARTIFACT_ID/$VERSION"
 mkdir -p "$CENTRAL_DIR"
 find "$CENTRAL_DIR" -maxdepth 1 -type f \
     -name "$ARTIFACT_ID-$VERSION-maven-central-*.zip" -delete
@@ -142,7 +142,7 @@ GRADLE_ARGS=(
     -PaetherVersion="$VERSION"
     -PaetherArtifactId="$ARTIFACT_ID"
     -PaetherMavenRepo="$MAVEN_REPO"
-    :aether:publishReleasePublicationToAetherLocalRepository
+    :roost:publishReleasePublicationToAetherLocalRepository
 )
 
 if [[ "$SIGN_PUBLICATION" == "true" ]]; then
@@ -154,7 +154,7 @@ else
     "$GRADLE_BIN" "${GRADLE_ARGS[@]}"
 fi
 
-ARTIFACT_DIR="$MAVEN_REPO/com/aurelion/$ARTIFACT_ID/$VERSION"
+ARTIFACT_DIR="$MAVEN_REPO/io/github/relaynet/$ARTIFACT_ID/$VERSION"
 AAR="$ARTIFACT_DIR/$ARTIFACT_ID-$VERSION.aar"
 POM="$ARTIFACT_DIR/$ARTIFACT_ID-$VERSION.pom"
 
@@ -172,8 +172,8 @@ verify_aar "$AAR" "$POM"
 
 CENTRAL_STAGE="$(mktemp -d)"
 trap 'rm -rf "$CENTRAL_STAGE"' EXIT
-mkdir -p "$CENTRAL_STAGE/com/aurelion/$ARTIFACT_ID" "$CENTRAL_DIR"
-cp -R "$ARTIFACT_DIR" "$CENTRAL_STAGE/com/aurelion/$ARTIFACT_ID/$VERSION"
+mkdir -p "$CENTRAL_STAGE/io/github/relaynet/$ARTIFACT_ID" "$CENTRAL_DIR"
+cp -R "$ARTIFACT_DIR" "$CENTRAL_STAGE/io/github/relaynet/$ARTIFACT_ID/$VERSION"
 
 if [[ "$SIGN_PUBLICATION" == "true" ]]; then
     missing_signature=0
@@ -200,7 +200,7 @@ else
 fi
 (
     cd "$CENTRAL_STAGE"
-    jar cf "$CENTRAL_ZIP" com
+    jar cf "$CENTRAL_ZIP" io
 )
 
 SOURCE_RECORD="$CENTRAL_DIR/$ARTIFACT_ID-$VERSION-maven-central.source"

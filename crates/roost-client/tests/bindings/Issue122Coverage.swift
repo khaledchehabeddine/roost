@@ -63,14 +63,17 @@ private final class MemoryProtocolStateStore {
 @main
 struct Issue122Coverage {
     static func main() throws {
-        let engine = ProtocolStateEngine()
-        let limits = engine.hardeningLimits()
+        let alice = Client(storage: MemorySecureStorage())
+        let bob = Client(storage: MemorySecureStorage())
+        let contacts = alice.contacts()
+        let messaging = bob.messaging()
+        let limits = messaging.hardeningLimits()
         require(limits.maxEncodedMessageLen > 0, "hardening limits")
 
         let protocolStore = MemoryProtocolStateStore()
         let dedupKey = Data("dedup".utf8)
-        try protocolStore.commit(updates: [try engine.initializeDeduplicationSet(key: dedupKey)])
-        expectStaleProtocolStateCommit(protocolStore, update: try engine.initializeDeduplicationSet(key: dedupKey))
+        try protocolStore.commit(updates: [try messaging.initializeDeduplicationSet(key: dedupKey)])
+        expectStaleProtocolStateCommit(protocolStore, update: try messaging.initializeDeduplicationSet(key: dedupKey))
         let digestKey = Data("digest".utf8)
         let digestSeed = ProtocolStateUpdate(
             kind: .deduplicationSet,
@@ -93,29 +96,27 @@ struct Issue122Coverage {
         )
         require(loaded.count == 1, "protocol state store load")
 
-        let alice = KeyStore(storage: MemorySecureStorage())
-        let bob = KeyStore(storage: MemorySecureStorage())
         let aliceIdentity = try generateIdentity(alice)
         let bobIdentity = try generateIdentity(bob)
         try rotateSignedPrekeyNow(alice)
         try rotateSignedPrekeyNow(bob)
-        let alicePublication = try alice.currentPublicationBundle()
-        let bobPublication = try bob.currentPublicationBundle()
+        let alicePublication = try alice.identity().currentPublicationBundle()
+        let bobPublication = try bob.identity().currentPublicationBundle()
         let replenished = try replenishOneTimePrekeys(bob)
         require(replenished.count == 100, "prekey replenishment")
         let bobOneTimePrekey = replenished[0]
         require(bobPublication.signedPrekey.identifier == 0, "published signed prekey identifier")
         require(bobOneTimePrekey.identifier == 0, "published one-time prekey identifier")
 
-        let backup = try alice.exportEncryptedBackup(passphrase: "passphrase")
-        let restored = KeyStore(storage: MemorySecureStorage())
+        let backup = try alice.identity().exportEncryptedBackup(passphrase: "passphrase")
+        let restored = Client(storage: MemorySecureStorage())
         try importEncryptedBackup(restored, data: backup, passphrase: "passphrase")
-        let restoredHasIdentity = try restored.hasIdentity()
+        let restoredHasIdentity = try restored.identity().hasIdentity()
         require(restoredHasIdentity, "backup import")
         expectBackupFailure(restored)
 
         let sessionKey = Data(repeating: 0x45, count: 16)
-        let initiation = try alice.initiateSessionWithTransportBinding(
+        let initiation = try alice.messaging().initiateSession(
             sessionKey: sessionKey,
             responderIdentity: bobIdentity,
             responderPublication: bobPublication,
@@ -129,7 +130,7 @@ struct Issue122Coverage {
         // The stranger path: read who sent it before accepting, because the
         // session key is derived from both identities and acceptance stages
         // one-time-prekey consumption, so it should not be run just to find out.
-        let hinted = try bob.initiatorIdentityHintWithTransportBinding(
+        let hinted = try bob.messaging().initiatorIdentityHint(
             message: decodedInitial,
             transportBinding: TransportBinding(bytes: Data("test-route".utf8)),
             prekeySelection: PreKeySelection(
@@ -144,7 +145,7 @@ struct Issue122Coverage {
             "initiator identity hint"
         )
 
-        let acceptancePreparation = try bob.prepareAcceptSessionWithTransportBinding(
+        let acceptancePreparation = try bob.messaging().prepareAcceptSession(
             sessionKey: sessionKey,
             initiatorIdentity: nil,
             message: decodedInitial,
@@ -163,19 +164,19 @@ struct Issue122Coverage {
 
         var aliceSnapshot: [ProtocolStateEntry] = []
         apply(&aliceSnapshot, initiation.stateUpdates)
-        let recorded = try engine.recordContact(
+        let recorded = try contacts.recordContact(
             snapshot: [],
             contactIdentity: contactIdentity(identity: bobIdentity, publication: bobPublication)
         )
         try protocolStore.commit(updates: recorded.stateUpdates)
         apply(&aliceSnapshot, recorded.stateUpdates)
-        let acceptedContact = try engine.acceptContact(
+        let acceptedContact = try contacts.acceptContact(
             snapshot: aliceSnapshot,
             identityKey: identityKey(bobIdentity)
         )
         try protocolStore.commit(updates: acceptedContact.stateUpdates)
         apply(&aliceSnapshot, acceptedContact.stateUpdates)
-        let outbound = try alice.encryptMessageWithTransportBinding(
+        let outbound = try alice.messaging().encryptMessage(
             snapshot: aliceSnapshot,
             sessionKey: sessionKey,
             messageId: Data(repeating: 0x46, count: 16),
@@ -188,9 +189,9 @@ struct Issue122Coverage {
             transportBinding: TransportBinding(bytes: Data("test-route".utf8))
         )
         apply(&aliceSnapshot, outbound.stateUpdates)
-        let pending = try engine.pendingAcknowledgments(snapshot: aliceSnapshot, key: sessionKey)
+        let pending = try messaging.pendingAcknowledgments(snapshot: aliceSnapshot, key: sessionKey)
         require(pending.count == 1, "pending ack")
-        let retry = try engine.retryInstructions(
+        let retry = try messaging.retryInstructions(
             snapshot: aliceSnapshot,
             key: sessionKey,
             nowMillis: 43,
@@ -198,12 +199,15 @@ struct Issue122Coverage {
         )
         require(retry.instructions.count == 1, "retry instruction")
 
-        let blocked = try engine.blockContact(snapshot: aliceSnapshot, identityKey: identityKey(bobIdentity))
+        let preparedBlock = try alice.contacts().prepareBlockContact(snapshot: aliceSnapshot, identityKey: identityKey(bobIdentity))
+        let blocked = preparedBlock.block.contact
+        _ = try alice.commitOperation(identifier: preparedBlock.operation.identifier)
+        _ = try alice.finalizeOperation(identifier: preparedBlock.operation.identifier)
         var blockedSnapshot = aliceSnapshot
         apply(&blockedSnapshot, blocked.stateUpdates)
         expectBlockedSend(alice, snapshot: blockedSnapshot, sessionKey: sessionKey, bobIdentity: bobIdentity, bobPublication: bobPublication)
 
-        apply(&bobSnapshot, [try engine.initializeDeduplicationSet(key: dedupKey)])
+        apply(&bobSnapshot, [try messaging.initializeDeduplicationSet(key: dedupKey)])
         expectMissingCertificateValidation(
             bob,
             snapshot: bobSnapshot,
@@ -218,34 +222,34 @@ struct Issue122Coverage {
         print("Swift issue 122 coverage passed")
     }
 
-    private static func complete(_ store: KeyStore, _ operation: KeyStoreOperation) throws {
+    private static func complete(_ store: Client, _ operation: KeyStoreOperation) throws {
         _ = try store.commitOperation(identifier: operation.identifier)
         _ = try store.finalizeOperation(identifier: operation.identifier)
     }
 
-    private static func generateIdentity(_ store: KeyStore) throws -> Identity {
-        let prepared = try store.prepareGenerateIdentity()
+    private static func generateIdentity(_ store: Client) throws -> Identity {
+        let prepared = try store.identity().prepareGenerateIdentity()
         try complete(store, prepared.operation)
         return prepared.identity
     }
 
-    private static func rotateSignedPrekeyNow(_ store: KeyStore) throws {
-        let prepared = try store.prepareRotateSignedPrekeyNow()
+    private static func rotateSignedPrekeyNow(_ store: Client) throws {
+        let prepared = try store.identity().prepareRotateSignedPrekeyNow()
         try complete(store, prepared.operation)
     }
 
-    private static func replenishOneTimePrekeys(_ store: KeyStore) throws -> [OneTimePreKeyBundle] {
-        let prepared = try store.prepareReplenishOneTimePrekeys()
+    private static func replenishOneTimePrekeys(_ store: Client) throws -> [OneTimePreKeyBundle] {
+        let prepared = try store.identity().prepareReplenishOneTimePrekeys()
         try complete(store, prepared.operation)
         return prepared.oneTimePrekeys
     }
 
     private static func importEncryptedBackup(
-        _ store: KeyStore,
+        _ store: Client,
         data: Data,
         passphrase: String
     ) throws {
-        let operation = try store.prepareImportEncryptedBackup(data: data, passphrase: passphrase)
+        let operation = try store.identity().prepareImportEncryptedBackup(data: data, passphrase: passphrase)
         try complete(store, operation)
     }
 
@@ -295,9 +299,9 @@ struct Issue122Coverage {
     }
 
 
-    private static func expectBackupFailure(_ store: KeyStore) {
+    private static func expectBackupFailure(_ store: Client) {
         do {
-            _ = try store.prepareImportEncryptedBackup(data: Data([0x01]), passphrase: "bad")
+            _ = try store.identity().prepareImportEncryptedBackup(data: Data([0x01]), passphrase: "bad")
             fail("backup import should fail")
         } catch let error as ClientError {
             switch error {
@@ -312,14 +316,14 @@ struct Issue122Coverage {
     }
 
     private static func expectBlockedSend(
-        _ alice: KeyStore,
+        _ alice: Client,
         snapshot: [ProtocolStateEntry],
         sessionKey: Data,
         bobIdentity: Identity,
         bobPublication: PublicationBundle
     ) {
         do {
-            _ = try alice.encryptMessageWithTransportBinding(
+            _ = try alice.messaging().encryptMessage(
                 snapshot: snapshot,
                 sessionKey: sessionKey,
                 messageId: Data(repeating: 0x47, count: 16),
@@ -343,7 +347,7 @@ struct Issue122Coverage {
     }
 
     private static func expectMissingCertificateValidation(
-        _ bob: KeyStore,
+        _ bob: Client,
         snapshot: [ProtocolStateEntry],
         sessionKey: Data,
         dedupKey: Data,
@@ -351,7 +355,7 @@ struct Issue122Coverage {
         alicePublication: PublicationBundle
     ) {
         do {
-            _ = try bob.decryptMessageWithTransportBindings(
+            _ = try bob.messaging().decryptMessage(
                 snapshot: snapshot,
                 sessionKey: sessionKey,
                 deduplicationKey: dedupKey,

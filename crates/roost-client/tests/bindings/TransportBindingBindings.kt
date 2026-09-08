@@ -1,4 +1,4 @@
-package com.aurelion.aether
+package io.github.relaynet.roost
 
 private class TransportBindingMemoryStorage : SecureStorage {
     private val values = mutableMapOf<String, ByteArray>()
@@ -15,14 +15,14 @@ private class TransportBindingMemoryStorage : SecureStorage {
 }
 
 fun main() {
-    val alice = KeyStore(TransportBindingMemoryStorage())
-    val bob = KeyStore(TransportBindingMemoryStorage())
+    val alice = Client(TransportBindingMemoryStorage())
+    val bob = Client(TransportBindingMemoryStorage())
     val aliceIdentity = generateIdentity(alice)
     val bobIdentity = generateIdentity(bob)
     rotateSignedPrekey(alice)
     rotateSignedPrekey(bob)
-    val alicePublication = alice.currentPublicationBundle()
-    val bobPublication = bob.currentPublicationBundle()
+    val alicePublication = alice.identity().currentPublicationBundle()
+    val bobPublication = bob.identity().currentPublicationBundle()
     val bobOneTimePrekey = replenishOneTimePrekeys(bob)[0]
     val initialBinding = TransportBinding("consumer-owned initial metadata".encodeToByteArray())
     val prekeySelection = PreKeySelection(
@@ -31,7 +31,7 @@ fun main() {
     )
     val sessionKey = ByteArray(16) { 0x58 }
     expectInvalidData("empty Transport Binding") {
-        alice.initiateSessionWithTransportBinding(
+        alice.messaging().initiateSession(
             sessionKey,
             bobIdentity,
             bobPublication,
@@ -43,7 +43,7 @@ fun main() {
         )
     }
     expectInvalidData("oversized Transport Binding") {
-        alice.initiateSessionWithTransportBinding(
+        alice.messaging().initiateSession(
             sessionKey,
             bobIdentity,
             bobPublication,
@@ -54,7 +54,7 @@ fun main() {
             TransportBinding(ByteArray(1_025) { 0x41 }),
         )
     }
-    val initiation = alice.initiateSessionWithTransportBinding(
+    val initiation = alice.messaging().initiateSession(
         sessionKey,
         bobIdentity,
         bobPublication,
@@ -64,7 +64,7 @@ fun main() {
         "transport-bound hello".encodeToByteArray(),
         initialBinding,
     )
-    val hint = bob.initiatorIdentityHintWithTransportBinding(
+    val hint = bob.messaging().initiatorIdentityHint(
         initiation.message,
         initialBinding,
         prekeySelection,
@@ -76,14 +76,14 @@ fun main() {
 
     expectMismatchedPrekeySelection(bob, initiation.message, initialBinding, prekeySelection)
     expectAuthenticationFailed("maximum unsigned prekey identifiers") {
-        bob.initiatorIdentityHintWithTransportBinding(
+        bob.messaging().initiatorIdentityHint(
             initiation.message,
             initialBinding,
             PreKeySelection(ULong.MAX_VALUE, ULong.MAX_VALUE),
         )
     }
 
-    val prepared = bob.prepareAcceptSessionWithTransportBinding(
+    val prepared = bob.messaging().prepareAcceptSession(
         sessionKey,
         null,
         initiation.message,
@@ -97,21 +97,22 @@ fun main() {
         "transport-bound Session acceptance",
     )
 
-    val engine = ProtocolStateEngine()
+    val contacts = alice.contacts()
+    val messaging = bob.messaging()
     val aliceSnapshot = mutableListOf<ProtocolStateEntry>()
     applyUpdates(aliceSnapshot, initiation.stateUpdates)
     val bobSnapshot = mutableListOf<ProtocolStateEntry>()
     applyUpdates(bobSnapshot, prepared.acceptance.stateUpdates)
     applyUpdates(
         aliceSnapshot,
-        engine.recordContact(
+        contacts.recordContact(
             aliceSnapshot.toList(),
             contactIdentity(bobIdentity, bobPublication),
         ).stateUpdates,
     )
     applyUpdates(
         aliceSnapshot,
-        engine.acceptContact(aliceSnapshot.toList(), identityKey(bobIdentity)).stateUpdates,
+        contacts.acceptContact(aliceSnapshot.toList(), identityKey(bobIdentity)).stateUpdates,
     )
 
     val authority = DevelopmentCertificateAuthority(
@@ -124,7 +125,7 @@ fun main() {
     val messageBinding = TransportBinding("consumer-owned message metadata".encodeToByteArray())
     val acknowledgmentBinding =
         TransportBinding("consumer-owned acknowledgment metadata".encodeToByteArray())
-    val outbound = alice.encryptMessageWithTransportBinding(
+    val outbound = alice.messaging().encryptMessage(
         aliceSnapshot.toList(),
         sessionKey,
         ByteArray(16) { 0x59 },
@@ -140,12 +141,12 @@ fun main() {
     val deduplicationKey = "binding-dedup".encodeToByteArray()
     applyUpdates(
         bobSnapshot,
-        listOf(engine.initializeDeduplicationSet(deduplicationKey)),
+        listOf(messaging.initializeDeduplicationSet(deduplicationKey)),
     )
     val changedMessageBinding =
         TransportBinding("changed consumer-owned message metadata".encodeToByteArray())
     expectAuthenticationFailed("established decryption with changed binding bytes") {
-        bob.decryptMessageWithTransportBindings(
+        bob.messaging().decryptMessage(
             bobSnapshot.toList(),
             sessionKey,
             deduplicationKey,
@@ -160,7 +161,7 @@ fun main() {
             acknowledgmentBinding,
         )
     }
-    val inbound = bob.decryptMessageWithTransportBindings(
+    val inbound = bob.messaging().decryptMessage(
         bobSnapshot.toList(),
         sessionKey,
         deduplicationKey,
@@ -183,14 +184,14 @@ fun main() {
     val changedAcknowledgmentBinding =
         TransportBinding("changed consumer-owned acknowledgment metadata".encodeToByteArray())
     expectAuthenticationFailed("acknowledgment with changed binding bytes") {
-        alice.processAcknowledgmentWithTransportBinding(
+        alice.messaging().processAcknowledgment(
             aliceSnapshot.toList(),
             sessionKey,
             acknowledgment,
             changedAcknowledgmentBinding,
         )
     }
-    val acknowledgmentOutcome = alice.processAcknowledgmentWithTransportBinding(
+    val acknowledgmentOutcome = alice.messaging().processAcknowledgment(
         aliceSnapshot.toList(),
         sessionKey,
         acknowledgment,
@@ -205,7 +206,7 @@ fun main() {
 }
 
 private fun expectMismatchedPrekeySelection(
-    store: KeyStore,
+    store: Client,
     message: Message,
     transportBinding: TransportBinding,
     prekeySelection: PreKeySelection,
@@ -217,7 +218,7 @@ private fun expectMismatchedPrekeySelection(
         oneTimeIdentifier + 1uL,
     )
     try {
-        store.initiatorIdentityHintWithTransportBinding(message, transportBinding, mismatched)
+        store.messaging().initiatorIdentityHint(message, transportBinding, mismatched)
         failCoverage("mismatched one-time-prekey identifier should reject")
     } catch (_: ClientException.AuthenticationFailed) {
     }
@@ -239,24 +240,24 @@ private fun expectAuthenticationFailed(message: String, operation: () -> Unit) {
     }
 }
 
-private fun generateIdentity(store: KeyStore): Identity {
-    val prepared = store.prepareGenerateIdentity()
+private fun generateIdentity(store: Client): Identity {
+    val prepared = store.identity().prepareGenerateIdentity()
     completeOperation(store, prepared.operation)
     return prepared.identity
 }
 
-private fun rotateSignedPrekey(store: KeyStore) {
-    val prepared = store.prepareRotateSignedPrekeyNow()
+private fun rotateSignedPrekey(store: Client) {
+    val prepared = store.identity().prepareRotateSignedPrekeyNow()
     completeOperation(store, prepared.operation)
 }
 
-private fun replenishOneTimePrekeys(store: KeyStore): List<OneTimePreKeyBundle> {
-    val prepared = store.prepareReplenishOneTimePrekeys()
+private fun replenishOneTimePrekeys(store: Client): List<OneTimePreKeyBundle> {
+    val prepared = store.identity().prepareReplenishOneTimePrekeys()
     completeOperation(store, prepared.operation)
     return prepared.oneTimePrekeys
 }
 
-private fun completeOperation(store: KeyStore, operation: KeyStoreOperation) {
+private fun completeOperation(store: Client, operation: KeyStoreOperation) {
     store.commitOperation(operation.identifier)
     store.finalizeOperation(operation.identifier)
 }

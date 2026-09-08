@@ -179,6 +179,7 @@ struct KeyStoreInner {
     discovery: Arc<DiscoveryKeyManager>,
     one_time_prekey: Arc<OneTimePreKeyManager>,
     signed_prekey: Arc<SignedPreKeyManager>,
+    engine: ProtocolStateEngine,
     // Coordinates operations that update more than one stored key.
     lifecycle: Mutex<()>,
 }
@@ -198,15 +199,31 @@ impl KeyStore {
         Self::with_clock(storage, Arc::new(SystemClock))
     }
 
+    /// Creates a keystore whose operations share the supplied protocol configuration.
+    ///
+    /// The engine is immutable for this identity context, including prepared operations.
+    pub fn with_protocol_engine(
+        storage: Box<dyn SecureStorage>,
+        engine: ProtocolStateEngine,
+    ) -> Self {
+        Self::from_shared_storage(Arc::new(Mutex::new(storage)), Arc::new(SystemClock), engine)
+    }
+
+    /// Returns the engine shared by identity, messaging, and contact operations.
+    pub fn protocol_engine(&self) -> &ProtocolStateEngine {
+        &self.0.engine
+    }
+
     // Creates a keystore backed by `storage`, reading time from `clock`.
     pub(crate) fn with_clock(storage: Box<dyn SecureStorage>, clock: Arc<dyn Clock>) -> Self {
         let storage = Arc::new(Mutex::new(storage));
-        Self::from_shared_storage(storage, clock)
+        Self::from_shared_storage(storage, clock, ProtocolStateEngine::new())
     }
 
     fn from_shared_storage(
         storage: Arc<Mutex<Box<dyn SecureStorage>>>,
         clock: Arc<dyn Clock>,
+        engine: ProtocolStateEngine,
     ) -> Self {
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         let discovery = Arc::new(DiscoveryKeyManager::new(
@@ -231,6 +248,7 @@ impl KeyStore {
             discovery,
             one_time_prekey,
             signed_prekey,
+            engine,
             lifecycle: Mutex::new(()),
         }))
     }
@@ -432,7 +450,7 @@ impl KeyStore {
         snapshot: &ProtocolStateSnapshot,
         identity_key: ContactIdentityKey,
     ) -> Result<PreparedKeyStoreOperation<ContactBlock>, KeyStoreError> {
-        let contact = ProtocolStateEngine::new().block_contact(snapshot, identity_key)?;
+        let contact = self.0.engine.block_contact(snapshot, identity_key)?;
         // An unchanged contact yields no updates; rotating anyway would re-key every other contact
         // for nothing.
         if contact.state_updates.is_empty() {
@@ -935,7 +953,8 @@ mod tests {
     fn store_with_storage() -> (KeyStore, SharedStorage) {
         let storage: SharedStorage = Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())));
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let key_store = KeyStore::from_shared_storage(Arc::clone(&storage), clock);
+        let key_store =
+            KeyStore::from_shared_storage(Arc::clone(&storage), clock, ProtocolStateEngine::new());
         (key_store, storage)
     }
 

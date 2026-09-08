@@ -1,5 +1,5 @@
 [bindings.kotlin]
-package_name = "com.aurelion.aether"
+package_name = "io.github.relaynet.roost"
 
 [bindings.swift]
-module_name = "Aether"
+module_name = "Roost"

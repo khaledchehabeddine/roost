@@ -17,7 +17,7 @@ val generatedKotlinDir = rootProject.layout.projectDirectory.dir("../../target/a
 val generatedJniLibsDir = rootProject.layout.projectDirectory.dir("../../target/android/jniLibs")
 
 android {
-    namespace = "com.aurelion.aether"
+    namespace = "io.github.relaynet.roost"
     compileSdk = 36
 
     defaultConfig {
@@ -71,18 +71,18 @@ afterEvaluate {
     val publishingExtension = extensions.getByType<PublishingExtension>()
     val releasePublication = publishingExtension.publications.create<MavenPublication>("release") {
         from(components["release"])
-        groupId = "com.aurelion"
+        groupId = "io.github.relaynet"
         artifactId = aetherArtifactId
         version = aetherVersion
 
         pom {
-            name.set("Aether Android")
-            description.set("Android UniFFI bindings and native libraries for Aether.")
-            url.set("https://github.com/RelayNet/aether")
+            name.set("Roost")
+            description.set("Android UniFFI bindings and native libraries for Roost.")
+            url.set("https://github.com/RelayNet/roost-kotlin")
                     licenses {
                         license {
                             name.set("All rights reserved")
-                            url.set("https://github.com/RelayNet/aether/blob/main/LICENSE")
+                            url.set("https://github.com/RelayNet/roost/blob/main/LICENSE")
                         }
                     }
             developers {
@@ -92,9 +92,9 @@ afterEvaluate {
                 }
             }
             scm {
-                connection.set("scm:git:https://github.com/RelayNet/aether.git")
-                developerConnection.set("scm:git:ssh://git@github.com/RelayNet/aether.git")
-                url.set("https://github.com/RelayNet/aether")
+                connection.set("scm:git:https://github.com/RelayNet/roost.git")
+                developerConnection.set("scm:git:ssh://git@github.com/RelayNet/roost.git")
+                url.set("https://github.com/RelayNet/roost")
             }
         }
     }

@@ -171,7 +171,7 @@ impl KeyStore {
             timestamp_millis: input.timestamp_millis,
             plaintext: input.plaintext,
         };
-        let engine = crate::ProtocolStateEngine::new();
+        let engine = &self.0.engine;
         Ok(engine.encrypt_message_with_transport_binding(
             input.snapshot,
             input.session_key,
@@ -222,7 +222,7 @@ impl KeyStore {
             },
             sender_certificate_validation: input.sender_certificate_validation,
         };
-        let engine = crate::ProtocolStateEngine::new();
+        let engine = &self.0.engine;
         Ok(engine.decrypt_message_with_transport_bindings(
             &mut rng,
             input.snapshot,
@@ -257,7 +257,7 @@ impl KeyStore {
             recipient_discovery_key: &discovery_key,
             recipient_identity_verifying_key: identity.verifying_key().to_bytes(),
         };
-        let engine = crate::ProtocolStateEngine::new();
+        let engine = &self.0.engine;
         Ok(engine.process_acknowledgment_with_transport_binding(
             &mut rng,
             input.snapshot,

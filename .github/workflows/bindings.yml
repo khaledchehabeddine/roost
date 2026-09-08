@@ -54,7 +54,7 @@ jobs:
 
       # Compilation verification requires Gradle + UniFFI runtime; verify generation only
       - name: Verify Kotlin Generated
-        run: test -s target/bindings/kotlin/com/aurelion/aether/roost_client.kt
+        run: test -s target/bindings/kotlin/io/github/relaynet/roost/roost_client.kt
 
   fixture-replay:
     name: Binding Fixture Replay
