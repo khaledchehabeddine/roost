@@ -8,7 +8,6 @@
 //!
 //! - `development-certificates` exposes an in-memory certificate authority for local peer
 //!   simulations. Normal artifacts omit the API.
-//! - `fixture-replay` exposes checked-in fixture replay support for tests and tooling.
 //!
 //! # Examples
 //!
@@ -40,9 +39,6 @@
 
 uniffi::setup_scaffolding!("roost_client");
 
-#[cfg(all(feature = "fixture-replay", not(debug_assertions)))]
-compile_error!("fixture-replay is test-only and must not be enabled for release builds");
-
 mod binding;
 mod certificate;
 mod client;
@@ -50,8 +46,6 @@ mod client;
 mod development_certificate;
 mod error;
 mod evidence;
-#[cfg(feature = "fixture-replay")]
-mod fixture_replay;
 mod key_store_operation;
 mod message;
 mod protocol;

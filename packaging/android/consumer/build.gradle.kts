@@ -7,9 +7,6 @@ plugins {
 }
 
 val aetherVersion = rootProject.extensions.extraProperties["aetherVersion"] as String
-val issue122CoverageSource = rootProject.layout.projectDirectory
-    .file("../../crates/roost-client/tests/bindings/Issue122Coverage.kt")
-val generatedCoverageDir = layout.buildDirectory.dir("generated/androidTest/kotlin")
 
 android {
     namespace = "io.github.relaynet.roost.consumer"
@@ -54,38 +51,4 @@ kotlin {
 
 dependencies {
     implementation("io.github.relaynet:roost:$aetherVersion")
-}
-
-// The issue-122 regression coverage lives outside this Gradle project. Stage it into a
-// generated Kotlin source dir and wire it onto the androidTest variant via the AGP 9 variant
-// API: under built-in Kotlin, generated sources must be added through the `kotlin` source set's
-// addGeneratedSourceDirectory (the old `androidTest { java.srcDir(provider) }` form is rejected
-// and would not compile a Kotlin file anyway).
-abstract class StageCoverageSource : DefaultTask() {
-    @get:InputFile
-    abstract val source: RegularFileProperty
-
-    @get:OutputDirectory
-    abstract val outputDir: DirectoryProperty
-
-    @TaskAction
-    fun stage() {
-        val target = outputDir.get().asFile
-        target.mkdirs()
-        source.get().asFile.copyTo(target.resolve("Issue122Coverage.kt"), overwrite = true)
-    }
-}
-
-val stageIssue122Coverage = tasks.register<StageCoverageSource>("stageIssue122Coverage") {
-    source.set(issue122CoverageSource)
-    outputDir.set(generatedCoverageDir)
-}
-
-androidComponents {
-    onVariants { variant ->
-        variant.androidTest?.sources?.kotlin?.addGeneratedSourceDirectory(
-            stageIssue122Coverage,
-            StageCoverageSource::outputDir,
-        )
-    }
 }

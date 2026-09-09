@@ -54,8 +54,8 @@ message, and rejected when missing, already consumed, stale, or mismatched.
 
 ## Verification Evidence
 
-- `crates/roost-client/docs/api-coverage.md` records binding coverage for signed-prekey rotation,
-  one-time-prekey replenishment, consumed-key rejection, stale-epoch detection, and session
-  recovery/re-handshake entry points.
+- Core's `signed_prekey` and `one_time_prekey` unit tests cover rotation, retention and pool
+  bounds. `crates/roost-core/tests/prekey_identifiers.rs` covers publication and selection across
+  the public API; prepared-operation and recovery tests cover restart behavior.
 - `docs/security.md` records signed-prekey-only fallback when one-time pre-key pools are exhausted
   and distinct failures for stale, missing, consumed, or mismatched prekey references.

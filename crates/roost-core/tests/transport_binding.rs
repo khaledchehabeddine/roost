@@ -9,10 +9,7 @@ use roost_core::{
     TransportBinding, TransportBindingError,
 };
 use roost_crypto::CryptoError;
-use support::{
-    ProtocolFixture, accepted, acknowledgment_recipient_discovery_key,
-    inbound_with_certificate_validation, sequenced_outbound,
-};
+use support::{ProtocolFixture, accepted, acknowledgment_recipient_discovery_key};
 
 #[test]
 fn transport_binding_preserves_exact_caller_bytes() {
@@ -49,39 +46,31 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
     let message_binding = TransportBinding::new(b"message\0\xff".to_vec()).unwrap();
     let acknowledgment_binding = TransportBinding::new(b"acknowledgment\0\xff".to_vec()).unwrap();
     let changed_binding = TransportBinding::new(b"message\0\xfe".to_vec()).unwrap();
-    let read = fixture.alice_store.read();
+    let read = fixture.alice_store.snapshot();
     let outbound = engine
         .encrypt_message_with_transport_binding(
-            &read.snapshot,
+            &read,
             fixture.session_key.clone(),
-            sequenced_outbound(1, b"transport bound", &fixture.alice_sender.sender_identity),
+            fixture.outbound(1, b"transport bound"),
             &message_binding,
         )
         .unwrap();
     fixture
         .alice_store
         .commit_outbound(
-            read.token,
             outbound.state_updates,
             outbound.message_id,
             &outbound.message,
         )
         .unwrap();
 
-    let read = fixture.bob_store.read();
+    let read = fixture.bob_store.snapshot();
     let domain_keys = [fixture.alice_sender.domain_signing_key()];
     let receive = |binding: &TransportBinding| {
         engine.decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x43; 32]),
-            &read.snapshot,
-            inbound_with_certificate_validation(
-                fixture.session_key.clone(),
-                fixture.deduplication_key.clone(),
-                &outbound.message,
-                &fixture.bob_sender,
-                &domain_keys,
-                &[],
-            ),
+            &read,
+            fixture.inbound(&outbound.message, &domain_keys, &[]),
             binding,
             &acknowledgment_binding,
         )
@@ -91,18 +80,15 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
         Err(ProtocolStateError::Crypto(CryptoError::Aead))
     ));
     let received = accepted(receive(&message_binding).unwrap());
-    fixture
-        .bob_store
-        .commit(read.token, received.state_updates)
-        .unwrap();
+    fixture.bob_store.commit(received.state_updates).unwrap();
     assert_eq!(received.plaintext.as_slice(), b"transport bound");
 
-    let read = fixture.alice_store.read();
+    let read = fixture.alice_store.snapshot();
     let recipient = acknowledgment_recipient_discovery_key();
     let process = |binding: &TransportBinding| {
         engine.process_acknowledgment_with_transport_binding(
             &mut ChaCha20Rng::from_seed([0x44; 32]),
-            &read.snapshot,
+            &read,
             InboundAcknowledgmentMessage {
                 session_key: fixture.session_key.clone(),
                 message: &received.acknowledgment,
@@ -127,9 +113,6 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
     let AcknowledgmentOutcome::Cleared(cleared) = process(&acknowledgment_binding).unwrap() else {
         panic!("expected the pending Message to be acknowledged");
     };
-    fixture
-        .alice_store
-        .commit(read.token, cleared.state_updates)
-        .unwrap();
+    fixture.alice_store.commit(cleared.state_updates).unwrap();
     assert_eq!(cleared.acknowledged_message_id, outbound.message_id);
 }

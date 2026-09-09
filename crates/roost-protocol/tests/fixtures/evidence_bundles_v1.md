@@ -46,5 +46,5 @@ The rejection vectors pin malformed bytes, a mismatched profile, an unsupported 
 a noncanonical recipient Identity Key, a tampered Message signature, an excessive certificate
 grace window, and replay under a different expected relay domain. A Core regression also replaces
 the certificate and domain signature with a valid pair for the same Identity Key at another Relay
-and proves that the transcript signature rejects the substitution. The Core fixture test and both
-generated binding harnesses replay the shared verdicts.
+and proves that the transcript signature rejects the substitution. Rust tests own these rejection verdicts. The generated binding checks use the valid vector for
+native signature verification and FFI conversion.

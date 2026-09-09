@@ -10,11 +10,7 @@ cargo-fuzz = true
 [dependencies]
 roost-protocol = { path = "../crates/roost-protocol" }
 roost-core = { path = "../crates/roost-core" }
-roost-crypto = { path = "../crates/roost-crypto" }
-hex = "0.4.3"
 libfuzzer-sys = "0.4.12"
-rand = "0.8.6"
-rand_chacha = "0.3.1"
 
 [[bin]]
 name = "message_decode"
@@ -45,8 +41,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "sealed_frame_envelope_decode"
-path = "fuzz_targets/sealed_frame_envelope_decode.rs"
+name = "sealed_sender_envelope_decode"
+path = "fuzz_targets/sealed_sender_envelope_decode.rs"
 test = false
 doc = false
 bench = false

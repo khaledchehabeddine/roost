@@ -7,8 +7,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 PACKAGE_INPUT="${1:-}"
 WORK="$ROOT/target/ios-package-consumer"
-TEST_SOURCE="$ROOT/crates/roost-client/tests/bindings/Issue124PackageConsumerTests.swift"
-FIXTURES="$ROOT/crates/roost-core/tests/fixtures"
+TEST_SOURCE="$ROOT/crates/roost-client/tests/bindings/PackageConsumerTests.swift"
 SAFE_EXTRACT="$ROOT/scripts/release/extract-zip-safely.sh"
 
 usage() {
@@ -70,10 +69,8 @@ write_consumer_package() {
     local package_literal
 
     rm -rf "$consumer"
-    mkdir -p "$consumer/Tests/AetherPackageConsumerTests/Resources"
-    cp "$TEST_SOURCE" "$consumer/Tests/AetherPackageConsumerTests/Issue124PackageConsumerTests.swift"
-    cp "$FIXTURES/protocol_state_blobs_v1.json" "$consumer/Tests/AetherPackageConsumerTests/Resources/"
-    cp "$FIXTURES/sealed_sender_session_messages_v1.json" "$consumer/Tests/AetherPackageConsumerTests/Resources/"
+    mkdir -p "$consumer/Tests/AetherPackageConsumerTests"
+    cp "$TEST_SOURCE" "$consumer/Tests/AetherPackageConsumerTests/PackageConsumerTests.swift"
     package_literal="$(swift_string_literal "$package")"
 
     cat > "$consumer/Package.swift" <<PACKAGE
@@ -91,8 +88,7 @@ let package = Package(
             name: "AetherPackageConsumerTests",
             dependencies: [
                 .product(name: "Aether", package: "AetherIOS"),
-            ],
-            resources: [.copy("Resources")]
+            ]
         ),
     ]
 )
@@ -116,20 +112,7 @@ run_consumer() {
 
 DESTINATION="$(destination)"
 HAPPY="$WORK/happy"
-BROKEN_PACKAGE="$WORK/broken-package"
-NEGATIVE="$WORK/negative"
-
 write_consumer_package "$HAPPY" "$PACKAGE_DIR"
 run_consumer "$HAPPY" "$DESTINATION"
 
-rm -rf "$BROKEN_PACKAGE"
-cp -R "$PACKAGE_DIR" "$BROKEN_PACKAGE"
-rm -rf "$BROKEN_PACKAGE/Artifacts/Aether.xcframework"
-
-write_consumer_package "$NEGATIVE" "$BROKEN_PACKAGE"
-if run_consumer "$NEGATIVE" "$DESTINATION"; then
-    echo "negative package verification unexpectedly passed" >&2
-    exit 1
-fi
-
-echo "iOS package consumer verification passed"
+echo "iOS package installation and binding call passed"

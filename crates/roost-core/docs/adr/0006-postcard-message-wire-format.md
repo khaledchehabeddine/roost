@@ -35,5 +35,6 @@ of decoded as the current Message format.
   rejection inputs for old sender-visible layouts.
 - `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins session Message
   transport-visible fields and post-decryption sender material.
-- `crates/roost-client/docs/api-coverage.md` records binding replay coverage for sealed-sender
-  encode/decode, acknowledgments, and protocol-state outputs.
+- `crates/roost-core/tests/message_wire_fixtures.rs` and
+  `crates/roost-core/tests/sealed_sender_session_message_fixtures.rs` replay the canonical bytes.
+  `crates/roost-core/tests/protocol_state.rs` covers acknowledgments and state outputs.

@@ -146,23 +146,20 @@ pub mod fuzzing {
     pub use crate::one_time_prekey::fuzz_decode_one_time_prekey_pool;
     pub use crate::protocol_state::{
         fuzz_decode_protocol_state_blob, fuzz_decode_sealed_sender_envelope,
-        fuzz_deduplication_digest, fuzz_unpad_sealed_payload,
+        fuzz_unpad_sealed_payload,
     };
     pub use crate::signed_prekey::fuzz_decode_signed_prekey_blob;
 }
 
-/// Deterministic inputs used by the generated-binding checks.
+/// Crypto inputs used by Client's Rust adapter tests.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support {
     pub use roost_crypto::{
-        DiscoveryKey, DiscoveryKeyBundle, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext,
-        KeyPair, OneTimePreKey, PREKEY_BUNDLE_VERSION, PreKeyBundle, PublicKey, RatchetState,
-        RecipientDeliveryCapability, SealedFramePreKeyReference, Signature, SignedPreKey,
-        SignedPreKeyBundle, SigningKeyPair, VerifyingKey, accept, generate_discovery_key,
-        generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
-        generate_signing_key_pair, initiate, sign_identity_key_binding,
-        verify_discovery_key_bundle, verify_discovery_to_identity_binding,
-        verify_identity_key_bundle, verify_signed_prekey_bundle,
+        DiscoveryKeyBundle, IdentityKeyBundle, KeyPair, PREKEY_BUNDLE_VERSION, PublicKey,
+        RecipientDeliveryCapability, Signature, SignedPreKeyBundle, SigningKeyPair, VerifyingKey,
+        sign_identity_key_binding, verify_discovery_key_bundle,
+        verify_discovery_to_identity_binding, verify_identity_key_bundle,
+        verify_signed_prekey_bundle,
     };
 }

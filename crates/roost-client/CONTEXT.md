@@ -4,8 +4,9 @@ The platform FFI binding layer that generates Swift and Kotlin bindings from Rus
 
 ## Language
 
-**Binding Test Harness** (test-only binding surface):
-Feature-gated Swift and Kotlin binding checks that exercise generated bindings through fixture replay and FFI-boundary regressions. It verifies generated binding behavior without becoming production SDK API.
+**Binding Test Harness** (generated-binding checks):
+Swift and Kotlin checks of foreign storage callbacks, operation recovery, native signature
+verification, and byte conversion. Rust owns the protocol scenarios and canonical fixtures.
 Avoid: sample app, transport test, SDK feature
 
 **SecureStorage** (one implementation per platform):

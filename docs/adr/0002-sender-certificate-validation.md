@@ -17,5 +17,5 @@ plaintext or sender identity and does not advance ratchet/session state.
   expired, malformed, and signature-failure certificate cases.
 - `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` records that sender
   certificate material appears only after decrypt.
-- `crates/roost-client/docs/api-coverage.md` records binding coverage for certificate validation
-  and rejected certificate inputs.
+- `crates/roost-core/tests/protocol_state.rs` verifies certificate rejection before plaintext
+  or sender identity is surfaced.

@@ -20,44 +20,7 @@ concurrency:
 
 jobs:
   bindings:
-    name: UniFFI Bindings
-    runs-on: macos-latest
-    if: github.event.pull_request.draft == false
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build roost-client
-        run: cargo build -p roost-client
-
-      - name: Generate Kotlin Bindings
-        run: |
-          cargo run --bin uniffi-bindgen -- generate \
-            target/debug/libroost_client.dylib \
-            --language kotlin \
-            --out-dir target/bindings/kotlin
-
-      - name: Generate Swift Bindings
-        run: |
-          cargo run --bin uniffi-bindgen-swift -- \
-            target/debug/libroost_client.dylib \
-            target/bindings/swift \
-            --swift-sources --headers
-
-      - name: Verify Swift Compiles
-        run: swiftc -parse target/bindings/swift/*.swift
-
-      # Compilation verification requires Gradle + UniFFI runtime; verify generation only
-      - name: Verify Kotlin Generated
-        run: test -s target/bindings/kotlin/io/github/relaynet/roost/roost_client.kt
-
-  fixture-replay:
-    name: Binding Fixture Replay
+    name: Targeted FFI checks
     runs-on: macos-latest
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
@@ -78,16 +41,5 @@ jobs:
       - name: Install Kotlin
         run: brew install kotlin
 
-      - name: Download JNA
-        run: |
-          mkdir -p target/bindings/fixture-replay/jna
-          curl --fail --location --silent --show-error \
-            https://repo1.maven.org/maven2/net/java/dev/jna/jna/5.18.1/jna-5.18.1.jar \
-            --output target/bindings/fixture-replay/jna/jna-5.18.1.jar
-          echo "260c4b1e22b1db9e110ee441c4f13ce115f841fa48c41d78750986214b395557  target/bindings/fixture-replay/jna/jna-5.18.1.jar" \
-            | shasum -a 256 --check
-
-      - name: Replay Binding Fixtures
-        env:
-          JNA_JAR: ${{ github.workspace }}/target/bindings/fixture-replay/jna/jna-5.18.1.jar
-        run: scripts/test/binding-fixture-replay.sh
+      - name: Generate, compile, and test bindings
+        run: scripts/test/bindings.sh

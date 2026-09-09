@@ -6,7 +6,7 @@ targets=(
   protocol_state_blob_decode
   prekey_store_decode
   sender_certificate_validate
-  sealed_frame_envelope_decode
+  sealed_sender_envelope_decode
   sealed_payload_padding
 )
 

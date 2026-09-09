@@ -1,30 +1,25 @@
-# Binding Test Harness
+# Binding checks
 
-Swift and Kotlin harnesses in this directory exercise UniFFI bindings built with the `fixture-replay` feature. They are test-only consumers of canonical fixtures and FFI-boundary regressions, not production SDK examples.
+`scripts/test/bindings.sh` generates and compiles the production Swift and Kotlin bindings, then
+runs the checks Rust cannot perform alone:
 
-- `FixtureReplay.*`: canonical message, handshake, and protocol-state fixture replay.
-- `TransportBindingBindings.*`: generated-client coverage for opaque Transport Bindings across
-  initial and established-session operations, including binding-size and authentication failures.
-- `Issue122Coverage.*`: generated API coverage for identity, backup, protocol-state store,
-  sessions, messages, contacts/blocking, events, delivery retry, prekey replenishment, and negative
-  binding-visible errors. Event coverage commits through a second instance, reloads the shared
-  store, imports rebuilt current state, preserves local Event IDs, rejects foreign and stale
-  snapshots, and reconstructs state after restart.
-- `Issue219PreparedOperations.*`: generated prepared-operation lifecycle coverage for provisional
-  outputs, stable identifiers, orphan recovery, idempotent transitions, recovery gating, and stale
-  SecureStorage preconditions.
-- `Issue124PackageConsumerTests.swift`: generated iOS Swift Package consumer coverage, run through
-  `scripts/test/ios-package-consumer.sh`.
-- `SecureStorageUnexpectedError.*`: foreign storage exception mapping and mutex recovery.
-- `AuthenticationTranscriptSigning.*`: bare identity-key signing over a caller-built
-  authentication transcript, verified with the platform's own Ed25519 rather than Aether's, plus
-  the reserved-prefix refusals.
-- `Issue122Coverage.*` also covers `initiatorIdentityHint`: the stranger path, where the sender is
-  read from the frame and `prepareAcceptSession` is then called with no expected identity.
-- `KeyBindingVerification.*`: standalone IK/DK binding verification, with the platform's own Ed25519
-  as the counterparty rather than Aether's, plus the context-separation and malformed-input refusals.
-- `EvidenceBundleVectors.*`: version-one accepted-Message evidence replay through the production
-  verifier, including malformed, profile, version, signature, and cross-relay replay refusals.
-  CryptoKit and the JDK independently verify both signatures carried by the vector.
+- `SecureStorageUnexpectedError.*` checks foreign exception conversion and subsequent lock use.
+- `PreparedOperations.*` checks foreign SecureStorage staging, orphan discovery, stale preconditions,
+  lost write replies, restart recovery, and idempotent finalization.
+- `TransportBindingBindings.*` checks sliced byte containers, NUL and high-bit bytes, and rejection
+  after an authenticated byte changes.
+- `EvidenceBundleVectors.*` reads the canonical Rust evidence fixture through the runner. CryptoKit
+  and the JDK verify its certificate signature and the Message signature over fields returned by FFI.
+  They also verify a fresh authentication signature returned by the generated signer binding.
 
-Run through `scripts/test/binding-fixture-replay.sh`.
+The runner needs Rust, Python 3, Swift, Kotlin, and a JDK with Ed25519 support. It verifies the pinned
+JNA checksum. Set `ROOST_BINDING_LANGS=swift` or `kotlin` to run one language; `JNA_JAR` can name a
+cached copy of the pinned JAR.
+
+`PackageConsumerTests.swift` and Android's `AndroidAarConsumerTest` only verify package installation,
+native loading, and a real Client call. The complete consumer workflow is validated manually for
+v0.16.0 and after changes to packaging, release scripts, toolchains, ABI lists, package layout,
+bindings, or consumer repositories.
+
+Rust owns protocol scenarios and exact-byte fixtures. See the
+[coverage notes](../../../../docs/protocol-state-invariant-tests.md) for retained evidence and gaps.

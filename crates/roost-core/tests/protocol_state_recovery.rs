@@ -5,10 +5,7 @@ mod support;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{ProtocolStateEngine, SessionEvent, SessionUnrecoverableReason};
-use support::{
-    ProtocolFixture, dead_session_blob, inbound_with_certificate_validation, ratchet_address,
-    session_unrecoverable,
-};
+use support::{ProtocolFixture, dead_session_blob, ratchet_address, session_unrecoverable};
 
 #[test]
 fn dead_session_marker_is_durable_until_caller_replaces_session() {
@@ -25,21 +22,14 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
     let domain_keys = [fixture.alice_sender.domain_signing_key()];
     let revoked = [];
 
-    let first_read = fixture.bob_store.read();
+    let first_read = fixture.bob_store.snapshot();
     let first = engine
         .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5a; 32]),
-            &first_read.snapshot,
-            inbound_with_certificate_validation(
-                fixture.session_key.clone(),
-                fixture.deduplication_key.clone(),
-                &message.message,
-                &fixture.bob_sender,
-                &domain_keys,
-                &revoked,
-            ),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &first_read,
+            fixture.inbound(&message.message, &domain_keys, &revoked),
+            &fixture.binding,
+            &fixture.binding,
         )
         .map(session_unrecoverable)
         .unwrap();
@@ -54,25 +44,15 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
             ..
         })
     ));
-    fixture
-        .bob_store
-        .commit(first_read.token, first.state_updates)
-        .unwrap();
+    fixture.bob_store.commit(first.state_updates).unwrap();
 
     let repeated = engine
         .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5b; 32]),
-            &fixture.bob_store.read().snapshot,
-            inbound_with_certificate_validation(
-                fixture.session_key.clone(),
-                fixture.deduplication_key.clone(),
-                &message.message,
-                &fixture.bob_sender,
-                &domain_keys,
-                &revoked,
-            ),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &fixture.bob_store.snapshot(),
+            fixture.inbound(&message.message, &domain_keys, &revoked),
+            &fixture.binding,
+            &fixture.binding,
         )
         .map(session_unrecoverable)
         .unwrap();
@@ -97,29 +77,21 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
                 .set_session_state_with_peer_identity(fixture.session_key.clone(), state, peer)
                 .unwrap()
         };
-        let read = host.read();
         // A new handshake cannot silently overwrite an existing live or dead Session.
         assert_eq!(
-            host.commit(read.token, vec![initialize()]),
+            host.commit(vec![initialize()]),
             Err(support::HostCommitError::StaleCondition)
         );
-        let read = host.read();
-        host.commit(
-            read.token,
-            engine.wipe(&read.snapshot, fixture.session_key.clone()),
-        )
-        .unwrap();
+        let read = host.snapshot();
+        host.commit(engine.wipe(&read, fixture.session_key.clone()))
+            .unwrap();
         assert!(host.blob_bytes(&address).is_none());
-        let read = host.read();
-        host.commit(
-            read.token,
-            vec![
-                initialize(),
-                engine
-                    .initialize_pending_acknowledgments(fixture.session_key.clone())
-                    .unwrap(),
-            ],
-        )
+        host.commit(vec![
+            initialize(),
+            engine
+                .initialize_pending_acknowledgments(fixture.session_key.clone())
+                .unwrap(),
+        ])
         .unwrap();
     }
     let recovered = fixture.encrypt_from_alice(&engine, 2, b"after replacement");

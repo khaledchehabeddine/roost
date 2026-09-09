@@ -50,7 +50,7 @@ and prekey lifecycle behavior.
 
 - `crates/roost-core/tests/protocol_state_host_store.rs` verifies Core-computed absent and digest
   conditions and rejects stale updates before committing state or outbox effects.
-- `scripts/test/binding-fixture-replay.sh` exercises generated bindings through the fixture replay
-  harness.
+- `scripts/test/bindings.sh` generates and compiles bindings, then checks foreign storage
+  failures, prepared-operation recovery, native evidence verification, and byte conversion.
 - `crates/roost-core/tests/fixtures/protocol_state_blobs_v1.md` records that consumers persist
   Protocol State Blobs opaquely by kind/key without inspecting contents.

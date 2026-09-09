@@ -828,14 +828,10 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 name = "roost-client"
 version = "0.16.0"
 dependencies = [
- "blake3",
  "hex",
  "rand",
- "rand_chacha",
  "roost-core",
  "roost-protocol",
- "serde",
- "serde_json",
  "uniffi",
  "zeroize",
 ]

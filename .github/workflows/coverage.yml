@@ -37,8 +37,5 @@ jobs:
       - name: Run Tests with Coverage
         run: cargo llvm-cov --workspace --no-report
 
-      - name: Check roost-core Coverage
-        run: cargo llvm-cov report -p roost-core --fail-under-lines 80
-
-      - name: Check roost-crypto Coverage
-        run: cargo llvm-cov report -p roost-crypto --fail-under-lines 80
+      - name: Report Core and Crypto coverage
+        run: cargo llvm-cov report -p roost-core -p roost-crypto

@@ -4323,15 +4323,6 @@ pub fn fuzz_unpad_sealed_payload(padded: &[u8]) -> Result<(), ProtocolStateError
     unpad_sealed_payload(padded).map(|_| ())
 }
 
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_deduplication_digest(
-    digest_key: [u8; DEDUPLICATION_KEY_LEN],
-    encoded_message: &[u8],
-) -> [u8; DEDUPLICATION_DIGEST_LEN] {
-    deduplication_digest(&digest_key, &[], encoded_message)
-}
-
 fn sender_identity_key_matches(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
     expected.ct_eq(actual).into()
 }

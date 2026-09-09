@@ -359,86 +359,14 @@ fn evidence_bundle_with_noncanonical_recipient_identity_key_is_rejected() {
 }
 
 #[test]
-#[ignore = "prints the evidence_bundles_v1.json vector; run explicitly"]
-fn print_evidence_bundle_fixture() {
-    let (fixture, sent, accepted) = accepted_evidence(0x0221);
-    let domain_key = fixture.alice_sender.domain_signing_key();
-    let domain_signing_keys = [domain_key];
-    let verified = verify_evidence_bundle(EvidenceVerificationInput {
-        bundle: accepted.evidence_bundle.as_bytes(),
-        expected_profile: EvidenceProfile::MessageTranscriptV1,
-        domain_signing_keys: &domain_signing_keys,
-        expected_relay_domain: TEST_RELAY_DOMAIN,
-        accepted_timestamp_secs: ACCEPTED_TIMESTAMP_SECS,
-        grace_window_secs: 0,
-    })
+fn accepted_message_matches_canonical_evidence_bundle() {
+    let (_, _, accepted) = accepted_evidence(0x0221);
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../roost-protocol/tests/fixtures/evidence_bundles_v1.json"
+    ))
     .unwrap();
-    let mut wrong_profile = accepted.evidence_bundle.as_bytes().to_vec();
-    wrong_profile[1] = 2;
-    let mut unsupported_version = accepted.evidence_bundle.as_bytes().to_vec();
-    unsupported_version[0] = 2;
-    let mut tampered_signature = accepted.evidence_bundle.as_bytes().to_vec();
-    *tampered_signature.last_mut().unwrap() ^= 0x01;
-    let mut invalid_recipient_identity_key = accepted.evidence_bundle.as_bytes().to_vec();
-    let recipient_key_offset = invalid_recipient_identity_key
-        .windows(verified.recipient_identity_verifying_key.len())
-        .position(|window| window == verified.recipient_identity_verifying_key)
-        .unwrap();
-    invalid_recipient_identity_key[recipient_key_offset
-        ..recipient_key_offset + verified.recipient_identity_verifying_key.len()]
-        .fill(0xff);
-    let output = serde_json::json!({
-        "version": 1,
-        "profile": "message_transcript_v1",
-        "accepted_timestamp_secs": ACCEPTED_TIMESTAMP_SECS,
-        "grace_window_secs": 0,
-        "expected_relay_domain_hex": hex::encode(TEST_RELAY_DOMAIN),
-        "replay_relay_domain_hex": hex::encode(b"other-relay.test"),
-        "domain_signing_key": {
-            "identifier_hex": hex::encode(domain_key.identifier),
-            "verifying_key_hex": hex::encode(domain_key.verifying_key),
-            "status": "trusted"
-        },
-        "valid": {
-            "name": "accepted_text_message",
-            "bundle_hex": hex::encode(accepted.evidence_bundle.as_bytes()),
-            "verification_material": {
-                "sender_certificate_hex": hex::encode(&accepted.sender_identity.certificate),
-                "sender_certificate_signature_hex": hex::encode(&accepted.sender_identity.signature),
-                "message_transcript_signature_hex": hex::encode(
-                    &accepted.evidence_bundle.as_bytes()[accepted.evidence_bundle.as_bytes().len() - 64..]
-                )
-            },
-            "decoded": {
-                "evidence_identity_hex": hex::encode(verified.evidence_identity),
-                "session_key_hex": hex::encode(&verified.session_key),
-                "recipient_identity_verifying_key_hex": hex::encode(
-                    verified.recipient_identity_verifying_key
-                ),
-                "message_id_hex": hex::encode(verified.message_id.as_bytes()),
-                "timestamp_millis": verified.timestamp_millis,
-                "payload_kind": "encrypted_text",
-                "plaintext_hex": hex::encode(&verified.plaintext),
-                "sender_identity_x25519_public_key_hex": hex::encode(
-                    verified.sender_identity_key.x25519_public_key
-                ),
-                "sender_identity_ed25519_verifying_key_hex": hex::encode(
-                    verified.sender_identity_key.ed25519_verifying_key
-                ),
-                "relay_domain_hex": hex::encode(&verified.relay_domain),
-                "certificate_expires_at_secs": verified.certificate_expires_at_secs
-            },
-            "outbound_message_id_hex": hex::encode(sent.message_id.as_bytes())
-        },
-        "rejections": {
-            "malformed_bundle_hex": "0101ff",
-            "wrong_profile_bundle_hex": hex::encode(wrong_profile),
-            "unsupported_version_bundle_hex": hex::encode(unsupported_version),
-            "tampered_signature_bundle_hex": hex::encode(tampered_signature),
-            "invalid_recipient_identity_key_bundle_hex": hex::encode(
-                invalid_recipient_identity_key
-            )
-        }
-    });
-    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    assert_eq!(
+        hex::encode(accepted.evidence_bundle.as_bytes()),
+        fixture["valid"]["bundle_hex"].as_str().unwrap()
+    );
 }

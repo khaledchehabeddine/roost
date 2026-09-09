@@ -14,10 +14,7 @@ use roost_core::{
 };
 use roost_protocol::PayloadKind;
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
-use support::{
-    ProtocolFixture, StoredMessage, accepted, deduplication_address,
-    inbound_with_certificate_validation, ratchet_address,
-};
+use support::{ProtocolFixture, StoredMessage, accepted, deduplication_address, ratchet_address};
 
 #[global_allocator]
 static GLOBAL: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
@@ -200,16 +197,9 @@ fn maximum_size_precheck_rejects_before_state_access() {
         tight_engine.decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x80; 32]),
             &ProtocolStateSnapshot::new(),
-            inbound_with_certificate_validation(
-                fixture.session_key.clone(),
-                fixture.deduplication_key.clone(),
-                &message.message,
-                &fixture.bob_sender,
-                &domain_keys,
-                &revoked,
-            ),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            fixture.inbound(&message.message, &domain_keys, &revoked),
+            &fixture.binding,
+            &fixture.binding,
         )
     });
     let result = measured.value;
@@ -226,7 +216,7 @@ fn budget_harness_reports_too_small_memory_budget() {
     let engine = ProtocolStateEngine::new();
     let mut fixture = ProtocolFixture::new([0x44; 32]);
     let message = fixture.encrypt_from_alice(&engine, 0x90, b"memory negative");
-    let read = fixture.bob_store.read();
+    let read = fixture.bob_store.snapshot();
     let domain_keys = [fixture.alice_sender.domain_signing_key()];
     let revoked = [];
     let budget = Budget {
@@ -238,17 +228,10 @@ fn budget_harness_reports_too_small_memory_budget() {
         engine
             .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([0x90; 32]),
-                &read.snapshot,
-                inbound_with_certificate_validation(
-                    fixture.session_key.clone(),
-                    fixture.deduplication_key.clone(),
-                    &message.message,
-                    &fixture.bob_sender,
-                    &domain_keys,
-                    &revoked,
-                ),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &read,
+                fixture.inbound(&message.message, &domain_keys, &revoked),
+                &fixture.binding,
+                &fixture.binding,
             )
             .unwrap()
     });
@@ -260,7 +243,7 @@ fn budget_harness_reports_too_small_wall_clock_budget() {
     let engine = ProtocolStateEngine::new();
     let mut fixture = ProtocolFixture::new([0x55; 32]);
     let message = fixture.encrypt_from_alice(&engine, 0xa0, b"wall-clock negative");
-    let read = fixture.bob_store.read();
+    let read = fixture.bob_store.snapshot();
     let domain_keys = [fixture.alice_sender.domain_signing_key()];
     let revoked = [];
     let budget = Budget {
@@ -272,17 +255,10 @@ fn budget_harness_reports_too_small_wall_clock_budget() {
         engine
             .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([0xa0; 32]),
-                &read.snapshot,
-                inbound_with_certificate_validation(
-                    fixture.session_key.clone(),
-                    fixture.deduplication_key.clone(),
-                    &message.message,
-                    &fixture.bob_sender,
-                    &domain_keys,
-                    &revoked,
-                ),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &read,
+                fixture.inbound(&message.message, &domain_keys, &revoked),
+                &fixture.binding,
+                &fixture.binding,
             )
             .unwrap()
     });
@@ -298,7 +274,7 @@ fn decrypt_and_commit(
     label: &'static str,
     budget: Budget,
 ) -> Measurement {
-    let read = fixture.bob_store.read();
+    let read = fixture.bob_store.snapshot();
     let ratchet_address = ratchet_address(fixture.session_key.clone());
     let deduplication_address = deduplication_address(fixture.deduplication_key.clone());
     let prior_ratchet = fixture.bob_store.blob_bytes(&ratchet_address).unwrap();
@@ -312,17 +288,10 @@ fn decrypt_and_commit(
         engine
             .decrypt_message_with_transport_bindings(
                 &mut ChaCha20Rng::from_seed([rng_seed; 32]),
-                &read.snapshot,
-                inbound_with_certificate_validation(
-                    fixture.session_key.clone(),
-                    fixture.deduplication_key.clone(),
-                    &message.message,
-                    &fixture.bob_sender,
-                    &domain_keys,
-                    &revoked,
-                ),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                &read,
+                fixture.inbound(&message.message, &domain_keys, &revoked),
+                &fixture.binding,
+                &fixture.binding,
             )
             .unwrap()
     });
@@ -366,7 +335,7 @@ fn decrypt_and_commit(
         &prior_ratchet,
         &prior_deduplication,
     );
-    fixture.bob_store.commit(read.token, updates).unwrap();
+    fixture.bob_store.commit(updates).unwrap();
     measurement
 }
 

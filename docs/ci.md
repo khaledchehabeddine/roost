@@ -4,6 +4,13 @@ CI separates fast pull-request checks from release gates. Pull-request checks pr
 quality, dependency policy, and the supported runtime verification subset. Release gates verify the
 mobile artifacts that ship from a commit.
 
+## Protocol and binding checks
+
+Rust owns protocol scenarios and canonical fixtures. The bindings workflow runs
+`scripts/test/bindings.sh` against production exports for foreign storage and recovery, native
+Evidence Bundle verification, and Transport Binding byte conversion. Coverage reports have no
+minimum threshold. [Coverage notes](protocol-state-invariant-tests.md) record the accepted gaps.
+
 ## Runtime Verification
 
 Miri runs on nightly for `roost-protocol`, `roost-crypto`, and `roost-core` library tests:
@@ -28,7 +35,7 @@ scripts/ci/sanitizer-test.sh memory
 The sanitizer subset targets `x86_64-unknown-linux-gnu` and runs library plus integration tests for
 `roost-protocol`, `roost-server`, `roost-crypto`, and `roost-core` with `-Z build-std`. The sanitizer jobs also use
 `--features blake3/pure` to avoid native BLAKE3 C/assembly code that would otherwise fall outside
-the Rust-instrumented test surface. UniFFI binding replay and mobile target builds remain covered by
+the Rust-instrumented test surface. Targeted UniFFI checks and mobile target builds remain covered by
 their own workflows, not by sanitizer jobs.
 
 ## Constrained Decryption Budget
@@ -49,8 +56,8 @@ The release-verification workflow builds the Android AAR from the checked-out so
 to a local Maven repository, uploads the unsigned Maven layout for later signing, and runs two
 consumer checks:
 
-- happy path: resolve `com.aurelion:aether:<workspace-version>` and run the Kotlin binding coverage
-  flow on an Android API 36 managed device
+- happy path: resolve the package, load its native library, and call Client from an Android API 36
+  managed device
 - negative path: remove the AAR from a temporary Maven layout and require consumer resolution to
   fail
 

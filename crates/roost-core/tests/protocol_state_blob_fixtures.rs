@@ -174,10 +174,6 @@ fn accepted_contact_discovery_key() -> DiscoveryKey {
     generate_discovery_key(&mut rng, &identity, 0, CREATED_AT)
 }
 
-fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
-    Box::leak(Box::new(accepted_contact_discovery_key()))
-}
-
 fn local_identity_key() -> IdentityKey {
     let mut rng = ChaCha20Rng::from_seed([0x72; 32]);
     let identity = generate_signing_key_pair(&mut rng);
@@ -419,12 +415,13 @@ fn install_accepted_contact(engine: &ProtocolStateEngine, snapshot: &mut Protoco
 fn outbound<'a>(
     plaintext: &'a [u8],
     sender_identity: &'a SenderIdentityMaterial,
+    signing_key: &'a SigningKeyPair,
 ) -> OutboundPlaintext<'a> {
     let contact = accepted_contact_identity();
     OutboundPlaintext {
         id: MessageId::from_bytes([1u8; 16]),
         sender_identity,
-        sender_identity_signing_key: sender_identity_signing_key(),
+        sender_identity_signing_key: signing_key,
         contact_identity_key: contact.identity_key,
         recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_123,
@@ -436,7 +433,7 @@ fn sender_identity() -> SenderIdentityMaterial {
     let signing_key = sender_identity_signing_key();
     let identity_key_pair = KeyPair::from_secret_bytes([0x34; 32]);
     let binding_signature =
-        sign_identity_key_binding(signing_key, &identity_key_pair.public).unwrap();
+        sign_identity_key_binding(&signing_key, &identity_key_pair.public).unwrap();
     SenderIdentityMaterial {
         identity_key: *identity_key_pair.public.as_bytes(),
         identity_verifying_key: signing_key.verifying.to_bytes(),
@@ -446,15 +443,18 @@ fn sender_identity() -> SenderIdentityMaterial {
     }
 }
 
-fn sender_identity_signing_key() -> &'static SigningKeyPair {
-    Box::leak(Box::new(SigningKeyPair::from_signing_bytes([1u8; 32])))
+fn sender_identity_signing_key() -> SigningKeyPair {
+    SigningKeyPair::from_signing_bytes([1u8; 32])
 }
 
-fn acknowledgment<'a>(sender_identity: &'a SenderIdentityMaterial) -> OutboundAcknowledgment<'a> {
+fn acknowledgment<'a>(
+    sender_identity: &'a SenderIdentityMaterial,
+    signing_key: &'a SigningKeyPair,
+) -> OutboundAcknowledgment<'a> {
     OutboundAcknowledgment {
         id: MessageId::from_bytes([0xee; 16]),
         sender_identity,
-        sender_identity_signing_key: sender_identity_signing_key(),
+        sender_identity_signing_key: signing_key,
         recipient_public_key: [0xb6; 32],
         timestamp_millis: 1_700_000_100_000,
     }
@@ -510,7 +510,7 @@ fn current_version_fixture_matches_decoded_state_expectations() {
         .encrypt_message_with_transport_binding(
             &fixture_snapshot,
             key.clone(),
-            outbound(b"fixture", &sender_identity),
+            outbound(b"fixture", &sender_identity, &sender_identity_signing_key()),
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
@@ -518,7 +518,7 @@ fn current_version_fixture_matches_decoded_state_expectations() {
         .encrypt_message_with_transport_binding(
             &expected_snapshot,
             key,
-            outbound(b"fixture", &sender_identity),
+            outbound(b"fixture", &sender_identity, &sender_identity_signing_key()),
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap();
@@ -725,11 +725,14 @@ fn assert_duplicate_inbound_replay(
                 session_key: session_key(),
                 deduplication_key: deduplication_key(),
                 message: &message,
-                recipient_discovery_key: accepted_contact_discovery_key_ref(),
+                recipient_discovery_key: &accepted_contact_discovery_key(),
                 recipient_identity_verifying_key: accepted_contact_identity()
                     .identity_key
                     .ed25519_verifying_key,
-                acknowledgment: acknowledgment(&acknowledgment_sender),
+                acknowledgment: acknowledgment(
+                    &acknowledgment_sender,
+                    &sender_identity_signing_key(),
+                ),
                 sender_certificate_validation: None,
             },
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
@@ -763,7 +766,7 @@ fn assert_duplicate_acknowledgment_replay(
             InboundAcknowledgmentMessage {
                 session_key: session_key(),
                 message: &message,
-                recipient_discovery_key: accepted_contact_discovery_key_ref(),
+                recipient_discovery_key: &accepted_contact_discovery_key(),
                 recipient_identity_verifying_key: accepted_contact_identity()
                     .identity_key
                     .ed25519_verifying_key,
@@ -897,72 +900,24 @@ fn flat_ratchet_state_blob_is_rejected_as_malformed_current_blob() {
 }
 
 #[test]
-fn unsupported_major_version_is_a_fault() {
+fn non_current_envelope_versions_are_faults() {
     let engine = ProtocolStateEngine::new();
-    let key = session_key();
-    let address = session_address(key.clone());
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .set(
-            address.clone(),
-            ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa]),
-        )
-        .unwrap();
-
-    assert!(matches!(
-        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
-        Err(ProtocolStateError::UnsupportedBlobVersion {
-            address: actual,
-            major: 2,
-            minor: 0
-        }) if actual == address
-    ));
-}
-
-#[test]
-fn lower_pre_release_version_is_a_fault() {
-    let engine = ProtocolStateEngine::new();
-    let key = session_key();
-    let address = session_address(key.clone());
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .set(
-            address.clone(),
-            ProtocolStateBlob::from_bytes(vec![0, 1, 0xaa]),
-        )
-        .unwrap();
-
-    assert!(matches!(
-        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
-        Err(ProtocolStateError::UnsupportedBlobVersion {
-            address: actual,
-            major: 0,
-            minor: 1
-        }) if actual == address
-    ));
-}
-
-#[test]
-fn unsupported_minor_version_is_a_fault() {
-    let engine = ProtocolStateEngine::new();
-    let key = session_key();
-    let address = session_address(key.clone());
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .set(
-            address.clone(),
-            ProtocolStateBlob::from_bytes(vec![1, 1, 0xaa]),
-        )
-        .unwrap();
-
-    assert!(matches!(
-        engine.bind_session_state_peer_identity_key(&snapshot, key, [1u8; 32]),
-        Err(ProtocolStateError::UnsupportedBlobVersion {
-            address: actual,
-            major: 1,
-            minor: 1
-        }) if actual == address
-    ));
+    for (major, minor) in [(2, 0), (0, 1), (1, 1)] {
+        let key = session_key();
+        let address = session_address(key.clone());
+        let mut snapshot = ProtocolStateSnapshot::new();
+        snapshot
+            .set(
+                address.clone(),
+                ProtocolStateBlob::from_bytes(vec![major, minor, 0xaa]),
+            )
+            .unwrap();
+        assert!(matches!(
+            engine.bind_session_state_peer_identity_key(&snapshot, key, [1; 32]),
+            Err(ProtocolStateError::UnsupportedBlobVersion { address: actual, major: actual_major, minor: actual_minor })
+                if actual == address && actual_major == major && actual_minor == minor
+        ));
+    }
 }
 
 #[test]

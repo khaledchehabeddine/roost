@@ -112,5 +112,5 @@ behavior. It does not require Rust implementation in the decision-record change.
 - `crates/roost-core/tests/protocol_state.rs` covers blocked inbound unreachable and
   silent-receipt acknowledgment behavior, duplicate blocked Messages, DK rotation while blocked,
   and unblock-without-handshake recovery.
-- `crates/roost-client/docs/api-coverage.md` records binding coverage for contact trust,
-  blocking, blocked-contact negative paths, and stale protocol-state commits.
+- `crates/roost-core/tests/contact_state.rs` covers contact trust and blocking. The host-store
+  tests reject stale protocol-state commits before changing blobs or outbox effects.

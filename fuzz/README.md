@@ -1,40 +1,26 @@
-# Malformed-Input Fuzzing
+# Decoder fuzzing
 
-This package is excluded from the workspace and is built through `cargo-fuzz`.
+This package is excluded from the workspace and built through `cargo-fuzz`.
+Run `scripts/ci/fuzz-smoke.sh` for a bounded smoke run, or set `AETHER_FUZZ_SECONDS=900` for an
+extended campaign. The script uses a scratch corpus under `fuzz/target/` so mutations do not change
+committed seeds.
 
-Targets:
+| Target | Raw input |
+| --- | --- |
+| `message_decode` | Encoded outer Message frame, including X3DH prekey references |
+| `protocol_state_blob_decode` | Kind index from `ProtocolStateKind::all()`, one-byte key length, key, blob |
+| `prekey_store_decode` | Kind byte modulo 3, then discovery, signed-prekey, or one-time-prekey bytes |
+| `sender_certificate_validate` | 64-byte signature followed by certificate; shorter inputs have a short signature and empty certificate |
+| `sealed_sender_envelope_decode` | Decrypted inner sender envelope |
+| `sealed_payload_padding` | Padded payload |
 
-- `message_decode`
-- `protocol_state_blob_decode`
-- `prekey_store_decode`
-- `sender_certificate_validate`
-- `sealed_frame_envelope_decode`
-- `sealed_payload_padding`
+Keep small named seeds that reach a distinct decoder path. Certificate trust, revocation, and expiry
+policy are asserted in Rust certificate fixtures; fuzzing uses their trusted primary key and fixed
+validation inputs. The fixed signature prefix does not fuzz signature lengths independently of
+certificate parsing; the Rust signature-rejection test covers malformed lengths. AEAD tampering and deduplication have Rust assertions instead of fuzz calls that
+ignore their results. Outer-frame parsing runs through `message_decode` once.
 
-Run the bounded smoke suite:
-
-```bash
-scripts/ci/fuzz-smoke.sh
-```
-
-Run an extended campaign:
-
-```bash
-AETHER_FUZZ_SECONDS=900 scripts/ci/fuzz-smoke.sh
-```
-
-Seed files live under `fuzz/corpus/<target>/`. Prefer small, named seeds that either replay a
-checked-in fixture or pin one malformed class: unsupported version, truncation, overlong field,
-non-canonical key, tampered associated data, padding boundary, or replay/deduplication state.
-
-Text seed forms:
-
-- `hex:<hex>` decodes raw bytes.
-- `repeat:<byte>:<count>` expands repeated raw bytes, capped at 256 KiB.
-- Protocol-state seeds use `kind:`, `key:`, and `blob:` fields.
-- PreKey seeds use `kind: discovery|signed|one_time` and `blob:`.
-- Sender-certificate seeds use `certificate:`, `signature:`, `domain_id:`, `domain_key:`,
-  `domain_status:`, `expected_relay_domain:`, `reference:`, and `grace:`.
-
-When a new fixture is added, add one happy-path seed for it and one nearby rejection seed if the
-wire shape exposes a new malformed class.
+The inner-envelope seed uses the canonical sealed-session fixture's sender material, an all-zero
+64-byte transcript signature, and valid padding. This target checks decoding and key binding;
+Message transcript authentication remains covered by receive tests. Unsupported-version and
+truncated seeds derive from that valid envelope.
