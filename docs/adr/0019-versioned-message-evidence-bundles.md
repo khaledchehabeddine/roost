@@ -62,5 +62,6 @@ for the same sender Identity Key.
   oversized, noncanonical-key, over-grace, cross-relay, expired-at-acceptance, and
   signature-invalid bundles reject with stable typed categories.
 - [`evidence_bundles_v1.json`](../../crates/roost-protocol/tests/fixtures/evidence_bundles_v1.json)
-  pins the Rust encoding and rejection vectors; generated Swift and Kotlin harnesses replay the
-  same valid bytes and independently verify both Ed25519 signatures with CryptoKit and the JDK.
+  pins the Rust encoding and rejection vectors. Swift package tests independently verify the
+  signatures with CryptoKit; Kotlin package tests compare returned fields with the same fixture.
+  The Android test runtime does not provide the key import used by the former desktop JDK check.

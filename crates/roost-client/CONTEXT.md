@@ -4,9 +4,9 @@ The platform FFI binding layer that generates Swift and Kotlin bindings from Rus
 
 ## Language
 
-**Binding Test Harness** (generated-binding checks):
-Swift and Kotlin checks of foreign storage callbacks, operation recovery, native signature
-verification, and byte conversion. Rust owns the protocol scenarios and canonical fixtures.
+**Package Consumption Check** (one suite per distribution repository):
+Swift and Kotlin checks against built packages of foreign storage callbacks, operation recovery, byte conversion and evidence results.
+Swift additionally verifies signatures with its native cryptographic API. Rust owns the protocol scenarios and canonical fixtures.
 Avoid: sample app, transport test, SDK feature
 
 **SecureStorage** (one implementation per platform):
@@ -32,18 +32,18 @@ Avoid: Rust storage callback, decoded protocol model, SDK database
 **Binding Surface** (generated API, not checked-in generated source):
 The Rust `#[uniffi::export]` objects, records, enums, and foreign traits that generate Swift and
 Kotlin APIs. Generated files live under `target/` during builds and tests; source review happens on
-the Rust declarations and harnesses.
+the Rust declarations and native tests.
 Avoid: handwritten FFI, SDK source drop, generated artifact
 
 **Android AAR Distribution** (one generated Maven artifact):
 The release-candidate Android package containing UniFFI-generated Kotlin classes and ABI-specific
-`libaether.so` libraries under Maven coordinates. It is built from Rust source and generated
+`libroost_client.so` libraries under Maven coordinates. It is built from Rust source and generated
 outputs during release verification; signing and pinned checksums are separate release steps.
 Avoid: checked-in SDK, handwritten binding layer, final signed release artifact
 
 **iOS Distribution Package** (one generated Swift Package per artifact version):
-The release-candidate Swift Package assembled under `target/` from generated Swift sources and the
-`Aether.xcframework` binary target. It is a packaging artifact, not checked-in SDK source.
+The release-candidate Swift Package assembled under `target/` around the
+`Roost.xcframework` binary target, which contains the compiled Swift API and Rust library. It is a packaging artifact, not checked-in SDK source.
 Avoid: source package, signed release, pinned checksum publication
 
 **Signed Release Artifact** (one final mobile binary artifact):
@@ -56,13 +56,6 @@ Avoid: release-candidate artifact, reproducibility pass output, unsigned package
 The release-published checksum generated after the final artifact bytes are fixed. Consumers verify
 it together with the OpenPGP signature before their host build consumes the artifact.
 Avoid: reproducibility manifest, CI scratch hash, trust root
-
-**Mobile Release Packet** (one per candidate source revision):
-The complete version-matched set of Signed Release Artifacts, package metadata, SBOM, public key,
-source record, successful release-gate evidence, and signed payload manifest. Every producer and
-gate record names the same source revision and source date epoch; CI records also name one GitHub
-Actions run.
-Avoid: build directory, unrelated CI artifacts, release-candidate hashes
 
 ## Example
 

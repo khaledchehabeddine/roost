@@ -1,84 +1,22 @@
-//! Replays checked-in signed pre-key fixtures across the public Crypto API.
+//! Fixed signed prekey bytes across Crypto's signing and verification boundary.
 
 use roost_crypto::{SignedPreKey, SigningKeyPair, verify_signed_prekey_bundle};
-use serde::Deserialize;
-
-const SIGNED_PREKEY_SIGNED_BYTES_PREFIX: &[u8] = b"AetherSPK-v1:";
-
-#[derive(Deserialize)]
-struct FixtureFile {
-    version: u8,
-    provenance: String,
-    fixtures: Vec<Fixture>,
-}
-
-#[derive(Deserialize)]
-struct Fixture {
-    name: String,
-    signing_key_seed_hex: String,
-    signed_prekey_secret_hex: String,
-    epoch: u32,
-    created_at: u64,
-    signed_bytes_hex: String,
-    signature_hex: String,
-}
 
 #[test]
-fn checked_in_signed_prekey_fixtures_verify() {
-    let fixture_file: FixtureFile =
-        serde_json::from_str(include_str!("fixtures/signed_prekeys_v1.json")).unwrap();
-
-    assert_eq!(fixture_file.version, 1);
-    assert!(fixture_file.provenance.contains("test-only"));
-    assert_eq!(fixture_file.fixtures.len(), 1);
-    for fixture in fixture_file.fixtures {
-        replay_fixture(&fixture);
-    }
-}
-
-fn replay_fixture(fixture: &Fixture) {
-    let signing_key = SigningKeyPair::from_signing_bytes(hex_array(&fixture.signing_key_seed_hex));
-    let secret = hex_array(&fixture.signed_prekey_secret_hex);
-    let unsigned =
-        SignedPreKey::from_secret_bytes(secret, [0u8; 64], 0, fixture.epoch, fixture.created_at);
-    let signed_bytes = signed_prekey_signed_bytes(
-        unsigned.public().as_bytes(),
-        fixture.epoch,
-        fixture.created_at,
-    );
-
-    assert_eq!(
-        hex::encode(&signed_bytes),
-        fixture.signed_bytes_hex,
-        "{} signed bytes",
-        fixture.name
-    );
-    assert_eq!(
-        hex::encode(signing_key.sign(&signed_bytes).to_bytes()),
-        fixture.signature_hex,
-        "{} signature",
-        fixture.name
-    );
-
-    let signed_prekey = SignedPreKey::from_secret_bytes(
-        secret,
-        hex_array(&fixture.signature_hex),
-        0,
-        fixture.epoch,
-        fixture.created_at,
-    );
-    verify_signed_prekey_bundle(&signed_prekey.bundle(), &signing_key.verifying).unwrap();
-}
-
-fn signed_prekey_signed_bytes(public_key: &[u8; 32], epoch: u32, created_at: u64) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(SIGNED_PREKEY_SIGNED_BYTES_PREFIX.len() + 32 + 4 + 8);
-    bytes.extend_from_slice(SIGNED_PREKEY_SIGNED_BYTES_PREFIX);
-    bytes.extend_from_slice(public_key);
-    bytes.extend_from_slice(&epoch.to_be_bytes());
-    bytes.extend_from_slice(&created_at.to_be_bytes());
-    bytes
-}
-
-fn hex_array<const N: usize>(hex: &str) -> [u8; N] {
-    hex::decode(hex).unwrap().try_into().unwrap()
+fn signed_prekey_known_answer() {
+    // Source: the original project-derived signed_prekeys_v1 fixture.
+    // Inputs: test-only signing seed 0x51, prekey seed 0x52, epoch 7, timestamp 1700000000.
+    // Derivation: Ed25519 over AetherSPK-v1:, the public key, epoch, and creation time.
+    // Output: fixed signed bytes and signature below, retained independently of this run.
+    let signing_key = SigningKeyPair::from_signing_bytes([0x51; 32]);
+    let signed_bytes = hex::decode("41657468657253504b2d76313af68b05ba03f7185e1ba88878682f8dd0b15158f6050889c9481d79c2d7d2fa0700000007000000006553f100").unwrap();
+    let signature: [u8; 64] = hex::decode("3d357f15e22e999c7cdd1ed27e2f3c52b6479ccf23f9681d0de1d27bb05fc4f1accbf3a4addf077d25c8e773ab99a52731745a5d70144e86519d71d79f183701").unwrap().try_into().unwrap();
+    let prekey = SignedPreKey::from_secret_bytes([0x52; 32], signature, 0, 7, 1_700_000_000);
+    let mut encoded = b"AetherSPK-v1:".to_vec();
+    encoded.extend_from_slice(prekey.public().as_bytes());
+    encoded.extend_from_slice(&7u32.to_be_bytes());
+    encoded.extend_from_slice(&1_700_000_000u64.to_be_bytes());
+    assert_eq!(encoded, signed_bytes);
+    assert_eq!(signing_key.sign(&signed_bytes).to_bytes(), signature);
+    verify_signed_prekey_bundle(&prekey.bundle(), &signing_key.verifying).unwrap();
 }

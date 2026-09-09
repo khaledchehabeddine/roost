@@ -1,163 +1,90 @@
-# Building Mobile
+# Building mobile packages
 
-## Android
-
-Requires [`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) and the Android NDK:
-
-```bash
-./scripts/build/android.sh
-```
-
-This writes ABI-specific shared libraries to `target/android/jniLibs/` and generated Kotlin
-bindings to `target/android/kotlin/`.
-
-Build the Android AAR and publish it to a local Maven repository:
-
-```bash
-scripts/release/android-aar.sh
-```
-
-The local artifact is published as:
-
-```text
-com.aurelion:aether:<workspace-version>
-```
-
-by default under `target/android/maven/`. Override the version or local repository with
-`AETHER_ANDROID_VERSION` and `AETHER_ANDROID_MAVEN_REPO`.
-
-Local peer simulations can publish a separate artifact containing the opt-in development
-certificate authority:
-
-```bash
-AETHER_CARGO_FEATURES=development-certificates \
-AETHER_ANDROID_ARTIFACT_ID=aether-development \
-scripts/release/android-aar.sh
-```
-
-This produces `com.aurelion:aether-development:<workspace-version>`. The packaging check requires
-the development authority in that coordinate and requires it to be absent from the default
-production artifact.
-
-Verify a consumer against that local repository with:
-
-```bash
-scripts/test/android-aar-consumer.sh
-```
-
-The consumer check resolves the Maven artifact and runs the Kotlin binding coverage flow on an
-Android API 36 managed device. Release consumers must verify the final AAR signature and pinned
-checksum before Gradle consumes the artifact:
-
-```bash
-version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
-scripts/release/verify-artifact.sh \
-  "aether-$version.aar" \
-  "aether-$version.aar.asc" \
-  "aether-$version.aar.sha256" \
-  "aether-v$version-release-key.asc"
-```
-
-Run this as a build preflight with `AETHER_RELEASE_GPG_FINGERPRINT` set to the expected release key
-fingerprint. Verification fails closed when the fingerprint is missing or mismatched; do not fall
-back to an unsigned, checksum-mismatched, or wrong-key-signed artifact.
+Build from the Roost repository root. Generated bindings and binaries stay under `target/`.
+The workspace version identifies both packages. Rust, Swift and Kotlin source APIs come from
+the same Rust declarations.
 
 ## iOS
 
-Requires Xcode command-line tools:
+Requires Xcode with an iOS simulator runtime. Build the XCFramework and local Swift package:
 
 ```bash
-./scripts/build/xcframework.sh
+scripts/build/ios-package.sh
 ```
 
-To assemble the generated Swift Package binary distribution:
+Outputs are `target/ios-distribution/roost-swift-v<version>/`,
+`Roost-v<version>.xcframework.zip` and `Roost-v<version>.swift-package.zip` in the same directory.
+The package exports `Roost`, a binary framework containing the compiled Swift API and Rust library.
+It supports arm64 devices and arm64/x86_64 simulators, with an iOS 13 deployment target.
+`scripts/build/xcframework.sh` builds just the framework when package assembly is unnecessary.
+
+Run `./check.sh <roost-checkout>` in `roost-swift` to build and test the package once.
+`ROOST_IOS_DESTINATION` can select a specific Xcode simulator destination.
+
+## Android
+
+Requires JDK 17, Gradle 9.5.0, Android SDK 36, NDK r28c and `cargo-ndk` 4.1.2.
+Set `ANDROID_HOME` and `ANDROID_NDK_HOME` to the installed SDK and NDK. `GRADLE_BIN` may select
+an existing Gradle executable. Build the local Maven package:
 
 ```bash
-./scripts/build/ios-package.sh
+scripts/build/android-aar.sh
 ```
 
-The package is written under `target/ios-distribution/aether-ios-v<version>/` and archived as
-`target/ios-distribution/Aether-v<version>.swift-package.zip`. It contains product `Aether`,
-generated Swift source target `Aether`, and binary target `AetherFFI`.
+The AAR and POM are under
+`target/android/maven/io/github/relaynet/roost/<version>/`, with coordinate
+`io.github.relaynet:roost:<version>`. The AAR contains the generated Kotlin API and native libraries
+for arm64-v8a, armeabi-v7a and x86_64. Its POM supplies JNA. The current minimum Android API is 36.
+`scripts/build/android.sh` builds just the libraries and Kotlin sources.
 
-Verify the package with an iOS Simulator consumer:
+Run `./check.sh <roost-checkout>` in `roost-kotlin` to build the production AAR and test it on one
+API 36 managed device. `ROOST_ANDROID_TEST_TASK=:consumer:connectedDebugAndroidTest` selects an
+already-running emulator instead.
+
+Local peer simulations may build the separate `io.github.relaynet:roost-development` coordinate:
 
 ```bash
-version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
-scripts/test/ios-package-consumer.sh "target/ios-distribution/Aether-v$version.swift-package.zip"
+ROOST_CARGO_FEATURES=development-certificates scripts/build/android-aar.sh
 ```
 
-Release consumers must verify the final xcframework archive signature and pinned checksum before
-the Swift Package consumes the binary target:
+This is an on-demand local build. Production package checks always clear that feature selection.
+
+## Release
+
+Run Rust CI and both package checks against the intended source commit. The package repositories
+own their native checks and eventual distribution metadata. The first Roost publication still
+needs its versioned Swift binary URL/checksum and GitHub Packages upload configured. Kotlin uses
+`https://maven.pkg.github.com/relaynet/roost-kotlin`.
+
+Publish the exact checked bytes and record the source commit, workspace version and toolchain
+versions in the release description. Uploading rebuilt bytes requires checking those bytes again.
+Sign the XCFramework archive and AAR with the release key:
 
 ```bash
-version="${AETHER_RELEASE_VERSION:?set release version without leading v}"
-scripts/release/verify-artifact.sh \
-  "Aether-v$version.xcframework.zip" \
-  "Aether-v$version.xcframework.zip.asc" \
-  "Aether-v$version.xcframework.zip.sha256" \
-  "aether-v$version-release-key.asc"
+export ROOST_RELEASE_FINGERPRINT='<trusted release key fingerprint>'
+scripts/release/sign-artifact.sh '<artifact>'
+scripts/release/verify-artifact.sh '<artifact>' '<artifact>.asc' '<artifact>.sha256' '<public-key.asc>'
 ```
 
-Run this as a build preflight with `AETHER_RELEASE_GPG_FINGERPRINT` set to the expected release key
-fingerprint. Verification fails closed when the fingerprint is missing or mismatched; do not fall
-back to an unsigned, checksum-mismatched, or wrong-key-signed artifact.
+Distribute signatures, checksums and the public key alongside the artifacts. Consumers obtain the
+trusted fingerprint separately. Swift's published binary-target checksum must name the same
+XCFramework archive that passed the package check. Keep the AAR with its generated POM when
+publishing to GitHub Packages so runtime dependencies resolve.
 
-## Manual Bindings
+For on-demand reproducibility, run the normal build in two clean checkouts of the same commit
+with the same Rust, Xcode or Android tools. Compare `shasum -a 256` of the XCFramework archives or
+AARs. The iOS archive fixes timestamps from the source commit; Gradle fixes archive timestamps and
+entry order. Investigate differences before claiming a reproducible result. This is not a release
+requirement, and no fresh byte-for-byte proof is claimed for each release.
 
-```bash
-cargo build -p roost-client
+The [v0.15.0 release record](release.md), published assets and tags remain historical and unchanged.
+Its custom gate and packet instructions apply to that release only.
 
-# Kotlin
-cargo run --bin uniffi-bindgen -- generate \
-    target/debug/libroost_client.dylib \
-    --language kotlin \
-    --out-dir target/bindings/kotlin
+## Host integration
 
-# Swift (headers + sources)
-cargo run --bin uniffi-bindgen-swift -- \
-    target/debug/libroost_client.dylib \
-    target/bindings/swift \
-    --swift-sources --headers
-```
-
-> [!NOTE]                                                                                                                                                  
-> On Linux, replace `.dylib` with `.so`.
-
-Generated Swift and Kotlin sources are build outputs. Keep them under `target/` or your app build
-cache; do not commit them to this repository.
-
-## iOS Artifact Verification
-
-Release-candidate CI uploads `Aether-v<version>.xcframework.zip`,
-`Aether-v<version>.swift-package.zip`, and `SHA256SUMS` from the same build. Release-tag CI puts the
-Swift Package archive in the signed mobile release packet beside the xcframework signature, pinned
-checksum, public release key, package metadata, SBOM, source record, release-gate evidence, and
-signed packet manifest. Packet and package verification validate bounded portable ZIP members
-before extraction.
-Treat release-candidate hashes as reproducibility evidence, not as the distribution trust root.
-Final publication remains Relay-gated.
-
-## Binding Surface
-
-- Swift and Kotlin bindings are generated by UniFFI; keep generated files under `target/` or the app
-  build cache. This repository does not maintain a handwritten unsafe binding layer.
-- Implement `SecureStorage` in the host app and pass it to `KeyStore`.
-- Implement or adapt `ProtocolStateStore` in the host app for opaque `ProtocolStateKind + key`
-  blobs.
-- Active protocol-state kinds are ratchet/session, deduplication set, pending acknowledgments, and
-  contact state. Prekey state stays in `KeyStore`; sender certificates are caller validation inputs.
-- Commit returned `ProtocolStateUpdate` values atomically with the message, acknowledgment, event,
-  retry, or outbox side effect returned from the same call.
-- Reject stale commits by enforcing each update's commit check: absent for new blobs, digest match
-  for snapshot-derived replacements/deletes, unchecked only for wipe updates.
-- Use `KeyStore` for identity, prekeys, backup, session establishment, message encryption,
-  message decryption, and acknowledgment processing.
-- Use `ProtocolStateEngine` for protocol-state initialization/wipe, contacts/trust/blocking,
-  pending acknowledgments, retry instructions, hardening limits, and snapshot loading.
-- When another host instance commits contact-state blobs, rebuild the contact view with
-  `ProtocolStateEngine.contactStates`, then call `ContactEventStream.importCurrentState` while
-  holding the same host serializer. The import preserves the local Event ID and makes existing
-  observers recover from a fresh snapshot through an explicit stale-state item. Retain the opaque
-  snapshot object for `resumeAfter`; a snapshot from another stream is rejected even if its numeric
-  tags match.
+Create `Client` with the host's `SecureStorage` implementation. Store Protocol State Blobs opaquely.
+Commit returned state updates and their message, acknowledgment or outbox effects atomically,
+enforcing absent/digest preconditions. Serialize each identity's prepared-operation lifecycle
+across clients and processes, and recover unfinished operations after interruption. The native
+checks prove callback conversion and recovery through the package; the host application must test
+its own Keychain/Keystore implementation and database transaction behavior.

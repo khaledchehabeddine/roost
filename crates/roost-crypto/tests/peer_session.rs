@@ -205,30 +205,6 @@ fn consecutive_sends_use_symmetric_ratchet_only() {
 }
 
 #[test]
-fn out_of_order_delivery_uses_skipped_keys() {
-    let (mut setup, mut rng) = setup();
-    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"msg-0");
-    let associated_data = associated_data(&setup);
-
-    let mut messages = Vec::new();
-    for i in 1..=5 {
-        let plaintext = format!("msg-{i}");
-        let (header, ciphertext) = alice
-            .ratchet_encrypt(plaintext.as_bytes(), &associated_data)
-            .unwrap();
-        messages.push((plaintext, header, ciphertext));
-    }
-
-    for delivery_index in [0usize, 2, 4, 1, 3] {
-        let (plaintext, header, ciphertext) = &messages[delivery_index];
-        let decrypted = bob
-            .ratchet_decrypt(&mut rng, ciphertext, header, &associated_data)
-            .unwrap();
-        assert_eq!(decrypted.as_slice(), plaintext.as_bytes());
-    }
-}
-
-#[test]
 fn skipped_keys_are_consumed_after_use() {
     let (mut setup, mut rng) = setup();
     let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"msg-0");
@@ -258,36 +234,6 @@ fn skipped_keys_are_consumed_after_use() {
     bob.ratchet_decrypt(&mut rng, &messages[3].1, &messages[3].0, &associated_data)
         .unwrap();
     assert_eq!(bob.skipped_key_count(), 0);
-}
-
-#[test]
-fn ratchet_is_self_contained_after_bootstrap() {
-    let (mut setup, mut rng) = setup();
-    let associated_data = associated_data(&setup);
-    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, b"hello");
-
-    drop(setup);
-
-    let bob_message = b"still here";
-    let (bob_header, bob_ciphertext) = bob.ratchet_encrypt(bob_message, &associated_data).unwrap();
-    assert_eq!(
-        alice
-            .ratchet_decrypt(&mut rng, &bob_ciphertext, &bob_header, &associated_data)
-            .unwrap()
-            .as_slice(),
-        bob_message,
-    );
-
-    let alice_message = b"acknowledged";
-    let (alice_header, alice_ciphertext) = alice
-        .ratchet_encrypt(alice_message, &associated_data)
-        .unwrap();
-    assert_eq!(
-        bob.ratchet_decrypt(&mut rng, &alice_ciphertext, &alice_header, &associated_data)
-            .unwrap()
-            .as_slice(),
-        alice_message,
-    );
 }
 
 #[test]

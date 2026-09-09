@@ -19,4 +19,5 @@ for existing callers and avoiding transport-specific policy in the cryptographic
   hosts.
 - `docs/release.md` records constrained-decryption budget evidence for the release-gated receive
   path.
-- `scripts/ci/constrained-decryption-budget.sh` runs the optimized budget harness used by CI.
+- The v1 MVP removes the platform-dependent allocation/latency gate. Input caps and explicit
+  rejection tests remain; current releases make no measured device performance guarantee.

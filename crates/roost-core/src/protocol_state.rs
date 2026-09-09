@@ -3388,41 +3388,6 @@ fn decode_contact_state_payload(
     decoded_contact_state(address, decoded_contact_state_parts_v2(wire))
 }
 
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_decode_protocol_state_blob(
-    kind: ProtocolStateKind,
-    key: ProtocolStateKey,
-    blob: ProtocolStateBlob,
-) -> Result<(), ProtocolStateError> {
-    let address = ProtocolStateAddress::new(kind, key);
-    let limits = ProtocolHardeningLimits::default();
-    match kind {
-        ProtocolStateKind::RatchetSession => {
-            decode_session_state(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::DeduplicationSet => {
-            decode_deduplication_set(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::PendingAcknowledgments => {
-            decode_pending_acknowledgments(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::ContactState => {
-            decode_contact_state(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::PeerInboxAuthorization => {
-            let mut snapshot = ProtocolStateSnapshot::new();
-            snapshot.set(address.clone(), blob)?;
-            load_peer_inbox_authorization(&snapshot, &address).map(|_| ())
-        }
-        ProtocolStateKind::LocalInboxAuthorization => {
-            let mut snapshot = ProtocolStateSnapshot::new();
-            snapshot.set(address.clone(), blob)?;
-            load_delivered_inbox_authorization(&snapshot, &address).map(|_| ())
-        }
-    }
-}
-
 struct DecodedContactStateParts {
     identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
@@ -4095,12 +4060,6 @@ fn decode_sealed_sender_envelope(
     })
 }
 
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_decode_sealed_sender_envelope(bytes: &[u8]) -> Result<(), ProtocolStateError> {
-    decode_sealed_sender_envelope(bytes, ProtocolHardeningLimits::default()).map(|_| ())
-}
-
 fn receive_state_updates(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -4315,12 +4274,6 @@ pub(crate) fn unpad_sealed_payload(
     unpad_message_payload(padded).map_err(|error| ProtocolStateError::InvalidMessage {
         reason: error.to_string(),
     })
-}
-
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_unpad_sealed_payload(padded: &[u8]) -> Result<(), ProtocolStateError> {
-    unpad_sealed_payload(padded).map(|_| ())
 }
 
 fn sender_identity_key_matches(expected: &[u8; 32], actual: &[u8; 32]) -> bool {

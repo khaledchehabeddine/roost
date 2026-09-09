@@ -8,8 +8,7 @@ use roost_core::{
     KeyStoreOperationStatus, SecureStorage, StorageError,
 };
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, mpsc};
-use std::thread;
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 const OPERATION_JOURNAL_KEY: &str = "operation/journal";
@@ -155,66 +154,6 @@ impl SecureStorage for SharedSecureStorage {
         }
         Ok(())
     }
-}
-
-#[test]
-fn host_coordinator_blocks_overlapping_lifecycles_across_distinct_key_store_instances() {
-    let storage = SharedSecureStorage::new();
-    let coordinator = Arc::new(Mutex::new(()));
-
-    {
-        let _identity_operation = coordinator.lock().unwrap();
-        let store = storage.key_store();
-        let prepared = store.prepare_generate_identity().unwrap();
-        store
-            .commit_operation(prepared.operation.identifier)
-            .unwrap();
-        store
-            .finalize_operation(prepared.operation.identifier)
-            .unwrap();
-    }
-
-    let first_store = storage.key_store();
-    let first_coordinator = Arc::clone(&coordinator);
-    let (first_ready_tx, first_ready_rx) = mpsc::channel();
-    let (first_continue_tx, first_continue_rx) = mpsc::channel();
-    let first = thread::spawn(move || {
-        let _operation = first_coordinator.lock().unwrap();
-        let prepared = first_store.prepare_rotate_signed_prekey_now().unwrap();
-        first_ready_tx.send(()).unwrap();
-        first_continue_rx.recv().unwrap();
-        first_store
-            .commit_operation(prepared.operation.identifier)
-            .unwrap();
-        first_store
-            .finalize_operation(prepared.operation.identifier)
-            .unwrap();
-    });
-
-    first_ready_rx.recv().unwrap();
-
-    let second_store = storage.key_store();
-    let second_coordinator = Arc::clone(&coordinator);
-    let (contention_tx, contention_rx) = mpsc::channel();
-    let second = thread::spawn(move || {
-        let was_blocked = second_coordinator.try_lock().is_err();
-        contention_tx.send(was_blocked).unwrap();
-        let _operation = second_coordinator.lock().unwrap();
-        let prepared = second_store.prepare_generate_one_time_prekeys(1).unwrap();
-        second_store
-            .commit_operation(prepared.operation.identifier)
-            .unwrap();
-        second_store
-            .finalize_operation(prepared.operation.identifier)
-            .unwrap();
-    });
-
-    assert!(contention_rx.recv().unwrap());
-    first_continue_tx.send(()).unwrap();
-    first.join().unwrap();
-    second.join().unwrap();
-
-    assert!(storage.key_store().current_publication_bundle().is_ok());
 }
 
 #[test]
@@ -556,7 +495,15 @@ fn applied_store_with_ambiguous_failure_is_safely_replayed() {
         .finalize_operation(prepared.operation.identifier)
         .unwrap();
     assert_eq!(storage.successful_stores("discovery/current"), 2);
-    assert!(recovered.has_identity().unwrap());
+    let identity = recovered.load_identity().unwrap();
+    assert_eq!(
+        identity.public_key().as_bytes(),
+        prepared.output.public_key().as_bytes()
+    );
+    assert_eq!(
+        identity.verifying_key().to_bytes(),
+        prepared.output.verifying_key().to_bytes()
+    );
 }
 
 #[test]

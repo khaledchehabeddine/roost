@@ -34,6 +34,7 @@ Domain docs are multi-context; before exploring a crate or proposing terminology
 
 ## Workflow
 
+- Optimize for one maintainer: retain tooling for demonstrated current value or a named future need that would be costly to add later
 - Carry authorized work through implementation and verification; preserve the task's scope across follow-ups
 - Resolve routine choices from context. Reuse supplied answers and approvals; ask when an unresolved decision materially affects the result
 - Explicit user instructions take precedence over skill guidelines. Before a skill causes a pause, complete independent authorized work, then link its `SKILL.md` and quote the blocking instruction

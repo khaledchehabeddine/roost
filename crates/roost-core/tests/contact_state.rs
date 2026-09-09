@@ -1,5 +1,7 @@
 //! Exercises IK-keyed Contact State protocol blobs and trust transitions.
 
+mod support;
+
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
@@ -9,17 +11,15 @@ use roost_core::{
     SenderIdentityMaterial, SessionId, derive_safety_number,
 };
 use roost_crypto::{
-    IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState,
-    RecipientDeliveryCapability, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initiate, sign_identity_key_binding,
+    KeyPair, RecipientDeliveryCapability, SigningKeyPair, generate_discovery_key,
+    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
 };
 use roost_protocol::MessageId;
 
 const CREATED_AT: u64 = 1_700_000_000;
 
 struct Setup {
-    alice_state: RatchetState,
+    sender_signing_key: SigningKeyPair,
     alice_identity: IdentityKey,
     bob_identity: ContactIdentityKey,
     bob_discovery: ContactDiscoveryKey,
@@ -32,50 +32,14 @@ fn setup() -> Setup {
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key_pair = generate_key_pair(&mut rng);
-    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
-    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
-    let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
-    let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT);
-    let bob_one_time_prekey =
-        generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
-    let prekey_bundle = PreKeyBundle {
-        version: roost_crypto::PREKEY_BUNDLE_VERSION,
-        discovery_key: bob_discovery.bundle(),
-        signed_prekey: bob_signed_prekey.bundle(),
-        one_time_prekey: Some(bob_one_time_prekey.bundle()),
-    };
-    let (alice_state, envelope) = initiate(
-        &mut rng,
-        &alice_discovery,
-        &alice_identity_key,
-        &bob_identity_key,
-        &prekey_bundle,
-        InitialPlaintext {
-            sender_certificate: b"sender certificate",
-            sender_signature: b"sender signature",
-            plaintext: b"initial",
-        },
-    )
-    .unwrap();
-    let _ = accept(
-        &mut rng,
-        &envelope,
-        Some(&alice_identity_key),
-        &bob_identity_key,
-        &bob_discovery,
-        &bob_signed_prekey,
-        Some(bob_one_time_prekey),
-    )
-    .unwrap();
     let bob_rotated_discovery = generate_discovery_key(&mut rng, &bob_identity, 1, CREATED_AT + 60);
     let bob_restored_discovery =
         generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT + 120);
     let alice_identity_key_pair = generate_key_pair(&mut rng);
 
     Setup {
-        alice_state,
+        sender_signing_key: sender_identity_signing_key(),
         alice_identity: IdentityKey {
             x25519_public_key: *alice_identity_key_pair.public.as_bytes(),
             ed25519_verifying_key: alice_identity.verifying.to_bytes(),
@@ -98,7 +62,7 @@ fn sender_identity() -> SenderIdentityMaterial {
     let signing_key = sender_identity_signing_key();
     let identity_key_pair = KeyPair::from_secret_bytes([0x34; 32]);
     let binding_signature =
-        sign_identity_key_binding(signing_key, &identity_key_pair.public).unwrap();
+        sign_identity_key_binding(&signing_key, &identity_key_pair.public).unwrap();
     SenderIdentityMaterial {
         identity_key: *identity_key_pair.public.as_bytes(),
         identity_verifying_key: signing_key.verifying.to_bytes(),
@@ -108,18 +72,8 @@ fn sender_identity() -> SenderIdentityMaterial {
     }
 }
 
-fn sender_identity_signing_key() -> &'static SigningKeyPair {
-    Box::leak(Box::new(SigningKeyPair::from_signing_bytes([1u8; 32])))
-}
-
-fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
-    let agreement_key = generate_key_pair(rng);
-    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
-    IdentityKeyBundle {
-        public_key: agreement_key.public,
-        verifying_key: signing_key.verifying,
-        binding_signature,
-    }
+fn sender_identity_signing_key() -> SigningKeyPair {
+    SigningKeyPair::from_signing_bytes([1; 32])
 }
 
 fn contact_identity(setup: &Setup) -> ContactIdentity {
@@ -143,13 +97,13 @@ fn alternate_contact_identity() -> ContactIdentity {
     }
 }
 
-fn snapshot_with_session(engine: &ProtocolStateEngine, setup: &Setup) -> ProtocolStateSnapshot {
+fn snapshot_with_session(engine: &ProtocolStateEngine) -> ProtocolStateSnapshot {
     let key = session_key();
     let mut snapshot = ProtocolStateSnapshot::new();
     snapshot
         .apply(
             engine
-                .set_session_state(key.clone(), &setup.alice_state)
+                .set_session_state(key.clone(), &support::setup([7; 32]).alice_state)
                 .unwrap(),
         )
         .unwrap();
@@ -160,13 +114,13 @@ fn snapshot_with_session(engine: &ProtocolStateEngine, setup: &Setup) -> Protoco
 }
 
 fn outbound<'a>(
-    setup: &Setup,
+    setup: &'a Setup,
     sender_identity: &'a SenderIdentityMaterial,
 ) -> OutboundPlaintext<'a> {
     OutboundPlaintext {
         id: MessageId::from_bytes([1u8; 16]),
         sender_identity,
-        sender_identity_signing_key: sender_identity_signing_key(),
+        sender_identity_signing_key: &setup.sender_signing_key,
         contact_identity_key: setup.bob_identity,
         recipient_public_key: setup.bob_discovery.prekey_bundle_lookup_key(),
         timestamp_millis: 1_700_000_000_123,
@@ -209,7 +163,7 @@ fn pending_contact_refuses_outgoing_user_message_until_accepted() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine, &setup);
+    let mut snapshot = snapshot_with_session(&engine);
     let change = engine
         .record_contact(&snapshot, contact_identity(&setup))
         .unwrap();
@@ -375,7 +329,7 @@ fn blocked_accepted_contact_refuses_outgoing_user_message() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine, &setup);
+    let mut snapshot = snapshot_with_session(&engine);
     snapshot
         .apply_all(
             engine
@@ -436,7 +390,7 @@ fn accepted_contact_refuses_outgoing_message_for_stale_recipient_key() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine, &setup);
+    let mut snapshot = snapshot_with_session(&engine);
     snapshot
         .apply_all(
             engine
@@ -473,7 +427,7 @@ fn outbound_message_binds_session_to_one_contact_identity() {
     let other_contact = alternate_contact_identity();
     let engine = ProtocolStateEngine::new();
     let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine, &setup);
+    let mut snapshot = snapshot_with_session(&engine);
     snapshot
         .apply_all(
             engine

@@ -7,7 +7,9 @@ set -euo pipefail
 CRATE="roost-client"
 LIB="libroost_client"
 OUT="target/android"
-FEATURES="${AETHER_CARGO_FEATURES:-}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd "$ROOT"
+FEATURES="${ROOST_CARGO_FEATURES:-}"
 
 CARGO_ARGS=(--locked)
 if [[ -n "$FEATURES" ]]; then

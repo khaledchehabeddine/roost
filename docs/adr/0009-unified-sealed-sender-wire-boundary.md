@@ -25,5 +25,5 @@ parallel session, acknowledgment, and X3DH envelopes.
   transport-visible frame fields and post-decryption sender material for session Messages.
 - `crates/roost-core/docs/adr/0006-postcard-message-wire-format.md` records that old
   sender-visible and pre-frame layouts reject instead of decoding as current Messages.
-- `fuzz/fuzz_targets/message_decode.rs` covers outer frames;
-  `fuzz/fuzz_targets/sealed_sender_envelope_decode.rs` covers decrypted sender envelopes.
+- Explicit malformed-frame and envelope tests retain decoder rejection coverage. Maintained fuzz
+  targets were removed for the v1 MVP; unexpected input combinations receive less exploration.

@@ -9,8 +9,6 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct FixtureFile {
-    version: u8,
-    profile: String,
     accepted_timestamp_secs: u64,
     grace_window_secs: u64,
     expected_relay_domain_hex: String,
@@ -24,12 +22,10 @@ struct FixtureFile {
 struct DomainSigningKeyFixture {
     identifier_hex: String,
     verifying_key_hex: String,
-    status: String,
 }
 
 #[derive(Deserialize)]
 struct ValidFixture {
-    name: String,
     bundle_hex: String,
     decoded: DecodedFixture,
 }
@@ -41,7 +37,6 @@ struct DecodedFixture {
     recipient_identity_verifying_key_hex: String,
     message_id_hex: String,
     timestamp_millis: u64,
-    payload_kind: String,
     plaintext_hex: String,
     sender_identity_x25519_public_key_hex: String,
     sender_identity_ed25519_verifying_key_hex: String,
@@ -64,10 +59,6 @@ fn checked_in_evidence_bundle_vector_replays() {
         "../../roost-protocol/tests/fixtures/evidence_bundles_v1.json"
     ))
     .unwrap();
-    assert_eq!(fixture.version, 1);
-    assert_eq!(fixture.profile, "message_transcript_v1");
-    assert_eq!(fixture.valid.name, "accepted_text_message");
-    assert_eq!(fixture.domain_signing_key.status, "trusted");
 
     let identifier = hex::decode(&fixture.domain_signing_key.identifier_hex).unwrap();
     let verifying_key = hex::decode(&fixture.domain_signing_key.verifying_key_hex).unwrap();
@@ -132,6 +123,49 @@ fn checked_in_evidence_bundle_vector_replays() {
         fixture.grace_window_secs,
         EvidenceVerificationError::MalformedBundle,
     );
+    let mut trailing = bundle.clone();
+    trailing.push(0);
+    for (bytes, keys, grace, expected) in [
+        (
+            vec![0; 160 * 1024 + 1],
+            domain_signing_keys.to_vec(),
+            0,
+            EvidenceVerificationError::BundleTooLarge,
+        ),
+        (
+            trailing,
+            domain_signing_keys.to_vec(),
+            0,
+            EvidenceVerificationError::MalformedBundle,
+        ),
+        (
+            bundle.clone(),
+            vec![domain_signing_keys[0]; 33],
+            0,
+            EvidenceVerificationError::TooManyDomainSigningKeys {
+                count: 33,
+                maximum: 32,
+            },
+        ),
+        (
+            bundle.clone(),
+            domain_signing_keys.to_vec(),
+            301,
+            EvidenceVerificationError::GraceWindowTooLarge {
+                actual: 301,
+                maximum: 300,
+            },
+        ),
+    ] {
+        assert_rejected(
+            &bytes,
+            &keys,
+            &relay_domain,
+            fixture.accepted_timestamp_secs,
+            grace,
+            expected,
+        );
+    }
     let replay_domain = hex::decode(&fixture.replay_relay_domain_hex).unwrap();
     assert_rejected(
         &bundle,
@@ -161,7 +195,6 @@ fn assert_verified(actual: &VerifiedEvidenceBundle, expected: &DecodedFixture) {
         expected.message_id_hex
     );
     assert_eq!(actual.timestamp_millis, expected.timestamp_millis);
-    assert_eq!(expected.payload_kind, "encrypted_text");
     assert_eq!(actual.payload_kind, PayloadKind::EncryptedText);
     assert_eq!(hex::encode(&actual.plaintext), expected.plaintext_hex);
     assert_eq!(

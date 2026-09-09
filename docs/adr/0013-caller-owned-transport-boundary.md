@@ -36,6 +36,6 @@ transport signing and verification remain host-owned and outside the UniFFI surf
 - `docs/security.md` records that transports expose routing metadata and that host applications own
   network IO, rate limiting, batching, and caller-added identifiers.
 - `crates/roost-core/tests/transport_binding.rs` verifies authentication of exact caller bytes;
-  `crates/roost-client/tests/bindings/TransportBindingBindings.*` verifies platform conversion.
+  the `roost-swift` and `roost-kotlin` package tests verify platform conversion.
 - `crates/roost-core/docs/adr/0009-encrypted-acknowledgments-and-retries.md` records that
   acknowledgments and retries are returned to the consumer for transport instead of sent by Core.

@@ -54,8 +54,8 @@ See [`README.md`](README.md#architecture) for the crate dependency graph.
 - For crypto-adjacent crates (touching keys, signatures, encryption, KDFs): require maintainer reputation (RustCrypto org, dalek-cryptography, etc.) and audit history
 - Prefer audited crates
 - Pin major versions in each crate's `Cargo.toml`; hoist shared deps to `[workspace.dependencies]`. Update via `cargo update -p <crate>` with reasoning in the commit message
-- License, advisory, source, and yanked policy: enforced by `cargo-deny`
-- After bumping any crypto-adjacent dep, run `cargo deny check bans` for transitive duplicates. Allowed duplicates need an explicit `[bans] skip` entry in `deny.toml` with reasoning
+- Dependabot owns vulnerability alerts and security-update PRs; the maintainer configures it in GitHub
+- When adding or updating dependencies, review licenses, sources, maintenance status, and new transitive duplicates
 
 ### Error Handling
 
@@ -97,6 +97,7 @@ See [`README.md`](README.md#architecture) for the crate dependency graph.
 
 - Test names define behavior scope. Assertions should prove that named behavior and its required preconditions
 - Avoid duplicate coverage at the same responsibility layer. Higher-level tests focus on the contract added by that layer
+- Keep tests and their setup for concrete consumer failures; simple forwarding and duplicated fixtures need no separate suite
 - Keep repeated coverage when it protects a security/protocol invariant or verifies behavior across an API, persistence, serialization, FFI, or other boundary
 - Inline unit tests live in `#[cfg(test)] mod tests { ... }` at the bottom of the source file they exercise
 - Integration tests live in `crates/<crate>/tests/<scenario>.rs` and exercise only the public API; if a test needs an internal item, the test belongs inline
@@ -143,6 +144,7 @@ Domain docs are multi-context; before exploring a crate or proposing terminology
 
 ## Workflow
 
+- Optimize for one maintainer: retain tooling for demonstrated current value or a named future need that would be costly to add later
 - Carry authorized work through implementation and verification; preserve the task's scope across follow-ups
 - Resolve routine choices from context. Reuse supplied answers and approvals; ask when an unresolved decision materially affects the result
 - Explicit user instructions take precedence over skill guidelines. Before a skill causes a pause, complete independent authorized work, then link its `SKILL.md` and quote the blocking instruction

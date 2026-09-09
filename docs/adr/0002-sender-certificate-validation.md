@@ -13,8 +13,9 @@ plaintext or sender identity and does not advance ratchet/session state.
 
 ## Verification Evidence
 
-- `crates/roost-protocol/tests/sender_certificate_fixtures.rs` replays trusted, untrusted, revoked,
-  expired, malformed, and signature-failure certificate cases.
+- `crates/roost-protocol/tests/sender_certificate_fixtures.rs` pins the signed certificate bytes;
+  unit tests in `roost-protocol/src/sender_certificate.rs` cover trust, revocation, expiry,
+  malformed input and signature failures.
 - `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` records that sender
   certificate material appears only after decrypt.
 - `crates/roost-core/tests/protocol_state.rs` verifies certificate rejection before plaintext

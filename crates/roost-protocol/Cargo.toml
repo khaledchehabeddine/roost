@@ -16,8 +16,6 @@ zeroize = { workspace = true, features = ["derive"] }
 [dev-dependencies]
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
 hex.workspace = true
-serde_json.workspace = true
-serde.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 

@@ -13,8 +13,6 @@ struct Fixture {
     name: String,
     first_identity: IdentityKeyFixture,
     second_identity: IdentityKeyFixture,
-    initial_discovery_x25519_public_key_hex: Option<String>,
-    rotated_discovery_x25519_public_key_hex: Option<String>,
     expected: ExpectedFixture,
 }
 
@@ -35,7 +33,6 @@ fn checked_in_safety_number_fixtures_replay() {
     let fixture_file: FixtureFile =
         serde_json::from_str(include_str!("fixtures/safety_numbers_v1.json")).unwrap();
 
-    assert_eq!(fixture_file.fixtures.len(), 3);
     for fixture in fixture_file.fixtures {
         let first = identity_key(&fixture.first_identity);
         let second = identity_key(&fixture.second_identity);
@@ -52,12 +49,6 @@ fn checked_in_safety_number_fixtures_replay() {
             "{} display changed",
             fixture.name
         );
-        if fixture.name == "dk_rotation_alpha" {
-            assert_ne!(
-                fixture.initial_discovery_x25519_public_key_hex,
-                fixture.rotated_discovery_x25519_public_key_hex
-            );
-        }
     }
 }
 

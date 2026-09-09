@@ -1,144 +1,33 @@
-# CI Verification
+# CI
 
-CI separates fast pull-request checks from release gates. Pull-request checks protect source
-quality, dependency policy, and the supported runtime verification subset. Release gates verify the
-mobile artifacts that ship from a commit.
-
-## Protocol and binding checks
-
-Rust owns protocol scenarios and canonical fixtures. The bindings workflow runs
-`scripts/test/bindings.sh` against production exports for foreign storage and recovery, native
-Evidence Bundle verification, and Transport Binding byte conversion. Coverage reports have no
-minimum threshold. [Coverage notes](protocol-state-invariant-tests.md) record the accepted gaps.
-
-## Runtime Verification
-
-Miri runs on nightly for `roost-protocol`, `roost-crypto`, and `roost-core` library tests:
+Roost uses one Linux job for pull requests and pushes to `main`. It runs formatting,
+Clippy, workspace tests and rustdoc with the pinned Rust toolchain. Run the same checks locally:
 
 ```bash
-scripts/ci/miri-test.sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
 ```
 
-The Miri subset runs `roost-protocol` and `roost-core` with `--features blake3/pure` so the run stays in Rust code that
-Miri can interpret. `roost-crypto` has no BLAKE3 feature, so its library tests run without that
-feature flag. The subset intentionally excludes `roost-client`, generated Swift/Kotlin bindings,
-Android, and iOS artifacts because those paths cross FFI, dynamic libraries, or platform toolchains
-that Miri does not model.
+Run the manual package consumption workflow in `roost-swift` and `roost-kotlin` when bindings
+or packaging change, and before each mobile release. Select the same Roost source revision in
+both repositories. Each builds its platform once and exercises the resulting package on one
+simulator or emulator. The checks cover native loading, unexpected foreign storage errors,
+lost-write recovery, binary Transport Binding conversion and canonical evidence results. Swift
+also verifies signatures with CryptoKit.
+Rust owns protocol behavior; native suites reuse its canonical evidence fixture.
 
-AddressSanitizer and MemorySanitizer run on nightly Linux for those packages and the Server verifier:
+The maintainer will enable Dependabot alerts and security updates after this cleanup. Until then,
+there is no automated dependency advisory monitoring. Dependency additions and updates still need
+review of licensing, sources, maintenance and new transitive duplicates. First-party unsafe code
+is denied by workspace Rust lints.
 
-```bash
-scripts/ci/sanitizer-test.sh address
-scripts/ci/sanitizer-test.sh memory
-```
+Reproducibility is an on-demand check for toolchain or build-system changes. Final artifact signing
+and checksums remain, but there is no custom gate-evidence packet, SBOM pipeline, duplicate mobile
+release build, scheduled diagnostics, fuzz setup or coverage reporting. CI job results are the
+verification record. See [building and releasing packages](building-mobile.md) and
+[coverage limits](protocol-state-invariant-tests.md).
 
-The sanitizer subset targets `x86_64-unknown-linux-gnu` and runs library plus integration tests for
-`roost-protocol`, `roost-server`, `roost-crypto`, and `roost-core` with `-Z build-std`. The sanitizer jobs also use
-`--features blake3/pure` to avoid native BLAKE3 C/assembly code that would otherwise fall outside
-the Rust-instrumented test surface. Targeted UniFFI checks and mobile target builds remain covered by
-their own workflows, not by sanitizer jobs.
-
-## Constrained Decryption Budget
-
-The v0.15.0 constrained decryption release gate runs the optimized Core budget harness:
-
-```bash
-scripts/ci/constrained-decryption-budget.sh
-```
-
-The harness measures the real `ProtocolStateEngine::decrypt_message` path one operation at a time
-against the documented 24 MiB tracked Rust heap allocation budget and 250 ms wall-clock budget. It
-is a release gate for the profiled constrained path, not a general endpoint security guarantee.
-
-## Android AAR Distribution
-
-The release-verification workflow builds the Android AAR from the checked-out source, publishes it
-to a local Maven repository, uploads the unsigned Maven layout for later signing, and runs two
-consumer checks:
-
-- happy path: resolve the package, load its native library, and call Client from an Android API 36
-  managed device
-- negative path: remove the AAR from a temporary Maven layout and require consumer resolution to
-  fail
-
-This gate proves packaging, local Maven metadata, generated Kotlin bindings, native library
-placement, and consumer execution. Final artifact signatures and pinned checksums are verified by
-the signed-release gate, not by this unsigned distribution check.
-
-## Signed Release Artifacts
-
-On release tags, the release-verification workflow signs the exact uploaded mobile artifacts from
-the release jobs:
-
-- `Aether-v<version>.xcframework.zip`
-- `aether-<version>.aar`
-
-The signed-release job waits for the `release` environment's required review, imports the OpenPGP
-release key from repository secrets, then assembles one
-packet from the reproducible iOS and Android outputs, Android publication metadata, SBOM, and gate
-evidence. Each evidence record names the successful command, source revision and epoch, and the
-shared GitHub Actions run identity. The packet has detached `.asc` signatures and pinned `.sha256`
-sidecars for both mobile binaries, the public release key, a source record, and a signed
-`SHA256SUMS` manifest covering every payload file. The verifier also proves that the Swift Package
-and Maven bundle contain the same binary and POM bytes published separately, verifies every primary
-file in a signed Maven bundle against the same release key, and validates ZIP members before
-extraction.
-
-Required secrets:
-
-- `AETHER_RELEASE_GPG_PRIVATE_KEY`
-- `AETHER_RELEASE_GPG_PASSPHRASE`
-- `AETHER_RELEASE_GPG_FINGERPRINT`
-
-Publication also requires the `release` environment secret `AETHER_RELEASE_ADMIN_READ_TOKEN`, a
-fine-grained token limited to `RelayNet/aether` with Administration read permission. It reads the
-repository's immutable-release setting only. The normal `github.token` retains the separate
-contents-write permission used for release creation. Configure the environment's required reviewer
-and disable protection-rule bypass before creating a release tag; the YAML reference alone does not
-install those rules.
-An active tag ruleset must also prohibit updates and deletions of `refs/tags/v0.15.0` without bypass
-actors. The release operator verifies this pre-tag control; it keeps the source revision fixed
-while GitHub CLI stages and uploads the draft before publication.
-
-The Android AAR distribution job also enables Gradle publication signing on release tags so the
-Maven Central bundle contains Maven `.asc` signatures. Non-tag workflow runs keep producing
-unsigned release-candidate artifacts.
-
-On non-tag release-verification runs, CI assembles the same packet shape with an ephemeral CI-only
-OpenPGP key and an unsigned Maven Central candidate. It runs the same completeness and provenance
-checks plus signature, checksum, checksum-filename, fingerprint, gate-evidence, hostile-ZIP, and
-tamper failures. This proves the release flow before final publication but does not publish assets
-or create a public trust root.
-
-The release-preflight job runs `scripts/release/verify-release-gates.sh` early for fail-fast tag
-checks, and the signed-release job runs the same gate again immediately before signed asset upload
-or final GitHub Release publication. The publication step pins `github.com/RelayNet/aether`, checks
-the exact Mobile Release Packet file set and source revision, verifies repository immutability is
-enabled, and proves the remote tag resolves to that revision on `main`. It creates the release once,
-refuses to edit or replace an existing release, and checks the published release's immutability and
-locked tag revision. Both jobs pass `GH_TOKEN` from `github.token` so the GitHub CLI can read issue
-and release state.
-
-## Supply Chain
-
-`deny.toml` is the committed dependency policy. It blocks disallowed licenses, vulnerable or yanked
-crates, unknown sources, wildcard dependencies, and duplicate dependency versions unless a duplicate
-has an explicit skip reason.
-
-The supply-chain workflow runs on pull requests, `main`, and release tags. It enforces:
-
-- `cargo deny check`
-- a negative cargo-deny license-policy dry run that must fail
-- `cargo audit --deny warnings`
-- `cargo geiger` reports for each workspace package
-- mobile release packet contract and cross-checkout SBOM reproducibility tests
-- v0.15.0 release preflight and immutable publication contract tests
-- no first-party `unsafe` in `crates/**/*.rs`
-
-`cargo-audit` is an advisory backstop for the RustSec database. `cargo-geiger` records the unsafe
-posture of first-party and dependency code; first-party unsafe remains a hard failure until a future
-review deliberately changes that policy.
-
-Crypto-adjacent dependency changes must include explicit maintainer reputation, audit-history, and
-duplicate-dependency reasoning before release. If a duplicate becomes necessary, add a targeted
-`[bans] skip` entry in `deny.toml` with the reason.
+Repository settings must require the `Rust / check` job instead of the removed workflow jobs.
+Workflow files alone cannot update branch protection.

@@ -7,6 +7,7 @@ paths:
 
 - Test names define behavior scope. Assertions should prove that named behavior and its required preconditions
 - Avoid duplicate coverage at the same responsibility layer. Higher-level tests focus on the contract added by that layer
+- Keep tests and their setup for concrete consumer failures; simple forwarding and duplicated fixtures need no separate suite
 - Keep repeated coverage when it protects a security/protocol invariant or verifies behavior across an API, persistence, serialization, FFI, or other boundary
 - Inline unit tests live in `#[cfg(test)] mod tests { ... }` at the bottom of the source file they exercise
 - Integration tests live in `crates/<crate>/tests/<scenario>.rs` and exercise only the public API; if a test needs an internal item, the test belongs inline
