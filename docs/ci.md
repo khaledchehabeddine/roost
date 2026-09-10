@@ -16,7 +16,7 @@ both repositories. Each builds its platform once and exercises the resulting pac
 simulator or emulator. The checks cover native loading, unexpected foreign storage errors,
 lost-write recovery, binary Transport Binding conversion and canonical evidence results. Swift
 also verifies signatures with CryptoKit.
-Rust owns protocol behavior; native suites reuse its canonical evidence fixture.
+Rust owns protocol behavior; native suites keep small local inputs for package checks.
 
 The maintainer will enable Dependabot alerts and security updates after this cleanup. Until then,
 there is no automated dependency advisory monitoring. Dependency additions and updates still need

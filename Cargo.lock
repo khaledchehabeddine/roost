@@ -851,7 +851,6 @@ dependencies = [
  "roost-crypto",
  "roost-protocol",
  "serde",
- "serde_json",
  "subtle",
  "unicode-normalization",
  "zeroize",
@@ -872,7 +871,6 @@ dependencies = [
  "rand_chacha",
  "roost-protocol",
  "serde",
- "serde_json",
  "sha2",
  "subtle",
  "x25519-dalek",
@@ -901,8 +899,6 @@ version = "0.16.0"
 dependencies = [
  "hex",
  "roost-protocol",
- "serde",
- "serde_json",
 ]
 
 [[package]]

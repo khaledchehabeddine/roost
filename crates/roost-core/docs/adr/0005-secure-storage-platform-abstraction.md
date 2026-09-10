@@ -1,5 +1,11 @@
-# Secure Storage Platform Abstraction
+# Secure storage platform abstraction
 
 **Status:** Accepted
 
-Platform secret storage (iOS Keychain, Android Keystore) is exposed through a Rust trait owned by the identity-layer crate and consumed by identity-layer code as a trait object, with the host app providing the platform implementation at compile time. The trait lives in the identity layer rather than at the FFI boundary because identity-key persistence is an identity-layer concern, and defining the contract where the concern lives keeps the FFI boundary clean and stable. The trait-object pattern lets multiple identity-layer consumers share a single storage instance without their internal types leaking into the FFI signature, so the FFI surface stays stable as those consumers evolve, and a self-contained in-memory implementation ships in the same crate so the test suite exercises the storage contract without any OS dependency.
+Core owns the secure-storage trait because it owns identity persistence. The host supplies an
+implementation at runtime through UniFFI; Core shares it as a trait object without depending on
+platform APIs. In-memory test storage exercises this contract without an OS secret store.
+
+Each entry write must be durable and non-tearing. Cross-entry recovery belongs to
+[prepared operations](../../../../docs/adr/0018-recoverable-prepared-keystore-operations.md);
+platform secret storage does not supply a transaction spanning the host's protocol database.

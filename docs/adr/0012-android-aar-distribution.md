@@ -15,10 +15,3 @@ checksum verification are owned by [ADR 0014](0014-mobile-release-artifact-bound
   bindings would add review noise and duplicate the Rust UniFFI surface.
 - Publish loose Kotlin sources and shared libraries. Rejected because Android consumers expect a
   single dependency that carries classes, native libraries, and transitive runtime metadata.
-
-## Verification Evidence
-
-- `scripts/build/android-aar.sh` builds the AAR and local Maven layout from source.
-- The `roost-kotlin` consumer resolves the generated Maven coordinate and runs native calls on
-  Android. Its missing-artifact mock test was removed for the MVP; successful resolution already
-  requires the AAR and its metadata.

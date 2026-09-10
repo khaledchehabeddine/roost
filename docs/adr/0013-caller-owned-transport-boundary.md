@@ -7,11 +7,13 @@ may send over any route they choose per send. Retry Instructions are host-local 
 callers may retransmit the enclosed Message, but the instruction metadata itself is not a transport
 payload. The library performs no network IO, stores no transport routing policy, and does not
 authenticate a general transport envelope; any transport-level signing, headers, identifiers,
-batching, retry scheduling, rate limiting, or abuse controls belong to the host application. A
-caller may opt into authenticating an opaque Transport Binding as sealed-frame associated data, as
+batching, retry scheduling, rate limiting, or abuse controls belong to the host application. Message operations
+require an opaque Transport Binding authenticated as sealed-frame associated data, as
 defined by [ADR 0021](0021-opaque-transport-bindings.md), but the caller owns its encoding and
 meaning. Protocol APIs accept caller-supplied signature bytes where the protocol needs them, while
-transport signing and verification remain host-owned and outside the UniFFI surface.
+the host owns transport layouts. The constrained signer in
+[ADR 0016](0016-caller-defined-authentication-transcript-signing.md) exposes the private-key
+operation required by host authentication transcripts.
 
 ## Considered Options
 
@@ -30,12 +32,3 @@ transport signing and verification remain host-owned and outside the UniFFI surf
   a bound operation.
 - Release verification checks protocol outputs and artifact authenticity, not host transport
   contracts.
-
-## Verification Evidence
-
-- `docs/security.md` records that transports expose routing metadata and that host applications own
-  network IO, rate limiting, batching, and caller-added identifiers.
-- `crates/roost-core/tests/transport_binding.rs` verifies authentication of exact caller bytes;
-  the `roost-swift` and `roost-kotlin` package tests verify platform conversion.
-- `crates/roost-core/docs/adr/0009-encrypted-acknowledgments-and-retries.md` records that
-  acknowledgments and retries are returned to the consumer for transport instead of sent by Core.

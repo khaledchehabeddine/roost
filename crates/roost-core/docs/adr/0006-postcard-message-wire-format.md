@@ -28,13 +28,3 @@ of decoded as the current Message format.
 - Keep sender identity fields beside the ciphertext. Rejected because it would expose the sender identity key and future sender certificate material to transports before ciphertext authentication.
 - Keep a distinct X3DH first-message sealed-sender schema. Rejected because session messages,
   acknowledgments, and X3DH initials share one frame/envelope version namespace.
-
-## Verification Evidence
-
-- `crates/roost-core/tests/fixtures/message_wire_v1.md` pins current Message encoding and explicit
-  rejection inputs for old sender-visible layouts.
-- `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` pins session Message
-  transport-visible fields and post-decryption sender material.
-- `crates/roost-core/tests/message_wire_fixtures.rs` and
-  `crates/roost-core/tests/sealed_sender_session_message_fixtures.rs` replay the canonical bytes.
-  `crates/roost-core/tests/protocol_state.rs` covers acknowledgments and state outputs.

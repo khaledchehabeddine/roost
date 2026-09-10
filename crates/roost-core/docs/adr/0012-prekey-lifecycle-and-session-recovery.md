@@ -51,11 +51,3 @@ message, and rejected when missing, already consumed, stale, or mismatched.
   inbox rotation advances the Epoch, preventing identifier reuse from stale or cloned backups.
 - Consumed one-time pre-keys are destroyed before reuse can occur; callers publish replenished
   one-time pre-key bundles explicitly.
-
-## Verification Evidence
-
-- Core's `signed_prekey` and `one_time_prekey` unit tests cover rotation, retention and pool
-  bounds. `crates/roost-core/tests/prekey_identifiers.rs` covers publication and selection across
-  the public API; prepared-operation and recovery tests cover restart behavior.
-- `docs/security.md` records signed-prekey-only fallback when one-time pre-key pools are exhausted
-  and distinct failures for stale, missing, consumed, or mismatched prekey references.

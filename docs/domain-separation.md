@@ -239,14 +239,14 @@ canonical transcript field, including the exact sender certificate. The sender I
 Relay domain come from that verified certificate. Source:
 [`evidence.rs`](../crates/roost-protocol/src/evidence.rs).
 
-The version-one Evidence Bundle fixture produces:
+The local signed report in the Server and native package tests produces:
 
 ```text
 a7af7974cb7c5c3c770baf1b946f8d7d69a295068d99b78425b1df538a6aa489
 ```
 
 This value was independently reproduced with the official BLAKE3 C 1.7.0 implementation using
-`blake3_hasher_init_derive_key` and is pinned by the Rust, Swift, and Kotlin fixture replays.
+`blake3_hasher_init_derive_key` and is checked by the Rust, Swift, and Kotlin package tests.
 
 ### `AetherSecureStoragePrecondition-v1`
 

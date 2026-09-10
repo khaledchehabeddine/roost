@@ -1,37 +1,15 @@
 # Contributing
 
-## Branches
+Branches use `<type>/<short-description>`; types follow the repository's GitHub labels.
 
-Format: `<type>/<short-description>`
+Commits use an imperative summary and concrete change bullets:
 
-Types match the repo's GitHub labels — run `gh label list` to see the current set.
-
-### Example
-
-```
-feature/signed-prekey-rotation
+```text
+<type>: <summary>
+- <what changed>
 ```
 
-## Commits
+Types: `feat`, `fix`, `chore`, `docs`, `ci`, `refactor`, `test`.
+Append a `Co-Authored-By:` trailer when an AI agent contributed.
 
-Format: `<type>: <summary>\n- <what changed>\n- <what changed>`
-
-Types: `feat` `fix` `chore` `docs` `ci` `refactor` `test`
-
-If an AI agent contributed, append a `Co-Authored-By:` trailer naming the agent.
-
-### Example
-
-```
-feat: add Curve25519 key generation to roost-crypto
-- Add `generate_key_pair()` returning `(PublicKey, SecretKey)`
-- Add `KeyPair` struct to roost-crypto public API
-- Add unit tests for key generation and round-trip encoding
-
-Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
-```
-
-## Pull Requests
-
-- All CI workflows must pass
-- See [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md) for the required PR structure
+Use the [PR template](.github/PULL_REQUEST_TEMPLATE.md). CI must pass before review completion.

@@ -1,7 +1,4 @@
 {
-  "hooks": {
-    "PostToolUse": []
-  },
   "permissions": {
     "ask": [
       "Bash(cargo publish*)",

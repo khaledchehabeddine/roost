@@ -19,12 +19,3 @@ delivery without surfacing plaintext.
   outbox commits.
 - In-memory pending state. Rejected because multiple library instances and restarts must observe
   the same authoritative Protocol State Blob.
-
-## Verification Evidence
-
-- `crates/roost-core/tests/fixtures/protocol_state_blobs_v1.md` pins pending-acknowledgment state
-  and duplicate acknowledgment replay behavior.
-- `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` records encrypted
-  acknowledgment artifacts using the sealed-sender Message shape.
-- `docs/adr/0007-certificates-contacts-trust-and-public-api-shape.md` records blocked-contact
-  unreachable and silent-receipt acknowledgment modes.

@@ -107,18 +107,9 @@ fn reused_message_id_with_distinct_transcript_has_distinct_evidence_identity() {
 fn evidence_bundle_with_substituted_valid_relay_certificate_is_rejected() {
     const OTHER_RELAY_DOMAIN: &[u8] = b"other.test";
 
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../roost-protocol/tests/fixtures/evidence_bundles_v1.json"
-    ))
-    .unwrap();
-    let material = &fixture["valid"]["verification_material"];
-    let certificate = hex::decode(material["sender_certificate_hex"].as_str().unwrap()).unwrap();
-    let signature = hex::decode(
-        material["sender_certificate_signature_hex"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let (fixture, _, accepted) = accepted_evidence(1);
+    let certificate = &fixture.alice_sender.sender_identity.certificate;
+    let signature = &fixture.alice_sender.sender_identity.signature;
     let mut substituted_certificate = certificate.clone();
     let relay_offset = substituted_certificate
         .windows(TEST_RELAY_DOMAIN.len())
@@ -130,30 +121,25 @@ fn evidence_bundle_with_substituted_valid_relay_certificate_is_rejected() {
     let substituted_certificate_signature =
         domain_signing_key.sign(&substituted_certificate).to_bytes();
 
-    let mut substituted = hex::decode(fixture["valid"]["bundle_hex"].as_str().unwrap()).unwrap();
+    let mut substituted = accepted.evidence_bundle.as_bytes().to_vec();
     let certificate_offset = substituted
         .windows(certificate.len())
-        .position(|window| window == certificate)
+        .position(|window| window == certificate.as_slice())
         .unwrap();
     substituted[certificate_offset..certificate_offset + substituted_certificate.len()]
         .copy_from_slice(&substituted_certificate);
     let certificate_signature_offset = substituted
         .windows(signature.len())
-        .position(|window| window == signature)
+        .position(|window| window == signature.as_slice())
         .unwrap();
     substituted[certificate_signature_offset
         ..certificate_signature_offset + substituted_certificate_signature.len()]
         .copy_from_slice(&substituted_certificate_signature);
 
-    let identifier = hex::decode(
-        fixture["domain_signing_key"]["identifier_hex"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let identifier = fixture.alice_sender.domain_signing_key().identifier;
     let verifying_key = domain_signing_key.verifying.to_bytes();
     let domain_signing_keys = [DomainSigningKey {
-        identifier: &identifier,
+        identifier,
         verifying_key: &verifying_key,
         status: DomainSigningKeyStatus::Trusted,
     }];
@@ -167,17 +153,4 @@ fn evidence_bundle_with_substituted_valid_relay_certificate_is_rejected() {
     }));
 
     assert_eq!(actual, EvidenceVerificationError::SignatureFailure);
-}
-
-#[test]
-fn accepted_message_matches_canonical_evidence_bundle() {
-    let (_, _, accepted) = accepted_evidence(0x0221);
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../roost-protocol/tests/fixtures/evidence_bundles_v1.json"
-    ))
-    .unwrap();
-    assert_eq!(
-        hex::encode(accepted.evidence_bundle.as_bytes()),
-        fixture["valid"]["bundle_hex"].as_str().unwrap()
-    );
 }

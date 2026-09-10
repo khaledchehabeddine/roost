@@ -721,7 +721,7 @@ fn outbound_message_and_advanced_state_return_together() {
 }
 
 #[test]
-fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
+fn sealed_sender_round_trip_hides_sender_identity_until_decrypt() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
@@ -763,11 +763,32 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
     alice_snapshot.apply_all(encrypted.state_updates).unwrap();
 
     let encoded = encrypted.message.to_bytes().unwrap();
-    assert!(
-        !encoded
-            .windows(sender.sender_identity.identity_key.len())
-            .any(|window| window == sender.sender_identity.identity_key)
-    );
+    for (name, material) in [
+        (
+            "identity key",
+            sender.sender_identity.identity_key.as_slice(),
+        ),
+        (
+            "identity verifying key",
+            sender.sender_identity.identity_verifying_key.as_slice(),
+        ),
+        (
+            "identity binding signature",
+            sender.sender_identity.identity_binding_signature.as_slice(),
+        ),
+        ("certificate", sender.sender_identity.certificate.as_slice()),
+        (
+            "certificate signature",
+            sender.sender_identity.signature.as_slice(),
+        ),
+    ] {
+        assert!(
+            !encoded
+                .windows(material.len())
+                .any(|window| window == material),
+            "wire message exposes {name}"
+        );
+    }
 
     let decrypted = engine
         .decrypt_message_with_transport_bindings(
@@ -792,6 +813,14 @@ fn sealed_sender_round_trip_exposes_sender_identity_after_decrypt() {
     assert_eq!(
         decrypted.sender_identity.identity_key,
         sender.sender_identity.identity_key
+    );
+    assert_eq!(
+        decrypted.sender_identity.identity_verifying_key,
+        sender.sender_identity.identity_verifying_key
+    );
+    assert_eq!(
+        decrypted.sender_identity.identity_binding_signature,
+        sender.sender_identity.identity_binding_signature
     );
     assert_eq!(
         decrypted.sender_identity.certificate,

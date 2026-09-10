@@ -1,23 +1,24 @@
 # Test scope and limits
 
-Tests protect concrete consumer failures. Crypto owns handshake agreement, ratchet advancement,
-replay and skipped-key bounds. Its short generated bidirectional traces cover combinations of
-ordering and direction without maintaining a separate fuzz project. Fixed signed-prekey and
-certificate answers pin exact bytes. The canonical evidence and handshake fixtures remain shared
-where several boundaries consume them.
+Tests protect current consumer behavior. Crypto covers handshake agreement, ratchet advancement,
+replay rejection and skipped-key bounds. Short generated bidirectional exchanges cover ordering and
+direction; independent cryptographic known answers stay beside the code they exercise.
 
-Core tests cover accepted-message production, identity and prekey lifecycle, stale-write rejection,
-atomic blob/outbox updates, corruption faults, contact trust and recovery after ambiguous storage
-replies. Setup fills a skipped-key cache directly when the test only needs Core's overflow behavior.
-Server owns evidence-verifier rejection cases. Client tests retain handwritten conversion and
-error decisions; straightforward forwarding does not need another protocol suite.
+Core covers identity and prekey lifecycle, contact trust, accepted-message evidence, stale writes,
+atomic blob/outbox commits, corruption faults and recovery after ambiguous storage replies. It
+creates Messages and state during tests. Server verifies a local signed report and builds malformed
+or tampered inputs in the test. There is no stored transcript replay or format-freezing JSON suite.
 
 Swift and Kotlin package tests live in their distribution repositories. They load the actual
 package, cross a foreign storage callback, recover a lost write reply and preserve binary binding
-bytes. Swift CryptoKit verifies both the canonical evidence transcript and a fresh
-signature returned through the bindings. Kotlin compares the returned evidence fields with the
-canonical fixture. Canonical fixture bytes are copied from the selected
-Roost revision during the check, with no maintained native copy.
+bytes. Each keeps its small Evidence Bundle input beside the assertions, avoiding shared resource
+loading and copy steps. Swift CryptoKit verifies the reconstructed Message Transcript and a fresh
+signature; Kotlin checks the returned fields. The expected Evidence Identity comes from an
+independent BLAKE3 C 1.7.0 calculation. A format change requires updating these local examples.
+
+The pre-MVP tests do not promise compatibility with earlier prerelease bytes. Once real persisted
+user data must survive upgrades, add focused tests for the specific supported formats. The v0.15.0
+published release records and artifacts remain unchanged.
 
 Accepted limits:
 

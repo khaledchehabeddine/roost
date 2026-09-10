@@ -46,8 +46,7 @@ consumer adoption follow the approved package prerequisite and mobile cutover ti
 
 - [`CONTEXT_MAP.md`](CONTEXT_MAP.md) — workspace context paths and relationships
 - [`docs/adr/`](docs/adr/) — workspace-wide architectural decisions (per-crate decisions under `crates/<crate>/docs/adr/`)
-- [`docs/building-mobile.md`](docs/building-mobile.md) — Android, iOS, and manual UniFFI bindings
-- [`docs/ci.md`](docs/ci.md) — CI, runtime verification, and supply-chain gates
+- [`docs/building-mobile.md`](docs/building-mobile.md) — build, sign, and verify Android and iOS packages
+- [`docs/ci.md`](docs/ci.md) — Rust CI and native package checks
 - [`docs/release.md`](docs/release.md) — historical v0.15.0 release record
-- [`docs/security/secret-handling.md`](docs/security/secret-handling.md) — secret-handling audit notes and limits
-- [`docs/security.md`](docs/security.md) — DoS limits, caller responsibilities, and constrained-host trade-offs
+- [`docs/security.md`](docs/security.md) — security boundaries and caller responsibilities

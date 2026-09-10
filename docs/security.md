@@ -1,14 +1,13 @@
 # Security
 
-This page records denial-of-service hardening behavior that callers must preserve when integrating
-the protocol core.
+Integration requirements and limits of the cryptographic core.
 
 ## Current Guarantees
 
 - Messages authenticate the sealed-sender frame before plaintext, sender identity material, payload
   kind, or Message metadata are surfaced.
-- Transport-Bound APIs additionally authenticate the exact opaque bytes supplied by the caller
-  without interpreting or hiding them.
+- Message operations require a Transport Binding and authenticate its exact bytes without
+  interpreting or hiding them.
 - Protocol State Blobs are versioned, opaque caller-persisted values. Unsupported or malformed
   blobs fault instead of silently resetting state.
 - X3DH and established Messages bind the peer Identity Key so a Session cannot be relabeled under a
@@ -29,16 +28,14 @@ the protocol core.
   already exposed to that endpoint.
 - The library does not implement network rate limiting, abuse throttling, or transport retries.
 - Sender Certificate validation is caller-timed and depends on caller-provided trusted signing keys
-  and revocation inputs.
+  and revocation inputs. Established-message receive performs that check; X3DH acceptance returns
+  certificate material for the caller to validate before trusting initial-message content.
 - Post-handshake messages carry sealed Identity Key transcript signatures; first-contact sender
   material uses a sealed key-possession proof. Aether does not provide a deniable messaging mode or
   message franking.
-- The library does not claim protection against rooted, jailbroken, malware-compromised, or
-  otherwise untrusted endpoints.
 
-Release-facing documentation and notes must preserve these limits. Artifact signatures,
-reproducible builds, and CI evidence authenticate distribution outputs only; they do not broaden
-runtime metadata privacy, endpoint-compromise, or transport-security claims.
+Artifact signatures and checksums establish distribution authenticity, not runtime privacy or
+endpoint security. No formal side-channel proof is claimed.
 
 ## Resource Limits
 
@@ -74,13 +71,12 @@ for one Identity's protocol state.
 Protocol State Blobs are secret-bearing live key material. Protect them at rest with controls
 comparable to identity-key storage.
 
-The library does not implement transport batching, IP unlinking, transport-identifier hygiene,
-push-token privacy, transport validation, network rate limiting, or metadata protection. Host
-integrations own those policies and all network I/O. Caller-added identifiers outside the encoded
-Message are outside Aether's sealed-sender boundary unless their canonical encoding is included in
-the Transport Binding supplied to a bound API.
+Rust zeroizes owned secrets on drop. Swift/Kotlin buffers and caller-created copies remain the
+host's responsibility: avoid logging or unnecessary copies of keys, passphrases, plaintext, and
+Protocol State Blobs. Foreign SecureStorage callbacks receive secret bytes; their implementation
+must protect those values and their copies. Error messages must not include secret material.
 
-Hosts using bound APIs must persist the exact Transport Binding with each outbound Message or
+Hosts must persist the exact Transport Binding with each outbound Message or
 acknowledgment and reuse it for retries; changing any byte causes authentication failure. For an
 initial referencing a retained superseded signed prekey, the host must validate transport
 admission before supersession and supply the corresponding PreKey Selection. If selected prekey
@@ -97,7 +93,7 @@ rotation so a stale or cloned backup cannot reuse identifiers under the backed-u
 ## Replay, Retry, and Skipped Keys
 
 Received encrypted Messages are deduplicated by a bounded, identity-scoped digest window over the
-encoded sealed-sender frame bytes and, for bound receives, the exact Transport Binding.
+encoded sealed-sender frame bytes and the exact Transport Binding.
 Identical replays return duplicate outcomes without regenerating user-visible delivery or
 acknowledgment effects.
 

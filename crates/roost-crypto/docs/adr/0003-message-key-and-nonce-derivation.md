@@ -1,5 +1,11 @@
-# Message Key and Nonce Derivation
+# Message key and nonce derivation
 
 **Status:** Accepted
 
-Each ratchet message key is expanded by a single HKDF-SHA256 call (protocol-specific info string, no salt) into both the 32-byte XChaCha20-Poly1305 encryption key and the 24-byte Nonce; the Nonce is omitted from the wire so the receiver re-derives it from its own symmetrically derived message key. Deriving the Nonce alongside the key saves the 24 bytes of wire overhead per message without weakening security because each message key is used exactly once — there is no reuse risk a random nonce would protect against. The info string is distinct from every other HKDF call in the crate so cross-protocol key reuse is impossible by construction, and salt is omitted per RFC 5869 §3.1 because the chain-derived input is already pseudo-random.
+One HKDF-SHA256 expansion derives the 32-byte encryption key and 24-byte nonce from each ratchet
+message key. The receiver derives the same pair, avoiding nonce transmission. This relies on using
+each message key once; replay rejection and durable ratchet-state commits preserve that condition.
+
+The chain-derived input already supplies pseudorandom key material, so this expansion uses no salt.
+Distinct, non-empty info strings separate derivation purposes; their bytes are fixed in
+[domain separation](../../../../docs/domain-separation.md).
