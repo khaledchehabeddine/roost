@@ -451,22 +451,14 @@ impl KeyStore {
         identity_key: ContactIdentityKey,
     ) -> Result<PreparedKeyStoreOperation<ContactBlock>, KeyStoreError> {
         let contact = self.0.engine.block_contact(snapshot, identity_key)?;
-        // An unchanged contact yields no updates; rotating anyway would re-key every other contact
-        // for nothing.
-        if contact.state_updates.is_empty() {
-            return self.prepare_operation(move |_| {
-                Ok(ContactBlock {
-                    contact,
-                    rotation: None,
-                })
-            });
-        }
         self.prepare_operation(move |staged| {
-            let rotation = staged.rotate_inbox_now_eager()?;
-            Ok(ContactBlock {
-                contact,
-                rotation: Some(rotation),
-            })
+            // Repeated blocking still owns an operation, but must not rotate other contacts' capabilities.
+            let rotation = if contact.state_updates.is_empty() {
+                None
+            } else {
+                Some(staged.rotate_inbox_now_eager()?)
+            };
+            Ok(ContactBlock { contact, rotation })
         })
     }
 

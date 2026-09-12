@@ -1,14 +1,15 @@
-//! Application-layer key management for private messaging clients.
+//! Identity lifecycle, messaging and transitions over host-owned protocol state.
 //!
-//! This crate wraps [`roost_crypto`] primitives with persistence, identity lifecycle management,
-//! and signed-pre-key rotation for Rust callers wiring the core into apps. Platform adapters
-//! provide a [`SecureStorage`] implementation backed by secure storage.
+//! This implementation crate coordinates [`roost_crypto`] operations with caller-owned storage.
+//! Mobile consumers use `roost-client`; backends use `roost-server`. Platform adapters provide
+//! [`SecureStorage`] for keys and the host owns durable Protocol State Blob transactions.
 //!
 //! # Overview
 //!
-//! [`KeyStore`] is the entry point for identity setup, encrypted backup import and export, and
-//! signed-pre-key publication. It serializes access to the underlying storage so callers can share
-//! a cloned handle across application components.
+//! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys and one configured
+//! [`ProtocolStateEngine`]. The host serializes each identity's complete operation and commit,
+//! including prepared-operation recovery across instances and processes. See [`KeyStore`] and
+//! [`ProtocolStateSnapshot`] for the storage and commit contracts.
 //!
 //! # Examples
 //!

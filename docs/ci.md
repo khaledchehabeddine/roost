@@ -1,7 +1,8 @@
 # CI
 
 Roost uses one Linux job for pull requests and pushes to `main`. It runs formatting,
-Clippy, workspace tests and rustdoc with the pinned Rust toolchain. Run the same checks locally:
+Clippy, workspace tests and rustdoc with the pinned Rust toolchain. Release-command regressions
+require Python 3.11 or newer for `tomllib`; select that interpreter locally before running the checks:
 
 ```bash
 cargo fmt --all -- --check

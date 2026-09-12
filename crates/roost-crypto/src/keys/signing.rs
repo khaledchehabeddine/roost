@@ -37,6 +37,26 @@ impl SigningKeyPair {
     ///
     /// `context` must be a non-empty domain separator naming the signature purpose. Both inputs are
     /// caller-supplied bytes; this helper does not define a transport signing layout.
+    /// Contexts used with the same key must be prefix-free: no context may be a prefix of another.
+    /// This method inserts no delimiter or length prefix and does not enforce that requirement.
+    ///
+    /// # Examples
+    /// ```
+    /// use rand::rngs::OsRng;
+    /// use roost_crypto::generate_signing_key_pair;
+    /// use roost_protocol::verify_with_context;
+    ///
+    /// let key = generate_signing_key_pair(&mut OsRng);
+    /// let context = b"ExampleAuthentication-v1:";
+    /// let message = b"caller-defined transcript";
+    /// let signature = key.sign_with_context(context, message)?;
+    /// verify_with_context(&key.verifying, context, message, &signature)?;
+    /// # Ok::<(), roost_crypto::CryptoError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// - [`CryptoError::InvalidSignatureContext`] if `context` is empty or the combined context
+    ///   and message length overflows.
     pub fn sign_with_context(
         &self,
         context: &[u8],

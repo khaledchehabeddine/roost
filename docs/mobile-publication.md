@@ -5,6 +5,19 @@ and `roost-kotlin` repositories own native checks, manual workflows and consumer
 One workspace version and source commit govern both distributions. Generated Swift and Kotlin
 implementation sources remain build outputs. The v0.15.0 record, tags and artifacts stay unchanged.
 
+## Release ordering
+
+Finish the remaining Rust cleanup, repository agent fixes and documentation in
+[#271](https://github.com/RelayNet/roost/issues/271) before selecting the official source revision.
+The publication implementation is merged, but
+[#270](https://github.com/RelayNet/roost/issues/270) defers access setup, plan changes, candidate
+preparation and publication until that cleanup is complete. Earlier local checks do not verify the
+final signed candidates.
+
+After cleanup, #270 owns exact-candidate installation and publication. Then
+[#268](https://github.com/RelayNet/roost/issues/268) owns published-package resolution and full Relay
+validation. Keep [#264](https://github.com/RelayNet/roost/issues/264) open until those results are recorded.
+
 ## Configuration
 
 Khaled configures access before running the workflows. These secret names describe required
