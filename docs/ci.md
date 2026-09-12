@@ -7,6 +7,7 @@ Clippy, workspace tests and rustdoc with the pinned Rust toolchain. Run the same
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
+python3 scripts/release/test_commands.py
 RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
 ```
 
@@ -26,8 +27,12 @@ is denied by workspace Rust lints.
 Reproducibility is an on-demand check for toolchain or build-system changes. Final artifact signing
 and checksums remain, but there is no custom gate-evidence packet, SBOM pipeline, duplicate mobile
 release build, scheduled diagnostics, fuzz setup or coverage reporting. CI job results are the
-verification record. See [building and releasing packages](building-mobile.md) and
+verification record. See [building packages](building-mobile.md), [mobile publication](mobile-publication.md) and
 [coverage limits](protocol-state-invariant-tests.md).
 
 Repository settings must require the `Rust / check` job instead of the removed workflow jobs.
 Workflow files alone cannot update branch protection.
+
+The same job checks release commands with small files and isolated external-tool responses.
+It tests source/run rejection, pinned signatures and checksums, and retries without replacing bytes.
+The signing test uses a temporary keyring; CI needs no release credential for these regressions.

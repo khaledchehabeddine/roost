@@ -51,10 +51,9 @@ This is an on-demand local build. Production package checks always clear that fe
 
 ## Release
 
-Run Rust CI and both package checks against the intended source commit. The package repositories
-own their native checks and eventual distribution metadata. The first Roost publication still
-needs its versioned Swift binary URL/checksum and GitHub Packages upload configured. Kotlin uses
-`https://maven.pkg.github.com/relaynet/roost-kotlin`.
+Run Rust CI and both package checks against the intended source commit. Follow
+[mobile publication](mobile-publication.md) for access configuration, exact-artifact handoff,
+signed-candidate installation and owner-initiated publication to the private distribution repositories.
 
 Publish the exact checked bytes and record the source commit, workspace version and toolchain
 versions in the release description. Uploading rebuilt bytes requires checking those bytes again.
@@ -63,7 +62,7 @@ Sign the XCFramework archive and AAR with the release key:
 ```bash
 export ROOST_RELEASE_FINGERPRINT='<trusted release key fingerprint>'
 scripts/release/sign-artifact.sh '<artifact>'
-scripts/release/verify-artifact.sh '<artifact>' '<artifact>.asc' '<artifact>.sha256' '<public-key.asc>'
+scripts/release/verify-artifact.sh '<artifact>' '<artifact>.asc' '<artifact>.sha256' '<public-key.asc>' '<pinned-sha256>'
 ```
 
 Distribute signatures, checksums and the public key alongside the artifacts. Consumers obtain the

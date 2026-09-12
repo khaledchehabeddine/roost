@@ -1,0 +1,90 @@
+name: Prepare signed mobile candidates
+run-name: Prepare ${{ inputs.source_revision }} Swift ${{ inputs.swift_run }} Kotlin ${{ inputs.kotlin_run }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_revision:
+        description: Full Roost main commit checked by both package workflows
+        required: true
+        type: string
+      swift_run:
+        description: Successful roost-swift Package consumption run ID
+        required: true
+        type: string
+      kotlin_run:
+        description: Successful roost-kotlin Package consumption run ID
+        required: true
+        type: string
+      sha256_json:
+        description: Reviewed JSON object mapping the ZIP, AAR and POM filenames to SHA-256 pins
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: mobile-preparation
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'KhaledChehabeddine' &&
+      github.triggering_actor == 'KhaledChehabeddine' &&
+      inputs.source_revision == github.sha
+    runs-on: ubuntu-latest
+    environment: signing
+    env:
+      ROOST_SOURCE_REVISION: ${{ inputs.source_revision }}
+      ROOST_SWIFT_RUN: ${{ inputs.swift_run }}
+      ROOST_KOTLIN_RUN: ${{ inputs.kotlin_run }}
+      ROOST_SHA256_JSON: ${{ inputs.sha256_json }}
+      ROOST_RELEASE_FINGERPRINT: 8C936E5EE86B909B53B607EA0EEDE342BC541851
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Download the checked bytes and verify provenance and pins
+        run: python3 scripts/release/mobile.py collect target/mobile-candidate
+        env:
+          GH_TOKEN: ${{ secrets.ROOST_READ_TOKEN }}
+      - name: Sign and verify the exact artifacts
+        env:
+          GNUPGHOME: ${{ runner.temp }}/roost-signing
+          ROOST_RELEASE_PRIVATE_KEY: ${{ secrets.ROOST_RELEASE_PRIVATE_KEY }}
+          ROOST_RELEASE_PASSPHRASE: ${{ secrets.ROOST_RELEASE_PASSPHRASE }}
+        run: |
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$ROOST_RELEASE_PRIVATE_KEY" | gpg --batch --import
+          gpg --batch --armor --export "$ROOST_RELEASE_FINGERPRINT" > target/mobile-candidate/roost-release-key.asc
+          for artifact in target/mobile-candidate/*.zip target/mobile-candidate/*.aar target/mobile-candidate/*.pom; do
+            scripts/release/sign-artifact.sh "$artifact"
+          done
+          python3 scripts/release/mobile.py verify target/mobile-candidate
+      - name: Record preparation and show the reviewable release description
+        id: version
+        run: |
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          printf '\nSigned candidate: %s/%s/actions/runs/%s (attempt %s)\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            >> target/mobile-candidate/release-notes.md
+          cat target/mobile-candidate/release-notes.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roost-signed-${{ inputs.source_revision }}-v${{ steps.version.outputs.version }}-${{ github.run_attempt }}
+          path: target/mobile-candidate/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Remove signing material
+        if: always()
+        env:
+          GNUPGHOME: ${{ runner.temp }}/roost-signing
+        run: |
+          gpgconf --kill gpg-agent || true
+          rm -rf "$GNUPGHOME"
