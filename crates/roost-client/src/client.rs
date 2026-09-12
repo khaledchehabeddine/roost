@@ -205,7 +205,8 @@ impl Client {
 
     /// Creates one identity context with immutable protocol configuration.
     ///
-    /// Every interface and prepared operation uses this policy; callers never configure engines.
+    /// Every interface and prepared operation uses this policy. `deduplication_capacity` must be
+    /// between 64 and 2048 inclusive. See [`Client`] for serialization and recovery requirements.
     ///
     /// # Examples
     /// ```
@@ -219,8 +220,7 @@ impl Client {
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if the capacity cannot fit the platform's address space.
-    /// - [`ClientError::InvalidData`] if the capacity is outside Core's supported range.
+    /// - [`ClientError::InvalidData`] if the capacity is outside that range.
     #[uniffi::constructor]
     pub fn with_configuration(
         storage: Arc<dyn SecureStorage>,
@@ -760,8 +760,23 @@ impl IdentityOperations {
     ///
     /// This is a bearer secret. Give it only to authorized contacts over an encrypted channel and
     /// persist it in platform secure storage. Register
-    /// [`PublicationBundle::recipient_delivery_verifier`] with the relay instead — Aether never
+    /// [`PublicationBundle::recipient_delivery_verifier`] with the relay instead. Roost never
     /// registers, validates, or transmits a capability.
+    ///
+    /// # Examples
+    /// ```
+    /// # use roost_client::{Client, ClientError, InMemorySecureStorage};
+    /// # use std::sync::Arc;
+    /// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
+    /// let prepared = client.identity().prepare_generate_identity()?;
+    /// client.commit_operation(prepared.operation.identifier.clone())?;
+    /// // Commit the host's identity record and operation identifier before finalizing.
+    /// client.finalize_operation(prepared.operation.identifier)?;
+    /// let capability = client.identity().current_delivery_capability()?;
+    /// // Send only to authorized contacts through an encrypted channel.
+    /// assert_eq!(capability.len(), 32);
+    /// # Ok::<(), ClientError>(())
+    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InternalError`] on storage lock poisoning.
@@ -1743,6 +1758,8 @@ fn convert_prepared<T, U>(
     let operation = prepared.operation.into();
     match convert(prepared.output) {
         Ok(output) => Ok((operation, output)),
+        // A conversion failure hides the prepared output from the host. Abort its journal record,
+        // or return the identifier so the host can reconcile an uncertain cleanup after restart.
         Err(error) => match store.abort_operation(identifier) {
             Ok(_) => Err(error),
             Err(abort_error) => Err(ClientError::OperationRecoveryRequired {

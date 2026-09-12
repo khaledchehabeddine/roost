@@ -848,6 +848,43 @@ fn contact_lookup_rejects_blob_whose_identity_key_mismatches_address() {
 }
 
 #[test]
+fn contact_lookup_rejects_corrupt_blobs_without_replacing_stored_state() {
+    let setup = setup();
+    let engine = ProtocolStateEngine::new();
+    let mut snapshot = ProtocolStateSnapshot::new();
+    let change = engine
+        .record_contact(&snapshot, contact_identity(&setup))
+        .unwrap();
+    snapshot.apply_all(change.state_updates).unwrap();
+    assert!(
+        engine
+            .contact_state(&snapshot, setup.bob_identity)
+            .unwrap()
+            .is_some()
+    );
+
+    let address =
+        ProtocolStateAddress::new(ProtocolStateKind::ContactState, setup.bob_identity.into());
+    let valid = snapshot.get(&address).unwrap().as_bytes().to_vec();
+    let mut trailing = valid.clone();
+    trailing.push(0xaa);
+    let truncated = valid[..valid.len() / 2].to_vec();
+    for corrupt in [trailing, truncated] {
+        snapshot
+            .set(
+                address.clone(),
+                ProtocolStateBlob::from_bytes(corrupt.clone()),
+            )
+            .unwrap();
+        assert!(matches!(
+            engine.contact_state(&snapshot, setup.bob_identity),
+            Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+        ));
+        assert_eq!(snapshot.get(&address).unwrap().as_bytes(), corrupt);
+    }
+}
+
+#[test]
 fn contact_inputs_reject_non_canonical_identity_and_discovery_keys() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();

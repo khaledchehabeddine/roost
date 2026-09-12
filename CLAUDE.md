@@ -1,12 +1,17 @@
-# Aether
+# Roost
 
 ## Overview
 
-Aether is the shared cryptographic and networking core for a private, end-to-end encrypted cloud messaging system.
+Roost is the shared cryptographic and networking core for a private, end-to-end encrypted cloud messaging system.
 
 ## Architecture
 
 See [`README.md`](README.md#architecture) for the crate dependency graph.
+
+## Coding guidelines
+
+Before changing code, dependencies, tests, or agent configuration, read the applicable sections of
+[the shared coding guidelines](docs/agents/coding-guidelines.md). Runtime rules route to that policy.
 
 ## Decision Records
 

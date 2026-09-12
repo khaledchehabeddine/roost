@@ -33,5 +33,5 @@ encryption. The whole Message module does not move merely because evidence share
 - Existing cryptographic context bytes and current-format vectors are unchanged by this Rust
   package and ownership refactor. Their fixed domain separators remain protocol inputs.
 
-The approved boundary is recorded in [the architecture resolution](https://github.com/RelayNet/aether/issues/259#issuecomment-5558392822)
-and implemented by [ticket 266](https://github.com/RelayNet/aether/issues/266).
+The approved boundary is recorded in [the architecture resolution](https://github.com/RelayNet/roost/issues/259#issuecomment-5558392822)
+and implemented by [ticket 266](https://github.com/RelayNet/roost/issues/266).

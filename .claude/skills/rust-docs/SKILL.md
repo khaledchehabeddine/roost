@@ -1,13 +1,15 @@
 ---
-description: Audit and update documentation on Rust symbols per the project's documentation tier system.
+description: Audit and update symbol, crate and module documentation against the shared style reference.
 argument-hint: [crate-or-file-path]
-allowed-tools: Bash(cargo doc *) Edit MultiEdit Read
+allowed-tools: Bash(cargo doc *) Bash(cargo test *) Bash(RUSTDOCFLAGS=*) Edit MultiEdit Read
 paths: "**/*.rs"
 ---
 
-When auditing or updating Rust doc comments:
+Use `$ARGUMENTS` as the target when supplied.
 
-1. **Determine the target**: use `$ARGUMENTS` if provided (crate name or file path), otherwise ask the user
-2. **Read the style spec**: [docs/agents/rust-docs-style.md](../../../docs/agents/rust-docs-style.md) for the tier's conventions
-3. **Audit existing docs**: add or update so each item conforms to the tier
-4. **Verify**: `cargo doc -p <crate> --no-deps` and confirm no warnings
+When auditing or updating Rust documentation:
+
+1. Resolve the target from the request and current task. Ask for a crate, file or symbol only when the scope is missing.
+2. Read [the domain routing guide](../../../docs/agents/domain.md) for terminology and [the Rust documentation style](../../../docs/agents/rust-docs-style.md) for tier selection and content. These references own the policy.
+3. Audit and update the target's `///` and `//!` documentation against the code. Keep implementation edits and inline-comment changes outside this skill's scope, along with README, ADRs, agent configuration and generated bindings.
+4. Run `RUSTDOCFLAGS="-D warnings" cargo doc --locked -p <crate> --no-deps`. When executable examples change, also run `cargo test --locked -p <crate> --doc`. Report the checked scope and any remaining contract ambiguity.

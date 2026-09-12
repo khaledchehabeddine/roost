@@ -1,8 +1,10 @@
 //! UniFFI bindings for the cryptographic core.
 //!
 //! This crate exposes the storage-backed [`Client`] API and FFI-safe record types used by SDKs.
-//! Apps provide a platform [`SecureStorage`] implementation, then use one [`Client`] for the app
-//! lifetime to manage the local identity and publication keys.
+//! Apps provide a platform [`SecureStorage`] implementation, then keep one [`Client`] per identity
+//! namespace. Identity, messaging and contacts interfaces share its configuration. The host owns
+//! protocol-state transactions and observation of committed stores; see [`Client`] for serialization
+//! and recovery requirements.
 //!
 //! # Feature flags
 //!
@@ -26,11 +28,13 @@
 //! if !store.identity().has_identity()? {
 //!     let identity = store.identity().prepare_generate_identity()?;
 //!     store.commit_operation(identity.operation.identifier.clone())?;
+//!     // Commit the host's identity record and operation identifier before finalizing.
 //!     store.finalize_operation(identity.operation.identifier)?;
 //! }
 //!
 //! let signed_prekey = store.identity().prepare_rotate_signed_prekey_now()?;
 //! store.commit_operation(signed_prekey.operation.identifier.clone())?;
+//! // Commit publication work and the operation identifier in the host transaction.
 //! store.finalize_operation(signed_prekey.operation.identifier)?;
 //! let publication = store.identity().current_publication_bundle()?;
 //! publish(&publication)?;

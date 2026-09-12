@@ -7,7 +7,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InMemorySecureStorage, KeyStore,
-    PreparedKeyStoreOperation, ProtocolStateEngine, ProtocolStateSnapshot,
+    KeyStoreOperationStatus, PreparedKeyStoreOperation, ProtocolStateEngine, ProtocolStateSnapshot,
 };
 use roost_crypto::{
     generate_discovery_key, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
@@ -94,14 +94,22 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
     snapshot.apply_all(first.contact.state_updates).unwrap();
     let generation_after_first = key_store.current_discovery_key_bundle().unwrap().epoch;
 
-    let second = complete(
-        &key_store,
-        key_store
-            .prepare_block_contact(&snapshot, identity_key)
-            .unwrap(),
-    );
+    let prepared = key_store
+        .prepare_block_contact(&snapshot, identity_key)
+        .unwrap();
+    let identifier = prepared.operation.identifier;
+    assert!(matches!(
+        key_store.operation_status(identifier).unwrap(),
+        KeyStoreOperationStatus::Prepared
+    ));
+    assert!(prepared.output.contact.state_updates.is_empty());
+    let second = complete(&key_store, prepared);
 
     assert!(second.rotation.is_none());
+    assert!(matches!(
+        key_store.operation_status(identifier).unwrap(),
+        KeyStoreOperationStatus::Finalized
+    ));
     assert_eq!(
         key_store.current_discovery_key_bundle().unwrap().epoch,
         generation_after_first

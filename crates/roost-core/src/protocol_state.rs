@@ -146,9 +146,8 @@ pub enum ProtocolStateKind {
     ContactState = 5,
     /// Identity-key-addressed peer inbox authorization (AE-STA-01).
     ///
-    /// Kept separate from [`Self::ContactState`] rather than folded into that blob because a
-    /// peer's delivery capability is a bearer secret, while contact state is mirrored to every
-    /// event-stream observer as a public snapshot.
+    /// Kept separate from [`Self::ContactState`] because a peer's delivery capability is a bearer
+    /// secret, while contact queries return public state for host-owned views and observation.
     PeerInboxAuthorization = 6,
     /// Identity-key-addressed record of which local inbox generation a contact has been given
     /// (AE-STA-01).
@@ -3385,60 +3384,34 @@ fn decode_contact_state_payload(
             reason: "contact-state payload version is unsupported".into(),
         });
     }
-    decoded_contact_state(address, decoded_contact_state_parts_v2(wire))
-}
-
-struct DecodedContactStateParts {
-    identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    discovery_epoch: u32,
-    discovery_created_at: u64,
-    discovery_identity_signature: Vec<u8>,
-    trust_state: ContactTrustState,
-    blocked: bool,
-}
-
-fn decoded_contact_state_parts_v2(wire: DecodedContactStateWireV2) -> DecodedContactStateParts {
-    DecodedContactStateParts {
-        identity_x25519_public_key: wire.identity_x25519_public_key,
-        identity_ed25519_verifying_key: wire.identity_ed25519_verifying_key,
-        discovery_x25519_public_key: wire.discovery_x25519_public_key,
-        discovery_ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
-        discovery_epoch: wire.discovery_epoch,
-        discovery_created_at: wire.discovery_created_at,
-        discovery_identity_signature: wire.discovery_identity_signature,
-        trust_state: wire.trust_state,
-        blocked: wire.blocked,
-    }
+    decoded_contact_state(address, wire)
 }
 
 fn decoded_contact_state(
     address: &ProtocolStateAddress,
-    parts: DecodedContactStateParts,
+    wire: DecodedContactStateWireV2,
 ) -> Result<ContactState, ProtocolStateError> {
     let contact = ContactState {
         identity: ContactIdentity {
             identity_key: ContactIdentityKey {
-                x25519_public_key: parts.identity_x25519_public_key,
-                ed25519_verifying_key: parts.identity_ed25519_verifying_key,
+                x25519_public_key: wire.identity_x25519_public_key,
+                ed25519_verifying_key: wire.identity_ed25519_verifying_key,
             },
             discovery_key: ContactDiscoveryKey {
-                x25519_public_key: parts.discovery_x25519_public_key,
-                ed25519_verifying_key: parts.discovery_ed25519_verifying_key,
-                epoch: parts.discovery_epoch,
-                created_at: parts.discovery_created_at,
-                identity_signature: parts.discovery_identity_signature.try_into().map_err(
-                    |_| ProtocolStateError::BlobDecode {
+                x25519_public_key: wire.discovery_x25519_public_key,
+                ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
+                epoch: wire.discovery_epoch,
+                created_at: wire.discovery_created_at,
+                identity_signature: wire.discovery_identity_signature.try_into().map_err(|_| {
+                    ProtocolStateError::BlobDecode {
                         address: address.clone(),
                         reason: "contact discovery key signature length is invalid".into(),
-                    },
-                )?,
+                    }
+                })?,
             },
         },
-        trust_state: parts.trust_state,
-        blocked: parts.blocked,
+        trust_state: wire.trust_state,
+        blocked: wire.blocked,
     };
     validate_decoded_contact_state(address, &contact)?;
     Ok(contact)
