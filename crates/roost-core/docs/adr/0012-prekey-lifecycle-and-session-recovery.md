@@ -51,11 +51,3 @@ message, and rejected when missing, already consumed, stale, or mismatched.
   inbox rotation advances the Epoch, preventing identifier reuse from stale or cloned backups.
 - Consumed one-time pre-keys are destroyed before reuse can occur; callers publish replenished
   one-time pre-key bundles explicitly.
-
-## Verification Evidence
-
-- `crates/roost-client/docs/api-coverage.md` records binding coverage for signed-prekey rotation,
-  one-time-prekey replenishment, consumed-key rejection, stale-epoch detection, and session
-  recovery/re-handshake entry points.
-- `docs/security.md` records signed-prekey-only fallback when one-time pre-key pools are exhausted
-  and distinct failures for stale, missing, consumed, or mismatched prekey references.

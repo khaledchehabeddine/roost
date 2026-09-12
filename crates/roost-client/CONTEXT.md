@@ -1,88 +1,25 @@
 # Client
 
-The platform FFI binding layer that generates Swift and Kotlin bindings from Rust source so client platforms consume the Core API natively. It holds the storage abstraction trait the host app implements for keychain access.
+The mobile UniFFI declarations and adapters for Core operations and Protocol verification.
 
 ## Language
 
-**Binding Test Harness** (test-only binding surface):
-Feature-gated Swift and Kotlin binding checks that exercise generated bindings through fixture replay and FFI-boundary regressions. It verifies generated binding behavior without becoming production SDK API.
-Avoid: sample app, transport test, SDK feature
+**SecureStorage**:
+The foreign-implementable interface through which the host supplies platform secret storage at
+runtime. Rust adapts it to Core's storage trait; Core does not access Keychain or Keystore directly.
+_Avoid_: protocol database, SDK-owned keychain
 
-**SecureStorage** (one implementation per platform):
-The generated UniFFI storage protocol the host app implements to expose its platform secret store
-(iOS Keychain, Android Keystore) to Aether. Rust adapts that implementation into
-`roost_core::SecureStorage` for Core; the implementation is provided at compile time.
-Avoid: keychain, keystore, secrets store
+**Prepared KeyStore Operation**:
+The host-visible identifier, preconditions, and provisional output of Core's secure mutation.
+Staged secrets stay in SecureStorage; the host coordinates its database commit with finalization.
+_Avoid_: eager KeyStore call, platform transaction
 
-**Prepared KeyStore Operation** (one host coordination boundary per secure mutation):
-The generated record carrying a stable operation identifier, SecureStorage preconditions, and
-provisional output without exposing staged secrets. The host records the identifier alongside its
-atomic Protocol State Blob transaction, then asks Core to finalize or abort by identifier. One
-host-owned per-identity actor or lock spans that lifecycle across every KeyStore instance and
-process sharing the identity namespace.
-Avoid: platform transaction, background task, eager KeyStore call
+**Host State Transaction**:
+The atomic commit of Core's conditional blob updates and their associated effects. The host owns
+persistence and serialization across processes; a Rust callback cannot supply that transaction.
+_Avoid_: Rust storage callback, SDK database
 
-**Host State Transaction** (one durable commit boundary per operation):
-The host loads opaque Protocol State Blobs and passes them to Roost. Roost returns typed updates
-with absent or digest conditions and provisional effects. The host checks those conditions and
-commits the updates and effects atomically under its per-identity serializer.
-Avoid: Rust storage callback, decoded protocol model, SDK database
-
-**Binding Surface** (generated API, not checked-in generated source):
-The Rust `#[uniffi::export]` objects, records, enums, and foreign traits that generate Swift and
-Kotlin APIs. Generated files live under `target/` during builds and tests; source review happens on
-the Rust declarations and harnesses.
-Avoid: handwritten FFI, SDK source drop, generated artifact
-
-**Android AAR Distribution** (one generated Maven artifact):
-The release-candidate Android package containing UniFFI-generated Kotlin classes and ABI-specific
-`libaether.so` libraries under Maven coordinates. It is built from Rust source and generated
-outputs during release verification; signing and pinned checksums are separate release steps.
-Avoid: checked-in SDK, handwritten binding layer, final signed release artifact
-
-**iOS Distribution Package** (one generated Swift Package per artifact version):
-The release-candidate Swift Package assembled under `target/` from generated Swift sources and the
-`Aether.xcframework` binary target. It is a packaging artifact, not checked-in SDK source.
-Avoid: source package, signed release, pinned checksum publication
-
-**Signed Release Artifact** (one final mobile binary artifact):
-The release artifact generated from the tagged release commit and published with a detached
-OpenPGP signature. For mobile releases this means the iOS xcframework archive and Android AAR, not
-earlier release-candidate outputs or generated source directories.
-Avoid: release-candidate artifact, reproducibility pass output, unsigned package
-
-**Pinned Artifact Checksum** (one SHA-256 sidecar per signed artifact):
-The release-published checksum generated after the final artifact bytes are fixed. Consumers verify
-it together with the OpenPGP signature before their host build consumes the artifact.
-Avoid: reproducibility manifest, CI scratch hash, trust root
-
-**Mobile Release Packet** (one per candidate source revision):
-The complete version-matched set of Signed Release Artifacts, package metadata, SBOM, public key,
-source record, successful release-gate evidence, and signed payload manifest. Every producer and
-gate record names the same source revision and source date epoch; CI records also name one GitHub
-Actions run.
-Avoid: build directory, unrelated CI artifacts, release-candidate hashes
-
-## Example
-
-**Dev:** Does Aether store private keys directly in the iOS Keychain?
-
-**Domain expert:** Aether doesn't touch the Keychain. The host app implements the generated UniFFI
-storage protocol against the Keychain and hands the implementation to Aether at compile time. The
-FFI adapter translates that protocol into Core's `SecureStorage` trait, so Core sees a storage
-contract, not the platform API.
-
-**Dev:** So `InMemorySecureStorage` is the same shape, just with no platform behind it?
-
-**Domain expert:** Right. It's a self-contained implementation used in tests, so nothing in Core or Crypto needs to know about platforms during testing.
-
-**Dev:** Should Swift decode a ratchet blob to know which message number it is on?
-
-**Domain expert:** No. Swift stores the blob opaquely and gives it back to Rust by Protocol State
-Kind and key. Rust advances the protocol state and returns replacement blobs with the message or
-event outputs that must be committed in the same host transaction. If another writer changed the
-same blob first, Swift rejects the stale update using the digest precondition Rust returned.
-
-## Flagged Ambiguities
-
-None currently.
+**Binding Surface**:
+The Rust UniFFI objects, records, enums, and foreign traits from which Swift and Kotlin APIs are
+generated. Generated files are build outputs; Rust declarations remain their maintained source.
+_Avoid_: handwritten FFI, checked-in SDK source

@@ -1,18 +1,15 @@
 import org.gradle.api.publish.maven.MavenPublication
 import org.gradle.api.publish.PublishingExtension
-import org.gradle.plugins.signing.SigningExtension
 
 plugins {
     // AGP 9.0+ provides built-in Kotlin support; applying org.jetbrains.kotlin.android
     // is now an error (see https://kotl.in/gradle/agp-built-in-kotlin).
     id("com.android.library")
     id("maven-publish")
-    id("signing")
 }
 
-val aetherVersion = rootProject.extensions.extraProperties["aetherVersion"] as String
-val aetherMavenRepo = rootProject.extensions.extraProperties["aetherMavenRepo"] as String
-val aetherArtifactId = rootProject.extensions.extraProperties["aetherArtifactId"] as String
+val roostVersion = providers.gradleProperty("roostVersion").get()
+val roostArtifactId = providers.gradleProperty("roostArtifactId").get()
 val generatedKotlinDir = rootProject.layout.projectDirectory.dir("../../target/android/kotlin")
 val generatedJniLibsDir = rootProject.layout.projectDirectory.dir("../../target/android/jniLibs")
 
@@ -61,55 +58,29 @@ dependencies {
 publishing {
     repositories {
         maven {
-            name = "AetherLocal"
-            url = uri(aetherMavenRepo)
+            name = "Local"
+            url = uri(rootProject.file("../../target/android/maven"))
         }
     }
 }
 
 afterEvaluate {
     val publishingExtension = extensions.getByType<PublishingExtension>()
-    val releasePublication = publishingExtension.publications.create<MavenPublication>("release") {
+    publishingExtension.publications.create<MavenPublication>("release") {
         from(components["release"])
         groupId = "io.github.relaynet"
-        artifactId = aetherArtifactId
-        version = aetherVersion
+        artifactId = roostArtifactId
+        version = roostVersion
 
         pom {
             name.set("Roost")
-            description.set("Android UniFFI bindings and native libraries for Roost.")
+            description.set("Kotlin bindings and native libraries for Roost")
             url.set("https://github.com/RelayNet/roost-kotlin")
-                    licenses {
-                        license {
-                            name.set("All rights reserved")
-                            url.set("https://github.com/RelayNet/roost/blob/main/LICENSE")
-                        }
-                    }
-            developers {
-                developer {
-                    id.set("aurelion")
-                    name.set("Aurelion")
-                }
-            }
-            scm {
-                connection.set("scm:git:https://github.com/RelayNet/roost.git")
-                developerConnection.set("scm:git:ssh://git@github.com/RelayNet/roost.git")
-                url.set("https://github.com/RelayNet/roost")
-            }
         }
     }
+}
 
-    extensions.configure<SigningExtension>("signing") {
-        val signingEnabled = providers.gradleProperty("aetherSignPublication")
-            .map { it.toBooleanStrict() }
-            .orElse(false)
-        val signingKey = providers.gradleProperty("signingInMemoryKey")
-        val signingPassword = providers.gradleProperty("signingInMemoryKeyPassword")
-
-        isRequired = signingEnabled.get()
-        if (signingEnabled.get()) {
-            useInMemoryPgpKeys(signingKey.get(), signingPassword.get())
-            sign(releasePublication)
-        }
-    }
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }

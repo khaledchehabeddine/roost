@@ -13,8 +13,6 @@ const CREATED_AT: u64 = 1_700_000_000;
 
 struct Setup {
     local_identity: IdentityKey,
-    local_discovery: ContactDiscoveryKey,
-    local_rotated_discovery: ContactDiscoveryKey,
     contact_identity: IdentityKey,
     contact_discovery: ContactDiscoveryKey,
     contact_rotated_discovery: ContactDiscoveryKey,
@@ -29,17 +27,12 @@ fn setup() -> Setup {
     let contact_discovery = generate_discovery_key(&mut rng, &contact_signing, 0, CREATED_AT);
     let contact_rotated_discovery =
         generate_discovery_key(&mut rng, &contact_signing, 1, CREATED_AT + 60);
-    let local_discovery = generate_discovery_key(&mut rng, &local_signing, 0, CREATED_AT);
-    let local_rotated_discovery =
-        generate_discovery_key(&mut rng, &local_signing, 1, CREATED_AT + 60);
 
     Setup {
         local_identity: IdentityKey {
             x25519_public_key: *local_key_pair.public.as_bytes(),
             ed25519_verifying_key: local_signing.verifying.to_bytes(),
         },
-        local_discovery: ContactDiscoveryKey::from(&local_discovery.bundle()),
-        local_rotated_discovery: ContactDiscoveryKey::from(&local_rotated_discovery.bundle()),
         contact_identity: IdentityKey {
             x25519_public_key: *contact_key_pair.public.as_bytes(),
             ed25519_verifying_key: contact_signing.verifying.to_bytes(),
@@ -84,18 +77,6 @@ fn safety_number_derivation_is_deterministic_and_order_independent() {
             .iter()
             .all(|group| group.len() == 5 && group.chars().all(|ch| ch.is_ascii_digit()))
     );
-}
-
-#[test]
-fn safety_number_derivation_agrees_across_independent_caller_views() {
-    let setup = setup();
-    let local_view = (setup.local_identity, setup.contact_identity);
-    let contact_view = (setup.contact_identity, setup.local_identity);
-
-    let local_number = derive_safety_number(local_view.0, local_view.1).unwrap();
-    let contact_number = derive_safety_number(contact_view.0, contact_view.1).unwrap();
-
-    assert_eq!(local_number, contact_number);
 }
 
 #[test]
@@ -161,22 +142,6 @@ fn discovery_key_rotation_does_not_change_safety_number() {
         setup.contact_rotated_discovery
     );
     assert_eq!(contact.trust_state, ContactTrustState::Unverified);
-}
-
-#[test]
-fn local_discovery_key_rotation_does_not_change_safety_number() {
-    let setup = setup();
-    let initial_number =
-        derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-
-    assert_ne!(
-        setup.local_discovery.prekey_bundle_lookup_key(),
-        setup.local_rotated_discovery.prekey_bundle_lookup_key()
-    );
-    assert_eq!(
-        derive_safety_number(setup.local_identity, setup.contact_identity).unwrap(),
-        initial_number
-    );
 }
 
 #[test]

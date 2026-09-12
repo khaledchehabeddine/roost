@@ -232,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_and_verify_round_trip() {
+    fn generated_signature_covers_domain_key_epoch_and_creation_time() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
         let signed_prekey = generate_signed_prekey(
@@ -243,6 +243,11 @@ mod tests {
             FIXED_CREATED_AT,
         );
         let bundle = signed_prekey.bundle();
+        let mut signed = b"AetherSPK-v1:".to_vec();
+        signed.extend_from_slice(bundle.public_key.as_bytes());
+        signed.extend_from_slice(&FIXED_EPOCH.to_be_bytes());
+        signed.extend_from_slice(&FIXED_CREATED_AT.to_be_bytes());
+        assert_eq!(bundle.signature, signing_key.sign(&signed));
         assert!(verify_signed_prekey_bundle(&bundle, &signing_key.verifying).is_ok());
     }
 

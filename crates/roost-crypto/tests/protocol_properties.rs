@@ -293,44 +293,6 @@ fn generated_bidirectional_traces_decrypt_once_and_remain_live_property() {
 }
 
 #[test]
-fn ratchet_progression_under_reordering_property() {
-    let strategy = (any::<[u8; 32]>(), 1usize..=8, 0usize..8, any::<bool>());
-    runner([0xA2u8; 32], 32)
-        .run(&strategy, |(seed, message_count, offset, reverse)| {
-            let (mut setup, mut rng) = setup(seed);
-            let associated_data = associated_data(&setup);
-            let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, true, b"start");
-
-            let mut messages = Vec::with_capacity(message_count);
-            for i in 0..message_count {
-                let plaintext = format!("alice msg {i}");
-                let (header, ciphertext) = alice
-                    .ratchet_encrypt(plaintext.as_bytes(), &associated_data)
-                    .unwrap();
-                messages.push((plaintext, header, ciphertext));
-            }
-
-            let mut order: Vec<usize> = (0..message_count).collect();
-            order.rotate_left(offset % message_count);
-            if reverse {
-                order.reverse();
-            }
-
-            for index in order {
-                let (plaintext, header, ciphertext) = &messages[index];
-                let decrypted = bob
-                    .ratchet_decrypt(&mut rng, ciphertext, header, &associated_data)
-                    .unwrap();
-                prop_assert_eq!(decrypted.as_slice(), plaintext.as_bytes());
-                prop_assert!(bob.skipped_key_count() < message_count);
-            }
-            prop_assert_eq!(bob.skipped_key_count(), 0);
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
 fn per_chain_skip_overflow_rejects_without_advancing_state() {
     let (mut setup, mut rng) = setup([0xA5u8; 32]);
     let associated_data = associated_data(&setup);

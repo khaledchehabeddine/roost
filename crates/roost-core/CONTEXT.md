@@ -1,6 +1,6 @@
 # Core
 
-The orchestration layer that exposes high-level entities — Sessions, Identities, Devices, Messages — and coordinates their lifecycle on top of the primitives in `roost-crypto`.
+Identity, messaging, contact, and storage coordination over Crypto and Protocol.
 
 ## Language
 
@@ -10,48 +10,28 @@ Message. Core returns it to the consumer for transport; Core never transmits it.
 Avoid: receipt, delivery callback, network ack
 
 **Caller-Owned Transport** (one host-selected path per send):
-The host application's network and authentication boundary for sending encoded Messages,
-Acknowledgment Artifacts, and Retry Instructions. Core produces or consumes opaque protocol bytes
-and caller-supplied signing inputs, but it does not select transports, define transport headers, or
-perform network IO. A bound operation authenticates only the exact Transport Binding bytes supplied
-by the host; admission, authorization, encoding, and all transport-envelope fields remain
-host-owned.
+The host application's networking, authentication, and retry boundary. Roost returns opaque
+messages and authenticates the exact Transport Binding the host supplies; the host owns its schema,
+authorization policy, and delivery.
 Avoid: Core network, transport session, library-owned routing
 
 **Transport Binding** (one caller-supplied value per bound Message operation):
-Opaque, non-empty public bytes authenticated as sealed-frame external associated data and included
-in pre-decryption deduplication. Core limits the value to 1 KiB but never interprets, transmits, or
-stores it. The host owns a canonical encoding, retains the exact bytes with an outbound Message,
-and supplies them again for receive or retransmission.
+Non-empty public bytes, at most 1 KiB, authenticated as sealed-frame associated data and included
+in pre-decryption deduplication. The host owns the encoding and retains the exact bytes for receive
+and retransmission; Roost neither interprets nor stores them.
 Avoid: transport envelope, route record, delivery capability
 
 **Blocking** (one local verdict per Contact Identity):
-An IK-keyed local suppression rule. Blocking is independent of Trust State and distinct from
-sender-certificate revocation; it controls consumer-visible surfacing, not protocol acceptance. A
-blocked Message's Acknowledgment Artifact follows the consumer-configured blocked-contact
-acknowledgment policy: the default suppresses it, so a block is indistinguishable from an unreachable
-recipient; an opt-in mode returns it while still hiding plaintext.
+IK-keyed suppression of plaintext, independent of Trust State and certificate revocation. Protocol
+acceptance still advances receive state; Unreachable suppresses acknowledgments, while SilentReceipt
+returns them and reveals delivery.
 Avoid: revocation, distrust, remote blocklist
-
-**Clock** (one per KeyStore):
-The injected source of wall-clock time for caller-invoked prekey lifecycle checks, such as deciding
-whether a superseded signed pre-key remains inside its retention window. `SystemClock` in production; a
-virtual clock in tests makes lifecycle decisions reproducible.
-Avoid: timer, time source
 
 **Contact Identity** (one peer IK plus current DK):
 The peer identity Core knows about for local contact, trust, and blocking state. The IK is
 permanent and owns Trust State; the DK is current routing/discovery material and may rotate
 without changing trust.
 Avoid: account, profile, sender metadata
-
-**Constrained Decryption Profile** (one release-gate budget):
-The measured release profile for the real encrypted Message receive path under extension-class
-execution constraints. The gate measures one decrypt operation at a time in an optimized test run,
-with a 24 MiB tracked Rust heap allocation budget and a 250 ms wall-clock budget. It is release
-evidence for the profiled path, not a guarantee for every host extension configuration or
-compromised endpoint.
-Avoid: production SLA, memory proof, endpoint guarantee
 
 **Deduplication Digest** (one per received encrypted Message):
 A keyed, truncated digest of the encoded sealed-sender frame and the exact
@@ -65,10 +45,9 @@ loaded at receive start and advanced only after a unique Message decrypts and is
 Avoid: cache, in-memory set
 
 **Dead Session** (one terminal state per Session generation):
-A Session persisted as unrecoverable after Core records an authenticated terminal condition. Core
-does not attempt further decrypts under that Session and never surfaces plaintext from it; recovery
-requires a fresh prekey bundle, a new X3DH exchange, and replacement Session state. Skipped-key cap
-rejections from incoming ratchet headers are unauthenticated and do not create Dead Sessions.
+A Session persisted as unrecoverable after an authenticated terminal condition; recovery requires
+a fresh prekey bundle and X3DH exchange. Unauthenticated skipped-key cap pressure rejects a
+Message without making the Session dead.
 Avoid: reset session, closed conversation, transient failure
 
 **Device** (exactly one per Identity):
@@ -80,20 +59,15 @@ A rotatable keypair — an Ed25519 signing key plus X25519 key-agreement key —
 Avoid: prekey, ephemeral key
 
 **Epoch** (one per Discovery Key generation):
-The validity window of a Discovery Key and the prekey bundle bound to it. Rotating the Discovery Key advances the Epoch — a signed `u32` counter — and invalidates the prior Epoch's pre-keys. Epochs are monotonic only within one Device's storage lineage. Restoring an Identity backup preserves the backed-up Discovery Key and its Epoch for validation, but prekey use stays blocked until inbox rotation advances the generation; use the signed `created_at` timestamp to compare freshness across restored lineages.
-Avoid: window, generation
+The Discovery Key's signed generation counter, also called Inbox Generation, starting at 1 for a
+new Identity. It orders one storage lineage; peers compare signed `(created_at, epoch)` pairs to
+order keys across restored lineages.
+Avoid: independent inbox counter
 
 **Event** (one optional change value per operation):
 An immutable public value describing a state change. It remains provisional until the host commits
 the associated updates. Hosts retain required recovery effects and observe their committed stores.
 Avoid: notification, callback
-
-**Hardening Limits** (one configured set per Protocol State Engine):
-Consumer-selected ceilings that bound externally influenced Message, Sealed Sender Envelope,
-Sender Certificate, Protocol State Blob, deduplication, and acknowledgment state work before
-expensive cryptographic or state-mutating operations. Defaults target general mobile clients;
-constrained hosts may lower them but cannot raise them beyond supported ceilings.
-Avoid: rate limits, transport policy
 
 **Identity** (exactly one Device):
 A long-lived public-key persona held by a single Device, anchored by a permanent Identity Key and a rotatable Discovery Key. Identifies a participant across Sessions.
@@ -133,57 +107,44 @@ timestamps, then removed when a matching acknowledgment is processed.
 Avoid: retry cache, outbox, in-memory pending state
 
 **Prepared KeyStore Operation** (one per prepared KeyStore mutation request):
-A Core-owned recoverable intent containing a stable identifier, SecureStorage preconditions,
-zero or more staged secret mutations, and provisional caller output. The host commits related
-Protocol State Blob updates and its operation record atomically between Core commit and
-finalization; until finalization, authoritative key entries do not change. One host-owned
-per-identity actor or lock serializes the whole lifecycle across separately constructed KeyStore
-instances and processes.
+A recoverable intent containing a stable identifier, SecureStorage preconditions, staged secrets,
+and provisional output. The host serializes prepare, commit, its atomic state transaction, and
+finalize or abort across all instances and processes sharing the identity namespace.
 Avoid: database transaction, eager key mutation, deferred write
 
 **PreKey State** (one persisted lifecycle surface per local Identity):
-The `prekey/*` secure-storage records managed by KeyStore: the current Discovery Key, current and
-up to five unexpired superseded signed pre-keys, and one-time pre-key pool for the current Epoch.
-Signed and one-time prekeys have separate stable unsigned 64-bit identifier sequences that restart
-at zero per Epoch. Rotating the Discovery Key advances the Epoch and immediately destroys
-prior-Epoch signed and one-time prekey secrets; normal signed-prekey rotation retains superseded
-secrets for 30 days. Backup restore replaces both prekey records with an inbox-rotation-required
-marker so identifiers cannot restart under the restored Discovery Key. PreKey State is not a
-Protocol State Blob; malformed prekey corpora exercise KeyStore secure-storage decoders.
+KeyStore-owned secure-storage records for the current Discovery Key and its signed and one-time
+prekeys. Unlike Protocol State Blobs, these secrets follow the prepared-operation lifecycle;
+backup restore blocks their use until inbox rotation.
 Avoid: protocol state blob, in-memory prekey cache, automatic publication rotation
 
 **PreKey Identifier** (one stable `u64` per prekey within one Epoch):
-The Core-allocated lookup value published beside a signed or one-time prekey. Signed- and
-one-time-prekey sequences are independent; identifiers may repeat across those kinds or after
-Discovery Key rotation, so the Epoch and prekey kind remain part of the lookup context. A host that
-needs the identifiers authenticated as transport metadata includes them in its Transport Binding.
+An unsigned 64-bit lookup value allocated by Core within one Epoch and prekey kind. Signed- and
+one-time-prekey sequences are independent, so an identifier is not globally unique or automatically
+authenticated transport metadata.
 Avoid: database row ID, key fingerprint, global sequence
 
 **PreKey Selection** (one caller-supplied value per bound X3DH receive):
-The stable signed- and optional one-time-prekey identifiers the host selected from a recipient
-publication. Core uses the signed identifier to locate retained state and checks the resulting
-public key plus optional one-time identifier against the authenticated initial Message. The value
-does not define or decode Transport Binding bytes.
+The caller-selected signed- and optional one-time-prekey identifiers for an inbound X3DH initial.
+Core uses them to locate retained secrets and match the authenticated Message, independently of
+the host's Transport Binding encoding.
 Avoid: route, prekey reference, transport metadata
 
 **Protocol State Blob** (many per Identity or Session):
-An opaque byte value produced by Core and committed by the consumer's durable store. Core may load
-and advance a Blob during one operation, but the consumer-held Blob is authoritative between
-operations. Ratchet/session Blobs may also carry the expected peer Sender Identity Key used to
-reject later sealed-sender swaps after decryption.
+Opaque, secret-bearing bytes produced by Core and held authoritatively in the host's durable
+store between operations. Core returns conditional updates that the host commits atomically
+with their message, acknowledgment, or recovery effects.
 Avoid: cache, in-memory state, decoded state
 
 **Protocol State Blob Version** (one per Protocol State Blob):
-The Core-owned major/minor envelope version read before decoding a Blob's version-specific
-payload. Only supported current-format envelopes and explicitly supported same-major body shapes are
-accepted; unsupported envelope versions are faults, not reset or restore signals.
+The Core-owned major/minor envelope selecting a blob's body decoder. Unsupported or malformed
+versions fault; they do not imply permission to reset or restore state.
 Avoid: schema version, ratchet version
 
 **Protocol State Kind** (one per Protocol State Blob address):
-The stable category for a Protocol State Blob address. Current blob decode surfaces are
-ratchet/session state, deduplication set, pending acknowledgments, and contact state, including
-trust and blocking. PreKey State remains KeyStore secure-storage state, and Sender Certificates are
-validated caller inputs rather than persisted blob bodies.
+The category in a blob address, defined by the
+[public enum](src/protocol_state.rs). It includes peer inbox authorization containing a bearer
+capability and local inbox-distribution bookkeeping; PreKey State belongs to SecureStorage.
 Avoid: table, bucket, namespace
 
 **Retry Instruction** (many per pending-acknowledgment query):
@@ -191,11 +152,6 @@ A consumer-visible instruction to retransmit a still-unacknowledged Message afte
 retry window elapses. Core returns the instruction and updated pending-acknowledgment state; the
 consumer decides whether and how to transmit.
 Avoid: automatic retry, resend job, network task
-
-**Retry Reference Time** (one per retry query):
-The caller-supplied Unix timestamp in milliseconds used to evaluate retry windows. Retry checks do
-not read the KeyStore Clock because retry scheduling is a consumer-visible transport boundary.
-Avoid: Clock, timer, wall-clock read
 
 **Safety Number** (one display value for two Identity Keys):
 A deterministic grouped-decimal value derived from both parties' canonical IK encodings. Consumers
@@ -216,39 +172,22 @@ authenticate caller-supplied Transport Binding bytes without encoding them into 
 Avoid: transport envelope, sender-visible message
 
 **Sender Identity Material** (one per Sealed Sender Envelope):
-The sender's post-decryption identity material needed by later sender-certificate validation:
-identity key, opaque sender certificate, and opaque sender signature. Certificate validation is a
-future verdict over this material, not part of Message decode.
+The sender key, certificate, and signature recovered from a Sealed Sender Envelope. Established
+message receive validates certificate trust; X3DH acceptance proves key possession and returns
+certificate material for the caller to validate separately.
 Avoid: sender IK, sender metadata
 
 **Session** (between two Identities):
-An ongoing encrypted channel between two Identities, advanced by the Double Ratchet, identified by `SessionID`.
+An encrypted channel between two Identities, advanced by the Double Ratchet and identified by
+`SessionID`. Capitalized Session means this protocol state, not an app login.
 Avoid: connection, conversation, chat
 
 **Session-Unrecoverable Event** (at most one per Dead Session):
-The public Event emitted when Core observes a persisted Dead Session marker that has not yet emitted
-its event. Later Messages under the same dead Session return an unrecoverable outcome with no
-plaintext and do not re-emit the Event; replacing the Session via X3DH allows a new Event if that
-new Session later dies.
+A recovery signal returned at most once for a persisted Dead Session. The host must commit it with
+the state marking it reported; replacing the Session permits a new signal for a later failure.
 Avoid: warning, retry hint, decrypt error
 
 **Trust State** (one local state per peer IK):
 The consumer-recorded local trust verdict for a Contact Identity: Pending until accepted,
 Unverified after acceptance, and Verified only after out-of-band Safety Number confirmation.
 Avoid: certificate validity, blocking, remote reputation
-
-## Example
-
-**Dev:** If a user re-installs the app, do they keep their Identity?
-
-**Domain expert:** No — Identity is bound to private key material held on the Device. A fresh installation starts a new Identity unless the user restores from an Identity backup, which re-creates the Identity on the new installation.
-
-**Dev:** Then why distinguish Identity from Device at all in the MVP?
-
-**Domain expert:** Identity is the addressing unit — Sessions pair two Identities and sender certificates bind to Identity keys. Device is the persistence unit — it owns the private material in platform secure storage. Even at one-to-one, separating them keeps Session establishment, sender certificates, and Identity backup independent of where the bytes physically live.
-
-## Flagged Ambiguities
-
-**Clock time** (maintenance) vs **reference time** (validation): Rotation reads "now" from an injected `Clock` because it is library-initiated maintenance. Validation verdicts (e.g., sender-certificate expiry, [ADR 0002](../../docs/adr/0002-sender-certificate-validation.md)) instead take a caller-supplied reference timestamp, so the verdict stays a reproducible pure function of its inputs. Reserve the `Clock` for maintenance scheduling; do not route validation through it.
-
-**Session** (cryptographic) vs **session** (app login state): The cryptographic Session is the Double Ratchet state between two Identities; the lowercase host-app "session" is the user's logged-in state. Reserve capitalized `Session` for the cryptographic concept.

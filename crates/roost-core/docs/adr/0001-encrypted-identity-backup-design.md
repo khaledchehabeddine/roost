@@ -39,12 +39,3 @@ one-time-prekey identifiers inside a generation that already published those val
   invoking export.
 - Restored Identities require explicit protocol-state cleanup and fresh session recovery paths.
 - Restored Identities require an inbox rotation before prekey generation or publication.
-
-## Verification Evidence
-
-- `crates/roost-core/tests/fixtures/identity_backup_v2.md` pins backup version `2`, Argon2id
-  parameters, NFC passphrase normalization, DK inclusion, restored public material, and
-  below-floor rejection.
-- `docs/security.md` records restore as a fresh compromise boundary and unsupported-major rejection.
-- `docs/security/secret-handling.md` records backup plaintext/key zeroization and redacted
-  passphrase-error handling.

@@ -33,6 +33,5 @@ Avoid: compression, random padding
 **Sender Certificate** (one domain-signed binding for a sender IK at a Relay):
 A signed public statement from a trusted domain signing key binding a sender's IK, Relay domain,
 signing-key identifier, and expiry. Validation is a caller-timed verdict over the current
-trusted-key and revocation inputs. Sender Certificate malformed-input corpora exercise validation
-inputs, not Protocol State Blob decoding.
+trusted-key and revocation inputs.
 Avoid: trust state, sender profile, discovery key signature

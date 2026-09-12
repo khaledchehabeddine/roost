@@ -1,59 +1,37 @@
-# Protocol State Invariant Tests
+# Test scope and limits
 
-Issue 114 coverage uses bounded generated traces plus deterministic negative scenarios. These tests
-verify the public contract without treating ADR or context documents as executable code.
+Tests protect current consumer behavior. Crypto covers handshake agreement, ratchet advancement,
+replay rejection and skipped-key bounds. Short generated bidirectional exchanges cover ordering and
+direction; independent cryptographic known answers stay beside the code they exercise.
 
-## Generated Trace Model
+Core covers identity and prekey lifecycle, contact trust, accepted-message evidence, stale writes,
+atomic blob/outbox commits, corruption faults and recovery after ambiguous storage replies. It
+creates Messages and state during tests. Server verifies a local signed report and builds malformed
+or tampered inputs in the test. There is no stored transcript replay or format-freezing JSON suite.
 
-Generated traces produce short sequences of encrypted Messages over one Session. The model records
-the expected plaintext for each Message, delivers Messages in generated order, and asserts each
-accepted Message decrypts exactly once. Replays run after the receiver commits advanced blobs, so
-byte-identical retries must hit the Deduplication Set before Ratchet state is loaded or mutated.
+Swift and Kotlin package tests live in their distribution repositories. They load the actual
+package, cross a foreign storage callback, recover a lost write reply and preserve binary binding
+bytes. Each keeps its small Evidence Bundle input beside the assertions, avoiding shared resource
+loading and copy steps. Swift CryptoKit verifies the reconstructed Message Transcript and a fresh
+signature; Kotlin checks the returned fields. The expected Evidence Identity comes from an
+independent BLAKE3 C 1.7.0 calculation. A format change requires updating these local examples.
 
-The crypto-only trace model exercises the Ratchet directly. It covers bidirectional sends,
-out-of-order delivery inside skipped-key bounds, replay rejection after state advancement, and
-continued use after the final generated step.
+The pre-MVP tests do not promise compatibility with earlier prerelease bytes. Once real persisted
+user data must survive upgrades, add focused tests for the specific supported formats. The v0.15.0
+published release records and artifacts remain unchanged.
 
-## Serialized Host-Store Model
+Accepted limits:
 
-Core tests model a host store that owns Protocol State Blobs. Each operation reads a snapshot,
-returns updates with Core-computed absent or digest conditions, and commits them atomically.
-The model also uses a host transaction token to serialize reads across the complete identity. The model rejects stale commits and
-conflicting writes, proving Library Instances do not reuse forked authoritative in-memory state
-across operations.
-
-## Rollback And Corruption Model
-
-Rollback tests commit only complete update sets. If a simulated host commit is interrupted, the
-last fully committed Message, advanced Protocol State Blob, and Deduplication Set remain the only
-visible state. Corruption tests replace committed blobs with malformed bytes and assert Core
-surfaces decode faults rather than silently reinitializing state.
-
-## Session Recovery Model
-
-Dead Session tests use the existing unrecoverable-session marker. The first observation returns one
-Session-Unrecoverable Event with a conditional update that records the recovery signal. The host
-commits both before scheduling recovery. Later Messages
-under the same Dead Session return the same unrecoverable outcome without duplicate recovery signals or
-automatic X3DH churn. A new Session initializer cannot overwrite a live or dead Session. Recovery
-conditionally wipes the old Session, then installs a fresh handshake through an absent-condition
-host commit; the test keeps the same host stores throughout.
-
-Prepared blocking also exercises both uncertain host-commit outcomes. A single durable host record
-contains the contact blob and operation identifier. After the commit response is lost, recovery
-reopens that record and the SecureStorage journal, finalizing an applied transaction or aborting an
-unapplied one. The contact state and discovery-key epoch remain consistent.
-
-## Evidence for #267 removals
-
-| Removed item | Remaining evidence | Accepted gap |
-| --- | --- | --- |
-| ProtocolStateStore callback and binding-built conditions | Core host-store tests; Swift/Kotlin host snapshot and stale-commit checks | Hosts implement their own database transaction |
-| Rust Event Stream, observers, cursors, and stream scenarios | Two-instance committed contact queries; typed changes; durable dead-session recovery | UI observation may coalesce changes; no Rust event delivery guarantee |
-| Observer-based two-instance helpers | Protocol-state ordering, acknowledgment, retry and replay tests; host-store, rollback and recovery tests | No repeated event ordering scenario |
-| Unbound messaging and key-only current-prekey lookup | Bound X3DH; distinct binary Message/acknowledgment binding and tamper tests; retained prekey selection and prepared acceptance tests | Hosts must preserve canonical routing bytes |
-| Optional receive fields and reason-string classification | Rich enum conversion and native binding calls; typed error tests | Log wording is not a caller contract |
-| Alternate session readers and contact v1 fallback | Canonical current blob fixtures; corruption, bounds, trailing-data and recovery tests | No obsolete prerelease state migration |
-
-Broad generated-language and release-gate cleanup remains in #269 and later tickets. This change
-ports their affected callers and removes only the deleted callback and observation paths.
+- No maintained fuzzing, Miri, sanitizer or allocation/latency budget suite. Unanticipated malformed
+  inputs and platform-specific memory faults have less automated exploration. Explicit malformed,
+  oversized, tampered and replay cases remain.
+- No complete protocol suite repeated in each generated language, no mobile check on every Rust
+  edit, and one runtime device per platform. Other shipped ABIs are built; Android package assembly
+  compares their embedded native libraries with the build outputs.
+- The API 36 test image cannot import Ed25519 public keys for independent Java verification.
+  That check remains in Swift; Kotlin has no separate native signature oracle or fresh-signature
+  oracle. Adding a crypto provider solely for tests would expand the dependency and setup cost.
+- Host-store tests use a test implementation. They do not prove the consuming app's database
+  isolation, crash durability or secure storage behavior.
+- No coverage percentage target or formal certification claim. Independent security/code review is
+  the v1 audit target. A new regression gets a focused test where its behavior is owned.

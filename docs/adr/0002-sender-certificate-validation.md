@@ -6,16 +6,12 @@ Sender certificate validation runs three checks — signature against a consumer
 
 Validation consumes sender certificate material only after Message or X3DH first-message ciphertext authentication/decryption exposes the sealed-sender envelope. The current wire format deliberately does not carry sender identity key, sender certificate, or sender signature in clear transport-visible fields. X3DH still verifies a private sender key-possession proof before returning first-message sender material; that proof is not certificate trust, revocation, or expiry validation.
 
-Receive paths must not surface plaintext or sender identity until the sealed sender certificate
+Established-message receive must not surface plaintext or sender identity until the sealed sender certificate
 validates against caller-supplied trusted signing keys, revocation input, reference time, and grace
 window. A duplicate receive may return a duplicate outcome before validation because it exposes no
 plaintext or sender identity and does not advance ratchet/session state.
 
-## Verification Evidence
-
-- `crates/roost-protocol/tests/sender_certificate_fixtures.rs` replays trusted, untrusted, revoked,
-  expired, malformed, and signature-failure certificate cases.
-- `crates/roost-core/tests/fixtures/sealed_sender_session_messages_v1.md` records that sender
-  certificate material appears only after decrypt.
-- `crates/roost-client/docs/api-coverage.md` records binding coverage for certificate validation
-  and rejected certificate inputs.
+X3DH acceptance authenticates key possession but returns plaintext and opaque certificate material
+without a certificate-trust verdict. The caller must validate that certificate before treating
+initial-message content as trusted, using its domain keys, revocation input, reference time, and
+grace policy.

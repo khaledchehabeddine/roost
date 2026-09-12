@@ -37,8 +37,8 @@ than something every future change has to preserve.
 - Discovery-key blob version 1 is not readable. It is rejected by the length check before the
   version byte is examined. No production identity is affected: neither Relay client has
   implemented backup export or restore, so no v1 backup exists outside test fixtures.
-- `tests/fixtures/identity_backup_v2.json` was regenerated, since the backup envelope carries the
-  discovery-key blob verbatim. The envelope format itself is unchanged — only its payload.
+- The backup envelope carries the discovery-key blob verbatim. Its payload changed with this
+  decision while the outer backup format stayed unchanged.
 - `PublicationBundle` gained `recipient_delivery_verifier`, changing the generated Kotlin and Swift
   record shape.
 - Existing locally-stored identities from v0.9.0 debug builds must be reset and re-created. This is

@@ -7,7 +7,7 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{InboundMessageOutcome, ProtocolStateEngine};
-use support::{ProtocolFixture, StoredMessage, inbound_duplicate, ratchet_address};
+use support::{ProtocolFixture, StoredMessage, ratchet_address};
 
 #[derive(Clone, Debug)]
 struct TraceBatch {
@@ -81,15 +81,10 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                     let duplicate = engine
                         .decrypt_message_with_transport_bindings(
                             &mut ChaCha20Rng::from_seed([0x90; 32]),
-                            &corrupt_store.read().snapshot,
-                            inbound_duplicate(
-                                fixture.session_key.clone(),
-                                fixture.deduplication_key.clone(),
-                                &message.message,
-                                &fixture.bob_sender,
-                            ),
-                            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-                            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+                            &corrupt_store.snapshot(),
+                            fixture.inbound(&message.message, &[], &[]),
+                            &fixture.binding,
+                            &fixture.binding,
                         )
                         .unwrap();
                     prop_assert!(matches!(duplicate, InboundMessageOutcome::Duplicate));

@@ -5,10 +5,9 @@ The shared cryptographic core for a private, end-to-end encrypted cloud messagin
 ## Setup
 
 ```bash
-git clone git@github.com:RelayNet/aether.git
-cd aether
+git clone git@github.com:RelayNet/roost.git
+cd roost
 rustup show
-cargo install cargo-deny cargo-llvm-cov
 cargo build --workspace
 ```
 
@@ -47,8 +46,7 @@ consumer adoption follow the approved package prerequisite and mobile cutover ti
 
 - [`CONTEXT_MAP.md`](CONTEXT_MAP.md) — workspace context paths and relationships
 - [`docs/adr/`](docs/adr/) — workspace-wide architectural decisions (per-crate decisions under `crates/<crate>/docs/adr/`)
-- [`docs/building-mobile.md`](docs/building-mobile.md) — Android, iOS, and manual UniFFI bindings
-- [`docs/ci.md`](docs/ci.md) — CI, runtime verification, and supply-chain gates
-- [`docs/release.md`](docs/release.md) — release artifact, SBOM, and reproducible-build verification
-- [`docs/security/secret-handling.md`](docs/security/secret-handling.md) — secret-handling audit notes and limits
-- [`docs/security.md`](docs/security.md) — DoS limits, caller responsibilities, and constrained-host trade-offs
+- [`docs/building-mobile.md`](docs/building-mobile.md) — build, sign, and verify Android and iOS packages
+- [`docs/ci.md`](docs/ci.md) — Rust CI and native package checks
+- [`docs/release.md`](docs/release.md) — historical v0.15.0 release record
+- [`docs/security.md`](docs/security.md) — security boundaries and caller responsibilities

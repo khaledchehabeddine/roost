@@ -828,14 +828,10 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 name = "roost-client"
 version = "0.16.0"
 dependencies = [
- "blake3",
  "hex",
  "rand",
- "rand_chacha",
  "roost-core",
  "roost-protocol",
- "serde",
- "serde_json",
  "uniffi",
  "zeroize",
 ]
@@ -855,8 +851,6 @@ dependencies = [
  "roost-crypto",
  "roost-protocol",
  "serde",
- "serde_json",
- "stats_alloc",
  "subtle",
  "unicode-normalization",
  "zeroize",
@@ -877,7 +871,6 @@ dependencies = [
  "rand_chacha",
  "roost-protocol",
  "serde",
- "serde_json",
  "sha2",
  "subtle",
  "x25519-dalek",
@@ -896,7 +889,6 @@ dependencies = [
  "rand",
  "rand_chacha",
  "serde",
- "serde_json",
  "subtle",
  "zeroize",
 ]
@@ -907,8 +899,6 @@ version = "0.16.0"
 dependencies = [
  "hex",
  "roost-protocol",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1074,12 +1064,6 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
-
-[[package]]
-name = "stats_alloc"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c0e04424e733e69714ca1bbb9204c1a57f09f5493439520f9f68c132ad25eec"
 
 [[package]]
 name = "strsim"

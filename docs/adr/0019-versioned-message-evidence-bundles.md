@@ -61,6 +61,7 @@ for the same sender Identity Key.
 - Unknown envelope versions and profile mismatches reject before body interpretation. Malformed,
   oversized, noncanonical-key, over-grace, cross-relay, expired-at-acceptance, and
   signature-invalid bundles reject with stable typed categories.
-- [`evidence_bundles_v1.json`](../../crates/roost-protocol/tests/fixtures/evidence_bundles_v1.json)
-  pins the Rust encoding and rejection vectors; generated Swift and Kotlin harnesses replay the
-  same valid bytes and independently verify both Ed25519 signatures with CryptoKit and the JDK.
+- Core tests create accepted evidence and check verification and certificate-substitution rejection.
+  Server and native package tests keep a local signed example. Swift independently verifies its
+  signatures with CryptoKit; Kotlin compares returned fields. The Android test runtime does not
+  provide the Ed25519 key import needed for a separate native signature check.

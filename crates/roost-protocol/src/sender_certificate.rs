@@ -668,10 +668,11 @@ mod tests {
         signed.signature[0] ^= 0x01;
         let domain_keys = [trusted_key(PRIMARY_IDENTIFIER, &verifying_key)];
 
-        assert_validation_error(
-            validation_input(&signed, &domain_keys, &[]),
-            SenderCertificateValidationError::SignatureFailure,
-        );
+        for signature in [signed.signature.as_slice(), &signed.signature[..1]] {
+            let mut input = validation_input(&signed, &domain_keys, &[]);
+            input.signature = signature;
+            assert_validation_error(input, SenderCertificateValidationError::SignatureFailure);
+        }
     }
 
     #[test]

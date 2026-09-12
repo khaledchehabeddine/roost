@@ -20,8 +20,3 @@ The deduplication set capacity is consumer-supplied, defaults to 1024 digests, h
 - Post-decryption-only rejection. Rejected. A duplicate could touch Ratchet/session state before being identified, which is the failure this layer exists to prevent.
 - Transport-owned deduplication. Rejected. Transports do not own protocol state, may differ across delivery paths, and cannot enforce one replay policy across all consumers.
 - Unbounded digest set. Rejected. Replay defense must not let external input grow persisted state without a hard cap.
-
-## Verification Evidence
-
-- `docs/protocol-state-invariant-tests.md` records replay and duplicate-delivery scenarios for the persisted deduplication set.
-- `crates/roost-core/tests/fixtures/protocol_state_blobs_v1.md` pins empty and non-empty deduplication-set blobs and duplicate replay outcomes.

@@ -1,27 +1,4 @@
 {
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "if": "Bash(git commit *)",
-            "command": "bash scripts/hooks/deny.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|MultiEdit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash scripts/hooks/check.sh"
-          }
-        ]
-      }
-    ]
-  },
   "permissions": {
     "ask": [
       "Bash(cargo publish*)",

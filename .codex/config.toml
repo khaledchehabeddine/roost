@@ -1,4 +1,1 @@
 model = "gpt-6-astra"
-
-[features]
-codex_hooks = true

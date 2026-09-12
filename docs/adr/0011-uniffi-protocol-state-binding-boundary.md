@@ -42,15 +42,6 @@ and prekey lifecycle behavior.
 - Expose decoded protocol-state records to Swift and Kotlin. Rejected because decoded ratchet and
   replay state would couple clients to internal wire shapes and increase the secret-bearing API
   surface.
-- Check generated Kotlin and Swift into the repo. Rejected because current CI already verifies
+- Check generated Kotlin and Swift into the repo. Rejected because package checks verify
   generation from source, and checked-in generated output would add review noise without improving
   the binding contract.
-
-## Verification Evidence
-
-- `crates/roost-core/tests/protocol_state_host_store.rs` verifies Core-computed absent and digest
-  conditions and rejects stale updates before committing state or outbox effects.
-- `scripts/test/binding-fixture-replay.sh` exercises generated bindings through the fixture replay
-  harness.
-- `crates/roost-core/tests/fixtures/protocol_state_blobs_v1.md` records that consumers persist
-  Protocol State Blobs opaquely by kind/key without inspecting contents.

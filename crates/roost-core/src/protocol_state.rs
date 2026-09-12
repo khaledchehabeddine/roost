@@ -3388,41 +3388,6 @@ fn decode_contact_state_payload(
     decoded_contact_state(address, decoded_contact_state_parts_v2(wire))
 }
 
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_decode_protocol_state_blob(
-    kind: ProtocolStateKind,
-    key: ProtocolStateKey,
-    blob: ProtocolStateBlob,
-) -> Result<(), ProtocolStateError> {
-    let address = ProtocolStateAddress::new(kind, key);
-    let limits = ProtocolHardeningLimits::default();
-    match kind {
-        ProtocolStateKind::RatchetSession => {
-            decode_session_state(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::DeduplicationSet => {
-            decode_deduplication_set(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::PendingAcknowledgments => {
-            decode_pending_acknowledgments(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::ContactState => {
-            decode_contact_state(&address, &blob, limits).map(|_| ())
-        }
-        ProtocolStateKind::PeerInboxAuthorization => {
-            let mut snapshot = ProtocolStateSnapshot::new();
-            snapshot.set(address.clone(), blob)?;
-            load_peer_inbox_authorization(&snapshot, &address).map(|_| ())
-        }
-        ProtocolStateKind::LocalInboxAuthorization => {
-            let mut snapshot = ProtocolStateSnapshot::new();
-            snapshot.set(address.clone(), blob)?;
-            load_delivered_inbox_authorization(&snapshot, &address).map(|_| ())
-        }
-    }
-}
-
 struct DecodedContactStateParts {
     identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
@@ -4095,12 +4060,6 @@ fn decode_sealed_sender_envelope(
     })
 }
 
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_decode_sealed_sender_envelope(bytes: &[u8]) -> Result<(), ProtocolStateError> {
-    decode_sealed_sender_envelope(bytes, ProtocolHardeningLimits::default()).map(|_| ())
-}
-
 fn receive_state_updates(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -4317,21 +4276,6 @@ pub(crate) fn unpad_sealed_payload(
     })
 }
 
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_unpad_sealed_payload(padded: &[u8]) -> Result<(), ProtocolStateError> {
-    unpad_sealed_payload(padded).map(|_| ())
-}
-
-#[cfg(fuzzing)]
-#[allow(missing_docs)]
-pub fn fuzz_deduplication_digest(
-    digest_key: [u8; DEDUPLICATION_KEY_LEN],
-    encoded_message: &[u8],
-) -> [u8; DEDUPLICATION_DIGEST_LEN] {
-    deduplication_digest(&digest_key, &[], encoded_message)
-}
-
 fn sender_identity_key_matches(expected: &[u8; 32], actual: &[u8; 32]) -> bool {
     expected.ct_eq(actual).into()
 }
@@ -4365,15 +4309,72 @@ fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
 #[cfg(test)]
 mod tests {
     use super::{
+        CURRENT_PROTOCOL_STATE_BLOB_MAJOR, CURRENT_PROTOCOL_STATE_BLOB_MINOR,
         DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
-        MIN_DEDUPLICATION_CAPACITY, MessageTranscriptInput, PayloadKind, ProtocolStateError,
-        SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN, contains_digest,
-        deduplication_digest, pad_sealed_payload, record_deduplication_digest,
-        sign_message_transcript, unpad_sealed_payload, verify_message_transcript,
+        MIN_DEDUPLICATION_CAPACITY, MessageTranscriptInput, PayloadKind, ProtocolHardeningLimits,
+        ProtocolStateError, SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN,
+        SESSION_STATE_WIRE_VERSION, SessionStateWire, SessionStatusWire, contains_digest,
+        decode_session_state, deduplication_digest, pad_sealed_payload,
+        record_deduplication_digest, sign_message_transcript, unpad_sealed_payload,
+        verify_message_transcript,
     };
-    use crate::{MessageId, SenderIdentityMaterial};
+    use crate::{
+        MessageId, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind,
+        SenderIdentityMaterial, SessionId,
+    };
     use roost_crypto::{KeyPair, SigningKeyPair, sign_identity_key_binding};
     use zeroize::Zeroizing;
+
+    #[test]
+    fn non_current_session_blob_versions_are_faults() {
+        let address = ProtocolStateAddress::new(
+            ProtocolStateKind::RatchetSession,
+            ProtocolStateKey::session(SessionId::from_bytes([9; 16])),
+        );
+        for (major, minor) in [(2, 0), (0, 1), (1, 1)] {
+            let blob = ProtocolStateBlob::from_bytes(vec![major, minor, 0xaa]);
+            assert!(matches!(
+                decode_session_state(&address, &blob, ProtocolHardeningLimits::default()),
+                Err(ProtocolStateError::UnsupportedBlobVersion {
+                    address: actual, major: actual_major, minor: actual_minor,
+                }) if actual == address && actual_major == major && actual_minor == minor
+            ));
+        }
+    }
+
+    #[test]
+    fn nested_ratchet_decode_failure_does_not_echo_state_bytes() {
+        let address = ProtocolStateAddress::new(
+            ProtocolStateKind::RatchetSession,
+            ProtocolStateKey::session(SessionId::from_bytes([9; 16])),
+        );
+        let mut bytes = vec![
+            CURRENT_PROTOCOL_STATE_BLOB_MAJOR,
+            CURRENT_PROTOCOL_STATE_BLOB_MINOR,
+        ];
+        bytes.extend(
+            postcard::to_stdvec(&SessionStateWire {
+                version: SESSION_STATE_WIRE_VERSION,
+                status: SessionStatusWire::ContactUnbound {
+                    ratchet_state: &[0x42],
+                },
+                peer_sender_identity_key: None,
+            })
+            .unwrap(),
+        );
+        let blob = ProtocolStateBlob::from_bytes(bytes);
+        let Err(error) = decode_session_state(&address, &blob, ProtocolHardeningLimits::default())
+        else {
+            panic!("malformed nested ratchet state decoded");
+        };
+        let rendered = error.to_string();
+        assert!(
+            matches!(error, ProtocolStateError::BlobDecode { address: actual, reason }
+            if actual == address && reason == "ratchet/session state failed to decode")
+        );
+        assert!(!rendered.contains("66"));
+        assert!(!rendered.contains("0x42"));
+    }
 
     #[test]
     fn same_encrypted_bytes_under_different_deduplication_keys_have_different_digests() {

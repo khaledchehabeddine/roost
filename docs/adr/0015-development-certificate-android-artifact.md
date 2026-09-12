@@ -2,9 +2,9 @@
 
 **Status:** Accepted
 
-The production Android coordinate, `com.aurelion:aether`, is built without
+The production Android coordinate, `io.github.relaynet:roost`, is built without
 development certificate issuance. Local peer simulations consume a separate,
-version-matched `com.aurelion:aether-development` coordinate built with the
+version-matched `io.github.relaynet:roost-development` coordinate built with the
 `development-certificates` feature.
 
 Keeping distinct coordinates makes Gradle variant selection explicit and lets
@@ -26,5 +26,5 @@ supplies the process-local development authority.
 
 - Consumers that need local peer simulation select the development coordinate
   only in debug variants; release variants select the production coordinate.
-- The Android packaging workflow must verify both API surfaces and publish
-  version-matched coordinates.
+- The development coordinate is built on demand for local peer simulations. Production checks
+  build only the default coordinate; no second release build is required.
