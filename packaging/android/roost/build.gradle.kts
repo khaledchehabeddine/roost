@@ -41,9 +41,7 @@ android {
     }
 
     publishing {
-        singleVariant("release") {
-            withSourcesJar()
-        }
+        singleVariant("release")
     }
 }
 
@@ -83,4 +81,9 @@ afterEvaluate {
 tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
+}
+
+// The distribution uploads the checked AAR and POM, with no separate Gradle module metadata.
+tasks.withType<GenerateModuleMetadata>().configureEach {
+    enabled = false
 }
