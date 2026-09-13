@@ -1,12 +1,8 @@
 ---
-description: Stage, commit, push, and create or update a draft pull request
-argument-hint: [issue-number]
-disable-model-invocation: true
-allowed-tools: Agent Bash(gh *) Bash(git *) Bash(cargo *) Bash(python3 *) Read Write
+name: commit-push
+description: Use when the user wants to commit changes, amend a commit, push a branch, or create or update a pull request.
 ---
 
-Use `$ARGUMENTS` as the issue number when supplied.
-
-Read and follow [the shared commit-push workflow](../../../docs/agents/workflows/commit-push.md).
+Read [SKILL.md](../../../.agents/instructions/skills/commit-push/SKILL.md).
 
 PR footer: `Created with [Claude Code](https://claude.com/claude-code).`

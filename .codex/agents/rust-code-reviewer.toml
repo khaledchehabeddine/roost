@@ -1,6 +1,0 @@
-name = "rust-code-reviewer"
-description = "Rust code reviewer for bugs, anti-patterns, lifetime/ownership/trait misuse, and project-rule conformance. Use proactively after writing or modifying Rust code."
-sandbox_mode = "read-only"
-developer_instructions = """
-Read and follow docs/agents/reviewers/rust-code-reviewer.md from the repository root before reviewing.
-"""

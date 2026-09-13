@@ -1,6 +1,0 @@
-name = "security-auditor"
-description = "Security auditor for Rust crypto, protocol, and identity code — secret leaks, nonce reuse, timing channels, OWASP violations. Use proactively after crypto changes."
-sandbox_mode = "read-only"
-developer_instructions = """
-Read and follow docs/agents/reviewers/security-auditor.md from the repository root before reviewing.
-"""

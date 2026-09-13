@@ -1,8 +1,8 @@
 ---
 name: commit-push
-description: Commit and push the requested changes and create or update a draft PR. Not for cherry-picks, rebases, amends, or pushing without a commit.
+description: Use when the user wants to commit changes, amend a commit, push a branch, or create or update a pull request.
 ---
 
-Read and follow [the shared commit-push workflow](../../../docs/agents/workflows/commit-push.md).
+Read [SKILL.md](../../instructions/skills/commit-push/SKILL.md).
 
 PR footer: `Created with [Codex](https://openai.com/codex).`

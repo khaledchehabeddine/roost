@@ -1,4 +1,4 @@
-# Rust Docs Style
+# Documentation
 
 ## Tiers
 
@@ -45,17 +45,6 @@ Require:
 - Document limitations explicitly, not by silence
 - Crate and module docs orient the reader. Avoid restating item-level contracts unless the repetition adds navigation context
 
-## Known-answer tests (KAT)
-
-- Derivation source preference: RFC vectors → reference implementation → independent crate/library → hand-derived (flag for security-auditor review)
-- Expected outputs must never be derived against the implementation under test
-- Test functions are grouped together within the file, before related non-KAT behavior tests
-- Expected outputs live in named constants (`<PRIMITIVE>_KAT_EXPECTED`)
-- Derivation comment goes on the test, not the constant
-- Test comments follow `Source` → `Inputs` → `Derivation` → `Output` (`Source` line names the reference tool and API call (e.g., `pyca/cryptography 46 HKDF-SHA256`))
-- Derivation pseudocode uses `text` code fences
-- Both directions (encrypt/decrypt, sign/verify) reference the same expected constant
-
 ## Crate-level (`//!` in lib.rs)
 
 Required for every crate, regardless of tier:
@@ -87,3 +76,5 @@ Required for every crate, regardless of tier:
 - UniFFI crates with only `cdylib`/`staticlib` crate-types skip doctests silently, add `rlib` to crate-type so doctests are verified
 - Examples use `?` operator over `unwrap()` for error handling
 - Use `must` for hard requirements, `should` for recommendations
+
+Known-answer test provenance follows [testing](testing.md#known-answer-tests).
