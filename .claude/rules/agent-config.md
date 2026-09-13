@@ -3,6 +3,7 @@ paths:
   - ".agents/**"
   - ".claude/**"
   - ".codex/**"
+  - "docs/agents/**"
   - "AGENTS.md"
   - "CLAUDE.md"
 ---

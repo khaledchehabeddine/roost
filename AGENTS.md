@@ -1,12 +1,7 @@
 # Roost
 
-## Overview
-
-Roost is the shared cryptographic and networking core for a private, end-to-end encrypted cloud messaging system.
-
-## Architecture
-
-See [`README.md`](README.md#architecture) for the crate dependency graph.
+This is the canonical project policy for agents. See [README.md](README.md) for orientation,
+setup and the crate dependency graph.
 
 ## Coding guidelines
 

@@ -4,9 +4,9 @@ Shared coding and agent-configuration policy for both runtimes.
 
 ## Agent Config
 
-- Customizations that benefit collaborators on this project must live in project scope (`.agents/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`)
+- Customizations that benefit collaborators on this project must live in project scope (`docs/agents/`, `.agents/`, `.claude/`, `.codex/`, `AGENTS.md`, `CLAUDE.md`)
 - Customization may live in user scope only if it neither shapes the project's workflow nor improves agent quality for collaborators
-- When updating one agent's customization, mirror the behavioral change in the other agent's equivalent (Claude ↔ Codex). Stylistic patterns differ between agents per their respective documentation
+- Keep shared workflow bodies in `docs/agents/workflows/` and reviewer checklists in `docs/agents/reviewers/`. Runtime entries load them and own registration, invocation, permissions, memory and attribution. Change shared behavior once; mirror runtime-specific changes in the other runtime when applicable
 - Follow the structure and style from existing peer customizations of the same type within the same agent
 - Pattern-skill body items follow a cohesive ordering (workflow, scope, criticality, frequency, etc.)
 - Pattern-skill descriptions list the same items as the body, in the same order

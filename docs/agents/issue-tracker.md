@@ -30,10 +30,10 @@ Before creating an issue:
 Reuse the maintainer's supplied fields, labels, milestone and authorization. Ask only for missing choices.
 
 1. Classify it as `task`, `parent`, `bug`, or `security`.
-2. Build its body from `.github/issue-scaffolds/<type>.md`.
+2. Read `.github/ISSUE_TEMPLATE/<type>.yml`. Build Markdown sections from its `body` fields in order, using each field's label and description. Supply every required field, use the declared dropdown options, and omit empty optional sections. The issue forms own these fields; do not maintain a separate scaffold.
 3. Use `bug` for bugs, `security` for security work, or ask the maintainer to choose a repository label for tasks and parents.
 4. List open milestones with `gh api --hostname github.com 'repos/RelayNet/roost/milestones?state=open' --jq '[.[] | {number,title}]'` and ask the maintainer to choose one; put the selected numeric milestone ID in the payload, or omit it when none exist.
-5. Add the issue to the `Aether` project.
+5. Add project membership only when the maintainer requests it. Verify the selected project exists and is accessible with `gh project list --owner RelayNet --format json`, paginating as needed. Reuse an exact verified project title. An absent project or missing project access does not block issue creation; report that requested step separately. Do not create a project or expand credential scopes without authorization.
 
 ## Operations
 
@@ -42,7 +42,7 @@ Create an issue by writing this shape to a private temporary JSON file through a
 ```json
 {
   "title": "Reviewed title",
-  "body": "Body built from the selected scaffold",
+  "body": "Body built from the selected issue form",
   "labels": ["docs"],
   "milestone": 12
 }
@@ -54,10 +54,10 @@ Omit `milestone` when none was selected. Then execute:
 ["gh", "api", "--hostname", "github.com", "--method", "POST", "repos/RelayNet/roost/issues", "--input", "<payload-path>", "--jq", ".number"]
 ```
 
-Validate the returned issue number, then add it to the project:
+Validate the returned issue number. Only for requested, verified project membership, use:
 
 ```text
-["gh", "issue", "edit", "<number>", "--repo", "github.com/RelayNet/roost", "--add-project", "Aether"]
+["gh", "issue", "edit", "<number>", "--repo", "github.com/RelayNet/roost", "--add-project", "<verified-project-title>"]
 ```
 
 Other operations:
@@ -76,8 +76,7 @@ Comment creation uses this argv shape:
 
 ## Draft pull requests
 
-The commit-push skill owns review, staging, commits and pushes. Its tracker operations use this
-guide even when external PRs are not a triage request surface.
+The commit-push skill owns review, staging, commits and pushes. Its tracker operations use this guide.
 
 Read an existing branch PR with explicit `--repo github.com/RelayNet/roost`. For creation, write a
 JSON payload containing `title`, `body`, the pushed `head` branch, `base: "main"`, and `draft: true`,
@@ -95,13 +94,7 @@ completion. Draft creation may precede CI completion; review completion requires
 
 ## Pull requests as a triage surface
 
-**PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
-
-When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
-
-- **Read a PR**: `gh pr view <number> --repo github.com/RelayNet/roost --json number,title,body,labels,author,authorAssociation,comments,reviews` and `gh pr diff <number> --repo github.com/RelayNet/roost`.
-- **List external PRs for triage**: `gh pr list --repo github.com/RelayNet/roost --state open --json number,title,body,labels,author,authorAssociation,comments`, then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIMER`, `FIRST_TIME_CONTRIBUTOR`, or `NONE`.
-- **Comment / label / close**: use JSON payloads for free-form comments and explicit `--repo github.com/RelayNet/roost` for label or close operations.
+**PRs as a request surface: no.** `/triage` uses issues in this repository.
 
 GitHub shares one number space across issues and PRs. Resolve a validated bare number with explicit `--repo github.com/RelayNet/roost` lookups.
 
@@ -117,8 +110,8 @@ Run `gh issue view <number> --repo github.com/RelayNet/roost --json number,title
 
 Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
 
-- **Map**: create a parent issue through a JSON payload labelled `wayfinder:map`. Use `.github/issue-scaffolds/parent.md` and place Notes, Decisions-so-far, and Fog under its Notes section.
-- **Child ticket**: create a task issue through a JSON payload labelled `wayfinder:research`, `wayfinder:prototype`, `wayfinder:grilling`, or `wayfinder:task`. Use `.github/issue-scaffolds/task.md`, then set its validated parent number with explicit `--repo github.com/RelayNet/roost`.
+- **Map**: create a parent issue through a JSON payload labelled `wayfinder:map`. Use `.github/ISSUE_TEMPLATE/parent.yml` and place Notes, Decisions-so-far, and Fog under its Notes section.
+- **Child ticket**: create a task issue through a JSON payload labelled `wayfinder:research`, `wayfinder:prototype`, `wayfinder:grilling`, or `wayfinder:task`. Use `.github/ISSUE_TEMPLATE/task.yml`, then set its validated parent number with explicit `--repo github.com/RelayNet/roost`.
 - **Blocking**: add native dependencies with validated child and blocker numbers and explicit `--repo github.com/RelayNet/roost`.
 - **Frontier query**: preserve map order from `gh issue view <map> --repo github.com/RelayNet/roost --json subIssues --jq '.subIssues[].number'`. For each validated child number, read `number,state,assignees,blockedBy` from the same explicit repository; keep open, unassigned children whose blockers are all closed.
 - **Claim**: assign `@me` to the validated child number in `github.com/RelayNet/roost`; this is the session's first write.
