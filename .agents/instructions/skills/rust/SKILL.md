@@ -1,12 +1,15 @@
 # Rust
 
-Apply the relevant standards to the affected code and its consumers. Use [CONTEXT_MAP.md](../../../../CONTEXT_MAP.md) to find the owning crate's vocabulary when domain terms matter.
+Read the references that apply to the task.
 
 ## References
 
-- [Style](references/style.md): declarations, naming, error handling, async contracts, or Cargo dependencies.
-- [Public API](references/public-api.md): visibility, consumer naming, or compatibility.
-- [Documentation](references/documentation.md): symbol, module, and crate rustdoc or executable examples.
-- [Testing](references/testing.md): behavior coverage, test structure, or known-answer provenance.
-- [Cryptography](references/cryptography.md): primitives, secrets, untrusted inputs, or protocol state.
-- [UniFFI](references/uniffi.md): mobile bindings, adapters, or foreign errors.
+- [API](references/api.md): designing types and functions or changing how callers use them.
+- [Cargo](references/cargo.md): changing workspace settings, dependencies, features, or toolchain requirements.
+- [Cryptography](references/cryptography.md): handling secrets, cryptographic operations, untrusted input, or protocol state.
+- [Documentation](references/documentation.md): deciding what to document or writing rustdoc, examples, or inline comments.
+- [Implementation](references/implementation.md): writing function and method bodies.
+- [Naming](references/naming.md): choosing names, including domain terms, abbreviations, and units.
+- [Structure](references/structure.md): organizing files, modules, imports, or declarations.
+- [Testing](references/testing.md): deciding what to test or writing and organizing tests.
+- [UniFFI](references/uniffi.md): exposing Rust code through UniFFI or adapting types for the bindings.

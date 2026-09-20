@@ -1,10 +1,8 @@
 # UniFFI
 
-- FFI-incompatible core types must be wrapped in the `roost-client` crate — `&str`, `&[u8]`, lifetimes, trait objects without `#[uniffi::export(with_foreign)]`, tuples, external-crate types without conversion
-- Secret bytes cross as bare `Vec<u8>` and wrap in `Zeroizing` immediately in the adapter layer, not client code
-- Stateful types wrap with `#[derive(uniffi::Object)]` and interior mutability — decouples internal type evolution from FFI stability
-- Foreign-implementable traits use `#[uniffi::export(with_foreign)]` to let clients implement Rust-callable traits
-- Errors crossing the UniFFI boundary must use `#[derive(uniffi::Error)]` — library errors and panics cannot propagate
-- Internal errors convert to `ClientError` via `From` impls
-- `ClientError` variants describe failures in client-relevant terms (e.g., `AlreadyExists`, `NotFound`)
-- Internal failures the client cannot meaningfully handle (e.g., lock poisoning, KDF output overflow) reduce to a generic `InternalError { reason: String }` — `reason` is for logs, not client logic
+- Keep UniFFI declarations and host-type conversions in `roost-client`. Preserve idiomatic lower-crate APIs and add adapters only where the bindings or host contract require them.
+- Receive secret buffers in owned types and wrap them in `Zeroizing` immediately in `roost-client`, before validation or early returns. Keep outgoing secrets in zeroizing types until the final binding conversion. This does not guarantee erasure of copies made by UniFFI or the host language.
+- Use `#[derive(uniffi::Object)]` for shared Rust handles and `#[derive(uniffi::Record)]` for data passed by value. Objects must be `Send + Sync`; reuse existing synchronization and add thread-safe interior mutability only where needed.
+- Use `#[uniffi::export(with_foreign)]` for traits the host app implements.
+- Expose `ClientError` with `#[derive(uniffi::Error)]`. Its variants describe failures hosts need to distinguish; map other internal failures to `InternalError { reason: String }`.
+- Keep `reason` fields diagnostic-only. Host logic uses variants and structured fields, never message text.
