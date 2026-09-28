@@ -19,8 +19,6 @@ Add verification scripts or CI gates only for recurring needs that justify their
 
 ## Skills
 
-- For Rust design, edits, or review, including Cargo configuration and rustdoc, read [Rust](.agents/instructions/skills/rust/SKILL.md) and its applicable references.
-- When terminology, context boundaries, relationships, or consequential architectural decisions change, read [Domain modeling](.agents/instructions/skills/domain-modeling/SKILL.md).
 - Commit and push only when requested, using [Commit and push](.agents/instructions/skills/commit-push/SKILL.md).
 
 Shared customizations live under `.agents/instructions/`, grouped by type. Runtime entries load them and retain only runtime-specific metadata and permissions.

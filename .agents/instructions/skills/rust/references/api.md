@@ -1,12 +1,68 @@
 # API
 
-- Keep modules private and re-export the crate's API from `lib.rs`; `unreachable_pub` flags `pub` items that aren't re-exported.
-- Make an item `pub` only when code outside the crate uses it. Re-exporting it from `lib.rs` doesn't count as a use.
-- Secret-bearing types additionally require a consumer who specifically needs the secret form
-- Only `roost-client`'s UniFFI surface has a compatibility contract. Other crates' APIs may change freely inside the workspace.
-- Describe every breaking change to that contract in the PR, with what hosts must change. In generated Swift and Kotlin, renaming or removing an item, field, or variant, adding an enum variant, and adding a required record field all break host code.
-- Don't mark enums `#[non_exhaustive]`; every consumer is in this workspace. When matching an enum from another workspace crate, list every variant instead of `_`, so a new variant fails the build where it needs a decision.
+Every caller ships in the same app as this code, so only stored data outlives a release.
+
+## Types
+
+- Add a trait or generic parameter only when production code needs more than one implementation or input type.
+- Don't mark enums `#[non_exhaustive]`.
+- Use `SystemTime` for points in time and `Duration` for spans, and an integer only where a time is signed, stored, or encoded.
+- Check a value once at the boundary, then pass it inward in a type that can only hold valid values.
+
+### ❌ Bad
+
+```rust
+fn derive_example_key(secret: &[u8]) -> Result<ExampleKey, ExampleError> {
+    let secret: &[u8; 32] = secret.try_into()?;
+    Ok(ExampleKey::derive(secret))
+}
+```
+
+### ✅ Good
+
+```rust
+fn derive_example_key(secret: &[u8; 32]) -> ExampleKey {
+    ExampleKey::derive(secret)
+}
+```
+
+## Visibility
+
+- Keep modules private and re-export the public API from `lib.rs` by name, not with `*`.
+- Give each item the narrowest visibility its callers need: private, `pub(super)`, `pub(crate)`, or `pub`. A re-export isn't a caller.
+- Re-export what callers need from lower workspace crates.
+- Import another workspace crate's items into tests through `[dev-dependencies]`, never by making or re-exporting them publicly.
+- Keep a type that holds a secret private unless callers must pass or receive that secret.
 
 ## Errors
 
-- Give each module or operation its own error enum with only the failures it can return, and wrap lower-level errors as variants. `ClientError` is the exception: it flattens everything into the one error Swift and Kotlin hosts catch.
+- Give each module or operation an error enum that lists only the failures it can return.
+- Derive `Display`, `Error`, and `From` with `thiserror`.
+- Wrap a lower-level error with `#[from]` or `#[source]`, and keep its message out of the outer message.
+
+### ❌ Bad
+
+```rust
+#[derive(Debug, thiserror::Error)]
+enum ExampleError {
+    #[error("example signature failed: {0}")]
+    Signature(#[from] SignatureError),
+}
+```
+
+### ✅ Good
+
+```rust
+#[derive(Debug, thiserror::Error)]
+enum ExampleError {
+    #[error("example signature failed")]
+    Signature(#[from] SignatureError),
+}
+```
+
+## Stored Data
+
+- Start each encoding with its version, and reject an unknown version with its own error before decoding the rest.
+- Bump the version when fields or enum variants change order, number, or type.
+- Don't write migration code for older versions until a release promises that stored data survives upgrades.
+- Encode each type through one private `*Wire` struct, not the domain type, and derive both `Serialize` and `Deserialize` on it.

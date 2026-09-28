@@ -1,8 +1,19 @@
 # UniFFI
 
-- Keep UniFFI declarations and host-type conversions in `roost-client`. Preserve idiomatic lower-crate APIs and add adapters only where the bindings or host contract require them.
-- Receive secret buffers in owned types and wrap them in `Zeroizing` immediately in `roost-client`, before validation or early returns. Keep outgoing secrets in zeroizing types until the final binding conversion. This does not guarantee erasure of copies made by UniFFI or the host language.
-- Use `#[derive(uniffi::Object)]` for shared Rust handles and `#[derive(uniffi::Record)]` for data passed by value. Objects must be `Send + Sync`; reuse existing synchronization and add thread-safe interior mutability only where needed.
-- Use `#[uniffi::export(with_foreign)]` for traits the host app implements.
-- Expose `ClientError` with `#[derive(uniffi::Error)]`. Its variants describe failures hosts need to distinguish; map other internal failures to `InternalError { reason: String }`.
-- Keep `reason` fields diagnostic-only. Host logic uses variants and structured fields, never message text.
+The app calls the SDK only through generated Swift and Kotlin code, so `roost-client`'s exports are the API.
+
+## Boundary
+
+- Keep every UniFFI attribute and host-type conversion in `roost-client`.
+- Write a UniFFI record's conversions as crate-private methods, such as `from_core` and `to_core`, not `From` impls, which can't be made private.
+
+## Types
+
+- Expose every UniFFI time value as integer milliseconds, such as `created_at_millis`.
+- Take a secret argument as `Vec<u8>` or `String`, not `&[u8]` or `&str`, since a borrowed one leaves a copy in freed memory.
+- Export a trait the host implements with `#[uniffi::export(with_foreign)]`.
+
+## Errors
+
+- Share one error type across exported functions, and add a variant only for a failure hosts handle differently.
+- Build each `reason` from the error's whole `source()` chain, such as `example storage failed: disk full`, not `example storage failed`.

@@ -1,21 +1,93 @@
 # Cryptography
 
-- Use `OsRng` or `getrandom` directly for production randomness.
-- Hardcoded secret keys, seeds, and nonces are restricted to test fixtures.
-- Never expose secrets in errors, logs, or `Debug` output. Use non-secret identifiers for diagnostic context.
-- Never reuse an AEAD key/nonce pair for a new encryption. Preserve the operation's nonce construction; consult its ADR before changing it.
-- Use stable domain-separation labels, distinct for different cryptographic purposes. Keep HKDF `info` non-empty and encode labels and payload fields unambiguously. Treat changes to existing context bytes as protocol changes.
-- Use types that zeroize on drop for owned secrets, including temporary stack buffers. Create raw secret buffers inside `Zeroizing` when possible; wrap incoming or returned secret buffers immediately, before validation or early returns. Existing types that zeroize on drop need no extra wrapper.
-- For custom secret-bearing structs, prefer `ZeroizeOnDrop` derives or verified field cleanup. Use a manual `Drop` implementation when necessary and add `Zeroize` only when explicit wiping is needed. Skip fields only if they are non-secret or independently zeroized on drop.
-- Add `Clone` or `Serialize` to secret-bearing types only for a concrete use, explained in a nearby comment. Ensure owned copies and serialized secret buffers zeroize on drop; borrowed views rely on the secret owner's cleanup.
-- Use constant-time checks for secrets, authentication tags and tokens, and comparisons that could reveal private metadata. Use library verification APIs or `subtle::ConstantTimeEq`. Ordinary equality is allowed when timing reveals only public information; default to constant-time when unsure.
-- Validate lengths, formats, and bounds at network, decoding, and FFI boundaries. Enforce resource limits before input-driven allocation, computation, recursion, or accumulated state growth. Reuse existing validated limits where sufficient; otherwise add explicit caps.
+The app holds private keys and messages and reads bytes from anyone, so a mistake here can leak them.
+
+## Primitives
+
+- Use an established crate for every cryptographic primitive and construction, even one that looks simple, such as HMAC instead of hashing a key with a message.
+- Take the random number generator as a parameter, and pass `OsRng` in production and a seeded generator in tests.
+- Never encrypt more than one message with the same key and nonce.
+- Compare secrets, tags, tokens, and keys in constant time, with `ct_eq` or the crate's verify method.
+
+## Labels
+
+- Give each key derivation, signature, and hash its own label starting with `Roost`, such as `b"RoostExample-v1:"`.
+- When a label changes, bump the version of each encoding whose keys, signatures, or hashes depend on it.
+- In bytes that are signed, hashed, or used to derive a key, put a big-endian `u32` length before each variable-length field.
+
+### ❌ Bad
+
+```rust
+fn example_signed_bytes(name: &[u8], note: &[u8]) -> Vec<u8> {
+    [EXAMPLE_LABEL, name, note].concat()
+}
+```
+
+### ✅ Good
+
+```rust
+fn example_signed_bytes(name: &[u8], note: &[u8]) -> Result<Vec<u8>, TryFromIntError> {
+    let mut bytes = EXAMPLE_LABEL.to_vec();
+    for field in [name, note] {
+        bytes.extend_from_slice(&u32::try_from(field.len())?.to_be_bytes());
+        bytes.extend_from_slice(field);
+    }
+    Ok(bytes)
+}
+```
+
+## Secrets
+
+- Don't implement `Debug` on a type that holds a secret, and keep secrets out of error messages and logs.
+- Implement `Clone` on a type that holds a secret only when code needs a copy, and never on a public type.
+- Don't let a `Vec` of secret bytes grow, since it can leave copies in freed memory.
+- Hold every owned secret in a type that zeroizes on drop from the moment it's created or received, including temporary buffers, wire structs, and encoded bytes.
+
+### ❌ Bad
+
+```rust
+fn example_secret(bytes: Vec<u8>) -> Result<Zeroizing<[u8; 32]>, ExampleError> {
+    let secret: [u8; 32] = bytes.try_into().map_err(|_| ExampleError::Length)?;
+    Ok(Zeroizing::new(secret))
+}
+```
+
+### ✅ Good
+
+```rust
+fn example_secret(bytes: Vec<u8>) -> Result<Zeroizing<[u8; 32]>, ExampleError> {
+    let bytes = Zeroizing::new(bytes);
+    let secret: &[u8; 32] = bytes[..].try_into().map_err(|_| ExampleError::Length)?;
+    Ok(Zeroizing::new(*secret))
+}
+```
+
+## Untrusted Input
+
+- Before allocating or looping on a size, count, or depth that untrusted input or stored state sets, check it against a named limit, unless an earlier check already bounds it.
+- Reject input that has bytes left over after decoding.
+
+### ❌ Bad
+
+```rust
+fn decode_example_message(bytes: &[u8]) -> Result<ExampleWire, ExampleError> {
+    postcard::from_bytes(bytes).map_err(|_| ExampleError::Decode)
+}
+```
+
+### ✅ Good
+
+```rust
+fn decode_example_message(bytes: &[u8]) -> Result<ExampleWire, ExampleError> {
+    let (wire, rest) = postcard::take_from_bytes(bytes).map_err(|_| ExampleError::Decode)?;
+    if !rest.is_empty() {
+        return Err(ExampleError::Decode);
+    }
+    Ok(wire)
+}
+```
 
 ## Protocol State
 
-For Double Ratchet processing:
-
-- Reject replays while allowing out-of-order messages whose keys are still retained.
-- Authenticate the ciphertext and associated data, including the header, before committing receive-state changes. Failed processing must leave live state and cached message keys unchanged.
-- Erase superseded chain keys and successfully consumed message keys.
-- Bound skipped-key derivation and total retained keys; enforce cache bounds when restoring persisted state.
+- Change protocol state, such as a ratchet or a one-time prekey, only after the whole message, header included, authenticates, and leave it unchanged when it doesn't.
+- Delete a message key once it decrypts its message, and a chain key once it's replaced.

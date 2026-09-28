@@ -1,68 +1,61 @@
 # Implementation
 
-## Control Flow
+This code runs inside the app, so a failure here can crash it or leave changes behind.
 
-- For simple mappings that return `Result`, return `Ok` or `Err` from each `match` arm.
-- Prefer method chains for simple filtering and mapping. Use `match` or loops when branching or state changes make a chain harder to read.
-- When behavior depends on protocol state, match every variant explicitly.
-- Use early returns for input validation.
-- Name intermediate values when they clarify separate steps. Keep simple expressions inline.
+## Checks
 
-### ❌ Bad
-
-```rust
-Ok(Identity::from_core(self.inner.load_identity()?)?)
-```
-
-### ✅ Good
-
-```rust
-let identity = self.inner.load_identity()?;
-Ok(Identity::from_core(identity)?)
-```
+- Check every input and precondition before changing any state.
+- Group repeated checks for a value in one function, such as encoding and decoding.
 
 ## State Changes
 
-Check preconditions before changing state. Use staging or rollback when failure must leave state unchanged.
-
-## Ownership and Allocation
-
-Prefer borrowing or moving existing values. Clone when you need an owned copy and must keep the original.
-
-Write serialized output directly into its destination buffer. Preallocate when the size is known.
-
-## Resource Lifetimes
-
-Keep guards alive throughout the operation they protect. End their scope before unrelated work.
+- When a failure must leave state unchanged, change a copy and replace the original only after every step succeeds.
+- Keep a lock guard alive until the last step it protects.
 
 ### ❌ Bad
 
 ```rust
-{
-    let _lifecycle = self.lifecycle_guard();
-    self.ensure_no_recovery_required()?;
+impl ExampleStore {
+    fn prepare_example(&self) -> Result<ExamplePlan, ExampleError> {
+        {
+            let _guard = self.lock_example();
+            self.check_example_ready()?;
+        }
+        self.stage_example()
+    }
 }
-
-let output = operation(&staged_store)?;
 ```
 
 ### ✅ Good
 
 ```rust
-let _lifecycle = self.lifecycle_guard();
-self.ensure_no_recovery_required()?;
-
-let output = operation(&staged_store)?;
+impl ExampleStore {
+    fn prepare_example(&self) -> Result<ExamplePlan, ExampleError> {
+        let _guard = self.lock_example();
+        self.check_example_ready()?;
+        self.stage_example()
+    }
+}
 ```
-
-## Helpers
-
-Extract helpers when they clarify an operation or enforce a shared rule. Short, obvious expressions can stay inline even when repeated.
 
 ## Errors
 
-- Return failures as `Result`. Do not use `unwrap`, `expect`, or `panic!` in production code.
-- Use `?` to propagate errors. Omit `From` conversions it already performs.
-- Use defaults for expected absence. Propagate failures unless the operation defines a recovery path.
-- Include values and limits that help diagnose a failure. Don't repeat context the error type already provides.
-- Write error messages in lowercase without trailing punctuation. Preserve capitalization in names and acronyms.
+- Return every failure as an error, and never `unwrap`, `expect`, or panic in production code, even when a call's arguments make failure impossible.
+- Give an error the values that explain it, such as `TooLong { len, max }`, not `TooLong`.
+- Never turn an error into a default value, such as an empty set when loading fails.
+
+### ❌ Bad
+
+```rust
+fn load_example_set(storage: &ExampleStorage) -> Result<ExampleSet, ExampleError> {
+    Ok(storage.load().ok().flatten().unwrap_or_default())
+}
+```
+
+### ✅ Good
+
+```rust
+fn load_example_set(storage: &ExampleStorage) -> Result<ExampleSet, ExampleError> {
+    Ok(storage.load()?.unwrap_or_default())
+}
+```
