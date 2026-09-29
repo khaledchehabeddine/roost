@@ -1,6 +1,6 @@
 ---
 name: rust
-description: Apply Rust conventions when designing, editing, or reviewing Rust code, `Cargo.toml` files, rustdoc, tests, cryptography, or UniFFI bindings.
+description: Use for any task that involves Rust code or Cargo.toml files.
 ---
 
 Read [SKILL.md](../../instructions/skills/rust/SKILL.md).
