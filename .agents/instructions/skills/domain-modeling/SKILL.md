@@ -21,7 +21,7 @@ Follow the [template](templates/adr.md) when writing an ADR in `docs/adr/`.
 - Write an ADR only when a decision is costly to reverse, surprising without context, and the result of a real trade-off.
 - State the context, decision, and reason in one to three sentences.
 - List an alternative only when a reader might ask why it wasn't chosen, and give the reason in one sentence.
-- Record each decision in one ADR, and link that ADR by its title wherever another ADR relies on the decision.
+- Record each decision in one ADR.
 - Leave out code details, such as caller duties, limits, test coverage, and encodings.
 - Update an ADR in place when its decision changes.
 - Delete an ADR when its decision no longer applies, renumber the ADRs after it, and update every reference.
