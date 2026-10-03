@@ -2,6 +2,6 @@
 
 Context, decision, and reason.
 
-## Considered Options
+## Alternatives
 
-- Other option. Rejected because reason.
+- Example alternative: why it wasn't chosen.

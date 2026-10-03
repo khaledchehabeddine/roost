@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Use when a task adds, renames, or redefines a domain term, makes an architectural decision, or edits GLOSSARY.md or an ADR.
+description: Use for any task that changes the domain vocabulary or the architecture, or edits the glossary or a decision record.
 ---
 
 Read [SKILL.md](../../instructions/skills/domain-modeling/SKILL.md).
