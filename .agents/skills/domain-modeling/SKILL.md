@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Maintain domain glossaries, context relationships, and ADRs when terminology, context boundaries, or consequential architectural decisions change.
+description: Use when a task adds, renames, or redefines a domain term, makes an architectural decision, or edits GLOSSARY.md or an ADR.
 ---
 
 Read [SKILL.md](../../instructions/skills/domain-modeling/SKILL.md).
