@@ -1,5 +1,6 @@
 //! Sender-certificate validation records exposed through UniFFI.
 
+use crate::IdentityContext;
 use crate::error::RoostError;
 use crate::protocol::IdentityKey;
 use crate::records::fixed_32;
@@ -10,7 +11,6 @@ use roost_protocol::{
     RevocationState as ProtocolRevocationState, SenderCertificateIdentityKey,
     SenderCertificateValidationInput,
 };
-use std::time::Duration;
 
 /// Trust status for a domain-signing key.
 #[derive(Clone, Copy, uniffi::Enum)]
@@ -41,10 +41,9 @@ pub struct RevocationState {
     pub revoked_identity_keys: Vec<IdentityKey>,
 }
 
-/// A sender-certificate validation policy for one receive operation.
+/// The trust, revocation, and time inputs for validating sender certificates on one receive.
 ///
-/// Every validation, standalone or on receive, rejects a `grace_window_millis` above 300,000 (five
-/// minutes) as invalid data.
+/// The grace for expired certificates comes from the context's configuration.
 #[derive(uniffi::Record)]
 pub struct SenderCertificateValidation {
     /// Known domain-signing keys.
@@ -55,8 +54,6 @@ pub struct SenderCertificateValidation {
     pub revocation_state: RevocationState,
     /// Caller-supplied Unix timestamp in milliseconds.
     pub reference_time_millis: u64,
-    /// Caller-supplied grace window in milliseconds, at most 300,000.
-    pub grace_window_millis: u64,
 }
 
 /// Validated sender certificate contents.
@@ -75,40 +72,49 @@ pub struct ValidatedSenderCertificate {
     pub expires_at_millis: u64,
 }
 
-/// Validates a sender certificate against caller-supplied trust, revocation, and time inputs.
 #[uniffi::export]
-pub fn validate_sender_certificate(
-    certificate: Vec<u8>,
-    signature: Vec<u8>,
-    domain_signing_keys: Vec<DomainSigningKey>,
-    expected_relay_domain: Vec<u8>,
-    revocation_state: RevocationState,
-    reference_time_millis: u64,
-    grace_window_millis: u64,
-) -> Result<ValidatedSenderCertificate, RoostError> {
-    let protocol_domain_keys = domain_signing_keys_to_protocol(&domain_signing_keys)?;
-    let revoked_identity_keys = revoked_identity_keys_to_protocol(&revocation_state)?;
-    let protocol_revocation_state =
-        revocation_state_to_protocol(&revocation_state, &revoked_identity_keys);
-    let validated =
-        roost_protocol::validate_sender_certificate(SenderCertificateValidationInput {
-            certificate: &certificate,
-            signature: &signature,
-            domain_signing_keys: &protocol_domain_keys,
-            expected_relay_domain: &expected_relay_domain,
-            revocation_state: protocol_revocation_state,
-            reference_time: time_from_millis(reference_time_millis, "reference_time_millis")?,
-            grace_window: Duration::from_millis(grace_window_millis),
-        })?;
-    Ok(ValidatedSenderCertificate {
-        signing_key_id: validated.signing_key_id,
-        identity_key: IdentityKey {
-            agreement_key: validated.identity_key.x25519_public_key.to_vec(),
-            signing_key: validated.identity_key.ed25519_verifying_key.to_vec(),
-        },
-        relay_domain: validated.relay_domain,
-        expires_at_millis: millis_from_secs(validated.expires_at_secs, "certificate expiry")?,
-    })
+impl IdentityContext {
+    /// Validates a sender certificate against the host's trust, revocation, and time inputs.
+    ///
+    /// An expired certificate still validates within the configured certificate grace.
+    ///
+    /// # Errors
+    /// - [`RoostError::CertificateRejected`] if the certificate is expired, revoked, untrusted, or
+    ///   signed for another relay domain.
+    /// - [`RoostError::InvalidData`] if a key or the reference time is malformed.
+    pub fn validate_sender_certificate(
+        &self,
+        certificate: Vec<u8>,
+        signature: Vec<u8>,
+        domain_signing_keys: Vec<DomainSigningKey>,
+        expected_relay_domain: Vec<u8>,
+        revocation_state: RevocationState,
+        reference_time_millis: u64,
+    ) -> Result<ValidatedSenderCertificate, RoostError> {
+        let protocol_domain_keys = domain_signing_keys_to_protocol(&domain_signing_keys)?;
+        let revoked_identity_keys = revoked_identity_keys_to_protocol(&revocation_state)?;
+        let protocol_revocation_state =
+            revocation_state_to_protocol(&revocation_state, &revoked_identity_keys);
+        let validated =
+            roost_protocol::validate_sender_certificate(SenderCertificateValidationInput {
+                certificate: &certificate,
+                signature: &signature,
+                domain_signing_keys: &protocol_domain_keys,
+                expected_relay_domain: &expected_relay_domain,
+                revocation_state: protocol_revocation_state,
+                reference_time: time_from_millis(reference_time_millis, "reference_time_millis")?,
+                grace_window: self.inner.protocol_engine().certificate_grace(),
+            })?;
+        Ok(ValidatedSenderCertificate {
+            signing_key_id: validated.signing_key_id,
+            identity_key: IdentityKey {
+                agreement_key: validated.identity_key.x25519_public_key.to_vec(),
+                signing_key: validated.identity_key.ed25519_verifying_key.to_vec(),
+            },
+            relay_domain: validated.relay_domain,
+            expires_at_millis: millis_from_secs(validated.expires_at_secs, "certificate expiry")?,
+        })
+    }
 }
 
 impl DomainSigningKey {

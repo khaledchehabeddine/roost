@@ -21,8 +21,9 @@ use roost_crypto::{
     verify_public_discovery_key, verify_public_identity_key,
 };
 use roost_protocol::{
-    DomainSigningKey, RevocationState, SenderCertificateValidationError,
-    SenderCertificateValidationInput, validate_sender_certificate,
+    DomainSigningKey, MAX_CERTIFICATE_GRACE_WINDOW, RevocationState,
+    SenderCertificateValidationError, SenderCertificateValidationInput,
+    validate_sender_certificate,
 };
 use roost_protocol::{
     MESSAGE_TRANSCRIPT_CONTEXT, MessageTranscriptInput, message_transcript,
@@ -479,11 +480,6 @@ pub struct InboundSenderCertificateValidation<'a> {
     pub revocation_state: RevocationState<'a>,
     /// Caller-supplied time used for expiry evaluation.
     pub reference_time: SystemTime,
-    /// Caller-supplied grace window, at most
-    /// [`MAX_CERTIFICATE_GRACE_WINDOW`](roost_protocol::MAX_CERTIFICATE_GRACE_WINDOW).
-    ///
-    /// For its trade-off, see [`SenderCertificateValidationInput::grace_window`].
-    pub grace_window: Duration,
 }
 
 /// Inbound plaintext and all advanced protocol-state updates from one operation.
@@ -668,6 +664,7 @@ pub enum BlockedContactAcknowledgmentPolicy {
 pub struct ProtocolStateEngine {
     limits: ProtocolHardeningLimits,
     blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy,
+    certificate_grace: Duration,
 }
 
 impl ProtocolStateEngine {
@@ -678,6 +675,7 @@ impl ProtocolStateEngine {
         Self {
             limits,
             blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::default(),
+            certificate_grace: Duration::ZERO,
         }
     }
 
@@ -689,6 +687,7 @@ impl ProtocolStateEngine {
         Ok(Self {
             limits,
             blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::default(),
+            certificate_grace: Duration::ZERO,
         })
     }
 
@@ -715,6 +714,29 @@ impl ProtocolStateEngine {
     ) -> Self {
         self.blocked_contact_acknowledgment_policy = policy;
         self
+    }
+
+    /// Returns how long after expiry an inbound sender certificate still validates.
+    #[must_use]
+    pub fn certificate_grace(&self) -> Duration {
+        self.certificate_grace
+    }
+
+    /// Sets how long after expiry an inbound sender certificate still validates.
+    ///
+    /// The grace defaults to zero. It covers clock skew between devices, at the cost of accepting
+    /// a certificate the relay has already stopped vouching for.
+    pub fn with_certificate_grace(mut self, grace: Duration) -> Result<Self, ProtocolStateError> {
+        if grace > MAX_CERTIFICATE_GRACE_WINDOW {
+            return Err(ProtocolStateError::SenderCertificateValidation(
+                SenderCertificateValidationError::GraceWindowTooLarge {
+                    grace_window: grace,
+                    max: MAX_CERTIFICATE_GRACE_WINDOW,
+                },
+            ));
+        }
+        self.certificate_grace = grace;
+        Ok(self)
     }
 
     /// Returns an update that initializes an empty deduplication set for a local Identity.
@@ -1410,6 +1432,7 @@ impl ProtocolStateEngine {
             .ok_or(ProtocolStateError::MissingSenderCertificateValidation)?;
         let inbound_contact_identity_key = inbound_contact_identity_key(
             validation,
+            self.certificate_grace,
             &decoded.sender_identity,
             contact_identity_key,
             self.limits,
@@ -3399,6 +3422,7 @@ fn ensure_contact_allows_outbound(
 
 fn inbound_contact_identity_key(
     validation: InboundSenderCertificateValidation<'_>,
+    certificate_grace: Duration,
     sender_identity: &SenderIdentityMaterial,
     session_contact_identity_key: Option<ContactIdentityKey>,
     limits: ProtocolHardeningLimits,
@@ -3426,7 +3450,7 @@ fn inbound_contact_identity_key(
         expected_relay_domain: validation.expected_relay_domain,
         revocation_state: validation.revocation_state,
         reference_time: validation.reference_time,
-        grace_window: validation.grace_window,
+        grace_window: certificate_grace,
     })
     .map_err(ProtocolStateError::SenderCertificateValidation)?;
     if validated

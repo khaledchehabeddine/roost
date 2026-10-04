@@ -296,7 +296,6 @@ fn sender_certificate_validation<'a>(
         domain_signing_keys,
         revocation_state,
         reference_time: from_unix_secs(CERTIFICATE_REFERENCE_TIME_SECS).unwrap(),
-        grace_window: Duration::ZERO,
     }
 }
 
@@ -2341,72 +2340,6 @@ fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_wi
 }
 
 #[test]
-fn blocked_message_rejects_grace_window_above_the_maximum() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let key = key();
-    let deduplication_key = deduplication_key();
-    let sender = validated_sender_for_contact_expires_at(
-        accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME_SECS - MAX_CERTIFICATE_GRACE_WINDOW.as_secs() - 1,
-    );
-    let domain_keys = [sender.domain_signing_key()];
-    let revoked = [];
-    let acknowledgment_sender_identity = acknowledgment_sender_identity();
-    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
-    let mut bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
-        &engine,
-        key.clone(),
-        &setup.bob_state,
-        &sender.sender_identity,
-        deduplication_key.clone(),
-    );
-    block_contact(&engine, &mut bob_snapshot);
-    let encrypted = engine
-        .encrypt_message_with_transport_binding(
-            &alice_snapshot,
-            key.clone(),
-            outbound(
-                0x5f,
-                b"blocked outside the grace window",
-                &sender.sender_identity,
-            ),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        )
-        .unwrap()
-        .message;
-    let mut inbound = inbound_with_certificate_validation(
-        key,
-        deduplication_key,
-        &encrypted,
-        &acknowledgment_sender_identity,
-        &domain_keys,
-        &revoked,
-    );
-    inbound
-        .sender_certificate_validation
-        .as_mut()
-        .unwrap()
-        .grace_window = MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1);
-
-    let result = engine.decrypt_message_with_transport_bindings(
-        &mut ChaCha20Rng::from_seed([0x5f; 32]),
-        &bob_snapshot,
-        inbound,
-        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-    );
-
-    assert!(matches!(
-        result,
-        Err(ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::GraceWindowTooLarge { grace_window, max }
-        )) if grace_window == MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1)
-            && max == MAX_CERTIFICATE_GRACE_WINDOW
-    ));
-}
-
-#[test]
 fn blocked_inbound_message_under_silent_receipt_policy_returns_acknowledgment_without_plaintext() {
     let setup = setup();
     let engine = ProtocolStateEngine::new().with_blocked_contact_acknowledgment_policy(
@@ -2902,6 +2835,17 @@ fn untrusted_signing_key_rejects_before_plaintext_is_surfaced() {
 }
 
 #[test]
+fn engine_rejects_certificate_grace_above_the_maximum() {
+    let grace = MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_millis(1);
+    assert!(matches!(
+        ProtocolStateEngine::new().with_certificate_grace(grace),
+        Err(ProtocolStateError::SenderCertificateValidation(
+            SenderCertificateValidationError::GraceWindowTooLarge { grace_window, max }
+        )) if grace_window == grace && max == MAX_CERTIFICATE_GRACE_WINDOW
+    ));
+}
+
+#[test]
 fn expired_certificate_rejects_before_plaintext_is_surfaced() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
@@ -2956,70 +2900,11 @@ fn expired_certificate_rejects_before_plaintext_is_surfaced() {
 }
 
 #[test]
-fn unblocked_message_rejects_grace_window_above_the_maximum() {
+fn message_at_the_configured_grace_boundary_is_accepted() {
     let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let key = key();
-    let deduplication_key = deduplication_key();
-    let sender = validated_sender_for_contact_expires_at(
-        accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME_SECS - MAX_CERTIFICATE_GRACE_WINDOW.as_secs() - 1,
-    );
-    let domain_keys = [sender.domain_signing_key()];
-    let revoked = [];
-    let acknowledgment_sender_identity = acknowledgment_sender_identity();
-    let alice_snapshot = snapshot_with_state(&engine, key.clone(), &setup.alice_state);
-    let bob_snapshot = snapshot_with_state_peer_identity_and_deduplication(
-        &engine,
-        key.clone(),
-        &setup.bob_state,
-        &sender.sender_identity,
-        deduplication_key.clone(),
-    );
-    let encrypted = engine
-        .encrypt_message_with_transport_binding(
-            &alice_snapshot,
-            key.clone(),
-            outbound(0x5d, b"outside the grace window", &sender.sender_identity),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        )
-        .unwrap()
-        .message;
-    let mut inbound = inbound_with_certificate_validation(
-        key,
-        deduplication_key,
-        &encrypted,
-        &acknowledgment_sender_identity,
-        &domain_keys,
-        &revoked,
-    );
-    inbound
-        .sender_certificate_validation
-        .as_mut()
-        .unwrap()
-        .grace_window = MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1);
-
-    let result = engine.decrypt_message_with_transport_bindings(
-        &mut ChaCha20Rng::from_seed([0x5d; 32]),
-        &bob_snapshot,
-        inbound,
-        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-    );
-
-    assert!(matches!(
-        result,
-        Err(ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::GraceWindowTooLarge { grace_window, max }
-        )) if grace_window == MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1)
-            && max == MAX_CERTIFICATE_GRACE_WINDOW
-    ));
-}
-
-#[test]
-fn message_at_the_grace_window_boundary_is_accepted() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
+    let engine = ProtocolStateEngine::new()
+        .with_certificate_grace(MAX_CERTIFICATE_GRACE_WINDOW)
+        .unwrap();
     let key = key();
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
@@ -3050,7 +2935,7 @@ fn message_at_the_grace_window_boundary_is_accepted() {
         )
         .unwrap()
         .message;
-    let mut inbound = inbound_with_certificate_validation(
+    let inbound = inbound_with_certificate_validation(
         key,
         deduplication_key,
         &encrypted,
@@ -3058,12 +2943,6 @@ fn message_at_the_grace_window_boundary_is_accepted() {
         &domain_keys,
         &revoked,
     );
-    inbound
-        .sender_certificate_validation
-        .as_mut()
-        .unwrap()
-        .grace_window = MAX_CERTIFICATE_GRACE_WINDOW;
-
     let accepted = engine
         .decrypt_message_with_transport_bindings(
             &mut ChaCha20Rng::from_seed([0x5e; 32]),

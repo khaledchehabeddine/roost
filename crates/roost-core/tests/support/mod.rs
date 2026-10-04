@@ -4,7 +4,6 @@ pub mod host_identity;
 
 use roost_protocol::from_unix_secs;
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -278,7 +277,6 @@ impl ProtocolFixture {
                 expected_relay_domain: TEST_RELAY_DOMAIN,
                 revocation_state: RevocationState::Available(revoked_identity_keys),
                 reference_time: from_unix_secs(CREATED_AT_SECS).unwrap(),
-                grace_window: Duration::ZERO,
             }),
         }
     }

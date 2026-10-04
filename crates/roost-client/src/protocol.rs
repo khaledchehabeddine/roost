@@ -411,7 +411,7 @@ pub struct AcknowledgmentResult {
 }
 
 /// Blocked-contact acknowledgment policy.
-#[derive(Clone, Copy, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
 pub enum BlockedContactAcknowledgmentPolicy {
     /// Suppress acknowledgments so blocks look like unreachable recipients.
     Unreachable,

@@ -135,17 +135,27 @@ fn operation_ids_must_be_canonical() {
     ));
 }
 
+/// A configuration a host might choose: smaller deduplication, receipts for blocked senders,
+/// the largest certificate grace, and its own revision number.
+fn configuration() -> ContextConfiguration {
+    ContextConfiguration {
+        deduplication_capacity: 64,
+        blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::SilentReceipt,
+        certificate_grace_millis: 300_000,
+        revision: 7,
+    }
+}
+
 #[test]
-fn groups_use_the_contexts_configuration() {
-    let context = IdentityContext::with_configuration(
-        Arc::new(MemoryStorage::default()),
-        ContextConfiguration {
-            deduplication_capacity: 64,
-            blocked_contact_acknowledgment_policy:
-                BlockedContactAcknowledgmentPolicy::SilentReceipt,
-        },
-    )
-    .unwrap();
+fn context_reports_the_configuration_it_was_created_with() {
+    let default = IdentityContext::new(Arc::new(MemoryStorage::default())).configuration();
+    assert_eq!(default.certificate_grace_millis, 0);
+    assert_eq!(default.revision, 0);
+
+    let context =
+        IdentityContext::with_configuration(Arc::new(MemoryStorage::default()), configuration())
+            .unwrap();
+    assert_eq!(context.configuration(), configuration());
     assert_eq!(
         context
             .messaging()
@@ -153,6 +163,18 @@ fn groups_use_the_contexts_configuration() {
             .deduplication_capacity,
         64
     );
+}
+
+#[test]
+fn configuration_rejects_certificate_grace_above_five_minutes() {
+    let result = IdentityContext::with_configuration(
+        Arc::new(MemoryStorage::default()),
+        ContextConfiguration {
+            certificate_grace_millis: 300_001,
+            ..configuration()
+        },
+    );
+    assert!(matches!(result, Err(RoostError::InvalidData { .. })));
 }
 
 #[test]
