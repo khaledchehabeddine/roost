@@ -4,9 +4,9 @@
 UniFFI copies Rust doc comments into Swift and Kotlin unchanged. For the given platform this:
 
 - keeps only that platform's `swift` or `kotlin` example blocks;
-- rewrites rustdoc links to the names the binding exposes: [`ClientError::InvalidData`] becomes
-  `ClientError.InvalidData` in Swift and [ClientException.InvalidData] in Kotlin, and
-  [`Self::commit_operation`] becomes `commitOperation`;
+- rewrites rustdoc links to the names the binding exposes: [`RoostError::InvalidData`] becomes
+  `RoostError.InvalidData` in Swift and [RoostException.InvalidData] in Kotlin, and
+  [`Self::reserve_operation`] becomes `reserveOperation`;
 - turns a `# Errors` section into Swift's `- Throws:` field or Kotlin's `@throws` tags at the end of
   the comment.
 """
@@ -105,7 +105,7 @@ def throws_lines(prefix, errors, platform):
             condition = names.group(2)
             exceptions = [name.strip("[]`") for name in re.findall(HOST_NAME, names.group(1))]
         else:
-            condition, exceptions = text, ["ClientException"]
+            condition, exceptions = text, ["RoostException"]
         lines.extend(f"{prefix} @throws {exception} {condition}".rstrip() + newline for exception in exceptions)
     return lines
 

@@ -1,6 +1,6 @@
 //! UniFFI records for caller-owned Message bindings and prekey selection.
 
-use crate::error::ClientError;
+use crate::error::RoostError;
 use roost_core::{
     PreKeySelection as CorePreKeySelection, TransportBinding as CoreTransportBinding,
 };
@@ -18,7 +18,7 @@ pub struct TransportBinding {
 }
 
 impl TransportBinding {
-    pub(crate) fn into_core(self) -> Result<CoreTransportBinding, ClientError> {
+    pub(crate) fn into_core(self) -> Result<CoreTransportBinding, RoostError> {
         Ok(CoreTransportBinding::new(self.bytes)?)
     }
 }

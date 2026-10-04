@@ -1,6 +1,6 @@
 //! Prepared identity creation across the public KeyStore and SecureStorage seam.
 //!
-//! The scenario proves that staged secret material is not authoritative until the caller commits
+//! The scenario proves that staged secret material is not authoritative until the caller reserves
 //! and finalizes the prepared operation, including idempotent lifecycle calls.
 
 use roost_core::{
@@ -12,10 +12,10 @@ use roost_core::{
 fn prepared_identity_creation_becomes_visible_only_after_finalize() {
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
 
-    let prepared = store.prepare_generate_identity().unwrap();
+    let prepared = store.prepare_identity_creation().unwrap();
     let id = prepared.operation.id;
 
-    assert!(!store.has_identity().unwrap());
+    assert!(store.identity().unwrap().is_none());
     assert_eq!(
         store.operation_status(id).unwrap(),
         KeyStoreOperationStatus::Prepared
@@ -32,12 +32,12 @@ fn prepared_identity_creation_becomes_visible_only_after_finalize() {
     );
 
     assert_eq!(
-        store.commit_operation(id).unwrap(),
-        KeyStoreOperationStatus::Committed
+        store.reserve_operation(id).unwrap(),
+        KeyStoreOperationStatus::Reserved
     );
     assert_eq!(
-        store.commit_operation(id).unwrap(),
-        KeyStoreOperationStatus::Committed
+        store.reserve_operation(id).unwrap(),
+        KeyStoreOperationStatus::Reserved
     );
 
     assert_eq!(
@@ -48,7 +48,7 @@ fn prepared_identity_creation_becomes_visible_only_after_finalize() {
         store.finalize_operation(id).unwrap(),
         KeyStoreOperationStatus::Finalized
     );
-    assert!(store.has_identity().unwrap());
+    assert!(store.identity().unwrap().is_some());
     assert_eq!(
         store.load_identity().unwrap().public_key(),
         prepared.output.public_key()
@@ -58,14 +58,14 @@ fn prepared_identity_creation_becomes_visible_only_after_finalize() {
 #[test]
 fn prepared_operation_rejects_secure_state_changed_after_preparation() {
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    let first = store.prepare_generate_identity().unwrap();
-    let stale = store.prepare_generate_identity().unwrap();
+    let first = store.prepare_identity_creation().unwrap();
+    let stale = store.prepare_identity_creation().unwrap();
 
-    store.commit_operation(first.operation.id).unwrap();
+    store.reserve_operation(first.operation.id).unwrap();
     store.finalize_operation(first.operation.id).unwrap();
 
     assert!(matches!(
-        store.commit_operation(stale.operation.id),
+        store.reserve_operation(stale.operation.id),
         Err(KeyStoreError::Operation(
             KeyStoreOperationError::PreconditionChanged { .. }
         ))

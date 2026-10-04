@@ -1,11 +1,11 @@
-use crate::ClientError;
+use crate::RoostError;
 use roost_core::{SecureStorage as CoreSecureStorage, StorageError};
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
 use zeroize::Zeroizing;
 
-/// Platform secure-storage boundary used by [`Client`](crate::Client).
+/// Platform secure storage, such as Keychain or Keystore, that an [`IdentityContext`](crate::IdentityContext) keeps keys in.
 ///
 /// Implementations must persist bytes in platform secure storage, not plain files or temporary
 /// process memory. Values returned from [`SecureStorage::load`] contain secret material and must
@@ -17,30 +17,29 @@ use zeroize::Zeroizing;
 ///
 /// # Implementation
 ///
-/// Methods are called synchronously from Rust. Return [`ClientError::Storage`] for platform
-/// failures instead of panicking. A successful mutation must be durable. An interrupted `store`
+/// Methods are called synchronously from Rust. Return [`RoostError::Storage`] for platform
+/// failures instead of panicking. A successful mutation must be durable. An interrupted `save`
 /// must leave either the complete previous value or the complete new value, never a torn value.
-/// Core may retry `store` or `delete` after an ambiguous failure, so both operations must be safe
-/// to repeat.
+/// Roost may retry `save` or `remove` after an ambiguous failure, so both must be safe to repeat.
 #[uniffi::export(with_foreign)]
 pub trait SecureStorage: Send + Sync {
-    /// Stores `value` under `key`, overwriting any existing entry.
+    /// Saves `value` under `key`, replacing any existing entry.
     ///
     /// # Errors
-    /// - [`ClientError::Storage`] when platform storage returns an error.
-    fn store(&self, key: String, value: Vec<u8>) -> Result<(), ClientError>;
+    /// - [`RoostError::Storage`] when platform storage returns an error.
+    fn save(&self, key: String, value: Vec<u8>) -> Result<(), RoostError>;
 
     /// Returns the value stored under `key`, or `None` if not present.
     ///
     /// # Errors
-    /// - [`ClientError::Storage`] when platform storage returns an error.
-    fn load(&self, key: String) -> Result<Option<Vec<u8>>, ClientError>;
+    /// - [`RoostError::Storage`] when platform storage returns an error.
+    fn load(&self, key: String) -> Result<Option<Vec<u8>>, RoostError>;
 
     /// Removes the value stored under `key`. Missing keys are treated as success.
     ///
     /// # Errors
-    /// - [`ClientError::Storage`] when platform storage returns an error.
-    fn delete(&self, key: String) -> Result<(), ClientError>;
+    /// - [`RoostError::Storage`] when platform storage returns an error.
+    fn remove(&self, key: String) -> Result<(), RoostError>;
 }
 
 /// Secure storage held in memory, for this crate's unit tests.
@@ -52,12 +51,12 @@ pub(crate) struct MemoryStorage {
 
 #[cfg(test)]
 impl SecureStorage for MemoryStorage {
-    fn store(&self, key: String, value: Vec<u8>) -> Result<(), ClientError> {
+    fn save(&self, key: String, value: Vec<u8>) -> Result<(), RoostError> {
         let value = Zeroizing::new(value);
         Ok(self.inner.lock().unwrap().store(&key, &value)?)
     }
 
-    fn load(&self, key: String) -> Result<Option<Vec<u8>>, ClientError> {
+    fn load(&self, key: String) -> Result<Option<Vec<u8>>, RoostError> {
         Ok(self
             .inner
             .lock()
@@ -66,12 +65,12 @@ impl SecureStorage for MemoryStorage {
             .map(|value| value.to_vec()))
     }
 
-    fn delete(&self, key: String) -> Result<(), ClientError> {
+    fn remove(&self, key: String) -> Result<(), RoostError> {
         Ok(self.inner.lock().unwrap().delete(&key)?)
     }
 }
 
-// Bridges a client SecureStorage implementation into the core storage trait.
+// Bridges the host's SecureStorage into Core's storage trait.
 pub(crate) struct SecureStorageAdapter {
     storage: Arc<dyn SecureStorage>,
 }
@@ -85,7 +84,7 @@ impl SecureStorageAdapter {
 impl CoreSecureStorage for SecureStorageAdapter {
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.storage
-            .store(key.to_string(), value.to_vec())
+            .save(key.to_string(), value.to_vec())
             .map_err(|e| StorageError::IO(e.to_string()))
     }
 
@@ -98,7 +97,7 @@ impl CoreSecureStorage for SecureStorageAdapter {
 
     fn delete(&mut self, key: &str) -> Result<(), StorageError> {
         self.storage
-            .delete(key.to_string())
+            .remove(key.to_string())
             .map_err(|e| StorageError::IO(e.to_string()))
     }
 }

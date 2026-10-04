@@ -166,12 +166,7 @@ impl IdentityManager {
         })
     }
 
-    pub(crate) fn has_identity(&self) -> Result<bool, IdentityError> {
-        let storage = self.lock_storage()?;
-        has_identity_entry(&**storage)
-    }
-
-    // Use `KeyStore::prepare_reset` to clear dependent key material before identity.
+    // Use `KeyStore::prepare_identity_deletion` to clear dependent key material before identity.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
         storage
@@ -418,32 +413,5 @@ mod tests {
             identity_shared_secret.as_bytes(),
             peer_shared_secret.as_bytes()
         );
-    }
-
-    #[test]
-    fn has_identity_is_false_before_generate() {
-        let manager = manager();
-        assert!(!manager.has_identity().unwrap());
-    }
-
-    #[test]
-    fn has_identity_is_true_after_generate() {
-        let manager = manager();
-        manager.generate_identity(&mut OsRng).unwrap();
-        assert!(manager.has_identity().unwrap());
-    }
-
-    #[test]
-    fn has_identity_returns_true_when_only_x25519_half_present() {
-        let storage = Arc::new(Mutex::new(
-            Box::new(InMemorySecureStorage::new()) as Box<dyn SecureStorage>
-        ));
-        storage
-            .lock()
-            .unwrap()
-            .store(IDENTITY_X25519_KEY, &[0u8; 32])
-            .unwrap();
-        let manager = IdentityManager::new(storage);
-        assert!(manager.has_identity().unwrap());
     }
 }

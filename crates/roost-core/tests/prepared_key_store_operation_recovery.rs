@@ -1,7 +1,7 @@
 //! Prepared KeyStore operation recovery across process replacement and storage failure.
 //!
 //! The scenario crosses the public KeyStore and SecureStorage seams to model orphaned preparation,
-//! a crash after commit, ambiguous mutation results, and a crash during finalization.
+//! a crash after reservation, ambiguous mutation results, and a crash during finalization.
 
 use roost_core::{
     InMemorySecureStorage, KeyStore, KeyStoreError, KeyStoreOperationError,
@@ -162,7 +162,7 @@ fn prepared_journal_transition_recovers_from_before_and_after_apply_failures() {
         let storage = SharedSecureStorage::new();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
-        assert!(storage.key_store().prepare_generate_identity().is_err());
+        assert!(storage.key_store().prepare_identity_creation().is_err());
 
         let recovered = storage.key_store();
         let unfinished = recovered.unfinished_operations().unwrap();
@@ -176,24 +176,24 @@ fn prepared_journal_transition_recovers_from_before_and_after_apply_failures() {
                     .unwrap();
             }
         }
-        assert!(!recovered.has_identity().unwrap());
+        assert!(recovered.identity().unwrap().is_none());
     }
 }
 
 #[test]
-fn committed_journal_transition_recovers_from_before_and_after_apply_failures() {
+fn reserved_journal_transition_recovers_from_before_and_after_apply_failures() {
     for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
         let storage = SharedSecureStorage::new();
         let store = storage.key_store();
-        let prepared = store.prepare_generate_identity().unwrap();
+        let prepared = store.prepare_identity_creation().unwrap();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
-        assert!(store.commit_operation(prepared.operation.id).is_err());
+        assert!(store.reserve_operation(prepared.operation.id).is_err());
 
         let recovered = storage.key_store();
         let expected = match timing {
             FailureTiming::BeforeApply => KeyStoreOperationStatus::Prepared,
-            FailureTiming::AfterApply => KeyStoreOperationStatus::Committed,
+            FailureTiming::AfterApply => KeyStoreOperationStatus::Reserved,
         };
         assert_eq!(
             recovered.operation_status(prepared.operation.id).unwrap(),
@@ -201,7 +201,7 @@ fn committed_journal_transition_recovers_from_before_and_after_apply_failures() 
         );
         // The host transaction was deliberately not attempted, so abort is safe in either case.
         recovered.abort_operation(prepared.operation.id).unwrap();
-        assert!(!recovered.has_identity().unwrap());
+        assert!(recovered.identity().unwrap().is_none());
     }
 }
 
@@ -210,15 +210,15 @@ fn finalizing_journal_transition_recovers_from_before_and_after_apply_failures()
     for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
         let storage = SharedSecureStorage::new();
         let store = storage.key_store();
-        let prepared = store.prepare_generate_identity().unwrap();
-        store.commit_operation(prepared.operation.id).unwrap();
+        let prepared = store.prepare_identity_creation().unwrap();
+        store.reserve_operation(prepared.operation.id).unwrap();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
         assert!(store.finalize_operation(prepared.operation.id).is_err());
 
         let recovered = storage.key_store();
         let expected = match timing {
-            FailureTiming::BeforeApply => KeyStoreOperationStatus::Committed,
+            FailureTiming::BeforeApply => KeyStoreOperationStatus::Reserved,
             FailureTiming::AfterApply => KeyStoreOperationStatus::Finalizing,
         };
         assert_eq!(
@@ -226,7 +226,7 @@ fn finalizing_journal_transition_recovers_from_before_and_after_apply_failures()
             expected
         );
         recovered.finalize_operation(prepared.operation.id).unwrap();
-        assert!(recovered.has_identity().unwrap());
+        assert!(recovered.identity().unwrap().is_some());
     }
 }
 
@@ -235,8 +235,8 @@ fn progress_checkpoint_recovers_from_before_and_after_apply_failures() {
     for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
         let storage = SharedSecureStorage::new();
         let store = storage.key_store();
-        let prepared = store.prepare_generate_identity().unwrap();
-        store.commit_operation(prepared.operation.id).unwrap();
+        let prepared = store.prepare_identity_creation().unwrap();
+        store.reserve_operation(prepared.operation.id).unwrap();
         // Skip the Finalizing write, then fail the first durable progress checkpoint.
         storage.fail_store(OPERATION_JOURNAL_KEY, 1, timing);
 
@@ -258,7 +258,7 @@ fn progress_checkpoint_recovers_from_before_and_after_apply_failures() {
             storage.successful_stores("discovery/current"),
             expected_stores
         );
-        assert!(recovered.has_identity().unwrap());
+        assert!(recovered.identity().unwrap().is_some());
     }
 }
 
@@ -267,19 +267,19 @@ fn finalized_journal_transition_recovers_from_before_and_after_apply_failures() 
     for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
         let storage = SharedSecureStorage::new();
         let store = storage.key_store();
-        let identity = store.prepare_generate_identity().unwrap();
-        store.commit_operation(identity.operation.id).unwrap();
+        let identity = store.prepare_identity_creation().unwrap();
+        store.reserve_operation(identity.operation.id).unwrap();
         store.finalize_operation(identity.operation.id).unwrap();
-        let initial_signed_prekey = store.prepare_rotate_signed_prekey_now().unwrap();
+        let initial_signed_prekey = store.prepare_signed_prekey_rotation().unwrap();
         store
-            .commit_operation(initial_signed_prekey.operation.id)
+            .reserve_operation(initial_signed_prekey.operation.id)
             .unwrap();
         store
             .finalize_operation(initial_signed_prekey.operation.id)
             .unwrap();
-        let prepared = store.prepare_rotate_signed_prekey_if_stale().unwrap();
+        let prepared = store.prepare_signed_prekey_rotation_if_stale().unwrap();
         assert!(prepared.output.is_none());
-        store.commit_operation(prepared.operation.id).unwrap();
+        store.reserve_operation(prepared.operation.id).unwrap();
         // A no-op has only Finalizing and Finalized journal writes.
         storage.fail_store(OPERATION_JOURNAL_KEY, 1, timing);
 
@@ -304,7 +304,7 @@ fn aborted_journal_transition_recovers_from_before_and_after_apply_failures() {
     for timing in [FailureTiming::BeforeApply, FailureTiming::AfterApply] {
         let storage = SharedSecureStorage::new();
         let store = storage.key_store();
-        let prepared = store.prepare_generate_identity().unwrap();
+        let prepared = store.prepare_identity_creation().unwrap();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
         assert!(store.abort_operation(prepared.operation.id).is_err());
@@ -320,7 +320,7 @@ fn aborted_journal_transition_recovers_from_before_and_after_apply_failures() {
         );
         recovered.abort_operation(prepared.operation.id).unwrap();
         assert!(recovered.unfinished_operations().unwrap().is_empty());
-        assert!(!recovered.has_identity().unwrap());
+        assert!(recovered.identity().unwrap().is_none());
     }
 }
 
@@ -328,7 +328,7 @@ fn aborted_journal_transition_recovers_from_before_and_after_apply_failures() {
 fn orphaned_preparation_is_discoverable_and_abortable_after_restart() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let prepared = store.prepare_generate_identity().unwrap();
+    let prepared = store.prepare_identity_creation().unwrap();
     drop(store);
 
     let recovered = storage.key_store();
@@ -338,51 +338,51 @@ fn orphaned_preparation_is_discoverable_and_abortable_after_restart() {
     assert_eq!(unfinished[0].status, KeyStoreOperationStatus::Prepared);
 
     recovered.abort_operation(prepared.operation.id).unwrap();
-    assert!(!recovered.has_identity().unwrap());
+    assert!(recovered.identity().unwrap().is_none());
     assert!(recovered.unfinished_operations().unwrap().is_empty());
 }
 
 #[test]
-fn committed_preparation_can_finalize_after_restart() {
+fn reserved_preparation_can_finalize_after_restart() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let prepared = store.prepare_generate_identity().unwrap();
-    store.commit_operation(prepared.operation.id).unwrap();
+    let prepared = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
     drop(store);
 
     let recovered = storage.key_store();
     assert_eq!(
         recovered.unfinished_operations().unwrap()[0].status,
-        KeyStoreOperationStatus::Committed
+        KeyStoreOperationStatus::Reserved
     );
     recovered.finalize_operation(prepared.operation.id).unwrap();
-    assert!(recovered.has_identity().unwrap());
+    assert!(recovered.identity().unwrap().is_some());
 }
 
 #[test]
-fn committed_preparation_blocks_authoritative_reads_until_recovery() {
+fn reserved_preparation_blocks_authoritative_reads_until_recovery() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let prepared = store.prepare_generate_identity().unwrap();
-    store.commit_operation(prepared.operation.id).unwrap();
+    let prepared = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
 
     assert!(matches!(
-        store.has_identity(),
+        store.identity(),
         Err(KeyStoreError::Operation(
             KeyStoreOperationError::RecoveryRequired { id }
         )) if id == prepared.operation.id
     ));
 
     store.abort_operation(prepared.operation.id).unwrap();
-    assert!(!store.has_identity().unwrap());
+    assert!(store.identity().unwrap().is_none());
 }
 
 #[test]
 fn interrupted_finalization_resumes_from_durable_progress() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let prepared = store.prepare_generate_identity().unwrap();
-    store.commit_operation(prepared.operation.id).unwrap();
+    let prepared = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
 
     // Persist Finalizing, apply the first mutation, persist its progress, then fail the second
     // mutation. Recovery must resume at the second mutation instead of replaying the first.
@@ -398,15 +398,15 @@ fn interrupted_finalization_resumes_from_durable_progress() {
     );
     recovered.finalize_operation(prepared.operation.id).unwrap();
     assert_eq!(storage.successful_stores("discovery/current"), 1);
-    assert!(recovered.has_identity().unwrap());
+    assert!(recovered.identity().unwrap().is_some());
 }
 
 #[test]
 fn applied_store_with_ambiguous_failure_is_safely_replayed() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let prepared = store.prepare_generate_identity().unwrap();
-    store.commit_operation(prepared.operation.id).unwrap();
+    let prepared = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
 
     storage.fail_store_after_apply("discovery/current");
     assert!(store.finalize_operation(prepared.operation.id).is_err());
@@ -431,11 +431,11 @@ fn applied_store_with_ambiguous_failure_is_safely_replayed() {
 fn applied_delete_with_ambiguous_failure_is_safely_replayed() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let identity = store.prepare_generate_identity().unwrap();
-    store.commit_operation(identity.operation.id).unwrap();
+    let identity = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(identity.operation.id).unwrap();
     store.finalize_operation(identity.operation.id).unwrap();
-    let reset = store.prepare_reset().unwrap();
-    store.commit_operation(reset.operation.id).unwrap();
+    let reset = store.prepare_identity_deletion().unwrap();
+    store.reserve_operation(reset.operation.id).unwrap();
 
     storage.fail_delete_after_apply("discovery/current");
     assert!(store.finalize_operation(reset.operation.id).is_err());
@@ -445,5 +445,5 @@ fn applied_delete_with_ambiguous_failure_is_safely_replayed() {
     let recovered = storage.key_store();
     recovered.finalize_operation(reset.operation.id).unwrap();
     assert_eq!(storage.successful_deletes("discovery/current"), 2);
-    assert!(!recovered.has_identity().unwrap());
+    assert!(recovered.identity().unwrap().is_none());
 }

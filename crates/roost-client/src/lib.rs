@@ -1,10 +1,7 @@
-//! UniFFI bindings for the cryptographic core.
+//! The Swift and Kotlin API, exported through UniFFI.
 //!
-//! This crate exposes the storage-backed [`Client`] API and FFI-safe record types used by SDKs.
-//! Apps provide a platform [`SecureStorage`] implementation, then keep one [`Client`] per identity
-//! namespace. Identity, messaging and contacts interfaces share its configuration. The host owns
-//! protocol-state transactions and observation of committed stores; see [`Client`] for serialization
-//! and recovery requirements.
+//! Hosts create one [`IdentityContext`] per identity namespace over their own [`SecureStorage`].
+//! Its documentation says what Roost and the host each own.
 //!
 //! # Feature flags
 //!
@@ -15,12 +12,12 @@ uniffi::setup_scaffolding!("roost_client");
 
 mod binding;
 mod certificate;
-mod client;
+mod context;
 #[cfg(feature = "development-certificates")]
 mod development_certificate;
 mod error;
-mod key_store_operation;
 mod message;
+mod operation;
 mod protocol;
 mod records;
 mod storage;
@@ -32,21 +29,21 @@ pub use certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
     ValidatedSenderCertificate, validate_sender_certificate,
 };
-pub use client::{
-    Client, ClientConfiguration, Contacts, IdentityOperations, Messaging, SessionAcceptanceResult,
-    SessionInitiationResult,
+pub use context::{
+    ContactBlock, Contacts, ContextConfiguration, IdentityContext, Messaging,
+    SessionAcceptanceResult, SessionInitiationResult,
 };
 #[cfg(feature = "development-certificates")]
 pub use development_certificate::{DevelopmentCertificateAuthority, DevelopmentSenderCertificate};
-pub use error::ClientError;
-pub use key_store_operation::{
-    KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
-    PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
-    PreparedSignedPreKeyRotation, SecureStoragePrecondition, UnfinishedKeyStoreOperation,
-};
+pub use error::RoostError;
 pub use message::{
     FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial, decode_message,
     encode_message,
+};
+pub use operation::{
+    OperationId, OperationStatus, PreparedContactBlock, PreparedIdentity, PreparedInboxRotation,
+    PreparedOneTimePreKeys, PreparedSessionAcceptance, PreparedSignedPreKeyRotation,
+    UnfinishedOperation,
 };
 pub use protocol::{
     AcknowledgmentOutcome, AcknowledgmentResult, BlockedContactAcknowledgmentPolicy,

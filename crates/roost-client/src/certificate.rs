@@ -1,6 +1,6 @@
 //! Sender-certificate validation records exposed through UniFFI.
 
-use crate::error::ClientError;
+use crate::error::RoostError;
 use crate::protocol::IdentityKey;
 use crate::records::fixed_32;
 use crate::time::{millis_from_secs, time_from_millis};
@@ -85,7 +85,7 @@ pub fn validate_sender_certificate(
     revocation_state: RevocationState,
     reference_time_millis: u64,
     grace_window_millis: u64,
-) -> Result<ValidatedSenderCertificate, ClientError> {
+) -> Result<ValidatedSenderCertificate, RoostError> {
     let protocol_domain_keys = domain_signing_keys_to_protocol(&domain_signing_keys)?;
     let revoked_identity_keys = revoked_identity_keys_to_protocol(&revocation_state)?;
     let protocol_revocation_state =
@@ -103,8 +103,8 @@ pub fn validate_sender_certificate(
     Ok(ValidatedSenderCertificate {
         signing_key_id: validated.signing_key_id,
         identity_key: IdentityKey {
-            x25519_public_key: validated.identity_key.x25519_public_key.to_vec(),
-            ed25519_verifying_key: validated.identity_key.ed25519_verifying_key.to_vec(),
+            agreement_key: validated.identity_key.x25519_public_key.to_vec(),
+            signing_key: validated.identity_key.ed25519_verifying_key.to_vec(),
         },
         relay_domain: validated.relay_domain,
         expires_at_millis: millis_from_secs(validated.expires_at_secs, "certificate expiry")?,
@@ -112,7 +112,7 @@ pub fn validate_sender_certificate(
 }
 
 impl DomainSigningKey {
-    pub(crate) fn to_protocol(&self) -> Result<ProtocolDomainSigningKey<'_>, ClientError> {
+    pub(crate) fn to_protocol(&self) -> Result<ProtocolDomainSigningKey<'_>, RoostError> {
         fixed_32(&self.verifying_key, "domain signing verifying key")?;
         Ok(ProtocolDomainSigningKey {
             id: &self.id,
@@ -133,13 +133,13 @@ impl DomainSigningKeyStatus {
 
 pub(crate) fn domain_signing_keys_to_protocol(
     values: &[DomainSigningKey],
-) -> Result<Vec<ProtocolDomainSigningKey<'_>>, ClientError> {
+) -> Result<Vec<ProtocolDomainSigningKey<'_>>, RoostError> {
     values.iter().map(DomainSigningKey::to_protocol).collect()
 }
 
 pub(crate) fn revoked_identity_keys_to_protocol(
     state: &RevocationState,
-) -> Result<Vec<SenderCertificateIdentityKey>, ClientError> {
+) -> Result<Vec<SenderCertificateIdentityKey>, RoostError> {
     state
         .revoked_identity_keys
         .iter()

@@ -16,7 +16,7 @@ use roost_crypto::{
 const CREATED_AT_SECS: u64 = 1_700_000_000;
 
 fn complete<T>(key_store: &KeyStore, prepared: PreparedKeyStoreOperation<T>) -> T {
-    key_store.commit_operation(prepared.operation.id).unwrap();
+    key_store.reserve_operation(prepared.operation.id).unwrap();
     key_store.finalize_operation(prepared.operation.id).unwrap();
     prepared.output
 }
@@ -38,7 +38,7 @@ fn peer_contact() -> ContactIdentity {
 
 fn store_with_contact() -> (KeyStore, ProtocolStateSnapshot, ContactIdentityKey) {
     let key_store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    let identity = key_store.prepare_generate_identity().unwrap();
+    let identity = key_store.prepare_identity_creation().unwrap();
     complete(&key_store, identity);
     let engine = ProtocolStateEngine::new();
     let contact = peer_contact();
@@ -57,7 +57,7 @@ fn store_with_contact() -> (KeyStore, ProtocolStateSnapshot, ContactIdentityKey)
 #[test]
 fn blocking_a_contact_rotates_the_inbox() {
     let (key_store, snapshot, identity_key) = store_with_contact();
-    let before = key_store.current_discovery_key_bundle().unwrap().epoch;
+    let before = key_store.current_public_discovery_key().unwrap().epoch;
     let previous_capability = *key_store.current_delivery_capability().unwrap().to_bytes();
 
     let block = complete(
@@ -88,7 +88,7 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
             .unwrap(),
     );
     snapshot.apply_all(first.contact.state_updates).unwrap();
-    let generation_after_first = key_store.current_discovery_key_bundle().unwrap().epoch;
+    let generation_after_first = key_store.current_public_discovery_key().unwrap().epoch;
 
     let prepared = key_store
         .prepare_block_contact(&snapshot, identity_key)
@@ -107,7 +107,7 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
         KeyStoreOperationStatus::Finalized
     ));
     assert_eq!(
-        key_store.current_discovery_key_bundle().unwrap().epoch,
+        key_store.current_public_discovery_key().unwrap().epoch,
         generation_after_first
     );
 }

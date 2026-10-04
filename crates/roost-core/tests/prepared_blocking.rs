@@ -69,8 +69,8 @@ fn setup() -> (
 ) {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let identity = store.prepare_generate_identity().unwrap();
-    store.commit_operation(identity.operation.id).unwrap();
+    let identity = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(identity.operation.id).unwrap();
     store.finalize_operation(identity.operation.id).unwrap();
     let engine = ProtocolStateEngine::new();
     let contact = peer_contact();
@@ -90,7 +90,7 @@ fn setup() -> (
 #[test]
 fn prepared_block_commits_contact_and_rotation_without_a_cross_store_partial_state() {
     let (_storage, store, engine, mut snapshot, identity_key) = setup();
-    let before = store.current_discovery_key_bundle().unwrap().epoch;
+    let before = store.current_public_discovery_key().unwrap().epoch;
 
     let prepared = store
         .prepare_block_contact(&snapshot, identity_key)
@@ -108,16 +108,16 @@ fn prepared_block_commits_contact_and_rotation_without_a_cross_store_partial_sta
             .epoch,
         before + 1
     );
-    assert_eq!(store.current_discovery_key_bundle().unwrap().epoch, before);
+    assert_eq!(store.current_public_discovery_key().unwrap().epoch, before);
 
-    store.commit_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
     snapshot
         .apply_all(prepared.output.contact.state_updates)
         .unwrap();
     store.finalize_operation(prepared.operation.id).unwrap();
 
     assert_eq!(
-        store.current_discovery_key_bundle().unwrap().epoch,
+        store.current_public_discovery_key().unwrap().epoch,
         before + 1
     );
     assert!(
@@ -132,22 +132,22 @@ fn prepared_block_commits_contact_and_rotation_without_a_cross_store_partial_sta
 #[test]
 fn failed_host_block_commit_aborts_without_rotating_the_inbox() {
     let (_storage, store, _engine, snapshot, identity_key) = setup();
-    let before = store.current_discovery_key_bundle().unwrap().epoch;
+    let before = store.current_public_discovery_key().unwrap().epoch;
     let prepared = store
         .prepare_block_contact(&snapshot, identity_key)
         .unwrap();
 
-    store.commit_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
     store.abort_operation(prepared.operation.id).unwrap();
 
-    assert_eq!(store.current_discovery_key_bundle().unwrap().epoch, before);
+    assert_eq!(store.current_public_discovery_key().unwrap().epoch, before);
 }
 
 #[test]
 fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_record() {
     for applied_before_response_loss in [false, true] {
         let (storage, store, engine, mut snapshot, identity_key) = setup();
-        let before = store.current_discovery_key_bundle().unwrap().epoch;
+        let before = store.current_public_discovery_key().unwrap().epoch;
         let prepared = store
             .prepare_block_contact(&snapshot, identity_key)
             .unwrap();
@@ -171,7 +171,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
             .sync_all()
             .unwrap();
 
-        store.commit_operation(id).unwrap();
+        store.reserve_operation(id).unwrap();
         assert!(updates.iter().all(|update| {
             update
                 .commit_condition()
@@ -200,7 +200,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
                 .unfinished_operations()
                 .unwrap()
                 .iter()
-                .any(|operation| operation.status == KeyStoreOperationStatus::Committed)
+                .any(|operation| operation.status == KeyStoreOperationStatus::Reserved)
         );
         drop(snapshot);
         drop(store);
@@ -209,7 +209,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
         let unfinished = recovered.unfinished_operations().unwrap();
         assert_eq!(unfinished.len(), 1);
         let operation = &unfinished[0];
-        assert_eq!(operation.status, KeyStoreOperationStatus::Committed);
+        assert_eq!(operation.status, KeyStoreOperationStatus::Reserved);
         let durable = Zeroizing::new(std::fs::read(&committed_path).unwrap());
         let (host_id, blob): (Option<[u8; 16]>, &[u8]) = postcard::from_bytes(&durable).unwrap();
         let expected_status = if host_id == Some(*operation.operation.id.as_bytes()) {
@@ -247,7 +247,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
             applied_before_response_loss
         );
         assert_eq!(
-            recovered.current_discovery_key_bundle().unwrap().epoch,
+            recovered.current_public_discovery_key().unwrap().epoch,
             before + u32::from(applied_before_response_loss)
         );
         std::fs::remove_dir_all(directory).unwrap();

@@ -1,6 +1,6 @@
 //! FFI-safe sealed-sender Message records and encode/decode helpers.
 
-use crate::error::ClientError;
+use crate::error::RoostError;
 use crate::records::fixed_32;
 use roost_core::Message as CoreMessage;
 use roost_core::SealedFramePreKeyReference as CorePreKeyReference;
@@ -86,7 +86,7 @@ impl Message {
         }
     }
 
-    pub(crate) fn to_core(&self) -> Result<CoreMessage, ClientError> {
+    pub(crate) fn to_core(&self) -> Result<CoreMessage, RoostError> {
         Ok(CoreMessage {
             version: self.version,
             recipient_public_key: fixed_32(&self.recipient_public_key, "recipient public key")?,
@@ -113,7 +113,7 @@ impl FramePreKeyReference {
         }
     }
 
-    fn to_core(&self) -> Result<CorePreKeyReference, ClientError> {
+    fn to_core(&self) -> Result<CorePreKeyReference, RoostError> {
         Ok(CorePreKeyReference {
             discovery_epoch: self.discovery_epoch,
             signed_prekey_public_key: fixed_32(
@@ -143,12 +143,12 @@ impl PayloadKind {
 
 /// Encodes a Message into canonical sealed-frame bytes.
 #[uniffi::export]
-pub fn encode_message(message: Message) -> Result<Vec<u8>, ClientError> {
+pub fn encode_message(message: Message) -> Result<Vec<u8>, RoostError> {
     Ok(message.to_core()?.to_bytes()?)
 }
 
 /// Decodes canonical sealed-frame bytes into transport-visible fields.
 #[uniffi::export]
-pub fn decode_message(bytes: Vec<u8>) -> Result<Message, ClientError> {
+pub fn decode_message(bytes: Vec<u8>) -> Result<Message, RoostError> {
     Ok(Message::from_core(CoreMessage::from_bytes(&bytes)?))
 }

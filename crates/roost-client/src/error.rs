@@ -14,7 +14,7 @@ use roost_protocol::{SenderCertificateValidationError, SignatureError};
 /// bindings. `reason` fields are diagnostic strings for logs and must not drive application
 /// logic.
 #[derive(Debug, uniffi::Error)]
-pub enum ClientError {
+pub enum RoostError {
     /// An identity already exists in storage.
     AlreadyExists,
     /// Cryptographic authentication or decryption failed.
@@ -69,8 +69,8 @@ pub enum ClientError {
     },
     /// A committed or finalizing KeyStore operation must be recovered before ordinary work.
     OperationRecoveryRequired {
-        /// Opaque 16-byte identifier of the operation to recover.
-        operation_id: Vec<u8>,
+        /// The operation to recover.
+        operation_id: crate::OperationId,
         /// Diagnostic context for logging only.
         reason: String,
     },
@@ -104,127 +104,127 @@ pub enum ClientError {
     },
 }
 
-impl std::error::Error for ClientError {}
+impl std::error::Error for RoostError {}
 
-impl std::fmt::Display for ClientError {
+impl std::fmt::Display for RoostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientError::AlreadyExists => write!(f, "identity already exists"),
-            ClientError::AuthenticationFailed { reason } => {
+            RoostError::AlreadyExists => write!(f, "identity already exists"),
+            RoostError::AuthenticationFailed { reason } => {
                 write!(f, "authentication failed: {reason}")
             }
-            ClientError::BackupFailed { reason } => write!(f, "backup failed: {reason}"),
-            ClientError::BackupImportFailed { reason } => {
+            RoostError::BackupFailed { reason } => write!(f, "backup failed: {reason}"),
+            RoostError::BackupImportFailed { reason } => {
                 write!(f, "backup import failed: {reason}")
             }
-            ClientError::BlockedContact { reason } => write!(f, "blocked contact: {reason}"),
-            ClientError::CertificateRejected { reason } => {
+            RoostError::BlockedContact { reason } => write!(f, "blocked contact: {reason}"),
+            RoostError::CertificateRejected { reason } => {
                 write!(f, "certificate rejected: {reason}")
             }
-            ClientError::ContactNotAccepted => write!(f, "contact is not accepted"),
-            ClientError::Corrupt => write!(f, "stored key material is corrupt"),
-            ClientError::DecryptionFailed => write!(f, "decryption failed"),
-            ClientError::InternalError { reason } => write!(f, "internal error: {reason}"),
-            ClientError::InvalidData { reason } => write!(f, "invalid data: {reason}"),
-            ClientError::InboxRotationRequired => {
+            RoostError::ContactNotAccepted => write!(f, "contact is not accepted"),
+            RoostError::Corrupt => write!(f, "stored key material is corrupt"),
+            RoostError::DecryptionFailed => write!(f, "decryption failed"),
+            RoostError::InternalError { reason } => write!(f, "internal error: {reason}"),
+            RoostError::InvalidData { reason } => write!(f, "invalid data: {reason}"),
+            RoostError::InboxRotationRequired => {
                 write!(f, "inbox rotation required after backup restore")
             }
-            ClientError::NotFound => write!(f, "key material not found"),
-            ClientError::OperationConflict { reason } => {
+            RoostError::NotFound => write!(f, "key material not found"),
+            RoostError::OperationConflict { reason } => {
                 write!(f, "prepared-operation conflict: {reason}")
             }
-            ClientError::OperationRecoveryRequired { reason, .. } => {
+            RoostError::OperationRecoveryRequired { reason, .. } => {
                 write!(f, "prepared-operation recovery required: {reason}")
             }
-            ClientError::ProtocolStateFault { reason } => {
+            RoostError::ProtocolStateFault { reason } => {
                 write!(f, "protocol-state fault: {reason}")
             }
-            ClientError::Storage { reason } => write!(f, "storage error: {reason}"),
-            ClientError::SecureStoragePreconditionChanged { key } => {
+            RoostError::Storage { reason } => write!(f, "storage error: {reason}"),
+            RoostError::SecureStoragePreconditionChanged { key } => {
                 write!(f, "secure-storage precondition changed for {key}")
             }
-            ClientError::TerminalSessionRecovery { reason } => {
+            RoostError::TerminalSessionRecovery { reason } => {
                 write!(f, "terminal session recovery required: {reason}")
             }
-            ClientError::TooManyUnfinishedOperations => {
+            RoostError::TooManyUnfinishedOperations => {
                 write!(f, "too many unfinished prepared operations")
             }
-            ClientError::UnsupportedVersion { reason } => {
+            RoostError::UnsupportedVersion { reason } => {
                 write!(f, "unsupported version: {reason}")
             }
         }
     }
 }
 
-impl From<uniffi::UnexpectedUniFFICallbackError> for ClientError {
+impl From<uniffi::UnexpectedUniFFICallbackError> for RoostError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        ClientError::InternalError {
+        RoostError::InternalError {
             reason: "unexpected foreign callback failure".into(),
         }
     }
 }
 
-impl From<IdentityError> for ClientError {
+impl From<IdentityError> for RoostError {
     fn from(e: IdentityError) -> Self {
         match e {
-            IdentityError::AlreadyExists => ClientError::AlreadyExists,
-            IdentityError::BackupFailed(reason) => ClientError::BackupFailed { reason },
-            IdentityError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+            IdentityError::AlreadyExists => RoostError::AlreadyExists,
+            IdentityError::BackupFailed(reason) => RoostError::BackupFailed { reason },
+            IdentityError::UnsupportedVersion(version) => RoostError::UnsupportedVersion {
                 reason: format!("unsupported stored format version: {version}"),
             },
-            IdentityError::Corrupt => ClientError::Corrupt,
-            IdentityError::DecryptionFailed => ClientError::DecryptionFailed,
-            IdentityError::InvalidData(reason) => ClientError::InvalidData { reason },
-            IdentityError::LockPoisoned => ClientError::InternalError {
+            IdentityError::Corrupt => RoostError::Corrupt,
+            IdentityError::DecryptionFailed => RoostError::DecryptionFailed,
+            IdentityError::InvalidData(reason) => RoostError::InvalidData { reason },
+            IdentityError::LockPoisoned => RoostError::InternalError {
                 reason: "internal lock poisoned".into(),
             },
-            IdentityError::NotFound => ClientError::NotFound,
-            IdentityError::Storage(e) => ClientError::Storage {
+            IdentityError::NotFound => RoostError::NotFound,
+            IdentityError::Storage(e) => RoostError::Storage {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<SignedPreKeyError> for ClientError {
+impl From<SignedPreKeyError> for RoostError {
     fn from(e: SignedPreKeyError) -> Self {
         match e {
-            SignedPreKeyError::Clock => ClientError::InternalError {
+            SignedPreKeyError::Clock => RoostError::InternalError {
                 reason: "system clock is before Unix epoch".into(),
             },
-            SignedPreKeyError::Corrupt => ClientError::Corrupt,
+            SignedPreKeyError::Corrupt => RoostError::Corrupt,
             SignedPreKeyError::Discovery(e) => e.into(),
-            SignedPreKeyError::InboxRotationRequired => ClientError::InboxRotationRequired,
-            SignedPreKeyError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+            SignedPreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
+            SignedPreKeyError::UnsupportedVersion(version) => RoostError::UnsupportedVersion {
                 reason: format!("unsupported stored format version: {version}"),
             },
-            SignedPreKeyError::InvalidData(reason) => ClientError::InvalidData { reason },
-            SignedPreKeyError::LockPoisoned => ClientError::InternalError {
+            SignedPreKeyError::InvalidData(reason) => RoostError::InvalidData { reason },
+            SignedPreKeyError::LockPoisoned => RoostError::InternalError {
                 reason: "internal lock poisoned".into(),
             },
-            SignedPreKeyError::NotFound => ClientError::NotFound,
+            SignedPreKeyError::NotFound => RoostError::NotFound,
             SignedPreKeyError::Storage(e) => e.into(),
         }
     }
 }
 
-impl From<OneTimePreKeyError> for ClientError {
+impl From<OneTimePreKeyError> for RoostError {
     fn from(e: OneTimePreKeyError) -> Self {
         match e {
-            OneTimePreKeyError::Clock => ClientError::InternalError {
+            OneTimePreKeyError::Clock => RoostError::InternalError {
                 reason: "system clock is before Unix epoch".into(),
             },
             OneTimePreKeyError::Discovery(e) => e.into(),
-            OneTimePreKeyError::InboxRotationRequired => ClientError::InboxRotationRequired,
-            OneTimePreKeyError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+            OneTimePreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
+            OneTimePreKeyError::UnsupportedVersion(version) => RoostError::UnsupportedVersion {
                 reason: format!("unsupported stored format version: {version}"),
             },
-            OneTimePreKeyError::InvalidData(reason) => ClientError::InvalidData { reason },
-            OneTimePreKeyError::LockPoisoned => ClientError::InternalError {
+            OneTimePreKeyError::InvalidData(reason) => RoostError::InvalidData { reason },
+            OneTimePreKeyError::LockPoisoned => RoostError::InternalError {
                 reason: "internal lock poisoned".into(),
             },
-            OneTimePreKeyError::NotFound => ClientError::NotFound,
-            OneTimePreKeyError::StaleEpoch => ClientError::InvalidData {
+            OneTimePreKeyError::NotFound => RoostError::NotFound,
+            OneTimePreKeyError::StaleEpoch => RoostError::InvalidData {
                 reason: "one-time pre-key belongs to a superseded discovery-key epoch".into(),
             },
             OneTimePreKeyError::Storage(e) => e.into(),
@@ -232,69 +232,69 @@ impl From<OneTimePreKeyError> for ClientError {
     }
 }
 
-impl From<DiscoveryKeyError> for ClientError {
+impl From<DiscoveryKeyError> for RoostError {
     fn from(e: DiscoveryKeyError) -> Self {
         match e {
-            DiscoveryKeyError::Clock => ClientError::InternalError {
+            DiscoveryKeyError::Clock => RoostError::InternalError {
                 reason: "system clock is before Unix epoch".into(),
             },
-            DiscoveryKeyError::Corrupt => ClientError::Corrupt,
+            DiscoveryKeyError::Corrupt => RoostError::Corrupt,
             DiscoveryKeyError::Identity(e) => e.into(),
-            DiscoveryKeyError::UnsupportedVersion(version) => ClientError::UnsupportedVersion {
+            DiscoveryKeyError::UnsupportedVersion(version) => RoostError::UnsupportedVersion {
                 reason: format!("unsupported stored format version: {version}"),
             },
-            DiscoveryKeyError::InvalidData(reason) => ClientError::InvalidData { reason },
-            DiscoveryKeyError::LockPoisoned => ClientError::InternalError {
+            DiscoveryKeyError::InvalidData(reason) => RoostError::InvalidData { reason },
+            DiscoveryKeyError::LockPoisoned => RoostError::InternalError {
                 reason: "internal lock poisoned".into(),
             },
-            DiscoveryKeyError::NotFound => ClientError::NotFound,
+            DiscoveryKeyError::NotFound => RoostError::NotFound,
             DiscoveryKeyError::Storage(e) => e.into(),
         }
     }
 }
 
-impl From<StorageError> for ClientError {
+impl From<StorageError> for RoostError {
     fn from(e: StorageError) -> Self {
-        ClientError::Storage {
+        RoostError::Storage {
             reason: e.to_string(),
         }
     }
 }
 
-impl From<KeyStoreOperationError> for ClientError {
+impl From<KeyStoreOperationError> for RoostError {
     fn from(e: KeyStoreOperationError) -> Self {
         match e {
-            KeyStoreOperationError::Corrupt(_) => ClientError::Corrupt,
+            KeyStoreOperationError::Corrupt(_) => RoostError::Corrupt,
             KeyStoreOperationError::InvalidTransition { status, action } => {
-                ClientError::OperationConflict {
+                RoostError::OperationConflict {
                     reason: format!("cannot {action} operation in {status:?} state"),
                 }
             }
-            KeyStoreOperationError::LockPoisoned => ClientError::InternalError {
+            KeyStoreOperationError::LockPoisoned => RoostError::InternalError {
                 reason: "prepared-operation lock poisoned".into(),
             },
-            KeyStoreOperationError::NotFound => ClientError::NotFound,
+            KeyStoreOperationError::NotFound => RoostError::NotFound,
             KeyStoreOperationError::PreconditionChanged { key } => {
-                ClientError::SecureStoragePreconditionChanged { key }
+                RoostError::SecureStoragePreconditionChanged { key }
             }
-            KeyStoreOperationError::Randomness => ClientError::InternalError {
+            KeyStoreOperationError::Randomness => RoostError::InternalError {
                 reason: "operation identifier generation failed".into(),
             },
             KeyStoreOperationError::RecoveryRequired { id } => {
-                ClientError::OperationRecoveryRequired {
-                    operation_id: id.as_bytes().to_vec(),
+                RoostError::OperationRecoveryRequired {
+                    operation_id: crate::OperationId::from_core(id),
                     reason: "recover the identified operation before continuing".into(),
                 }
             }
             KeyStoreOperationError::Storage(e) => e.into(),
             KeyStoreOperationError::TooManyUnfinishedOperations => {
-                ClientError::TooManyUnfinishedOperations
+                RoostError::TooManyUnfinishedOperations
             }
         }
     }
 }
 
-impl From<KeyStoreError> for ClientError {
+impl From<KeyStoreError> for RoostError {
     fn from(e: KeyStoreError) -> Self {
         match e {
             KeyStoreError::Discovery(e) => e.into(),
@@ -307,7 +307,7 @@ impl From<KeyStoreError> for ClientError {
     }
 }
 
-impl From<HandshakeError> for ClientError {
+impl From<HandshakeError> for RoostError {
     fn from(e: HandshakeError) -> Self {
         match e {
             HandshakeError::PublicKey(source) => source.into(),
@@ -317,68 +317,68 @@ impl From<HandshakeError> for ClientError {
             | HandshakeError::OneTimePreKeyMismatch
             | HandshakeError::SenderIdentityMismatch
             | HandshakeError::SenderProofInvalid
-            | HandshakeError::SignedPreKeyMismatch => ClientError::AuthenticationFailed {
+            | HandshakeError::SignedPreKeyMismatch => RoostError::AuthenticationFailed {
                 reason: e.to_string(),
             },
-            HandshakeError::UnsupportedPreKeyBundleVersion(_) => ClientError::UnsupportedVersion {
+            HandshakeError::UnsupportedPreKeyBundleVersion(_) => RoostError::UnsupportedVersion {
                 reason: e.to_string(),
             },
             HandshakeError::EnvelopeEncode | HandshakeError::HkdfExpand => {
-                ClientError::InternalError {
+                RoostError::InternalError {
                     reason: e.to_string(),
                 }
             }
             HandshakeError::EnvelopeDecode
             | HandshakeError::MissingOneTimePreKey
-            | HandshakeError::StalePreKey => ClientError::InvalidData {
+            | HandshakeError::StalePreKey => RoostError::InvalidData {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<PublicKeyError> for ClientError {
+impl From<PublicKeyError> for RoostError {
     fn from(e: PublicKeyError) -> Self {
         match e {
             PublicKeyError::Signature(source) => source.into(),
-            PublicKeyError::InvalidKeyEncoding => ClientError::InvalidData {
+            PublicKeyError::InvalidKeyEncoding => RoostError::InvalidData {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<RatchetError> for ClientError {
+impl From<RatchetError> for RoostError {
     fn from(e: RatchetError) -> Self {
         match e {
             RatchetError::Aead | RatchetError::NonContributorySharedSecret => {
-                ClientError::AuthenticationFailed {
+                RoostError::AuthenticationFailed {
                     reason: e.to_string(),
                 }
             }
-            RatchetError::HkdfExpand | RatchetError::InvalidHmacKey => ClientError::InternalError {
+            RatchetError::HkdfExpand | RatchetError::InvalidHmacKey => RoostError::InternalError {
                 reason: e.to_string(),
             },
             RatchetError::InvalidState(_)
             | RatchetError::MaxSkipExceeded
-            | RatchetError::MaxSkippedKeysExceeded => ClientError::InvalidData {
+            | RatchetError::MaxSkippedKeysExceeded => RoostError::InvalidData {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<RatchetStateError> for ClientError {
+impl From<RatchetStateError> for RoostError {
     fn from(e: RatchetStateError) -> Self {
         match e {
-            RatchetStateError::UnsupportedVersion(_) => ClientError::UnsupportedVersion {
+            RatchetStateError::UnsupportedVersion(_) => RoostError::UnsupportedVersion {
                 reason: e.to_string(),
             },
-            RatchetStateError::Encode => ClientError::InternalError {
+            RatchetStateError::Encode => RoostError::InternalError {
                 reason: e.to_string(),
             },
             RatchetStateError::Decode | RatchetStateError::MaxSkippedKeysExceeded => {
-                ClientError::InvalidData {
+                RoostError::InvalidData {
                     reason: e.to_string(),
                 }
             }
@@ -386,42 +386,42 @@ impl From<RatchetStateError> for ClientError {
     }
 }
 
-impl From<SealedFrameError> for ClientError {
+impl From<SealedFrameError> for RoostError {
     fn from(e: SealedFrameError) -> Self {
         match e {
             SealedFrameError::Aead | SealedFrameError::NonContributorySharedSecret => {
-                ClientError::AuthenticationFailed {
+                RoostError::AuthenticationFailed {
                     reason: e.to_string(),
                 }
             }
-            SealedFrameError::Encode | SealedFrameError::HkdfExpand => ClientError::InternalError {
+            SealedFrameError::Encode | SealedFrameError::HkdfExpand => RoostError::InternalError {
                 reason: e.to_string(),
             },
-            SealedFrameError::Decode => ClientError::InvalidData {
+            SealedFrameError::Decode => RoostError::InvalidData {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<SignatureError> for ClientError {
+impl From<SignatureError> for RoostError {
     fn from(e: SignatureError) -> Self {
         match e {
-            SignatureError::SignatureInvalid => ClientError::AuthenticationFailed {
+            SignatureError::SignatureInvalid => RoostError::AuthenticationFailed {
                 reason: e.to_string(),
             },
-            SignatureError::InvalidSignatureContext => ClientError::InvalidData {
+            SignatureError::InvalidSignatureContext => RoostError::InvalidData {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<MessageError> for ClientError {
+impl From<MessageError> for RoostError {
     fn from(e: MessageError) -> Self {
         match e {
             MessageError::UnsupportedPayloadKind(_) | MessageError::UnsupportedVersion(_) => {
-                ClientError::UnsupportedVersion {
+                RoostError::UnsupportedVersion {
                     reason: e.to_string(),
                 }
             }
@@ -430,43 +430,43 @@ impl From<MessageError> for ClientError {
             | MessageError::Decode
             | MessageError::EncodedTooLarge
             | MessageError::InvalidPublicKey
-            | MessageError::PayloadTooLarge => ClientError::InvalidData {
+            | MessageError::PayloadTooLarge => RoostError::InvalidData {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<ProtocolStateError> for ClientError {
+impl From<ProtocolStateError> for RoostError {
     fn from(e: ProtocolStateError) -> Self {
         match e {
             ProtocolStateError::SenderCertificateValidation(source) => {
-                ClientError::CertificateRejected {
+                RoostError::CertificateRejected {
                     reason: source.to_string(),
                 }
             }
-            ProtocolStateError::UnsupportedBlobVersion { .. } => ClientError::UnsupportedVersion {
+            ProtocolStateError::UnsupportedBlobVersion { .. } => RoostError::UnsupportedVersion {
                 reason: e.to_string(),
             },
             ProtocolStateError::MissingSenderCertificateValidation
             | ProtocolStateError::InvalidDeduplicationCapacity { .. }
             | ProtocolStateError::InvalidHardeningLimit { .. }
             | ProtocolStateError::InvalidMessage { .. }
-            | ProtocolStateError::InvalidStateKey { .. } => ClientError::InvalidData {
+            | ProtocolStateError::InvalidStateKey { .. } => RoostError::InvalidData {
                 reason: e.to_string(),
             },
-            ProtocolStateError::BlockedContact => ClientError::BlockedContact {
+            ProtocolStateError::BlockedContact => RoostError::BlockedContact {
                 reason: e.to_string(),
             },
-            ProtocolStateError::ContactNotAccepted => ClientError::ContactNotAccepted,
-            ProtocolStateError::SessionUnrecoverable => ClientError::TerminalSessionRecovery {
+            ProtocolStateError::ContactNotAccepted => RoostError::ContactNotAccepted,
+            ProtocolStateError::SessionUnrecoverable => RoostError::TerminalSessionRecovery {
                 reason: e.to_string(),
             },
-            ProtocolStateError::BlobEncode { .. } => ClientError::InternalError {
+            ProtocolStateError::BlobEncode { .. } => RoostError::InternalError {
                 reason: e.to_string(),
             },
             ProtocolStateError::MessageEncode(source) => source.into(),
-            ProtocolStateError::SnapshotCapacityExceeded => ClientError::InvalidData {
+            ProtocolStateError::SnapshotCapacityExceeded => RoostError::InvalidData {
                 reason: e.to_string(),
             },
             ProtocolStateError::Ratchet(source) => source.into(),
@@ -475,19 +475,19 @@ impl From<ProtocolStateError> for ClientError {
             ProtocolStateError::Signature(source) => source.into(),
             ProtocolStateError::BlobDecode { .. }
             | ProtocolStateError::InvalidStateBinding { .. }
-            | ProtocolStateError::MissingRequiredState { .. } => ClientError::ProtocolStateFault {
+            | ProtocolStateError::MissingRequiredState { .. } => RoostError::ProtocolStateFault {
                 reason: e.to_string(),
             },
         }
     }
 }
 
-impl From<SenderCertificateValidationError> for ClientError {
+impl From<SenderCertificateValidationError> for RoostError {
     fn from(e: SenderCertificateValidationError) -> Self {
         match e {
             // An oversized grace window is the host's setting, not a fault in the certificate.
             SenderCertificateValidationError::GraceWindowTooLarge { .. } => {
-                ClientError::InvalidData {
+                RoostError::InvalidData {
                     reason: e.to_string(),
                 }
             }
@@ -501,7 +501,7 @@ impl From<SenderCertificateValidationError> for ClientError {
             | SenderCertificateValidationError::RevocationStateUnavailable
             | SenderCertificateValidationError::RevokedIdentityKey
             | SenderCertificateValidationError::ExpiredCertificate => {
-                ClientError::CertificateRejected {
+                RoostError::CertificateRejected {
                     reason: e.to_string(),
                 }
             }
@@ -509,15 +509,15 @@ impl From<SenderCertificateValidationError> for ClientError {
     }
 }
 
-impl From<SafetyNumberError> for ClientError {
+impl From<SafetyNumberError> for RoostError {
     fn from(e: SafetyNumberError) -> Self {
-        ClientError::InvalidData {
+        RoostError::InvalidData {
             reason: e.to_string(),
         }
     }
 }
 
-impl From<SessionEstablishmentError> for ClientError {
+impl From<SessionEstablishmentError> for RoostError {
     fn from(e: SessionEstablishmentError) -> Self {
         match e {
             SessionEstablishmentError::Discovery(e) => e.into(),
@@ -533,7 +533,7 @@ impl From<SessionEstablishmentError> for ClientError {
     }
 }
 
-impl From<MessageOperationError> for ClientError {
+impl From<MessageOperationError> for RoostError {
     fn from(e: MessageOperationError) -> Self {
         match e {
             MessageOperationError::Discovery(e) => e.into(),
@@ -544,9 +544,9 @@ impl From<MessageOperationError> for ClientError {
     }
 }
 
-impl From<TransportBindingError> for ClientError {
+impl From<TransportBindingError> for RoostError {
     fn from(e: TransportBindingError) -> Self {
-        ClientError::InvalidData {
+        RoostError::InvalidData {
             reason: e.to_string(),
         }
     }
@@ -564,8 +564,8 @@ mod tests {
             MessageError::Encode,
         ] {
             assert!(matches!(
-                ClientError::from(ProtocolStateError::MessageEncode(error)),
-                ClientError::InvalidData { .. }
+                RoostError::from(ProtocolStateError::MessageEncode(error)),
+                RoostError::InvalidData { .. }
             ));
         }
     }
