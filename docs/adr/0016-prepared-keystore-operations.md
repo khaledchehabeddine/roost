@@ -1,6 +1,6 @@
 # Prepared KeyStore Operations
 
-No transaction covers both SecureStorage and the app's database, and staged secrets must stay in SecureStorage. So Core stages every key change inside SecureStorage as a Prepared KeyStore Operation, which the app reserves before its own commit and finalizes after it, or aborts once it knows that commit failed. Reserving checks that SecureStorage hasn't changed since preparation, and at startup the app finalizes or aborts any operation a crash left open according to whether its own records hold the operation's ID.
+No transaction covers both SecureStorage and the app's database, and staged secrets must stay in SecureStorage. So Core stages every key change inside SecureStorage as a Prepared KeyStore Operation, which the app reserves before its own commit and finalizes after it, or aborts once it knows that commit failed. Reserving checks that SecureStorage hasn't changed since preparation, and an operation a crash leaves open stays recoverable until the app finalizes or aborts it.
 
 ## Alternatives
 

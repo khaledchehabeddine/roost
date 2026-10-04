@@ -25,6 +25,8 @@
   - Avoid: user, account, profile
 - **Identity Backup**: A passphrase-encrypted copy of an Identity's keys that restores the Identity onto a new Device.
   - Avoid: account backup
+- **Identity Context**: Roost's handle on one local identity namespace, which shares its SecureStorage and configuration and keeps no protocol state.
+  - Avoid: client, keystore
 - **Identity Key (IK)**: The permanent key pair that anchors an Identity and signs its Discovery Key.
   - Avoid: master key, root key
 - **Identity Secret Blob**: The SecureStorage entry that holds an Identity Key's secret halves.
