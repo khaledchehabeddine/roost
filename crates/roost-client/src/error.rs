@@ -6,7 +6,7 @@ use roost_core::{
     ProtocolStateError, RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
     SessionEstablishmentError, SignedPreKeyError, StorageError, TransportBindingError,
 };
-use roost_protocol::{EvidenceVerificationError, SenderCertificateValidationError, SignatureError};
+use roost_protocol::{SenderCertificateValidationError, SignatureError};
 
 /// Errors surfaced across the UniFFI boundary.
 ///
@@ -484,29 +484,27 @@ impl From<ProtocolStateError> for ClientError {
 
 impl From<SenderCertificateValidationError> for ClientError {
     fn from(e: SenderCertificateValidationError) -> Self {
-        ClientError::CertificateRejected {
-            reason: e.to_string(),
-        }
-    }
-}
-
-impl From<EvidenceVerificationError> for ClientError {
-    fn from(e: EvidenceVerificationError) -> Self {
         match e {
-            EvidenceVerificationError::BundleTooLarge
-            | EvidenceVerificationError::MalformedBundle
-            | EvidenceVerificationError::WrongProfile { .. }
-            | EvidenceVerificationError::TooManyDomainSigningKeys { .. }
-            | EvidenceVerificationError::GraceWindowTooLarge { .. } => ClientError::InvalidData {
-                reason: e.to_string(),
-            },
-            EvidenceVerificationError::UnsupportedVersion(_) => ClientError::UnsupportedVersion {
-                reason: e.to_string(),
-            },
-            EvidenceVerificationError::SenderCertificate(e) => e.into(),
-            EvidenceVerificationError::SignatureFailure => ClientError::AuthenticationFailed {
-                reason: e.to_string(),
-            },
+            // An oversized grace window is the host's setting, not a fault in the certificate.
+            SenderCertificateValidationError::GraceWindowTooLarge { .. } => {
+                ClientError::InvalidData {
+                    reason: e.to_string(),
+                }
+            }
+            SenderCertificateValidationError::MalformedCertificate
+            | SenderCertificateValidationError::RelayDomainMismatch
+            | SenderCertificateValidationError::InvalidKeyEncoding
+            | SenderCertificateValidationError::UnknownSigningKeyId
+            | SenderCertificateValidationError::UntrustedSigningKeyId
+            | SenderCertificateValidationError::DuplicateSigningKeyId
+            | SenderCertificateValidationError::SignatureFailure
+            | SenderCertificateValidationError::RevocationStateUnavailable
+            | SenderCertificateValidationError::RevokedIdentityKey
+            | SenderCertificateValidationError::ExpiredCertificate => {
+                ClientError::CertificateRejected {
+                    reason: e.to_string(),
+                }
+            }
         }
     }
 }

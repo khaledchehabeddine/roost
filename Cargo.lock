@@ -881,24 +881,12 @@ dependencies = [
 name = "roost-protocol"
 version = "0.16.0"
 dependencies = [
- "blake3",
  "curve25519-dalek",
  "ed25519-dalek",
- "hex",
- "postcard",
  "rand",
  "rand_chacha",
- "serde",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "roost-server"
-version = "0.16.0"
-dependencies = [
- "hex",
- "roost-protocol",
 ]
 
 [[package]]

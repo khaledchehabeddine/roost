@@ -2,8 +2,6 @@
 
 - **Acknowledgment Artifact**: An encrypted Message that proves the receiver accepted an earlier Message.
   - Avoid: receipt, network ack
-- **Backend**: The reporting service that verifies Evidence Bundles and counts reports.
-  - Avoid: server
 - **Blocking**: A local choice to hide a contact's Messages, separate from Trust State and certificate revocation.
   - Avoid: revocation, distrust, blocklist
 - **Caller-Owned Transport**: The app's own networking, authentication, and retries, which carry the Messages Roost produces.
@@ -23,10 +21,6 @@
   - Avoid: inbox counter
 - **Event**: A record of a state change that stays provisional until the app commits the matching updates.
   - Avoid: notification, callback
-- **Evidence Bundle**: A verifiable copy of an accepted Message with its sender's certificate and signatures, which proves who sent it. It contains the plaintext.
-  - Avoid: report payload, acknowledgment artifact, audit log
-- **Evidence Identity**: A stable hash of a verified Message that lets a Backend spot duplicate reports.
-  - Avoid: report ID, MessageID, bundle hash, Deduplication Digest
 - **Identity**: A participant on one Device, identified by a permanent Identity Key and a rotatable Discovery Key.
   - Avoid: user, account, profile
 - **Identity Backup**: A passphrase-encrypted copy of an Identity's keys that restores the Identity onto a new Device.

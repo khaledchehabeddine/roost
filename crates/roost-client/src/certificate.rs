@@ -43,10 +43,8 @@ pub struct RevocationState {
 
 /// A sender-certificate validation policy for one receive operation.
 ///
-/// Standalone certificate validation and blocked receives use the complete caller-selected grace
-/// window. An unblocked established-session Message produces an Evidence Bundle, so receive rejects
-/// it more than 300 seconds past certificate expiry even when `grace_window_millis` is larger. Blocked
-/// outcomes carry no evidence and retain the complete grace window.
+/// Every validation, standalone or on receive, rejects a `grace_window_millis` above 300,000 (five
+/// minutes) as invalid data.
 ///
 /// # Examples
 /// ```
@@ -81,7 +79,7 @@ pub struct SenderCertificateValidation {
     pub revocation_state: RevocationState,
     /// Caller-supplied Unix timestamp in milliseconds.
     pub reference_time_millis: u64,
-    /// Caller-supplied grace window in milliseconds, subject to the receive distinction above.
+    /// Caller-supplied grace window in milliseconds, at most 300,000.
     pub grace_window_millis: u64,
 }
 

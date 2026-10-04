@@ -3,7 +3,6 @@ members = [
     "crates/roost-core",
     "crates/roost-crypto",
     "crates/roost-client",
-    "crates/roost-server",
     "crates/roost-protocol"
 ]
 resolver = "3"

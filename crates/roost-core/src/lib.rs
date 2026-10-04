@@ -1,8 +1,8 @@
 //! Identity lifecycle, messaging and transitions over host-owned protocol state.
 //!
 //! This implementation crate coordinates [`roost_crypto`] operations with caller-owned storage.
-//! Mobile consumers use `roost-client`; backends use `roost-server`. Platform adapters provide
-//! [`SecureStorage`] for keys and the host owns durable Protocol State Blob transactions.
+//! Mobile consumers use `roost-client`. Platform adapters provide [`SecureStorage`] for keys and
+//! the host owns durable Protocol State Blob transactions.
 //!
 //! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys and one configured
 //! [`ProtocolStateEngine`]. The host serializes each identity's complete operation and commit,

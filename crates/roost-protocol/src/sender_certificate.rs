@@ -19,6 +19,9 @@ const MAX_RELAY_DOMAIN_LEN: usize = 255;
 const SIGNATURE_LEN: usize = 64;
 const MAX_SIGNING_KEY_ID_LEN: usize = 64;
 
+/// Largest grace window a caller may allow for an expired sender certificate.
+pub const MAX_CERTIFICATE_GRACE_WINDOW: Duration = Duration::from_secs(300);
+
 /// Inputs for one sender certificate validation verdict.
 ///
 /// Validation is a pure function of these inputs. It does not read the device clock, does not
@@ -41,12 +44,10 @@ pub struct SenderCertificateValidationInput<'a> {
     pub revocation_state: RevocationState<'a>,
     /// Caller-supplied time used for expiry evaluation.
     pub reference_time: SystemTime,
-    /// Caller-supplied grace window, with no library-imposed ceiling.
+    /// Caller-supplied grace window, at most [`MAX_CERTIFICATE_GRACE_WINDOW`].
     ///
-    /// Callers own all grace-window bounds. Larger values tolerate more sender/receiver clock
-    /// skew and delivery delay but keep expired certificates acceptable for longer;
-    /// [`Duration::MAX`] keeps every expired certificate acceptable forever. The consumer sets this
-    /// from its own product requirements with that trade-off in view.
+    /// Larger values tolerate more sender/receiver clock skew and delivery delay but keep expired
+    /// certificates acceptable for longer.
     pub grace_window: Duration,
 }
 
@@ -136,6 +137,13 @@ pub enum SenderCertificateValidationError {
     RevokedIdentityKey,
     /// The certificate is expired outside the supplied grace window.
     ExpiredCertificate,
+    /// The supplied grace window exceeds [`MAX_CERTIFICATE_GRACE_WINDOW`].
+    GraceWindowTooLarge {
+        /// Grace window the caller supplied.
+        grace_window: Duration,
+        /// Largest grace window allowed.
+        max: Duration,
+    },
 }
 
 impl fmt::Display for SenderCertificateValidationError {
@@ -161,6 +169,10 @@ impl fmt::Display for SenderCertificateValidationError {
             }
             Self::RevokedIdentityKey => write!(f, "sender certificate identity key is revoked"),
             Self::ExpiredCertificate => write!(f, "sender certificate is expired"),
+            Self::GraceWindowTooLarge { grace_window, max } => write!(
+                f,
+                "sender certificate grace window {grace_window:?} exceeds {max:?}"
+            ),
         }
     }
 }
@@ -179,12 +191,18 @@ struct ParsedSenderCertificate<'a> {
 /// The certificate signature is verified only against the trusted domain-signing key whose
 /// identifier exactly matches the identifier embedded in `input.certificate`. Expiry is evaluated
 /// against `reference_time` and `grace_window`; this function never reads the
-/// device clock and never caps the supplied grace window. Revocation is evaluated from the current
+/// device clock and rejects a grace window above [`MAX_CERTIFICATE_GRACE_WINDOW`]. Revocation is evaluated from the current
 /// `revocation_state` input on every call after signature verification, and an unavailable
 /// revocation source fails validation closed rather than validating against an empty set.
 pub fn validate_sender_certificate(
     input: SenderCertificateValidationInput<'_>,
 ) -> Result<ValidatedSenderCertificate, SenderCertificateValidationError> {
+    if input.grace_window > MAX_CERTIFICATE_GRACE_WINDOW {
+        return Err(SenderCertificateValidationError::GraceWindowTooLarge {
+            grace_window: input.grace_window,
+            max: MAX_CERTIFICATE_GRACE_WINDOW,
+        });
+    }
     let certificate = parse_certificate(input.certificate)?;
     validate_identity_key(&certificate.identity_key)?;
     if certificate.relay_domain != input.expected_relay_domain {
@@ -767,16 +785,35 @@ mod tests {
     }
 
     #[test]
-    fn accepts_expired_certificate_inside_unbounded_grace_window() {
+    fn accepts_expired_certificate_inside_the_largest_grace_window() {
         let signing_key = signing_key(0x01);
         let verifying_key = signing_key.verifying_key().to_bytes();
-        let signed = signed_certificate(PRIMARY_ID, &signing_key, 0);
+        let max_secs = MAX_CERTIFICATE_GRACE_WINDOW.as_secs();
+        let signed = signed_certificate(PRIMARY_ID, &signing_key, NOW_SECS - max_secs);
         let domain_keys = [trusted_key(PRIMARY_ID, &verifying_key)];
         let mut input = validation_input(&signed, &domain_keys, &[]);
-        input.reference_time = at(u64::from(u32::MAX) * 1_000);
-        input.grace_window = Duration::MAX;
+        input.grace_window = MAX_CERTIFICATE_GRACE_WINDOW;
 
         validate_sender_certificate(input).unwrap();
+    }
+
+    #[test]
+    fn rejects_grace_window_above_the_maximum() {
+        let signing_key = signing_key(0x01);
+        let verifying_key = signing_key.verifying_key().to_bytes();
+        let signed = signed_certificate(PRIMARY_ID, &signing_key, NOW_SECS + 300);
+        let domain_keys = [trusted_key(PRIMARY_ID, &verifying_key)];
+        let mut input = validation_input(&signed, &domain_keys, &[]);
+        let grace_window = MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1);
+        input.grace_window = grace_window;
+
+        assert_validation_error(
+            input,
+            SenderCertificateValidationError::GraceWindowTooLarge {
+                grace_window,
+                max: MAX_CERTIFICATE_GRACE_WINDOW,
+            },
+        );
     }
 
     #[test]

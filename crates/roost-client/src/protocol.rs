@@ -320,12 +320,8 @@ pub struct SessionEvent {
 /// }
 /// ```
 #[derive(uniffi::Enum)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "UniFFI enum variants carry outcome records by value"
-)]
 pub enum InboundMessageOutcome {
-    /// Authenticated plaintext, evidence, and acknowledgment for a unique Message.
+    /// Authenticated plaintext and acknowledgment for a unique Message.
     Accepted {
         /// Payload for this outcome.
         result: InboundMessageResult,
@@ -347,7 +343,7 @@ pub enum InboundMessageOutcome {
 /// Authenticated Message data that remains provisional until the host transaction commits.
 ///
 /// The host commits the Message, acknowledgment, and conditional updates in one transaction.
-/// Plaintext and evidence are host-owned secret bytes; clear discarded copies promptly.
+/// Plaintext is host-owned secret bytes; clear discarded copies promptly.
 ///
 /// # Examples
 /// ```
@@ -373,15 +369,13 @@ pub struct InboundMessageResult {
     pub plaintext: Vec<u8>,
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
-    /// Authenticity evidence containing plaintext. Retain only when reporting policy requires.
-    pub evidence_bundle: Vec<u8>,
     /// Encrypted acknowledgment to commit with its exact caller-supplied Transport Binding.
     pub acknowledgment: Message,
     /// Conditional opaque updates to commit with the accepted Message and acknowledgment.
     pub state_updates: Vec<ProtocolStateUpdate>,
 }
 
-/// A blocked receive with no plaintext or evidence available to the caller.
+/// A blocked receive with no plaintext available to the caller.
 ///
 /// The acknowledgment is present only under the silent-receipt policy. Commit it with the updates
 /// before sending; under the default policy the host persists only the processed state.
@@ -1373,7 +1367,6 @@ impl InboundMessageOutcome {
                         payload_kind: PayloadKind::from_protocol(result.payload_kind),
                         plaintext: result.plaintext.to_vec(),
                         sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                        evidence_bundle: result.evidence_bundle.as_bytes().to_vec(),
                         acknowledgment: Message::from_core(result.acknowledgment),
                         state_updates,
                     },

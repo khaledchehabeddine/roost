@@ -19,7 +19,6 @@ mod client;
 #[cfg(feature = "development-certificates")]
 mod development_certificate;
 mod error;
-mod evidence;
 mod key_store_operation;
 mod message;
 mod protocol;
@@ -40,7 +39,6 @@ pub use client::{
 #[cfg(feature = "development-certificates")]
 pub use development_certificate::{DevelopmentCertificateAuthority, DevelopmentSenderCertificate};
 pub use error::ClientError;
-pub use evidence::{EvidenceProfile, VerifiedEvidenceBundle, verify_evidence_bundle};
 pub use key_store_operation::{
     KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
     PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
