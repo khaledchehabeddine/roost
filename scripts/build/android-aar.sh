@@ -16,7 +16,7 @@ scripts/build/android.sh
     :roost:publishReleasePublicationToLocalRepository
 AAR="$ROOT/target/android/maven/io/github/relaynet/$ARTIFACT/$VERSION/$ARTIFACT-$VERSION.aar"
 CLASSES="$(unzip -p "$AAR" classes.jar | jar --list)"
-[[ "$CLASSES" == *io/github/relaynet/roost/Client.class* ]]
+[[ "$CLASSES" == *io/github/relaynet/roost/IdentityContext.class* ]]
 if [[ "$ARTIFACT" == roost ]]; then
     [[ "$CLASSES" != *io/github/relaynet/roost/DevelopmentCertificateAuthority.class* ]]
 else

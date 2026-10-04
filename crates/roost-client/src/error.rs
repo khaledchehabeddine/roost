@@ -67,7 +67,7 @@ pub enum RoostError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// A committed or finalizing KeyStore operation must be recovered before ordinary work.
+    /// A reserved or finalizing operation must be finalized or aborted before other work.
     OperationRecoveryRequired {
         /// The operation to recover.
         operation_id: crate::OperationId,

@@ -62,9 +62,10 @@ const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 /// for certificate checks, does no networking, and keeps no copy of protocol state between calls.
 ///
 /// The host owns the [`SecureStorage`] adapter, the database that stores Protocol State Blobs and
-/// operation IDs, and its transactions. It runs Roost's synchronous calls off the main thread,
-/// and holds one lock that covers every process sharing the identity from preparing an operation
-/// until its host commit is resolved.
+/// operation IDs, and its transactions. It stores the blobs without decoding them or keeping a
+/// copy of its own, and calls Roost outside its database transactions, off the main thread. It
+/// holds one lock that covers every process sharing the identity from preparing an operation until
+/// its host commit is resolved.
 ///
 /// # Key Changes
 ///
@@ -81,7 +82,11 @@ const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 ///
 /// At startup, and after any unknown outcome, resolve each of [`Self::unfinished_operations`]
 /// against the host's records: finalize a reserved or finalizing operation whose ID the host
-/// committed, abort a prepared or reserved one whose ID it didn't, and stop on anything else.
+/// committed, abort a prepared or reserved one whose ID it didn't, and stop on anything else. A
+/// host that records finalization itself also checks each committed operation it hasn't marked:
+/// a crash between finalizing and marking leaves [`Self::operation_status`] reporting it
+/// finalized. When SecureStorage has no identity but the host's records still hold one, stop
+/// instead of creating a new identity.
 ///
 /// ```swift
 /// for operation in try context.unfinishedOperations() {
@@ -95,6 +100,7 @@ const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 ///     }
 /// }
 /// if try context.identity() == nil {
+///     guard try database.isEmpty() else { throw StartupError.inconsistentStorage }
 ///     let prepared = try context.prepareIdentityCreation()
 ///     try context.reserveOperation(id: prepared.operationId)
 ///     switch try database.saveIdentity(prepared.identity, operationId: prepared.operationId) {
@@ -119,6 +125,7 @@ const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 ///     }
 /// }
 /// if (context.identity() == null) {
+///     if (!database.isEmpty()) throw InconsistentStorage()
 ///     val prepared = context.prepareIdentityCreation()
 ///     context.reserveOperation(prepared.operationId)
 ///     when (database.saveIdentity(prepared.identity, prepared.operationId)) {

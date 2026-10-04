@@ -14,7 +14,7 @@
 
 use crate::error::RoostError;
 use crate::protocol::IdentityKey;
-use crate::records::{fixed_32, fixed_64};
+use crate::records::{Identity, fixed_32, fixed_64};
 use roost_core::{
     PublicIdentityKey as CorePublicIdentityKey, Signature,
     verify_discovery_to_identity_binding as crypto_verify_discovery_to_identity_binding,
@@ -22,7 +22,8 @@ use roost_core::{
 };
 use roost_protocol::parse_ed25519_verifying_key_bytes;
 
-/// Verifies that an identity key vouches for its own X25519 half (the IK self-binding).
+/// Verifies that an identity's binding signature ties its agreement key to its signing key (the IK
+/// self-binding).
 ///
 /// This is the `AetherIKBinding-v1:` direction. It says only that whoever holds the Ed25519 half
 /// claimed the X25519 half beside it; it says nothing about which discovery key, if any, points at
@@ -37,16 +38,8 @@ use roost_protocol::parse_ed25519_verifying_key_bytes;
 /// - [`RoostError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or the
 ///   Ed25519 half does not decompress to a valid point.
 #[uniffi::export]
-pub fn verify_identity_key_binding(
-    identity: IdentityKey,
-    binding_signature: Vec<u8>,
-) -> Result<(), RoostError> {
-    let bundle = CorePublicIdentityKey::from_bytes(
-        &fixed_32(&identity.agreement_key, "identity agreement key")?,
-        &fixed_32(&identity.signing_key, "identity signing key")?,
-        &fixed_64(&binding_signature, "identity binding signature")?,
-    )?;
-    Ok(verify_public_identity_key(&bundle)?)
+pub fn verify_identity_key_binding(identity: Identity) -> Result<(), RoostError> {
+    Ok(verify_public_identity_key(&identity.to_core()?)?)
 }
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (the DK→IK
@@ -105,9 +98,10 @@ fn binding_payload_identity_key(
 ) -> Result<CorePublicIdentityKey, RoostError> {
     const UNREAD_BINDING_SIGNATURE: [u8; 64] = [0u8; 64];
 
+    let key = identity.to_core()?;
     Ok(CorePublicIdentityKey::from_bytes(
-        &fixed_32(&identity.agreement_key, "identity agreement key")?,
-        &fixed_32(&identity.signing_key, "identity signing key")?,
+        &key.x25519_public_key,
+        &key.ed25519_verifying_key,
         &UNREAD_BINDING_SIGNATURE,
     )?)
 }
@@ -116,7 +110,7 @@ fn binding_payload_identity_key(
 mod tests {
     use super::{verify_discovery_to_identity_binding, verify_identity_key_binding};
     use crate::storage::MemoryStorage;
-    use crate::{IdentityContext, RoostError, SecureStorage, protocol::IdentityKey};
+    use crate::{Identity, IdentityContext, RoostError, SecureStorage, protocol::IdentityKey};
     use roost_core::test_support::{SigningKeyPair, sign_identity_key_binding};
     use std::sync::Arc;
 
@@ -214,13 +208,13 @@ mod tests {
 
         // And the DK→IK vector must not pass as a self-binding, checked under the discovery key
         // that made it, so that only the context can be what rejects it.
-        match verify_identity_key_binding(
-            IdentityKey {
+        match verify_identity_key_binding(Identity {
+            key: IdentityKey {
                 agreement_key: IDENTITY_X25519.to_vec(),
                 signing_key: discovery_signing.verifying.to_bytes().to_vec(),
             },
-            DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
-        ) {
+            binding_signature: DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+        }) {
             Err(RoostError::AuthenticationFailed { .. }) => {}
             other => panic!("expected AuthenticationFailed across contexts, got {other:?}"),
         }
@@ -239,13 +233,10 @@ mod tests {
         let self_binding = sign_identity_key_binding(&impostor, &IDENTITY_X25519.into()).unwrap();
 
         // The impostor's own self-binding holds — substitution does not fail here.
-        verify_identity_key_binding(
-            IdentityKey {
-                agreement_key: impostor_identity.agreement_key.clone(),
-                signing_key: impostor_identity.signing_key.clone(),
-            },
-            self_binding.to_bytes().to_vec(),
-        )
+        verify_identity_key_binding(Identity {
+            key: impostor_identity.clone(),
+            binding_signature: self_binding.to_bytes().to_vec(),
+        })
         .expect("a self-consistent impostor identity self-binds");
 
         // It fails here, which is the only place it can.
@@ -265,7 +256,7 @@ mod tests {
     fn a_generated_identity_verifies_through_the_export() {
         let identity = key_store().generate_identity().unwrap();
 
-        verify_identity_key_binding(identity.key, identity.binding_signature)
+        verify_identity_key_binding(identity)
             .expect("Aether's own identity must satisfy Aether's own exported verifier");
     }
 
@@ -323,13 +314,13 @@ mod tests {
             ),
             (
                 "off-curve identity verifying key",
-                verify_identity_key_binding(
-                    IdentityKey {
+                verify_identity_key_binding(Identity {
+                    key: IdentityKey {
                         agreement_key: identity.agreement_key.clone(),
                         signing_key: vec![0xFF; 32],
                     },
-                    vec![0u8; 64],
-                ),
+                    binding_signature: vec![0u8; 64],
+                }),
             ),
         ] {
             match result {

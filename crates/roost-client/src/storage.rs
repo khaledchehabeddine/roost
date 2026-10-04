@@ -29,7 +29,7 @@ pub trait SecureStorage: Send + Sync {
     /// - [`RoostError::Storage`] when platform storage returns an error.
     fn save(&self, key: String, value: Vec<u8>) -> Result<(), RoostError>;
 
-    /// Returns the value stored under `key`, or `None` if not present.
+    /// Returns the value saved under `key`, absent when there is none.
     ///
     /// # Errors
     /// - [`RoostError::Storage`] when platform storage returns an error.
