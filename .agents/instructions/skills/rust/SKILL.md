@@ -11,5 +11,5 @@ Read every reference before writing or reviewing Rust.
 - [Implementation](references/implementation.md): how function bodies check input, change state, and return errors.
 - [Naming](references/naming.md): names, including timestamps and integer times.
 - [Structure](references/structure.md): grouping code into modules and files.
-- [Testing](references/testing.md): when to add a test, test names, and assertions.
+- [Testing](references/testing.md): what to test, test names, and assertions.
 - [UniFFI](references/uniffi.md): the `roost-client` boundary, and the types and errors it exports.

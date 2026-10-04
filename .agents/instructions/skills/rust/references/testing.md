@@ -2,10 +2,10 @@
 
 Broken code can still round-trip data and reject bad input, so a round trip or an error alone doesn't prove it works.
 
-## What to Test
+## Scope
 
-- Add a test only when an important app flow, a costly failure, or a likely regression would otherwise go unprotected. A change may need none.
-- Test behavior with representative cases, not implementation details or what another test already covers.
+- Add a test only when no existing test covers an important app flow, a costly failure, or a likely regression.
+- Test what a caller can observe, such as outputs, errors, and stored state.
 
 ## Names
 
