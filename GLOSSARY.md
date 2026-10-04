@@ -1,0 +1,85 @@
+# Glossary
+
+- **Acknowledgment Artifact**: An encrypted Message that proves the receiver accepted an earlier Message.
+  - Avoid: receipt, network ack
+- **Backend**: The reporting service that verifies Evidence Bundles and counts reports.
+  - Avoid: server
+- **Blocking**: A local choice to hide a contact's Messages, separate from Trust State and certificate revocation.
+  - Avoid: revocation, distrust, blocklist
+- **Caller-Owned Transport**: The app's own networking, authentication, and retries, which carry the Messages Roost produces.
+- **Contact Identity**: The Identity Key and current Discovery Key that identify a peer.
+  - Avoid: account, profile
+- **Dead Session**: A Session that an authenticated failure has made unrecoverable, so only a new X3DH exchange can replace it.
+  - Avoid: reset session, closed conversation
+- **Deduplication Digest**: A keyed hash of a received frame and its Transport Binding that catches a repeated delivery before decryption.
+  - Avoid: message hash, replay token
+- **Deduplication Set**: The limited set of recent Deduplication Digests kept for one Identity.
+  - Avoid: cache
+- **Device**: The app install that holds one Identity's private keys.
+  - Avoid: client, installation, instance
+- **Discovery Key (DK)**: A rotatable key pair, signed by the Identity Key, that peers use to start Sessions with an Identity.
+  - Avoid: prekey, ephemeral key
+- **Epoch**: A Discovery Key's generation number, which goes up with each rotation.
+  - Avoid: inbox counter
+- **Event**: A record of a state change that stays provisional until the app commits the matching updates.
+  - Avoid: notification, callback
+- **Evidence Bundle**: A verifiable copy of an accepted Message with its sender's certificate and signatures, which proves who sent it. It contains the plaintext.
+  - Avoid: report payload, acknowledgment artifact, audit log
+- **Evidence Identity**: A stable hash of a verified Message that lets a Backend spot duplicate reports.
+  - Avoid: report ID, MessageID, bundle hash, Deduplication Digest
+- **Identity**: A participant on one Device, identified by a permanent Identity Key and a rotatable Discovery Key.
+  - Avoid: user, account, profile
+- **Identity Backup**: A passphrase-encrypted copy of an Identity's keys that restores the Identity onto a new Device.
+  - Avoid: account backup
+- **Identity Key (IK)**: The permanent key pair that anchors an Identity and signs its Discovery Key.
+  - Avoid: master key, root key
+- **Identity Secret Blob**: The SecureStorage entry that holds an Identity Key's secret halves.
+  - Avoid: backup blob
+- **Library Instance**: One running copy of Roost in a process, which owns no durable state.
+  - Avoid: Device, client
+- **Message**: One Sealed Sender Frame sent within a Session.
+  - Avoid: payload, packet
+- **MessageID**: The identifier of one Message within a Session.
+  - Avoid: uuid, packet id
+- **Message Transcript**: The bytes a sender signs for each Message, binding it to its recipient, Session, and sender certificate.
+  - Avoid: associated data
+- **Pending Acknowledgment**: The stored record of a sent Message still waiting for its Acknowledgment Artifact.
+  - Avoid: outbox, retry cache
+- **PreKey ID**: The number that identifies a prekey within one Epoch, counted separately for signed and one-time prekeys.
+  - Avoid: key fingerprint, database row ID
+- **PreKey Selection**: The signed and one-time prekey IDs the app picks for an incoming X3DH Message.
+  - Avoid: prekey reference
+- **PreKey State**: The stored secrets for an Identity's current Discovery Key and its prekeys.
+  - Avoid: protocol state blob, prekey cache
+- **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app finalizes or aborts after committing its own state.
+  - Avoid: database transaction, deferred write
+- **Protocol State Blob**: Opaque state, including secrets, that Roost produces and the app stores between operations.
+  - Avoid: cache
+- **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a peer's inbox authorization.
+  - Avoid: table, bucket, namespace
+- **Retry Instruction**: A notice telling the app to resend a Message that is still unacknowledged.
+  - Avoid: resend job
+- **Safety Number**: A number derived from two Identity Keys that two people compare outside the app to verify each other.
+  - Avoid: fingerprint, verification code
+- **Sealed Payload Padding**: The padding that rounds a sealed plaintext up to a fixed size, so its length stays hidden.
+  - Avoid: random padding
+- **Sealed Sender Envelope**: The encrypted inner envelope that carries the sender's identity alongside the plaintext.
+  - Avoid: sender header
+- **Sealed Sender Frame**: The visible outer layer of a Message, which shows only what routing needs.
+  - Avoid: transport envelope
+- **SecureStorage**: The secret storage the app provides, such as Keychain or Keystore, where Roost keeps keys.
+  - Avoid: keychain, protocol database
+- **Sender Certificate**: A domain-signed statement that binds a sender's Identity Key to a Relay until it expires.
+  - Avoid: trust state, sender profile, discovery key signature
+- **Sender Identity Material**: The sender's key, certificate, and signature recovered from a Sealed Sender Envelope.
+  - Avoid: sender IK, sender metadata
+- **Session**: An encrypted channel between two Identities, advanced by the Double Ratchet.
+  - Avoid: connection, conversation, chat, login
+- **Session-Unrecoverable Event**: The one-time signal that a Session has become a Dead Session.
+  - Avoid: decrypt error, warning
+- **Transport Binding**: Public bytes the app attaches to a Message, which Roost authenticates but never reads or stores.
+  - Avoid: transport envelope, route record, delivery capability
+- **Trust State**: The trust level the app records for a peer: pending, accepted but unverified, or verified by Safety Number.
+  - Avoid: certificate validity, blocking
+- **X3DH**: The handshake that starts a Session, which binds both Identity Keys into the shared secret.
+  - Avoid: login, certificate validation

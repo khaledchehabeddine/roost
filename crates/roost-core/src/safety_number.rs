@@ -1,7 +1,7 @@
 //! Safety Number derivation from permanent Identity Keys.
 
 use roost_protocol::{
-    PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes, validate_x25519_public_key,
+    PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
 };
 use std::error::Error;
 use std::fmt;
@@ -60,9 +60,6 @@ impl Error for SafetyNumberError {}
 /// inputs, so Discovery Key rotation does not change the Safety Number for the same two Identity
 /// Keys. The two canonical IK encodings are sorted before hashing so both parties derive the same
 /// value.
-///
-/// # Errors
-/// - [`SafetyNumberError::InvalidIdentityKey`] if either Identity Key is non-canonical or weak.
 pub fn derive_safety_number(
     first: IdentityKey,
     second: IdentityKey,
@@ -86,7 +83,7 @@ pub fn derive_safety_number(
 }
 
 pub(crate) fn identity_key_is_valid(identity_key: &IdentityKey) -> bool {
-    validate_x25519_public_key(&identity_key.x25519_public_key)
+    is_valid_x25519_public_key(&identity_key.x25519_public_key)
         && parse_ed25519_verifying_key_bytes(&identity_key.ed25519_verifying_key).is_some()
 }
 

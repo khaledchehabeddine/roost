@@ -2,14 +2,14 @@
 
 use crate::SecureStorage;
 use crate::certificate::{
-    SenderCertificateValidation, domain_signing_keys_to_core, revocation_state_to_core,
-    revoked_identity_keys_to_core,
+    SenderCertificateValidation, domain_signing_keys_to_protocol, revocation_state_to_protocol,
+    revoked_identity_keys_to_protocol,
 };
 use crate::error::ClientError;
 use crate::key_store_operation::{
     KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
     PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
-    PreparedSignedPreKeyRotation, UnfinishedKeyStoreOperation, operation_identifier,
+    PreparedSignedPreKeyRotation, UnfinishedKeyStoreOperation, operation_id,
 };
 use crate::message::{Message, SenderIdentityMaterial};
 use crate::protocol::{
@@ -22,6 +22,7 @@ use crate::records::{
     SignedPreKeyBundle, fixed_16, fixed_32,
 };
 use crate::storage::SecureStorageAdapter;
+use crate::time::time_from_millis;
 use crate::transport_binding::{PreKeySelection, TransportBinding};
 use roost_core::{
     AcknowledgmentProcessing, InboundSenderCertificateValidation, KeyStore as CoreKeyStore,
@@ -32,6 +33,7 @@ use roost_core::{
 };
 use roost_protocol::MessageId;
 use std::sync::Arc;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// Largest authentication transcript this keystore will sign, in bytes.
@@ -43,9 +45,8 @@ const MAX_AUTHENTICATION_TRANSCRIPT_LEN: usize = 4096;
 
 /// ASCII prefix reserved for preimages Aether signs or verifies itself.
 ///
-/// Every context and domain tag in `docs/domain-separation.md` starts with these bytes, so
-/// refusing them keeps [`IdentityOperations::sign_authentication_transcript`] disjoint from the whole
-/// registry. Matched case-insensitively to cover the lowercase hash-domain convention as well.
+/// Every signature context and domain tag Aether defines starts with these bytes, so refusing
+/// them keeps [`IdentityOperations::sign_authentication_transcript`] disjoint from all of them. Matched case-insensitively to cover the lowercase hash-domain convention as well.
 const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 
 /// Identity-scoped entry point for Identity, Messaging, and Contact operations.
@@ -233,7 +234,9 @@ impl Client {
         })?;
         let engine = CoreProtocolStateEngine::with_deduplication_capacity(capacity)?
             .with_blocked_contact_acknowledgment_policy(
-                configuration.blocked_contact_acknowledgment_policy.into(),
+                configuration
+                    .blocked_contact_acknowledgment_policy
+                    .to_core(),
             );
         Ok(Arc::new(Self {
             inner: Arc::new(CoreKeyStore::with_protocol_engine(
@@ -314,24 +317,20 @@ impl Client {
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = Client::new(storage);
     /// let prepared = store.identity().prepare_generate_identity()?;
-    /// let status = store.operation_status(prepared.operation.identifier)?;
+    /// let status = store.operation_status(prepared.operation.id)?;
     /// assert!(matches!(status, KeyStoreOperationStatus::Prepared));
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
     /// - [`ClientError::NotFound`] if the operation is no longer retained.
     /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
     ///   [`ClientError::Storage`] if the operation journal cannot be read.
-    pub fn operation_status(
-        &self,
-        identifier: Vec<u8>,
-    ) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(self
-            .inner
-            .operation_status(operation_identifier(&identifier)?)?
-            .into())
+    pub fn operation_status(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
+        Ok(KeyStoreOperationStatus::from_core(
+            self.inner.operation_status(operation_id(&id)?)?,
+        ))
     }
 
     /// Validates SecureStorage preconditions and reserves an operation for the host transaction.
@@ -348,15 +347,15 @@ impl Client {
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = Client::new(storage);
     /// let prepared = store.identity().prepare_generate_identity()?;
-    /// let status = store.commit_operation(prepared.operation.identifier.clone())?;
+    /// let status = store.commit_operation(prepared.operation.id.clone())?;
     /// assert!(matches!(status, KeyStoreOperationStatus::Committed));
-    /// // Atomically persist host-owned output and the identifier here.
-    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// // Atomically persist host-owned output and the id here.
+    /// store.finalize_operation(prepared.operation.id)?;
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
     /// - [`ClientError::NotFound`] if the operation is no longer retained.
     /// - [`ClientError::OperationConflict`] if the operation cannot be committed in its current
     ///   state.
@@ -365,14 +364,10 @@ impl Client {
     ///   preparation.
     /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
     ///   [`ClientError::Storage`] if the operation journal cannot be updated.
-    pub fn commit_operation(
-        &self,
-        identifier: Vec<u8>,
-    ) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(self
-            .inner
-            .commit_operation(operation_identifier(&identifier)?)?
-            .into())
+    pub fn commit_operation(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
+        Ok(KeyStoreOperationStatus::from_core(
+            self.inner.commit_operation(operation_id(&id)?)?,
+        ))
     }
 
     /// Makes a committed operation's staged SecureStorage mutations authoritative.
@@ -386,27 +381,23 @@ impl Client {
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = Client::new(storage);
     /// let prepared = store.identity().prepare_generate_identity()?;
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
+    /// store.commit_operation(prepared.operation.id.clone())?;
     /// // The host transaction committed before finalization.
-    /// let status = store.finalize_operation(prepared.operation.identifier)?;
+    /// let status = store.finalize_operation(prepared.operation.id)?;
     /// assert!(matches!(status, KeyStoreOperationStatus::Finalized));
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
     /// - [`ClientError::NotFound`] if the operation is no longer retained.
     /// - [`ClientError::OperationConflict`] if the operation has not committed or was aborted.
     /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
     ///   [`ClientError::Storage`] if staged mutations cannot be resumed.
-    pub fn finalize_operation(
-        &self,
-        identifier: Vec<u8>,
-    ) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(self
-            .inner
-            .finalize_operation(operation_identifier(&identifier)?)?
-            .into())
+    pub fn finalize_operation(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
+        Ok(KeyStoreOperationStatus::from_core(
+            self.inner.finalize_operation(operation_id(&id)?)?,
+        ))
     }
 
     /// Discards staged SecureStorage mutations before finalization starts.
@@ -421,25 +412,21 @@ impl Client {
     /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// # let store = Client::new(storage);
     /// let prepared = store.identity().prepare_generate_identity()?;
-    /// let status = store.abort_operation(prepared.operation.identifier)?;
+    /// let status = store.abort_operation(prepared.operation.id)?;
     /// assert!(matches!(status, KeyStoreOperationStatus::Aborted));
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `identifier` is not 16 bytes.
+    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
     /// - [`ClientError::NotFound`] if the operation is no longer retained.
     /// - [`ClientError::OperationConflict`] if finalization already started or completed.
     /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
     ///   [`ClientError::Storage`] if the operation journal cannot be updated.
-    pub fn abort_operation(
-        &self,
-        identifier: Vec<u8>,
-    ) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(self
-            .inner
-            .abort_operation(operation_identifier(&identifier)?)?
-            .into())
+    pub fn abort_operation(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
+        Ok(KeyStoreOperationStatus::from_core(
+            self.inner.abort_operation(operation_id(&id)?)?,
+        ))
     }
 
     /// Returns prepared operations that still need startup recovery.
@@ -455,7 +442,7 @@ impl Client {
     /// # let store = Client::new(storage);
     /// let prepared = store.identity().prepare_generate_identity()?;
     /// let unfinished = store.unfinished_operations()?;
-    /// assert_eq!(unfinished[0].operation.identifier, prepared.operation.identifier);
+    /// assert_eq!(unfinished[0].operation.id, prepared.operation.id);
     /// assert!(matches!(unfinished[0].status, KeyStoreOperationStatus::Prepared));
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -468,7 +455,7 @@ impl Client {
             .inner
             .unfinished_operations()?
             .into_iter()
-            .map(Into::into)
+            .map(UnfinishedKeyStoreOperation::from_core)
             .collect())
     }
 }
@@ -489,8 +476,8 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// let prepared = store.prepare_generate_identity()?;
-    /// client.commit_operation(prepared.operation.identifier.clone())?;
-    /// client.finalize_operation(prepared.operation.identifier.clone())?;
+    /// client.commit_operation(prepared.operation.id.clone())?;
+    /// client.finalize_operation(prepared.operation.id.clone())?;
     /// publish_identity(&prepared.identity)?;
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -526,8 +513,8 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let prepared = store.prepare_generate_identity()?;
-    /// # client.commit_operation(prepared.operation.identifier.clone())?;
-    /// # client.finalize_operation(prepared.operation.identifier)?;
+    /// # client.commit_operation(prepared.operation.id.clone())?;
+    /// # client.finalize_operation(prepared.operation.id)?;
     /// let identity = store.load_identity()?;
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -540,7 +527,8 @@ impl IdentityOperations {
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`ClientError::Storage`] on platform storage failure.
     pub fn load_identity(&self) -> Result<Identity, ClientError> {
-        Ok(Identity::from_core(self.inner.load_identity()?)?)
+        let identity = self.inner.load_identity()?;
+        Ok(Identity::from_core(identity)?)
     }
 
     /// Returns `true` when this keystore has identity data in storage.
@@ -557,8 +545,8 @@ impl IdentityOperations {
     /// let store = client.identity();
     /// if !store.has_identity()? {
     ///     let prepared = store.prepare_generate_identity()?;
-    ///     client.commit_operation(prepared.operation.identifier.clone())?;
-    ///     client.finalize_operation(prepared.operation.identifier)?;
+    ///     client.commit_operation(prepared.operation.id.clone())?;
+    ///     client.finalize_operation(prepared.operation.id)?;
     /// }
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -584,7 +572,7 @@ impl IdentityOperations {
     /// What Aether does enforce is that the result can never be mistaken for one of its own
     /// signatures. A transcript starting with the reserved ASCII prefix `Aether`, matched
     /// case-insensitively, is refused, because every preimage Aether signs or verifies begins with
-    /// a context from `docs/domain-separation.md` and every one of those begins with those bytes.
+    /// one of its signature contexts, and every one of those begins with those bytes.
     /// Without the check this export would be a signing oracle able to mint an identity binding, a
     /// discovery-to-identity binding, or a message-transcript signature under the local identity
     /// key from bytes the caller — or whoever supplies the caller — chose.
@@ -601,8 +589,8 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let prepared = store.prepare_generate_identity()?;
-    /// # client.commit_operation(prepared.operation.identifier.clone())?;
-    /// # client.finalize_operation(prepared.operation.identifier)?;
+    /// # client.commit_operation(prepared.operation.id.clone())?;
+    /// # client.finalize_operation(prepared.operation.id)?;
     /// let identity = store.load_identity()?;
     ///
     /// // The caller builds the whole preimage, context included.
@@ -655,11 +643,11 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # client.commit_operation(identity.operation.identifier.clone())?;
-    /// # client.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.id.clone())?;
+    /// # client.finalize_operation(identity.operation.id)?;
     /// # let signed_prekey = store.prepare_rotate_signed_prekey_if_stale()?;
-    /// # client.commit_operation(signed_prekey.operation.identifier.clone())?;
-    /// # client.finalize_operation(signed_prekey.operation.identifier)?;
+    /// # client.commit_operation(signed_prekey.operation.id.clone())?;
+    /// # client.finalize_operation(signed_prekey.operation.id)?;
     /// let bundle = store.current_signed_prekey_bundle()?;
     /// send_bundle_to_peer(&bundle)?;
     /// # Ok::<(), ClientError>(())
@@ -674,7 +662,7 @@ impl IdentityOperations {
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`ClientError::Storage`] on platform storage failure.
     pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, ClientError> {
-        Ok(self.inner.current_signed_prekey_bundle()?.into())
+        SignedPreKeyBundle::from_core(self.inner.current_signed_prekey_bundle()?)
     }
 
     /// Returns the current discovery-key bundle, verified against the identity key.
@@ -694,8 +682,8 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let prepared = store.prepare_generate_identity()?;
-    /// # client.commit_operation(prepared.operation.identifier.clone())?;
-    /// # client.finalize_operation(prepared.operation.identifier)?;
+    /// # client.commit_operation(prepared.operation.id.clone())?;
+    /// # client.finalize_operation(prepared.operation.id)?;
     /// let bundle = store.current_discovery_key_bundle()?;
     /// send_to_peer(&bundle)?;
     /// # Ok::<(), ClientError>(())
@@ -710,7 +698,7 @@ impl IdentityOperations {
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`ClientError::Storage`] on platform storage failure.
     pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, ClientError> {
-        Ok(self.inner.current_discovery_key_bundle()?.into())
+        DiscoveryKeyBundle::from_core(self.inner.current_discovery_key_bundle()?)
     }
 
     /// Returns the current publishable pair (discovery-key bundle + signed pre-key), atomically.
@@ -732,11 +720,11 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # client.commit_operation(identity.operation.identifier.clone())?;
-    /// # client.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.id.clone())?;
+    /// # client.finalize_operation(identity.operation.id)?;
     /// # let signed_prekey = store.prepare_rotate_signed_prekey_now()?;
-    /// # client.commit_operation(signed_prekey.operation.identifier.clone())?;
-    /// # client.finalize_operation(signed_prekey.operation.identifier)?;
+    /// # client.commit_operation(signed_prekey.operation.id.clone())?;
+    /// # client.finalize_operation(signed_prekey.operation.id)?;
     /// let publication = store.current_publication_bundle()?;
     /// publish(&publication)?;
     /// # Ok::<(), ClientError>(())
@@ -752,7 +740,7 @@ impl IdentityOperations {
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`ClientError::Storage`] on platform storage failure.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, ClientError> {
-        Ok(self.inner.current_publication_bundle()?.into())
+        PublicationBundle::from_core(self.inner.current_publication_bundle()?)
     }
 
     /// Returns the recipient delivery capability for the current inbox generation. Always 32
@@ -769,9 +757,9 @@ impl IdentityOperations {
     /// # use std::sync::Arc;
     /// let client = Client::new(Arc::new(InMemorySecureStorage::new()));
     /// let prepared = client.identity().prepare_generate_identity()?;
-    /// client.commit_operation(prepared.operation.identifier.clone())?;
-    /// // Commit the host's identity record and operation identifier before finalizing.
-    /// client.finalize_operation(prepared.operation.identifier)?;
+    /// client.commit_operation(prepared.operation.id.clone())?;
+    /// // Commit the host's identity record and operation id before finalizing.
+    /// client.finalize_operation(prepared.operation.id)?;
     /// let capability = client.identity().current_delivery_capability()?;
     /// // Send only to authorized contacts through an encrypted channel.
     /// assert_eq!(capability.len(), 32);
@@ -805,13 +793,13 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # client.commit_operation(identity.operation.identifier.clone())?;
-    /// # client.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.id.clone())?;
+    /// # client.finalize_operation(identity.operation.id)?;
     /// let prepared = store.prepare_generate_one_time_prekeys(8)?;
     /// assert_eq!(prepared.one_time_prekeys.len(), 8);
-    /// client.commit_operation(prepared.operation.identifier.clone())?;
-    /// // Atomically queue the public bundles and persist the identifier here.
-    /// client.finalize_operation(prepared.operation.identifier)?;
+    /// client.commit_operation(prepared.operation.id.clone())?;
+    /// // Atomically queue the public bundles and persist the id here.
+    /// client.finalize_operation(prepared.operation.id)?;
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
@@ -832,7 +820,12 @@ impl IdentityOperations {
             &self.inner,
             self.inner
                 .prepare_generate_one_time_prekeys(batch_size as usize)?,
-            |one_time_prekeys| Ok(one_time_prekeys.into_iter().map(Into::into).collect()),
+            |one_time_prekeys| {
+                one_time_prekeys
+                    .into_iter()
+                    .map(OneTimePreKeyBundle::from_core)
+                    .collect()
+            },
         )?;
         Ok(PreparedOneTimePreKeys {
             operation,
@@ -853,12 +846,12 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # client.commit_operation(identity.operation.identifier.clone())?;
-    /// # client.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.id.clone())?;
+    /// # client.finalize_operation(identity.operation.id)?;
     /// let prepared = store.prepare_replenish_one_time_prekeys()?;
-    /// client.commit_operation(prepared.operation.identifier.clone())?;
+    /// client.commit_operation(prepared.operation.id.clone())?;
     /// // Finalize even when `one_time_prekeys` is empty.
-    /// client.finalize_operation(prepared.operation.identifier)?;
+    /// client.finalize_operation(prepared.operation.id)?;
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
@@ -876,7 +869,12 @@ impl IdentityOperations {
         let (operation, one_time_prekeys) = convert_prepared(
             &self.inner,
             self.inner.prepare_replenish_one_time_prekeys()?,
-            |one_time_prekeys| Ok(one_time_prekeys.into_iter().map(Into::into).collect()),
+            |one_time_prekeys| {
+                one_time_prekeys
+                    .into_iter()
+                    .map(OneTimePreKeyBundle::from_core)
+                    .collect()
+            },
         )?;
         Ok(PreparedOneTimePreKeys {
             operation,
@@ -903,11 +901,11 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # client.commit_operation(identity.operation.identifier.clone())?;
-    /// # client.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.id.clone())?;
+    /// # client.finalize_operation(identity.operation.id)?;
     /// let prepared = store.prepare_rotate_inbox_now()?;
-    /// client.commit_operation(prepared.operation.identifier.clone())?;
-    /// client.finalize_operation(prepared.operation.identifier.clone())?;
+    /// client.commit_operation(prepared.operation.id.clone())?;
+    /// client.finalize_operation(prepared.operation.id.clone())?;
     /// publish_rotation(&prepared.rotation.publication)?;
     /// # Ok::<(), ClientError>(())
     /// ```
@@ -925,7 +923,7 @@ impl IdentityOperations {
         let (operation, rotation) = convert_prepared(
             &self.inner,
             self.inner.prepare_rotate_inbox_now()?,
-            |rotation| Ok(inbox_rotation_from_core(rotation)),
+            inbox_rotation_from_core,
         )?;
         Ok(PreparedInboxRotation {
             operation,
@@ -956,11 +954,11 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # client.commit_operation(identity.operation.identifier.clone())?;
-    /// # client.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.id.clone())?;
+    /// # client.finalize_operation(identity.operation.id)?;
     /// let prepared = store.prepare_rotate_signed_prekey_if_stale()?;
-    /// client.commit_operation(prepared.operation.identifier.clone())?;
-    /// client.finalize_operation(prepared.operation.identifier)?;
+    /// client.commit_operation(prepared.operation.id.clone())?;
+    /// client.finalize_operation(prepared.operation.id)?;
     /// if let Some(new_bundle) = prepared.signed_prekey {
     ///     publish_signed_prekey_bundle(&new_bundle)?;
     /// }
@@ -984,7 +982,7 @@ impl IdentityOperations {
         let (operation, signed_prekey) = convert_prepared(
             &self.inner,
             self.inner.prepare_rotate_signed_prekey_if_stale()?,
-            |signed_prekey| Ok(signed_prekey.map(Into::into)),
+            |signed_prekey| signed_prekey.map(SignedPreKeyBundle::from_core).transpose(),
         )?;
         Ok(PreparedSignedPreKeyRotation {
             operation,
@@ -1009,11 +1007,11 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let identity = store.prepare_generate_identity()?;
-    /// # client.commit_operation(identity.operation.identifier.clone())?;
-    /// # client.finalize_operation(identity.operation.identifier)?;
+    /// # client.commit_operation(identity.operation.id.clone())?;
+    /// # client.finalize_operation(identity.operation.id)?;
     /// let prepared = store.prepare_rotate_signed_prekey_now()?;
-    /// client.commit_operation(prepared.operation.identifier.clone())?;
-    /// client.finalize_operation(prepared.operation.identifier)?;
+    /// client.commit_operation(prepared.operation.id.clone())?;
+    /// client.finalize_operation(prepared.operation.id)?;
     /// if let Some(new_bundle) = prepared.signed_prekey {
     ///     publish_signed_prekey_bundle(&new_bundle)?;
     /// }
@@ -1036,7 +1034,7 @@ impl IdentityOperations {
         let (operation, signed_prekey) = convert_prepared(
             &self.inner,
             self.inner.prepare_rotate_signed_prekey_now()?,
-            |signed_prekey| Ok(Some(signed_prekey.into())),
+            |signed_prekey| SignedPreKeyBundle::from_core(signed_prekey).map(Some),
         )?;
         Ok(PreparedSignedPreKeyRotation {
             operation,
@@ -1062,8 +1060,8 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// # let prepared = store.prepare_generate_identity()?;
-    /// # client.commit_operation(prepared.operation.identifier.clone())?;
-    /// # client.finalize_operation(prepared.operation.identifier)?;
+    /// # client.commit_operation(prepared.operation.id.clone())?;
+    /// # client.finalize_operation(prepared.operation.id)?;
     /// let blob = store.export_encrypted_backup("strong passphrase".into())?;
     /// persist_backup_blob(&blob)?;
     /// # Ok::<(), ClientError>(())
@@ -1107,8 +1105,8 @@ impl IdentityOperations {
     /// let source: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// let source_store = Client::new(source);
     /// let identity = source_store.identity().prepare_generate_identity()?;
-    /// source_store.commit_operation(identity.operation.identifier.clone())?;
-    /// source_store.finalize_operation(identity.operation.identifier)?;
+    /// source_store.commit_operation(identity.operation.id.clone())?;
+    /// source_store.finalize_operation(identity.operation.id)?;
     /// let blob = source_store.identity().export_encrypted_backup("strong passphrase".into())?;
     ///
     /// // Restored keystore: import the blob into a fresh store.
@@ -1118,13 +1116,13 @@ impl IdentityOperations {
     ///     blob,
     ///     "strong passphrase".into(),
     /// )?;
-    /// destination_store.commit_operation(operation.identifier.clone())?;
+    /// destination_store.commit_operation(operation.id.clone())?;
     /// // Atomically wipe host-owned protocol state here.
-    /// destination_store.finalize_operation(operation.identifier)?;
+    /// destination_store.finalize_operation(operation.id)?;
     /// let rotation = destination_store.identity().prepare_rotate_inbox_now()?;
-    /// destination_store.commit_operation(rotation.operation.identifier.clone())?;
-    /// // Publish `rotation.rotation.publication` and persist the identifier atomically.
-    /// destination_store.finalize_operation(rotation.operation.identifier)?;
+    /// destination_store.commit_operation(rotation.operation.id.clone())?;
+    /// // Publish `rotation.rotation.publication` and persist the id atomically.
+    /// destination_store.finalize_operation(rotation.operation.id)?;
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
@@ -1151,11 +1149,11 @@ impl IdentityOperations {
     ) -> Result<KeyStoreOperation, ClientError> {
         let data = Zeroizing::new(data);
         let passphrase = Zeroizing::new(passphrase);
-        Ok(self
-            .inner
-            .prepare_import_encrypted_backup(data.as_slice(), passphrase.as_str())?
-            .operation
-            .into())
+        Ok(KeyStoreOperation::from_core(
+            self.inner
+                .prepare_import_encrypted_backup(data.as_slice(), passphrase.as_str())?
+                .operation,
+        ))
     }
 
     /// Prepares deletion of all stored prekeys, discovery-key, and identity material.
@@ -1171,9 +1169,9 @@ impl IdentityOperations {
     /// # let client = Client::new(storage);
     /// let store = client.identity();
     /// let operation = store.prepare_reset()?;
-    /// client.commit_operation(operation.identifier.clone())?;
+    /// client.commit_operation(operation.id.clone())?;
     /// // Atomically wipe host-owned protocol state here.
-    /// client.finalize_operation(operation.identifier)?;
+    /// client.finalize_operation(operation.id)?;
     /// # Ok::<(), ClientError>(())
     /// ```
     ///
@@ -1183,7 +1181,9 @@ impl IdentityOperations {
     /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
     /// - [`ClientError::Storage`] on platform storage failure.
     pub fn prepare_reset(&self) -> Result<KeyStoreOperation, ClientError> {
-        Ok(self.inner.prepare_reset()?.operation.into())
+        Ok(KeyStoreOperation::from_core(
+            self.inner.prepare_reset()?.operation,
+        ))
     }
 }
 
@@ -1270,7 +1270,7 @@ impl Messaging {
         )?;
         Ok(SessionInitiationResult {
             message: Message::from_core(result.message),
-            state_updates: updates_from_core(result.state_updates)?,
+            state_updates: updates_from_core(result.state_updates),
         })
     }
 
@@ -1402,7 +1402,7 @@ impl Messaging {
             prekey_selection.to_core(),
         )?;
         let (operation, acceptance) = convert_prepared(&self.inner, prepared, |result| {
-            let state_updates = updates_from_core(result.state_updates)?;
+            let state_updates = updates_from_core(result.state_updates);
             Ok(SessionAcceptanceResult {
                 plaintext: result.plaintext.to_vec(),
                 sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
@@ -1472,7 +1472,7 @@ impl Messaging {
         message_id: Vec<u8>,
         contact_identity_key: FfiIdentityKey,
         recipient_public_key: Vec<u8>,
-        timestamp_millis: u64,
+        sent_at_millis: u64,
         sender_certificate: Vec<u8>,
         sender_signature: Vec<u8>,
         plaintext: Vec<u8>,
@@ -1483,20 +1483,22 @@ impl Messaging {
         let plaintext = Zeroizing::new(plaintext);
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let transport_binding = transport_binding.into_core()?;
-        OutboundMessageResult::from_core(self.inner.encrypt_message_with_transport_binding(
-            MessageEncryption {
-                snapshot: &snapshot,
-                session_key: protocol_key(session_key)?,
-                message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
-                contact_identity_key: contact_identity_key.to_core()?,
-                recipient_public_key: fixed_32(&recipient_public_key, "recipient public key")?,
-                timestamp_millis,
-                sender_certificate: &sender_certificate,
-                sender_signature: &sender_signature,
-                plaintext: &plaintext,
-            },
-            &transport_binding,
-        )?)
+        Ok(OutboundMessageResult::from_core(
+            self.inner.encrypt_message_with_transport_binding(
+                MessageEncryption {
+                    snapshot: &snapshot,
+                    session_key: protocol_key(session_key)?,
+                    message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
+                    contact_identity_key: contact_identity_key.to_core()?,
+                    recipient_public_key: fixed_32(&recipient_public_key, "recipient public key")?,
+                    sent_at_millis,
+                    sender_certificate: &sender_certificate,
+                    sender_signature: &sender_signature,
+                    plaintext: &plaintext,
+                },
+                &transport_binding,
+            )?,
+        ))
     }
 
     /// Decrypts an established-session Message while authenticating its Transport Binding and the
@@ -1563,7 +1565,7 @@ impl Messaging {
         message: Message,
         acknowledgment_id: Vec<u8>,
         acknowledgment_recipient_public_key: Vec<u8>,
-        acknowledgment_timestamp_millis: u64,
+        acknowledgment_sent_at_millis: u64,
         acknowledgment_sender_certificate: Vec<u8>,
         acknowledgment_sender_signature: Vec<u8>,
         sender_certificate_validation: Option<SenderCertificateValidation>,
@@ -1579,8 +1581,9 @@ impl Messaging {
 
         let validation_storage = if let Some(validation) = &sender_certificate_validation {
             Some((
-                domain_signing_keys_to_core(&validation.domain_signing_keys)?,
-                revoked_identity_keys_to_core(&validation.revocation_state)?,
+                domain_signing_keys_to_protocol(&validation.domain_signing_keys)?,
+                revoked_identity_keys_to_protocol(&validation.revocation_state)?,
+                time_from_millis(validation.reference_time_millis, "reference_time_millis")?,
             ))
         } else {
             None
@@ -1589,42 +1592,44 @@ impl Messaging {
             .as_ref()
             .zip(validation_storage.as_ref())
             .map(
-                |(validation, (domain_signing_keys, revoked_identity_keys))| {
+                |(validation, (domain_signing_keys, revoked_identity_keys, reference_time))| {
                     InboundSenderCertificateValidation {
                         domain_signing_keys,
                         expected_relay_domain: &validation.expected_relay_domain,
-                        revocation_state: revocation_state_to_core(
+                        revocation_state: revocation_state_to_protocol(
                             &validation.revocation_state,
                             revoked_identity_keys,
                         ),
-                        reference_timestamp_secs: validation.reference_timestamp_secs,
-                        grace_window_secs: validation.grace_window_secs,
+                        reference_time: *reference_time,
+                        grace_window: Duration::from_millis(validation.grace_window_millis),
                     }
                 },
             );
 
-        InboundMessageOutcome::from_core(self.inner.decrypt_message_with_transport_bindings(
-            MessageDecryption {
-                snapshot: &snapshot,
-                session_key: protocol_key(session_key)?,
-                deduplication_key: protocol_key(deduplication_key)?,
-                message: &message,
-                acknowledgment_id: MessageId::from_bytes(fixed_16(
-                    &acknowledgment_id,
-                    "acknowledgment id",
-                )?),
-                acknowledgment_recipient_public_key: fixed_32(
-                    &acknowledgment_recipient_public_key,
-                    "acknowledgment recipient public key",
-                )?,
-                acknowledgment_timestamp_millis,
-                acknowledgment_sender_certificate: &acknowledgment_sender_certificate,
-                acknowledgment_sender_signature: &acknowledgment_sender_signature,
-                sender_certificate_validation: core_validation,
-            },
-            &message_transport_binding,
-            &acknowledgment_transport_binding,
-        )?)
+        Ok(InboundMessageOutcome::from_core(
+            self.inner.decrypt_message_with_transport_bindings(
+                MessageDecryption {
+                    snapshot: &snapshot,
+                    session_key: protocol_key(session_key)?,
+                    deduplication_key: protocol_key(deduplication_key)?,
+                    message: &message,
+                    acknowledgment_id: MessageId::from_bytes(fixed_16(
+                        &acknowledgment_id,
+                        "acknowledgment id",
+                    )?),
+                    acknowledgment_recipient_public_key: fixed_32(
+                        &acknowledgment_recipient_public_key,
+                        "acknowledgment recipient public key",
+                    )?,
+                    acknowledgment_sent_at_millis,
+                    acknowledgment_sender_certificate: &acknowledgment_sender_certificate,
+                    acknowledgment_sender_signature: &acknowledgment_sender_signature,
+                    sender_certificate_validation: core_validation,
+                },
+                &message_transport_binding,
+                &acknowledgment_transport_binding,
+            )?,
+        ))
     }
 
     /// Processes an encrypted acknowledgment while authenticating its Transport Binding.
@@ -1675,14 +1680,16 @@ impl Messaging {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let message = message.to_core()?;
         let transport_binding = transport_binding.into_core()?;
-        AcknowledgmentOutcome::from_core(self.inner.process_acknowledgment_with_transport_binding(
-            AcknowledgmentProcessing {
-                snapshot: &snapshot,
-                session_key: protocol_key(session_key)?,
-                message: &message,
-            },
-            &transport_binding,
-        )?)
+        Ok(AcknowledgmentOutcome::from_core(
+            self.inner.process_acknowledgment_with_transport_binding(
+                AcknowledgmentProcessing {
+                    snapshot: &snapshot,
+                    session_key: protocol_key(session_key)?,
+                    message: &message,
+                },
+                &transport_binding,
+            )?,
+        ))
     }
 }
 
@@ -1715,9 +1722,9 @@ impl Contacts {
     ///     identity_key: IdentityKey,
     /// ) -> Result<(), ClientError> {
     ///     let prepared = client.contacts().prepare_block_contact(snapshot, identity_key)?;
-    ///     client.commit_operation(prepared.operation.identifier.clone())?;
-    ///     // Persist `prepared.block.contact`, publication work, and the identifier atomically.
-    ///     client.finalize_operation(prepared.operation.identifier)?;
+    ///     client.commit_operation(prepared.operation.id.clone())?;
+    ///     // Persist `prepared.block.contact`, publication work, and the id atomically.
+    ///     client.finalize_operation(prepared.operation.id)?;
     ///     Ok(())
     /// }
     /// ```
@@ -1742,7 +1749,7 @@ impl Contacts {
         let (operation, block) = convert_prepared(&self.inner, prepared, |blocked| {
             Ok(ContactBlock {
                 contact: ContactStateChange::from_core(blocked.contact)?,
-                rotation: blocked.rotation.map(inbox_rotation_from_core),
+                rotation: blocked.rotation.map(inbox_rotation_from_core).transpose()?,
             })
         })?;
         Ok(PreparedContactBlock { operation, block })
@@ -1754,16 +1761,16 @@ fn convert_prepared<T, U>(
     prepared: CorePreparedKeyStoreOperation<T>,
     convert: impl FnOnce(T) -> Result<U, ClientError>,
 ) -> Result<(KeyStoreOperation, U), ClientError> {
-    let identifier = prepared.operation.identifier;
-    let operation = prepared.operation.into();
+    let id = prepared.operation.id;
+    let operation = KeyStoreOperation::from_core(prepared.operation);
     match convert(prepared.output) {
         Ok(output) => Ok((operation, output)),
         // A conversion failure hides the prepared output from the host. Abort its journal record,
         // or return the identifier so the host can reconcile an uncertain cleanup after restart.
-        Err(error) => match store.abort_operation(identifier) {
+        Err(error) => match store.abort_operation(id) {
             Ok(_) => Err(error),
             Err(abort_error) => Err(ClientError::OperationRecoveryRequired {
-                operation_identifier: identifier.as_bytes().to_vec(),
+                operation_id: id.as_bytes().to_vec(),
                 reason: format!(
                     "prepared output conversion failed and cleanup also failed: {abort_error}"
                 ),
@@ -1771,16 +1778,18 @@ fn convert_prepared<T, U>(
         },
     }
 }
-fn inbox_rotation_from_core(rotation: roost_core::InboxRotation) -> InboxRotation {
-    InboxRotation {
-        publication: rotation.publication.into(),
+fn inbox_rotation_from_core(
+    rotation: roost_core::InboxRotation,
+) -> Result<InboxRotation, ClientError> {
+    Ok(InboxRotation {
+        publication: PublicationBundle::from_core(rotation.publication)?,
         capability: rotation.capability.to_bytes().to_vec(),
-    }
+    })
 }
 
 // Bounds what the identity key will sign for a caller-defined purpose. The prefix rule is the
-// security-relevant half: it keeps this export's preimages disjoint from every context in
-// docs/domain-separation.md, so no signature it produces can satisfy an Aether verifier.
+// security-relevant half: it keeps this export's preimages disjoint from every signature context
+// Aether defines, so no signature it produces can satisfy an Aether verifier.
 fn check_signable_transcript(transcript: &[u8]) -> Result<(), ClientError> {
     if transcript.is_empty() {
         return Err(ClientError::InvalidData {
@@ -1813,8 +1822,8 @@ impl Client {
         operation: KeyStoreOperation,
         output: T,
     ) -> Result<T, ClientError> {
-        self.commit_operation(operation.identifier.clone())?;
-        self.finalize_operation(operation.identifier)?;
+        self.commit_operation(operation.id.clone())?;
+        self.finalize_operation(operation.id)?;
         Ok(output)
     }
 
@@ -1867,11 +1876,11 @@ impl Client {
         message: Message,
     ) -> Result<SessionAcceptanceResult, ClientError> {
         let selection = crate::PreKeySelection {
-            signed_prekey_identifier: self.identity().current_signed_prekey_bundle()?.identifier,
-            one_time_prekey_identifier: message
+            signed_prekey_id: self.identity().current_signed_prekey_bundle()?.id,
+            one_time_prekey_id: message
                 .prekey_reference
                 .as_ref()
-                .and_then(|p| p.one_time_prekey_identifier),
+                .and_then(|p| p.one_time_prekey_id),
         };
         let prepared = self.messaging().prepare_accept_session(
             session_key,
@@ -1912,8 +1921,8 @@ mod tests {
     use roost_protocol::verify_with_context;
     use std::sync::Arc;
 
-    /// Every Ed25519 signature context and canonical-encoding domain tag in
-    /// `docs/domain-separation.md`, plus the one lowercase hash domain, as of v0.11.0.
+    /// Every Ed25519 signature context and canonical-encoding domain tag Aether defines, plus the
+    /// one lowercase hash domain, as of v0.11.0.
     const AETHER_DOMAIN_REGISTRY: [&str; 10] = [
         "AetherIKBinding-v1:",
         "AetherDK-v1:",
@@ -1953,7 +1962,7 @@ mod tests {
         transcript.extend_from_slice(field);
     }
 
-    // REL-RLY-16: concat("Relay-HTTP-Auth-v1", protocol_version_u16_be, challenge_nonce,
+    // Relay's authentication transcript: concat("Relay-HTTP-Auth-v1", protocol_version_u16_be, challenge_nonce,
     // identity_signing_key, len_u16_be(relay_domain), relay_domain, len_u16_be(method), method,
     // len_u16_be(request_target), request_target, SHA-256(request_body)). Fixed-width fields and
     // the context itself carry no length prefix, and nothing separates the context from what
@@ -1974,9 +1983,9 @@ mod tests {
         Signature::from_bytes(&<[u8; 64]>::try_from(bytes).unwrap())
     }
 
-    /// Known-answer test for the REL-RLY-16 authentication transcript and the signature over it.
+    /// Known-answer test for Relay's authentication transcript and the signature over it.
     ///
-    /// Source: Relay REL-RLY-18 published vector (`relay/docs/auth-transcript.md`), produced by
+    /// Source: Relay's published vector, produced by
     /// the relay's own transcript encoder and `ed25519-dalek` verifier, which share no code with
     /// this crate. Matching the expected signature pins all 159 transcript bytes, because any
     /// difference in field order, length prefixing, or separators changes the signature.
@@ -2135,34 +2144,34 @@ mod tests {
     fn prepared_identity_lifecycle_crosses_the_uniffi_boundary() {
         let store = key_store();
         let prepared = store.identity().prepare_generate_identity().unwrap();
-        let identifier = prepared.operation.identifier.clone();
+        let id = prepared.operation.id.clone();
 
-        assert_eq!(identifier.len(), 16);
+        assert_eq!(id.len(), 16);
         assert!(!prepared.operation.secure_storage_preconditions.is_empty());
         assert!(matches!(
-            store.operation_status(identifier.clone()).unwrap(),
+            store.operation_status(id.clone()).unwrap(),
             KeyStoreOperationStatus::Prepared
         ));
         assert!(!store.identity().has_identity().unwrap());
 
         assert!(matches!(
-            store.commit_operation(identifier.clone()).unwrap(),
+            store.commit_operation(id.clone()).unwrap(),
             KeyStoreOperationStatus::Committed
         ));
         assert!(matches!(
             store.identity().has_identity(),
             Err(ClientError::OperationRecoveryRequired {
-                operation_identifier,
+                operation_id,
                 ..
-            }) if operation_identifier == identifier
+            }) if operation_id == id
         ));
 
         assert!(matches!(
-            store.finalize_operation(identifier.clone()).unwrap(),
+            store.finalize_operation(id.clone()).unwrap(),
             KeyStoreOperationStatus::Finalized
         ));
         assert!(matches!(
-            store.finalize_operation(identifier).unwrap(),
+            store.finalize_operation(id).unwrap(),
             KeyStoreOperationStatus::Finalized
         ));
         assert_eq!(
@@ -2192,7 +2201,7 @@ mod tests {
             &bundle.public_key,
             &bundle.verifying_key,
             bundle.epoch,
-            bundle.created_at,
+            bundle.created_at_millis / 1_000,
             &bundle.signature,
         )
         .unwrap()
@@ -2200,7 +2209,7 @@ mod tests {
 
     fn signed_prekey_bundle(bundle: &FfiSignedPreKeyBundle) -> CryptoSignedPreKeyBundle {
         CryptoSignedPreKeyBundle {
-            id: bundle.identifier,
+            id: bundle.id,
             public_key: PublicKey::from(
                 <[u8; 32]>::try_from(bundle.public_key.as_slice()).unwrap(),
             ),
@@ -2208,7 +2217,7 @@ mod tests {
                 &<[u8; 64]>::try_from(bundle.signature.as_slice()).unwrap(),
             ),
             epoch: bundle.epoch,
-            created_at: bundle.created_at,
+            created_at_secs: bundle.created_at_millis / 1_000,
         }
     }
 
@@ -2259,7 +2268,7 @@ mod tests {
 
     /// The host registers the verifier and shares the capability only with authorized contacts, so
     /// both must cross the FFI boundary and the verifier must commit to the capability actually in
-    /// storage (AE-IDN-10).
+    /// storage.
     #[test]
     fn publication_verifier_commits_to_the_capability_across_ffi() {
         let key_store = key_store();
@@ -2321,7 +2330,7 @@ mod tests {
                 x25519_public_key: publication.discovery_key.public_key.clone(),
                 ed25519_verifying_key: publication.discovery_key.verifying_key.clone(),
                 epoch: publication.discovery_key.epoch,
-                created_at: publication.discovery_key.created_at,
+                created_at_millis: publication.discovery_key.created_at_millis,
                 identity_signature: publication.discovery_key.signature.clone(),
             },
         }
@@ -2442,10 +2451,7 @@ mod tests {
 
         assert_eq!(bundles.len(), 3);
         assert_eq!(
-            bundles
-                .iter()
-                .map(|bundle| bundle.identifier)
-                .collect::<Vec<_>>(),
+            bundles.iter().map(|bundle| bundle.id).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
         for bundle in &bundles {

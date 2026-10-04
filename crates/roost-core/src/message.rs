@@ -25,22 +25,11 @@ impl Message {
     ///
     /// The sealed-frame version is internal to the encoded message and independent of any
     /// transport envelope a consumer may add around the returned bytes.
-    ///
-    /// # Errors
-    /// - [`MessageError::PayloadTooLarge`] if `ciphertext` exceeds the message payload cap.
-    /// - [`MessageError::EncodedTooLarge`] if the encoded output exceeds the encoded-message cap.
-    /// - [`MessageError::Encode`] if Postcard rejects the wire form.
     pub fn to_bytes(&self) -> Result<Vec<u8>, MessageError> {
         self.to_bytes_with_hardening_limits(ProtocolHardeningLimits::default())
     }
 
     /// Encodes this message with caller-selected hardening limits.
-    ///
-    /// # Errors
-    /// - [`MessageError::PayloadTooLarge`] if `ciphertext` exceeds the configured payload cap.
-    /// - [`MessageError::EncodedTooLarge`] if the encoded output exceeds the configured
-    ///   encoded-message cap.
-    /// - [`MessageError::Encode`] if Postcard rejects the wire form.
     pub fn to_bytes_with_hardening_limits(
         &self,
         limits: ProtocolHardeningLimits,
@@ -62,12 +51,6 @@ impl Message {
     /// Decodes a sealed-frame message from bytes produced by [`Self::to_bytes`].
     ///
     /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
-    ///
-    /// # Errors
-    /// - [`MessageError::EncodedTooLarge`] if `bytes` exceeds the encoded-message cap.
-    /// - [`MessageError::Decode`] if the bytes are empty, malformed, unsupported, or have trailing
-    ///   data.
-    /// - [`MessageError::PayloadTooLarge`] if the decoded ciphertext exceeds the payload cap.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MessageError> {
         Self::from_bytes_with_hardening_limits(bytes, ProtocolHardeningLimits::default())
     }
@@ -75,13 +58,6 @@ impl Message {
     /// Decodes a sealed-frame message with caller-selected hardening limits.
     ///
     /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
-    ///
-    /// # Errors
-    /// - [`MessageError::EncodedTooLarge`] if `bytes` exceeds the configured encoded-message cap.
-    /// - [`MessageError::Decode`] if the bytes are empty, malformed, unsupported, or have trailing
-    ///   data.
-    /// - [`MessageError::PayloadTooLarge`] if the decoded ciphertext exceeds the configured
-    ///   payload cap.
     pub fn from_bytes_with_hardening_limits(
         bytes: &[u8],
         limits: ProtocolHardeningLimits,
@@ -180,7 +156,7 @@ mod tests {
             id: [u8; 16],
             sender_public_key: Vec<u8>,
             recipient_public_key: Vec<u8>,
-            timestamp_millis: u64,
+            sent_at_millis: u64,
             payload_kind: u8,
             payload: Vec<u8>,
         }
@@ -190,7 +166,7 @@ mod tests {
             id: [1u8; 16],
             sender_public_key: vec![2u8; PUBLIC_KEY_LEN],
             recipient_public_key: vec![3u8; PUBLIC_KEY_LEN],
-            timestamp_millis: 1_700_000_000_123,
+            sent_at_millis: 1_700_000_000_123,
             payload_kind: 0,
             payload: vec![0x90, 0x91, 0x92, 0x93, 0x94],
         })

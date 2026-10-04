@@ -3,7 +3,7 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    CryptoError, KeyPair, SealedFrame, SealedFramePreKeyReference, generate_discovery_key,
+    KeyPair, SealedFrame, SealedFrameError, SealedFramePreKeyReference, generate_discovery_key,
     generate_signing_key_pair, open_frame, open_frame_for_discovery_key_with_associated_data,
     seal_frame, seal_frame_with_associated_data,
 };
@@ -42,11 +42,11 @@ fn sealed_frame_authenticates_external_associated_data() {
             &frame,
             b"consumer-binding:changed",
         ),
-        Err(CryptoError::Aead)
+        Err(SealedFrameError::Aead)
     ));
     assert!(matches!(
         open_frame_for_discovery_key_with_associated_data(&recipient, &frame, &[]),
-        Err(CryptoError::Aead)
+        Err(SealedFrameError::Aead)
     ));
 }
 
@@ -102,12 +102,12 @@ fn sealed_frame_aad_binds_transport_visible_fields() {
     assert!(open_frame(&recipient, &wrong_version).is_err());
     assert!(matches!(
         open_frame(&other_recipient, &wrong_recipient),
-        Err(CryptoError::Aead)
+        Err(SealedFrameError::Aead)
     ));
     for tampered in [wrong_ephemeral, wrong_prekey] {
         assert!(matches!(
             open_frame(&recipient, &tampered),
-            Err(CryptoError::Aead)
+            Err(SealedFrameError::Aead)
         ));
     }
 }
@@ -118,7 +118,7 @@ fn sealed_frame_from_bytes_rejects_oversized_before_decode() {
 
     assert!(matches!(
         SealedFrame::from_bytes(&bytes),
-        Err(CryptoError::SealedFrameDecode)
+        Err(SealedFrameError::Decode)
     ));
 }
 
@@ -132,17 +132,11 @@ fn sealed_frame_rejects_invalid_public_keys() {
         ciphertext: vec![0x51; 16],
     };
 
-    assert!(matches!(
-        frame.to_bytes(),
-        Err(CryptoError::SealedFrameEncode)
-    ));
+    assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
 
     frame.recipient_public_key = *recipient_key().public.as_bytes();
     frame.ephemeral_public_key = [0u8; 32];
-    assert!(matches!(
-        frame.to_bytes(),
-        Err(CryptoError::SealedFrameEncode)
-    ));
+    assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
 }
 
 #[test]
@@ -158,10 +152,7 @@ fn sealed_frame_rejects_mismatched_one_time_prekey_reference_halves() {
         ciphertext: vec![0x61; 16],
     };
 
-    assert!(matches!(
-        frame.to_bytes(),
-        Err(CryptoError::SealedFrameEncode)
-    ));
+    assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
 }
 
 #[test]
@@ -173,6 +164,6 @@ fn sealed_frame_open_rejects_recipient_key_mismatch() {
 
     assert!(matches!(
         open_frame(&other_recipient, &frame),
-        Err(CryptoError::SealedFrameDecode)
+        Err(SealedFrameError::Decode)
     ));
 }

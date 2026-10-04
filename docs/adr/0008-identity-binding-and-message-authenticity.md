@@ -1,10 +1,8 @@
-# Identity Binding And Message Authenticity
+# Identity Binding and Message Authenticity
 
-**Status:** Accepted
+X3DH mixes both Identity Keys into the Session's root key, after checking each one's self-signature, so nobody can pass off the Session as belonging to an Identity the peer didn't verify. The sender also signs every Message Transcript with its Identity Key, and the signature travels sealed so the transport can't see it. By design, a sender can't later deny writing a Message.
 
-X3DH session derivation binds both parties' canonical Identity Key encodings into the root-key transcript, and every distributed IK X25519 half is signed by its IK Ed25519 key before agreement use. This prevents identity misbinding: a session secret cannot be replayed or re-labeled under a different IK than the peer verified. Post-handshake Messages additionally carry a sealed IK Ed25519 signature over the authenticated message transcript, making Message authorship non-repudiable by design while preserving sealed sender at the transport boundary: sender IK, certificate, and signatures remain inside the encrypted envelope and are not transport-visible fields.
+## Alternatives
 
-## Considered Options
-
-- Preserve sender-anonymous X3DH root derivation. Rejected. It kept first-contact deniability but left the root secret bound only to prekey material, conflicting with the active identity-misbinding prevention requirement.
-- Sign Message transcripts with the DK Ed25519 key. Rejected. It limits long-lived IK signature exposure, but the active specification makes non-repudiable IK authorship the authenticity boundary.
+- Leave Identity Keys out of the root key: first contact stays deniable, but the Session is tied only to prekeys.
+- Sign Messages with the Discovery Key: this would use the permanent key less, but authorship must trace back to the Identity Key.

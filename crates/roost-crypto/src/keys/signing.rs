@@ -6,9 +6,9 @@
 
 pub use ed25519_dalek::{Signature, VerifyingKey};
 
-use crate::CryptoError;
 use ed25519_dalek::SigningKey;
 use rand::{CryptoRng, RngCore};
+use roost_protocol::SignatureError;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An Ed25519 key pair for signing.
@@ -39,31 +39,13 @@ impl SigningKeyPair {
     /// caller-supplied bytes; this helper does not define a transport signing layout.
     /// Contexts used with the same key must be prefix-free: no context may be a prefix of another.
     /// This method inserts no delimiter or length prefix and does not enforce that requirement.
-    ///
-    /// # Examples
-    /// ```
-    /// use rand::rngs::OsRng;
-    /// use roost_crypto::generate_signing_key_pair;
-    /// use roost_protocol::verify_with_context;
-    ///
-    /// let key = generate_signing_key_pair(&mut OsRng);
-    /// let context = b"ExampleAuthentication-v1:";
-    /// let message = b"caller-defined transcript";
-    /// let signature = key.sign_with_context(context, message)?;
-    /// verify_with_context(&key.verifying, context, message, &signature)?;
-    /// # Ok::<(), roost_crypto::CryptoError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`CryptoError::InvalidSignatureContext`] if `context` is empty or the combined context
-    ///   and message length overflows.
     pub fn sign_with_context(
         &self,
         context: &[u8],
         message: &[u8],
-    ) -> Result<Signature, CryptoError> {
+    ) -> Result<Signature, SignatureError> {
         if context.is_empty() {
-            return Err(CryptoError::InvalidSignatureContext);
+            return Err(SignatureError::InvalidSignatureContext);
         }
         Ok(self.sign(&roost_protocol::contextual_message(context, message)?))
     }
@@ -95,7 +77,8 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
 mod tests {
     use super::*;
     use crate::{
-        IdentityKeyBundle, KeyPair, sign_identity_key_binding, verify_identity_key_bundle,
+        IdentityKeyBundle, KeyBundleError, KeyPair, sign_identity_key_binding,
+        verify_identity_key_bundle,
     };
     use ed25519_dalek::Verifier;
     use rand::SeedableRng;
@@ -286,7 +269,7 @@ mod tests {
 
         assert!(matches!(
             verify_identity_key_bundle(&tampered),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -306,7 +289,7 @@ mod tests {
 
         assert!(matches!(
             verify_identity_key_bundle(&tampered),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 }

@@ -6,16 +6,15 @@ pub use messaging::{
     AcknowledgmentProcessing, MessageDecryption, MessageEncryption, MessageOperationError,
 };
 pub use operation::{
-    KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationIdentifier,
-    KeyStoreOperationStatus, PreparedKeyStoreOperation, SecureStorageExpectedValue,
-    SecureStoragePrecondition, UnfinishedKeyStoreOperation,
+    KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId, KeyStoreOperationStatus,
+    PreparedKeyStoreOperation, SecureStorageExpectedValue, SecureStoragePrecondition,
+    UnfinishedKeyStoreOperation,
 };
 pub use session::{
     SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
     SessionInitiationResult,
 };
 
-use crate::clock::{Clock, SystemClock};
 use crate::contact::{ContactIdentityKey, ContactStateChange};
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager, DiscoveryKeyStatus};
 use crate::identity::{Identity, IdentityError, IdentityManager};
@@ -33,6 +32,7 @@ use roost_crypto::{
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 
 /// Errors returned by [`KeyStore`] operations.
 #[derive(Debug)]
@@ -126,14 +126,13 @@ pub struct PublicationBundle {
     /// Its `signature` field is the IK→DK half of the mutual binding.
     pub discovery_key: DiscoveryKeyBundle,
     /// The DK→IK half of the mutual binding: [`Self::discovery_key`] signing the identity it
-    /// belongs to (AE-KEY-04).
+    /// belongs to.
     ///
     /// A relay verifies this alongside the IK→DK direction before accepting a registration, and a
     /// peer that starts from a discovery key verifies it to learn the identity really was
     /// authorized by that discovery key.
     pub discovery_to_identity: Signature,
-    /// Public commitment to the recipient delivery capability of this inbox generation
-    /// (AE-IDN-10).
+    /// Public commitment to the recipient delivery capability of this inbox generation.
     ///
     /// Register this with the relay. The capability it commits to is a bearer secret and is
     /// reached only through [`KeyStore::current_delivery_capability`].
@@ -142,7 +141,7 @@ pub struct PublicationBundle {
     pub signed_prekey: SignedPreKeyBundle,
 }
 
-/// Everything one inbox rotation produces (AE-IDN-08).
+/// Everything one inbox rotation produces.
 ///
 /// A rotation advances the inbox generation and replaces the discovery key, its mutual binding
 /// signatures, the prekey bundle, and the recipient delivery capability together. Both halves are
@@ -159,7 +158,7 @@ pub struct InboxRotation {
     pub capability: RecipientDeliveryCapability,
 }
 
-/// Result of blocking a contact (AE-BLK-08).
+/// Result of blocking a contact.
 pub struct ContactBlock {
     /// Contact state change to commit durably, then emit.
     pub contact: ContactStateChange,
@@ -174,7 +173,6 @@ pub struct ContactBlock {
 
 struct KeyStoreInner {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
-    clock: Arc<dyn Clock>,
     identity: Arc<IdentityManager>,
     discovery: Arc<DiscoveryKeyManager>,
     one_time_prekey: Arc<OneTimePreKeyManager>,
@@ -190,13 +188,27 @@ struct KeyStoreInner {
 /// do not. A host that uses multiple instances or processes for one identity namespace must hold
 /// one shared per-identity actor or lock from before preparing an operation until it is finalized,
 /// aborted, or reconciled after an ambiguous host commit.
+///
+/// Methods named `prepare_*` stage a secure-storage change and return it with an operation id.
+/// Commit the operation, persist its output and id in the host transaction, then finalize:
+///
+/// ```
+/// use roost_core::{InMemorySecureStorage, KeyStore};
+///
+/// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+/// let prepared = store.prepare_generate_identity()?;
+/// store.commit_operation(prepared.operation.id)?;
+/// // Persist or publish `prepared.output` with the host operation id.
+/// store.finalize_operation(prepared.operation.id)?;
+/// # Ok::<(), roost_core::KeyStoreError>(())
+/// ```
 #[derive(Clone)]
 pub struct KeyStore(Arc<KeyStoreInner>);
 
 impl KeyStore {
     /// Creates a keystore backed by `storage`, reading time from the system clock.
     pub fn new(storage: Box<dyn SecureStorage>) -> Self {
-        Self::with_clock(storage, Arc::new(SystemClock))
+        Self::with_protocol_engine(storage, ProtocolStateEngine::new())
     }
 
     /// Creates a keystore whose operations share the supplied protocol configuration.
@@ -206,7 +218,7 @@ impl KeyStore {
         storage: Box<dyn SecureStorage>,
         engine: ProtocolStateEngine,
     ) -> Self {
-        Self::from_shared_storage(Arc::new(Mutex::new(storage)), Arc::new(SystemClock), engine)
+        Self::from_shared_storage(Arc::new(Mutex::new(storage)), engine)
     }
 
     /// Returns the engine shared by identity, messaging, and contact operations.
@@ -214,36 +226,25 @@ impl KeyStore {
         &self.0.engine
     }
 
-    // Creates a keystore backed by `storage`, reading time from `clock`.
-    pub(crate) fn with_clock(storage: Box<dyn SecureStorage>, clock: Arc<dyn Clock>) -> Self {
-        let storage = Arc::new(Mutex::new(storage));
-        Self::from_shared_storage(storage, clock, ProtocolStateEngine::new())
-    }
-
     fn from_shared_storage(
         storage: Arc<Mutex<Box<dyn SecureStorage>>>,
-        clock: Arc<dyn Clock>,
         engine: ProtocolStateEngine,
     ) -> Self {
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         let discovery = Arc::new(DiscoveryKeyManager::new(
             Arc::clone(&storage),
             Arc::clone(&identity),
-            Arc::clone(&clock),
         ));
         let one_time_prekey = Arc::new(OneTimePreKeyManager::new(
             Arc::clone(&storage),
             Arc::clone(&discovery),
-            Arc::clone(&clock),
         ));
         let signed_prekey = Arc::new(SignedPreKeyManager::new(
             Arc::clone(&storage),
             Arc::clone(&discovery),
-            Arc::clone(&clock),
         ));
         KeyStore(Arc::new(KeyStoreInner {
             storage,
-            clock,
             identity,
             discovery,
             one_time_prekey,
@@ -254,24 +255,6 @@ impl KeyStore {
     }
 
     /// Prepares fresh identity and discovery-key material without changing authoritative storage.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let prepared = store.prepare_generate_identity()?;
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// // Persist or publish `prepared.output` with the host operation identifier.
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Identity`] (`AlreadyExists`) if a complete identity already exists.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::Identity`] if stored key material is
-    ///   malformed, missing a required half, or cannot be read.
-    /// - [`KeyStoreError::Operation`] if staging or operation-journal persistence fails.
     pub fn prepare_generate_identity(
         &self,
     ) -> Result<PreparedKeyStoreOperation<Identity>, KeyStoreError> {
@@ -296,19 +279,11 @@ impl KeyStore {
             },
             Err(e) => return Err(e.into()),
         };
-        self.0.discovery.rotate_now(&mut OsRng)?;
+        self.0.discovery.rotate_now(&mut OsRng, SystemTime::now())?;
         Ok(identity)
     }
 
     /// Loads the stored [`Identity`].
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Identity`] (`Corrupt`) if only one of the two identity keys is present.
-    /// - [`KeyStoreError::Identity`] (`InvalidData`) if a stored key has the wrong byte length.
-    /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
-    /// - [`KeyStoreError::Identity`] (`NotFound`) if no identity is stored.
-    /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure.
-    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn load_identity(&self) -> Result<Identity, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -319,11 +294,6 @@ impl KeyStore {
     ///
     /// This is a presence check only. Use [`Self::load_identity`] to read and validate the stored
     /// identity.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Identity`] (`LockPoisoned`) on storage lock poisoning.
-    /// - [`KeyStoreError::Identity`] (`Storage`) on platform storage failure.
-    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn has_identity(&self) -> Result<bool, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -334,30 +304,13 @@ impl KeyStore {
     ///
     /// Use [`Self::current_publication_bundle`] when publishing. It returns the matching discovery
     /// key and verifies the pair before returning it.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored blob is malformed.
-    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
-    ///   inbox rotation.
-    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key is stored.
-    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
-        Ok(self.0.signed_prekey.current_bundle()?)
+        Ok(self.0.signed_prekey.current_bundle(SystemTime::now())?)
     }
 
     /// Returns the current [`DiscoveryKeyBundle`], verified against the identity key.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Corrupt`) if the stored discovery key does not verify
-    ///   against the identity key.
-    /// - [`KeyStoreError::Discovery`] (`Identity`) if loading the verifying identity fails.
-    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
-    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Discovery`] (`NotFound`) if no discovery key is stored.
-    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -370,21 +323,6 @@ impl KeyStore {
     /// identity publication over reading the two bundles separately. One-time pre-key bundles are
     /// managed by [`Self::prepare_generate_one_time_prekeys`] and
     /// [`Self::prepare_replenish_one_time_prekeys`].
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `NotFound`) if the discovery
-    ///   key is unverifiable, malformed, or absent.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::SignedPreKey`]
-    ///   (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::SignedPreKey`] (`Corrupt`) if the stored signed pre-key does not verify
-    ///   against the current discovery key.
-    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
-    ///   malformed.
-    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
-    ///   inbox rotation.
-    /// - [`KeyStoreError::SignedPreKey`] (`NotFound`) if no signed pre-key has been created.
-    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
@@ -392,7 +330,7 @@ impl KeyStore {
         let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
         let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
         let discovery_key = discovery_key.bundle();
-        let signed_prekey = self.0.signed_prekey.current_bundle()?;
+        let signed_prekey = self.0.signed_prekey.current_bundle(SystemTime::now())?;
         // Reject storage rollback/desync before publishing a mismatched pair.
         verify_signed_prekey_bundle(&signed_prekey, &discovery_key.verifying_key)
             .map_err(|_| SignedPreKeyError::Corrupt)?;
@@ -405,7 +343,7 @@ impl KeyStore {
         })
     }
 
-    /// Blocks a contact and rotates the inbox so the block takes effect at the relay (AE-BLK-08).
+    /// Blocks a contact and rotates the inbox so the block takes effect at the relay.
     ///
     /// Blocking alone only stops messages being surfaced locally; the relay would still accept and
     /// queue them, because the blocked contact still holds a working delivery capability. Rotating
@@ -419,32 +357,6 @@ impl KeyStore {
     /// Neither change is authoritative when this returns. Commit the operation, atomically apply
     /// [`ContactBlock::contact`] in the host transaction, then finalize the staged inbox rotation.
     /// Abort only after proving the host transaction did not commit.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{ContactIdentityKey, KeyStore, ProtocolStateSnapshot};
-    ///
-    /// fn block_contact(
-    ///     store: &KeyStore,
-    ///     snapshot: &ProtocolStateSnapshot,
-    ///     identity_key: ContactIdentityKey,
-    /// ) -> Result<(), Box<dyn std::error::Error>> {
-    ///     let prepared = store.prepare_block_contact(snapshot, identity_key)?;
-    ///     store.commit_operation(prepared.operation.identifier)?;
-    ///     // Persist `prepared.output.contact` and the identifier atomically.
-    ///     store.finalize_operation(prepared.operation.identifier)?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::ProtocolState`] if the contact blob is missing, malformed, or
-    ///   `identity_key` is not canonical.
-    /// - [`KeyStoreError::Discovery`] (`Clock` | `Identity` | `InvalidData`) if the rotation
-    ///   cannot read the clock, the identity, or the stored discovery key.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::OneTimePreKey`] |
-    ///   [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_block_contact(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -462,17 +374,11 @@ impl KeyStore {
         })
     }
 
-    /// Returns the recipient delivery capability for the current inbox generation (AE-IDN-06).
+    /// Returns the recipient delivery capability for the current inbox generation.
     ///
     /// Secret-bearing. Give it only to authorized contacts through an encrypted channel, and
     /// register [`PublicationBundle::recipient_delivery_verifier`] instead — Aether never
-    /// registers, validates, or transmits a capability (AE-IDN-09).
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`InvalidData` | `NotFound`) if the stored discovery key is
-    ///   malformed or absent.
-    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
+    /// registers, validates, or transmits a capability.
     pub fn current_delivery_capability(
         &self,
     ) -> Result<RecipientDeliveryCapability, KeyStoreError> {
@@ -485,32 +391,6 @@ impl KeyStore {
     ///
     /// The new secrets remain staged until finalization. No discovery-key rotation is required.
     /// The call fails if the requested batch would exceed the pool cap.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let identity = store.prepare_generate_identity()?;
-    /// store.commit_operation(identity.operation.identifier)?;
-    /// store.finalize_operation(identity.operation.identifier)?;
-    /// let prepared = store.prepare_generate_one_time_prekeys(8)?;
-    /// assert_eq!(prepared.output.len(), 8);
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::OneTimePreKey`] (`Discovery`) if the discovery key is malformed,
-    ///   unverifiable, or absent.
-    /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
-    ///   malformed or the requested batch exceeds capacity.
-    /// - [`KeyStoreError::OneTimePreKey`] (`InboxRotationRequired`) after backup restore and
-    ///   before inbox rotation.
-    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_generate_one_time_prekeys(
         &self,
         batch_size: usize,
@@ -526,7 +406,7 @@ impl KeyStore {
         Ok(self
             .0
             .one_time_prekey
-            .generate_batch(&mut OsRng, batch_size)?)
+            .generate_batch(&mut OsRng, batch_size, SystemTime::now())?)
     }
 
     /// Prepares replenishment of the stored one-time pre-key pool.
@@ -534,32 +414,6 @@ impl KeyStore {
     /// Returns the bundles created by this call. A missing or stale pool is rebuilt for the
     /// current discovery-key epoch; a current pool above the replenish threshold is left unchanged
     /// and returns an empty list. The returned no-op operation must still be finalized or aborted.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let identity = store.prepare_generate_identity()?;
-    /// store.commit_operation(identity.operation.identifier)?;
-    /// store.finalize_operation(identity.operation.identifier)?;
-    /// let prepared = store.prepare_replenish_one_time_prekeys()?;
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// // Finalize even when `prepared.output` is empty.
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::OneTimePreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::OneTimePreKey`] (`Discovery`) if the discovery key is malformed,
-    ///   unverifiable, or absent.
-    /// - [`KeyStoreError::OneTimePreKey`] (`InvalidData`) if the stored one-time-pre-key pool is
-    ///   malformed.
-    /// - [`KeyStoreError::OneTimePreKey`] (`InboxRotationRequired`) after backup restore and
-    ///   before inbox rotation.
-    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_replenish_one_time_prekeys(
         &self,
     ) -> Result<PreparedKeyStoreOperation<Vec<OneTimePreKeyBundle>>, KeyStoreError> {
@@ -568,7 +422,10 @@ impl KeyStore {
 
     fn replenish_one_time_prekeys_eager(&self) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        Ok(self.0.one_time_prekey.replenish(&mut OsRng)?)
+        Ok(self
+            .0
+            .one_time_prekey
+            .replenish(&mut OsRng, SystemTime::now())?)
     }
 
     #[cfg(test)]
@@ -582,7 +439,7 @@ impl KeyStore {
         Ok(self.0.one_time_prekey.consume_one_time_prekey(epoch, id)?)
     }
 
-    /// Prepares rotation of the whole inbox (AE-IDN-08).
+    /// Prepares rotation of the whole inbox.
     ///
     /// Advances the inbox generation, replaces the discovery key and the recipient delivery
     /// capability together, clears generation-bound one-time pre-keys, and returns both the
@@ -590,30 +447,7 @@ impl KeyStore {
     /// changes, leaving the previous authoritative inbox generation intact.
     ///
     /// This invalidates every contact's delivery authorization — that is what makes it the
-    /// mechanism behind blocking (AE-BLK-08), and why it is not merely a discovery-key rotation.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let identity = store.prepare_generate_identity()?;
-    /// store.commit_operation(identity.operation.identifier)?;
-    /// store.finalize_operation(identity.operation.identifier)?;
-    /// let prepared = store.prepare_rotate_inbox_now()?;
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// // Publish `prepared.output.publication` in the host transaction.
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::Discovery`] (`Identity`) if loading the identity fails.
-    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the stored discovery key is malformed.
-    /// - [`KeyStoreError::Discovery`] | [`KeyStoreError::OneTimePreKey`] |
-    ///   [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
+    /// mechanism behind blocking, and why it is not merely a discovery-key rotation.
     pub fn prepare_rotate_inbox_now(
         &self,
     ) -> Result<PreparedKeyStoreOperation<InboxRotation>, KeyStoreError> {
@@ -622,13 +456,14 @@ impl KeyStore {
 
     fn rotate_inbox_now_eager(&self) -> Result<InboxRotation, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
+        let now = SystemTime::now();
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
-        let discovery_key = self.0.discovery.rotate_now(&mut OsRng)?;
+        let discovery_key = self.0.discovery.rotate_now(&mut OsRng, now)?;
         let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
         let capability = self.0.discovery.current_capability()?;
         let recipient_delivery_verifier = capability.verifier();
-        let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng)?;
+        let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng, now)?;
         let publication = PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
             discovery_key: discovery_key.bundle(),
@@ -646,32 +481,6 @@ impl KeyStore {
     ///
     /// Returns `Some(bundle)` when callers need to upload a new bundle, or `None` when no rotation
     /// was needed. The returned no-op operation must still be finalized or aborted.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let identity = store.prepare_generate_identity()?;
-    /// store.commit_operation(identity.operation.identifier)?;
-    /// store.finalize_operation(identity.operation.identifier)?;
-    /// let prepared = store.prepare_rotate_signed_prekey_if_stale()?;
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// // Finalize even when `prepared.output` is `None`.
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key
-    ///   fails.
-    /// - [`KeyStoreError::SignedPreKey`] (`InvalidData`) if the stored signed-pre-key blob is
-    ///   malformed.
-    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
-    ///   inbox rotation.
-    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_rotate_signed_prekey_if_stale(
         &self,
     ) -> Result<PreparedKeyStoreOperation<Option<SignedPreKeyBundle>>, KeyStoreError> {
@@ -685,7 +494,7 @@ impl KeyStore {
         Ok(self
             .0
             .signed_prekey
-            .rotate_if_stale(&mut OsRng)?
+            .rotate_if_stale(&mut OsRng, SystemTime::now())?
             .map(|signed_prekey| signed_prekey.bundle()))
     }
 
@@ -693,30 +502,6 @@ impl KeyStore {
     ///
     /// Use this for explicit key-reset operations that must publish a fresh signed pre-key even
     /// when the stored bundle is still fresh.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let identity = store.prepare_generate_identity()?;
-    /// store.commit_operation(identity.operation.identifier)?;
-    /// store.finalize_operation(identity.operation.identifier)?;
-    /// let prepared = store.prepare_rotate_signed_prekey_now()?;
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// // Publish `prepared.output` in the host transaction.
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::SignedPreKey`] (`Clock`) if the system clock is before the Unix epoch.
-    /// - [`KeyStoreError::SignedPreKey`] (`Discovery`) when loading or verifying the discovery key
-    ///   fails.
-    /// - [`KeyStoreError::SignedPreKey`] (`InboxRotationRequired`) after backup restore and before
-    ///   inbox rotation.
-    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_rotate_signed_prekey_now(
         &self,
     ) -> Result<PreparedKeyStoreOperation<SignedPreKeyBundle>, KeyStoreError> {
@@ -725,7 +510,11 @@ impl KeyStore {
 
     fn rotate_signed_prekey_now_eager(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        Ok(self.0.signed_prekey.rotate_now(&mut OsRng)?.bundle())
+        Ok(self
+            .0
+            .signed_prekey
+            .rotate_now(&mut OsRng, SystemTime::now())?
+            .bundle())
     }
 
     /// Exports the stored identity and current discovery key as a passphrase-encrypted backup blob.
@@ -733,25 +522,15 @@ impl KeyStore {
     /// Requires a stored discovery key; a partially generated identity must be completed with
     /// [`Self::prepare_generate_identity`] (which repairs a missing discovery key) before
     /// exporting.
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Corrupt` | `InvalidData` | `LockPoisoned` | `NotFound`
-    ///   | `Storage`) when loading or verifying the discovery key to export fails.
-    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on RNG failure, Argon2id derivation error,
-    ///   or authenticated encryption failure.
-    /// - [`KeyStoreError::Identity`] (`Corrupt` | `InvalidData` | `NotFound`) when loading the
-    ///   identity to export fails.
-    /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on storage failures.
-    /// - [`KeyStoreError::Operation`] if a committed operation needs recovery.
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         self.0.discovery.current()?;
-        let dk_blob = self.0.discovery.export_blob()?;
+        let discovery_key_blob = self.0.discovery.export_blob()?;
         Ok(self
             .0
             .identity
-            .export_encrypted_backup(&mut OsRng, passphrase, &dk_blob)?)
+            .export_encrypted_backup(&mut OsRng, passphrase, &discovery_key_blob)?)
     }
 
     /// Prepares restoration of an identity and discovery key from an encrypted backup.
@@ -763,42 +542,6 @@ impl KeyStore {
     /// the discovery-key epoch lineage from the backup, but prekey generation and publication stay
     /// blocked until [`Self::prepare_rotate_inbox_now`] advances to a fresh generation. This avoids
     /// reusing prekey identifiers that the backed-up generation may already have published.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::KeyStore;
-    ///
-    /// fn import_backup(
-    ///     store: &KeyStore,
-    ///     encrypted_backup: &[u8],
-    ///     passphrase: &str,
-    /// ) -> Result<(), Box<dyn std::error::Error>> {
-    ///     let prepared = store.prepare_import_encrypted_backup(encrypted_backup, passphrase)?;
-    ///     store.commit_operation(prepared.operation.identifier)?;
-    ///     // Atomically wipe host-owned protocol state and persist the identifier.
-    ///     store.finalize_operation(prepared.operation.identifier)?;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`Corrupt`) if the backup's discovery key is not signed by
-    ///   the backup's identity key.
-    /// - [`KeyStoreError::Discovery`] (`InvalidData`) if the backup's discovery-key blob is
-    ///   malformed.
-    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key reset or
-    ///   restore failure.
-    /// - [`KeyStoreError::Identity`] (`BackupFailed`) on Argon2id parameter or derivation failure.
-    /// - [`KeyStoreError::Identity`] (`DecryptionFailed`) on wrong passphrase or tampered blob.
-    /// - [`KeyStoreError::Identity`] (`InvalidData`) on a malformed header, unsupported version, or
-    ///   below-floor Argon2id parameters.
-    /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on identity delete or commit
-    ///   failure.
-    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) when writing the
-    ///   inbox-rotation-required marker fails.
-    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) when writing the
-    ///   inbox-rotation-required marker fails.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_import_encrypted_backup(
         &self,
         data: &[u8],
@@ -813,15 +556,16 @@ impl KeyStore {
         passphrase: &str,
     ) -> Result<(), KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        let (identity_key, dk_blob) = self.0.identity.decrypt_backup(data, passphrase)?;
+        let (identity_key, discovery_key_blob) =
+            self.0.identity.decrypt_backup(data, passphrase)?;
         // Validate the restored key graph before clearing any existing material.
-        DiscoveryKeyManager::validate_blob_for_identity(&dk_blob, &identity_key)?;
+        DiscoveryKeyManager::validate_blob_for_identity(&discovery_key_blob, &identity_key)?;
         self.0.one_time_prekey.mark_inbox_rotation_required()?;
         self.0.signed_prekey.mark_inbox_rotation_required()?;
         self.0.discovery.reset()?;
         self.0.identity.reset()?;
         self.0.identity.store_decrypted_identity(&identity_key)?;
-        self.0.discovery.restore_from_blob(&dk_blob)?;
+        self.0.discovery.restore_from_blob(&discovery_key_blob)?;
         Ok(())
     }
 
@@ -829,28 +573,6 @@ impl KeyStore {
     ///
     /// Commit this operation, atomically wipe host-owned protocol state, then finalize. Interrupted
     /// finalization resumes from durable progress.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let prepared = store.prepare_reset()?;
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// // Atomically wipe host-owned protocol state and persist the identifier.
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Discovery`] (`LockPoisoned` | `Storage`) on discovery-key delete
-    ///   failure.
-    /// - [`KeyStoreError::Identity`] (`LockPoisoned` | `Storage`) on identity delete failure.
-    /// - [`KeyStoreError::OneTimePreKey`] (`LockPoisoned` | `Storage`) on one-time-pre-key delete
-    ///   failure.
-    /// - [`KeyStoreError::SignedPreKey`] (`LockPoisoned` | `Storage`) on signed-pre-key delete
-    ///   failure.
-    /// - [`KeyStoreError::Operation`] if staging fails or a committed operation needs recovery.
     pub fn prepare_reset(&self) -> Result<PreparedKeyStoreOperation<()>, KeyStoreError> {
         self.prepare_operation(|staged| staged.reset_eager())
     }
@@ -944,9 +666,8 @@ mod tests {
 
     fn store_with_storage() -> (KeyStore, SharedStorage) {
         let storage: SharedStorage = Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())));
-        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
         let key_store =
-            KeyStore::from_shared_storage(Arc::clone(&storage), clock, ProtocolStateEngine::new());
+            KeyStore::from_shared_storage(Arc::clone(&storage), ProtocolStateEngine::new());
         (key_store, storage)
     }
 
@@ -958,7 +679,7 @@ mod tests {
         assert!(cloned_store.load_identity().is_ok());
     }
 
-    /// AE-IDN-08 requires one operation to return everything a rotation produces. Returning the
+    /// One operation must return everything a rotation produces. Returning the
     /// publishable material without the capability invites a caller to publish a new generation
     /// while still handing contacts the previous generation's secret.
     #[test]
@@ -979,7 +700,7 @@ mod tests {
         assert_eq!(rotation.publication.discovery_key.epoch, 2);
     }
 
-    /// The host registers the verifier and never the capability (AE-IDN-10), so the published
+    /// The host registers the verifier and never the capability, so the published
     /// bundle must carry a verifier that actually commits to the capability currently in storage.
     #[test]
     fn publication_bundle_carries_the_verifier_for_the_current_capability() {
@@ -1437,7 +1158,8 @@ mod tests {
             key_store.0.signed_prekey.prekey_for_reference(
                 first_epoch,
                 first_prekey.id,
-                first_prekey.public_key.as_bytes()
+                first_prekey.public_key.as_bytes(),
+                SystemTime::now(),
             ),
             Err(SignedPreKeyError::NotFound)
         ));
@@ -1750,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn import_then_inbox_rotation_uses_fresh_epoch_and_signed_prekey_identifier() {
+    fn import_then_inbox_rotation_uses_fresh_epoch_and_signed_prekey_id() {
         let destination_store = store();
         destination_store.generate_identity().unwrap();
         destination_store.rotate_signed_prekey_if_stale().unwrap();

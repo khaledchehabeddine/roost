@@ -19,10 +19,6 @@ impl TransportBinding {
     pub const MAX_LEN: usize = MAX_TRANSPORT_BINDING_LEN;
 
     /// Creates a non-empty Transport Binding within the supported size limit.
-    ///
-    /// # Errors
-    /// - [`TransportBindingError::Empty`] if `bytes` is empty.
-    /// - [`TransportBindingError::TooLong`] if `bytes` exceeds [`Self::MAX_LEN`].
     pub fn new(bytes: Vec<u8>) -> Result<Self, TransportBindingError> {
         if bytes.is_empty() {
             return Err(TransportBindingError::Empty);
@@ -51,9 +47,9 @@ impl TransportBinding {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreKeySelection {
     /// Identifier of the selected signed pre-key within one Discovery Key Epoch.
-    pub signed_prekey_identifier: u64,
+    pub signed_prekey_id: u64,
     /// Identifier of the selected one-time pre-key, when one was used.
-    pub one_time_prekey_identifier: Option<u64>,
+    pub one_time_prekey_id: Option<u64>,
 }
 
 /// Errors returned while constructing a [`TransportBinding`].

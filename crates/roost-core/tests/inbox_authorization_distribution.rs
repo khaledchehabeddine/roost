@@ -1,4 +1,4 @@
-//! Tracks which contacts still hold a superseded inbox generation (AE-STA-01).
+//! Tracks which contacts still hold a superseded inbox generation.
 //!
 //! After an inbox rotation every contact holds a stale delivery capability and must be re-supplied
 //! in band — except a blocked one, who must never be. This exercises that bookkeeping through the
@@ -12,13 +12,13 @@ use roost_core::{
 };
 use roost_crypto::{generate_discovery_key, generate_key_pair, generate_signing_key_pair};
 
-const CREATED_AT: u64 = 1_700_000_000;
+const CREATED_AT_SECS: u64 = 1_700_000_000;
 
 fn peer_contact(seed: u8) -> ContactIdentity {
     let mut rng = ChaCha20Rng::from_seed([seed; 32]);
     let signing = generate_signing_key_pair(&mut rng);
     let agreement = generate_key_pair(&mut rng);
-    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT);
+    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS);
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *agreement.public.as_bytes(),
@@ -96,7 +96,7 @@ fn a_contact_needs_authorization_until_the_current_generation_is_delivered() {
 }
 
 /// The whole point of rotating on a block is that the blocked contact does not receive the
-/// replacement capability (AE-BLK-08). Listing them for re-key would silently undo the block.
+/// replacement capability. Listing them for re-key would silently undo the block.
 #[test]
 fn a_blocked_contact_is_never_listed_for_re_key() {
     let mut setup = setup();

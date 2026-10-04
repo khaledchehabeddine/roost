@@ -20,7 +20,7 @@ pub struct ContactDiscoveryKey {
     /// Discovery Key epoch, monotonic within one storage lineage.
     pub epoch: u32,
     /// Signed creation timestamp used to compare restored storage lineages.
-    pub created_at: u64,
+    pub created_at_secs: u64,
     /// Identity-key signature over the Discovery Key bundle.
     pub identity_signature: [u8; SIGNATURE_LEN],
 }
@@ -39,7 +39,7 @@ impl From<&DiscoveryKeyBundle> for ContactDiscoveryKey {
             x25519_public_key: *value.public_key.as_bytes(),
             ed25519_verifying_key: value.verifying_key.to_bytes(),
             epoch: value.epoch,
-            created_at: value.created_at,
+            created_at_secs: value.created_at_secs,
             identity_signature: value.signature.to_bytes(),
         }
     }
@@ -106,7 +106,7 @@ pub enum ContactSafetyNumberConfirmation {
 
 /// A peer's current inbox authorization: what a caller needs to submit an established Message.
 ///
-/// Held per contact and supplied by that contact inside an encrypted Message (AE-CON-05). The
+/// Held per contact and supplied by that contact inside an encrypted Message. The
 /// capability is the peer's bearer secret, so this deliberately does not live in [`ContactState`],
 /// which is available through public contact queries.
 ///

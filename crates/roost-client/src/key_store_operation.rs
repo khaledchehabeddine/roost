@@ -4,8 +4,7 @@ use crate::client::{ContactBlock, SessionAcceptanceResult};
 use crate::error::ClientError;
 use crate::records::{Identity, InboxRotation, OneTimePreKeyBundle, SignedPreKeyBundle, fixed_16};
 use roost_core::{
-    KeyStoreOperation as CoreKeyStoreOperation,
-    KeyStoreOperationIdentifier as CoreKeyStoreOperationIdentifier,
+    KeyStoreOperation as CoreKeyStoreOperation, KeyStoreOperationId as CoreKeyStoreOperationId,
     KeyStoreOperationStatus as CoreKeyStoreOperationStatus,
     SecureStorageExpectedValue as CoreSecureStorageExpectedValue,
     SecureStoragePrecondition as CoreSecureStoragePrecondition,
@@ -35,8 +34,8 @@ pub struct SecureStoragePrecondition {
     pub expected_value_digest: Option<Vec<u8>>,
 }
 
-impl From<CoreSecureStoragePrecondition> for SecureStoragePrecondition {
-    fn from(precondition: CoreSecureStoragePrecondition) -> Self {
+impl SecureStoragePrecondition {
+    fn from_core(precondition: CoreSecureStoragePrecondition) -> Self {
         let expected_value_digest = match precondition.expected_value {
             CoreSecureStorageExpectedValue::Absent => None,
             CoreSecureStorageExpectedValue::Digest(digest) => Some(digest.to_vec()),
@@ -58,27 +57,27 @@ impl From<CoreSecureStoragePrecondition> for SecureStoragePrecondition {
 /// use roost_client::KeyStoreOperation;
 ///
 /// let operation = KeyStoreOperation {
-///     identifier: vec![7; 16],
+///     id: vec![7; 16],
 ///     secure_storage_preconditions: Vec::new(),
 /// };
-/// assert_eq!(operation.identifier.len(), 16);
+/// assert_eq!(operation.id.len(), 16);
 /// ```
 #[derive(Clone, uniffi::Record)]
 pub struct KeyStoreOperation {
     /// Opaque 16-byte identifier to persist with the host transaction.
-    pub identifier: Vec<u8>,
+    pub id: Vec<u8>,
     /// SecureStorage inputs Core validates when the operation commits.
     pub secure_storage_preconditions: Vec<SecureStoragePrecondition>,
 }
 
-impl From<CoreKeyStoreOperation> for KeyStoreOperation {
-    fn from(operation: CoreKeyStoreOperation) -> Self {
+impl KeyStoreOperation {
+    pub(crate) fn from_core(operation: CoreKeyStoreOperation) -> Self {
         Self {
-            identifier: operation.identifier.as_bytes().to_vec(),
+            id: operation.id.as_bytes().to_vec(),
             secure_storage_preconditions: operation
                 .secure_storage_preconditions
                 .into_iter()
-                .map(Into::into)
+                .map(SecureStoragePrecondition::from_core)
                 .collect(),
         }
     }
@@ -110,8 +109,8 @@ pub enum KeyStoreOperationStatus {
     Aborted,
 }
 
-impl From<CoreKeyStoreOperationStatus> for KeyStoreOperationStatus {
-    fn from(status: CoreKeyStoreOperationStatus) -> Self {
+impl KeyStoreOperationStatus {
+    pub(crate) fn from_core(status: CoreKeyStoreOperationStatus) -> Self {
         match status {
             CoreKeyStoreOperationStatus::Prepared => Self::Prepared,
             CoreKeyStoreOperationStatus::Committed => Self::Committed,
@@ -133,12 +132,12 @@ impl From<CoreKeyStoreOperationStatus> for KeyStoreOperationStatus {
 ///
 /// let unfinished = UnfinishedKeyStoreOperation {
 ///     operation: KeyStoreOperation {
-///         identifier: vec![9; 16],
+///         id: vec![9; 16],
 ///         secure_storage_preconditions: Vec::new(),
 ///     },
 ///     status: KeyStoreOperationStatus::Prepared,
 /// };
-/// assert_eq!(unfinished.operation.identifier, vec![9; 16]);
+/// assert_eq!(unfinished.operation.id, vec![9; 16]);
 /// ```
 #[derive(Clone, uniffi::Record)]
 pub struct UnfinishedKeyStoreOperation {
@@ -148,11 +147,11 @@ pub struct UnfinishedKeyStoreOperation {
     pub status: KeyStoreOperationStatus,
 }
 
-impl From<CoreUnfinishedKeyStoreOperation> for UnfinishedKeyStoreOperation {
-    fn from(operation: CoreUnfinishedKeyStoreOperation) -> Self {
+impl UnfinishedKeyStoreOperation {
+    pub(crate) fn from_core(operation: CoreUnfinishedKeyStoreOperation) -> Self {
         Self {
-            operation: operation.operation.into(),
-            status: operation.status.into(),
+            operation: KeyStoreOperation::from_core(operation.operation),
+            status: KeyStoreOperationStatus::from_core(operation.status),
         }
     }
 }
@@ -168,7 +167,7 @@ impl From<CoreUnfinishedKeyStoreOperation> for UnfinishedKeyStoreOperation {
 ///
 /// fn host_record(prepared: &PreparedIdentityGeneration) -> (&[u8], &[u8]) {
 ///     (
-///         &prepared.operation.identifier,
+///         &prepared.operation.id,
 ///         &prepared.identity.x25519_public_key,
 ///     )
 /// }
@@ -286,11 +285,9 @@ pub struct PreparedSessionAcceptance {
     pub acceptance: SessionAcceptanceResult,
 }
 
-pub(crate) fn operation_identifier(
-    identifier: &[u8],
-) -> Result<CoreKeyStoreOperationIdentifier, ClientError> {
-    Ok(CoreKeyStoreOperationIdentifier::from_bytes(fixed_16(
-        identifier,
+pub(crate) fn operation_id(id: &[u8]) -> Result<CoreKeyStoreOperationId, ClientError> {
+    Ok(CoreKeyStoreOperationId::from_bytes(fixed_16(
+        id,
         "operation identifier",
     )?))
 }

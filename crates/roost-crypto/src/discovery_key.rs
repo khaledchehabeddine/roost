@@ -4,14 +4,15 @@
 //! signature covers the public keys, epoch, and creation timestamp. The discovery signing key signs
 //! signed pre-key public keys.
 
-use crate::error::CryptoError;
 use crate::keys::{
-    IdentityKeyBundle, SigningKeyPair, generate_signing_key_pair, identity_key_binding_payload,
-    parse_ed25519_verifying_key_bytes, validate_x25519_public_key, verify_with_context,
+    IdentityKeyBundle, KeyBundleError, SigningKeyPair, generate_signing_key_pair,
+    identity_key_binding_payload, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
+    verify_with_context,
 };
 use crate::signed_prekey::{SignedPreKey, generate_signed_prekey};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
+use roost_protocol::SignatureError;
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
@@ -34,7 +35,7 @@ pub struct DiscoveryKey {
     #[zeroize(skip)]
     epoch: u32,
     #[zeroize(skip)]
-    created_at: u64,
+    created_at_secs: u64,
     #[zeroize(skip)]
     identity_signature: Signature,
 }
@@ -48,7 +49,7 @@ impl DiscoveryKey {
         key_agreement_secret: [u8; 32],
         signing_secret: [u8; 32],
         epoch: u32,
-        created_at: u64,
+        created_at_secs: u64,
         identity_signature: [u8; 64],
     ) -> Self {
         let key_agreement_secret = StaticSecret::from(key_agreement_secret);
@@ -60,7 +61,7 @@ impl DiscoveryKey {
             signing,
             key_agreement_public,
             epoch,
-            created_at,
+            created_at_secs,
             identity_signature,
         }
     }
@@ -81,8 +82,8 @@ impl DiscoveryKey {
     }
 
     /// Returns the Unix timestamp (seconds) when this discovery key was generated.
-    pub fn created_at(&self) -> u64 {
-        self.created_at
+    pub fn created_at_secs(&self) -> u64 {
+        self.created_at_secs
     }
 
     /// Returns the identity-key signature over this discovery key.
@@ -101,7 +102,7 @@ impl DiscoveryKey {
             public_key: self.key_agreement_public,
             verifying_key: self.signing.verifying,
             epoch: self.epoch,
-            created_at: self.created_at,
+            created_at_secs: self.created_at_secs,
             signature: self.identity_signature,
         }
     }
@@ -118,7 +119,7 @@ impl DiscoveryKey {
 
     /// Signs `identity`'s public halves with this discovery key's Ed25519 half.
     ///
-    /// This is the DK→IK half of the mutual binding (AE-KEY-04). A peer starting from a discovery
+    /// This is the DK→IK half of the mutual binding. A peer starting from a discovery
     /// key verifies it to learn that the discovery key really authorized the identity it was
     /// handed, without trusting whoever handed it over.
     ///
@@ -126,14 +127,10 @@ impl DiscoveryKey {
     /// IK→DK direction needs an epoch because one permanent identity key signs many discovery keys
     /// over its lifetime; this direction does not, because a fresh discovery key is minted per
     /// inbox generation and so already identifies the generation it belongs to.
-    ///
-    /// # Errors
-    /// - [`CryptoError::InvalidSignatureContext`] if the domain-separation context is empty, which
-    ///   a non-empty constant precludes.
     pub fn sign_identity_binding(
         &self,
         identity: &IdentityKeyBundle,
-    ) -> Result<Signature, CryptoError> {
+    ) -> Result<Signature, SignatureError> {
         self.signing.sign_with_context(
             DISCOVERY_TO_IDENTITY_CONTEXT,
             &identity_key_binding_payload(&identity.public_key, &identity.verifying_key),
@@ -143,17 +140,14 @@ impl DiscoveryKey {
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s public halves.
 ///
-/// The DK→IK half of the mutual binding (AE-KEY-04). Verify both directions before trusting a
+/// The DK→IK half of the mutual binding. Verify both directions before trusting a
 /// discovery-key-to-identity mapping: this one proves the discovery key authorized the identity,
 /// and [`verify_discovery_key_bundle`] proves the identity authorized the discovery key.
-///
-/// # Errors
-/// - [`CryptoError::SignatureInvalid`] when the signature does not validate.
 pub fn verify_discovery_to_identity_binding(
     identity: &IdentityKeyBundle,
     discovery_verifying_key: &VerifyingKey,
     signature: &Signature,
-) -> Result<(), CryptoError> {
+) -> Result<(), KeyBundleError> {
     verify_with_context(
         discovery_verifying_key,
         DISCOVERY_TO_IDENTITY_CONTEXT,
@@ -175,7 +169,7 @@ pub struct DiscoveryKeyBundle {
     /// Rotation epoch, monotonic within a storage lineage.
     pub epoch: u32,
     /// Unix timestamp in seconds when the discovery key was generated.
-    pub created_at: u64,
+    pub created_at_secs: u64,
     /// Identity-key signature over the domain-separated discovery-key payload.
     pub signature: Signature,
 }
@@ -186,36 +180,32 @@ impl DiscoveryKeyBundle {
     /// This validates encodings only. `public_key` accepts any 32-byte X25519 value, while
     /// `verifying_key` must decode to a valid Ed25519 point. Call
     /// [`verify_discovery_key_bundle`] to authenticate the parsed fields.
-    ///
-    /// # Errors
-    /// - [`CryptoError::InvalidKeyEncoding`] when a field has the wrong length or the verifying
-    ///   key does not decompress to a valid Edwards point.
     pub fn from_bytes(
         public_key: &[u8],
         verifying_key: &[u8],
         epoch: u32,
-        created_at: u64,
+        created_at_secs: u64,
         signature: &[u8],
-    ) -> Result<Self, CryptoError> {
+    ) -> Result<Self, KeyBundleError> {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
-        if !validate_x25519_public_key(&public_key_bytes) {
-            return Err(CryptoError::InvalidKeyEncoding);
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+        if !is_valid_x25519_public_key(&public_key_bytes) {
+            return Err(KeyBundleError::InvalidKeyEncoding);
         }
         let verifying_key_bytes: [u8; 32] = verifying_key
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
         let verifying_key = parse_ed25519_verifying_key_bytes(&verifying_key_bytes)
-            .ok_or(CryptoError::InvalidKeyEncoding)?;
+            .ok_or(KeyBundleError::InvalidKeyEncoding)?;
         let signature_bytes: [u8; 64] = signature
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
         Ok(DiscoveryKeyBundle {
             public_key: PublicKey::from(public_key_bytes),
             verifying_key,
             epoch,
-            created_at,
+            created_at_secs,
             signature: Signature::from_bytes(&signature_bytes),
         })
     }
@@ -229,13 +219,17 @@ pub fn generate_discovery_key<R: RngCore + CryptoRng>(
     rng: &mut R,
     identity: &SigningKeyPair,
     epoch: u32,
-    created_at: u64,
+    created_at_secs: u64,
 ) -> DiscoveryKey {
     let key_agreement_secret = StaticSecret::random_from_rng(&mut *rng);
     let key_agreement_public = PublicKey::from(&key_agreement_secret);
     let signing = generate_signing_key_pair(rng);
-    let payload =
-        discovery_key_payload(&key_agreement_public, &signing.verifying, epoch, created_at);
+    let payload = discovery_key_payload(
+        &key_agreement_public,
+        &signing.verifying,
+        epoch,
+        created_at_secs,
+    );
     let identity_signature = identity
         .sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)
         .expect("non-empty discovery-key signature context");
@@ -244,24 +238,21 @@ pub fn generate_discovery_key<R: RngCore + CryptoRng>(
         signing,
         key_agreement_public,
         epoch,
-        created_at,
+        created_at_secs,
         identity_signature,
     }
 }
 
 /// Verifies a discovery-key bundle was signed by the identity verifying key.
-///
-/// # Errors
-/// - [`CryptoError::SignatureInvalid`] when the signature does not validate.
 pub fn verify_discovery_key_bundle(
     bundle: &DiscoveryKeyBundle,
     identity_verifying_key: &VerifyingKey,
-) -> Result<(), CryptoError> {
+) -> Result<(), KeyBundleError> {
     let payload = discovery_key_payload(
         &bundle.public_key,
         &bundle.verifying_key,
         bundle.epoch,
-        bundle.created_at,
+        bundle.created_at_secs,
     );
     verify_with_context(
         identity_verifying_key,
@@ -276,13 +267,13 @@ fn discovery_key_payload(
     key_agreement_public: &PublicKey,
     verifying_key: &VerifyingKey,
     epoch: u32,
-    created_at: u64,
+    created_at_secs: u64,
 ) -> Vec<u8> {
     let mut payload = Vec::with_capacity(32 + 32 + 4 + 8);
     payload.extend_from_slice(key_agreement_public.as_bytes());
     payload.extend_from_slice(verifying_key.as_bytes());
     payload.extend_from_slice(&epoch.to_be_bytes());
-    payload.extend_from_slice(&created_at.to_be_bytes());
+    payload.extend_from_slice(&created_at_secs.to_be_bytes());
     payload
 }
 
@@ -296,14 +287,14 @@ pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
     rng: &mut R,
     discovery_key: &DiscoveryKey,
     id: u64,
-    created_at: u64,
+    created_at_secs: u64,
 ) -> SignedPreKey {
     generate_signed_prekey(
         rng,
         &discovery_key.signing,
         id,
         discovery_key.epoch,
-        created_at,
+        created_at_secs,
     )
 }
 
@@ -316,7 +307,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     const FIXED_EPOCH: u32 = 7;
-    const FIXED_CREATED_AT: u64 = 1_700_000_000;
+    const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
 
     struct DiscoveryKeySetup {
         rng: ChaCha20Rng,
@@ -332,7 +323,7 @@ mod tests {
         let mut rng = seeded_rng();
         let identity = generate_signing_key_pair(&mut rng);
         let discovery_key =
-            generate_discovery_key(&mut rng, &identity, FIXED_EPOCH, FIXED_CREATED_AT);
+            generate_discovery_key(&mut rng, &identity, FIXED_EPOCH, FIXED_CREATED_AT_SECS);
         DiscoveryKeySetup {
             rng,
             identity,
@@ -349,7 +340,7 @@ mod tests {
     /// - `key_agreement_public = [0x22; 32]`
     /// - `discovery_signing_secret = [0x33; 32]`
     /// - `epoch = 7`
-    /// - `created_at = 1_700_000_000`
+    /// - `created_at_secs = 1_700_000_000`
     ///
     /// Output: Ed25519 signature over the discovery-key context and `discovery_key_payload(...)`.
     #[test]
@@ -368,7 +359,7 @@ mod tests {
             &key_agreement_public,
             &discovery_signing.verifying,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
 
         let signature = identity
@@ -378,7 +369,7 @@ mod tests {
             public_key: key_agreement_public,
             verifying_key: discovery_signing.verifying,
             epoch: FIXED_EPOCH,
-            created_at: FIXED_CREATED_AT,
+            created_at_secs: FIXED_CREATED_AT_SECS,
             signature,
         };
 
@@ -394,7 +385,7 @@ mod tests {
             *original.key_agreement_secret_bytes(),
             *original.signing_secret_bytes(),
             original.epoch(),
-            original.created_at(),
+            original.created_at_secs(),
             original.identity_signature().to_bytes(),
         );
         assert_eq!(
@@ -406,7 +397,7 @@ mod tests {
             original.verifying_key().as_bytes()
         );
         assert_eq!(restored.epoch(), original.epoch());
-        assert_eq!(restored.created_at(), original.created_at());
+        assert_eq!(restored.created_at_secs(), original.created_at_secs());
         assert_eq!(
             restored.identity_signature().to_bytes(),
             original.identity_signature().to_bytes()
@@ -426,7 +417,7 @@ mod tests {
             setup.discovery_key.verifying_key().as_bytes()
         );
         assert_eq!(bundle.epoch, FIXED_EPOCH);
-        assert_eq!(bundle.created_at, FIXED_CREATED_AT);
+        assert_eq!(bundle.created_at_secs, FIXED_CREATED_AT_SECS);
         assert_eq!(
             bundle.signature.to_bytes(),
             setup.discovery_key.identity_signature().to_bytes()
@@ -448,7 +439,7 @@ mod tests {
             bundle.public_key.as_bytes(),
             bundle.verifying_key.as_bytes(),
             bundle.epoch,
-            bundle.created_at,
+            bundle.created_at_secs,
             &bundle.signature.to_bytes(),
         )
         .unwrap();
@@ -458,7 +449,7 @@ mod tests {
             bundle.verifying_key.as_bytes()
         );
         assert_eq!(parsed.epoch, bundle.epoch);
-        assert_eq!(parsed.created_at, bundle.created_at);
+        assert_eq!(parsed.created_at_secs, bundle.created_at_secs);
         assert_eq!(parsed.signature.to_bytes(), bundle.signature.to_bytes());
     }
 
@@ -466,15 +457,15 @@ mod tests {
     fn from_bytes_rejects_wrong_lengths() {
         assert!(matches!(
             DiscoveryKeyBundle::from_bytes(&[0u8; 31], &[0u8; 32], 0, 0, &[0u8; 64]),
-            Err(CryptoError::InvalidKeyEncoding)
+            Err(KeyBundleError::InvalidKeyEncoding)
         ));
         assert!(matches!(
             DiscoveryKeyBundle::from_bytes(&[0u8; 32], &[0u8; 31], 0, 0, &[0u8; 64]),
-            Err(CryptoError::InvalidKeyEncoding)
+            Err(KeyBundleError::InvalidKeyEncoding)
         ));
         assert!(matches!(
             DiscoveryKeyBundle::from_bytes(&[0u8; 32], &[0u8; 32], 0, 0, &[0u8; 63]),
-            Err(CryptoError::InvalidKeyEncoding)
+            Err(KeyBundleError::InvalidKeyEncoding)
         ));
     }
 
@@ -488,10 +479,10 @@ mod tests {
             &[0u8; 32],
             &non_decompressible_ed25519_verifying_key_bytes,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
             &[0u8; 64],
         );
-        assert!(matches!(result, Err(CryptoError::InvalidKeyEncoding)));
+        assert!(matches!(result, Err(KeyBundleError::InvalidKeyEncoding)));
     }
 
     #[test]
@@ -501,10 +492,10 @@ mod tests {
             &[0xFFu8; 32],
             setup.identity.verifying.as_bytes(),
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
             &[0u8; 64],
         );
-        assert!(matches!(result, Err(CryptoError::InvalidKeyEncoding)));
+        assert!(matches!(result, Err(KeyBundleError::InvalidKeyEncoding)));
     }
 
     #[test]
@@ -521,7 +512,7 @@ mod tests {
         let bundle = setup.discovery_key.bundle();
         assert!(matches!(
             verify_discovery_key_bundle(&bundle, &other_identity.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -536,28 +527,28 @@ mod tests {
         bundle.public_key = PublicKey::from(public_key_bytes);
         assert!(matches!(
             verify_discovery_key_bundle(&bundle, identity),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
 
         let mut bundle = setup.discovery_key.bundle();
         bundle.verifying_key = generate_signing_key_pair(&mut setup.rng).verifying;
         assert!(matches!(
             verify_discovery_key_bundle(&bundle, identity),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
 
         let mut bundle = setup.discovery_key.bundle();
         bundle.epoch += 1;
         assert!(matches!(
             verify_discovery_key_bundle(&bundle, identity),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
 
         let mut bundle = setup.discovery_key.bundle();
-        bundle.created_at += 1;
+        bundle.created_at_secs += 1;
         assert!(matches!(
             verify_discovery_key_bundle(&bundle, identity),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -569,11 +560,11 @@ mod tests {
         bare_payload.extend_from_slice(bundle.public_key.as_bytes());
         bare_payload.extend_from_slice(bundle.verifying_key.as_bytes());
         bare_payload.extend_from_slice(&bundle.epoch.to_be_bytes());
-        bare_payload.extend_from_slice(&bundle.created_at.to_be_bytes());
+        bare_payload.extend_from_slice(&bundle.created_at_secs.to_be_bytes());
         bundle.signature = setup.identity.sign(&bare_payload);
         assert!(matches!(
             verify_discovery_key_bundle(&bundle, &setup.identity.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -584,13 +575,13 @@ mod tests {
             &mut setup.rng,
             &setup.discovery_key,
             0,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
         assert!(verify_signed_prekey_bundle(&bundle, setup.discovery_key.verifying_key()).is_ok());
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &setup.identity.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -634,7 +625,7 @@ mod tests {
             &mut setup.rng,
             &setup.identity,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
 
         let signature = setup
@@ -648,7 +639,7 @@ mod tests {
                 other_discovery.verifying_key(),
                 &signature,
             ),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -668,13 +659,13 @@ mod tests {
         tampered_x25519.public_key = PublicKey::from(public_key_bytes);
         assert!(matches!(
             verify_discovery_to_identity_binding(&tampered_x25519, verifying_key, &signature),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
 
         let tampered_ed25519 = identity_bundle([0x44u8; 32], [0x22u8; 32]);
         assert!(matches!(
             verify_discovery_to_identity_binding(&tampered_ed25519, verifying_key, &signature),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -694,7 +685,7 @@ mod tests {
                 setup.discovery_key.verifying_key(),
                 &signature,
             ),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -729,7 +720,7 @@ mod tests {
             key_agreement_public: PublicKey::from(&StaticSecret::from([0x55u8; 32])),
             signing: discovery_signing,
             epoch: FIXED_EPOCH,
-            created_at: FIXED_CREATED_AT,
+            created_at_secs: FIXED_CREATED_AT_SECS,
             identity_signature: Signature::from_bytes(&[0u8; 64]),
         };
 
@@ -748,7 +739,7 @@ mod tests {
 
     /// The two directions cover identical bytes, so only the context separates them. A discovery
     /// key signing the identity halves under the identity-binding context must not satisfy the
-    /// discovery-to-identity check (AE-KEY-02).
+    /// discovery-to-identity check.
     #[test]
     fn identity_binding_rejects_signature_made_under_identity_binding_context() {
         let setup = setup();
@@ -763,7 +754,7 @@ mod tests {
                 setup.discovery_key.verifying_key(),
                 &signature,
             ),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 }

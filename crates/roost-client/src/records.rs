@@ -1,6 +1,7 @@
 //! UniFFI public identity and publication records.
 
 use crate::error::ClientError;
+use crate::time::{millis_from_secs, whole_secs_from_millis};
 use roost_core::{
     DiscoveryKeyBundle as CoreDiscoveryKeyBundle, IdentityKeyBundle as CoreIdentityKeyBundle,
     OneTimePreKeyBundle as CoreOneTimePreKeyBundle, PreKeyBundle as CorePreKeyBundle, PublicKey,
@@ -52,49 +53,51 @@ impl Identity {
 /// use roost_client::SignedPreKeyBundle;
 ///
 /// let bundle = SignedPreKeyBundle {
-///     identifier: u64::MAX,
+///     id: u64::MAX,
 ///     public_key: vec![0x11; 32],
 ///     signature: vec![0x22; 64],
 ///     epoch: 7,
-///     created_at: 1_700_000_000,
+///     created_at_millis: 1_700_000_000_000,
 /// };
-/// assert_eq!(bundle.identifier, u64::MAX);
+/// assert_eq!(bundle.id, u64::MAX);
 /// ```
 #[derive(Clone, uniffi::Record)]
 pub struct SignedPreKeyBundle {
     /// Stable unsigned identifier within the discovery-key epoch. A host that needs this lookup
     /// value authenticated as transport metadata must include it in its Transport Binding.
-    pub identifier: u64,
+    pub id: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
-    /// Ed25519 signature over `public_key`, `epoch`, and `created_at`. Always 64 bytes.
+    /// Ed25519 signature over `public_key`, `epoch`, and the creation time in whole Unix seconds.
+    /// Always 64 bytes.
     pub signature: Vec<u8>,
     /// Discovery-key epoch this signed pre-key is bound to.
     pub epoch: u32,
-    /// Generated timestamp in Unix seconds.
-    pub created_at: u64,
-}
-
-impl From<CoreSignedPreKeyBundle> for SignedPreKeyBundle {
-    fn from(b: CoreSignedPreKeyBundle) -> Self {
-        SignedPreKeyBundle {
-            identifier: b.id,
-            public_key: b.public_key.as_bytes().to_vec(),
-            signature: b.signature.to_bytes().to_vec(),
-            epoch: b.epoch,
-            created_at: b.created_at,
-        }
-    }
+    /// Creation time in Unix milliseconds, always a whole number of seconds.
+    pub created_at_millis: u64,
 }
 
 impl SignedPreKeyBundle {
+    pub(crate) fn from_core(b: CoreSignedPreKeyBundle) -> Result<Self, ClientError> {
+        Ok(SignedPreKeyBundle {
+            id: b.id,
+            public_key: b.public_key.as_bytes().to_vec(),
+            signature: b.signature.to_bytes().to_vec(),
+            epoch: b.epoch,
+            created_at_millis: millis_from_secs(b.created_at_secs, "signed pre-key creation time")?,
+        })
+    }
+
     pub(crate) fn to_core(&self) -> Result<CoreSignedPreKeyBundle, ClientError> {
         Ok(CoreSignedPreKeyBundle {
-            id: self.identifier,
+            id: self.id,
             public_key: public_key_from_vec(&self.public_key)?,
             signature: signature_from_vec(&self.signature)?,
             epoch: self.epoch,
-            created_at: self.created_at,
+            created_at_secs: whole_secs_from_millis(
+                self.created_at_millis,
+                "signed pre-key created_at_millis",
+            )?,
         })
     }
 }
@@ -108,45 +111,43 @@ impl SignedPreKeyBundle {
 /// use roost_client::OneTimePreKeyBundle;
 ///
 /// let bundle = OneTimePreKeyBundle {
-///     identifier: u64::MAX,
+///     id: u64::MAX,
 ///     public_key: vec![0x11; 32],
 ///     epoch: 7,
-///     created_at: 1_700_000_000,
+///     created_at_millis: 1_700_000_000_000,
 /// };
-/// assert_eq!(bundle.identifier, u64::MAX);
+/// assert_eq!(bundle.id, u64::MAX);
 /// ```
 #[derive(Clone, uniffi::Record)]
 pub struct OneTimePreKeyBundle {
     /// One-time pre-key identifier within the current discovery-key epoch.
-    pub identifier: u64,
+    pub id: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
     /// Discovery-key epoch this one-time pre-key is bound to.
     pub epoch: u32,
-    /// Generated timestamp in Unix seconds.
-    pub created_at: u64,
-}
-
-impl From<CoreOneTimePreKeyBundle> for OneTimePreKeyBundle {
-    fn from(b: CoreOneTimePreKeyBundle) -> Self {
-        OneTimePreKeyBundle {
-            identifier: b.id,
-            public_key: b.public_key.as_bytes().to_vec(),
-            epoch: b.epoch,
-            created_at: b.created_at,
-        }
-    }
+    /// Creation time in Unix milliseconds, always a whole number of seconds.
+    pub created_at_millis: u64,
 }
 
 impl OneTimePreKeyBundle {
+    pub(crate) fn from_core(b: CoreOneTimePreKeyBundle) -> Result<Self, ClientError> {
+        Ok(OneTimePreKeyBundle {
+            id: b.id,
+            public_key: b.public_key.as_bytes().to_vec(),
+            epoch: b.epoch,
+            created_at_millis: millis_from_secs(
+                b.created_at_secs,
+                "one-time pre-key creation time",
+            )?,
+        })
+    }
+
     pub(crate) fn to_core(&self) -> Result<CoreOneTimePreKeyBundle, ClientError> {
-        CoreOneTimePreKeyBundle::from_bytes(
-            self.identifier,
-            &self.public_key,
-            self.epoch,
-            self.created_at,
-        )
-        .map_err(ClientError::from)
+        let created_at_secs =
+            whole_secs_from_millis(self.created_at_millis, "one-time pre-key created_at_millis")?;
+        CoreOneTimePreKeyBundle::from_bytes(self.id, &self.public_key, self.epoch, created_at_secs)
+            .map_err(ClientError::from)
     }
 }
 
@@ -163,29 +164,27 @@ pub struct DiscoveryKeyBundle {
     pub signature: Vec<u8>,
     /// Rotation epoch, monotonic within one storage lineage.
     pub epoch: u32,
-    /// Generated timestamp in Unix seconds.
-    pub created_at: u64,
+    /// Creation time in Unix milliseconds, always a whole number of seconds.
+    pub created_at_millis: u64,
 }
 
-impl From<CoreDiscoveryKeyBundle> for DiscoveryKeyBundle {
-    fn from(b: CoreDiscoveryKeyBundle) -> Self {
-        DiscoveryKeyBundle {
+impl DiscoveryKeyBundle {
+    pub(crate) fn from_core(b: CoreDiscoveryKeyBundle) -> Result<Self, ClientError> {
+        Ok(DiscoveryKeyBundle {
             public_key: b.public_key.as_bytes().to_vec(),
             verifying_key: b.verifying_key.as_bytes().to_vec(),
             signature: b.signature.to_bytes().to_vec(),
             epoch: b.epoch,
-            created_at: b.created_at,
-        }
+            created_at_millis: millis_from_secs(b.created_at_secs, "discovery-key creation time")?,
+        })
     }
-}
 
-impl DiscoveryKeyBundle {
     pub(crate) fn to_core(&self) -> Result<CoreDiscoveryKeyBundle, ClientError> {
         CoreDiscoveryKeyBundle::from_bytes(
             &self.public_key,
             &self.verifying_key,
             self.epoch,
-            self.created_at,
+            whole_secs_from_millis(self.created_at_millis, "discovery-key created_at_millis")?,
             &self.signature,
         )
         .map_err(ClientError::from)
@@ -219,15 +218,15 @@ pub struct PublicationBundle {
     pub signed_prekey: SignedPreKeyBundle,
 }
 
-impl From<CorePublicationBundle> for PublicationBundle {
-    fn from(b: CorePublicationBundle) -> Self {
-        PublicationBundle {
+impl PublicationBundle {
+    pub(crate) fn from_core(b: CorePublicationBundle) -> Result<Self, ClientError> {
+        Ok(PublicationBundle {
             version: b.version,
-            discovery_key: b.discovery_key.into(),
+            discovery_key: DiscoveryKeyBundle::from_core(b.discovery_key)?,
             discovery_to_identity: b.discovery_to_identity.to_bytes().to_vec(),
             recipient_delivery_verifier: b.recipient_delivery_verifier.as_bytes().to_vec(),
-            signed_prekey: b.signed_prekey.into(),
-        }
+            signed_prekey: SignedPreKeyBundle::from_core(b.signed_prekey)?,
+        })
     }
 }
 
@@ -305,23 +304,23 @@ mod tests {
     use roost_core::test_support::KeyPair;
 
     #[test]
-    fn prekey_records_preserve_unsigned_identifier_boundaries() {
+    fn prekey_records_preserve_unsigned_id_boundaries() {
         let public_key = KeyPair::from_secret_bytes([0x42; 32])
             .public
             .as_bytes()
             .to_vec();
         let signed = SignedPreKeyBundle {
-            identifier: u64::MAX,
+            id: u64::MAX,
             public_key: public_key.clone(),
             signature: vec![0; 64],
             epoch: u32::MAX,
-            created_at: u64::MAX,
+            created_at_millis: u64::MAX / 1_000 * 1_000,
         };
         let one_time = OneTimePreKeyBundle {
-            identifier: u64::MAX,
+            id: u64::MAX,
             public_key,
             epoch: u32::MAX,
-            created_at: u64::MAX,
+            created_at_millis: u64::MAX / 1_000 * 1_000,
         };
 
         assert_eq!(signed.to_core().unwrap().id, u64::MAX);

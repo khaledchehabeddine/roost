@@ -1,6 +1,6 @@
 //! Standalone IK/DK binding verification exposed through UniFFI.
 //!
-//! Both directions of the mutual binding (AE-KEY-04) were already implemented in `roost-crypto`
+//! Both directions of the mutual binding were already implemented in `roost-crypto`
 //! and already checked on every path that establishes a session or records a contact. Neither was
 //! reachable from a binding before this module: `initiate_session` needs a live publication bundle
 //! and a session, and `record_contact` covers only the IK→DK direction. A client adding a contact
@@ -10,8 +10,7 @@
 //! The functions here take public material only and return nothing but a verdict, so they are not
 //! a signing oracle. They are not a general Ed25519 verification oracle either: each one fixes its
 //! own context and rebuilds the payload from the identity key it was handed, so a caller chooses
-//! neither the context nor the shape of the signed bytes. See
-//! [ADR 0017](../../../docs/adr/0017-standalone-binding-verification.md).
+//! neither the context nor the shape of the signed bytes.
 
 use crate::error::ClientError;
 use crate::protocol::IdentityKey;
@@ -23,7 +22,7 @@ use roost_core::{
 };
 use roost_protocol::parse_ed25519_verifying_key_bytes;
 
-/// Verifies that an identity key vouches for its own X25519 half (AE-KEY-04, IK self-binding).
+/// Verifies that an identity key vouches for its own X25519 half (the IK self-binding).
 ///
 /// This is the `AetherIKBinding-v1:` direction. It says only that whoever holds the Ed25519 half
 /// claimed the X25519 half beside it; it says nothing about which discovery key, if any, points at
@@ -39,8 +38,8 @@ use roost_protocol::parse_ed25519_verifying_key_bytes;
 /// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
 /// # let store = Client::new(storage);
 /// let prepared = store.identity().prepare_generate_identity()?;
-/// store.commit_operation(prepared.operation.identifier.clone())?;
-/// store.finalize_operation(prepared.operation.identifier)?;
+/// store.commit_operation(prepared.operation.id.clone())?;
+/// store.finalize_operation(prepared.operation.id)?;
 /// let identity = prepared.identity;
 ///
 /// roost_client::verify_identity_key_binding(
@@ -74,8 +73,8 @@ pub fn verify_identity_key_binding(
     Ok(verify_identity_key_bundle(&bundle)?)
 }
 
-/// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (AE-KEY-04,
-/// DK→IK direction).
+/// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (the DK→IK
+/// direction).
 ///
 /// This is the `AetherDKToIK-v1:` direction, and it is the whole security of adding a contact by
 /// discovery key: the relay answers a lookup with an identity, and nothing about the transport says
@@ -147,9 +146,9 @@ mod tests {
     /// Aether's published cross-implementation vector for `AetherDKToIK-v1:`.
     ///
     /// Source: `discovery_to_identity_binding_known_answer` in
-    /// `crates/roost-crypto/src/discovery_key.rs`, republished in `docs/domain-separation.md`, and
-    /// derived from the RFC 8032 reference implementation rather than from `ed25519-dalek` (ADR
-    /// 0005). Pinning it here means the *exported* path agrees with that independent derivation,
+    /// `crates/roost-crypto/src/discovery_key.rs`, and
+    /// derived from the RFC 8032 reference implementation rather than from `ed25519-dalek`.
+    /// Pinning it here means the *exported* path agrees with that independent derivation,
     /// not merely with `roost-crypto`.
     ///
     /// Inputs: `discovery_signing_secret = [0x33; 32]`, `identity_signing_secret = [0x11; 32]`,

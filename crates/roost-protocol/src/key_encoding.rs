@@ -5,8 +5,8 @@ use subtle::ConstantTimeEq;
 /// Length of a Curve25519 public key encoding.
 pub const PUBLIC_KEY_LEN: usize = 32;
 
-/// Checks that an X25519 public key is canonical and not low order.
-pub fn validate_x25519_public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
+/// Returns whether an X25519 public key is canonically encoded and not low order.
+pub fn is_valid_x25519_public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
     is_canonical_x25519_public_key(bytes) && !is_low_order_x25519_public_key(bytes)
 }
 

@@ -1,6 +1,8 @@
-#![allow(dead_code)]
+#![allow(dead_code, unreachable_pub)]
 
+use roost_protocol::from_unix_secs;
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -24,7 +26,7 @@ use roost_protocol::{
 };
 use zeroize::Zeroizing;
 
-pub const CREATED_AT: u64 = 1_700_000_000;
+pub const CREATED_AT_SECS: u64 = 1_700_000_000;
 pub const TEST_RELAY_DOMAIN: &[u8] = b"relay.test";
 const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
 const CERTIFICATE_VERSION: u8 = 2;
@@ -151,14 +153,14 @@ pub struct StoredMessage {
 pub struct ValidatedSender {
     pub sender_identity: SenderIdentityMaterial,
     signing_key: SigningKeyPair,
-    domain_identifier: Vec<u8>,
+    domain_id: Vec<u8>,
     domain_verifying_key: Vec<u8>,
 }
 
 impl ValidatedSender {
     pub fn domain_signing_key(&self) -> DomainSigningKey<'_> {
         DomainSigningKey {
-            identifier: &self.domain_identifier,
+            id: &self.domain_id,
             verifying_key: &self.domain_verifying_key,
             status: DomainSigningKeyStatus::Trusted,
         }
@@ -243,7 +245,7 @@ impl ProtocolFixture {
             sender_identity_signing_key: &self.alice_sender.signing_key,
             contact_identity_key: contact.identity_key,
             recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-            timestamp_millis: 1_700_000_300_000 + u64::from(sequence),
+            sent_at_millis: 1_700_000_300_000 + u64::from(sequence),
             plaintext,
         }
     }
@@ -267,14 +269,14 @@ impl ProtocolFixture {
                 recipient_public_key: *acknowledgment_recipient_discovery_key()
                     .public_key()
                     .as_bytes(),
-                timestamp_millis: 1_700_000_100_000 + 0xee,
+                sent_at_millis: 1_700_000_100_000 + 0xee,
             },
             sender_certificate_validation: Some(InboundSenderCertificateValidation {
                 domain_signing_keys,
                 expected_relay_domain: TEST_RELAY_DOMAIN,
                 revocation_state: RevocationState::Available(revoked_identity_keys),
-                reference_timestamp_secs: CREATED_AT,
-                grace_window_secs: 0,
+                reference_time: from_unix_secs(CREATED_AT_SECS).unwrap(),
+                grace_window: Duration::ZERO,
             }),
         }
     }
@@ -385,12 +387,12 @@ pub fn setup(seed: [u8; 32]) -> Setup {
     let bob_identity = generate_signing_key_pair(&mut rng);
     let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
     let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
-    let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT);
-    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
+    let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT_SECS);
+    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS);
     let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT);
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT_SECS);
     let bob_one_time_prekey =
-        generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT);
+        generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT_SECS);
     let prekey_bundle = PreKeyBundle {
         version: roost_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: bob_discovery.bundle(),
@@ -446,7 +448,7 @@ fn discovery_key(signing_key: &SigningKeyPair, seed: u8) -> DiscoveryKey {
         &mut ChaCha20Rng::from_seed([seed; 32]),
         signing_key,
         0,
-        CREATED_AT,
+        CREATED_AT_SECS,
     )
 }
 
@@ -494,9 +496,9 @@ fn sender_identity(
 fn validated_sender() -> ValidatedSender {
     let signing_key = SigningKeyPair::from_signing_bytes([0xa2; 32]);
     let domain_signing_key = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x90; 32]));
-    let domain_identifier = b"test-domain".to_vec();
+    let domain_id = b"test-domain".to_vec();
     let certificate = sender_certificate_bytes(
-        &domain_identifier,
+        &domain_id,
         contact_identity(0xa2, &signing_key, 0x72),
         1_700_100_000,
     );
@@ -504,21 +506,21 @@ fn validated_sender() -> ValidatedSender {
     ValidatedSender {
         sender_identity: sender_identity(0xa2, &signing_key, certificate, signature),
         signing_key,
-        domain_identifier,
+        domain_id,
         domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
     }
 }
 
 fn sender_certificate_bytes(
-    signing_key_identifier: &[u8],
+    signing_key_id: &[u8],
     contact: ContactIdentity,
     expires_at_secs: u64,
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(CERTIFICATE_DOMAIN_TAG);
     bytes.push(CERTIFICATE_VERSION);
-    bytes.push(signing_key_identifier.len() as u8);
-    bytes.extend_from_slice(signing_key_identifier);
+    bytes.push(signing_key_id.len() as u8);
+    bytes.extend_from_slice(signing_key_id);
     bytes.push(TEST_RELAY_DOMAIN.len() as u8);
     bytes.extend_from_slice(TEST_RELAY_DOMAIN);
     bytes.extend_from_slice(&contact.identity_key.x25519_public_key);

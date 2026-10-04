@@ -2,6 +2,7 @@
 
 use std::error::Error;
 use std::fmt;
+use std::time::{Duration, SystemTime};
 
 use crate::signature::verify_with_context;
 use ed25519_dalek::Signature;
@@ -29,11 +30,10 @@ const EVIDENCE_IDENTITY_CONTEXT: &str = "AetherEvidenceIdentity-v1";
 /// Maximum number of domain-signing keys scanned by one evidence verdict.
 pub const MAX_EVIDENCE_DOMAIN_SIGNING_KEYS: usize = 32;
 /// Maximum certificate grace window accepted by the Message evidence profile.
-pub const MAX_EVIDENCE_GRACE_WINDOW_SECS: u64 = 300;
+pub const MAX_EVIDENCE_GRACE_WINDOW: Duration = Duration::from_secs(300);
 const SIGNATURE_LEN: usize = 64;
 
 /// The authenticated transcript interpretation required by an evidence verifier.
-#[non_exhaustive]
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EvidenceProfile {
@@ -70,7 +70,7 @@ impl EvidenceBundle {
 /// Verification is pure and needs no Session or Protocol State Blob. It authenticates one bundle
 /// but does not track repeat submissions; reporting backends must deduplicate verified semantic
 /// identities rather than raw bundle encodings. Certificate expiry is evaluated at
-/// `accepted_timestamp_secs`; current sender revocation is intentionally not an input because
+/// `accepted_at`; current sender revocation is intentionally not an input because
 /// revocation after acceptance must not invalidate authentic historical evidence.
 pub struct EvidenceVerificationInput<'a> {
     /// Opaque bytes returned in an accepted Message result.
@@ -81,10 +81,10 @@ pub struct EvidenceVerificationInput<'a> {
     pub domain_signing_keys: &'a [DomainSigningKey<'a>],
     /// Relay domain the sender certificate must name.
     pub expected_relay_domain: &'a [u8],
-    /// Caller-recorded Unix timestamp in seconds when the Message was accepted.
-    pub accepted_timestamp_secs: u64,
-    /// Caller-selected certificate grace window in seconds, capped at 300 by this profile.
-    pub grace_window_secs: u64,
+    /// Caller-recorded time when the Message was accepted.
+    pub accepted_at: SystemTime,
+    /// Caller-selected certificate grace window, capped at 300 seconds by this profile.
+    pub grace_window: Duration,
 }
 
 /// Authenticated context recovered from a verified evidence bundle.
@@ -105,9 +105,9 @@ pub struct VerifiedEvidenceBundle {
     /// Message ID signed into the Message transcript.
     #[zeroize(skip)]
     pub message_id: MessageId,
-    /// Sender-observed Unix timestamp signed into the Message transcript.
+    /// Sender-observed Unix timestamp in milliseconds signed into the Message transcript.
     #[zeroize(skip)]
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Payload kind signed into the Message transcript.
     #[zeroize(skip)]
     pub payload_kind: PayloadKind,
@@ -125,7 +125,6 @@ pub struct VerifiedEvidenceBundle {
 }
 
 /// An error returned while verifying an evidence bundle.
-#[non_exhaustive]
 #[derive(Debug, Eq, PartialEq)]
 pub enum EvidenceVerificationError {
     /// Encoded evidence exceeds the fixed verification cap.
@@ -150,10 +149,10 @@ pub enum EvidenceVerificationError {
     },
     /// The caller supplied a grace window outside the evidence profile.
     GraceWindowTooLarge {
-        /// Caller-supplied grace window in seconds.
-        actual: u64,
+        /// Caller-supplied grace window.
+        actual: Duration,
         /// Maximum grace window accepted by this evidence profile.
-        maximum: u64,
+        maximum: Duration,
     },
     /// Sender-certificate validation rejected the evidence at its acceptance context.
     SenderCertificate(SenderCertificateValidationError),
@@ -180,7 +179,7 @@ impl fmt::Display for EvidenceVerificationError {
             ),
             Self::GraceWindowTooLarge { actual, maximum } => write!(
                 f,
-                "evidence certificate grace window exceeds limit: {actual} > {maximum}"
+                "evidence certificate grace window exceeds limit: {actual:?} > {maximum:?}"
             ),
             Self::SenderCertificate(error) => {
                 write!(f, "evidence sender certificate failed: {error}")
@@ -214,7 +213,7 @@ pub struct AcceptedMessageEvidenceInput<'a> {
     /// Sender-selected Message ID.
     pub message_id: MessageId,
     /// Sender-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Authenticated payload interpretation.
     pub payload_kind: PayloadKind,
     /// Authenticated padded plaintext.
@@ -234,7 +233,7 @@ struct EvidenceBundleWire<'a> {
     session_key: &'a [u8],
     recipient_identity_verifying_key: [u8; 32],
     message_id: [u8; 16],
-    timestamp_millis: u64,
+    sent_at_millis: u64,
     payload_kind: u8,
     padded_payload: &'a [u8],
     sender_certificate: &'a [u8],
@@ -250,7 +249,7 @@ struct DecodedEvidenceBundleWire<'a> {
     session_key: &'a [u8],
     recipient_identity_verifying_key: [u8; 32],
     message_id: [u8; 16],
-    timestamp_millis: u64,
+    sent_at_millis: u64,
     payload_kind: u8,
     #[serde(borrow)]
     padded_payload: &'a [u8],
@@ -292,9 +291,6 @@ impl Extend<u8> for ZeroizingBuffer {
 ///
 /// The caller must first authenticate and accept the Message. Encoding does not grant an
 /// authenticity verdict; consumers must call [`verify_evidence_bundle`] on submitted evidence.
-///
-/// # Errors
-/// - [`EvidenceVerificationError::MalformedBundle`] if a field exceeds the evidence profile's limits or encoding fails.
 pub fn generate_evidence_bundle(
     input: AcceptedMessageEvidenceInput<'_>,
 ) -> Result<EvidenceBundle, EvidenceVerificationError> {
@@ -313,7 +309,7 @@ pub fn generate_evidence_bundle(
         session_key: input.session_key,
         recipient_identity_verifying_key: *input.recipient_identity_verifying_key,
         message_id: *input.message_id.as_bytes(),
-        timestamp_millis: input.timestamp_millis,
+        sent_at_millis: input.sent_at_millis,
         payload_kind: input.payload_kind.tag(),
         padded_payload: input.padded_payload,
         sender_certificate: input.sender_certificate,
@@ -332,62 +328,16 @@ pub fn generate_evidence_bundle(
 /// Verifies a versioned evidence bundle without device or Session state.
 ///
 /// The verifier first pins the envelope version and caller-selected profile, then validates the
-/// sender certificate for `accepted_timestamp_secs` and `expected_relay_domain`, and finally
+/// sender certificate for `accepted_at` and `expected_relay_domain`, and finally
 /// verifies the original Message signature over the exported transcript fields. Revocation is not
 /// evaluated so a later revocation does not erase previously authentic evidence.
-///
-/// # Examples
-/// ```no_run
-/// use roost_protocol::{
-///     DomainSigningKey, DomainSigningKeyStatus, EvidenceProfile, EvidenceVerificationInput,
-///     verify_evidence_bundle,
-/// };
-///
-/// # fn verify(
-/// #     bundle: &[u8],
-/// #     key_identifier: &[u8],
-/// #     verifying_key: &[u8],
-/// # ) -> Result<(), roost_protocol::EvidenceVerificationError> {
-/// let trusted_keys = [DomainSigningKey {
-///     identifier: key_identifier,
-///     verifying_key,
-///     status: DomainSigningKeyStatus::Trusted,
-/// }];
-/// let verified = verify_evidence_bundle(EvidenceVerificationInput {
-///     bundle,
-///     expected_profile: EvidenceProfile::MessageTranscriptV1,
-///     domain_signing_keys: &trusted_keys,
-///     expected_relay_domain: b"relay.example",
-///     accepted_timestamp_secs: 1_700_000_000,
-///     grace_window_secs: 0,
-/// })?;
-/// assert_eq!(verified.relay_domain, b"relay.example");
-/// # Ok(())
-/// # }
-/// ```
-///
-/// # Errors
-/// - [`EvidenceVerificationError::BundleTooLarge`] if the encoded bundle exceeds 160 KiB.
-/// - [`EvidenceVerificationError::MalformedBundle`] if the bundle fails exact structural or
-///   bounded-field validation.
-/// - [`EvidenceVerificationError::UnsupportedVersion`] if the envelope version is unsupported.
-/// - [`EvidenceVerificationError::WrongProfile`] if the encoded profile differs from
-///   [`EvidenceVerificationInput::expected_profile`].
-/// - [`EvidenceVerificationError::TooManyDomainSigningKeys`] if the caller supplies more than 32
-///   trusted domain-signing keys.
-/// - [`EvidenceVerificationError::GraceWindowTooLarge`] if the caller supplies a certificate grace
-///   window greater than 300 seconds.
-/// - [`EvidenceVerificationError::SenderCertificate`] for any certificate trust, relay-domain,
-///   canonical-key, signature, or acceptance-time failure.
-/// - [`EvidenceVerificationError::SignatureFailure`] if the Message signature is malformed or
-///   does not authenticate the exported transcript.
 pub fn verify_evidence_bundle(
     input: EvidenceVerificationInput<'_>,
 ) -> Result<VerifiedEvidenceBundle, EvidenceVerificationError> {
-    if input.grace_window_secs > MAX_EVIDENCE_GRACE_WINDOW_SECS {
+    if input.grace_window > MAX_EVIDENCE_GRACE_WINDOW {
         return Err(EvidenceVerificationError::GraceWindowTooLarge {
-            actual: input.grace_window_secs,
-            maximum: MAX_EVIDENCE_GRACE_WINDOW_SECS,
+            actual: input.grace_window,
+            maximum: MAX_EVIDENCE_GRACE_WINDOW,
         });
     }
     if input.domain_signing_keys.len() > MAX_EVIDENCE_DOMAIN_SIGNING_KEYS {
@@ -443,8 +393,8 @@ pub fn verify_evidence_bundle(
         domain_signing_keys: input.domain_signing_keys,
         expected_relay_domain: input.expected_relay_domain,
         revocation_state: RevocationState::Available(&[]),
-        reference_timestamp_secs: input.accepted_timestamp_secs,
-        grace_window_secs: input.grace_window_secs,
+        reference_time: input.accepted_at,
+        grace_window: input.grace_window,
     })?;
     let verifying_key = parse_ed25519_verifying_key_bytes(
         &validated_certificate.identity_key.ed25519_verifying_key,
@@ -459,7 +409,7 @@ pub fn verify_evidence_bundle(
         session_key: decoded.session_key,
         recipient_identity_verifying_key: &decoded.recipient_identity_verifying_key,
         id: MessageId::from_bytes(decoded.message_id),
-        timestamp_millis: decoded.timestamp_millis,
+        sent_at_millis: decoded.sent_at_millis,
         payload_kind,
         payload: decoded.padded_payload,
         sender_certificate: decoded.sender_certificate,
@@ -484,7 +434,7 @@ pub fn verify_evidence_bundle(
         session_key: decoded.session_key.to_vec(),
         recipient_identity_verifying_key: decoded.recipient_identity_verifying_key,
         message_id: MessageId::from_bytes(decoded.message_id),
-        timestamp_millis: decoded.timestamp_millis,
+        sent_at_millis: decoded.sent_at_millis,
         payload_kind,
         plaintext,
         sender_identity_key: validated_certificate.identity_key,

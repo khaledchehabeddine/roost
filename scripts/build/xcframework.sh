@@ -19,6 +19,7 @@ rm -rf "$OUT"
 mkdir -p "$OUT/generated"
 cargo run --locked --bin uniffi-bindgen-swift -- \
     target/aarch64-apple-ios/release/libroost_client.a "$OUT/generated" --swift-sources --headers
+python3 scripts/build/host_docs.py swift "$OUT/generated/Roost.swift"
 
 build_framework() {
     local rust_target="$1" swift_target="$2" sdk_name="$3" identifier="$4"

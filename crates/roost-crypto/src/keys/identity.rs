@@ -1,8 +1,8 @@
+use super::KeyBundleError;
 use super::dh::PublicKey;
 use super::signing::{Signature, SigningKeyPair, VerifyingKey};
-use crate::CryptoError;
-use roost_protocol::verify_with_context;
-use roost_protocol::{parse_ed25519_verifying_key_bytes, validate_x25519_public_key};
+use roost_protocol::{SignatureError, verify_with_context};
+use roost_protocol::{is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes};
 
 const IDENTITY_KEY_BINDING_CONTEXT: &[u8] = b"AetherIKBinding-v1:";
 const PUBLIC_KEY_LEN: usize = 32;
@@ -21,29 +21,25 @@ pub struct IdentityKeyBundle {
 
 impl IdentityKeyBundle {
     /// Builds an Identity Key bundle from received boundary bytes.
-    ///
-    /// # Errors
-    /// - [`CryptoError::InvalidKeyEncoding`] if either key or the signature has the wrong length
-    ///   or non-canonical encoding.
     pub fn from_bytes(
         public_key: &[u8],
         verifying_key: &[u8],
         binding_signature: &[u8],
-    ) -> Result<Self, CryptoError> {
+    ) -> Result<Self, KeyBundleError> {
         let public_key: [u8; PUBLIC_KEY_LEN] = public_key
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
-        if !validate_x25519_public_key(&public_key) {
-            return Err(CryptoError::InvalidKeyEncoding);
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+        if !is_valid_x25519_public_key(&public_key) {
+            return Err(KeyBundleError::InvalidKeyEncoding);
         }
         let verifying_key: [u8; PUBLIC_KEY_LEN] = verifying_key
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
         let verifying_key = parse_ed25519_verifying_key_bytes(&verifying_key)
-            .ok_or(CryptoError::InvalidKeyEncoding)?;
+            .ok_or(KeyBundleError::InvalidKeyEncoding)?;
         let binding_signature: [u8; SIGNATURE_LEN] = binding_signature
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
         Ok(Self {
             public_key: PublicKey::from(public_key),
             verifying_key,
@@ -65,7 +61,7 @@ impl IdentityKeyBundle {
 pub fn sign_identity_key_binding(
     signing_key: &SigningKeyPair,
     public_key: &PublicKey,
-) -> Result<Signature, CryptoError> {
+) -> Result<Signature, SignatureError> {
     signing_key.sign_with_context(
         IDENTITY_KEY_BINDING_CONTEXT,
         &identity_key_binding_payload(public_key, &signing_key.verifying),
@@ -73,13 +69,13 @@ pub fn sign_identity_key_binding(
 }
 
 /// Verifies that an IK Ed25519 key owns its X25519 public half.
-pub fn verify_identity_key_bundle(bundle: &IdentityKeyBundle) -> Result<(), CryptoError> {
-    if !validate_x25519_public_key(bundle.public_key.as_bytes()) {
-        return Err(CryptoError::InvalidKeyEncoding);
+pub fn verify_identity_key_bundle(bundle: &IdentityKeyBundle) -> Result<(), KeyBundleError> {
+    if !is_valid_x25519_public_key(bundle.public_key.as_bytes()) {
+        return Err(KeyBundleError::InvalidKeyEncoding);
     }
     let verifying_key_bytes = bundle.verifying_key.to_bytes();
     parse_ed25519_verifying_key_bytes(&verifying_key_bytes)
-        .ok_or(CryptoError::InvalidKeyEncoding)?;
+        .ok_or(KeyBundleError::InvalidKeyEncoding)?;
     verify_with_context(
         &bundle.verifying_key,
         IDENTITY_KEY_BINDING_CONTEXT,
@@ -92,7 +88,7 @@ pub fn verify_identity_key_bundle(bundle: &IdentityKeyBundle) -> Result<(), Cryp
 /// Returns the identity key's two public halves, the bytes both binding directions cover.
 ///
 /// The IK self-binding signs these under `AetherIKBinding-v1:`, and a discovery key signs the same
-/// bytes under `AetherDKToIK-v1:` (AE-KEY-04). Only the context separates the two, so both
+/// bytes under `AetherDKToIK-v1:`. Only the context separates the two, so both
 /// directions must derive the payload here rather than rebuilding it.
 pub(crate) fn identity_key_binding_payload(
     public_key: &PublicKey,

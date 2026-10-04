@@ -8,11 +8,12 @@ use roost_core::ProtocolStateEngine;
 use roost_crypto::generate_signing_key_pair;
 use roost_protocol::{
     DomainSigningKey, DomainSigningKeyStatus, EvidenceProfile, EvidenceVerificationError,
-    EvidenceVerificationInput, PayloadKind, verify_evidence_bundle,
+    EvidenceVerificationInput, PayloadKind, from_unix_secs, verify_evidence_bundle,
 };
+use std::time::Duration;
 use support::{ProtocolFixture, TEST_RELAY_DOMAIN, accepted_contact_identity};
 
-const ACCEPTED_TIMESTAMP_SECS: u64 = 1_700_000_000;
+const ACCEPTED_AT_SECS: u64 = 1_700_000_000;
 
 fn verification_error(
     result: Result<roost_protocol::VerifiedEvidenceBundle, EvidenceVerificationError>,
@@ -47,8 +48,8 @@ fn verified_evidence(
         expected_profile: EvidenceProfile::MessageTranscriptV1,
         domain_signing_keys: &domain_signing_keys,
         expected_relay_domain: TEST_RELAY_DOMAIN,
-        accepted_timestamp_secs: ACCEPTED_TIMESTAMP_SECS,
-        grace_window_secs: 0,
+        accepted_at: from_unix_secs(ACCEPTED_AT_SECS).unwrap(),
+        grace_window: Duration::ZERO,
     })
     .unwrap()
 }
@@ -68,7 +69,7 @@ fn accepted_message_returns_verifiable_evidence_bundle() {
             .ed25519_verifying_key
     );
     assert_eq!(verified.message_id, sent.message_id);
-    assert_eq!(verified.timestamp_millis, 1_700_000_300_001);
+    assert_eq!(verified.sent_at_millis, 1_700_000_300_001);
     assert_eq!(verified.payload_kind, PayloadKind::EncryptedText);
     assert_eq!(verified.plaintext.as_slice(), sent.plaintext);
     assert_eq!(
@@ -136,10 +137,10 @@ fn evidence_bundle_with_substituted_valid_relay_certificate_is_rejected() {
         ..certificate_signature_offset + substituted_certificate_signature.len()]
         .copy_from_slice(&substituted_certificate_signature);
 
-    let identifier = fixture.alice_sender.domain_signing_key().identifier;
+    let id = fixture.alice_sender.domain_signing_key().id;
     let verifying_key = domain_signing_key.verifying.to_bytes();
     let domain_signing_keys = [DomainSigningKey {
-        identifier,
+        id,
         verifying_key: &verifying_key,
         status: DomainSigningKeyStatus::Trusted,
     }];
@@ -148,8 +149,8 @@ fn evidence_bundle_with_substituted_valid_relay_certificate_is_rejected() {
         expected_profile: EvidenceProfile::MessageTranscriptV1,
         domain_signing_keys: &domain_signing_keys,
         expected_relay_domain: OTHER_RELAY_DOMAIN,
-        accepted_timestamp_secs: ACCEPTED_TIMESTAMP_SECS,
-        grace_window_secs: 0,
+        accepted_at: from_unix_secs(ACCEPTED_AT_SECS).unwrap(),
+        grace_window: Duration::ZERO,
     }));
 
     assert_eq!(actual, EvidenceVerificationError::SignatureFailure);

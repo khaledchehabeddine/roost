@@ -1,14 +1,15 @@
 //! Shared sealed-sender frame encryption.
 
 use crate::discovery_key::DiscoveryKey;
-use crate::error::CryptoError;
-use crate::keys::{KeyPair, PublicKey, validate_x25519_public_key};
+use crate::keys::{KeyPair, PublicKey, is_valid_x25519_public_key};
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::error::Error;
+use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -57,16 +58,12 @@ impl SealedFrame {
     pub const MAX_ENCODED_LEN: usize = MAX_SEALED_FRAME_ENCODED_LEN;
 
     /// Encodes the frame into canonical Postcard bytes.
-    ///
-    /// # Errors
-    /// - [`CryptoError::SealedFrameEncode`] if frame fields are malformed, ciphertext exceeds the
-    ///   cap, or encoding fails.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, CryptoError> {
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SealedFrameError> {
         validate_frame(self, FrameValidation::Encode)?;
         let bytes = postcard::to_stdvec(&SealedFrameWire::from(self))
-            .map_err(|_| CryptoError::SealedFrameEncode)?;
+            .map_err(|_| SealedFrameError::Encode)?;
         if bytes.len() > MAX_SEALED_FRAME_ENCODED_LEN {
-            return Err(CryptoError::SealedFrameEncode);
+            return Err(SealedFrameError::Encode);
         }
         Ok(bytes)
     }
@@ -74,23 +71,19 @@ impl SealedFrame {
     /// Decodes a canonical sealed-frame byte sequence.
     ///
     /// Unsupported versions and oversized inputs are rejected before full Postcard parsing.
-    ///
-    /// # Errors
-    /// - [`CryptoError::SealedFrameDecode`] if bytes are malformed, unsupported, oversized, or have
-    ///   trailing data.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, SealedFrameError> {
         if bytes.len() > MAX_SEALED_FRAME_ENCODED_LEN {
-            return Err(CryptoError::SealedFrameDecode);
+            return Err(SealedFrameError::Decode);
         }
-        let version = *bytes.first().ok_or(CryptoError::SealedFrameDecode)?;
+        let version = *bytes.first().ok_or(SealedFrameError::Decode)?;
         if version != SEALED_FRAME_VERSION {
-            return Err(CryptoError::SealedFrameDecode);
+            return Err(SealedFrameError::Decode);
         }
 
         let (wire, trailing): (SealedFrameWire, &[u8]) =
-            postcard::take_from_bytes(bytes).map_err(|_| CryptoError::SealedFrameDecode)?;
+            postcard::take_from_bytes(bytes).map_err(|_| SealedFrameError::Decode)?;
         if !trailing.is_empty() {
-            return Err(CryptoError::SealedFrameDecode);
+            return Err(SealedFrameError::Decode);
         }
         let frame = SealedFrame::from(wire);
         validate_frame(&frame, FrameValidation::Decode)?;
@@ -99,19 +92,12 @@ impl SealedFrame {
 }
 
 /// Encrypts plaintext into a sealed-sender frame for `recipient_public_key`.
-///
-/// # Errors
-/// - [`CryptoError::Aead`] if XChaCha20-Poly1305 encryption fails.
-/// - [`CryptoError::HkdfExpand`] if frame key derivation fails.
-/// - [`CryptoError::NonContributorySharedSecret`] if the recipient key yields a low-order
-///   agreement.
-/// - [`CryptoError::SealedFrameEncode`] if frame fields or ciphertext exceed local caps.
 pub fn seal_frame<R: RngCore + CryptoRng>(
     rng: &mut R,
     recipient_public_key: &PublicKey,
     prekey_reference: Option<SealedFramePreKeyReference>,
     plaintext: &[u8],
-) -> Result<SealedFrame, CryptoError> {
+) -> Result<SealedFrame, SealedFrameError> {
     seal_frame_with_associated_data(rng, recipient_public_key, prekey_reference, plaintext, &[])
 }
 
@@ -120,21 +106,13 @@ pub fn seal_frame<R: RngCore + CryptoRng>(
 /// The additional bytes are authenticated but are not encoded into the returned frame. The
 /// recipient must supply the same bytes to
 /// [`open_frame_for_discovery_key_with_associated_data`].
-///
-/// # Errors
-/// - [`CryptoError::Aead`] if XChaCha20-Poly1305 encryption fails.
-/// - [`CryptoError::HkdfExpand`] if frame key derivation fails.
-/// - [`CryptoError::NonContributorySharedSecret`] if the recipient key yields a low-order
-///   agreement.
-/// - [`CryptoError::SealedFrameEncode`] if frame fields, ciphertext, or additional associated data
-///   exceed local caps.
 pub fn seal_frame_with_associated_data<R: RngCore + CryptoRng>(
     rng: &mut R,
     recipient_public_key: &PublicKey,
     prekey_reference: Option<SealedFramePreKeyReference>,
     plaintext: &[u8],
     additional_associated_data: &[u8],
-) -> Result<SealedFrame, CryptoError> {
+) -> Result<SealedFrame, SealedFrameError> {
     let ephemeral_key = crate::keys::generate_key_pair(rng);
     seal_frame_with_ephemeral_key_and_associated_data(
         &ephemeral_key,
@@ -151,7 +129,7 @@ pub(crate) fn seal_frame_with_ephemeral_key(
     recipient_public_key: &PublicKey,
     prekey_reference: Option<SealedFramePreKeyReference>,
     plaintext: &[u8],
-) -> Result<SealedFrame, CryptoError> {
+) -> Result<SealedFrame, SealedFrameError> {
     seal_frame_with_ephemeral_key_and_associated_data(
         ephemeral_key,
         recipient_public_key,
@@ -167,10 +145,10 @@ pub(crate) fn seal_frame_with_ephemeral_key_and_associated_data(
     prekey_reference: Option<SealedFramePreKeyReference>,
     plaintext: &[u8],
     additional_associated_data: &[u8],
-) -> Result<SealedFrame, CryptoError> {
+) -> Result<SealedFrame, SealedFrameError> {
     let shared_secret = ephemeral_key.diffie_hellman(recipient_public_key);
     if !shared_secret.was_contributory() {
-        return Err(CryptoError::NonContributorySharedSecret);
+        return Err(SealedFrameError::NonContributorySharedSecret);
     }
     let frame = SealedFrame {
         version: SEALED_FRAME_VERSION,
@@ -191,9 +169,9 @@ pub(crate) fn seal_frame_with_ephemeral_key_and_associated_data(
                 aad: &aad,
             },
         )
-        .map_err(|_| CryptoError::Aead)?;
+        .map_err(|_| SealedFrameError::Aead)?;
     if ciphertext.len() > MAX_SEALED_FRAME_CIPHERTEXT_LEN {
-        return Err(CryptoError::SealedFrameEncode);
+        return Err(SealedFrameError::Encode);
     }
     Ok(SealedFrame {
         ciphertext,
@@ -202,48 +180,32 @@ pub(crate) fn seal_frame_with_ephemeral_key_and_associated_data(
 }
 
 /// Opens a sealed-sender frame for the local recipient Discovery Key.
-///
-/// # Errors
-/// - [`CryptoError::Aead`] if authentication or decryption fails.
-/// - [`CryptoError::HkdfExpand`] if frame key derivation fails.
-/// - [`CryptoError::NonContributorySharedSecret`] if the ephemeral key yields a low-order
-///   agreement.
-/// - [`CryptoError::SealedFrameDecode`] if frame fields are malformed or target another
-///   recipient.
 pub fn open_frame(
     recipient_key: &KeyPair,
     frame: &SealedFrame,
-) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, SealedFrameError> {
     open_frame_with_associated_data(recipient_key, frame, &[])
 }
 
 /// Opens a sealed-sender frame while authenticating caller-supplied transport associated data.
-///
-/// # Errors
-/// - [`CryptoError::Aead`] if authentication or decryption fails.
-/// - [`CryptoError::HkdfExpand`] if frame key derivation fails.
-/// - [`CryptoError::NonContributorySharedSecret`] if the ephemeral key yields a low-order
-///   agreement.
-/// - [`CryptoError::SealedFrameDecode`] if frame fields are malformed, target another recipient,
-///   or additional associated data exceeds the local cap.
 fn open_frame_with_associated_data(
     recipient_key: &KeyPair,
     frame: &SealedFrame,
     additional_associated_data: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, SealedFrameError> {
     validate_frame(frame, FrameValidation::Decode)?;
     let recipient_matches: bool = frame
         .recipient_public_key
         .ct_eq(recipient_key.public.as_bytes())
         .into();
     if !recipient_matches {
-        return Err(CryptoError::SealedFrameDecode);
+        return Err(SealedFrameError::Decode);
     }
 
     let ephemeral_public_key = PublicKey::from(frame.ephemeral_public_key);
     let shared_secret = recipient_key.diffie_hellman(&ephemeral_public_key);
     if !shared_secret.was_contributory() {
-        return Err(CryptoError::NonContributorySharedSecret);
+        return Err(SealedFrameError::NonContributorySharedSecret);
     }
     let (key, nonce) = expand_frame_secret(shared_secret.as_bytes())?;
     let aad = frame_associated_data(frame, additional_associated_data, FrameValidation::Decode)?;
@@ -257,53 +219,37 @@ fn open_frame_with_associated_data(
             },
         )
         .map(Zeroizing::new)
-        .map_err(|_| CryptoError::Aead)
+        .map_err(|_| SealedFrameError::Aead)
 }
 
 /// Opens a sealed-sender frame for the local recipient Discovery Key.
-///
-/// # Errors
-/// - [`CryptoError::Aead`] if authentication or decryption fails.
-/// - [`CryptoError::HkdfExpand`] if frame key derivation fails.
-/// - [`CryptoError::NonContributorySharedSecret`] if the ephemeral key yields a low-order
-///   agreement.
-/// - [`CryptoError::SealedFrameDecode`] if frame fields are malformed or target another
-///   recipient.
 pub fn open_frame_for_discovery_key(
     recipient_key: &DiscoveryKey,
     frame: &SealedFrame,
-) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, SealedFrameError> {
     open_frame_for_discovery_key_with_associated_data(recipient_key, frame, &[])
 }
 
 /// Opens a sealed-sender frame for a Discovery Key while authenticating caller-supplied transport
 /// associated data.
-///
-/// # Errors
-/// - [`CryptoError::Aead`] if authentication or decryption fails.
-/// - [`CryptoError::HkdfExpand`] if frame key derivation fails.
-/// - [`CryptoError::NonContributorySharedSecret`] if the ephemeral key yields a low-order
-///   agreement.
-/// - [`CryptoError::SealedFrameDecode`] if frame fields are malformed, target another recipient,
-///   or additional associated data exceeds the local cap.
 pub fn open_frame_for_discovery_key_with_associated_data(
     recipient_key: &DiscoveryKey,
     frame: &SealedFrame,
     additional_associated_data: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, SealedFrameError> {
     validate_frame(frame, FrameValidation::Decode)?;
     let recipient_matches: bool = frame
         .recipient_public_key
         .ct_eq(recipient_key.public_key().as_bytes())
         .into();
     if !recipient_matches {
-        return Err(CryptoError::SealedFrameDecode);
+        return Err(SealedFrameError::Decode);
     }
 
     let ephemeral_public_key = PublicKey::from(frame.ephemeral_public_key);
     let shared_secret = recipient_key.diffie_hellman(&ephemeral_public_key);
     if !shared_secret.was_contributory() {
-        return Err(CryptoError::NonContributorySharedSecret);
+        return Err(SealedFrameError::NonContributorySharedSecret);
     }
     let (key, nonce) = expand_frame_secret(shared_secret.as_bytes())?;
     let aad = frame_associated_data(frame, additional_associated_data, FrameValidation::Decode)?;
@@ -317,8 +263,39 @@ pub fn open_frame_for_discovery_key_with_associated_data(
             },
         )
         .map(Zeroizing::new)
-        .map_err(|_| CryptoError::Aead)
+        .map_err(|_| SealedFrameError::Aead)
 }
+
+/// An error returned while encoding, decoding, sealing, or opening a [`SealedFrame`].
+#[derive(Debug)]
+pub enum SealedFrameError {
+    /// XChaCha20-Poly1305 encryption, decryption, or authentication failed.
+    Aead,
+    /// Frame bytes or fields are malformed, unsupported, oversized, or target another recipient.
+    Decode,
+    /// Frame fields, ciphertext, or additional associated data exceed local caps or fail to encode.
+    Encode,
+    /// HKDF-SHA256 rejected the requested output length.
+    HkdfExpand,
+    /// An X25519 exchange produced a non-contributory shared secret.
+    NonContributorySharedSecret,
+}
+
+impl fmt::Display for SealedFrameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Aead => write!(f, "xchacha20-poly1305 encryption or decryption failed"),
+            Self::Decode => write!(f, "sealed-sender frame bytes failed to decode"),
+            Self::Encode => write!(f, "sealed-sender frame failed to encode"),
+            Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
+            Self::NonContributorySharedSecret => {
+                write!(f, "x25519 shared secret was non-contributory")
+            }
+        }
+    }
+}
+
+impl Error for SealedFrameError {}
 
 #[derive(Deserialize, Serialize)]
 struct SealedFrameWire {
@@ -390,15 +367,15 @@ fn expand_frame_secret(
         Zeroizing<[u8; XCHACHA20_POLY1305_KEY_LEN]>,
         [u8; XCHACHA20_POLY1305_NONCE_LEN],
     ),
-    CryptoError,
+    SealedFrameError,
 > {
     let hkdf = Hkdf::<Sha256>::new(None, secret);
     let mut key = Zeroizing::new([0u8; XCHACHA20_POLY1305_KEY_LEN]);
     let mut nonce = [0u8; XCHACHA20_POLY1305_NONCE_LEN];
     hkdf.expand(SEALED_FRAME_KEY_INFO, key.as_mut())
-        .map_err(|_| CryptoError::HkdfExpand)?;
+        .map_err(|_| SealedFrameError::HkdfExpand)?;
     hkdf.expand(SEALED_FRAME_NONCE_INFO, &mut nonce)
-        .map_err(|_| CryptoError::HkdfExpand)?;
+        .map_err(|_| SealedFrameError::HkdfExpand)?;
     Ok((key, nonce))
 }
 
@@ -406,7 +383,7 @@ fn frame_associated_data(
     frame: &SealedFrame,
     additional_associated_data: &[u8],
     validation: FrameValidation,
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<Vec<u8>, SealedFrameError> {
     if additional_associated_data.len() > MAX_EXTERNAL_ASSOCIATED_DATA_LEN {
         return Err(validation.error());
     }
@@ -440,15 +417,18 @@ enum FrameValidation {
 }
 
 impl FrameValidation {
-    fn error(self) -> CryptoError {
+    fn error(self) -> SealedFrameError {
         match self {
-            Self::Encode => CryptoError::SealedFrameEncode,
-            Self::Decode => CryptoError::SealedFrameDecode,
+            Self::Encode => SealedFrameError::Encode,
+            Self::Decode => SealedFrameError::Decode,
         }
     }
 }
 
-fn validate_frame(frame: &SealedFrame, validation: FrameValidation) -> Result<(), CryptoError> {
+fn validate_frame(
+    frame: &SealedFrame,
+    validation: FrameValidation,
+) -> Result<(), SealedFrameError> {
     validate_frame_public_fields(frame, validation)?;
     if frame.ciphertext.len() > MAX_SEALED_FRAME_CIPHERTEXT_LEN {
         return Err(validation.error());
@@ -459,10 +439,10 @@ fn validate_frame(frame: &SealedFrame, validation: FrameValidation) -> Result<()
 fn validate_frame_public_fields(
     frame: &SealedFrame,
     validation: FrameValidation,
-) -> Result<(), CryptoError> {
+) -> Result<(), SealedFrameError> {
     if frame.version != SEALED_FRAME_VERSION
-        || !validate_x25519_public_key(&frame.recipient_public_key)
-        || !validate_x25519_public_key(&frame.ephemeral_public_key)
+        || !is_valid_x25519_public_key(&frame.recipient_public_key)
+        || !is_valid_x25519_public_key(&frame.ephemeral_public_key)
     {
         return Err(validation.error());
     }
@@ -475,12 +455,12 @@ fn validate_frame_public_fields(
 fn validate_prekey_reference(
     reference: SealedFramePreKeyReference,
     validation: FrameValidation,
-) -> Result<(), CryptoError> {
-    if !validate_x25519_public_key(&reference.signed_prekey_public_key)
+) -> Result<(), SealedFrameError> {
+    if !is_valid_x25519_public_key(&reference.signed_prekey_public_key)
         || reference.one_time_prekey_id.is_some() != reference.one_time_prekey_public_key.is_some()
         || reference
             .one_time_prekey_public_key
-            .is_some_and(|key| !validate_x25519_public_key(&key))
+            .is_some_and(|key| !is_valid_x25519_public_key(&key))
     {
         return Err(validation.error());
     }
