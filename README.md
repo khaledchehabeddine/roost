@@ -44,7 +44,7 @@ consumer adoption follow the approved package prerequisite and mobile cutover ti
 
 ## Docs
 
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor workflow and documentation ownership
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — branch and commit conventions
 - [`CONTEXT_MAP.md`](CONTEXT_MAP.md) — workspace context paths and relationships
 - [`docs/adr/`](docs/adr/) — workspace-wide architectural decisions (per-crate decisions under `crates/<crate>/docs/adr/`)
 - [`docs/building-mobile.md`](docs/building-mobile.md) — build, sign, and verify Android and iOS packages
