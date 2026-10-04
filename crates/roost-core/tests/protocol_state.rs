@@ -20,10 +20,9 @@ use roost_crypto::{
     seal_frame_with_associated_data, sign_identity_key_binding,
 };
 use roost_protocol::{
-    DomainSigningKey, DomainSigningKeyStatus, EvidenceProfile, EvidenceVerificationInput,
-    MAX_EVIDENCE_GRACE_WINDOW, MessageId, PayloadKind, RevocationState,
-    SenderCertificateIdentityKey, SenderCertificateValidationError, from_unix_millis,
-    from_unix_secs, verify_evidence_bundle,
+    DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, MessageId, PayloadKind,
+    RevocationState, SenderCertificateIdentityKey, SenderCertificateValidationError,
+    from_unix_millis, from_unix_secs,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -2342,14 +2341,14 @@ fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_wi
 }
 
 #[test]
-fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
+fn blocked_message_rejects_grace_window_above_the_maximum() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
         accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME_SECS - MAX_EVIDENCE_GRACE_WINDOW.as_secs() - 1,
+        CERTIFICATE_REFERENCE_TIME_SECS - MAX_CERTIFICATE_GRACE_WINDOW.as_secs() - 1,
     );
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
@@ -2369,7 +2368,7 @@ fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
             key.clone(),
             outbound(
                 0x5f,
-                b"blocked outside evidence grace",
+                b"blocked outside the grace window",
                 &sender.sender_identity,
             ),
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
@@ -2388,21 +2387,23 @@ fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
         .sender_certificate_validation
         .as_mut()
         .unwrap()
-        .grace_window = MAX_EVIDENCE_GRACE_WINDOW + Duration::from_secs(1);
+        .grace_window = MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1);
 
-    let blocked = engine
-        .decrypt_message_with_transport_bindings(
-            &mut ChaCha20Rng::from_seed([0x5f; 32]),
-            &bob_snapshot,
-            inbound,
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        )
-        .map(blocked)
-        .unwrap();
+    let result = engine.decrypt_message_with_transport_bindings(
+        &mut ChaCha20Rng::from_seed([0x5f; 32]),
+        &bob_snapshot,
+        inbound,
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+        &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+    );
 
-    assert!(blocked.acknowledgment.is_none());
-    assert_eq!(blocked.state_updates.len(), 2);
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::SenderCertificateValidation(
+            SenderCertificateValidationError::GraceWindowTooLarge { grace_window, max }
+        )) if grace_window == MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1)
+            && max == MAX_CERTIFICATE_GRACE_WINDOW
+    ));
 }
 
 #[test]
@@ -2955,14 +2956,14 @@ fn expired_certificate_rejects_before_plaintext_is_surfaced() {
 }
 
 #[test]
-fn unblocked_message_outside_evidence_grace_is_rejected() {
+fn unblocked_message_rejects_grace_window_above_the_maximum() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
         accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME_SECS - MAX_EVIDENCE_GRACE_WINDOW.as_secs() - 1,
+        CERTIFICATE_REFERENCE_TIME_SECS - MAX_CERTIFICATE_GRACE_WINDOW.as_secs() - 1,
     );
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
@@ -2979,7 +2980,7 @@ fn unblocked_message_outside_evidence_grace_is_rejected() {
         .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
-            outbound(0x5d, b"outside evidence grace", &sender.sender_identity),
+            outbound(0x5d, b"outside the grace window", &sender.sender_identity),
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
@@ -2996,7 +2997,7 @@ fn unblocked_message_outside_evidence_grace_is_rejected() {
         .sender_certificate_validation
         .as_mut()
         .unwrap()
-        .grace_window = MAX_EVIDENCE_GRACE_WINDOW + Duration::from_secs(1);
+        .grace_window = MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1);
 
     let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x5d; 32]),
@@ -3009,20 +3010,21 @@ fn unblocked_message_outside_evidence_grace_is_rejected() {
     assert!(matches!(
         result,
         Err(ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::ExpiredCertificate
-        ))
+            SenderCertificateValidationError::GraceWindowTooLarge { grace_window, max }
+        )) if grace_window == MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_secs(1)
+            && max == MAX_CERTIFICATE_GRACE_WINDOW
     ));
 }
 
 #[test]
-fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
+fn message_at_the_grace_window_boundary_is_accepted() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
         accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME_SECS - MAX_EVIDENCE_GRACE_WINDOW.as_secs(),
+        CERTIFICATE_REFERENCE_TIME_SECS - MAX_CERTIFICATE_GRACE_WINDOW.as_secs(),
     );
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
@@ -3039,7 +3041,11 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
         .encrypt_message_with_transport_binding(
             &alice_snapshot,
             key.clone(),
-            outbound(0x5e, b"at evidence grace", &sender.sender_identity),
+            outbound(
+                0x5e,
+                b"at the grace window boundary",
+                &sender.sender_identity,
+            ),
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         )
         .unwrap()
@@ -3056,7 +3062,7 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
         .sender_certificate_validation
         .as_mut()
         .unwrap()
-        .grace_window = MAX_EVIDENCE_GRACE_WINDOW;
+        .grace_window = MAX_CERTIFICATE_GRACE_WINDOW;
 
     let accepted = engine
         .decrypt_message_with_transport_bindings(
@@ -3068,17 +3074,11 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
         )
         .map(accepted)
         .unwrap();
-    let verified = verify_evidence_bundle(EvidenceVerificationInput {
-        bundle: accepted.evidence_bundle.as_bytes(),
-        expected_profile: EvidenceProfile::MessageTranscriptV1,
-        domain_signing_keys: &domain_keys,
-        expected_relay_domain: TEST_RELAY_DOMAIN,
-        accepted_at: from_unix_secs(CERTIFICATE_REFERENCE_TIME_SECS).unwrap(),
-        grace_window: MAX_EVIDENCE_GRACE_WINDOW,
-    })
-    .unwrap();
 
-    assert_eq!(verified.message_id, accepted.message_id);
+    assert_eq!(
+        accepted.plaintext.as_slice(),
+        b"at the grace window boundary"
+    );
 }
 
 #[test]

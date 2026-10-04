@@ -21,10 +21,6 @@ use roost_crypto::{
     verify_discovery_key_bundle, verify_identity_key_bundle,
 };
 use roost_protocol::{
-    AcceptedMessageEvidenceInput, EvidenceBundle, MAX_EVIDENCE_GRACE_WINDOW,
-    generate_evidence_bundle,
-};
-use roost_protocol::{
     DomainSigningKey, RevocationState, SenderCertificateValidationError,
     SenderCertificateValidationInput, validate_sender_certificate,
 };
@@ -38,7 +34,7 @@ use roost_protocol::{
 #[cfg(test)]
 use roost_protocol::{SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN};
 use roost_protocol::{SignatureError, verify_with_context};
-use roost_protocol::{from_unix_millis, from_unix_secs, to_unix_millis};
+use roost_protocol::{from_unix_millis, to_unix_millis};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
@@ -483,12 +479,10 @@ pub struct InboundSenderCertificateValidation<'a> {
     pub revocation_state: RevocationState<'a>,
     /// Caller-supplied time used for expiry evaluation.
     pub reference_time: SystemTime,
-    /// Caller-supplied grace window.
+    /// Caller-supplied grace window, at most
+    /// [`MAX_CERTIFICATE_GRACE_WINDOW`](roost_protocol::MAX_CERTIFICATE_GRACE_WINDOW).
     ///
-    /// The standalone certificate API imposes no ceiling; for its trade-off, see
-    /// [`SenderCertificateValidationInput::grace_window`]. Because an accepted unblocked
-    /// Message includes evidence, this receive path rejects a Message more than 300 seconds past
-    /// certificate expiry even when the caller permits a longer grace window.
+    /// For its trade-off, see [`SenderCertificateValidationInput::grace_window`].
     pub grace_window: Duration,
 }
 
@@ -504,8 +498,6 @@ pub struct InboundMessageResult {
     pub plaintext: Zeroizing<Vec<u8>>,
     /// Sender identity material decoded from the sealed-sender envelope.
     pub sender_identity: SenderIdentityMaterial,
-    /// Opaque authenticity evidence for optional durable abuse reporting.
-    pub evidence_bundle: EvidenceBundle,
     /// Encrypted acknowledgment artifact to durably queue with the returned state updates.
     pub acknowledgment: Message,
     /// Protocol-state updates to commit before treating the inbound Message as processed.
@@ -1416,24 +1408,13 @@ impl ProtocolStateEngine {
         let validation = inbound
             .sender_certificate_validation
             .ok_or(ProtocolStateError::MissingSenderCertificateValidation)?;
-        let (inbound_contact_identity_key, certificate_expires_at_secs) =
-            inbound_contact_identity_key(
-                validation,
-                &decoded.sender_identity,
-                contact_identity_key,
-                self.limits,
-            )?;
+        let inbound_contact_identity_key = inbound_contact_identity_key(
+            validation,
+            &decoded.sender_identity,
+            contact_identity_key,
+            self.limits,
+        )?;
         let blocked = contact_is_blocked(snapshot, inbound_contact_identity_key, self.limits)?;
-        if !blocked
-            && is_certificate_outside_evidence_grace(
-                certificate_expires_at_secs,
-                validation.reference_time,
-            )
-        {
-            return Err(ProtocolStateError::SenderCertificateValidation(
-                SenderCertificateValidationError::ExpiredCertificate,
-            ));
-        }
         record_deduplication_digest(&mut deduplication, digest);
         // Unreachable policy suppresses the acknowledgment and leaves the sending chain unadvanced;
         // the receiving-chain advance and recorded digest are still committed below.
@@ -1486,20 +1467,6 @@ impl ProtocolStateEngine {
                 },
             )));
         }
-        let evidence_bundle = generate_evidence_bundle(AcceptedMessageEvidenceInput {
-            session_key: &session_key_bytes,
-            recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
-            message_id: frame_plaintext.id,
-            sent_at_millis: frame_plaintext.sent_at_millis,
-            payload_kind: frame_plaintext.payload_kind,
-            padded_payload: &decoded.padded_plaintext,
-            sender_certificate: &decoded.sender_identity.certificate,
-            sender_certificate_signature: &decoded.sender_identity.signature,
-            transcript_signature: &decoded.transcript_signature,
-        })
-        .map_err(|_| ProtocolStateError::InvalidMessage {
-            reason: "accepted message evidence failed to encode".into(),
-        })?;
         Ok(InboundMessageOutcome::Accepted(Box::new(
             InboundMessageResult {
                 message_id: frame_plaintext.id,
@@ -1507,7 +1474,6 @@ impl ProtocolStateEngine {
                 payload_kind: frame_plaintext.payload_kind,
                 plaintext: decoded.plaintext,
                 sender_identity: decoded.sender_identity,
-                evidence_bundle,
                 acknowledgment,
                 state_updates,
             },
@@ -3436,7 +3402,7 @@ fn inbound_contact_identity_key(
     sender_identity: &SenderIdentityMaterial,
     session_contact_identity_key: Option<ContactIdentityKey>,
     limits: ProtocolHardeningLimits,
-) -> Result<(ContactIdentityKey, u64), ProtocolStateError> {
+) -> Result<ContactIdentityKey, ProtocolStateError> {
     if sender_identity.certificate.len() > limits.max_sender_certificate_len {
         return Err(ProtocolStateError::InvalidMessage {
             reason: format!(
@@ -3491,15 +3457,7 @@ fn inbound_contact_identity_key(
             reason: "sender certificate identity key does not match session contact".into(),
         });
     }
-    Ok((identity_key, validated.expires_at_secs))
-}
-
-fn is_certificate_outside_evidence_grace(expires_at_secs: u64, reference_time: SystemTime) -> bool {
-    from_unix_secs(expires_at_secs).is_some_and(|expires_at| {
-        reference_time
-            .duration_since(expires_at)
-            .is_ok_and(|elapsed| elapsed > MAX_EVIDENCE_GRACE_WINDOW)
-    })
+    Ok(identity_key)
 }
 
 fn contact_is_blocked(

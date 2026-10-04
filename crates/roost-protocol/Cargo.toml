@@ -5,17 +5,13 @@ publish.workspace = true
 version.workspace = true
 
 [dependencies]
-blake3.workspace = true
 curve25519-dalek.workspace = true
 ed25519-dalek.workspace = true
-postcard.workspace = true
-serde.workspace = true
 subtle.workspace = true
-zeroize = { workspace = true, features = ["derive"] }
+zeroize.workspace = true
 
 [dev-dependencies]
 ed25519-dalek = { workspace = true, features = ["rand_core"] }
-hex.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true
 
