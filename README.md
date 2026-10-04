@@ -28,18 +28,16 @@ tests need Python 3.11 or newer.
 
 ## Architecture
 
-Only `roost-client` and `roost-server` are supported consumer entry crates. Swift and Kotlin
-use Client's UniFFI bindings. Rust backends use Server's stateless Evidence Bundle verifier.
-Core, Crypto, and Protocol are implementation dependencies, not separate SDKs or release products.
-All five crates share one workspace version and remain unpublished on crates.io.
+Only `roost-client` is a supported consumer entry crate, and Swift and Kotlin use its UniFFI
+bindings. Core, Crypto, and Protocol are implementation dependencies, not separate SDKs or release
+products. All four crates share one workspace version and remain unpublished on crates.io.
 
 | Crate | Owns | Direct Roost dependencies |
 | --- | --- | --- |
 | `roost-client` | Mobile UniFFI declarations and adapters | `roost-core`, `roost-protocol` |
-| `roost-server` | Stateless evidence verifier and required types | `roost-protocol` |
 | `roost-core` | Identity lifecycle, messaging, contacts, state transitions, storage recovery | `roost-crypto`, `roost-protocol` |
 | `roost-crypto` | Keys, X3DH, Double Ratchet, encryption | `roost-protocol` |
-| `roost-protocol` | Shared encodings, certificates, canonical key validation, transcripts, padding, evidence | None |
+| `roost-protocol` | Shared encodings, certificates, canonical key validation, transcripts, padding | None |
 
 v0.16.0 breaks the Rust and native APIs, so consumers adopt matching libraries and bindings together.
 The v0.15.0 release record and notes are in
