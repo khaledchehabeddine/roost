@@ -5,7 +5,7 @@ The shared cryptographic core for a private, end-to-end encrypted cloud messagin
 ## Setup
 
 ```bash
-git clone git@github.com:RelayNet/roost.git
+git clone git@github.com:chirp-org/roost.git
 cd roost
 rustup show
 cargo build --workspace
@@ -23,6 +23,9 @@ Generate documentation:
 cargo doc --workspace --open
 ```
 
+CI runs the checks in [`ci.yml`](.github/workflows/ci.yml) on every pull request. The release-command
+tests need Python 3.11 or newer.
+
 ## Architecture
 
 Only `roost-client` and `roost-server` are supported consumer entry crates. Swift and Kotlin
@@ -38,16 +41,62 @@ All five crates share one workspace version and remain unpublished on crates.io.
 | `roost-crypto` | Keys, X3DH, Double Ratchet, encryption | `roost-protocol` |
 | `roost-protocol` | Shared encodings, certificates, canonical key validation, transcripts, padding, evidence | None |
 
-The v0.16.0 Rust cutover is breaking. Consumers adopt matching libraries and bindings together.
-The v0.15.0 release records and artifacts remain immutable. Mobile distribution identities and
-consumer adoption follow the approved package prerequisite and mobile cutover tickets.
+v0.16.0 breaks the Rust and native APIs, so consumers adopt matching libraries and bindings together.
+The v0.15.0 release record and notes are in
+[`docs/` at `5d86ceb`](https://github.com/chirp-org/roost/tree/5d86cebd195006578843bb9ae9b6f7bd622d7e8a/docs).
+
+## Integrating
+
+Create one `Client` per identity with your `SecureStorage`. Rustdoc has each method's contract. The
+host must:
+
+- Store Protocol State Blobs in an atomic, durable store, and protect them like identity keys.
+- Commit returned state updates together with their outbound Messages and acknowledgments, and
+  serialize each identity's operations across clients and processes.
+- Persist each Message's exact Transport Binding and reuse it for retries.
+- After restoring a backup, replace its Protocol State Blobs and rotate the inbox before publishing
+  prekeys.
+- Keep keys, passphrases, plaintext, and Protocol State Blobs out of logs.
+- Test its own Keychain or Keystore and database transactions, which the package checks don't cover.
+
+## Security Scope
+
+Roost doesn't hide transport metadata, so Transport Bindings, routing, timing, IP addresses, and push
+tokens stay visible to the transport. It can't protect secrets on a compromised device, and it has no
+rate limiting, transport retries, or deniable mode. Release signatures prove who built a package,
+not runtime privacy, and no side-channel proof is claimed.
+
+## Mobile Packages
+
+With Xcode and an iOS simulator runtime, `scripts/build/ios-package.sh` writes
+`target/ios-distribution/Roost-v<version>.xcframework.zip`.
+
+With JDK 17, Gradle 9.5.0, Android SDK 36, NDK r28c, and `cargo-ndk` 4.1.2, and with `ANDROID_HOME`
+and `ANDROID_NDK_HOME` set, `scripts/build/android-aar.sh` writes the AAR and POM under
+`target/android/maven/`. Set `ROOST_CARGO_FEATURES=development-certificates` to build the local-only
+`roost-development` package instead.
+
+To test a package, run `./check.sh <roost-checkout>` in `roost-swift` or `roost-kotlin`.
+
+## Releasing
+
+Release from a `main` commit whose Rust CI passed:
+
+1. Dispatch **Package consumption** in `roost-swift` and `roost-kotlin` with that commit, then pin
+   the SHA-256 of the XCFramework ZIP, AAR, and POM they checked.
+2. Dispatch **Prepare signed mobile candidates** with both run IDs and the pins. It signs the
+   checked bytes without rebuilding them.
+3. With `ROOST_SOURCE_REVISION`, `ROOST_SWIFT_RUN`, `ROOST_KOTLIN_RUN`, and `ROOST_SHA256_JSON` set,
+   run `python3 scripts/release/mobile.py fetch <new-dir> --run <run-id>/<attempt>`, then
+   `./check.sh <roost-checkout> <new-dir>` in each package repository.
+4. Dispatch **Publish verified mobile candidates** with the same inputs. After a partial failure,
+   rerun it, and it uploads only what's missing. Changed bytes need a new version.
+
+Publishing needs `ROOST_READ_TOKEN` with read access to all three repositories, a `signing`
+environment with the release key, and a `release` environment with `ROOST_PUBLISH_TOKEN`, both
+restricted to `main`. All three repositories need immutable releases and protected `v*` tags.
 
 ## Docs
 
 - [`GLOSSARY.md`](GLOSSARY.md) — domain terms and the words to avoid
 - [`docs/adr/`](docs/adr/) — architectural decisions
-- [`docs/building-mobile.md`](docs/building-mobile.md) — build, sign, and verify Android and iOS packages
-- [`docs/mobile-publication.md`](docs/mobile-publication.md) — release ordering, exact candidates and publication
-- [`docs/ci.md`](docs/ci.md) — Rust CI and native package checks
-- [`docs/release.md`](docs/release.md) — historical v0.15.0 release record
-- [`docs/security.md`](docs/security.md) — security boundaries and caller responsibilities

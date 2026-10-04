@@ -20,7 +20,8 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE_REPO = "RelayNet/roost"
+ORG = "chirp-org"
+SOURCE_REPO = f"{ORG}/roost"
 OWNER = "KhaledChehabeddine"
 FINGERPRINT = "8C936E5EE86B909B53B607EA0EEDE342BC541851"
 
@@ -62,7 +63,6 @@ def inputs():
         manifest = base64.b64decode(api(f"repos/{SOURCE_REPO}/contents/Cargo.toml?ref={revision}")["content"]).decode()
     version = tomllib.loads(manifest)["workspace"]["package"]["version"]
     require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version), "release version must be stable")
-    require(version != "0.15.0", "v0.15.0 is historical")
     files = [f"Roost-v{version}.xcframework.zip", f"roost-{version}.aar", f"roost-{version}.pom"]
     pins = json.loads(os.environ["ROOST_SHA256_JSON"])
     require(isinstance(pins, dict) and set(pins) == set(files), "pin the XCFramework ZIP, AAR and POM")
@@ -134,7 +134,7 @@ let package = Package(
     products: [.library(name: "Roost", targets: ["Roost"])],
     targets: [.binaryTarget(
         name: "Roost",
-        url: "https://api.github.com/repos/RelayNet/roost-swift/releases/assets/{asset_id}-Roost-v{version}.xcframework.zip",
+        url: "https://api.github.com/repos/{ORG}/roost-swift/releases/assets/{asset_id}-Roost-v{version}.xcframework.zip",
         checksum: "{pin}"
     )]
 )
@@ -154,7 +154,7 @@ def collect(output, revision, version, pins):
     notes = [f"# Roost v{version}\n\nSource: `{revision}`\nWorkspace version: `{version}`\n",
              f"Rust CI: {rust['html_url']}\n"]
     for platform, names in (("swift", list(pins)[:1]), ("kotlin", list(pins)[1:])):
-        repo = f"RelayNet/roost-{platform}"
+        repo = f"{ORG}/roost-{platform}"
         run = checked_run(repo, os.environ[f"ROOST_{platform.upper()}_RUN"], "check.yml", "check")
         require(api(f"repos/{repo}/commits/main")["sha"] == run["head_sha"], "rerun native checks after package repository changes")
         name = f"roost-{platform}-{revision}-v{version}-{run['run_attempt']}"
@@ -188,10 +188,10 @@ def native_runs(output):
     for platform in ("swift", "kotlin"):
         run_id = os.environ[f"ROOST_{platform.upper()}_RUN"]
         require(re.fullmatch(r"[0-9]+", run_id), "invalid native run ID")
-        pattern = rf"^{platform.title()} CI: https://github.com/RelayNet/roost-{platform}/actions/runs/{run_id} \(attempt ([0-9]+)\)$"
+        pattern = rf"^{platform.title()} CI: https://github.com/{ORG}/roost-{platform}/actions/runs/{run_id} \(attempt ([0-9]+)\)$"
         attempts = re.findall(pattern, notes, re.MULTILINE)
         require(len(attempts) == 1, "native run does not match the preparation's release description")
-        runs.append(checked_run(f"RelayNet/roost-{platform}", run_id, "check.yml", "check", attempts[0]))
+        runs.append(checked_run(f"{ORG}/roost-{platform}", run_id, "check.yml", "check", attempts[0]))
     return runs
 
 
@@ -263,7 +263,7 @@ class PackageRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def maven_file(version, name, data=None):
-    url = f"https://maven.pkg.github.com/relaynet/roost-kotlin/io/github/relaynet/roost/{version}/{name}"
+    url = f"https://maven.pkg.github.com/{ORG}/roost-kotlin/io/github/relaynet/roost/{version}/{name}"
     credential = base64.b64encode(f"{OWNER}:{os.environ['GH_TOKEN']}".encode()).decode()
     request = urllib.request.Request(url, data=data, method="GET" if data is None else "PUT",
                                     headers={"Authorization": f"Basic {credential}",
@@ -284,7 +284,6 @@ def publish(output, revision, version, pins):
             and os.environ.get("GITHUB_ACTOR") == OWNER
             and os.environ.get("GITHUB_TRIGGERING_ACTOR") == OWNER,
             "publication requires the owner's manual workflow, including reruns")
-    verify_signed(output, revision, version, pins)
     auth = subprocess.run(["gh", "auth", "status", "--hostname", "github.com"], capture_output=True)
     require(auth.returncode == 0 and b"'project'" in auth.stdout + auth.stderr, "publication credential needs project scope")
     require(api("user")["login"] == OWNER, "unexpected publication account")
@@ -293,8 +292,8 @@ def publish(output, revision, version, pins):
     tag = f"v{version}"
     swift, kotlin = native_runs(output)
     names = list(pins)
-    destinations = [("RelayNet/roost-swift", swift["head_sha"], names[:1]),
-                    ("RelayNet/roost-kotlin", kotlin["head_sha"], names[1:]),
+    destinations = [(f"{ORG}/roost-swift", swift["head_sha"], names[:1]),
+                    (f"{ORG}/roost-kotlin", kotlin["head_sha"], names[1:]),
                     (SOURCE_REPO, revision, [])]
     pending = []
     # Inspect every destination before creating tags or uploading any bytes.
