@@ -64,7 +64,7 @@ MAVEN = '''import base64, io, json, os, urllib.error, urllib.request
 from pathlib import Path
 class Registry:
     def open(self, request, **kwargs):
-        assert request.full_url.startswith("https://maven.pkg.github.com/relaynet/roost-kotlin/")
+        assert request.full_url.startswith("https://maven.pkg.github.com/chirp-org/roost-kotlin/")
         p = Path(os.environ["TEST_RESPONSES"])
         state = json.loads(p.read_text())
         name = request.full_url.rsplit("/", 1)[-1]
@@ -122,15 +122,15 @@ class CandidateCommands(unittest.TestCase):
         self.env.update(GITHUB_ACTIONS="true", GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_REF="refs/heads/main",
                         GITHUB_ACTOR="KhaledChehabeddine", GITHUB_TRIGGERING_ACTOR="KhaledChehabeddine", GH_TOKEN="test-token")
         routes = {"GET user": {"login": "KhaledChehabeddine"},
-                  f"GET repos/RelayNet/roost/compare/{self.revision}...main": {"status": "ahead"}}
-        self.notes += "\nSwift CI: https://github.com/RelayNet/roost-swift/actions/runs/101 (attempt 1)\n"
-        self.notes += "\nKotlin CI: https://github.com/RelayNet/roost-kotlin/actions/runs/102 (attempt 1)\n"
+                  f"GET repos/chirp-org/roost/compare/{self.revision}...main": {"status": "ahead"}}
+        self.notes += "\nSwift CI: https://github.com/chirp-org/roost-swift/actions/runs/101 (attempt 1)\n"
+        self.notes += "\nKotlin CI: https://github.com/chirp-org/roost-kotlin/actions/runs/102 (attempt 1)\n"
         (self.candidate / "release-notes.md").write_text(self.notes)
         tag = f"v{self.version}"
         for index, (repo, parent, files) in enumerate([
-            ("RelayNet/roost-swift", "1" * 40, self.names[:1]),
-            ("RelayNet/roost-kotlin", "2" * 40, self.names[1:]),
-            ("RelayNet/roost", self.revision, []),
+            ("chirp-org/roost-swift", "1" * 40, self.names[:1]),
+            ("chirp-org/roost-kotlin", "2" * 40, self.names[1:]),
+            ("chirp-org/roost", self.revision, []),
         ], start=1):
             prefix = "repos/" + repo
             if index < 3:
@@ -193,7 +193,7 @@ class CandidateCommands(unittest.TestCase):
 
     def test_publication_rejects_a_draft_with_another_candidates_description(self):
         state = self.publication()
-        state["github"]["GET repos/RelayNet/roost-swift/releases/1"]["body"] = "another candidate's notes"
+        state["github"]["GET repos/chirp-org/roost-swift/releases/1"]["body"] = "another candidate's notes"
         self.responses.write_text(json.dumps(state))
         result = self.run_command("publish")
         self.assertNotEqual(result.returncode, 0, result.stdout)
@@ -202,13 +202,13 @@ class CandidateCommands(unittest.TestCase):
 
     def prepared_run(self, state):
         run = {"id": 103, "run_attempt": 1, "event": "workflow_dispatch", "head_branch": "main",
-               "path": ".github/workflows/prepare-mobile.yml", "head_repository": {"full_name": "RelayNet/roost"},
+               "path": ".github/workflows/prepare-mobile.yml", "head_repository": {"full_name": "chirp-org/roost"},
                "status": "completed", "conclusion": "success", "head_sha": self.revision,
                "actor": {"login": "KhaledChehabeddine"}, "triggering_actor": {"login": "KhaledChehabeddine"},
                "display_title": f"Prepare {self.revision} Swift 101 Kotlin 102"}
-        state["github"]["GET repos/RelayNet/roost/actions/runs/103"] = run
-        state["github"]["GET repos/RelayNet/roost/actions/runs/103/attempts/1"] = run
-        state["github"]["GET repos/RelayNet/roost/actions/runs/103/attempts/1/jobs"] = {"jobs": [{"name": "prepare", "conclusion": "success"}]}
+        state["github"]["GET repos/chirp-org/roost/actions/runs/103"] = run
+        state["github"]["GET repos/chirp-org/roost/actions/runs/103/attempts/1"] = run
+        state["github"]["GET repos/chirp-org/roost/actions/runs/103/attempts/1/jobs"] = {"jobs": [{"name": "prepare", "conclusion": "success"}]}
         return run
 
     def test_fetch_rejects_an_unauthorized_rerun_actor(self):
@@ -222,7 +222,7 @@ class CandidateCommands(unittest.TestCase):
     def test_fetch_rejects_a_different_source_revision(self):
         state = self.publication()
         self.prepared_run(state)["head_sha"] = "f" * 40
-        state["github"][f"GET repos/RelayNet/roost/compare/{'f' * 40}...main"] = {"status": "ahead"}
+        state["github"][f"GET repos/chirp-org/roost/compare/{'f' * 40}...main"] = {"status": "ahead"}
         self.responses.write_text(json.dumps(state))
         result = self.run_command("fetch", "--run", "103/1")
         self.assertNotEqual(result.returncode, 0)
@@ -240,10 +240,10 @@ class CandidateCommands(unittest.TestCase):
     def test_fetch_rejects_a_corrupted_github_archive_before_extraction(self):
         state = self.publication()
         self.prepared_run(state)
-        state["github"]["GET repos/RelayNet/roost/actions/runs/103/artifacts?per_page=100"] = {"artifacts": [
+        state["github"]["GET repos/chirp-org/roost/actions/runs/103/artifacts?per_page=100"] = {"artifacts": [
             {"id": 9, "name": f"roost-signed-{self.revision}-v{self.version}-1", "expired": False,
              "workflow_run": {"head_sha": self.revision}, "digest": "sha256:" + "0" * 64}]}
-        state["github"]["GET repos/RelayNet/roost/actions/artifacts/9/zip"] = {"$raw": base64.b64encode(b"corrupt download").decode()}
+        state["github"]["GET repos/chirp-org/roost/actions/artifacts/9/zip"] = {"$raw": base64.b64encode(b"corrupt download").decode()}
         self.responses.write_text(json.dumps(state))
         result = self.run_command("fetch", "--run", "103/1")
         self.assertNotEqual(result.returncode, 0)
@@ -261,7 +261,7 @@ class CandidateCommands(unittest.TestCase):
 
     def test_publication_refuses_existing_release_bytes_that_differ(self):
         state = self.publication()
-        state["github"]["GET repos/RelayNet/roost-swift/releases/assets/10"] = {"$raw": base64.b64encode(b"another build").decode()}
+        state["github"]["GET repos/chirp-org/roost-swift/releases/assets/10"] = {"$raw": base64.b64encode(b"another build").decode()}
         self.responses.write_text(json.dumps(state))
         result = self.run_command("publish")
         self.assertNotEqual(result.returncode, 0)

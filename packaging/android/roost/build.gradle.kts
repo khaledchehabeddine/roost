@@ -73,7 +73,7 @@ afterEvaluate {
         pom {
             name.set("Roost")
             description.set("Kotlin bindings and native libraries for Roost")
-            url.set("https://github.com/RelayNet/roost-kotlin")
+            url.set("https://github.com/chirp-org/roost-kotlin")
         }
     }
 }
