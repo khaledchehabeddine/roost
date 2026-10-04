@@ -18,4 +18,4 @@ Add the `Co-Authored-By` line when an AI agent contributed.
 
 ## Branches
 
-Name branches `<label>/<short-description>`, using the issue's type label or the closest fit.
+Name branches `<label>/<short-description>`, using the issue's type label or the best fit.
