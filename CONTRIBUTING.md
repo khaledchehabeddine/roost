@@ -19,3 +19,7 @@ Add the `Co-Authored-By` line when an AI agent contributed.
 ## Branches
 
 Name branches `<label>/<short-description>`, using the issue's type label or the best fit.
+
+## Pull Requests
+
+Title each pull request after its branch in Title Case, such as `Chore: Move Tests to Core` for `chore/move-tests-to-core`.
