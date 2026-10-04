@@ -913,6 +913,13 @@ impl ProtocolHardeningLimits {
 }
 
 impl BlockedContactAcknowledgmentPolicy {
+    pub(crate) fn from_core(policy: roost_core::BlockedContactAcknowledgmentPolicy) -> Self {
+        match policy {
+            roost_core::BlockedContactAcknowledgmentPolicy::Unreachable => Self::Unreachable,
+            roost_core::BlockedContactAcknowledgmentPolicy::SilentReceipt => Self::SilentReceipt,
+        }
+    }
+
     pub(crate) fn to_core(self) -> roost_core::BlockedContactAcknowledgmentPolicy {
         match self {
             Self::Unreachable => roost_core::BlockedContactAcknowledgmentPolicy::Unreachable,

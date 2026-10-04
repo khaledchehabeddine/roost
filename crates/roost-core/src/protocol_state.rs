@@ -706,6 +706,12 @@ impl ProtocolStateEngine {
         Self::with_hardening_limits(limits)
     }
 
+    /// Returns the acknowledgment policy applied to Messages from blocked senders.
+    #[must_use]
+    pub fn blocked_contact_acknowledgment_policy(&self) -> BlockedContactAcknowledgmentPolicy {
+        self.blocked_contact_acknowledgment_policy
+    }
+
     /// Sets the acknowledgment policy applied to Messages from blocked senders.
     #[must_use]
     pub fn with_blocked_contact_acknowledgment_policy(

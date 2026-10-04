@@ -129,14 +129,10 @@ mod tests {
         authority: &DevelopmentCertificateAuthority,
         reference_time_millis: u64,
     ) -> Result<ValidatedSenderCertificate, RoostError> {
-        let validation = authority.sender_certificate_validation(reference_time_millis);
         context.validate_sender_certificate(
             issued.certificate.clone(),
             issued.signature.clone(),
-            validation.domain_signing_keys,
-            validation.expected_relay_domain,
-            validation.revocation_state,
-            validation.reference_time_millis,
+            authority.sender_certificate_validation(reference_time_millis),
         )
     }
 

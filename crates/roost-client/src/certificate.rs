@@ -41,7 +41,7 @@ pub struct RevocationState {
     pub revoked_identity_keys: Vec<IdentityKey>,
 }
 
-/// The trust, revocation, and time inputs for validating sender certificates on one receive.
+/// The trust, revocation, and time inputs for validating a sender certificate.
 ///
 /// The grace for expired certificates comes from the context's configuration.
 #[derive(uniffi::Record)]
@@ -86,23 +86,25 @@ impl IdentityContext {
         &self,
         certificate: Vec<u8>,
         signature: Vec<u8>,
-        domain_signing_keys: Vec<DomainSigningKey>,
-        expected_relay_domain: Vec<u8>,
-        revocation_state: RevocationState,
-        reference_time_millis: u64,
+        validation: SenderCertificateValidation,
     ) -> Result<ValidatedSenderCertificate, RoostError> {
-        let protocol_domain_keys = domain_signing_keys_to_protocol(&domain_signing_keys)?;
-        let revoked_identity_keys = revoked_identity_keys_to_protocol(&revocation_state)?;
-        let protocol_revocation_state =
-            revocation_state_to_protocol(&revocation_state, &revoked_identity_keys);
+        let domain_signing_keys = domain_signing_keys_to_protocol(&validation.domain_signing_keys)?;
+        let revoked_identity_keys =
+            revoked_identity_keys_to_protocol(&validation.revocation_state)?;
         let validated =
             roost_protocol::validate_sender_certificate(SenderCertificateValidationInput {
                 certificate: &certificate,
                 signature: &signature,
-                domain_signing_keys: &protocol_domain_keys,
-                expected_relay_domain: &expected_relay_domain,
-                revocation_state: protocol_revocation_state,
-                reference_time: time_from_millis(reference_time_millis, "reference_time_millis")?,
+                domain_signing_keys: &domain_signing_keys,
+                expected_relay_domain: &validation.expected_relay_domain,
+                revocation_state: revocation_state_to_protocol(
+                    &validation.revocation_state,
+                    &revoked_identity_keys,
+                ),
+                reference_time: time_from_millis(
+                    validation.reference_time_millis,
+                    "reference_time_millis",
+                )?,
                 grace_window: self.inner.protocol_engine().certificate_grace(),
             })?;
         Ok(ValidatedSenderCertificate {

@@ -25,8 +25,8 @@ use crate::storage::SecureStorageAdapter;
 use crate::time::time_from_millis;
 use crate::transport_binding::{PreKeySelection, TransportBinding};
 use roost_core::{
-    AcknowledgmentProcessing, DEFAULT_DEDUPLICATION_CAPACITY, InboundSenderCertificateValidation,
-    KeyStore as CoreKeyStore, MessageDecryption, MessageEncryption,
+    AcknowledgmentProcessing, InboundSenderCertificateValidation, KeyStore as CoreKeyStore,
+    MessageDecryption, MessageEncryption,
     PreparedKeyStoreOperation as CorePreparedKeyStoreOperation,
     ProtocolStateEngine as CoreProtocolStateEngine, ProtocolStateKey, SessionAcceptance,
     SessionInitiation,
@@ -138,7 +138,7 @@ const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 #[derive(uniffi::Object)]
 pub struct IdentityContext {
     pub(crate) inner: Arc<CoreKeyStore>,
-    configuration: ContextConfiguration,
+    revision: u64,
 }
 
 /// Session, Message, acknowledgment, and retry operations for one [`IdentityContext`].
@@ -169,7 +169,8 @@ pub struct ContextConfiguration {
     /// Number of received Message digests kept for this identity, from 64 to 2048. Defaults to
     /// 1024.
     pub deduplication_capacity: u64,
-    /// Whether a blocked sender receives an acknowledgment. Defaults to none.
+    /// Whether a blocked sender receives an acknowledgment. Defaults to
+    /// [`BlockedContactAcknowledgmentPolicy::Unreachable`](crate::BlockedContactAcknowledgmentPolicy::Unreachable).
     pub blocked_contact_acknowledgment_policy: crate::BlockedContactAcknowledgmentPolicy,
     /// How long after expiry a sender certificate still validates, in milliseconds, at most
     /// 300,000. Defaults to zero.
@@ -225,13 +226,7 @@ impl IdentityContext {
             inner: Arc::new(CoreKeyStore::new(Box::new(SecureStorageAdapter::new(
                 secure_storage,
             )))),
-            configuration: ContextConfiguration {
-                deduplication_capacity: DEFAULT_DEDUPLICATION_CAPACITY as u64,
-                blocked_contact_acknowledgment_policy:
-                    crate::BlockedContactAcknowledgmentPolicy::Unreachable,
-                certificate_grace_millis: 0,
-                revision: 0,
-            },
+            revision: 0,
         })
     }
 
@@ -266,13 +261,23 @@ impl IdentityContext {
                 Box::new(SecureStorageAdapter::new(secure_storage)),
                 engine,
             )),
-            configuration,
+            revision: configuration.revision,
         }))
     }
 
     /// Returns the configuration this context was created with.
     pub fn configuration(&self) -> ContextConfiguration {
-        self.configuration.clone()
+        let engine = self.inner.protocol_engine();
+        ContextConfiguration {
+            deduplication_capacity: engine.hardening_limits().deduplication_capacity as u64,
+            blocked_contact_acknowledgment_policy:
+                crate::BlockedContactAcknowledgmentPolicy::from_core(
+                    engine.blocked_contact_acknowledgment_policy(),
+                ),
+            // The engine accepts at most five minutes, which fits in u64 milliseconds.
+            certificate_grace_millis: engine.certificate_grace().as_millis() as u64,
+            revision: self.revision,
+        }
     }
 
     /// Returns the messaging group, which shares this context's storage and configuration.
