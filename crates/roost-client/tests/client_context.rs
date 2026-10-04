@@ -3,14 +3,18 @@
 use roost_client::{
     BlockedContactAcknowledgmentPolicy, Client, ClientConfiguration, ClientError,
     ContactDiscoveryKey, ContactIdentity, ContactSafetyNumberConfirmationKind, ContactTrustState,
-    IdentityKey, InMemorySecureStorage, KeyStoreOperationStatus, ProtocolStateEntry,
-    ProtocolStateUpdate, derive_safety_number,
+    IdentityKey, KeyStoreOperationStatus, ProtocolStateEntry, ProtocolStateUpdate,
+    derive_safety_number,
 };
 use std::sync::Arc;
 
+mod support;
+
+use support::MemoryStorage;
+
 #[test]
 fn focused_interfaces_share_the_configured_identity_context() {
-    let storage = Arc::new(InMemorySecureStorage::new());
+    let storage = Arc::new(MemoryStorage::default());
     let client = Client::with_configuration(
         storage.clone(),
         ClientConfiguration {
@@ -57,9 +61,9 @@ fn focused_interfaces_share_the_configured_identity_context() {
 
 #[test]
 fn safety_number_confirmation_uses_the_clients_local_identity() {
-    let alice = Client::new(Arc::new(InMemorySecureStorage::new()));
-    let bob = Client::new(Arc::new(InMemorySecureStorage::new()));
-    let charlie = Client::new(Arc::new(InMemorySecureStorage::new()));
+    let alice = Client::new(Arc::new(MemoryStorage::default()));
+    let bob = Client::new(Arc::new(MemoryStorage::default()));
+    let charlie = Client::new(Arc::new(MemoryStorage::default()));
     for client in [&alice, &bob, &charlie] {
         let prepared = client.identity().prepare_generate_identity().unwrap();
         client

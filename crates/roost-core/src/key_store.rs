@@ -26,8 +26,8 @@ use rand::rngs::OsRng;
 #[cfg(test)]
 use roost_crypto::OneTimePreKey;
 use roost_crypto::{
-    DiscoveryKeyBundle, OneTimePreKeyBundle, PREKEY_BUNDLE_VERSION, RecipientDeliveryCapability,
-    RecipientDeliveryVerifier, Signature, SignedPreKeyBundle, verify_signed_prekey_bundle,
+    PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
+    RecipientDeliveryCapability, RecipientDeliveryVerifier, Signature, verify_signed_prekey_bundle,
 };
 use std::error::Error;
 use std::fmt;
@@ -124,7 +124,7 @@ pub struct PublicationBundle {
     /// The discovery key for this publication.
     ///
     /// Its `signature` field is the IK→DK half of the mutual binding.
-    pub discovery_key: DiscoveryKeyBundle,
+    pub discovery_key: PublicDiscoveryKey,
     /// The DK→IK half of the mutual binding: [`Self::discovery_key`] signing the identity it
     /// belongs to.
     ///
@@ -138,7 +138,7 @@ pub struct PublicationBundle {
     /// reached only through [`KeyStore::current_delivery_capability`].
     pub recipient_delivery_verifier: RecipientDeliveryVerifier,
     /// The signed pre-key for this publication.
-    pub signed_prekey: SignedPreKeyBundle,
+    pub signed_prekey: PublicSignedPreKey,
 }
 
 /// Everything one inbox rotation produces.
@@ -300,28 +300,28 @@ impl KeyStore {
         Ok(self.0.identity.has_identity()?)
     }
 
-    /// Returns the stored [`SignedPreKeyBundle`] without checking the full publication chain.
+    /// Returns the stored [`PublicSignedPreKey`] without checking the full publication chain.
     ///
     /// Use [`Self::current_publication_bundle`] when publishing. It returns the matching discovery
     /// key and verifies the pair before returning it.
-    pub fn current_signed_prekey_bundle(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+    pub fn current_signed_prekey_bundle(&self) -> Result<PublicSignedPreKey, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
-        Ok(self.0.signed_prekey.current_bundle(SystemTime::now())?)
+        Ok(self.0.signed_prekey.current_public(SystemTime::now())?)
     }
 
-    /// Returns the current [`DiscoveryKeyBundle`], verified against the identity key.
-    pub fn current_discovery_key_bundle(&self) -> Result<DiscoveryKeyBundle, KeyStoreError> {
+    /// Returns the current [`PublicDiscoveryKey`], verified against the identity key.
+    pub fn current_discovery_key_bundle(&self) -> Result<PublicDiscoveryKey, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
-        Ok(self.0.discovery.current_bundle()?)
+        Ok(self.0.discovery.current_public()?)
     }
 
     /// Returns a publishable key pair.
     ///
     /// Returns a [`PublicationBundle`] whose caller-created keys verify together. Prefer this for
-    /// identity publication over reading the two bundles separately. One-time pre-key bundles are
-    /// managed by [`Self::prepare_generate_one_time_prekeys`] and
+    /// identity publication over reading the two public keys separately. Public one-time pre-keys
+    /// are managed by [`Self::prepare_generate_one_time_prekeys`] and
     /// [`Self::prepare_replenish_one_time_prekeys`].
     pub fn current_publication_bundle(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
@@ -329,8 +329,8 @@ impl KeyStore {
         let discovery_key = self.0.discovery.current()?;
         let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
         let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
-        let discovery_key = discovery_key.bundle();
-        let signed_prekey = self.0.signed_prekey.current_bundle(SystemTime::now())?;
+        let discovery_key = discovery_key.public();
+        let signed_prekey = self.0.signed_prekey.current_public(SystemTime::now())?;
         // Reject storage rollback/desync before publishing a mismatched pair.
         verify_signed_prekey_bundle(&signed_prekey, &discovery_key.verifying_key)
             .map_err(|_| SignedPreKeyError::Corrupt)?;
@@ -364,7 +364,8 @@ impl KeyStore {
     ) -> Result<PreparedKeyStoreOperation<ContactBlock>, KeyStoreError> {
         let contact = self.0.engine.block_contact(snapshot, identity_key)?;
         self.prepare_operation(move |staged| {
-            // Repeated blocking still owns an operation, but must not rotate other contacts' capabilities.
+            // Repeated blocking still owns an operation, but must not rotate other contacts'
+            // capabilities.
             let rotation = if contact.state_updates.is_empty() {
                 None
             } else {
@@ -394,14 +395,14 @@ impl KeyStore {
     pub fn prepare_generate_one_time_prekeys(
         &self,
         batch_size: usize,
-    ) -> Result<PreparedKeyStoreOperation<Vec<OneTimePreKeyBundle>>, KeyStoreError> {
+    ) -> Result<PreparedKeyStoreOperation<Vec<PublicOneTimePreKey>>, KeyStoreError> {
         self.prepare_operation(move |staged| staged.generate_one_time_prekeys_eager(batch_size))
     }
 
     fn generate_one_time_prekeys_eager(
         &self,
         batch_size: usize,
-    ) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+    ) -> Result<Vec<PublicOneTimePreKey>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         Ok(self
             .0
@@ -411,16 +412,17 @@ impl KeyStore {
 
     /// Prepares replenishment of the stored one-time pre-key pool.
     ///
-    /// Returns the bundles created by this call. A missing or stale pool is rebuilt for the
-    /// current discovery-key epoch; a current pool above the replenish threshold is left unchanged
-    /// and returns an empty list. The returned no-op operation must still be finalized or aborted.
+    /// Returns the public one-time pre-keys created by this call. A missing or stale pool is
+    /// rebuilt for the current discovery-key epoch; a current pool above the replenish threshold is
+    /// left unchanged and returns an empty list. The returned no-op operation must still be
+    /// finalized or aborted.
     pub fn prepare_replenish_one_time_prekeys(
         &self,
-    ) -> Result<PreparedKeyStoreOperation<Vec<OneTimePreKeyBundle>>, KeyStoreError> {
+    ) -> Result<PreparedKeyStoreOperation<Vec<PublicOneTimePreKey>>, KeyStoreError> {
         self.prepare_operation(|staged| staged.replenish_one_time_prekeys_eager())
     }
 
-    fn replenish_one_time_prekeys_eager(&self) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+    fn replenish_one_time_prekeys_eager(&self) -> Result<Vec<PublicOneTimePreKey>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         Ok(self
             .0
@@ -466,10 +468,10 @@ impl KeyStore {
         let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng, now)?;
         let publication = PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
-            discovery_key: discovery_key.bundle(),
+            discovery_key: discovery_key.public(),
             discovery_to_identity,
             recipient_delivery_verifier,
-            signed_prekey: signed_prekey.bundle(),
+            signed_prekey: signed_prekey.public(),
         };
         Ok(InboxRotation {
             publication,
@@ -477,44 +479,44 @@ impl KeyStore {
         })
     }
 
-    /// Prepares a signed-pre-key rotation when the stored bundle is stale or missing.
+    /// Prepares a signed-pre-key rotation when the stored one is stale or missing.
     ///
-    /// Returns `Some(bundle)` when callers need to upload a new bundle, or `None` when no rotation
-    /// was needed. The returned no-op operation must still be finalized or aborted.
+    /// Returns the new public signed pre-key when callers need to upload it, or `None` when no
+    /// rotation was needed. The returned no-op operation must still be finalized or aborted.
     pub fn prepare_rotate_signed_prekey_if_stale(
         &self,
-    ) -> Result<PreparedKeyStoreOperation<Option<SignedPreKeyBundle>>, KeyStoreError> {
+    ) -> Result<PreparedKeyStoreOperation<Option<PublicSignedPreKey>>, KeyStoreError> {
         self.prepare_operation(|staged| staged.rotate_signed_prekey_if_stale_eager())
     }
 
     fn rotate_signed_prekey_if_stale_eager(
         &self,
-    ) -> Result<Option<SignedPreKeyBundle>, KeyStoreError> {
+    ) -> Result<Option<PublicSignedPreKey>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         Ok(self
             .0
             .signed_prekey
             .rotate_if_stale(&mut OsRng, SystemTime::now())?
-            .map(|signed_prekey| signed_prekey.bundle()))
+            .map(|signed_prekey| signed_prekey.public()))
     }
 
-    /// Prepares an immediate signed-prekey rotation and returns the provisional bundle.
+    /// Prepares an immediate signed-prekey rotation and returns the provisional public key.
     ///
     /// Use this for explicit key-reset operations that must publish a fresh signed pre-key even
-    /// when the stored bundle is still fresh.
+    /// when the stored one is still fresh.
     pub fn prepare_rotate_signed_prekey_now(
         &self,
-    ) -> Result<PreparedKeyStoreOperation<SignedPreKeyBundle>, KeyStoreError> {
+    ) -> Result<PreparedKeyStoreOperation<PublicSignedPreKey>, KeyStoreError> {
         self.prepare_operation(|staged| staged.rotate_signed_prekey_now_eager())
     }
 
-    fn rotate_signed_prekey_now_eager(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+    fn rotate_signed_prekey_now_eager(&self) -> Result<PublicSignedPreKey, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         Ok(self
             .0
             .signed_prekey
             .rotate_now(&mut OsRng, SystemTime::now())?
-            .bundle())
+            .public())
     }
 
     /// Exports the stored identity and current discovery key as a passphrase-encrypted backup blob.
@@ -609,11 +611,11 @@ impl KeyStore {
     fn generate_one_time_prekeys(
         &self,
         batch_size: usize,
-    ) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+    ) -> Result<Vec<PublicOneTimePreKey>, KeyStoreError> {
         self.generate_one_time_prekeys_eager(batch_size)
     }
 
-    fn replenish_one_time_prekeys(&self) -> Result<Vec<OneTimePreKeyBundle>, KeyStoreError> {
+    fn replenish_one_time_prekeys(&self) -> Result<Vec<PublicOneTimePreKey>, KeyStoreError> {
         self.replenish_one_time_prekeys_eager()
     }
 
@@ -621,11 +623,11 @@ impl KeyStore {
         self.rotate_inbox_now_eager()
     }
 
-    fn rotate_signed_prekey_if_stale(&self) -> Result<Option<SignedPreKeyBundle>, KeyStoreError> {
+    fn rotate_signed_prekey_if_stale(&self) -> Result<Option<PublicSignedPreKey>, KeyStoreError> {
         self.rotate_signed_prekey_if_stale_eager()
     }
 
-    fn rotate_signed_prekey_now(&self) -> Result<SignedPreKeyBundle, KeyStoreError> {
+    fn rotate_signed_prekey_now(&self) -> Result<PublicSignedPreKey, KeyStoreError> {
         self.rotate_signed_prekey_now_eager()
     }
 
@@ -788,7 +790,7 @@ mod tests {
         // DK→IK: the discovery key authorized this identity.
         assert!(
             verify_discovery_to_identity_binding(
-                &identity.identity_key_bundle().unwrap(),
+                &identity.public().unwrap(),
                 &publication.discovery_key.verifying_key,
                 &publication.discovery_to_identity,
             )
@@ -809,7 +811,7 @@ mod tests {
         );
         assert!(
             verify_discovery_to_identity_binding(
-                &identity.identity_key_bundle().unwrap(),
+                &identity.public().unwrap(),
                 &publication.discovery_key.verifying_key,
                 &publication.discovery_to_identity,
             )
@@ -1488,16 +1490,17 @@ mod tests {
 
         let rotated_bundle = destination_store.current_signed_prekey_bundle().unwrap();
         let imported_identity = destination_store.load_identity().unwrap();
-        let discovery_bundle = destination_store.current_discovery_key_bundle().unwrap();
-        assert_eq!(discovery_bundle.epoch, backed_up_epoch + 1);
+        let public_discovery_key = destination_store.current_discovery_key_bundle().unwrap();
+        assert_eq!(public_discovery_key.epoch, backed_up_epoch + 1);
         assert_eq!(rotation.signed_prekey.id, 0);
         assert_eq!(rotated_bundle.id, 0);
         assert!(
-            verify_discovery_key_bundle(&discovery_bundle, imported_identity.verifying_key())
+            verify_discovery_key_bundle(&public_discovery_key, imported_identity.verifying_key())
                 .is_ok()
         );
         assert!(
-            verify_signed_prekey_bundle(&rotated_bundle, &discovery_bundle.verifying_key).is_ok()
+            verify_signed_prekey_bundle(&rotated_bundle, &public_discovery_key.verifying_key)
+                .is_ok()
         );
     }
 

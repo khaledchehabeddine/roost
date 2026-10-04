@@ -14,7 +14,7 @@ const SIGNED_PREKEY_CONTEXT: &[u8] = b"AetherSPK-v1:";
 /// An X25519 pre-key signed by an Ed25519 signing key.
 ///
 /// The secret key is zeroed on drop. The public key, signature, epoch, and creation timestamp
-/// remain available through accessors and bundle export.
+/// remain available through accessors and [`Self::public`].
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SignedPreKey {
     secret_key: StaticSecret,
@@ -37,7 +37,7 @@ impl SignedPreKey {
     }
 
     /// Returns the X25519 public key.
-    pub fn public(&self) -> &PublicKey {
+    pub fn public_key(&self) -> &PublicKey {
         &self.public_key
     }
 
@@ -92,8 +92,8 @@ impl SignedPreKey {
     }
 
     /// Returns the public form of this signed pre-key for distribution to peers.
-    pub fn bundle(&self) -> SignedPreKeyBundle {
-        SignedPreKeyBundle {
+    pub fn public(&self) -> PublicSignedPreKey {
+        PublicSignedPreKey {
             public_key: self.public_key,
             signature: self.signature,
             id: self.id,
@@ -108,7 +108,7 @@ impl SignedPreKey {
 /// The signer's verifying key is not embedded. Pass the verifying key to
 /// [`verify_signed_prekey_bundle`].
 #[derive(Clone, Debug)]
-pub struct SignedPreKeyBundle {
+pub struct PublicSignedPreKey {
     /// X25519 public key used by the peer during handshake root-key derivation.
     pub public_key: PublicKey,
     /// Ed25519 signature over
@@ -126,8 +126,8 @@ pub struct SignedPreKeyBundle {
     pub created_at_secs: u64,
 }
 
-impl SignedPreKeyBundle {
-    /// Builds a bundle from received wire bytes.
+impl PublicSignedPreKey {
+    /// Builds a public signed pre-key from received wire bytes.
     ///
     /// This validates byte lengths only. Call [`verify_signed_prekey_bundle`] with the discovery
     /// verifying key to authenticate the public key, epoch, and creation time. The identifier is
@@ -187,9 +187,9 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     }
 }
 
-/// Verifies a signed pre-key bundle against the verifying key that signed it.
+/// Verifies a public signed pre-key against the verifying key that signed it.
 pub fn verify_signed_prekey_bundle(
-    bundle: &SignedPreKeyBundle,
+    bundle: &PublicSignedPreKey,
     signer_verifying_key: &VerifyingKey,
 ) -> Result<(), KeyBundleError> {
     let payload = signed_prekey_payload(&bundle.public_key, bundle.epoch, bundle.created_at_secs);
@@ -237,7 +237,7 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let bundle = signed_prekey.bundle();
+        let bundle = signed_prekey.public();
         let mut signed = b"AetherSPK-v1:".to_vec();
         signed.extend_from_slice(bundle.public_key.as_bytes());
         signed.extend_from_slice(&FIXED_EPOCH.to_be_bytes());
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_fields_match_signed_prekey() {
+    fn public_fields_match_signed_prekey() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
         let signed_prekey = generate_signed_prekey(
@@ -257,10 +257,10 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let bundle = signed_prekey.bundle();
+        let bundle = signed_prekey.public();
         assert_eq!(
             bundle.public_key.as_bytes(),
-            signed_prekey.public().as_bytes()
+            signed_prekey.public_key().as_bytes()
         );
         assert_eq!(
             bundle.signature.to_bytes(),
@@ -282,7 +282,7 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let mut bundle = signed_prekey.bundle();
+        let mut bundle = signed_prekey.public();
         let mut public_key_bytes = *bundle.public_key.as_bytes();
         public_key_bytes[0] ^= 0x01;
         bundle.public_key = PublicKey::from(public_key_bytes);
@@ -303,10 +303,10 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let bundle = signed_prekey.bundle();
+        let bundle = signed_prekey.public();
         let mut signature_bytes = bundle.signature.to_bytes();
         signature_bytes[0] ^= 0x01;
-        let tampered = SignedPreKeyBundle {
+        let tampered = PublicSignedPreKey {
             public_key: bundle.public_key,
             signature: Signature::from_bytes(&signature_bytes),
             id: bundle.id,
@@ -331,7 +331,7 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let bundle = signed_prekey.bundle();
+        let bundle = signed_prekey.public();
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &wrong_signing_key.verifying),
             Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
@@ -349,8 +349,8 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let bundle = signed_prekey.bundle();
-        let tampered = SignedPreKeyBundle {
+        let bundle = signed_prekey.public();
+        let tampered = PublicSignedPreKey {
             public_key: bundle.public_key,
             signature: bundle.signature,
             id: bundle.id,
@@ -374,8 +374,8 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let bundle = signed_prekey.bundle();
-        let tampered = SignedPreKeyBundle {
+        let bundle = signed_prekey.public();
+        let tampered = PublicSignedPreKey {
             public_key: bundle.public_key,
             signature: bundle.signature,
             id: bundle.id,
@@ -394,7 +394,7 @@ mod tests {
         let signing_key = generate_signing_key_pair(&mut rng);
         let key_pair = generate_key_pair(&mut rng);
         let bare_signature = signing_key.sign(key_pair.public.as_bytes());
-        let bundle = SignedPreKeyBundle {
+        let bundle = PublicSignedPreKey {
             public_key: key_pair.public,
             signature: bare_signature,
             id: FIXED_ID,
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_from_bytes_round_trip_preserves_fields() {
+    fn public_from_bytes_round_trip_preserves_fields() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
         let signed_prekey = generate_signed_prekey(
@@ -418,9 +418,9 @@ mod tests {
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
         );
-        let bundle = signed_prekey.bundle();
+        let bundle = signed_prekey.public();
 
-        let parsed = SignedPreKeyBundle::from_bytes(
+        let parsed = PublicSignedPreKey::from_bytes(
             bundle.public_key.as_bytes(),
             &bundle.signature.to_bytes(),
             bundle.id,
@@ -437,9 +437,9 @@ mod tests {
     }
 
     #[test]
-    fn bundle_from_bytes_rejects_wrong_lengths() {
+    fn public_from_bytes_rejects_wrong_lengths() {
         assert!(matches!(
-            SignedPreKeyBundle::from_bytes(
+            PublicSignedPreKey::from_bytes(
                 &[0u8; 31],
                 &[0u8; 64],
                 FIXED_ID,
@@ -449,7 +449,7 @@ mod tests {
             Err(KeyBundleError::InvalidKeyEncoding)
         ));
         assert!(matches!(
-            SignedPreKeyBundle::from_bytes(
+            PublicSignedPreKey::from_bytes(
                 &[0u8; 32],
                 &[0u8; 63],
                 FIXED_ID,
@@ -478,7 +478,10 @@ mod tests {
             original.epoch(),
             original.created_at_secs(),
         );
-        assert_eq!(restored.public().as_bytes(), original.public().as_bytes());
+        assert_eq!(
+            restored.public_key().as_bytes(),
+            original.public_key().as_bytes()
+        );
         assert_eq!(
             restored.signature().to_bytes(),
             original.signature().to_bytes()

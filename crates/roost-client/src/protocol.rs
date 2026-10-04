@@ -42,15 +42,6 @@ pub enum ProtocolStateKind {
 /// Core derives this value from the input snapshot. Check it against current durable storage inside
 /// the same per-identity transaction that writes all returned updates and effects. Compare digests
 /// in constant time; on failure reload and process again.
-///
-/// # Examples
-/// ```
-/// use roost_client::{ProtocolStateCommitCheck, ProtocolStateUpdate};
-///
-/// fn requires_absent_blob(update: &ProtocolStateUpdate) -> bool {
-///     matches!(update.commit_check, ProtocolStateCommitCheck::Absent)
-/// }
-/// ```
 #[derive(Clone, Eq, PartialEq, uniffi::Enum)]
 pub enum ProtocolStateCommitCheck {
     /// The host must apply the update only when no blob exists at the address.
@@ -131,7 +122,7 @@ pub struct ContactDiscoveryKey {
     pub epoch: u32,
     /// Signed creation time in Unix milliseconds, always a whole number of seconds.
     pub created_at_millis: u64,
-    /// Identity-key signature over the Discovery Key bundle. Always 64 bytes.
+    /// Identity-key signature over the public Discovery Key. Always 64 bytes.
     pub identity_signature: Vec<u8>,
 }
 
@@ -303,22 +294,6 @@ pub struct SessionEvent {
 /// Switch on the outcome to obtain only the fields that case permits. The host transaction must
 /// enforce every returned condition and persist effects before plaintext is displayed, an
 /// acknowledgment is sent, or recovery is scheduled.
-///
-/// # Examples
-/// ```
-/// use roost_client::{ClientError, InboundMessageOutcome};
-///
-/// fn receive(
-///     outcome: InboundMessageOutcome,
-///     commit_atomically: impl FnOnce(&InboundMessageOutcome) -> Result<(), ClientError>,
-/// ) -> Result<Option<Vec<u8>>, ClientError> {
-///     commit_atomically(&outcome)?;
-///     Ok(match outcome {
-///         InboundMessageOutcome::Accepted { result } => Some(result.plaintext),
-///         _ => None,
-///     })
-/// }
-/// ```
 #[derive(uniffi::Enum)]
 pub enum InboundMessageOutcome {
     /// Authenticated plaintext and acknowledgment for a unique Message.
@@ -344,19 +319,6 @@ pub enum InboundMessageOutcome {
 ///
 /// The host commits the Message, acknowledgment, and conditional updates in one transaction.
 /// Plaintext is host-owned secret bytes; clear discarded copies promptly.
-///
-/// # Examples
-/// ```
-/// use roost_client::{ClientError, InboundMessageResult};
-///
-/// fn accept(
-///     result: InboundMessageResult,
-///     commit_atomically: impl FnOnce(&InboundMessageResult) -> Result<(), ClientError>,
-/// ) -> Result<Vec<u8>, ClientError> {
-///     commit_atomically(&result)?;
-///     Ok(result.plaintext)
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct InboundMessageResult {
     /// Authenticated Message identifier. Always 16 bytes.
@@ -379,19 +341,6 @@ pub struct InboundMessageResult {
 ///
 /// The acknowledgment is present only under the silent-receipt policy. Commit it with the updates
 /// before sending; under the default policy the host persists only the processed state.
-///
-/// # Examples
-/// ```
-/// use roost_client::{BlockedInboundMessageResult, ClientError, Message};
-///
-/// fn process_blocked(
-///     result: BlockedInboundMessageResult,
-///     commit_atomically: impl FnOnce(&BlockedInboundMessageResult) -> Result<(), ClientError>,
-/// ) -> Result<Option<Message>, ClientError> {
-///     commit_atomically(&result)?;
-///     Ok(result.acknowledgment)
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct BlockedInboundMessageResult {
     /// Acknowledgment when the configured policy permits one.
@@ -405,19 +354,6 @@ pub struct BlockedInboundMessageResult {
 /// An event accompanies the first durable observation. Persist it with the conditional updates so
 /// restarts can resume recovery without reporting it twice. Replacement requires an explicit host
 /// wipe and a fresh handshake; this result never resets the Session.
-///
-/// # Examples
-/// ```
-/// use roost_client::{ClientError, SessionEvent, SessionUnrecoverableResult};
-///
-/// fn record_recovery(
-///     result: SessionUnrecoverableResult,
-///     commit_atomically: impl FnOnce(&SessionUnrecoverableResult) -> Result<(), ClientError>,
-/// ) -> Result<Option<SessionEvent>, ClientError> {
-///     commit_atomically(&result)?;
-///     Ok(result.event)
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct SessionUnrecoverableResult {
     /// Session to replace through a fresh handshake.
@@ -435,22 +371,6 @@ pub struct SessionUnrecoverableResult {
 /// Cleared and missed acknowledgments both advance authenticated protocol state. Commit that state
 /// and the matching host delivery decision together. Duplicates have no effects; terminal Sessions
 /// carry the same durable recovery contract as Message receives.
-///
-/// # Examples
-/// ```
-/// use roost_client::{AcknowledgmentOutcome, ClientError};
-///
-/// fn acknowledge(
-///     outcome: AcknowledgmentOutcome,
-///     commit_atomically: impl FnOnce(&AcknowledgmentOutcome) -> Result<(), ClientError>,
-/// ) -> Result<Option<Vec<u8>>, ClientError> {
-///     commit_atomically(&outcome)?;
-///     Ok(match outcome {
-///         AcknowledgmentOutcome::Cleared { result } => Some(result.acknowledged_message_id),
-///         _ => None,
-///     })
-/// }
-/// ```
 #[derive(uniffi::Enum)]
 pub enum AcknowledgmentOutcome {
     /// A pending outbound Message was cleared.
@@ -476,19 +396,6 @@ pub enum AcknowledgmentOutcome {
 ///
 /// The named outbound Message may have already left host pending state. A missed acknowledgment
 /// still needs its protocol updates committed so retries are recognized as duplicates.
-///
-/// # Examples
-/// ```
-/// use roost_client::{AcknowledgmentResult, ClientError};
-///
-/// fn commit_acknowledgment(
-///     result: AcknowledgmentResult,
-///     commit_atomically: impl FnOnce(&AcknowledgmentResult) -> Result<(), ClientError>,
-/// ) -> Result<Vec<u8>, ClientError> {
-///     commit_atomically(&result)?;
-///     Ok(result.acknowledged_message_id)
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct AcknowledgmentResult {
     /// Acknowledgment Message identifier. Always 16 bytes.
@@ -517,16 +424,6 @@ impl Messaging {
     /// Returns the engine hardening limits.
     ///
     /// The values come from this Client's immutable configuration and describe the limits applied to its operations.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Messaging, ProtocolStateEntry};
-    /// fn example(messaging: &Messaging) -> Result<(), ClientError> {
-    ///     let limits = messaging.hardening_limits();
-    ///     assert!(limits.deduplication_capacity > 0);
-    ///     Ok(())
-    /// }
-    /// ```
     pub fn hardening_limits(&self) -> ProtocolHardeningLimits {
         ProtocolHardeningLimits::from_core(self.inner.protocol_engine().hardening_limits())
     }
@@ -534,16 +431,6 @@ impl Messaging {
     /// Returns an update that initializes a deduplication set.
     ///
     /// Persist the update with the first application effects using this set. Its absent precondition refuses replacement of an existing set.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Messaging, ProtocolStateEntry};
-    /// fn example(messaging: &Messaging) -> Result<(), ClientError> {
-    ///     let update = messaging.initialize_deduplication_set(b"deduplication".to_vec())?;
-    ///     assert!(matches!(update.commit_check, roost_client::ProtocolStateCommitCheck::Absent));
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if the key exceeds the protocol address limit.
@@ -563,16 +450,6 @@ impl Messaging {
     ///
     /// Persist the returned absent-checked update before using a separately initialized Session. Session initiation creates its own acknowledgment state.
     ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Messaging, ProtocolStateEntry};
-    /// fn example(messaging: &Messaging) -> Result<(), ClientError> {
-    ///     let update = messaging.initialize_pending_acknowledgments(vec![1; 16])?;
-    ///     assert!(update.blob.is_some());
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if the key exceeds the protocol address limit.
     /// - [`ClientError::InternalError`] if the new state cannot be encoded.
@@ -590,16 +467,6 @@ impl Messaging {
     /// Returns deletion updates for all protocol-state kinds at the key.
     ///
     /// Deletion remains conditional on the supplied snapshot. Commit the returned updates atomically with the host effects that require the wipe.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Messaging, ProtocolStateEntry};
-    /// fn example(messaging: &Messaging, snapshot: Vec<ProtocolStateEntry>) -> Result<(), ClientError> {
-    ///     let updates = messaging.wipe(snapshot, vec![1; 16])?;
-    ///     assert!(updates.iter().all(|update| update.blob.is_none()));
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if a key or snapshot exceeds its bounds or repeats an address.
@@ -620,16 +487,6 @@ impl Messaging {
     /// Returns all pending acknowledgments for a Session.
     ///
     /// Load the Session's pending-acknowledgment blob from the committed host store. This query does not change retry state.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Messaging, ProtocolStateEntry};
-    /// fn example(messaging: &Messaging, snapshot: Vec<ProtocolStateEntry>) -> Result<(), ClientError> {
-    ///     let pending = messaging.pending_acknowledgments(snapshot, vec![1; 16])?;
-    ///     let _ = pending;
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if a key or snapshot exceeds its bounds or repeats an address.
@@ -653,16 +510,6 @@ impl Messaging {
     /// Returns retry instructions whose retry window elapsed.
     ///
     /// Commit the returned updates with the host retry work. Preserve each Message's originally supplied Transport Binding when submitting it again.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Messaging, ProtocolStateEntry};
-    /// fn example(messaging: &Messaging, snapshot: Vec<ProtocolStateEntry>) -> Result<(), ClientError> {
-    ///     let retry = messaging.retry_instructions(snapshot, vec![1; 16], 2_000, 1_000)?;
-    ///     let _ = retry.state_updates;
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if a key or snapshot exceeds its bounds or repeats an address.
@@ -694,16 +541,6 @@ impl Contacts {
     ///
     /// Roost verifies the Contact Identity and Discovery Key binding. Commit the returned updates with the host contact record; an unchanged contact may produce no updates.
     ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: roost_client::ContactIdentity) -> Result<(), ClientError> {
-    ///     let change = contacts.record_contact(snapshot, peer)?;
-    ///     let _ = change.state_updates;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
     /// - [`ClientError::InternalError`] if the updated contact cannot be encoded.
@@ -726,16 +563,6 @@ impl Contacts {
     ///
     /// An absent contact returns `None`. Corrupt stored state is an error and must not be treated as absence.
     ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: roost_client::IdentityKey) -> Result<(), ClientError> {
-    ///     let contact = contacts.contact_state(snapshot, peer)?;
-    ///     let _ = contact;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
     /// - [`ClientError::ProtocolStateFault`] if peer keys are not canonical or stored contact state is malformed.
@@ -757,16 +584,6 @@ impl Contacts {
     ///
     /// Project contacts from a snapshot freshly loaded from the committed host store. Platform observation can coalesce refreshes without retaining Rust subscriptions or cursors.
     ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>) -> Result<(), ClientError> {
-    ///     let current = contacts.contact_states(snapshot)?;
-    ///     let _ = current;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if the snapshot exceeds its bounds or repeats an address.
     /// - [`ClientError::ProtocolStateFault`] if stored contact state is malformed.
@@ -787,16 +604,6 @@ impl Contacts {
     /// Accepts a pending contact.
     ///
     /// Accepting a pending peer changes its trust to unverified. Commit the returned contact changes before sending application messages to that peer.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: roost_client::IdentityKey) -> Result<(), ClientError> {
-    ///     let change = contacts.accept_contact(snapshot, peer)?;
-    ///     let _ = change.state_updates;
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
@@ -822,16 +629,6 @@ impl Contacts {
     /// load-bearing: an old authorization replayed at a contact would restore a capability the
     /// peer has already rotated away from, which is exactly the state a blocked sender wants to
     /// reach.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, IdentityKey, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: IdentityKey, capability: Vec<u8>) -> Result<(), ClientError> {
-    ///     let result = contacts.record_peer_inbox_authorization(snapshot, peer, 2, capability)?;
-    ///     # let _ = result;
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InternalError`] if the new authorization cannot be encoded.
@@ -865,16 +662,6 @@ impl Contacts {
 
     /// Returns the stored inbox authorization for a peer, if one has been recorded.
     ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, IdentityKey, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: IdentityKey) -> Result<(), ClientError> {
-    ///     let result = contacts.peer_inbox_authorization(snapshot, peer)?;
-    ///     # let _ = result;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if key lengths or snapshot bounds are invalid.
     /// - [`ClientError::ProtocolStateFault`] if the peer key is not canonical or stored authorization is malformed.
@@ -900,16 +687,6 @@ impl Contacts {
     /// Call this only once the authorization update has actually reached transport. Recording it
     /// earlier would let an app killed mid-re-key resume past a contact that never received
     /// anything, leaving that contact unable to deliver until the next rotation.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, IdentityKey, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: IdentityKey) -> Result<(), ClientError> {
-    ///     let result = contacts.record_inbox_authorization_delivered(snapshot, peer, 2)?;
-    ///     # let _ = result;
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InternalError`] if the new record cannot be encoded.
@@ -941,16 +718,6 @@ impl Contacts {
     /// capability the rotation revoked and silently undo the block. Contacts with no
     /// stored contact record are skipped.
     ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, IdentityKey, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: IdentityKey) -> Result<(), ClientError> {
-    ///     let result = contacts.contacts_needing_inbox_authorization(snapshot, 2, vec![peer])?;
-    ///     # let _ = result;
-    ///     Ok(())
-    /// }
-    /// ```
-    ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if candidate key lengths or snapshot bounds are invalid.
     /// - [`ClientError::ProtocolStateFault`] if a candidate key is not canonical or a stored record is malformed.
@@ -980,22 +747,6 @@ impl Contacts {
     /// The peer must already be accepted. A mismatch, including malformed presented text, returns
     /// no updates. The local Identity comes from this Client's storage and cannot be supplied by
     /// the caller. Commit a matching confirmation's updates before showing the peer as verified.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, IdentityKey, ProtocolStateEntry};
-    /// fn confirm(
-    ///     contacts: &Contacts,
-    ///     snapshot: Vec<ProtocolStateEntry>,
-    ///     peer: IdentityKey,
-    ///     presented: String,
-    /// ) -> Result<(), ClientError> {
-    ///     let confirmation = contacts.confirm_contact_safety_number(snapshot, peer, presented)?;
-    ///     // Commit `confirmation.change.state_updates` in the host store.
-    ///     # let _ = confirmation;
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::Corrupt`] if stored local Identity material is incomplete or malformed.
@@ -1030,16 +781,6 @@ impl Contacts {
     /// Unblocks a contact locally.
     ///
     /// Commit the returned state change before resuming local delivery. Unblocking does not restore a delivery capability invalidated by a prior inbox rotation.
-    ///
-    /// # Examples
-    /// ```
-    /// # use roost_client::{ClientError, Contacts, ProtocolStateEntry};
-    /// fn example(contacts: &Contacts, snapshot: Vec<ProtocolStateEntry>, peer: roost_client::IdentityKey) -> Result<(), ClientError> {
-    ///     let change = contacts.unblock_contact(snapshot, peer)?;
-    ///     let _ = change.state_updates;
-    ///     Ok(())
-    /// }
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if peer key lengths or snapshot bounds are invalid.

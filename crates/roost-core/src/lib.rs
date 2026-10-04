@@ -96,10 +96,11 @@ pub use protocol_state::{
     protocol_state_blob_digest,
 };
 pub use roost_crypto::{
-    DiscoveryKeyBundle, HandshakeError, IdentityKeyBundle, KeyBundleError, OneTimePreKeyBundle,
-    PreKeyBundle, PublicKey, RatchetError, RatchetStateError, RecipientDeliveryCapability,
-    SealedFrameError, SealedFramePreKeyReference, SenderIdentityMaterial, Signature,
-    SignedPreKeyBundle, verify_discovery_to_identity_binding, verify_identity_key_bundle,
+    HandshakeError, KeyBundleError, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey, PublicKey,
+    PublicOneTimePreKey, PublicSignedPreKey, RatchetError, RatchetStateError,
+    RecipientDeliveryCapability, SealedFrameError, SealedFramePreKeyReference,
+    SenderIdentityMaterial, Signature, verify_discovery_to_identity_binding,
+    verify_identity_key_bundle,
 };
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use signed_prekey::SignedPreKeyError;
@@ -111,8 +112,8 @@ pub use transport_binding::{PreKeySelection, TransportBinding, TransportBindingE
 #[doc(hidden)]
 pub mod test_support {
     pub use roost_crypto::{
-        DiscoveryKeyBundle, IdentityKeyBundle, KeyPair, PREKEY_BUNDLE_VERSION, PublicKey,
-        RecipientDeliveryCapability, Signature, SignedPreKeyBundle, SigningKeyPair, VerifyingKey,
+        KeyPair, PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicIdentityKey, PublicKey,
+        PublicSignedPreKey, RecipientDeliveryCapability, Signature, SigningKeyPair, VerifyingKey,
         sign_identity_key_binding, verify_discovery_key_bundle,
         verify_discovery_to_identity_binding, verify_identity_key_bundle,
         verify_signed_prekey_bundle,

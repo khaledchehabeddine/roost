@@ -45,30 +45,6 @@ pub struct RevocationState {
 ///
 /// Every validation, standalone or on receive, rejects a `grace_window_millis` above 300,000 (five
 /// minutes) as invalid data.
-///
-/// # Examples
-/// ```
-/// use roost_client::{
-///     DomainSigningKey, DomainSigningKeyStatus, RevocationState,
-///     SenderCertificateValidation,
-/// };
-///
-/// let validation = SenderCertificateValidation {
-///     domain_signing_keys: vec![DomainSigningKey {
-///         id: b"relay-key".to_vec(),
-///         verifying_key: vec![7; 32],
-///         status: DomainSigningKeyStatus::Trusted,
-///     }],
-///     expected_relay_domain: b"relay.example".to_vec(),
-///     revocation_state: RevocationState {
-///         available: true,
-///         revoked_identity_keys: Vec::new(),
-///     },
-///     reference_time_millis: 1_700_000_000_000,
-///     grace_window_millis: 300_000,
-/// };
-/// assert_eq!(validation.grace_window_millis, 300_000);
-/// ```
 #[derive(uniffi::Record)]
 pub struct SenderCertificateValidation {
     /// Known domain-signing keys.

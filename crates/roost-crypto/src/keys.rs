@@ -7,7 +7,7 @@ use std::error::Error;
 use std::fmt;
 
 pub use dh::{KeyPair, PublicKey, SharedSecret, generate_key_pair};
-pub use identity::{IdentityKeyBundle, sign_identity_key_binding, verify_identity_key_bundle};
+pub use identity::{PublicIdentityKey, sign_identity_key_binding, verify_identity_key_bundle};
 pub(crate) use roost_protocol::is_valid_x25519_public_key;
 pub(crate) use roost_protocol::parse_ed25519_verifying_key_bytes;
 // Shared by both binding directions; not part of the public surface.

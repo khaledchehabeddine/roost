@@ -37,8 +37,8 @@ fn setup() -> Setup {
             x25519_public_key: *contact_key_pair.public.as_bytes(),
             ed25519_verifying_key: contact_signing.verifying.to_bytes(),
         },
-        contact_discovery: ContactDiscoveryKey::from(&contact_discovery.bundle()),
-        contact_rotated_discovery: ContactDiscoveryKey::from(&contact_rotated_discovery.bundle()),
+        contact_discovery: ContactDiscoveryKey::from(&contact_discovery.public()),
+        contact_rotated_discovery: ContactDiscoveryKey::from(&contact_rotated_discovery.public()),
     }
 }
 

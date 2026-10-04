@@ -250,7 +250,7 @@ fn sender_identity_material(
     certificate: &[u8],
     signature: &[u8],
 ) -> Result<SenderIdentityMaterial, IdentityError> {
-    let bundle = identity.identity_key_bundle()?;
+    let bundle = identity.public()?;
     Ok(SenderIdentityMaterial {
         identity_key: *bundle.public_key.as_bytes(),
         identity_verifying_key: bundle.verifying_key.to_bytes(),

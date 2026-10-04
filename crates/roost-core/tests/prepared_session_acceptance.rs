@@ -40,7 +40,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         .initiate_session_with_transport_binding(
             SessionInitiation {
                 session_key: session_key.clone(),
-                responder_identity_key: bob_identity.output.identity_key_bundle().unwrap(),
+                responder_identity_key: bob_identity.output.public().unwrap(),
                 responder_discovery_to_identity: bob_publication.discovery_to_identity,
                 responder_prekey_bundle: roost_crypto::PreKeyBundle {
                     version: bob_publication.version,
@@ -63,7 +63,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
     finalize(&bob, &replacement_signed_prekey);
     let input = || SessionAcceptance {
         session_key: session_key.clone(),
-        initiator_identity_key: Some(alice_identity.output.identity_key_bundle().unwrap()),
+        initiator_identity_key: Some(alice_identity.output.public().unwrap()),
         message: &initial.message,
     };
 
@@ -89,7 +89,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         bob.prepare_accept_session_with_transport_binding(
             SessionAcceptance {
                 session_key: session_key.clone(),
-                initiator_identity_key: Some(alice_identity.output.identity_key_bundle().unwrap()),
+                initiator_identity_key: Some(alice_identity.output.public().unwrap()),
                 message: &initial.message,
             },
             &changed_transport_binding,

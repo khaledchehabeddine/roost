@@ -49,9 +49,9 @@ fn setup() -> Setup {
             x25519_public_key: *bob_identity_key_pair.public.as_bytes(),
             ed25519_verifying_key: bob_identity.verifying.to_bytes(),
         },
-        bob_discovery: ContactDiscoveryKey::from(&bob_discovery.bundle()),
-        bob_rotated_discovery: ContactDiscoveryKey::from(&bob_rotated_discovery.bundle()),
-        bob_restored_discovery: ContactDiscoveryKey::from(&bob_restored_discovery.bundle()),
+        bob_discovery: ContactDiscoveryKey::from(&bob_discovery.public()),
+        bob_rotated_discovery: ContactDiscoveryKey::from(&bob_rotated_discovery.public()),
+        bob_restored_discovery: ContactDiscoveryKey::from(&bob_restored_discovery.public()),
     }
 }
 
@@ -94,7 +94,7 @@ fn alternate_contact_identity() -> ContactIdentity {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
             ed25519_verifying_key: identity.verifying.to_bytes(),
         },
-        discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+        discovery_key: ContactDiscoveryKey::from(&discovery_key.public()),
     }
 }
 

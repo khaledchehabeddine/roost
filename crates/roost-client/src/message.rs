@@ -6,19 +6,6 @@ use roost_core::Message as CoreMessage;
 use roost_core::SealedFramePreKeyReference as CorePreKeyReference;
 
 /// Transport-visible X3DH prekey reference in a sealed-sender frame.
-///
-/// # Examples
-/// ```
-/// use roost_client::FramePreKeyReference;
-///
-/// let reference = FramePreKeyReference {
-///     discovery_epoch: 7,
-///     signed_prekey_public_key: vec![0x11; 32],
-///     one_time_prekey_id: Some(u64::MAX),
-///     one_time_prekey_public_key: Some(vec![0x22; 32]),
-/// };
-/// assert_eq!(reference.one_time_prekey_id, Some(u64::MAX));
-/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct FramePreKeyReference {
     /// Recipient Discovery Key epoch.

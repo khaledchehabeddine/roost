@@ -6,8 +6,8 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    DiscoveryKey, HandshakeEnvelope, HandshakeError, Header, IdentityKeyBundle, InitialPlaintext,
-    KeyBundleError, OneTimePreKey, PreKeyBundle, RatchetError, RatchetState, Signature,
+    DiscoveryKey, HandshakeEnvelope, HandshakeError, Header, InitialPlaintext, KeyBundleError,
+    OneTimePreKey, PreKeyBundle, PublicIdentityKey, RatchetError, RatchetState, Signature,
     SignedPreKey, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
     generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
     initial_associated_data, initiate, sign_identity_key_binding,
@@ -17,9 +17,9 @@ use roost_protocol::SignatureError;
 const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
 
 struct Setup {
-    alice_identity_key: IdentityKeyBundle,
+    alice_identity_key: PublicIdentityKey,
     alice_discovery_key: DiscoveryKey,
-    bob_identity_key: IdentityKeyBundle,
+    bob_identity_key: PublicIdentityKey,
     bob_discovery_key: DiscoveryKey,
     bob_signed_prekey: SignedPreKey,
     bob_one_time_prekey: Option<OneTimePreKey>,
@@ -28,11 +28,11 @@ struct Setup {
 fn setup() -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed([0x33u8; 32]);
     let alice_identity = generate_signing_key_pair(&mut rng);
-    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
+    let alice_identity_key = public_identity_key(&mut rng, &alice_identity);
     let alice_discovery_key =
         generate_discovery_key(&mut rng, &alice_identity, 1, FIXED_CREATED_AT_SECS);
     let bob_identity = generate_signing_key_pair(&mut rng);
-    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
+    let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
     let bob_discovery_key =
         generate_discovery_key(&mut rng, &bob_identity, 2, FIXED_CREATED_AT_SECS);
     let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
@@ -65,12 +65,12 @@ fn bootstrap(
 ) -> (RatchetState, RatchetState, HandshakeEnvelope) {
     let prekey_bundle = PreKeyBundle {
         version: roost_crypto::PREKEY_BUNDLE_VERSION,
-        discovery_key: setup.bob_discovery_key.bundle(),
-        signed_prekey: setup.bob_signed_prekey.bundle(),
+        discovery_key: setup.bob_discovery_key.public(),
+        signed_prekey: setup.bob_signed_prekey.public(),
         one_time_prekey: setup
             .bob_one_time_prekey
             .as_ref()
-            .map(OneTimePreKey::bundle),
+            .map(OneTimePreKey::public),
     };
     let (alice, envelope) = initiate(
         rng,
@@ -110,10 +110,10 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
     }
 }
 
-fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+fn public_identity_key(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> PublicIdentityKey {
     let agreement_key = generate_key_pair(rng);
     let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
-    IdentityKeyBundle {
+    PublicIdentityKey {
         public_key: agreement_key.public,
         verifying_key: signing_key.verifying,
         binding_signature,
@@ -145,12 +145,12 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
     let (mut setup, mut rng) = setup();
     let prekey_bundle = PreKeyBundle {
         version: roost_crypto::PREKEY_BUNDLE_VERSION,
-        discovery_key: setup.bob_discovery_key.bundle(),
-        signed_prekey: setup.bob_signed_prekey.bundle(),
+        discovery_key: setup.bob_discovery_key.public(),
+        signed_prekey: setup.bob_signed_prekey.public(),
         one_time_prekey: setup
             .bob_one_time_prekey
             .as_ref()
-            .map(OneTimePreKey::bundle),
+            .map(OneTimePreKey::public),
     };
     let (mut alice, envelope) = initiate(
         &mut rng,
@@ -249,18 +249,18 @@ fn skipped_keys_are_consumed_after_use() {
 #[test]
 fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
     let (setup, mut rng) = setup();
-    let mut bundle = setup.bob_signed_prekey.bundle();
+    let mut bundle = setup.bob_signed_prekey.public();
     let mut signature_bytes = bundle.signature.to_bytes();
     signature_bytes[0] ^= 0x01;
     bundle.signature = Signature::from_bytes(&signature_bytes);
     let prekey_bundle = PreKeyBundle {
         version: roost_crypto::PREKEY_BUNDLE_VERSION,
-        discovery_key: setup.bob_discovery_key.bundle(),
+        discovery_key: setup.bob_discovery_key.public(),
         signed_prekey: bundle,
         one_time_prekey: setup
             .bob_one_time_prekey
             .as_ref()
-            .map(OneTimePreKey::bundle),
+            .map(OneTimePreKey::public),
     };
     let result = initiate(
         &mut rng,

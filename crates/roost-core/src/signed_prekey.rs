@@ -2,7 +2,7 @@ use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
 use crate::prekey_state::INBOX_ROTATION_REQUIRED_MARKER;
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
-use roost_crypto::{SignedPreKey, SignedPreKeyBundle, generate_signed_prekey_for_discovery_key};
+use roost_crypto::{PublicSignedPreKey, SignedPreKey, generate_signed_prekey_for_discovery_key};
 use roost_protocol::{from_unix_secs, to_unix_secs};
 use std::error::Error;
 use std::fmt;
@@ -146,12 +146,12 @@ impl SignedPreKeyManager {
         Ok(store.current.clone_for_storage())
     }
 
-    // Returns the signed-pre-key bundle to distribute to peers.
-    pub(crate) fn current_bundle(
+    // Returns the public signed pre-key to distribute to peers.
+    pub(crate) fn current_public(
         &self,
         now: SystemTime,
-    ) -> Result<SignedPreKeyBundle, SignedPreKeyError> {
-        Ok(self.current(now)?.bundle())
+    ) -> Result<PublicSignedPreKey, SignedPreKeyError> {
+        Ok(self.current(now)?.public())
     }
 
     pub(crate) fn prekey_for_reference(
@@ -310,7 +310,7 @@ fn matching_prekey(
 ) -> Option<SignedPreKey> {
     let matches_epoch = prekey.epoch() == epoch;
     let matches_id = prekey.id() == id;
-    let matches_public_key: bool = prekey.public().as_bytes().ct_eq(public_key).into();
+    let matches_public_key: bool = prekey.public_key().as_bytes().ct_eq(public_key).into();
     (matches_epoch && matches_id && matches_public_key).then(|| prekey.clone_for_storage())
 }
 
@@ -689,13 +689,13 @@ mod tests {
     }
 
     #[test]
-    fn current_bundle_does_not_require_discovery_key() {
+    fn current_public_does_not_require_discovery_key() {
         let manager = manager_without_discovery_key();
         let signed_prekey = store_signed_prekey_with_created_at(&manager, FIXED_NOW);
-        let bundle = manager.current_bundle(at(FIXED_NOW)).unwrap();
+        let bundle = manager.current_public(at(FIXED_NOW)).unwrap();
         assert_eq!(
             bundle.public_key.as_bytes(),
-            signed_prekey.public().as_bytes()
+            signed_prekey.public_key().as_bytes()
         );
     }
 
@@ -706,14 +706,14 @@ mod tests {
             .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("first call must rotate");
-        let bundle = manager.current_bundle(at(FIXED_NOW)).unwrap();
+        let bundle = manager.current_public(at(FIXED_NOW)).unwrap();
         assert_eq!(
-            rotated.public().as_bytes(),
+            rotated.public_key().as_bytes(),
             bundle.public_key.as_bytes(),
             "returned signed pre-key must match persisted bundle",
         );
-        let discovery_bundle = discovery.current_bundle().unwrap();
-        assert!(verify_signed_prekey_bundle(&bundle, &discovery_bundle.verifying_key).is_ok());
+        let public_discovery_key = discovery.current_public().unwrap();
+        assert!(verify_signed_prekey_bundle(&bundle, &public_discovery_key.verifying_key).is_ok());
     }
 
     #[test]
@@ -725,13 +725,13 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let initial_public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
+        let initial_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
         let second_rotation = manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)).unwrap();
         assert!(
             second_rotation.is_none(),
             "fresh signed pre-key must not rotate"
         );
-        let current_public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
+        let current_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
         assert_eq!(initial_public_key.as_bytes(), current_public_key.as_bytes());
     }
 
@@ -747,15 +747,15 @@ mod tests {
             .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("backdated signed pre-key must trigger rotation");
-        let rotated_public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
+        let rotated_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
         assert_eq!(
-            rotated.public().as_bytes(),
+            rotated.public_key().as_bytes(),
             rotated_public_key.as_bytes(),
             "returned signed pre-key must match persisted bundle",
         );
         assert_ne!(
             rotated_public_key.as_bytes(),
-            stale_signed_prekey.public().as_bytes()
+            stale_signed_prekey.public_key().as_bytes()
         );
     }
 
@@ -771,7 +771,10 @@ mod tests {
             .unwrap()
             .expect("weekly boundary must rotate");
 
-        assert_ne!(rotated.public().as_bytes(), stale.public().as_bytes());
+        assert_ne!(
+            rotated.public_key().as_bytes(),
+            stale.public_key().as_bytes()
+        );
         assert_eq!(rotated.id(), stale.id() + 1);
     }
 
@@ -796,20 +799,20 @@ mod tests {
             .prekey_for_reference(
                 stale_signed_prekey.epoch(),
                 stale_signed_prekey.id(),
-                stale_signed_prekey.public().as_bytes(),
+                stale_signed_prekey.public_key().as_bytes(),
                 at(FIXED_NOW + SECONDS_PER_DAY),
             )
             .unwrap();
         assert_eq!(
-            retained.public().as_bytes(),
-            stale_signed_prekey.public().as_bytes()
+            retained.public_key().as_bytes(),
+            stale_signed_prekey.public_key().as_bytes()
         );
 
         assert!(matches!(
             setup.manager.prekey_for_reference(
                 stale_signed_prekey.epoch(),
                 stale_signed_prekey.id(),
-                stale_signed_prekey.public().as_bytes(),
+                stale_signed_prekey.public_key().as_bytes(),
                 at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS)
             ),
             Err(SignedPreKeyError::NotFound)
@@ -826,8 +829,8 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        let public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
-        assert_eq!(public_key.as_bytes(), signed_prekey.public().as_bytes());
+        let public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
+        assert_eq!(public_key.as_bytes(), signed_prekey.public_key().as_bytes());
     }
 
     #[test]
@@ -841,9 +844,9 @@ mod tests {
             .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("far-future signed pre-key must trigger rotation");
-        let public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
-        assert_eq!(public_key.as_bytes(), rotated.public().as_bytes());
-        assert_ne!(public_key.as_bytes(), signed_prekey.public().as_bytes());
+        let public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
+        assert_eq!(public_key.as_bytes(), rotated.public_key().as_bytes());
+        assert_ne!(public_key.as_bytes(), signed_prekey.public_key().as_bytes());
     }
 
     #[test]
@@ -857,14 +860,20 @@ mod tests {
             .prekey_for_reference(
                 first.epoch(),
                 first.id(),
-                first.public().as_bytes(),
+                first.public_key().as_bytes(),
                 at(FIXED_NOW),
             )
             .unwrap();
         let current = setup.manager.current(at(FIXED_NOW)).unwrap();
 
-        assert_eq!(retained.public().as_bytes(), first.public().as_bytes());
-        assert_eq!(current.public().as_bytes(), second.public().as_bytes());
+        assert_eq!(
+            retained.public_key().as_bytes(),
+            first.public_key().as_bytes()
+        );
+        assert_eq!(
+            current.public_key().as_bytes(),
+            second.public_key().as_bytes()
+        );
     }
 
     #[test]
@@ -880,7 +889,7 @@ mod tests {
                 .prekey_for_reference(
                     first.epoch(),
                     first.id(),
-                    first.public().as_bytes(),
+                    first.public_key().as_bytes(),
                     at(FIXED_NOW)
                 )
                 .is_ok()
@@ -891,7 +900,7 @@ mod tests {
                 .prekey_for_reference(
                     second.epoch(),
                     second.id(),
-                    second.public().as_bytes(),
+                    second.public_key().as_bytes(),
                     at(FIXED_NOW)
                 )
                 .is_ok()
@@ -901,9 +910,9 @@ mod tests {
                 .manager
                 .current(at(FIXED_NOW))
                 .unwrap()
-                .public()
+                .public_key()
                 .as_bytes(),
-            third.public().as_bytes()
+            third.public_key().as_bytes()
         );
     }
 
@@ -918,7 +927,7 @@ mod tests {
                 .prekey_for_reference(
                     first.epoch(),
                     first.id(),
-                    first.public().as_bytes(),
+                    first.public_key().as_bytes(),
                     at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS - 1)
                 )
                 .is_ok()
@@ -928,7 +937,7 @@ mod tests {
             setup.manager.prekey_for_reference(
                 first.epoch(),
                 first.id(),
-                first.public().as_bytes(),
+                first.public_key().as_bytes(),
                 at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS)
             ),
             Err(SignedPreKeyError::NotFound)
@@ -937,7 +946,7 @@ mod tests {
             setup.manager.prekey_for_reference(
                 first.epoch(),
                 first.id(),
-                first.public().as_bytes(),
+                first.public_key().as_bytes(),
                 at(FIXED_NOW)
             ),
             Err(SignedPreKeyError::NotFound)
@@ -953,7 +962,7 @@ mod tests {
             setup.manager.prekey_for_reference(
                 prekey.epoch(),
                 prekey.id() + 1,
-                prekey.public().as_bytes(),
+                prekey.public_key().as_bytes(),
                 at(FIXED_NOW)
             ),
             Err(SignedPreKeyError::NotFound)
@@ -1022,7 +1031,10 @@ mod tests {
         assert_eq!(blob.len(), SIGNED_PREKEY_V4_HEADER_LEN);
         let store = decode_signed_prekey_store(&blob).unwrap();
         let restored = store.current.clone_for_storage();
-        assert_eq!(restored.public().as_bytes(), original.public().as_bytes());
+        assert_eq!(
+            restored.public_key().as_bytes(),
+            original.public_key().as_bytes()
+        );
         assert_eq!(
             restored.signature().to_bytes(),
             original.signature().to_bytes()

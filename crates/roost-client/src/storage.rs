@@ -1,8 +1,8 @@
-//! Platform secure-storage trait, in-memory reference implementation, and core storage adapter.
-
 use crate::ClientError;
 use roost_core::{SecureStorage as CoreSecureStorage, StorageError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 /// Platform secure-storage boundary used by [`Client`](crate::Client).
@@ -22,8 +22,6 @@ use zeroize::Zeroizing;
 /// must leave either the complete previous value or the complete new value, never a torn value.
 /// Core may retry `store` or `delete` after an ambiguous failure, so both operations must be safe
 /// to repeat.
-///
-/// See [`InMemorySecureStorage`] for a reference implementation suitable for tests.
 #[uniffi::export(with_foreign)]
 pub trait SecureStorage: Send + Sync {
     /// Stores `value` under `key`, overwriting any existing entry.
@@ -45,48 +43,31 @@ pub trait SecureStorage: Send + Sync {
     fn delete(&self, key: String) -> Result<(), ClientError>;
 }
 
-/// In-memory secure storage for use in proofs-of-concept and tests.
-///
-/// Not suitable for production.
-#[derive(uniffi::Object)]
-pub struct InMemorySecureStorage {
+/// Secure storage held in memory, for this crate's unit tests.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MemoryStorage {
     inner: Mutex<roost_core::InMemorySecureStorage>,
 }
 
-#[uniffi::export]
-impl InMemorySecureStorage {
-    /// Creates an empty in-memory storage instance for use in tests and prototypes.
-    #[uniffi::constructor]
-    pub fn new() -> Self {
-        Self {
-            inner: Mutex::new(roost_core::InMemorySecureStorage::new()),
-        }
-    }
-}
-
-impl InMemorySecureStorage {
-    fn lock_inner(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, roost_core::InMemorySecureStorage>, ClientError> {
-        self.inner.lock().map_err(|_| ClientError::InternalError {
-            reason: "storage lock poisoned".into(),
-        })
-    }
-}
-
-#[uniffi::export]
-impl SecureStorage for InMemorySecureStorage {
+#[cfg(test)]
+impl SecureStorage for MemoryStorage {
     fn store(&self, key: String, value: Vec<u8>) -> Result<(), ClientError> {
         let value = Zeroizing::new(value);
-        Ok(self.lock_inner()?.store(&key, &value)?)
+        Ok(self.inner.lock().unwrap().store(&key, &value)?)
     }
 
     fn load(&self, key: String) -> Result<Option<Vec<u8>>, ClientError> {
-        Ok(self.lock_inner()?.load(&key)?.map(|z| z.to_vec()))
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .load(&key)?
+            .map(|value| value.to_vec()))
     }
 
     fn delete(&self, key: String) -> Result<(), ClientError> {
-        Ok(self.lock_inner()?.delete(&key)?)
+        Ok(self.inner.lock().unwrap().delete(&key)?)
     }
 }
 

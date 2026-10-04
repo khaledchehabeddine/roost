@@ -3,7 +3,7 @@ mod backup;
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    IdentityKeyBundle, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
+    KeyPair, PublicIdentityKey, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
     generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
 };
 use std::error::Error;
@@ -89,14 +89,14 @@ impl Identity {
         &self.signing_key_pair.verifying
     }
 
-    /// Returns the public Identity Key bundle proving that the X25519 and Ed25519 halves belong
+    /// Returns the public Identity Key proving that the X25519 and Ed25519 halves belong
     /// together.
-    pub fn identity_key_bundle(&self) -> Result<IdentityKeyBundle, IdentityError> {
+    pub fn public(&self) -> Result<PublicIdentityKey, IdentityError> {
         let binding_signature =
             sign_identity_key_binding(&self.signing_key_pair, &self.key_pair.public).map_err(
                 |_| IdentityError::InvalidData("identity binding signature failed".into()),
             )?;
-        Ok(IdentityKeyBundle {
+        Ok(PublicIdentityKey {
             public_key: PublicKey::from(*self.key_pair.public.as_bytes()),
             verifying_key: self.signing_key_pair.verifying,
             binding_signature,

@@ -2,7 +2,7 @@ use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    DiscoveryKey, DiscoveryKeyBundle, RecipientDeliveryCapability, Signature, SigningKeyPair,
+    DiscoveryKey, PublicDiscoveryKey, RecipientDeliveryCapability, Signature, SigningKeyPair,
     generate_discovery_key, generate_recipient_delivery_capability, verify_discovery_key_bundle,
 };
 use roost_protocol::to_unix_secs;
@@ -116,14 +116,14 @@ impl DiscoveryKeyManager {
     pub(crate) fn current(&self) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let discovery_key = self.load_stored()?;
         let identity = self.identity.load_identity()?;
-        verify_discovery_key_bundle(&discovery_key.bundle(), identity.verifying_key())
+        verify_discovery_key_bundle(&discovery_key.public(), identity.verifying_key())
             .map_err(|_| DiscoveryKeyError::Corrupt)?;
         Ok(discovery_key)
     }
 
-    // Returns the discovery-key bundle to distribute to peers, verified against the identity key.
-    pub(crate) fn current_bundle(&self) -> Result<DiscoveryKeyBundle, DiscoveryKeyError> {
-        Ok(self.current()?.bundle())
+    // Returns the public discovery key to distribute to peers, verified against the identity key.
+    pub(crate) fn current_public(&self) -> Result<PublicDiscoveryKey, DiscoveryKeyError> {
+        Ok(self.current()?.public())
     }
 
     // Returns the DK→IK binding for `discovery_key` against the stored identity.
@@ -138,7 +138,7 @@ impl DiscoveryKeyManager {
     ) -> Result<Signature, DiscoveryKeyError> {
         let identity = self.identity.load_identity()?;
         discovery_key
-            .sign_identity_binding(&identity.identity_key_bundle()?)
+            .sign_identity_binding(&identity.public()?)
             .map_err(|e| {
                 DiscoveryKeyError::InvalidData(format!("discovery-to-identity binding: {e}"))
             })
@@ -226,7 +226,7 @@ impl DiscoveryKeyManager {
         let mut signing_secret = Zeroizing::new([0u8; 32]);
         signing_secret.copy_from_slice(&identity_key[32..]);
         let identity_signing = SigningKeyPair::from_signing_bytes(*signing_secret);
-        verify_discovery_key_bundle(&discovery_key.bundle(), &identity_signing.verifying)
+        verify_discovery_key_bundle(&discovery_key.public(), &identity_signing.verifying)
             .map_err(|_| DiscoveryKeyError::Corrupt)?;
         Ok(())
     }
@@ -435,7 +435,7 @@ mod tests {
         let rotated = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         // Identity creation starts at inbox generation 1, not 0.
         assert_eq!(rotated.epoch(), 1);
-        let bundle = discovery.current_bundle().unwrap();
+        let bundle = discovery.current_public().unwrap();
         assert_eq!(bundle.epoch, 1);
         let loaded_identity = identity.load_identity().unwrap();
         assert!(verify_discovery_key_bundle(&bundle, loaded_identity.verifying_key()).is_ok());

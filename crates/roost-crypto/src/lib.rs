@@ -4,8 +4,8 @@
 //! encryption for Rust crates that need protocol-level crypto. Higher layers handle persistence,
 //! replay tracking, and transport framing.
 //!
-//! The identity key signs the discovery-key bundle. The discovery key signs the signed-pre-key
-//! bundle. Initiators verify both responder signatures, use [`initiate`] and [`accept`] to create
+//! The identity key signs the public discovery key. The discovery key signs the public signed
+//! pre-key. Initiators verify both responder signatures, use [`initiate`] and [`accept`] to create
 //! the first [`RatchetState`], then use the ratchet to encrypt messages. X3DH includes a one-time
 //! pre-key when one is available. Sender identity material is revealed only after the sealed first
 //! message decrypts successfully.
@@ -73,7 +73,7 @@ pub use delivery_capability::{
     RecipientDeliveryCapability, RecipientDeliveryVerifier, generate_recipient_delivery_capability,
 };
 pub use discovery_key::{
-    DiscoveryKey, DiscoveryKeyBundle, generate_discovery_key,
+    DiscoveryKey, PublicDiscoveryKey, generate_discovery_key,
     generate_signed_prekey_for_discovery_key, verify_discovery_key_bundle,
     verify_discovery_to_identity_binding,
 };
@@ -86,16 +86,16 @@ pub use handshake::{
     initiator_identity_hint, initiator_identity_hint_with_associated_data,
 };
 pub use keys::{
-    IdentityKeyBundle, KeyBundleError, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair,
+    KeyBundleError, KeyPair, PublicIdentityKey, PublicKey, SharedSecret, Signature, SigningKeyPair,
     VerifyingKey, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
     verify_identity_key_bundle,
 };
-pub use one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
+pub use one_time_prekey::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 pub use sealed_frame::{
     SealedFrame, SealedFrameError, SealedFramePreKeyReference, open_frame,
     open_frame_for_discovery_key, open_frame_for_discovery_key_with_associated_data, seal_frame,
     seal_frame_with_associated_data,
 };
 pub use signed_prekey::{
-    SignedPreKey, SignedPreKeyBundle, generate_signed_prekey, verify_signed_prekey_bundle,
+    PublicSignedPreKey, SignedPreKey, generate_signed_prekey, verify_signed_prekey_bundle,
 };

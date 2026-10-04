@@ -141,11 +141,11 @@ fn contact_identities() -> (ContactIdentity, ContactIdentity) {
     (
         ContactIdentity {
             identity_key,
-            discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+            discovery_key: ContactDiscoveryKey::from(&discovery_key.public()),
         },
         ContactIdentity {
             identity_key,
-            discovery_key: ContactDiscoveryKey::from(&rotated_discovery_key.bundle()),
+            discovery_key: ContactDiscoveryKey::from(&rotated_discovery_key.public()),
         },
     )
 }
@@ -252,7 +252,7 @@ fn alternate_contact_identity() -> ContactIdentity {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
             ed25519_verifying_key: identity.verifying.to_bytes(),
         },
-        discovery_key: ContactDiscoveryKey::from(&discovery_key.bundle()),
+        discovery_key: ContactDiscoveryKey::from(&discovery_key.public()),
     }
 }
 

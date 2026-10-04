@@ -60,8 +60,8 @@ pub use protocol::{
     protocol_state_blob_digest,
 };
 pub use records::{
-    DiscoveryKeyBundle, Identity, InboxRotation, OneTimePreKeyBundle, PublicationBundle,
-    SignedPreKeyBundle,
+    Identity, InboxRotation, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
+    PublicationBundle,
 };
-pub use storage::{InMemorySecureStorage, SecureStorage};
+pub use storage::SecureStorage;
 pub use transport_binding::{PreKeySelection, TransportBinding};

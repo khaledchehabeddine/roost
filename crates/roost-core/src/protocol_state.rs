@@ -15,7 +15,7 @@ use crate::{Message, MessageError, MessageId, PayloadKind, TransportBinding};
 use rand::rngs::OsRng;
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    DiscoveryKey, DiscoveryKeyBundle, Header, IdentityKeyBundle, PublicKey, RatchetState,
+    DiscoveryKey, Header, PublicDiscoveryKey, PublicIdentityKey, PublicKey, RatchetState,
     RecipientDeliveryCapability, SenderIdentityMaterial, Signature, SigningKeyPair,
     open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
     verify_discovery_key_bundle, verify_identity_key_bundle,
@@ -1323,7 +1323,7 @@ impl ProtocolStateEngine {
                     reason: "recipient identity verifying key is not canonical".into(),
                 })?;
         verify_discovery_key_bundle(
-            &inbound.recipient_discovery_key.bundle(),
+            &inbound.recipient_discovery_key.public(),
             &recipient_identity_verifying_key,
         )
         .map_err(|_| ProtocolStateError::InvalidMessage {
@@ -1576,7 +1576,7 @@ impl ProtocolStateEngine {
                     reason: "recipient identity verifying key is not canonical".into(),
                 })?;
         verify_discovery_key_bundle(
-            &inbound.recipient_discovery_key.bundle(),
+            &inbound.recipient_discovery_key.public(),
             &recipient_identity_verifying_key,
         )
         .map_err(|_| ProtocolStateError::InvalidMessage {
@@ -3255,7 +3255,7 @@ fn validate_contact_identity_for_decode(
             reason: "contact identity key is invalid".into(),
         });
     }
-    let Some(bundle) = contact_discovery_key_bundle(&contact_identity.discovery_key) else {
+    let Some(bundle) = contact_public_discovery_key(&contact_identity.discovery_key) else {
         return Err(ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: "contact discovery key is invalid".into(),
@@ -3325,7 +3325,7 @@ fn validate_contact_identity(
     contact_identity: &ContactIdentity,
 ) -> Result<(), ProtocolStateError> {
     validate_contact_identity_key(address, &contact_identity.identity_key)?;
-    let Some(bundle) = contact_discovery_key_bundle(&contact_identity.discovery_key) else {
+    let Some(bundle) = contact_public_discovery_key(&contact_identity.discovery_key) else {
         return Err(ProtocolStateError::InvalidStateBinding {
             address: address.clone(),
             reason: "contact discovery key is invalid".into(),
@@ -3349,11 +3349,11 @@ fn contact_identity_key_is_valid(identity_key: &ContactIdentityKey) -> bool {
     identity_key_is_valid(identity_key)
 }
 
-fn contact_discovery_key_bundle(discovery_key: &ContactDiscoveryKey) -> Option<DiscoveryKeyBundle> {
+fn contact_public_discovery_key(discovery_key: &ContactDiscoveryKey) -> Option<PublicDiscoveryKey> {
     if !is_valid_x25519_public_key(&discovery_key.x25519_public_key) {
         return None;
     }
-    Some(DiscoveryKeyBundle {
+    Some(PublicDiscoveryKey {
         public_key: PublicKey::from(discovery_key.x25519_public_key),
         verifying_key: parse_ed25519_verifying_key_bytes(&discovery_key.ed25519_verifying_key)?,
         epoch: discovery_key.epoch,
@@ -3967,13 +3967,13 @@ fn validate_sender_identity(
     sender_identity: &SenderIdentityMaterial,
     limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
-    let bundle = IdentityKeyBundle::from_bytes(
+    let bundle = PublicIdentityKey::from_bytes(
         &sender_identity.identity_key,
         &sender_identity.identity_verifying_key,
         &sender_identity.identity_binding_signature,
     )
     .map_err(|_| ProtocolStateError::InvalidMessage {
-        reason: "sender identity key bundle encoding is invalid".into(),
+        reason: "sender public identity key encoding is invalid".into(),
     })?;
     verify_identity_key_bundle(&bundle).map_err(|_| ProtocolStateError::InvalidMessage {
         reason: "sender identity key binding signature failed".into(),

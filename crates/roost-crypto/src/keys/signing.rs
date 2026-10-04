@@ -77,7 +77,7 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
 mod tests {
     use super::*;
     use crate::{
-        IdentityKeyBundle, KeyBundleError, KeyPair, sign_identity_key_binding,
+        KeyBundleError, KeyPair, PublicIdentityKey, sign_identity_key_binding,
         verify_identity_key_bundle,
     };
     use ed25519_dalek::Verifier;
@@ -261,7 +261,7 @@ mod tests {
         let other_agreement_key = KeyPair::from_secret_bytes([0x45; 32]);
         let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
 
-        let tampered = IdentityKeyBundle {
+        let tampered = PublicIdentityKey {
             public_key: other_agreement_key.public,
             verifying_key: signing_key.verifying,
             binding_signature: signature,
@@ -281,7 +281,7 @@ mod tests {
         let agreement_key = KeyPair::from_secret_bytes([0x46; 32]);
         let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
 
-        let tampered = IdentityKeyBundle {
+        let tampered = PublicIdentityKey {
             public_key: agreement_key.public,
             verifying_key: other_signing_key.verifying,
             binding_signature: signature,

@@ -40,16 +40,6 @@ impl DevelopmentCertificateAuthority {
     /// Create one authority per local peer simulation and use it to issue every participating
     /// peer's certificate plus the validation input used by receivers.
     ///
-    /// # Examples
-    /// ```
-    /// use roost_client::DevelopmentCertificateAuthority;
-    ///
-    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
-    /// let validation = authority.sender_certificate_validation(1_700_000_000, 0);
-    /// assert_eq!(validation.domain_signing_keys.len(), 1);
-    /// # Ok::<(), roost_client::ClientError>(())
-    /// ```
-    ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if `signing_key_id` is empty or longer than 64
     ///   bytes.
@@ -67,25 +57,6 @@ impl DevelopmentCertificateAuthority {
     /// Callers should read both values from the same initialized [`Client`](crate::Client).
     /// The certificate expires at the caller-supplied Unix timestamp and is accepted only by
     /// validation input from this authority.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_client::{
-    ///     DevelopmentCertificateAuthority, InMemorySecureStorage, Client, SecureStorage,
-    /// };
-    /// use std::sync::Arc;
-    ///
-    /// let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-    /// let store = Client::new(storage);
-    /// let prepared = store.identity().prepare_generate_identity()?;
-    /// store.commit_operation(prepared.operation.id.clone())?;
-    /// store.finalize_operation(prepared.operation.id)?;
-    /// let identity = prepared.identity;
-    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
-    /// let issued = authority.issue(identity, 1_800_000_000)?;
-    /// assert_eq!(issued.signature.len(), 64);
-    /// # Ok::<(), roost_client::ClientError>(())
-    /// ```
     ///
     /// # Errors
     /// - [`ClientError::InvalidData`] if an identity or discovery public key is the wrong length,
@@ -124,16 +95,6 @@ impl DevelopmentCertificateAuthority {
     ///
     /// Revocation is explicitly available with an empty local-development set. The caller owns
     /// the reference timestamp and grace window just like the production validation API.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_client::DevelopmentCertificateAuthority;
-    ///
-    /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
-    /// let validation = authority.sender_certificate_validation(1_700_000_000_000, 30_000);
-    /// assert!(validation.revocation_state.available);
-    /// # Ok::<(), roost_client::ClientError>(())
-    /// ```
     pub fn sender_certificate_validation(
         &self,
         reference_time_millis: u64,
@@ -159,11 +120,12 @@ impl DevelopmentCertificateAuthority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Client, InMemorySecureStorage, validate_sender_certificate};
+    use crate::storage::MemoryStorage;
+    use crate::{Client, validate_sender_certificate};
 
     #[test]
     fn issued_record_validates_through_uniffi_records() {
-        let store = Client::new(Arc::new(InMemorySecureStorage::new()));
+        let store = Client::new(Arc::new(MemoryStorage::default()));
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
         let authority = DevelopmentCertificateAuthority::new(

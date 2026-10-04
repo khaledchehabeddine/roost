@@ -10,7 +10,7 @@ const SIGNATURE_LEN: usize = 64;
 
 /// Public Identity Key material plus the binding signature for its X25519 half.
 #[derive(Clone, Debug)]
-pub struct IdentityKeyBundle {
+pub struct PublicIdentityKey {
     /// X25519 public key agreement half.
     pub public_key: PublicKey,
     /// Ed25519 verifying key identity half.
@@ -19,8 +19,8 @@ pub struct IdentityKeyBundle {
     pub binding_signature: Signature,
 }
 
-impl IdentityKeyBundle {
-    /// Builds an Identity Key bundle from received boundary bytes.
+impl PublicIdentityKey {
+    /// Builds a public Identity Key from received boundary bytes.
     pub fn from_bytes(
         public_key: &[u8],
         verifying_key: &[u8],
@@ -69,7 +69,7 @@ pub fn sign_identity_key_binding(
 }
 
 /// Verifies that an IK Ed25519 key owns its X25519 public half.
-pub fn verify_identity_key_bundle(bundle: &IdentityKeyBundle) -> Result<(), KeyBundleError> {
+pub fn verify_identity_key_bundle(bundle: &PublicIdentityKey) -> Result<(), KeyBundleError> {
     if !is_valid_x25519_public_key(bundle.public_key.as_bytes()) {
         return Err(KeyBundleError::InvalidKeyEncoding);
     }

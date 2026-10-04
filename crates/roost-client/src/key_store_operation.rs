@@ -2,7 +2,7 @@
 
 use crate::client::{ContactBlock, SessionAcceptanceResult};
 use crate::error::ClientError;
-use crate::records::{Identity, InboxRotation, OneTimePreKeyBundle, SignedPreKeyBundle, fixed_16};
+use crate::records::{Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey, fixed_16};
 use roost_core::{
     KeyStoreOperation as CoreKeyStoreOperation, KeyStoreOperationId as CoreKeyStoreOperationId,
     KeyStoreOperationStatus as CoreKeyStoreOperationStatus,
@@ -15,17 +15,6 @@ use roost_core::{
 ///
 /// The digest is opaque host metadata returned by Core. A host persists the enclosing operation
 /// identifier with its transaction; Core validates this precondition during `commit_operation`.
-///
-/// # Examples
-/// ```
-/// use roost_client::SecureStoragePrecondition;
-///
-/// let precondition = SecureStoragePrecondition {
-///     key: "identity/current".into(),
-///     expected_value_digest: None,
-/// };
-/// assert_eq!(precondition.key, "identity/current");
-/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct SecureStoragePrecondition {
     /// Stable SecureStorage entry name.
@@ -51,17 +40,6 @@ impl SecureStoragePrecondition {
 ///
 /// Every returned operation must be finalized or aborted, including operations whose provisional
 /// payload reports that no mutation was needed.
-///
-/// # Examples
-/// ```
-/// use roost_client::KeyStoreOperation;
-///
-/// let operation = KeyStoreOperation {
-///     id: vec![7; 16],
-///     secure_storage_preconditions: Vec::new(),
-/// };
-/// assert_eq!(operation.id.len(), 16);
-/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct KeyStoreOperation {
     /// Opaque 16-byte identifier to persist with the host transaction.
@@ -87,14 +65,6 @@ impl KeyStoreOperation {
 ///
 /// Hosts use this phase together with their transaction record to decide whether startup recovery
 /// aborts an orphan or resumes finalization.
-///
-/// # Examples
-/// ```
-/// use roost_client::KeyStoreOperationStatus;
-///
-/// let status = KeyStoreOperationStatus::Committed;
-/// assert!(matches!(status, KeyStoreOperationStatus::Committed));
-/// ```
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum KeyStoreOperationStatus {
     /// Secret mutations are staged and may be committed or aborted.
@@ -125,20 +95,6 @@ impl KeyStoreOperationStatus {
 ///
 /// The host matches the identifier against its own durable transaction record before choosing
 /// `finalize_operation` or `abort_operation`.
-///
-/// # Examples
-/// ```
-/// use roost_client::{KeyStoreOperation, KeyStoreOperationStatus, UnfinishedKeyStoreOperation};
-///
-/// let unfinished = UnfinishedKeyStoreOperation {
-///     operation: KeyStoreOperation {
-///         id: vec![9; 16],
-///         secure_storage_preconditions: Vec::new(),
-///     },
-///     status: KeyStoreOperationStatus::Prepared,
-/// };
-/// assert_eq!(unfinished.operation.id, vec![9; 16]);
-/// ```
 #[derive(Clone, uniffi::Record)]
 pub struct UnfinishedKeyStoreOperation {
     /// Stable operation metadata.
@@ -160,18 +116,6 @@ impl UnfinishedKeyStoreOperation {
 ///
 /// Publish or persist the identity only in the host transaction associated with the operation
 /// identifier, then finalize the operation.
-///
-/// # Examples
-/// ```
-/// use roost_client::PreparedIdentityGeneration;
-///
-/// fn host_record(prepared: &PreparedIdentityGeneration) -> (&[u8], &[u8]) {
-///     (
-///         &prepared.operation.id,
-///         &prepared.identity.x25519_public_key,
-///     )
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedIdentityGeneration {
     /// Recoverable operation metadata.
@@ -184,36 +128,18 @@ pub struct PreparedIdentityGeneration {
 ///
 /// The public bundles may be queued for publication in the host transaction; their secret halves
 /// remain staged until finalization.
-///
-/// # Examples
-/// ```
-/// use roost_client::PreparedOneTimePreKeys;
-///
-/// fn publication_count(prepared: &PreparedOneTimePreKeys) -> usize {
-///     prepared.one_time_prekeys.len()
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedOneTimePreKeys {
     /// Recoverable operation metadata.
     pub operation: KeyStoreOperation,
-    /// Provisional public one-time-prekey bundles.
-    pub one_time_prekeys: Vec<OneTimePreKeyBundle>,
+    /// Provisional public one-time pre-keys.
+    pub one_time_prekeys: Vec<PublicOneTimePreKey>,
 }
 
 /// Carries a provisional inbox rotation and its recoverable operation.
 ///
 /// The host publishes the returned generation only with the transaction that records the operation
 /// identifier; Core keeps the previous generation authoritative until finalization.
-///
-/// # Examples
-/// ```
-/// use roost_client::PreparedInboxRotation;
-///
-/// fn provisional_epoch(prepared: &PreparedInboxRotation) -> u32 {
-///     prepared.rotation.publication.discovery_key.epoch
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedInboxRotation {
     /// Recoverable operation metadata.
@@ -226,36 +152,18 @@ pub struct PreparedInboxRotation {
 ///
 /// A `None` bundle represents a no-op staleness check, but its operation still requires finalize
 /// or abort so the journal can reach a terminal state.
-///
-/// # Examples
-/// ```
-/// use roost_client::PreparedSignedPreKeyRotation;
-///
-/// fn needs_publication(prepared: &PreparedSignedPreKeyRotation) -> bool {
-///     prepared.signed_prekey.is_some()
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedSignedPreKeyRotation {
     /// Recoverable operation metadata.
     pub operation: KeyStoreOperation,
     /// Provisional bundle, absent when a staleness check did not require rotation.
-    pub signed_prekey: Option<SignedPreKeyBundle>,
+    pub signed_prekey: Option<PublicSignedPreKey>,
 }
 
 /// Carries a provisional contact block and inbox rotation as one recoverable operation.
 ///
 /// Persist the contact update and operation identifier atomically before finalizing the staged
 /// SecureStorage rotation.
-///
-/// # Examples
-/// ```
-/// use roost_client::PreparedContactBlock;
-///
-/// fn rotates_inbox(prepared: &PreparedContactBlock) -> bool {
-///     prepared.block.rotation.is_some()
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedContactBlock {
     /// Recoverable operation metadata.
@@ -268,15 +176,6 @@ pub struct PreparedContactBlock {
 ///
 /// The host persists the Session updates, plaintext disposition, and operation identifier in one
 /// transaction before Core finalizes staged one-time-prekey consumption.
-///
-/// # Examples
-/// ```
-/// use roost_client::PreparedSessionAcceptance;
-///
-/// fn authenticated_plaintext(prepared: &PreparedSessionAcceptance) -> &[u8] {
-///     &prepared.acceptance.plaintext
-/// }
-/// ```
 #[derive(uniffi::Record)]
 pub struct PreparedSessionAcceptance {
     /// Recoverable operation metadata.

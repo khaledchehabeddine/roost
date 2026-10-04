@@ -15,7 +15,7 @@ use roost_core::{
     TransportBinding,
 };
 use roost_crypto::{
-    DiscoveryKey, IdentityKeyBundle, InitialPlaintext, KeyPair, PreKeyBundle, RatchetState,
+    DiscoveryKey, InitialPlaintext, KeyPair, PreKeyBundle, PublicIdentityKey, RatchetState,
     SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
     sign_identity_key_binding,
@@ -385,8 +385,8 @@ pub fn setup(seed: [u8; 32]) -> Setup {
     let mut rng = ChaCha20Rng::from_seed(seed);
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
-    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
-    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
+    let alice_identity_key = public_identity_key(&mut rng, &alice_identity);
+    let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
     let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT_SECS);
     let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS);
     let bob_signed_prekey =
@@ -395,9 +395,9 @@ pub fn setup(seed: [u8; 32]) -> Setup {
         generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT_SECS);
     let prekey_bundle = PreKeyBundle {
         version: roost_crypto::PREKEY_BUNDLE_VERSION,
-        discovery_key: bob_discovery.bundle(),
-        signed_prekey: bob_signed_prekey.bundle(),
-        one_time_prekey: Some(bob_one_time_prekey.bundle()),
+        discovery_key: bob_discovery.public(),
+        signed_prekey: bob_signed_prekey.public(),
+        one_time_prekey: Some(bob_one_time_prekey.public()),
     };
     let (alice_state, envelope) = initiate(
         &mut rng,
@@ -433,10 +433,10 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
     }
 }
 
-fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+fn public_identity_key(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> PublicIdentityKey {
     let agreement_key = generate_key_pair(rng);
     let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
-    IdentityKeyBundle {
+    PublicIdentityKey {
         public_key: agreement_key.public,
         verifying_key: signing_key.verifying,
         binding_signature,
@@ -461,7 +461,7 @@ fn contact_identity(tag: u8, signing_key: &SigningKeyPair, discovery_seed: u8) -
             ed25519_verifying_key: signing_key.verifying.to_bytes(),
         },
         discovery_key: ContactDiscoveryKey::from(
-            &discovery_key(signing_key, discovery_seed).bundle(),
+            &discovery_key(signing_key, discovery_seed).public(),
         ),
     }
 }
