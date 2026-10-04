@@ -45,7 +45,7 @@
   - Avoid: prekey reference
 - **PreKey State**: The stored secrets for an Identity's current Discovery Key and its prekeys.
   - Avoid: protocol state blob, prekey cache
-- **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app finalizes or aborts after committing its own state.
+- **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app reserves before committing its own state, then finalizes or aborts.
   - Avoid: database transaction, deferred write
 - **Protocol State Blob**: Opaque state, including secrets, that Roost produces and the app stores between operations.
   - Avoid: cache

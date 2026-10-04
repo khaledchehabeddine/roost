@@ -45,12 +45,15 @@ The v0.15.0 release record and notes are in
 
 ## Integrating
 
-Create one `Client` per identity with your `SecureStorage`. Rustdoc has each method's contract. The
-host must:
+Create one `IdentityContext` per identity namespace with your `SecureStorage`. Its documentation
+says what Roost and the host each own, and rustdoc has each method's contract. The host must:
 
 - Store Protocol State Blobs in an atomic, durable store, and protect them like identity keys.
 - Commit returned state updates together with their outbound Messages and acknowledgments, and
-  serialize each identity's operations across clients and processes.
+  serialize each identity's operations across contexts and processes.
+- Reserve each prepared key change before committing its operation ID, finalize it after the commit,
+  and abort it only when the commit definitely failed. After an unknown outcome or a restart,
+  resolve unfinished operations against its own records first.
 - Persist each Message's exact Transport Binding and reuse it for retries.
 - After restoring a backup, replace its Protocol State Blobs and rotate the inbox before publishing
   prekeys.
