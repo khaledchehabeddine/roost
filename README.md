@@ -44,8 +44,8 @@ consumer adoption follow the approved package prerequisite and mobile cutover ti
 
 ## Docs
 
-- [`CONTEXT_MAP.md`](CONTEXT_MAP.md) — workspace context paths and relationships
-- [`docs/adr/`](docs/adr/) — workspace-wide architectural decisions (per-crate decisions under `crates/<crate>/docs/adr/`)
+- [`GLOSSARY.md`](GLOSSARY.md) — domain terms and the words to avoid
+- [`docs/adr/`](docs/adr/) — architectural decisions
 - [`docs/building-mobile.md`](docs/building-mobile.md) — build, sign, and verify Android and iOS packages
 - [`docs/mobile-publication.md`](docs/mobile-publication.md) — release ordering, exact candidates and publication
 - [`docs/ci.md`](docs/ci.md) — Rust CI and native package checks
