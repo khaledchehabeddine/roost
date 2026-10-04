@@ -4,7 +4,7 @@
 //! associated data and the serialized header are authenticated with the ciphertext.
 
 use super::header::Header;
-use crate::error::CryptoError;
+use super::state::RatchetError;
 use crate::ratchet::MessageKey;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
@@ -19,7 +19,7 @@ pub(super) fn encrypt(
     associated_data: &[u8],
     header: &Header,
     message_key: &MessageKey,
-) -> Result<Vec<u8>, CryptoError> {
+) -> Result<Vec<u8>, RatchetError> {
     let (encryption_key, nonce) = expand_message_key(message_key)?;
     let cipher = XChaCha20Poly1305::new((&*encryption_key).into());
     let full_associated_data = build_associated_data(associated_data, header);
@@ -29,7 +29,7 @@ pub(super) fn encrypt(
     };
     cipher
         .encrypt(XNonce::from_slice(&nonce), payload)
-        .map_err(|_| CryptoError::Aead)
+        .map_err(|_| RatchetError::Aead)
 }
 
 pub(super) fn decrypt(
@@ -37,7 +37,7 @@ pub(super) fn decrypt(
     associated_data: &[u8],
     header: &Header,
     message_key: &MessageKey,
-) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+) -> Result<Zeroizing<Vec<u8>>, RatchetError> {
     let (encryption_key, nonce) = expand_message_key(message_key)?;
     let cipher = XChaCha20Poly1305::new((&*encryption_key).into());
     let full_associated_data = build_associated_data(associated_data, header);
@@ -48,17 +48,17 @@ pub(super) fn decrypt(
     cipher
         .decrypt(XNonce::from_slice(&nonce), payload)
         .map(Zeroizing::new)
-        .map_err(|_| CryptoError::Aead)
+        .map_err(|_| RatchetError::Aead)
 }
 
 fn expand_message_key(
     message_key: &MessageKey,
-) -> Result<(Zeroizing<[u8; 32]>, [u8; 24]), CryptoError> {
+) -> Result<(Zeroizing<[u8; 32]>, [u8; 24]), RatchetError> {
     // The message key is already pseudo-random from the chain KDF, so no salt is needed.
     let hkdf = Hkdf::<Sha256>::new(None, message_key.as_bytes());
     let mut output_key_material = Zeroizing::new([0u8; 56]);
     hkdf.expand(MESSAGE_KEY_HKDF_INFO, output_key_material.as_mut())
-        .map_err(|_| CryptoError::HkdfExpand)?;
+        .map_err(|_| RatchetError::HkdfExpand)?;
 
     let mut encryption_key = Zeroizing::new([0u8; 32]);
     let mut nonce = [0u8; 24];
@@ -112,7 +112,7 @@ mod tests {
     /// ```text
     /// HKDF-SHA256(
     ///   salt = None,
-    ///   ikm = message_key,
+    ///   input_keying_material = message_key,
     ///   info = MESSAGE_KEY_HKDF_INFO,
     ///   L = 56
     /// )

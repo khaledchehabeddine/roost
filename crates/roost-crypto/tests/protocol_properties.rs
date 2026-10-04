@@ -5,8 +5,8 @@ use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRu
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    CryptoError, DiscoveryKey, HandshakeEnvelope, Header, IdentityKeyBundle, InitialPlaintext,
-    OneTimePreKey, PreKeyBundle, RatchetState, SignedPreKey, SigningKeyPair, accept,
+    DiscoveryKey, HandshakeEnvelope, Header, IdentityKeyBundle, InitialPlaintext, OneTimePreKey,
+    PreKeyBundle, RatchetError, RatchetState, SignedPreKey, SigningKeyPair, accept,
     generate_discovery_key, generate_key_pair, generate_one_time_prekey,
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
     initiate, sign_identity_key_binding,
@@ -186,7 +186,7 @@ fn decrypt_batch_once(
         seen[index] = true;
 
         let replay = state.ratchet_decrypt(rng, ciphertext, header, associated_data);
-        prop_assert!(matches!(replay, Err(CryptoError::Aead)));
+        prop_assert!(matches!(replay, Err(RatchetError::Aead)));
     }
     prop_assert!(seen.iter().all(|delivered| *delivered));
     prop_assert_eq!(state.skipped_key_count(), 0);
@@ -313,7 +313,7 @@ fn per_chain_skip_overflow_rejects_without_advancing_state() {
         &associated_data,
     );
 
-    assert!(matches!(overflow, Err(CryptoError::MaxSkipExceeded)));
+    assert!(matches!(overflow, Err(RatchetError::MaxSkipExceeded)));
     assert_eq!(bob.skipped_key_count(), 0);
     let (first_header, first_ciphertext) = &messages[0];
     let first = bob
@@ -350,7 +350,7 @@ fn skipped_key_bound_enforcement_property() {
                 let before = bob.skipped_key_count();
                 let result = bob.ratchet_decrypt(&mut rng, ciphertext, header, &associated_data);
                 if before + gap > SKIPPED_KEY_CAP {
-                    prop_assert!(matches!(result, Err(CryptoError::MaxSkippedKeysExceeded)));
+                    prop_assert!(matches!(result, Err(RatchetError::MaxSkippedKeysExceeded)));
                     prop_assert_eq!(bob.skipped_key_count(), before);
                     let (plaintext, header, ciphertext) = retained.take().unwrap();
                     let decrypted = bob

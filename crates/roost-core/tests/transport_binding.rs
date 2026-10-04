@@ -8,7 +8,7 @@ use roost_core::{
     AcknowledgmentOutcome, InboundAcknowledgmentMessage, ProtocolStateEngine, ProtocolStateError,
     TransportBinding, TransportBindingError,
 };
-use roost_crypto::CryptoError;
+use roost_crypto::SealedFrameError;
 use support::{ProtocolFixture, accepted, acknowledgment_recipient_discovery_key};
 
 #[test]
@@ -77,7 +77,7 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
     };
     assert!(matches!(
         receive(&changed_binding),
-        Err(ProtocolStateError::Crypto(CryptoError::Aead))
+        Err(ProtocolStateError::SealedFrame(SealedFrameError::Aead))
     ));
     let received = accepted(receive(&message_binding).unwrap());
     fixture.bob_store.commit(received.state_updates).unwrap();
@@ -104,11 +104,11 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
     // Even the valid inbound binding must not authenticate the generated acknowledgment.
     assert!(matches!(
         process(&message_binding),
-        Err(ProtocolStateError::Crypto(CryptoError::Aead))
+        Err(ProtocolStateError::SealedFrame(SealedFrameError::Aead))
     ));
     assert!(matches!(
         process(&changed_binding),
-        Err(ProtocolStateError::Crypto(CryptoError::Aead))
+        Err(ProtocolStateError::SealedFrame(SealedFrameError::Aead))
     ));
     let AcknowledgmentOutcome::Cleared(cleared) = process(&acknowledgment_binding).unwrap() else {
         panic!("expected the pending Message to be acknowledged");

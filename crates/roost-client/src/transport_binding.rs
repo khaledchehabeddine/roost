@@ -44,24 +44,24 @@ impl TransportBinding {
 /// use roost_client::PreKeySelection;
 ///
 /// let selection = PreKeySelection {
-///     signed_prekey_identifier: 7,
-///     one_time_prekey_identifier: Some(42),
+///     signed_prekey_id: 7,
+///     one_time_prekey_id: Some(42),
 /// };
-/// assert_eq!(selection.one_time_prekey_identifier, Some(42));
+/// assert_eq!(selection.one_time_prekey_id, Some(42));
 /// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PreKeySelection {
     /// Identifier of the selected signed pre-key within one Discovery Key Epoch.
-    pub signed_prekey_identifier: u64,
+    pub signed_prekey_id: u64,
     /// Identifier of the selected one-time pre-key, when one was used.
-    pub one_time_prekey_identifier: Option<u64>,
+    pub one_time_prekey_id: Option<u64>,
 }
 
 impl PreKeySelection {
     pub(crate) fn to_core(self) -> CorePreKeySelection {
         CorePreKeySelection {
-            signed_prekey_identifier: self.signed_prekey_identifier,
-            one_time_prekey_identifier: self.one_time_prekey_identifier,
+            signed_prekey_id: self.signed_prekey_id,
+            one_time_prekey_id: self.one_time_prekey_id,
         }
     }
 }

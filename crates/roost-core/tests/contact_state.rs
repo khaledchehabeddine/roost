@@ -16,7 +16,7 @@ use roost_crypto::{
 };
 use roost_protocol::MessageId;
 
-const CREATED_AT: u64 = 1_700_000_000;
+const CREATED_AT_SECS: u64 = 1_700_000_000;
 
 struct Setup {
     sender_signing_key: SigningKeyPair,
@@ -32,10 +32,11 @@ fn setup() -> Setup {
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key_pair = generate_key_pair(&mut rng);
-    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT);
-    let bob_rotated_discovery = generate_discovery_key(&mut rng, &bob_identity, 1, CREATED_AT + 60);
+    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS);
+    let bob_rotated_discovery =
+        generate_discovery_key(&mut rng, &bob_identity, 1, CREATED_AT_SECS + 60);
     let bob_restored_discovery =
-        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT + 120);
+        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS + 120);
     let alice_identity_key_pair = generate_key_pair(&mut rng);
 
     Setup {
@@ -87,7 +88,7 @@ fn alternate_contact_identity() -> ContactIdentity {
     let mut rng = ChaCha20Rng::from_seed([0x31; 32]);
     let identity = generate_signing_key_pair(&mut rng);
     let identity_key_pair = generate_key_pair(&mut rng);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS);
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
@@ -123,7 +124,7 @@ fn outbound<'a>(
         sender_identity_signing_key: &setup.sender_signing_key,
         contact_identity_key: setup.bob_identity,
         recipient_public_key: setup.bob_discovery.prekey_bundle_lookup_key(),
-        timestamp_millis: 1_700_000_000_123,
+        sent_at_millis: 1_700_000_000_123,
         plaintext: b"hello contact",
     }
 }
@@ -916,7 +917,7 @@ fn contact_input_rejects_invalid_discovery_key_signature() {
     ));
 }
 
-/// A peer's delivery capability is a bearer secret they handed us for submission (AE-CON-05).
+/// A peer's delivery capability is a bearer secret they handed us for submission.
 /// It must survive a commit and read back exactly, since a wrong byte means the relay rejects
 /// every submission to that contact.
 #[test]
@@ -973,8 +974,7 @@ fn peer_inbox_authorization_is_absent_until_recorded() {
 }
 
 /// Replaying an older inbox-authorization update must not roll a contact back to a capability
-/// they have already rotated away from — which is exactly what a blocked sender would want
-/// (AE-BLK-08).
+/// they have already rotated away from — which is exactly what a blocked sender would want.
 #[test]
 fn peer_inbox_authorization_refuses_to_go_backwards() {
     let setup = setup();

@@ -15,24 +15,26 @@ use roost_core::{
     SessionUnrecoverableReason, SessionUnrecoverableResult,
 };
 use roost_crypto::{
-    CryptoError, DiscoveryKey, Header, KeyPair, PublicKey, RatchetState,
+    DiscoveryKey, Header, KeyPair, PublicKey, RatchetError, RatchetState, SealedFrameError,
     SealedFramePreKeyReference, SigningKeyPair, generate_discovery_key, generate_signing_key_pair,
     seal_frame_with_associated_data, sign_identity_key_binding,
 };
 use roost_protocol::{
     DomainSigningKey, DomainSigningKeyStatus, EvidenceProfile, EvidenceVerificationInput,
-    MAX_EVIDENCE_GRACE_WINDOW_SECS, MessageId, PayloadKind, RevocationState,
-    SenderCertificateIdentityKey, SenderCertificateValidationError, verify_evidence_bundle,
+    MAX_EVIDENCE_GRACE_WINDOW, MessageId, PayloadKind, RevocationState,
+    SenderCertificateIdentityKey, SenderCertificateValidationError, from_unix_millis,
+    from_unix_secs, verify_evidence_bundle,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use support::dead_session_blob;
 
-const CREATED_AT: u64 = 1_700_000_000;
+const CREATED_AT_SECS: u64 = 1_700_000_000;
 const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
 const TEST_RELAY_DOMAIN: &[u8] = b"relay.test";
 const CERTIFICATE_VERSION: u8 = 2;
 const CERTIFICATE_EXPIRES_AT: u64 = 1_700_100_000;
-const CERTIFICATE_REFERENCE_TIME: u64 = 1_700_000_000;
+const CERTIFICATE_REFERENCE_TIME_SECS: u64 = 1_700_000_000;
 
 #[derive(Deserialize, Serialize)]
 struct TestPendingAcknowledgmentsWire {
@@ -45,8 +47,8 @@ struct TestPendingAcknowledgmentsWire {
 struct TestPendingAcknowledgmentWire {
     message_id: [u8; 16],
     encoded_message: Vec<u8>,
-    first_sent_millis: u64,
-    last_retry_millis: Option<u64>,
+    first_sent_at_millis: u64,
+    last_retried_at_millis: Option<u64>,
 }
 
 fn setup() -> support::Setup {
@@ -130,8 +132,9 @@ fn contact_identities() -> (ContactIdentity, ContactIdentity) {
     let identity = test_sender_identity_signing_key(0xa1);
     let identity_key_pair = test_identity_key_pair(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
-    let rotated_discovery_key = generate_discovery_key(&mut rng, &identity, 1, CREATED_AT + 60);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS);
+    let rotated_discovery_key =
+        generate_discovery_key(&mut rng, &identity, 1, CREATED_AT_SECS + 60);
     let identity_key = ContactIdentityKey {
         x25519_public_key: *identity_key_pair.public.as_bytes(),
         ed25519_verifying_key: identity.verifying.to_bytes(),
@@ -155,7 +158,7 @@ fn accepted_contact_identity() -> ContactIdentity {
 fn accepted_contact_discovery_key() -> DiscoveryKey {
     let identity = test_sender_identity_signing_key(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    generate_discovery_key(&mut rng, &identity, 0, CREATED_AT)
+    generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS)
 }
 
 fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
@@ -172,7 +175,7 @@ fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
         &mut rng,
         &test_sender_identity_signing_key(0xa1),
         0,
-        CREATED_AT,
+        CREATED_AT_SECS,
     )
 }
 
@@ -183,7 +186,7 @@ fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
 struct ValidatedSender {
     contact: ContactIdentity,
     sender_identity: Sender,
-    domain_identifier: Vec<u8>,
+    domain_id: Vec<u8>,
     domain_verifying_key: Vec<u8>,
 }
 
@@ -197,7 +200,7 @@ impl ValidatedSender {
         status: DomainSigningKeyStatus,
     ) -> DomainSigningKey<'_> {
         DomainSigningKey {
-            identifier: &self.domain_identifier,
+            id: &self.domain_id,
             verifying_key: &self.domain_verifying_key,
             status,
         }
@@ -225,8 +228,8 @@ fn validated_sender_for_contact_expires_at(
 ) -> ValidatedSender {
     let mut rng = ChaCha20Rng::from_seed([0x90; 32]);
     let domain_signing_key = generate_signing_key_pair(&mut rng);
-    let domain_identifier = b"test-domain".to_vec();
-    let certificate = sender_certificate_bytes(&domain_identifier, contact, expires_at_secs);
+    let domain_id = b"test-domain".to_vec();
+    let certificate = sender_certificate_bytes(&domain_id, contact, expires_at_secs);
     let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
     ValidatedSender {
         contact,
@@ -235,7 +238,7 @@ fn validated_sender_for_contact_expires_at(
             certificate.clone(),
             signature.clone(),
         ),
-        domain_identifier,
+        domain_id,
         domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
     }
 }
@@ -244,7 +247,7 @@ fn alternate_contact_identity() -> ContactIdentity {
     let identity = test_sender_identity_signing_key(0x77);
     let identity_key_pair = test_identity_key_pair(0x77);
     let mut rng = ChaCha20Rng::from_seed([0x73; 32]);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS);
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
@@ -268,15 +271,15 @@ fn contact_with_unrelated_identity_key_and_sender_discovery() -> ContactIdentity
 }
 
 fn sender_certificate_bytes(
-    signing_key_identifier: &[u8],
+    signing_key_id: &[u8],
     contact: ContactIdentity,
     expires_at_secs: u64,
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(CERTIFICATE_DOMAIN_TAG);
     bytes.push(CERTIFICATE_VERSION);
-    bytes.push(signing_key_identifier.len() as u8);
-    bytes.extend_from_slice(signing_key_identifier);
+    bytes.push(signing_key_id.len() as u8);
+    bytes.extend_from_slice(signing_key_id);
     bytes.push(TEST_RELAY_DOMAIN.len() as u8);
     bytes.extend_from_slice(TEST_RELAY_DOMAIN);
     bytes.extend_from_slice(&contact.identity_key.x25519_public_key);
@@ -293,8 +296,8 @@ fn sender_certificate_validation<'a>(
         expected_relay_domain: TEST_RELAY_DOMAIN,
         domain_signing_keys,
         revocation_state,
-        reference_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
-        grace_window_secs: 0,
+        reference_time: from_unix_secs(CERTIFICATE_REFERENCE_TIME_SECS).unwrap(),
+        grace_window: Duration::ZERO,
     }
 }
 
@@ -434,7 +437,7 @@ fn outbound<'a>(id: u8, plaintext: &'a [u8], sender_identity: &'a Sender) -> Out
         sender_identity_signing_key: sender_identity_signing_key(sender_identity),
         contact_identity_key: contact.identity_key,
         recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-        timestamp_millis: 1_700_000_000_123 + u64::from(id),
+        sent_at_millis: 1_700_000_000_123 + u64::from(id),
         plaintext,
     }
 }
@@ -453,7 +456,7 @@ fn sequenced_outbound<'a>(
         sender_identity_signing_key: sender_identity_signing_key(sender_identity),
         contact_identity_key: contact.identity_key,
         recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-        timestamp_millis: 1_700_000_300_000 + u64::from(sequence),
+        sent_at_millis: 1_700_000_300_000 + u64::from(sequence),
         plaintext,
     }
 }
@@ -490,7 +493,7 @@ fn acknowledgment<'a>(id: u8, sender_identity: &'a Sender) -> OutboundAcknowledg
         sender_identity,
         sender_identity_signing_key: sender_identity_signing_key(sender_identity),
         recipient_public_key: *recipient.public_key().as_bytes(),
-        timestamp_millis: 1_700_000_100_000 + u64::from(id),
+        sent_at_millis: 1_700_000_100_000 + u64::from(id),
     }
 }
 
@@ -647,7 +650,7 @@ fn ratchet_associated_data(
 
 fn message_frame_plaintext(
     id: MessageId,
-    timestamp_millis: u64,
+    sent_at_millis: u64,
     payload_kind: PayloadKind,
     ratcheted_payload: &[u8],
 ) -> Vec<u8> {
@@ -657,7 +660,7 @@ fn message_frame_plaintext(
     struct Wire<'a> {
         version: u8,
         id: [u8; 16],
-        timestamp_millis: u64,
+        sent_at_millis: u64,
         payload_kind: u8,
         ratcheted_payload: &'a [u8],
     }
@@ -667,12 +670,11 @@ fn message_frame_plaintext(
         PayloadKind::Acknowledgment => 1,
         PayloadKind::KeyExchange => 2,
         PayloadKind::RatchetHeader => 3,
-        _ => panic!("unsupported test payload kind"),
     };
     postcard::to_stdvec(&Wire {
         version: 1,
         id: *id.as_bytes(),
-        timestamp_millis,
+        sent_at_millis,
         payload_kind,
         ratcheted_payload,
     })
@@ -753,7 +755,7 @@ fn sealed_sender_round_trip_hides_sender_identity_until_decrypt() {
                     ),
                     contact_identity_key: contact.identity_key,
                     recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-                    timestamp_millis: 1_700_000_000_888,
+                    sent_at_millis: 1_700_000_000_888,
                     plaintext: b"sealed sender",
                 }
             },
@@ -889,7 +891,7 @@ fn sealed_frame_hides_message_metadata_until_decrypt() {
         .unwrap();
 
     assert_eq!(decrypted.message_id, MessageId::from_bytes([0x42; 16]));
-    assert_eq!(decrypted.timestamp_millis, 1_700_000_000_123 + 0x42);
+    assert_eq!(decrypted.sent_at_millis, 1_700_000_000_123 + 0x42);
     assert_eq!(decrypted.payload_kind, PayloadKind::EncryptedText);
     assert_eq!(decrypted.plaintext.as_slice(), b"hidden metadata");
 }
@@ -1017,8 +1019,8 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     wire.pending.push(TestPendingAcknowledgmentWire {
         message_id: [0x44; 16],
         encoded_message: vec![0xaa],
-        first_sent_millis: 1_700_000_100_123,
-        last_retry_millis: None,
+        first_sent_at_millis: 1_700_000_100_123,
+        last_retried_at_millis: None,
     });
     let mut malformed_pending_blob = pending_blob[..2].to_vec();
     malformed_pending_blob.extend(postcard::to_stdvec(&wire).unwrap());
@@ -1130,7 +1132,7 @@ fn retry_instructions_are_windowed_and_persisted() {
                     sender_identity_signing_key: sender_identity_signing_key(&sender_identity),
                     contact_identity_key: contact.identity_key,
                     recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-                    timestamp_millis: sent_at,
+                    sent_at_millis: sent_at,
                     plaintext: b"retry later",
                 }
             },
@@ -1140,20 +1142,35 @@ fn retry_instructions_are_windowed_and_persisted() {
     snapshot.apply_all(encrypted.state_updates).unwrap();
 
     let early = engine
-        .retry_instructions(&snapshot, key.clone(), sent_at + 999, 1_000)
+        .retry_instructions(
+            &snapshot,
+            key.clone(),
+            from_unix_millis(sent_at + 999).unwrap(),
+            Duration::from_millis(1_000),
+        )
         .unwrap();
     assert!(early.instructions.is_empty());
     assert!(early.state_updates.is_empty());
 
     let due = engine
-        .retry_instructions(&snapshot, key.clone(), sent_at + 1_000, 1_000)
+        .retry_instructions(
+            &snapshot,
+            key.clone(),
+            from_unix_millis(sent_at + 1_000).unwrap(),
+            Duration::from_millis(1_000),
+        )
         .unwrap();
     assert_eq!(due.instructions.len(), 1);
     assert_eq!(due.instructions[0].message_id, encrypted.message_id);
     snapshot.apply_all(due.state_updates).unwrap();
 
     let repeated = ProtocolStateEngine::new()
-        .retry_instructions(&snapshot, key.clone(), sent_at + 1_000, 1_000)
+        .retry_instructions(
+            &snapshot,
+            key.clone(),
+            from_unix_millis(sent_at + 1_000).unwrap(),
+            Duration::from_millis(1_000),
+        )
         .unwrap();
     assert!(repeated.instructions.is_empty());
     assert!(repeated.state_updates.is_empty());
@@ -1878,8 +1895,8 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
     );
     assert!(matches!(
         overflow,
-        Err(ProtocolStateError::Crypto(
-            CryptoError::MaxSkippedKeysExceeded
+        Err(ProtocolStateError::Ratchet(
+            RatchetError::MaxSkippedKeysExceeded
         ))
     ));
 
@@ -1899,8 +1916,8 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
     );
     assert!(matches!(
         repeated,
-        Err(ProtocolStateError::Crypto(
-            CryptoError::MaxSkippedKeysExceeded
+        Err(ProtocolStateError::Ratchet(
+            RatchetError::MaxSkippedKeysExceeded
         ))
     ));
 }
@@ -2039,7 +2056,7 @@ fn transient_aead_failure_does_not_mark_session_unrecoverable() {
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         ),
-        Err(ProtocolStateError::Crypto(roost_crypto::CryptoError::Aead))
+        Err(ProtocolStateError::SealedFrame(SealedFrameError::Aead))
     ));
 
     let decrypted = engine
@@ -2167,7 +2184,7 @@ fn validated_receive_persists_contact_identity_key_into_session_update() {
             ),
             contact_identity_key: other_contact.identity_key,
             recipient_public_key: other_contact.discovery_key.prekey_bundle_lookup_key(),
-            timestamp_millis: 1_700_000_000_500,
+            sent_at_millis: 1_700_000_000_500,
             plaintext: b"wrong contact",
         },
         &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
@@ -2332,7 +2349,7 @@ fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
         accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS - 1,
+        CERTIFICATE_REFERENCE_TIME_SECS - MAX_EVIDENCE_GRACE_WINDOW.as_secs() - 1,
     );
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
@@ -2371,7 +2388,7 @@ fn blocked_message_retains_caller_owned_certificate_grace_without_evidence() {
         .sender_certificate_validation
         .as_mut()
         .unwrap()
-        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
+        .grace_window = MAX_EVIDENCE_GRACE_WINDOW + Duration::from_secs(1);
 
     let blocked = engine
         .decrypt_message_with_transport_bindings(
@@ -2878,7 +2895,7 @@ fn untrusted_signing_key_rejects_before_plaintext_is_surfaced() {
     assert!(matches!(
         result,
         Err(ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::UntrustedSigningKeyIdentifier
+            SenderCertificateValidationError::UntrustedSigningKeyId
         ))
     ));
 }
@@ -2891,7 +2908,7 @@ fn expired_certificate_rejects_before_plaintext_is_surfaced() {
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
         accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME - 1,
+        CERTIFICATE_REFERENCE_TIME_SECS - 1,
     );
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
@@ -2945,7 +2962,7 @@ fn unblocked_message_outside_evidence_grace_is_rejected() {
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
         accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS - 1,
+        CERTIFICATE_REFERENCE_TIME_SECS - MAX_EVIDENCE_GRACE_WINDOW.as_secs() - 1,
     );
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
@@ -2979,7 +2996,7 @@ fn unblocked_message_outside_evidence_grace_is_rejected() {
         .sender_certificate_validation
         .as_mut()
         .unwrap()
-        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS + 1;
+        .grace_window = MAX_EVIDENCE_GRACE_WINDOW + Duration::from_secs(1);
 
     let result = engine.decrypt_message_with_transport_bindings(
         &mut ChaCha20Rng::from_seed([0x5d; 32]),
@@ -3005,7 +3022,7 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact_expires_at(
         accepted_contact_identity(),
-        CERTIFICATE_REFERENCE_TIME - MAX_EVIDENCE_GRACE_WINDOW_SECS,
+        CERTIFICATE_REFERENCE_TIME_SECS - MAX_EVIDENCE_GRACE_WINDOW.as_secs(),
     );
     let domain_keys = [sender.domain_signing_key()];
     let revoked = [];
@@ -3039,7 +3056,7 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
         .sender_certificate_validation
         .as_mut()
         .unwrap()
-        .grace_window_secs = MAX_EVIDENCE_GRACE_WINDOW_SECS;
+        .grace_window = MAX_EVIDENCE_GRACE_WINDOW;
 
     let accepted = engine
         .decrypt_message_with_transport_bindings(
@@ -3056,8 +3073,8 @@ fn message_at_evidence_grace_boundary_returns_verifiable_bundle() {
         expected_profile: EvidenceProfile::MessageTranscriptV1,
         domain_signing_keys: &domain_keys,
         expected_relay_domain: TEST_RELAY_DOMAIN,
-        accepted_timestamp_secs: CERTIFICATE_REFERENCE_TIME,
-        grace_window_secs: MAX_EVIDENCE_GRACE_WINDOW_SECS,
+        accepted_at: from_unix_secs(CERTIFICATE_REFERENCE_TIME_SECS).unwrap(),
+        grace_window: MAX_EVIDENCE_GRACE_WINDOW,
     })
     .unwrap();
 
@@ -3491,7 +3508,7 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
         &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
-    assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+    assert!(matches!(result, Err(ProtocolStateError::Ratchet(_))));
 }
 
 #[test]
@@ -3689,7 +3706,7 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
                     ),
                     contact_identity_key: contact.identity_key,
                     recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
-                    timestamp_millis: 1_700_000_000_999,
+                    sent_at_millis: 1_700_000_000_999,
                     plaintext: b"wrong sender",
                 }
             },
@@ -3757,7 +3774,7 @@ fn tampered_ciphertext_exposes_no_sender_identity() {
         &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
-    assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+    assert!(matches!(result, Err(ProtocolStateError::SealedFrame(_))));
 }
 
 #[test]
@@ -3806,7 +3823,7 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
             &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
         );
-        assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+        assert!(matches!(result, Err(ProtocolStateError::SealedFrame(_))));
     }
 }
 
@@ -3851,7 +3868,7 @@ fn message_transcript_signature_rejects_session_key_transplant() {
         &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
-    assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+    assert!(matches!(result, Err(ProtocolStateError::Ratchet(_))));
 }
 
 #[test]
@@ -4028,7 +4045,7 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
         &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
     );
 
-    assert!(matches!(result, Err(ProtocolStateError::Crypto(_))));
+    assert!(matches!(result, Err(ProtocolStateError::Ratchet(_))));
 }
 
 #[test]

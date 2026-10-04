@@ -1,7 +1,8 @@
 //! Provides signed X25519 pre-keys for the X3DH handshake.
 
-use crate::error::CryptoError;
-use crate::keys::{SigningKeyPair, validate_x25519_public_key, verify_with_context};
+use crate::keys::{
+    KeyBundleError, SigningKeyPair, is_valid_x25519_public_key, verify_with_context,
+};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
@@ -26,7 +27,7 @@ pub struct SignedPreKey {
     #[zeroize(skip)]
     epoch: u32,
     #[zeroize(skip)]
-    created_at: u64,
+    created_at_secs: u64,
 }
 
 impl SignedPreKey {
@@ -41,7 +42,7 @@ impl SignedPreKey {
     }
 
     /// Returns the Ed25519 signature over
-    /// `public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()` under the signed
+    /// `public_key[32] || epoch.to_be_bytes() || created_at_secs.to_be_bytes()` under the signed
     /// pre-key signature context.
     pub fn signature(&self) -> &Signature {
         &self.signature
@@ -53,8 +54,8 @@ impl SignedPreKey {
     }
 
     /// Returns the Unix timestamp (seconds) when this signed pre-key was generated.
-    pub fn created_at(&self) -> u64 {
-        self.created_at
+    pub fn created_at_secs(&self) -> u64 {
+        self.created_at_secs
     }
 
     /// Performs an X25519 Diffie-Hellman exchange between this signed pre-key's secret and `peer`.
@@ -75,7 +76,7 @@ impl SignedPreKey {
         signature: [u8; 64],
         id: u64,
         epoch: u32,
-        created_at: u64,
+        created_at_secs: u64,
     ) -> Self {
         let secret_key = StaticSecret::from(secret);
         let public_key = PublicKey::from(&secret_key);
@@ -86,7 +87,7 @@ impl SignedPreKey {
             signature,
             id,
             epoch,
-            created_at,
+            created_at_secs,
         }
     }
 
@@ -97,7 +98,7 @@ impl SignedPreKey {
             signature: self.signature,
             id: self.id,
             epoch: self.epoch,
-            created_at: self.created_at,
+            created_at_secs: self.created_at_secs,
         }
     }
 }
@@ -111,7 +112,7 @@ pub struct SignedPreKeyBundle {
     /// X25519 public key used by the peer during handshake root-key derivation.
     pub public_key: PublicKey,
     /// Ed25519 signature over
-    /// `public_key[32] || epoch.to_be_bytes() || created_at.to_be_bytes()` under the signed
+    /// `public_key[32] || epoch.to_be_bytes() || created_at_secs.to_be_bytes()` under the signed
     /// pre-key signature context.
     pub signature: Signature,
     /// Stable unsigned identifier allocated within [`Self::epoch`].
@@ -122,7 +123,7 @@ pub struct SignedPreKeyBundle {
     /// Discovery-key epoch this signed pre-key was produced under.
     pub epoch: u32,
     /// Unix timestamp in seconds covered by [`Self::signature`].
-    pub created_at: u64,
+    pub created_at_secs: u64,
 }
 
 impl SignedPreKeyBundle {
@@ -131,32 +132,28 @@ impl SignedPreKeyBundle {
     /// This validates byte lengths only. Call [`verify_signed_prekey_bundle`] with the discovery
     /// verifying key to authenticate the public key, epoch, and creation time. The identifier is
     /// authenticated separately only when the host includes it in the initial Transport Binding.
-    ///
-    /// # Errors
-    /// - [`CryptoError::InvalidKeyEncoding`] when the public key or signature has the wrong
-    ///   length.
     pub fn from_bytes(
         public_key: &[u8],
         signature: &[u8],
         id: u64,
         epoch: u32,
-        created_at: u64,
-    ) -> Result<Self, CryptoError> {
+        created_at_secs: u64,
+    ) -> Result<Self, KeyBundleError> {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
-        if !validate_x25519_public_key(&public_key_bytes) {
-            return Err(CryptoError::InvalidKeyEncoding);
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+        if !is_valid_x25519_public_key(&public_key_bytes) {
+            return Err(KeyBundleError::InvalidKeyEncoding);
         }
         let signature_bytes: [u8; 64] = signature
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
         Ok(Self {
             public_key: PublicKey::from(public_key_bytes),
             signature: Signature::from_bytes(&signature_bytes),
             id,
             epoch,
-            created_at,
+            created_at_secs,
         })
     }
 }
@@ -172,11 +169,11 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     signing_key: &SigningKeyPair,
     id: u64,
     epoch: u32,
-    created_at: u64,
+    created_at_secs: u64,
 ) -> SignedPreKey {
     let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
-    let payload = signed_prekey_payload(&public_key, epoch, created_at);
+    let payload = signed_prekey_payload(&public_key, epoch, created_at_secs);
     let signature = signing_key
         .sign_with_context(SIGNED_PREKEY_CONTEXT, &payload)
         .expect("non-empty signed-pre-key signature context");
@@ -186,19 +183,16 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
         signature,
         id,
         epoch,
-        created_at,
+        created_at_secs,
     }
 }
 
 /// Verifies a signed pre-key bundle against the verifying key that signed it.
-///
-/// # Errors
-/// - [`CryptoError::SignatureInvalid`] when the signature does not validate.
 pub fn verify_signed_prekey_bundle(
     bundle: &SignedPreKeyBundle,
     signer_verifying_key: &VerifyingKey,
-) -> Result<(), CryptoError> {
-    let payload = signed_prekey_payload(&bundle.public_key, bundle.epoch, bundle.created_at);
+) -> Result<(), KeyBundleError> {
+    let payload = signed_prekey_payload(&bundle.public_key, bundle.epoch, bundle.created_at_secs);
     verify_with_context(
         signer_verifying_key,
         SIGNED_PREKEY_CONTEXT,
@@ -208,11 +202,11 @@ pub fn verify_signed_prekey_bundle(
     .map_err(Into::into)
 }
 
-fn signed_prekey_payload(public_key: &PublicKey, epoch: u32, created_at: u64) -> Vec<u8> {
+fn signed_prekey_payload(public_key: &PublicKey, epoch: u32, created_at_secs: u64) -> Vec<u8> {
     let mut payload = Vec::with_capacity(32 + 4 + 8);
     payload.extend_from_slice(public_key.as_bytes());
     payload.extend_from_slice(&epoch.to_be_bytes());
-    payload.extend_from_slice(&created_at.to_be_bytes());
+    payload.extend_from_slice(&created_at_secs.to_be_bytes());
     payload
 }
 
@@ -222,8 +216,9 @@ mod tests {
     use crate::keys::{generate_key_pair, generate_signing_key_pair};
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
+    use roost_protocol::SignatureError;
 
-    const FIXED_CREATED_AT: u64 = 1_700_000_000;
+    const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
     const FIXED_EPOCH: u32 = 7;
     const FIXED_ID: u64 = 11;
 
@@ -240,13 +235,13 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
         let mut signed = b"AetherSPK-v1:".to_vec();
         signed.extend_from_slice(bundle.public_key.as_bytes());
         signed.extend_from_slice(&FIXED_EPOCH.to_be_bytes());
-        signed.extend_from_slice(&FIXED_CREATED_AT.to_be_bytes());
+        signed.extend_from_slice(&FIXED_CREATED_AT_SECS.to_be_bytes());
         assert_eq!(bundle.signature, signing_key.sign(&signed));
         assert!(verify_signed_prekey_bundle(&bundle, &signing_key.verifying).is_ok());
     }
@@ -260,7 +255,7 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
         assert_eq!(
@@ -273,7 +268,7 @@ mod tests {
         );
         assert_eq!(bundle.id, signed_prekey.id());
         assert_eq!(bundle.epoch, signed_prekey.epoch());
-        assert_eq!(bundle.created_at, signed_prekey.created_at());
+        assert_eq!(bundle.created_at_secs, signed_prekey.created_at_secs());
     }
 
     #[test]
@@ -285,7 +280,7 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let mut bundle = signed_prekey.bundle();
         let mut public_key_bytes = *bundle.public_key.as_bytes();
@@ -293,7 +288,7 @@ mod tests {
         bundle.public_key = PublicKey::from(public_key_bytes);
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &signing_key.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -306,7 +301,7 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
         let mut signature_bytes = bundle.signature.to_bytes();
@@ -316,11 +311,11 @@ mod tests {
             signature: Signature::from_bytes(&signature_bytes),
             id: bundle.id,
             epoch: bundle.epoch,
-            created_at: bundle.created_at,
+            created_at_secs: bundle.created_at_secs,
         };
         assert!(matches!(
             verify_signed_prekey_bundle(&tampered, &signing_key.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -334,12 +329,12 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &wrong_signing_key.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -352,7 +347,7 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
         let tampered = SignedPreKeyBundle {
@@ -360,11 +355,11 @@ mod tests {
             signature: bundle.signature,
             id: bundle.id,
             epoch: bundle.epoch + 1,
-            created_at: bundle.created_at,
+            created_at_secs: bundle.created_at_secs,
         };
         assert!(matches!(
             verify_signed_prekey_bundle(&tampered, &signing_key.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -377,7 +372,7 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
         let tampered = SignedPreKeyBundle {
@@ -385,11 +380,11 @@ mod tests {
             signature: bundle.signature,
             id: bundle.id,
             epoch: bundle.epoch,
-            created_at: bundle.created_at + 1,
+            created_at_secs: bundle.created_at_secs + 1,
         };
         assert!(matches!(
             verify_signed_prekey_bundle(&tampered, &signing_key.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -404,11 +399,11 @@ mod tests {
             signature: bare_signature,
             id: FIXED_ID,
             epoch: FIXED_EPOCH,
-            created_at: FIXED_CREATED_AT,
+            created_at_secs: FIXED_CREATED_AT_SECS,
         };
         assert!(matches!(
             verify_signed_prekey_bundle(&bundle, &signing_key.verifying),
-            Err(CryptoError::SignatureInvalid)
+            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -421,7 +416,7 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let bundle = signed_prekey.bundle();
 
@@ -430,7 +425,7 @@ mod tests {
             &bundle.signature.to_bytes(),
             bundle.id,
             bundle.epoch,
-            bundle.created_at,
+            bundle.created_at_secs,
         )
         .unwrap();
 
@@ -438,7 +433,7 @@ mod tests {
         assert_eq!(parsed.signature.to_bytes(), bundle.signature.to_bytes());
         assert_eq!(parsed.id, bundle.id);
         assert_eq!(parsed.epoch, bundle.epoch);
-        assert_eq!(parsed.created_at, bundle.created_at);
+        assert_eq!(parsed.created_at_secs, bundle.created_at_secs);
     }
 
     #[test]
@@ -449,9 +444,9 @@ mod tests {
                 &[0u8; 64],
                 FIXED_ID,
                 FIXED_EPOCH,
-                FIXED_CREATED_AT,
+                FIXED_CREATED_AT_SECS,
             ),
-            Err(CryptoError::InvalidKeyEncoding)
+            Err(KeyBundleError::InvalidKeyEncoding)
         ));
         assert!(matches!(
             SignedPreKeyBundle::from_bytes(
@@ -459,9 +454,9 @@ mod tests {
                 &[0u8; 63],
                 FIXED_ID,
                 FIXED_EPOCH,
-                FIXED_CREATED_AT,
+                FIXED_CREATED_AT_SECS,
             ),
-            Err(CryptoError::InvalidKeyEncoding)
+            Err(KeyBundleError::InvalidKeyEncoding)
         ));
     }
 
@@ -474,14 +469,14 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
             original.id(),
             original.epoch(),
-            original.created_at(),
+            original.created_at_secs(),
         );
         assert_eq!(restored.public().as_bytes(), original.public().as_bytes());
         assert_eq!(
@@ -490,7 +485,7 @@ mod tests {
         );
         assert_eq!(restored.epoch(), original.epoch());
         assert_eq!(restored.id(), original.id());
-        assert_eq!(restored.created_at(), original.created_at());
+        assert_eq!(restored.created_at_secs(), original.created_at_secs());
         assert_eq!(*restored.to_secret_bytes(), *original.to_secret_bytes());
     }
 
@@ -503,14 +498,14 @@ mod tests {
             &signing_key,
             FIXED_ID,
             FIXED_EPOCH,
-            FIXED_CREATED_AT,
+            FIXED_CREATED_AT_SECS,
         );
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
             original.id(),
             original.epoch(),
-            original.created_at(),
+            original.created_at_secs(),
         );
         let peer = generate_key_pair(&mut rng);
         let original_shared_secret = original.diffie_hellman(&peer.public);

@@ -23,7 +23,7 @@ pub struct MessageEncryption<'a> {
     /// Recipient Discovery Key X25519 public bytes.
     pub recipient_public_key: [u8; 32],
     /// Sender-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Opaque sender certificate sealed into the Message.
     pub sender_certificate: &'a [u8],
     /// Opaque sender signature sealed into the Message.
@@ -47,7 +47,7 @@ pub struct MessageDecryption<'a> {
     /// Recipient Discovery Key X25519 public bytes for the produced acknowledgment.
     pub acknowledgment_recipient_public_key: [u8; 32],
     /// Receiver-observed Unix timestamp in milliseconds.
-    pub acknowledgment_timestamp_millis: u64,
+    pub acknowledgment_sent_at_millis: u64,
     /// Opaque receiver certificate sealed into the produced acknowledgment.
     pub acknowledgment_sender_certificate: &'a [u8],
     /// Opaque receiver signature sealed into the produced acknowledgment.
@@ -146,12 +146,6 @@ impl KeyStore {
     ///     Ok((result, binding))
     /// }
     /// ```
-    ///
-    /// # Errors
-    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
-    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if state loading, contact gating, encryption, or
-    ///   update encoding fails.
     pub fn encrypt_message_with_transport_binding(
         &self,
         input: MessageEncryption<'_>,
@@ -168,7 +162,7 @@ impl KeyStore {
             sender_identity_signing_key: identity.signing_key_pair(),
             contact_identity_key: input.contact_identity_key,
             recipient_public_key: input.recipient_public_key,
-            timestamp_millis: input.timestamp_millis,
+            sent_at_millis: input.sent_at_millis,
             plaintext: input.plaintext,
         };
         let engine = &self.0.engine;
@@ -183,14 +177,6 @@ impl KeyStore {
     /// Decrypts an established-session Message and authenticates its Transport Binding plus the
     /// binding used for the returned acknowledgment.
     /// The caller must retain `acknowledgment_transport_binding` with that acknowledgment.
-    ///
-    /// # Errors
-    /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
-    ///   malformed.
-    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
-    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if deduplication, decryption,
-    ///   sender-certificate validation, acknowledgment encryption, or update encoding fails.
     pub fn decrypt_message_with_transport_bindings(
         &self,
         input: MessageDecryption<'_>,
@@ -218,7 +204,7 @@ impl KeyStore {
                 sender_identity: &sender_identity,
                 sender_identity_signing_key: identity.signing_key_pair(),
                 recipient_public_key: input.acknowledgment_recipient_public_key,
-                timestamp_millis: input.acknowledgment_timestamp_millis,
+                sent_at_millis: input.acknowledgment_sent_at_millis,
             },
             sender_certificate_validation: input.sender_certificate_validation,
         };
@@ -233,14 +219,6 @@ impl KeyStore {
     }
 
     /// Processes an encrypted acknowledgment while authenticating its Transport Binding.
-    ///
-    /// # Errors
-    /// - [`MessageOperationError::Discovery`] if local Discovery Key material is missing or
-    ///   malformed.
-    /// - [`MessageOperationError::Identity`] if local Identity material is missing or malformed.
-    /// - [`MessageOperationError::Operation`] if a committed operation needs recovery.
-    /// - [`MessageOperationError::ProtocolState`] if state loading, decryption, or update encoding
-    ///   fails.
     pub fn process_acknowledgment_with_transport_binding(
         &self,
         input: AcknowledgmentProcessing<'_>,

@@ -14,7 +14,7 @@ development-certificates = []
 roost-crypto.workspace = true
 roost-protocol.workspace = true
 # Utility
-argon2 = "0.5.3"
+argon2.workspace = true
 blake3.workspace = true
 chacha20poly1305.workspace = true
 postcard.workspace = true

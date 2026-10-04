@@ -25,10 +25,6 @@ impl fmt::Display for SignatureError {
 impl Error for SignatureError {}
 
 /// Verifies a signature over caller-supplied `context || message` bytes.
-///
-/// # Errors
-/// - [`SignatureError::InvalidSignatureContext`] if the context is empty or the combined length overflows.
-/// - [`SignatureError::SignatureInvalid`] if the signature fails verification.
 pub fn verify_with_context(
     verifying_key: &VerifyingKey,
     context: &[u8],
@@ -46,9 +42,6 @@ pub fn verify_with_context(
 }
 
 /// Joins a non-empty domain context and message in zeroizing memory.
-///
-/// # Errors
-/// - [`SignatureError::InvalidSignatureContext`] if the context is empty or the combined length overflows.
 pub fn contextual_message(
     context: &[u8],
     message: &[u8],

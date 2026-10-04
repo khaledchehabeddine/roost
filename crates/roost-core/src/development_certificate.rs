@@ -6,7 +6,7 @@ use roost_protocol::{PUBLIC_KEY_LEN, SenderCertificateIdentityKey};
 use std::{error::Error, fmt};
 
 const MAX_RELAY_DOMAIN_LEN: usize = 255;
-const MAX_SIGNING_KEY_IDENTIFIER_LEN: usize = 64;
+const MAX_SIGNING_KEY_ID_LEN: usize = 64;
 
 /// An in-memory certificate authority for local development peers.
 ///
@@ -16,7 +16,7 @@ const MAX_SIGNING_KEY_IDENTIFIER_LEN: usize = 64;
 /// is available only with the `development-certificates` feature and must not back production
 /// sender identity.
 pub struct DevelopmentCertificateAuthority {
-    signing_key_identifier: Vec<u8>,
+    signing_key_id: Vec<u8>,
     relay_domain: Vec<u8>,
     signing_key: SigningKeyPair,
 }
@@ -33,7 +33,7 @@ pub struct DevelopmentSenderCertificate {
 #[derive(Debug, Eq, PartialEq)]
 pub enum DevelopmentCertificateError {
     /// The signing-key identifier is empty or exceeds the certificate format limit.
-    InvalidSigningKeyIdentifier,
+    InvalidSigningKeyId,
     /// The sender Identity Key is not canonically encoded.
     InvalidIdentityKey,
     /// The sender Discovery Key is not canonically encoded.
@@ -45,7 +45,7 @@ pub enum DevelopmentCertificateError {
 impl fmt::Display for DevelopmentCertificateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidSigningKeyIdentifier => {
+            Self::InvalidSigningKeyId => {
                 write!(
                     f,
                     "development certificate signing-key identifier is invalid"
@@ -70,37 +70,18 @@ impl DevelopmentCertificateAuthority {
     /// Constructs a process-local development certificate authority.
     ///
     /// The signing key is generated from the operating-system CSPRNG and zeroized on drop. Peers
-    /// must explicitly include [`Self::verifying_key`] under [`Self::signing_key_identifier`] in
+    /// must explicitly include [`Self::verifying_key`] under [`Self::signing_key_id`] in
     /// their validation input before certificates from this authority are accepted.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::DevelopmentCertificateAuthority;
-    ///
-    /// let authority = DevelopmentCertificateAuthority::new(
-    ///     b"local-loopback".to_vec(),
-    ///     b"relay.example".to_vec(),
-    /// )?;
-    /// assert_eq!(authority.verifying_key().len(), 32);
-    /// assert_eq!(authority.relay_domain(), b"relay.example");
-    /// # Ok::<(), roost_core::DevelopmentCertificateError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`DevelopmentCertificateError::InvalidSigningKeyIdentifier`] if the identifier is empty
-    ///   or exceeds the certificate format's 64-byte limit.
-    /// - [`DevelopmentCertificateError::InvalidRelayDomain`] if the relay domain is empty or
-    ///   longer than a single length byte can express.
     pub fn new(
-        signing_key_identifier: Vec<u8>,
+        signing_key_id: Vec<u8>,
         relay_domain: Vec<u8>,
     ) -> Result<Self, DevelopmentCertificateError> {
-        validate_development_signing_key_identifier(&signing_key_identifier)?;
+        validate_development_signing_key_id(&signing_key_id)?;
         if relay_domain.is_empty() || relay_domain.len() > MAX_RELAY_DOMAIN_LEN {
             return Err(DevelopmentCertificateError::InvalidRelayDomain);
         }
         Ok(Self {
-            signing_key_identifier,
+            signing_key_id,
             relay_domain,
             signing_key: generate_signing_key_pair(&mut OsRng),
         })
@@ -108,8 +89,8 @@ impl DevelopmentCertificateAuthority {
 
     /// Returns the identifier embedded in every certificate from this authority.
     #[must_use]
-    pub fn signing_key_identifier(&self) -> &[u8] {
-        &self.signing_key_identifier
+    pub fn signing_key_id(&self) -> &[u8] {
+        &self.signing_key_id
     }
 
     /// Returns the relay domain every certificate from this authority names.
@@ -132,39 +113,13 @@ impl DevelopmentCertificateAuthority {
     /// The returned bytes use the production certificate encoding and signature verification path,
     /// naming this authority's relay domain. This method does not validate the Identity Key binding
     /// signature; callers must obtain the key from an already initialized keystore.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{DevelopmentCertificateAuthority};
-    /// use roost_protocol::{SenderCertificateIdentityKey};
-    ///
-    /// # use roost_crypto::{generate_key_pair, generate_signing_key_pair};
-    /// # use rand::rngs::OsRng;
-    /// # let identity_agreement = generate_key_pair(&mut OsRng);
-    /// # let identity_signing = generate_signing_key_pair(&mut OsRng);
-    /// # let identity = SenderCertificateIdentityKey {
-    /// #     x25519_public_key: *identity_agreement.public.as_bytes(),
-    /// #     ed25519_verifying_key: identity_signing.verifying.to_bytes(),
-    /// # };
-    /// let authority = DevelopmentCertificateAuthority::new(
-    ///     b"local-loopback".to_vec(),
-    ///     b"relay.example".to_vec(),
-    /// )?;
-    /// let issued = authority.issue(identity, 1_800_000_000)?;
-    /// assert_eq!(issued.signature.len(), 64);
-    /// # Ok::<(), roost_core::DevelopmentCertificateError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`DevelopmentCertificateError::InvalidIdentityKey`] if either Identity Key public key is
-    ///   not canonically encoded.
     pub fn issue(
         &self,
         identity_key: SenderCertificateIdentityKey,
         expires_at_secs: u64,
     ) -> Result<DevelopmentSenderCertificate, DevelopmentCertificateError> {
         let certificate = roost_protocol::encode_sender_certificate(
-            &self.signing_key_identifier,
+            &self.signing_key_id,
             &self.relay_domain,
             identity_key,
             expires_at_secs,
@@ -179,11 +134,9 @@ impl DevelopmentCertificateAuthority {
     }
 }
 
-fn validate_development_signing_key_identifier(
-    identifier: &[u8],
-) -> Result<(), DevelopmentCertificateError> {
-    if identifier.is_empty() || identifier.len() > MAX_SIGNING_KEY_IDENTIFIER_LEN {
-        Err(DevelopmentCertificateError::InvalidSigningKeyIdentifier)
+fn validate_development_signing_key_id(id: &[u8]) -> Result<(), DevelopmentCertificateError> {
+    if id.is_empty() || id.len() > MAX_SIGNING_KEY_ID_LEN {
+        Err(DevelopmentCertificateError::InvalidSigningKeyId)
     } else {
         Ok(())
     }
@@ -192,12 +145,14 @@ fn validate_development_signing_key_identifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use roost_protocol::from_unix_secs;
     use roost_protocol::{
         DomainSigningKey, DomainSigningKeyStatus, RevocationState,
         SenderCertificateValidationError, SenderCertificateValidationInput,
         validate_sender_certificate,
     };
-    const PRIMARY_IDENTIFIER: &[u8] = b"primary";
+    use std::time::Duration;
+    const PRIMARY_ID: &[u8] = b"primary";
     const OTHER_RELAY_DOMAIN: &[u8] = b"other.example";
     const RELAY_DOMAIN: &[u8] = b"relay.example";
     const NOW_SECS: u64 = 1_700_000_000;
@@ -209,27 +164,22 @@ mod tests {
                 .to_bytes(),
         }
     }
-    fn trusted_key<'a>(identifier: &'a [u8], verifying_key: &'a [u8]) -> DomainSigningKey<'a> {
+    fn trusted_key<'a>(id: &'a [u8], verifying_key: &'a [u8]) -> DomainSigningKey<'a> {
         DomainSigningKey {
-            identifier,
+            id,
             verifying_key,
             status: DomainSigningKeyStatus::Trusted,
         }
     }
     #[test]
     fn development_authority_issues_through_production_validation_path() {
-        let authority = DevelopmentCertificateAuthority::new(
-            PRIMARY_IDENTIFIER.to_vec(),
-            RELAY_DOMAIN.to_vec(),
-        )
-        .unwrap();
+        let authority =
+            DevelopmentCertificateAuthority::new(PRIMARY_ID.to_vec(), RELAY_DOMAIN.to_vec())
+                .unwrap();
         let identity_key = identity_key();
         let issued = authority.issue(identity_key, NOW_SECS + 300).unwrap();
         let verifying_key = authority.verifying_key();
-        let domain_keys = [trusted_key(
-            authority.signing_key_identifier(),
-            &verifying_key,
-        )];
+        let domain_keys = [trusted_key(authority.signing_key_id(), &verifying_key)];
 
         let validated = validate_sender_certificate(SenderCertificateValidationInput {
             certificate: &issued.certificate,
@@ -237,8 +187,8 @@ mod tests {
             domain_signing_keys: &domain_keys,
             expected_relay_domain: authority.relay_domain(),
             revocation_state: RevocationState::Available(&[]),
-            reference_timestamp_secs: NOW_SECS,
-            grace_window_secs: 0,
+            reference_time: from_unix_secs(NOW_SECS).unwrap(),
+            grace_window: Duration::ZERO,
         })
         .unwrap();
 
@@ -249,17 +199,12 @@ mod tests {
     /// An authority speaks for one relay, so a certificate it issues must not validate at another.
     #[test]
     fn development_authority_certificate_is_scoped_to_its_relay() {
-        let authority = DevelopmentCertificateAuthority::new(
-            PRIMARY_IDENTIFIER.to_vec(),
-            RELAY_DOMAIN.to_vec(),
-        )
-        .unwrap();
+        let authority =
+            DevelopmentCertificateAuthority::new(PRIMARY_ID.to_vec(), RELAY_DOMAIN.to_vec())
+                .unwrap();
         let issued = authority.issue(identity_key(), NOW_SECS + 300).unwrap();
         let verifying_key = authority.verifying_key();
-        let domain_keys = [trusted_key(
-            authority.signing_key_identifier(),
-            &verifying_key,
-        )];
+        let domain_keys = [trusted_key(authority.signing_key_id(), &verifying_key)];
 
         let result = validate_sender_certificate(SenderCertificateValidationInput {
             certificate: &issued.certificate,
@@ -267,8 +212,8 @@ mod tests {
             domain_signing_keys: &domain_keys,
             expected_relay_domain: OTHER_RELAY_DOMAIN,
             revocation_state: RevocationState::Available(&[]),
-            reference_timestamp_secs: NOW_SECS,
-            grace_window_secs: 0,
+            reference_time: from_unix_secs(NOW_SECS).unwrap(),
+            grace_window: Duration::ZERO,
         });
 
         assert_eq!(
@@ -278,20 +223,20 @@ mod tests {
     }
 
     #[test]
-    fn development_authority_rejects_invalid_identifier() {
+    fn development_authority_rejects_invalid_id() {
         assert!(matches!(
             DevelopmentCertificateAuthority::new(Vec::new(), RELAY_DOMAIN.to_vec()),
-            Err(DevelopmentCertificateError::InvalidSigningKeyIdentifier)
+            Err(DevelopmentCertificateError::InvalidSigningKeyId)
         ));
         assert!(matches!(
             DevelopmentCertificateAuthority::new(
-                vec![0; MAX_SIGNING_KEY_IDENTIFIER_LEN + 1],
+                vec![0; MAX_SIGNING_KEY_ID_LEN + 1],
                 RELAY_DOMAIN.to_vec()
             ),
-            Err(DevelopmentCertificateError::InvalidSigningKeyIdentifier)
+            Err(DevelopmentCertificateError::InvalidSigningKeyId)
         ));
         assert!(matches!(
-            DevelopmentCertificateAuthority::new(PRIMARY_IDENTIFIER.to_vec(), Vec::new()),
+            DevelopmentCertificateAuthority::new(PRIMARY_ID.to_vec(), Vec::new()),
             Err(DevelopmentCertificateError::InvalidRelayDomain)
         ));
     }

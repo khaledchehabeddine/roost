@@ -1,17 +1,15 @@
-use crate::clock::Clock;
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
 use crate::prekey_state::INBOX_ROTATION_REQUIRED_MARKER;
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{SignedPreKey, SignedPreKeyBundle, generate_signed_prekey_for_discovery_key};
+use roost_protocol::{from_unix_secs, to_unix_secs};
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
-
-pub(crate) const SIGNED_PREKEY_ROTATION_WINDOW_DAYS: u64 = 7;
-pub(crate) const SIGNED_PREKEY_RETENTION_WINDOW_DAYS: u64 = 30;
 
 const SIGNED_PREKEY_KEY: &str = "prekey/signed";
 const SIGNED_PREKEY_VERSION_V1: u8 = 1;
@@ -33,12 +31,10 @@ const RETAINED_SIGNED_PREKEY_RECORD_LEN: usize = SIGNED_PREKEY_RECORD_LEN + 8;
 const SIGNED_PREKEY_V4_HEADER_LEN: usize = 1 + 8 + SIGNED_PREKEY_RECORD_LEN + 1;
 const MAX_RETAINED_SIGNED_PREKEYS: usize = 5;
 const SECONDS_PER_DAY: u64 = 86_400;
-const SIGNED_PREKEY_ROTATION_WINDOW_SECS: u64 =
-    SIGNED_PREKEY_ROTATION_WINDOW_DAYS * SECONDS_PER_DAY;
-const SIGNED_PREKEY_RETENTION_WINDOW_SECS: u64 =
-    SIGNED_PREKEY_RETENTION_WINDOW_DAYS * SECONDS_PER_DAY;
-// Rotate far-future timestamps so clock manipulation cannot freeze rotation forever.
-const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = 30 * SECONDS_PER_DAY;
+const SIGNED_PREKEY_ROTATION_WINDOW: Duration = Duration::from_secs(7 * SECONDS_PER_DAY);
+const SIGNED_PREKEY_RETENTION_WINDOW: Duration = Duration::from_secs(30 * SECONDS_PER_DAY);
+// Treat far-future timestamps as expired so clock manipulation cannot freeze rotation forever.
+const FUTURE_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(30 * SECONDS_PER_DAY);
 
 /// Errors returned by signed-pre-key operations.
 #[derive(Debug)]
@@ -127,39 +123,35 @@ struct StoredSignedPreKeys {
 struct RetainedSignedPreKey {
     prekey: SignedPreKey,
     #[zeroize(skip)]
-    superseded_at: u64,
+    superseded_at_secs: u64,
 }
 
 // Manages signed-pre-key generation, rotation, and persistence.
 pub(crate) struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     discovery: Arc<DiscoveryKeyManager>,
-    clock: Arc<dyn Clock>,
 }
 
 impl SignedPreKeyManager {
     pub(crate) fn new(
         storage: Arc<Mutex<Box<dyn SecureStorage>>>,
         discovery: Arc<DiscoveryKeyManager>,
-        clock: Arc<dyn Clock>,
     ) -> Self {
-        SignedPreKeyManager {
-            storage,
-            discovery,
-            clock,
-        }
+        SignedPreKeyManager { storage, discovery }
     }
 
-    // Loads the secret signed pre-key from storage.
-    pub(crate) fn current(&self) -> Result<SignedPreKey, SignedPreKeyError> {
-        let now = self.now_secs()?;
+    // Loads the secret signed pre-key from storage, pruning retained keys expired at `now`.
+    pub(crate) fn current(&self, now: SystemTime) -> Result<SignedPreKey, SignedPreKeyError> {
         let store = self.load_store(now)?;
         Ok(store.current.clone_for_storage())
     }
 
     // Returns the signed-pre-key bundle to distribute to peers.
-    pub(crate) fn current_bundle(&self) -> Result<SignedPreKeyBundle, SignedPreKeyError> {
-        Ok(self.current()?.bundle())
+    pub(crate) fn current_bundle(
+        &self,
+        now: SystemTime,
+    ) -> Result<SignedPreKeyBundle, SignedPreKeyError> {
+        Ok(self.current(now)?.bundle())
     }
 
     pub(crate) fn prekey_for_reference(
@@ -167,8 +159,8 @@ impl SignedPreKeyManager {
         epoch: u32,
         id: u64,
         public_key: &[u8; 32],
+        now: SystemTime,
     ) -> Result<SignedPreKey, SignedPreKeyError> {
-        let now = self.now_secs()?;
         let store = self.load_store(now)?;
         matching_prekey(&store.current, epoch, id, public_key)
             .or_else(|| {
@@ -185,18 +177,17 @@ impl SignedPreKeyManager {
     pub(crate) fn rotate_if_stale<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
+        now: SystemTime,
     ) -> Result<Option<SignedPreKey>, SignedPreKeyError> {
-        let now = self.now_secs()?;
-        let needs_rotation = match self.read_stored_created_at(now)? {
-            None => true,
-            Some(timestamp) if timestamp > now.saturating_add(FUTURE_TIMESTAMP_TOLERANCE_SECS) => {
-                true
-            }
-            Some(timestamp) if timestamp > now => false,
-            Some(timestamp) => now - timestamp >= SIGNED_PREKEY_ROTATION_WINDOW_SECS,
-        };
+        let needs_rotation = self.load_store_optional(now)?.is_none_or(|store| {
+            is_expired(
+                store.current.created_at_secs(),
+                now,
+                SIGNED_PREKEY_ROTATION_WINDOW,
+            )
+        });
         if needs_rotation {
-            Ok(Some(self.rotate_now_at(rng, now)?))
+            Ok(Some(self.rotate_now(rng, now)?))
         } else {
             Ok(None)
         }
@@ -217,16 +208,9 @@ impl SignedPreKeyManager {
     pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
+        now: SystemTime,
     ) -> Result<SignedPreKey, SignedPreKeyError> {
-        let now = self.now_secs()?;
-        self.rotate_now_at(rng, now)
-    }
-
-    fn rotate_now_at<R: RngCore + CryptoRng>(
-        &self,
-        rng: &mut R,
-        now: u64,
-    ) -> Result<SignedPreKey, SignedPreKeyError> {
+        let now_secs = to_unix_secs(now).ok_or(SignedPreKeyError::Clock)?;
         let discovery_key = self.discovery.current()?;
         let previous = self.load_store_optional(now)?;
         let same_epoch = previous
@@ -240,7 +224,7 @@ impl SignedPreKeyManager {
             SignedPreKeyError::InvalidData("signed pre-key identifier space exhausted".into())
         })?;
         let signed_prekey =
-            generate_signed_prekey_for_discovery_key(rng, &discovery_key, next_id, now);
+            generate_signed_prekey_for_discovery_key(rng, &discovery_key, next_id, now_secs);
         let mut retained = Vec::new();
         if let Some(mut store) = previous.filter(|_| same_epoch) {
             retained = std::mem::take(&mut store.retained);
@@ -251,7 +235,7 @@ impl SignedPreKeyManager {
             }
             retained.push(RetainedSignedPreKey {
                 prekey: store.current.clone_for_storage(),
-                superseded_at: now,
+                superseded_at_secs: now_secs,
             });
         }
         let blob = encode_signed_prekey_store(&StoredSignedPreKeys {
@@ -264,14 +248,14 @@ impl SignedPreKeyManager {
         Ok(signed_prekey)
     }
 
-    fn load_store(&self, now: u64) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
+    fn load_store(&self, now: SystemTime) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
         self.load_store_optional(now)?
             .ok_or(SignedPreKeyError::NotFound)
     }
 
     fn load_store_optional(
         &self,
-        now: u64,
+        now: SystemTime,
     ) -> Result<Option<StoredSignedPreKeys>, SignedPreKeyError> {
         let mut storage = self.lock_storage()?;
         let Some(raw) = storage.load(SIGNED_PREKEY_KEY)? else {
@@ -280,9 +264,13 @@ impl SignedPreKeyManager {
         let is_legacy = raw.first().copied() != Some(SIGNED_PREKEY_VERSION);
         let mut store = decode_signed_prekey_store(&raw)?;
         let retained_count = store.retained.len();
-        store
-            .retained
-            .retain(|retained| !retained_prekey_expired(retained, now));
+        store.retained.retain(|retained| {
+            !is_expired(
+                retained.superseded_at_secs,
+                now,
+                SIGNED_PREKEY_RETENTION_WINDOW,
+            )
+        });
         if is_legacy || retained_count != store.retained.len() {
             let blob = encode_signed_prekey_store(&store);
             storage.store(SIGNED_PREKEY_KEY, &blob)?;
@@ -290,22 +278,10 @@ impl SignedPreKeyManager {
         Ok(Some(store))
     }
 
-    fn read_stored_created_at(&self, now: u64) -> Result<Option<u64>, SignedPreKeyError> {
-        Ok(self
-            .load_store_optional(now)?
-            .map(|store| store.current.created_at()))
-    }
-
     fn lock_storage(&self) -> Result<MutexGuard<'_, Box<dyn SecureStorage>>, SignedPreKeyError> {
         self.storage
             .lock()
             .map_err(|_| SignedPreKeyError::LockPoisoned)
-    }
-
-    fn now_secs(&self) -> Result<u64, SignedPreKeyError> {
-        self.clock
-            .now_unix_secs()
-            .map_err(|_| SignedPreKeyError::Clock)
     }
 }
 
@@ -320,7 +296,7 @@ impl CloneForSignedPreKeyStorage for SignedPreKey {
             self.signature().to_bytes(),
             self.id(),
             self.epoch(),
-            self.created_at(),
+            self.created_at_secs(),
         )
     }
 }
@@ -338,11 +314,16 @@ fn matching_prekey(
     (matches_epoch && matches_id && matches_public_key).then(|| prekey.clone_for_storage())
 }
 
-fn retained_prekey_expired(retained: &RetainedSignedPreKey, now: u64) -> bool {
-    if retained.superseded_at > now.saturating_add(FUTURE_TIMESTAMP_TOLERANCE_SECS) {
+// Returns whether a stored Unix-seconds timestamp is at least `window` old at `now`. Timestamps
+// more than `FUTURE_TIMESTAMP_TOLERANCE` ahead also count as expired.
+fn is_expired(timestamp_secs: u64, now: SystemTime, window: Duration) -> bool {
+    let Some(timestamp) = from_unix_secs(timestamp_secs) else {
         return true;
+    };
+    match now.duration_since(timestamp) {
+        Ok(age) => age >= window,
+        Err(ahead) => ahead.duration() > FUTURE_TIMESTAMP_TOLERANCE,
     }
-    now.saturating_sub(retained.superseded_at) >= SIGNED_PREKEY_RETENTION_WINDOW_SECS
 }
 
 fn encode_signed_prekey_store(store: &StoredSignedPreKeys) -> Zeroizing<Vec<u8>> {
@@ -355,7 +336,7 @@ fn encode_signed_prekey_store(store: &StoredSignedPreKeys) -> Zeroizing<Vec<u8>>
     blob.push(store.retained.len() as u8);
     for retained in &store.retained {
         encode_signed_prekey_record(&mut blob, &retained.prekey);
-        blob.extend_from_slice(&retained.superseded_at.to_be_bytes());
+        blob.extend_from_slice(&retained.superseded_at_secs.to_be_bytes());
     }
     blob
 }
@@ -374,7 +355,7 @@ fn encode_signed_prekey_record(blob: &mut Vec<u8>, signed_prekey: &SignedPreKey)
     blob.extend_from_slice(&*signed_prekey.to_secret_bytes());
     blob.extend_from_slice(&signed_prekey.signature().to_bytes());
     blob.extend_from_slice(&signed_prekey.epoch().to_be_bytes());
-    blob.extend_from_slice(&signed_prekey.created_at().to_be_bytes());
+    blob.extend_from_slice(&signed_prekey.created_at_secs().to_be_bytes());
 }
 
 fn decode_signed_prekey_record(record: &[u8]) -> SignedPreKey {
@@ -390,11 +371,11 @@ fn decode_legacy_signed_prekey_record(record: &[u8], id: u64) -> SignedPreKey {
     signature.copy_from_slice(&record[32..96]);
     let mut epoch_bytes = [0u8; 4];
     epoch_bytes.copy_from_slice(&record[96..100]);
-    let mut timestamp_bytes = [0u8; 8];
-    timestamp_bytes.copy_from_slice(&record[100..LEGACY_SIGNED_PREKEY_RECORD_LEN]);
+    let mut created_at_bytes = [0u8; 8];
+    created_at_bytes.copy_from_slice(&record[100..LEGACY_SIGNED_PREKEY_RECORD_LEN]);
     let epoch = u32::from_be_bytes(epoch_bytes);
-    let created_at = u64::from_be_bytes(timestamp_bytes);
-    SignedPreKey::from_secret_bytes(secret, signature, id, epoch, created_at)
+    let created_at_secs = u64::from_be_bytes(created_at_bytes);
+    SignedPreKey::from_secret_bytes(secret, signature, id, epoch, created_at_secs)
 }
 
 fn decode_signed_prekey_store(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
@@ -453,7 +434,7 @@ fn decode_signed_prekey_store_v2(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
         let prekey =
             decode_legacy_signed_prekey_record(&raw[retained_start..SIGNED_PREKEY_V2_BLOB_LEN], 0);
         vec![RetainedSignedPreKey {
-            superseded_at: current.created_at(),
+            superseded_at_secs: current.created_at_secs(),
             prekey,
         }]
     } else {
@@ -484,7 +465,7 @@ fn decode_signed_prekey_store_v3(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
             superseded_at_bytes.copy_from_slice(&raw[retained_end..SIGNED_PREKEY_V3_BLOB_LEN]);
             vec![RetainedSignedPreKey {
                 prekey,
-                superseded_at: u64::from_be_bytes(superseded_at_bytes),
+                superseded_at_secs: u64::from_be_bytes(superseded_at_bytes),
             }]
         }
         flag => {
@@ -537,7 +518,7 @@ fn decode_signed_prekey_store_v4(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
         superseded_at_bytes.copy_from_slice(&raw[prekey_end..superseded_at_end]);
         retained.push(RetainedSignedPreKey {
             prekey,
-            superseded_at: u64::from_be_bytes(superseded_at_bytes),
+            superseded_at_secs: u64::from_be_bytes(superseded_at_bytes),
         });
         offset = superseded_at_end;
     }
@@ -589,7 +570,6 @@ fn checked_blob(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::ManualClock;
     use crate::identity::IdentityManager;
     use crate::storage::InMemorySecureStorage;
     use rand::rngs::OsRng;
@@ -597,9 +577,17 @@ mod tests {
         generate_signed_prekey, generate_signed_prekey_for_discovery_key,
         generate_signing_key_pair, verify_signed_prekey_bundle,
     };
+    use roost_protocol::from_unix_secs;
 
     const FIXED_NOW: u64 = 1_700_000_000;
     const FIXED_EPOCH: u32 = 3;
+    const SIGNED_PREKEY_ROTATION_WINDOW_SECS: u64 = SIGNED_PREKEY_ROTATION_WINDOW.as_secs();
+    const SIGNED_PREKEY_RETENTION_WINDOW_SECS: u64 = SIGNED_PREKEY_RETENTION_WINDOW.as_secs();
+    const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = FUTURE_TIMESTAMP_TOLERANCE.as_secs();
+
+    fn at(secs: u64) -> SystemTime {
+        from_unix_secs(secs).unwrap()
+    }
 
     struct SignedPreKeySetup {
         discovery: Arc<DiscoveryKeyManager>,
@@ -614,49 +602,29 @@ mod tests {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         identity.generate_identity(&mut OsRng).unwrap();
-        let discovery = Arc::new(DiscoveryKeyManager::new(
-            Arc::clone(&storage),
-            identity,
-            Arc::new(ManualClock::new(FIXED_NOW)),
-        ));
-        discovery.rotate_now(&mut OsRng).unwrap();
-        let signed_prekey = SignedPreKeyManager::new(
-            storage,
-            Arc::clone(&discovery),
-            Arc::new(ManualClock::new(FIXED_NOW)),
-        );
+        let discovery = Arc::new(DiscoveryKeyManager::new(Arc::clone(&storage), identity));
+        discovery.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let signed_prekey = SignedPreKeyManager::new(storage, Arc::clone(&discovery));
         SignedPreKeySetup {
             discovery,
             manager: signed_prekey,
         }
     }
 
-    fn manager_at(setup: &SignedPreKeySetup, now: u64) -> SignedPreKeyManager {
-        SignedPreKeyManager::new(
-            Arc::clone(&setup.manager.storage),
-            Arc::clone(&setup.discovery),
-            Arc::new(ManualClock::new(now)),
-        )
-    }
-
     fn manager_without_discovery_key() -> SignedPreKeyManager {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        let discovery = Arc::new(DiscoveryKeyManager::new(
-            Arc::clone(&storage),
-            identity,
-            Arc::new(ManualClock::new(FIXED_NOW)),
-        ));
-        SignedPreKeyManager::new(storage, discovery, Arc::new(ManualClock::new(FIXED_NOW)))
+        let discovery = Arc::new(DiscoveryKeyManager::new(Arc::clone(&storage), identity));
+        SignedPreKeyManager::new(storage, discovery)
     }
 
     fn store_signed_prekey_with_created_at(
         manager: &SignedPreKeyManager,
-        created_at: u64,
+        created_at_secs: u64,
     ) -> SignedPreKey {
         let signing_key = generate_signing_key_pair(&mut OsRng);
         let signed_prekey =
-            generate_signed_prekey(&mut OsRng, &signing_key, 0, FIXED_EPOCH, created_at);
+            generate_signed_prekey(&mut OsRng, &signing_key, 0, FIXED_EPOCH, created_at_secs);
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -669,11 +637,15 @@ mod tests {
 
     fn store_current_discovery_signed_prekey_with_created_at(
         setup: &SignedPreKeySetup,
-        created_at: u64,
+        created_at_secs: u64,
     ) -> SignedPreKey {
         let discovery_key = setup.discovery.current().unwrap();
-        let signed_prekey =
-            generate_signed_prekey_for_discovery_key(&mut OsRng, &discovery_key, 0, created_at);
+        let signed_prekey = generate_signed_prekey_for_discovery_key(
+            &mut OsRng,
+            &discovery_key,
+            0,
+            created_at_secs,
+        );
         let blob = encode_signed_prekey(&signed_prekey);
         setup
             .manager
@@ -689,14 +661,14 @@ mod tests {
         blob.extend_from_slice(&*prekey.to_secret_bytes());
         blob.extend_from_slice(&prekey.signature().to_bytes());
         blob.extend_from_slice(&prekey.epoch().to_be_bytes());
-        blob.extend_from_slice(&prekey.created_at().to_be_bytes());
+        blob.extend_from_slice(&prekey.created_at_secs().to_be_bytes());
     }
 
     #[test]
     fn current_without_stored_signed_prekey_returns_not_found() {
         let manager = setup_with_discovery_key().manager;
         assert!(matches!(
-            manager.current(),
+            manager.current(at(FIXED_NOW)),
             Err(SignedPreKeyError::NotFound)
         ));
     }
@@ -711,7 +683,7 @@ mod tests {
             .store(SIGNED_PREKEY_KEY, &[0xAAu8; 50])
             .unwrap();
         assert!(matches!(
-            manager.current(),
+            manager.current(at(FIXED_NOW)),
             Err(SignedPreKeyError::UnsupportedVersion(0xaa))
         ));
     }
@@ -720,7 +692,7 @@ mod tests {
     fn current_bundle_does_not_require_discovery_key() {
         let manager = manager_without_discovery_key();
         let signed_prekey = store_signed_prekey_with_created_at(&manager, FIXED_NOW);
-        let bundle = manager.current_bundle().unwrap();
+        let bundle = manager.current_bundle(at(FIXED_NOW)).unwrap();
         assert_eq!(
             bundle.public_key.as_bytes(),
             signed_prekey.public().as_bytes()
@@ -731,10 +703,10 @@ mod tests {
     fn rotate_if_stale_seeds_first_signed_prekey_under_discovery_key() {
         let SignedPreKeySetup { discovery, manager } = setup_with_discovery_key();
         let rotated = manager
-            .rotate_if_stale(&mut OsRng)
+            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("first call must rotate");
-        let bundle = manager.current_bundle().unwrap();
+        let bundle = manager.current_bundle(at(FIXED_NOW)).unwrap();
         assert_eq!(
             rotated.public().as_bytes(),
             bundle.public_key.as_bytes(),
@@ -747,30 +719,35 @@ mod tests {
     #[test]
     fn rotate_if_stale_keeps_fresh_signed_prekey() {
         let manager = setup_with_discovery_key().manager;
-        assert!(manager.rotate_if_stale(&mut OsRng).unwrap().is_some());
-        let initial_public_key = manager.current_bundle().unwrap().public_key;
-        let second_rotation = manager.rotate_if_stale(&mut OsRng).unwrap();
+        assert!(
+            manager
+                .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+                .unwrap()
+                .is_some()
+        );
+        let initial_public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
+        let second_rotation = manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)).unwrap();
         assert!(
             second_rotation.is_none(),
             "fresh signed pre-key must not rotate"
         );
-        let current_public_key = manager.current_bundle().unwrap().public_key;
+        let current_public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
         assert_eq!(initial_public_key.as_bytes(), current_public_key.as_bytes());
     }
 
     #[test]
     fn rotate_if_stale_replaces_backdated_signed_prekey() {
         let manager = setup_with_discovery_key().manager;
-        manager.rotate_if_stale(&mut OsRng).unwrap();
-        let backdated_timestamp =
-            FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_DAYS + 1) * SECONDS_PER_DAY;
+        manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let backdated_created_at_secs =
+            FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_SECS + SECONDS_PER_DAY);
         let stale_signed_prekey =
-            store_signed_prekey_with_created_at(&manager, backdated_timestamp);
+            store_signed_prekey_with_created_at(&manager, backdated_created_at_secs);
         let rotated = manager
-            .rotate_if_stale(&mut OsRng)
+            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("backdated signed pre-key must trigger rotation");
-        let rotated_public_key = manager.current_bundle().unwrap().public_key;
+        let rotated_public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
         assert_eq!(
             rotated.public().as_bytes(),
             rotated_public_key.as_bytes(),
@@ -785,12 +762,12 @@ mod tests {
     #[test]
     fn rotate_if_stale_rotates_at_weekly_boundary() {
         let setup = setup_with_discovery_key();
-        let created_at = FIXED_NOW - SIGNED_PREKEY_ROTATION_WINDOW_SECS;
-        let stale = store_current_discovery_signed_prekey_with_created_at(&setup, created_at);
+        let created_at_secs = FIXED_NOW - SIGNED_PREKEY_ROTATION_WINDOW_SECS;
+        let stale = store_current_discovery_signed_prekey_with_created_at(&setup, created_at_secs);
 
         let rotated = setup
             .manager
-            .rotate_if_stale(&mut OsRng)
+            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("weekly boundary must rotate");
 
@@ -801,22 +778,26 @@ mod tests {
     #[test]
     fn rotate_if_stale_retains_backdated_prekey_for_thirty_days_after_supersession() {
         let setup = setup_with_discovery_key();
-        let backdated_timestamp =
-            FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_DAYS + 1) * SECONDS_PER_DAY;
-        let stale_signed_prekey =
-            store_current_discovery_signed_prekey_with_created_at(&setup, backdated_timestamp);
+        let backdated_created_at_secs =
+            FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_SECS + SECONDS_PER_DAY);
+        let stale_signed_prekey = store_current_discovery_signed_prekey_with_created_at(
+            &setup,
+            backdated_created_at_secs,
+        );
 
         setup
             .manager
-            .rotate_if_stale(&mut OsRng)
+            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("backdated signed pre-key must trigger rotation");
 
-        let retained = manager_at(&setup, FIXED_NOW + SECONDS_PER_DAY)
+        let retained = setup
+            .manager
             .prekey_for_reference(
                 stale_signed_prekey.epoch(),
                 stale_signed_prekey.id(),
                 stale_signed_prekey.public().as_bytes(),
+                at(FIXED_NOW + SECONDS_PER_DAY),
             )
             .unwrap();
         assert_eq!(
@@ -824,12 +805,12 @@ mod tests {
             stale_signed_prekey.public().as_bytes()
         );
 
-        let expired = manager_at(&setup, FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS);
         assert!(matches!(
-            expired.prekey_for_reference(
+            setup.manager.prekey_for_reference(
                 stale_signed_prekey.epoch(),
                 stale_signed_prekey.id(),
-                stale_signed_prekey.public().as_bytes()
+                stale_signed_prekey.public().as_bytes(),
+                at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS)
             ),
             Err(SignedPreKeyError::NotFound)
         ));
@@ -839,8 +820,13 @@ mod tests {
     fn rotate_if_stale_keeps_slightly_future_signed_prekey() {
         let manager = setup_with_discovery_key().manager;
         let signed_prekey = store_signed_prekey_with_created_at(&manager, FIXED_NOW + 100_000);
-        assert!(manager.rotate_if_stale(&mut OsRng).unwrap().is_none());
-        let public_key = manager.current_bundle().unwrap().public_key;
+        assert!(
+            manager
+                .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+                .unwrap()
+                .is_none()
+        );
+        let public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
         assert_eq!(public_key.as_bytes(), signed_prekey.public().as_bytes());
     }
 
@@ -852,10 +838,10 @@ mod tests {
             FIXED_NOW + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10,
         );
         let rotated = manager
-            .rotate_if_stale(&mut OsRng)
+            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
             .unwrap()
             .expect("far-future signed pre-key must trigger rotation");
-        let public_key = manager.current_bundle().unwrap().public_key;
+        let public_key = manager.current_bundle(at(FIXED_NOW)).unwrap().public_key;
         assert_eq!(public_key.as_bytes(), rotated.public().as_bytes());
         assert_ne!(public_key.as_bytes(), signed_prekey.public().as_bytes());
     }
@@ -863,14 +849,19 @@ mod tests {
     #[test]
     fn rotate_now_retains_immediately_superseded_prekey_inside_retention_window() {
         let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut OsRng).unwrap();
-        let second = setup.manager.rotate_now(&mut OsRng).unwrap();
+        let first = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let second = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
 
         let retained = setup
             .manager
-            .prekey_for_reference(first.epoch(), first.id(), first.public().as_bytes())
+            .prekey_for_reference(
+                first.epoch(),
+                first.id(),
+                first.public().as_bytes(),
+                at(FIXED_NOW),
+            )
             .unwrap();
-        let current = setup.manager.current().unwrap();
+        let current = setup.manager.current(at(FIXED_NOW)).unwrap();
 
         assert_eq!(retained.public().as_bytes(), first.public().as_bytes());
         assert_eq!(current.public().as_bytes(), second.public().as_bytes());
@@ -879,24 +870,39 @@ mod tests {
     #[test]
     fn rotate_now_retains_multiple_superseded_prekeys() {
         let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut OsRng).unwrap();
-        let second = setup.manager.rotate_now(&mut OsRng).unwrap();
-        let third = setup.manager.rotate_now(&mut OsRng).unwrap();
+        let first = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let second = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let third = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
 
         assert!(
             setup
                 .manager
-                .prekey_for_reference(first.epoch(), first.id(), first.public().as_bytes())
+                .prekey_for_reference(
+                    first.epoch(),
+                    first.id(),
+                    first.public().as_bytes(),
+                    at(FIXED_NOW)
+                )
                 .is_ok()
         );
         assert!(
             setup
                 .manager
-                .prekey_for_reference(second.epoch(), second.id(), second.public().as_bytes())
+                .prekey_for_reference(
+                    second.epoch(),
+                    second.id(),
+                    second.public().as_bytes(),
+                    at(FIXED_NOW)
+                )
                 .is_ok()
         );
         assert_eq!(
-            setup.manager.current().unwrap().public().as_bytes(),
+            setup
+                .manager
+                .current(at(FIXED_NOW))
+                .unwrap()
+                .public()
+                .as_bytes(),
             third.public().as_bytes()
         );
     }
@@ -904,40 +910,51 @@ mod tests {
     #[test]
     fn retained_prekey_expires_at_thirty_day_boundary() {
         let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut OsRng).unwrap();
-        setup.manager.rotate_now(&mut OsRng).unwrap();
-        let before_expiry = manager_at(&setup, FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS - 1);
+        let first = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
         assert!(
-            before_expiry
-                .prekey_for_reference(first.epoch(), first.id(), first.public().as_bytes())
+            setup
+                .manager
+                .prekey_for_reference(
+                    first.epoch(),
+                    first.id(),
+                    first.public().as_bytes(),
+                    at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS - 1)
+                )
                 .is_ok()
         );
-        let expired = manager_at(&setup, FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS);
 
         assert!(matches!(
-            expired.prekey_for_reference(first.epoch(), first.id(), first.public().as_bytes()),
+            setup.manager.prekey_for_reference(
+                first.epoch(),
+                first.id(),
+                first.public().as_bytes(),
+                at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS)
+            ),
             Err(SignedPreKeyError::NotFound)
         ));
         assert!(matches!(
             setup.manager.prekey_for_reference(
                 first.epoch(),
                 first.id(),
-                first.public().as_bytes()
+                first.public().as_bytes(),
+                at(FIXED_NOW)
             ),
             Err(SignedPreKeyError::NotFound)
         ));
     }
 
     #[test]
-    fn prekey_lookup_rejects_wrong_identifier_for_matching_public_key() {
+    fn prekey_lookup_rejects_wrong_id_for_matching_public_key() {
         let setup = setup_with_discovery_key();
-        let prekey = setup.manager.rotate_now(&mut OsRng).unwrap();
+        let prekey = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
 
         assert!(matches!(
             setup.manager.prekey_for_reference(
                 prekey.epoch(),
                 prekey.id() + 1,
                 prekey.public().as_bytes(),
+                at(FIXED_NOW)
             ),
             Err(SignedPreKeyError::NotFound)
         ));
@@ -947,15 +964,18 @@ mod tests {
     fn rotate_now_refuses_to_discard_unexpired_retained_prekeys() {
         let setup = setup_with_discovery_key();
         for _ in 0..=MAX_RETAINED_SIGNED_PREKEYS {
-            setup.manager.rotate_now(&mut OsRng).unwrap();
+            setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
         }
-        let current = setup.manager.current().unwrap();
+        let current = setup.manager.current(at(FIXED_NOW)).unwrap();
 
         assert!(matches!(
-            setup.manager.rotate_now(&mut OsRng),
+            setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
             Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("capacity")
         ));
-        assert_eq!(setup.manager.current().unwrap().id(), current.id());
+        assert_eq!(
+            setup.manager.current(at(FIXED_NOW)).unwrap().id(),
+            current.id()
+        );
     }
 
     #[test]
@@ -970,7 +990,7 @@ mod tests {
             .store(SIGNED_PREKEY_KEY, &blob)
             .unwrap();
         assert!(matches!(
-            manager.rotate_if_stale(&mut OsRng),
+            manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)),
             Err(SignedPreKeyError::UnsupportedVersion(_))
         ));
     }
@@ -979,7 +999,7 @@ mod tests {
     fn rotate_if_stale_without_discovery_key_returns_not_found() {
         let manager = manager_without_discovery_key();
         assert!(matches!(
-            manager.rotate_if_stale(&mut OsRng),
+            manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)),
             Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
@@ -988,7 +1008,7 @@ mod tests {
     fn rotate_now_without_discovery_key_returns_not_found() {
         let manager = manager_without_discovery_key();
         assert!(matches!(
-            manager.rotate_now(&mut OsRng),
+            manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
             Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
@@ -1008,11 +1028,11 @@ mod tests {
             original.signature().to_bytes()
         );
         assert_eq!(restored.epoch(), original.epoch());
-        assert_eq!(restored.created_at(), original.created_at());
+        assert_eq!(restored.created_at_secs(), original.created_at_secs());
     }
 
     #[test]
-    fn version_three_store_migrates_retained_and_current_identifiers() {
+    fn version_three_store_migrates_retained_and_current_ids() {
         let signing_key = generate_signing_key_pair(&mut OsRng);
         let retained = generate_signed_prekey(
             &mut OsRng,
@@ -1057,14 +1077,16 @@ mod tests {
         let migrated = decode_signed_prekey_store(&blob).unwrap();
         let migrated_retained = &migrated.retained[0];
 
-        assert_eq!(migrated_retained.superseded_at, FIXED_NOW);
-        assert!(!retained_prekey_expired(
-            migrated_retained,
-            FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS - 1,
+        assert_eq!(migrated_retained.superseded_at_secs, FIXED_NOW);
+        assert!(!is_expired(
+            migrated_retained.superseded_at_secs,
+            at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS - 1),
+            SIGNED_PREKEY_RETENTION_WINDOW,
         ));
-        assert!(retained_prekey_expired(
-            migrated_retained,
-            FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS,
+        assert!(is_expired(
+            migrated_retained.superseded_at_secs,
+            at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS),
+            SIGNED_PREKEY_RETENTION_WINDOW,
         ));
     }
 
@@ -1097,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn rotation_rejects_exhausted_signed_prekey_identifier_space() {
+    fn rotation_rejects_exhausted_signed_prekey_id_space() {
         let setup = setup_with_discovery_key();
         let discovery_key = setup.discovery.current().unwrap();
         let current = generate_signed_prekey_for_discovery_key(
@@ -1120,10 +1142,13 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            setup.manager.rotate_now(&mut OsRng),
+            setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
             Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("exhausted")
         ));
-        assert_eq!(setup.manager.current().unwrap().id(), u64::MAX - 1);
+        assert_eq!(
+            setup.manager.current(at(FIXED_NOW)).unwrap().id(),
+            u64::MAX - 1
+        );
     }
 
     #[test]

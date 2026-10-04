@@ -3,7 +3,7 @@
 use roost_core::{InMemorySecureStorage, KeyStore, PreparedKeyStoreOperation};
 
 #[test]
-fn prekey_identifiers_are_stable_and_restart_with_each_discovery_key_epoch() {
+fn prekey_ids_are_stable_and_restart_with_each_discovery_key_epoch() {
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
     let identity = store.prepare_generate_identity().unwrap();
     finalize(&store, &identity);
@@ -38,10 +38,6 @@ fn prekey_identifiers_are_stable_and_restart_with_each_discovery_key_epoch() {
 }
 
 fn finalize<T>(store: &KeyStore, prepared: &PreparedKeyStoreOperation<T>) {
-    store
-        .commit_operation(prepared.operation.identifier)
-        .unwrap();
-    store
-        .finalize_operation(prepared.operation.identifier)
-        .unwrap();
+    store.commit_operation(prepared.operation.id).unwrap();
+    store.finalize_operation(prepared.operation.id).unwrap();
 }

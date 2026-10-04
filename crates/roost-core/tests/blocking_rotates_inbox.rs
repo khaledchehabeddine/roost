@@ -1,4 +1,4 @@
-//! Blocking a contact rotates the local inbox (AE-BLK-08).
+//! Blocking a contact rotates the local inbox.
 //!
 //! Crosses the keystore boundary into protocol state: the contact flag lives in protocol state
 //! while the inbox lives in secure storage, and blocking must move both.
@@ -13,15 +13,11 @@ use roost_crypto::{
     generate_discovery_key, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
 };
 
-const CREATED_AT: u64 = 1_700_000_000;
+const CREATED_AT_SECS: u64 = 1_700_000_000;
 
 fn complete<T>(key_store: &KeyStore, prepared: PreparedKeyStoreOperation<T>) -> T {
-    key_store
-        .commit_operation(prepared.operation.identifier)
-        .unwrap();
-    key_store
-        .finalize_operation(prepared.operation.identifier)
-        .unwrap();
+    key_store.commit_operation(prepared.operation.id).unwrap();
+    key_store.finalize_operation(prepared.operation.id).unwrap();
     prepared.output
 }
 
@@ -30,7 +26,7 @@ fn peer_contact() -> ContactIdentity {
     let signing = generate_signing_key_pair(&mut rng);
     let agreement = generate_key_pair(&mut rng);
     let _binding = sign_identity_key_binding(&signing, &agreement.public).unwrap();
-    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT);
+    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS);
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *agreement.public.as_bytes(),
@@ -97,9 +93,9 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
     let prepared = key_store
         .prepare_block_contact(&snapshot, identity_key)
         .unwrap();
-    let identifier = prepared.operation.identifier;
+    let id = prepared.operation.id;
     assert!(matches!(
-        key_store.operation_status(identifier).unwrap(),
+        key_store.operation_status(id).unwrap(),
         KeyStoreOperationStatus::Prepared
     ));
     assert!(prepared.output.contact.state_updates.is_empty());
@@ -107,7 +103,7 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
 
     assert!(second.rotation.is_none());
     assert!(matches!(
-        key_store.operation_status(identifier).unwrap(),
+        key_store.operation_status(id).unwrap(),
         KeyStoreOperationStatus::Finalized
     ));
     assert_eq!(

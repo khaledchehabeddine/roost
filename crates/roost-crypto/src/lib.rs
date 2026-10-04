@@ -4,34 +4,11 @@
 //! encryption for Rust crates that need protocol-level crypto. Higher layers handle persistence,
 //! replay tracking, and transport framing.
 //!
-//! # Overview
-//!
 //! The identity key signs the discovery-key bundle. The discovery key signs the signed-pre-key
 //! bundle. Initiators verify both responder signatures, use [`initiate`] and [`accept`] to create
 //! the first [`RatchetState`], then use the ratchet to encrypt messages. X3DH includes a one-time
 //! pre-key when one is available. Sender identity material is revealed only after the sealed first
 //! message decrypts successfully.
-//!
-//! # Examples
-//!
-//! ```
-//! use roost_crypto::{
-//!     generate_discovery_key, generate_signed_prekey_for_discovery_key,
-//!     generate_signing_key_pair, verify_signed_prekey_bundle, verify_discovery_key_bundle,
-//! };
-//! use rand::rngs::OsRng;
-//!
-//! let mut rng = OsRng;
-//! let identity = generate_signing_key_pair(&mut rng);
-//! let discovery_key = generate_discovery_key(&mut rng, &identity, 0, 1_700_000_000);
-//! let discovery_bundle = discovery_key.bundle();
-//! verify_discovery_key_bundle(&discovery_bundle, &identity.verifying)?;
-//!
-//! let signed_prekey =
-//!     generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, 0, 1_700_000_000);
-//! verify_signed_prekey_bundle(&signed_prekey.bundle(), &discovery_bundle.verifying_key)?;
-//! # Ok::<(), roost_crypto::CryptoError>(())
-//! ```
 //!
 //! # Secret handling
 //!
@@ -85,7 +62,6 @@
 mod delivery_capability;
 mod discovery_key;
 mod double_ratchet;
-mod error;
 mod handshake;
 mod keys;
 mod one_time_prekey;
@@ -101,24 +77,24 @@ pub use discovery_key::{
     generate_signed_prekey_for_discovery_key, verify_discovery_key_bundle,
     verify_discovery_to_identity_binding,
 };
-pub use double_ratchet::{Header, RatchetState};
-pub use error::CryptoError;
+pub use double_ratchet::{Header, RatchetError, RatchetState, RatchetStateError};
 pub use handshake::{
-    AcceptedInitialMessage, HandshakeEnvelope, InitialPlaintext,
+    AcceptedInitialMessage, HandshakeEnvelope, HandshakeError, InitialPlaintext,
     PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM, PREKEY_BUNDLE_VERSION, PreKeyBundle,
     SenderIdentityMaterial, X3DH_ADDITIVE_SHARED_SECRET_HEADROOM, accept,
     accept_with_associated_data, initial_associated_data, initiate, initiate_with_associated_data,
     initiator_identity_hint, initiator_identity_hint_with_associated_data,
 };
 pub use keys::{
-    IdentityKeyBundle, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
-    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
+    IdentityKeyBundle, KeyBundleError, KeyPair, PublicKey, SharedSecret, Signature, SigningKeyPair,
+    VerifyingKey, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
     verify_identity_key_bundle,
 };
 pub use one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
 pub use sealed_frame::{
-    SealedFrame, SealedFramePreKeyReference, open_frame, open_frame_for_discovery_key,
-    open_frame_for_discovery_key_with_associated_data, seal_frame, seal_frame_with_associated_data,
+    SealedFrame, SealedFrameError, SealedFramePreKeyReference, open_frame,
+    open_frame_for_discovery_key, open_frame_for_discovery_key_with_associated_data, seal_frame,
+    seal_frame_with_associated_data,
 };
 pub use signed_prekey::{
     SignedPreKey, SignedPreKeyBundle, generate_signed_prekey, verify_signed_prekey_bundle,

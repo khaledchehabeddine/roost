@@ -13,11 +13,11 @@ fn prepared_identity_creation_becomes_visible_only_after_finalize() {
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
 
     let prepared = store.prepare_generate_identity().unwrap();
-    let identifier = prepared.operation.identifier;
+    let id = prepared.operation.id;
 
     assert!(!store.has_identity().unwrap());
     assert_eq!(
-        store.operation_status(identifier).unwrap(),
+        store.operation_status(id).unwrap(),
         KeyStoreOperationStatus::Prepared
     );
     assert!(
@@ -32,20 +32,20 @@ fn prepared_identity_creation_becomes_visible_only_after_finalize() {
     );
 
     assert_eq!(
-        store.commit_operation(identifier).unwrap(),
+        store.commit_operation(id).unwrap(),
         KeyStoreOperationStatus::Committed
     );
     assert_eq!(
-        store.commit_operation(identifier).unwrap(),
+        store.commit_operation(id).unwrap(),
         KeyStoreOperationStatus::Committed
     );
 
     assert_eq!(
-        store.finalize_operation(identifier).unwrap(),
+        store.finalize_operation(id).unwrap(),
         KeyStoreOperationStatus::Finalized
     );
     assert_eq!(
-        store.finalize_operation(identifier).unwrap(),
+        store.finalize_operation(id).unwrap(),
         KeyStoreOperationStatus::Finalized
     );
     assert!(store.has_identity().unwrap());
@@ -61,23 +61,21 @@ fn prepared_operation_rejects_secure_state_changed_after_preparation() {
     let first = store.prepare_generate_identity().unwrap();
     let stale = store.prepare_generate_identity().unwrap();
 
-    store.commit_operation(first.operation.identifier).unwrap();
-    store
-        .finalize_operation(first.operation.identifier)
-        .unwrap();
+    store.commit_operation(first.operation.id).unwrap();
+    store.finalize_operation(first.operation.id).unwrap();
 
     assert!(matches!(
-        store.commit_operation(stale.operation.identifier),
+        store.commit_operation(stale.operation.id),
         Err(KeyStoreError::Operation(
             KeyStoreOperationError::PreconditionChanged { .. }
         ))
     ));
     assert_eq!(
-        store.abort_operation(stale.operation.identifier).unwrap(),
+        store.abort_operation(stale.operation.id).unwrap(),
         KeyStoreOperationStatus::Aborted
     );
     assert_eq!(
-        store.abort_operation(stale.operation.identifier).unwrap(),
+        store.abort_operation(stale.operation.id).unwrap(),
         KeyStoreOperationStatus::Aborted
     );
 }

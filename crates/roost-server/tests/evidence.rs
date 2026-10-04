@@ -5,13 +5,20 @@ use roost_server::{
     EvidenceVerificationInput, PayloadKind, SenderCertificateValidationError,
     VerifiedEvidenceBundle, verify_evidence_bundle,
 };
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const ACCEPTED_AT_SECS: u64 = 1_700_000_000;
+
+fn accepted_at() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(ACCEPTED_AT_SECS)
+}
 #[test]
 fn verifies_a_signed_report_and_rejects_invalid_inputs() {
-    let identifier = b"test-domain".to_vec();
+    let id = b"test-domain".to_vec();
     let verifying_key =
         hex::decode("6556ea860463d074ae046736e1f20f6c78f7a26e31518d1fe7f645150aaa6ad1").unwrap();
     let domain_signing_keys = [DomainSigningKey {
-        identifier: &identifier,
+        id: &id,
         verifying_key: &verifying_key,
         status: DomainSigningKeyStatus::Trusted,
     }];
@@ -22,8 +29,8 @@ fn verifies_a_signed_report_and_rejects_invalid_inputs() {
         expected_profile: EvidenceProfile::MessageTranscriptV1,
         domain_signing_keys: &domain_signing_keys,
         expected_relay_domain: &relay_domain,
-        accepted_timestamp_secs: 1_700_000_000,
-        grace_window_secs: 0,
+        accepted_at: accepted_at(),
+        grace_window: Duration::ZERO,
     })
     .unwrap();
     assert_verified(&verified);
@@ -56,8 +63,8 @@ fn verifies_a_signed_report_and_rejects_invalid_inputs() {
             &bytes,
             &domain_signing_keys,
             &relay_domain,
-            1_700_000_000,
-            0,
+            accepted_at(),
+            Duration::ZERO,
             expected,
         );
     }
@@ -67,19 +74,19 @@ fn verifies_a_signed_report_and_rejects_invalid_inputs() {
         (
             vec![0; 160 * 1024 + 1],
             domain_signing_keys.to_vec(),
-            0,
+            Duration::ZERO,
             EvidenceVerificationError::BundleTooLarge,
         ),
         (
             trailing,
             domain_signing_keys.to_vec(),
-            0,
+            Duration::ZERO,
             EvidenceVerificationError::MalformedBundle,
         ),
         (
             bundle.clone(),
             vec![domain_signing_keys[0]; 33],
-            0,
+            Duration::ZERO,
             EvidenceVerificationError::TooManyDomainSigningKeys {
                 count: 33,
                 maximum: 32,
@@ -88,22 +95,22 @@ fn verifies_a_signed_report_and_rejects_invalid_inputs() {
         (
             bundle.clone(),
             domain_signing_keys.to_vec(),
-            301,
+            Duration::from_secs(301),
             EvidenceVerificationError::GraceWindowTooLarge {
-                actual: 301,
-                maximum: 300,
+                actual: Duration::from_secs(301),
+                maximum: Duration::from_secs(300),
             },
         ),
     ] {
-        assert_rejected(&bytes, &keys, &relay_domain, 1_700_000_000, grace, expected);
+        assert_rejected(&bytes, &keys, &relay_domain, accepted_at(), grace, expected);
     }
     let replay_domain = b"other.relay.test".to_vec();
     assert_rejected(
         &bundle,
         &domain_signing_keys,
         &replay_domain,
-        1_700_000_000,
-        0,
+        accepted_at(),
+        Duration::ZERO,
         EvidenceVerificationError::SenderCertificate(
             SenderCertificateValidationError::RelayDomainMismatch,
         ),
@@ -128,7 +135,7 @@ fn assert_verified(actual: &VerifiedEvidenceBundle) {
         hex::encode(actual.message_id.as_bytes()),
         "02210000000040008000000000000000"
     );
-    assert_eq!(actual.timestamp_millis, 1700000300545);
+    assert_eq!(actual.sent_at_millis, 1700000300545);
     assert_eq!(actual.payload_kind, PayloadKind::EncryptedText);
     assert_eq!(
         hex::encode(&actual.plaintext),
@@ -150,8 +157,8 @@ fn assert_rejected(
     bundle: &[u8],
     domain_signing_keys: &[DomainSigningKey<'_>],
     relay_domain: &[u8],
-    accepted_timestamp_secs: u64,
-    grace_window_secs: u64,
+    accepted_at: SystemTime,
+    grace_window: Duration,
     expected: EvidenceVerificationError,
 ) {
     let actual = match verify_evidence_bundle(EvidenceVerificationInput {
@@ -159,8 +166,8 @@ fn assert_rejected(
         expected_profile: EvidenceProfile::MessageTranscriptV1,
         domain_signing_keys,
         expected_relay_domain: relay_domain,
-        accepted_timestamp_secs,
-        grace_window_secs,
+        accepted_at,
+        grace_window,
     }) {
         Ok(_) => panic!("invalid evidence verified unexpectedly"),
         Err(error) => error,

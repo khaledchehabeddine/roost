@@ -10,12 +10,8 @@ use roost_core::{
 };
 
 fn finalize<T>(store: &KeyStore, prepared: &roost_core::PreparedKeyStoreOperation<T>) {
-    store
-        .commit_operation(prepared.operation.identifier)
-        .unwrap();
-    store
-        .finalize_operation(prepared.operation.identifier)
-        .unwrap();
+    store.commit_operation(prepared.operation.id).unwrap();
+    store.finalize_operation(prepared.operation.id).unwrap();
 }
 
 #[test]
@@ -35,8 +31,8 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
     let transport_binding =
         TransportBinding::new(b"consumer-owned initial binding".to_vec()).unwrap();
     let prekey_selection = PreKeySelection {
-        signed_prekey_identifier: bob_publication.signed_prekey.id,
-        one_time_prekey_identifier: Some(bob_one_time_prekey.id),
+        signed_prekey_id: bob_publication.signed_prekey.id,
+        one_time_prekey_id: Some(bob_one_time_prekey.id),
     };
 
     let session_key = ProtocolStateKey::session(SessionId::from_bytes([0x22; 16]));
@@ -62,7 +58,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
     let replacement_signed_prekey = bob.prepare_rotate_signed_prekey_now().unwrap();
     assert_eq!(
         replacement_signed_prekey.output.id,
-        prekey_selection.signed_prekey_identifier + 1
+        prekey_selection.signed_prekey_id + 1
     );
     finalize(&bob, &replacement_signed_prekey);
     let input = || SessionAcceptance {
@@ -102,7 +98,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         .is_err()
     );
     let wrong_signed_prekey = PreKeySelection {
-        signed_prekey_identifier: prekey_selection.signed_prekey_identifier + 1,
+        signed_prekey_id: prekey_selection.signed_prekey_id + 1,
         ..prekey_selection
     };
     assert!(matches!(
@@ -116,9 +112,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         ))
     ));
     let wrong_one_time_prekey = PreKeySelection {
-        one_time_prekey_identifier: prekey_selection
-            .one_time_prekey_identifier
-            .map(|identifier| identifier + 1),
+        one_time_prekey_id: prekey_selection.one_time_prekey_id.map(|id| id + 1),
         ..prekey_selection
     };
     assert!(matches!(
@@ -127,19 +121,19 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
             &transport_binding,
             wrong_one_time_prekey,
         ),
-        Err(SessionEstablishmentError::Crypto(
-            roost_crypto::CryptoError::OneTimePreKeyMismatch
+        Err(SessionEstablishmentError::Handshake(
+            roost_crypto::HandshakeError::OneTimePreKeyMismatch
         ))
     ));
 
     finalize(&bob, &accepted);
     assert!(matches!(
-        bob.commit_operation(stale.operation.identifier),
+        bob.commit_operation(stale.operation.id),
         Err(KeyStoreError::Operation(
             KeyStoreOperationError::PreconditionChanged { .. }
         ))
     ));
-    bob.abort_operation(stale.operation.identifier).unwrap();
+    bob.abort_operation(stale.operation.id).unwrap();
     assert!(
         bob.prepare_accept_session_with_transport_binding(
             input(),

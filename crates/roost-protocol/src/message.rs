@@ -32,7 +32,6 @@ impl MessageId {
 }
 
 /// The semantic type of a Message payload.
-#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PayloadKind {
     /// Encrypted application text content.
@@ -57,9 +56,6 @@ impl PayloadKind {
     }
 
     /// Parses a canonical payload tag.
-    ///
-    /// # Errors
-    /// - [`MessageEncodingError::UnsupportedPayloadKind`] if the tag is unknown.
     pub fn from_tag(tag: u8) -> Result<Self, MessageEncodingError> {
         match tag {
             0 => Ok(PayloadKind::EncryptedText),
@@ -80,13 +76,120 @@ pub struct MessageTranscriptInput<'a> {
     /// Sender-selected Message ID.
     pub id: MessageId,
     /// Sender-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Authenticated payload interpretation.
     pub payload_kind: PayloadKind,
     /// Padded plaintext authenticated by the signature.
     pub payload: &'a [u8],
     /// Exact domain-signed sender certificate.
     pub sender_certificate: &'a [u8],
+}
+
+/// Constructs the canonical transcript, excluding its signature context.
+///
+/// The caller signs or verifies these bytes under [`MESSAGE_TRANSCRIPT_CONTEXT`].
+pub fn message_transcript(
+    input: MessageTranscriptInput<'_>,
+) -> Result<Zeroizing<Vec<u8>>, MessageEncodingError> {
+    if input.session_key.len() > 96
+        || input.payload.len() > 65_536
+        || input.sender_certificate.len() > 16 * 1024
+    {
+        return Err(MessageEncodingError::PayloadTooLarge);
+    }
+    let session_key_len = u32::try_from(input.session_key.len())
+        .map_err(|_| MessageEncodingError::PayloadTooLarge)?;
+    let payload_len =
+        u32::try_from(input.payload.len()).map_err(|_| MessageEncodingError::PayloadTooLarge)?;
+    let sender_certificate_len = u32::try_from(input.sender_certificate.len())
+        .map_err(|_| MessageEncodingError::PayloadTooLarge)?;
+    let capacity = 4usize
+        .checked_add(input.session_key.len())
+        .and_then(|len| len.checked_add(PUBLIC_KEY_LEN + 16 + 8 + 1 + 4))
+        .and_then(|len| len.checked_add(input.payload.len()))
+        .and_then(|len| len.checked_add(4))
+        .and_then(|len| len.checked_add(input.sender_certificate.len()))
+        .ok_or(MessageEncodingError::PayloadTooLarge)?;
+    let mut transcript = Zeroizing::new(Vec::with_capacity(capacity));
+    transcript.extend_from_slice(&session_key_len.to_be_bytes());
+    transcript.extend_from_slice(input.session_key);
+    transcript.extend_from_slice(input.recipient_identity_verifying_key);
+    transcript.extend_from_slice(input.id.as_bytes());
+    transcript.extend_from_slice(&input.sent_at_millis.to_be_bytes());
+    transcript.push(input.payload_kind.tag());
+    transcript.extend_from_slice(&payload_len.to_be_bytes());
+    transcript.extend_from_slice(input.payload);
+    transcript.extend_from_slice(&sender_certificate_len.to_be_bytes());
+    transcript.extend_from_slice(input.sender_certificate);
+    Ok(transcript)
+}
+
+/// An error returned while encoding authenticated Message metadata.
+#[derive(Debug, Eq, PartialEq)]
+pub enum MessageEncodingError {
+    /// A transcript field exceeds the supported encoding length.
+    PayloadTooLarge,
+    /// The payload tag is unknown.
+    UnsupportedPayloadKind(u8),
+}
+
+impl fmt::Display for MessageEncodingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PayloadTooLarge => write!(f, "message transcript field exceeds size limit"),
+            Self::UnsupportedPayloadKind(tag) => {
+                write!(f, "unsupported message payload kind: {tag}")
+            }
+        }
+    }
+}
+
+impl Error for MessageEncodingError {}
+
+/// Prefixes the plaintext length and fills the next supported bucket with zeros.
+pub fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedPayloadError> {
+    let required_len = plaintext
+        .len()
+        .checked_add(SEALED_PAYLOAD_LEN_PREFIX_LEN)
+        .ok_or(SealedPayloadError::LengthOverflow)?;
+    let bucket = SEALED_PAYLOAD_BUCKETS
+        .iter()
+        .copied()
+        .find(|bucket| required_len <= *bucket)
+        .ok_or(SealedPayloadError::LengthTooLarge(plaintext.len()))?;
+    let plaintext_len =
+        u32::try_from(plaintext.len()).map_err(|_| SealedPayloadError::LengthExceedsU32)?;
+    let mut padded = Zeroizing::new(Vec::with_capacity(bucket));
+    padded.extend_from_slice(&plaintext_len.to_be_bytes());
+    padded.extend_from_slice(plaintext);
+    padded.resize(bucket, 0);
+    Ok(padded)
+}
+
+/// Validates the bucket, length prefix, and zero fill before copying the plaintext.
+pub fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedPayloadError> {
+    if !SEALED_PAYLOAD_BUCKETS.contains(&padded.len()) {
+        return Err(SealedPayloadError::InvalidBucket(padded.len()));
+    }
+    let len_bytes: [u8; SEALED_PAYLOAD_LEN_PREFIX_LEN] = padded
+        .get(..SEALED_PAYLOAD_LEN_PREFIX_LEN)
+        .ok_or(SealedPayloadError::TooShort)?
+        .try_into()
+        .map_err(|_| SealedPayloadError::InvalidLengthPrefix)?;
+    let plaintext_len = usize::try_from(u32::from_be_bytes(len_bytes))
+        .map_err(|_| SealedPayloadError::PlatformLimit)?;
+    let plaintext_end = SEALED_PAYLOAD_LEN_PREFIX_LEN
+        .checked_add(plaintext_len)
+        .ok_or(SealedPayloadError::LengthOverflow)?;
+    if plaintext_end > padded.len() {
+        return Err(SealedPayloadError::LengthExceedsBucket);
+    }
+    if padded[plaintext_end..].iter().any(|byte| *byte != 0) {
+        return Err(SealedPayloadError::MalformedPadding);
+    }
+    Ok(Zeroizing::new(
+        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..plaintext_end].to_vec(),
+    ))
 }
 
 /// An error returned by sealed payload padding or decoding.
@@ -138,124 +241,4 @@ impl fmt::Display for SealedPayloadError {
     }
 }
 
-/// Constructs the canonical transcript, excluding its signature context.
-///
-/// The caller signs or verifies these bytes under [`MESSAGE_TRANSCRIPT_CONTEXT`].
-///
-/// # Errors
-/// - [`MessageEncodingError::PayloadTooLarge`] if a field exceeds its fixed cap or its encoded length overflows.
-pub fn message_transcript(
-    input: MessageTranscriptInput<'_>,
-) -> Result<Zeroizing<Vec<u8>>, MessageEncodingError> {
-    if input.session_key.len() > 96
-        || input.payload.len() > 65_536
-        || input.sender_certificate.len() > 16 * 1024
-    {
-        return Err(MessageEncodingError::PayloadTooLarge);
-    }
-    let session_key_len = u32::try_from(input.session_key.len())
-        .map_err(|_| MessageEncodingError::PayloadTooLarge)?;
-    let payload_len =
-        u32::try_from(input.payload.len()).map_err(|_| MessageEncodingError::PayloadTooLarge)?;
-    let sender_certificate_len = u32::try_from(input.sender_certificate.len())
-        .map_err(|_| MessageEncodingError::PayloadTooLarge)?;
-    let capacity = 4usize
-        .checked_add(input.session_key.len())
-        .and_then(|len| len.checked_add(PUBLIC_KEY_LEN + 16 + 8 + 1 + 4))
-        .and_then(|len| len.checked_add(input.payload.len()))
-        .and_then(|len| len.checked_add(4))
-        .and_then(|len| len.checked_add(input.sender_certificate.len()))
-        .ok_or(MessageEncodingError::PayloadTooLarge)?;
-    let mut transcript = Zeroizing::new(Vec::with_capacity(capacity));
-    transcript.extend_from_slice(&session_key_len.to_be_bytes());
-    transcript.extend_from_slice(input.session_key);
-    transcript.extend_from_slice(input.recipient_identity_verifying_key);
-    transcript.extend_from_slice(input.id.as_bytes());
-    transcript.extend_from_slice(&input.timestamp_millis.to_be_bytes());
-    transcript.push(input.payload_kind.tag());
-    transcript.extend_from_slice(&payload_len.to_be_bytes());
-    transcript.extend_from_slice(input.payload);
-    transcript.extend_from_slice(&sender_certificate_len.to_be_bytes());
-    transcript.extend_from_slice(input.sender_certificate);
-    Ok(transcript)
-}
-
-/// Prefixes the plaintext length and fills the next supported bucket with zeros.
-///
-/// # Errors
-/// - [`SealedPayloadError::LengthOverflow`] if adding the prefix overflows.
-/// - [`SealedPayloadError::LengthTooLarge`] if no supported bucket fits the plaintext.
-/// - [`SealedPayloadError::LengthExceedsU32`] if the length cannot fit its prefix.
-pub fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedPayloadError> {
-    let required_len = plaintext
-        .len()
-        .checked_add(SEALED_PAYLOAD_LEN_PREFIX_LEN)
-        .ok_or(SealedPayloadError::LengthOverflow)?;
-    let bucket = SEALED_PAYLOAD_BUCKETS
-        .iter()
-        .copied()
-        .find(|bucket| required_len <= *bucket)
-        .ok_or(SealedPayloadError::LengthTooLarge(plaintext.len()))?;
-    let plaintext_len =
-        u32::try_from(plaintext.len()).map_err(|_| SealedPayloadError::LengthExceedsU32)?;
-    let mut padded = Zeroizing::new(vec![0u8; bucket]);
-    padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
-    padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..required_len].copy_from_slice(plaintext);
-    Ok(padded)
-}
-
-/// Validates the bucket, length prefix, and zero fill before copying the plaintext.
-///
-/// # Errors
-/// - [`SealedPayloadError::InvalidBucket`] if the padded length is unsupported.
-/// - [`SealedPayloadError::TooShort`] or [`SealedPayloadError::InvalidLengthPrefix`] if the prefix cannot be read.
-/// - [`SealedPayloadError::PlatformLimit`] or [`SealedPayloadError::LengthOverflow`] if the decoded length overflows.
-/// - [`SealedPayloadError::LengthExceedsBucket`] if the plaintext exceeds the bucket.
-/// - [`SealedPayloadError::MalformedPadding`] if any fill byte is nonzero.
-pub fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedPayloadError> {
-    if !SEALED_PAYLOAD_BUCKETS.contains(&padded.len()) {
-        return Err(SealedPayloadError::InvalidBucket(padded.len()));
-    }
-    let len_bytes: [u8; SEALED_PAYLOAD_LEN_PREFIX_LEN] = padded
-        .get(..SEALED_PAYLOAD_LEN_PREFIX_LEN)
-        .ok_or(SealedPayloadError::TooShort)?
-        .try_into()
-        .map_err(|_| SealedPayloadError::InvalidLengthPrefix)?;
-    let plaintext_len = usize::try_from(u32::from_be_bytes(len_bytes))
-        .map_err(|_| SealedPayloadError::PlatformLimit)?;
-    let plaintext_end = SEALED_PAYLOAD_LEN_PREFIX_LEN
-        .checked_add(plaintext_len)
-        .ok_or(SealedPayloadError::LengthOverflow)?;
-    if plaintext_end > padded.len() {
-        return Err(SealedPayloadError::LengthExceedsBucket);
-    }
-    if padded[plaintext_end..].iter().any(|byte| *byte != 0) {
-        return Err(SealedPayloadError::MalformedPadding);
-    }
-    Ok(Zeroizing::new(
-        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN..plaintext_end].to_vec(),
-    ))
-}
-
-/// An error returned while encoding authenticated Message metadata.
-#[derive(Debug, Eq, PartialEq)]
-pub enum MessageEncodingError {
-    /// A transcript field exceeds the supported encoding length.
-    PayloadTooLarge,
-    /// The payload tag is unknown.
-    UnsupportedPayloadKind(u8),
-}
-
-impl fmt::Display for MessageEncodingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PayloadTooLarge => write!(f, "message transcript field exceeds size limit"),
-            Self::UnsupportedPayloadKind(tag) => {
-                write!(f, "unsupported message payload kind: {tag}")
-            }
-        }
-    }
-}
-
-impl Error for MessageEncodingError {}
 impl Error for SealedPayloadError {}

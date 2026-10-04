@@ -6,14 +6,15 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    CryptoError, DiscoveryKey, HandshakeEnvelope, Header, IdentityKeyBundle, InitialPlaintext,
-    OneTimePreKey, PreKeyBundle, RatchetState, Signature, SignedPreKey, SigningKeyPair, accept,
-    generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
-    initiate, sign_identity_key_binding,
+    DiscoveryKey, HandshakeEnvelope, HandshakeError, Header, IdentityKeyBundle, InitialPlaintext,
+    KeyBundleError, OneTimePreKey, PreKeyBundle, RatchetError, RatchetState, Signature,
+    SignedPreKey, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initial_associated_data, initiate, sign_identity_key_binding,
 };
+use roost_protocol::SignatureError;
 
-const FIXED_CREATED_AT: u64 = 1_700_000_000;
+const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
 
 struct Setup {
     alice_identity_key: IdentityKeyBundle,
@@ -29,14 +30,23 @@ fn setup() -> (Setup, ChaCha20Rng) {
     let alice_identity = generate_signing_key_pair(&mut rng);
     let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
     let alice_discovery_key =
-        generate_discovery_key(&mut rng, &alice_identity, 1, FIXED_CREATED_AT);
+        generate_discovery_key(&mut rng, &alice_identity, 1, FIXED_CREATED_AT_SECS);
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
-    let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, FIXED_CREATED_AT);
-    let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, FIXED_CREATED_AT);
-    let bob_one_time_prekey =
-        generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), FIXED_CREATED_AT);
+    let bob_discovery_key =
+        generate_discovery_key(&mut rng, &bob_identity, 2, FIXED_CREATED_AT_SECS);
+    let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
+        &mut rng,
+        &bob_discovery_key,
+        0,
+        FIXED_CREATED_AT_SECS,
+    );
+    let bob_one_time_prekey = generate_one_time_prekey(
+        &mut rng,
+        7,
+        bob_discovery_key.epoch(),
+        FIXED_CREATED_AT_SECS,
+    );
     let setup = Setup {
         alice_identity_key,
         alice_discovery_key,
@@ -260,7 +270,12 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
         &prekey_bundle,
         initial_plaintext(b"payload"),
     );
-    assert!(matches!(result, Err(CryptoError::SignatureInvalid)));
+    assert!(matches!(
+        result,
+        Err(HandshakeError::KeyBundle(KeyBundleError::Signature(
+            SignatureError::SignatureInvalid
+        )))
+    ));
 }
 
 #[test]
@@ -277,7 +292,7 @@ fn tampered_header_rolls_back_state() {
     };
     assert!(matches!(
         bob.ratchet_decrypt(&mut rng, &ciphertext, &tampered, &associated_data),
-        Err(CryptoError::Aead)
+        Err(RatchetError::Aead)
     ));
     assert_eq!(
         bob.skipped_key_count(),

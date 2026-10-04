@@ -10,7 +10,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const OPERATION_JOURNAL_KEY: &str = "operation/journal";
 const OPERATION_JOURNAL_VERSION: u8 = 1;
-const OPERATION_IDENTIFIER_LEN: usize = 16;
+const OPERATION_ID_LEN: usize = 16;
 const PRECONDITION_DIGEST_LEN: usize = 32;
 const MAX_OPERATION_RECORDS: usize = 32;
 const MAX_UNFINISHED_OPERATIONS: usize = 16;
@@ -19,21 +19,21 @@ const MAX_OPERATION_MUTATIONS: usize = 16;
 const MAX_STORAGE_KEY_LEN: usize = 128;
 const MAX_STAGED_VALUE_LEN: usize = 128 * 1024;
 const MAX_OPERATION_JOURNAL_LEN: usize = 2 * 1024 * 1024;
-const IDENTIFIER_GENERATION_ATTEMPTS: usize = 8;
+const ID_GENERATION_ATTEMPTS: usize = 8;
 const SECURE_STORAGE_PRECONDITION_CONTEXT: &str = "AetherSecureStoragePrecondition-v1";
 
 /// Stable identifier for one prepared KeyStore operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct KeyStoreOperationIdentifier([u8; OPERATION_IDENTIFIER_LEN]);
+pub struct KeyStoreOperationId([u8; OPERATION_ID_LEN]);
 
-impl KeyStoreOperationIdentifier {
+impl KeyStoreOperationId {
     /// Creates an identifier from its stable byte encoding.
-    pub fn from_bytes(bytes: [u8; OPERATION_IDENTIFIER_LEN]) -> Self {
+    pub fn from_bytes(bytes: [u8; OPERATION_ID_LEN]) -> Self {
         Self(bytes)
     }
 
     /// Returns the stable byte encoding.
-    pub fn as_bytes(&self) -> &[u8; OPERATION_IDENTIFIER_LEN] {
+    pub fn as_bytes(&self) -> &[u8; OPERATION_ID_LEN] {
         &self.0
     }
 }
@@ -63,7 +63,7 @@ pub struct SecureStoragePrecondition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyStoreOperation {
     /// Stable identifier persisted by the host with its atomic transaction.
-    pub identifier: KeyStoreOperationIdentifier,
+    pub id: KeyStoreOperationId,
     /// SecureStorage inputs checked before the operation is committed.
     pub secure_storage_preconditions: Vec<SecureStoragePrecondition>,
 }
@@ -126,7 +126,7 @@ pub enum KeyStoreOperationError {
     /// A previously committed operation must be finalized or aborted before more work proceeds.
     RecoveryRequired {
         /// Identifier of the unfinished operation.
-        identifier: KeyStoreOperationIdentifier,
+        id: KeyStoreOperationId,
     },
     /// SecureStorage returned a platform failure.
     Storage(StorageError),
@@ -215,7 +215,7 @@ struct StagedMutation {
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct JournalRecord {
     #[zeroize(skip)]
-    identifier: KeyStoreOperationIdentifier,
+    id: KeyStoreOperationId,
     status: JournalStatus,
     #[zeroize(skip)]
     preconditions: Vec<SecureStoragePrecondition>,
@@ -225,7 +225,7 @@ struct JournalRecord {
 impl JournalRecord {
     fn public_operation(&self) -> KeyStoreOperation {
         KeyStoreOperation {
-            identifier: self.identifier,
+            id: self.id,
             secure_storage_preconditions: self.preconditions.clone(),
         }
     }
@@ -377,21 +377,18 @@ impl KeyStore {
         E: From<KeyStoreOperationError>,
     {
         let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required().map_err(E::from)?;
+        self.ensure_no_recovery_required()?;
 
         let (staging_storage, state) = StagingSecureStorage::new(Arc::clone(&self.0.storage));
         let staged_store = KeyStore::from_shared_storage(
             Arc::new(Mutex::new(Box::new(staging_storage))),
-            Arc::clone(&self.0.clock),
             self.0.engine,
         );
         let output = operation(&staged_store)?;
         let state = state
             .lock()
-            .map_err(|_| E::from(KeyStoreOperationError::LockPoisoned))?;
-        let operation = self
-            .stage_operation(state.preconditions(), state.mutations())
-            .map_err(E::from)?;
+            .map_err(|_| KeyStoreOperationError::LockPoisoned)?;
+        let operation = self.stage_operation(state.preconditions(), state.mutations())?;
         Ok(PreparedKeyStoreOperation { operation, output })
     }
 
@@ -400,31 +397,14 @@ impl KeyStore {
     /// Use this after an ambiguous lifecycle call or while reconciling startup state. Terminal
     /// tombstones are retained only within the bounded operation journal, so a sufficiently old
     /// finalized or aborted identifier may be unknown.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let prepared = store.prepare_generate_identity()?;
-    /// assert!(matches!(
-    ///     store.operation_status(prepared.operation.identifier)?,
-    ///     KeyStoreOperationStatus::Prepared
-    /// ));
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Operation`] if the identifier is unknown, the journal is corrupt, or
-    ///   SecureStorage fails.
     pub fn operation_status(
         &self,
-        identifier: KeyStoreOperationIdentifier,
+        id: KeyStoreOperationId,
     ) -> Result<KeyStoreOperationStatus, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let storage = self.lock_operation_storage()?;
         let journal = load_journal(&**storage)?;
-        Ok(find_record(&journal, identifier)?.status.public())
+        Ok(find_record(&journal, id)?.status.public())
     }
 
     /// Validates secure inputs and reserves an operation for the host transaction.
@@ -434,44 +414,23 @@ impl KeyStore {
     /// [`Self::finalize_operation`]. Abort only after proving the host transaction did not commit.
     /// If the host result is ambiguous, reload its operation record and reconcile it through
     /// [`Self::unfinished_operations`].
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let prepared = store.prepare_generate_identity()?;
-    /// assert!(matches!(
-    ///     store.commit_operation(prepared.operation.identifier)?,
-    ///     KeyStoreOperationStatus::Committed
-    /// ));
-    /// // Atomically persist host-owned output and the identifier here.
-    /// store.finalize_operation(prepared.operation.identifier)?;
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Operation`] if the operation is unknown, another committed operation
-    ///   needs recovery, a precondition changed, the transition is invalid, the journal is
-    ///   corrupt, or SecureStorage fails.
     pub fn commit_operation(
         &self,
-        identifier: KeyStoreOperationIdentifier,
+        id: KeyStoreOperationId,
     ) -> Result<KeyStoreOperationStatus, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let mut storage = self.lock_operation_storage()?;
         let mut journal = load_journal(&**storage)?;
-        let index = record_index(&journal, identifier)?;
+        let index = record_index(&journal, id)?;
         let status = journal.records[index].status;
         match status {
             JournalStatus::Prepared => {
-                if let Some(record) = journal.records.iter().find(|record| {
-                    record.identifier != identifier && record.status.requires_recovery()
-                }) {
-                    return Err(KeyStoreOperationError::RecoveryRequired {
-                        identifier: record.identifier,
-                    }
-                    .into());
+                if let Some(record) = journal
+                    .records
+                    .iter()
+                    .find(|record| record.id != id && record.status.requires_recovery())
+                {
+                    return Err(KeyStoreOperationError::RecoveryRequired { id: record.id }.into());
                 }
                 validate_preconditions(&**storage, &journal.records[index].preconditions)?;
                 journal.records[index].status = JournalStatus::Committed;
@@ -492,35 +451,16 @@ impl KeyStore {
     /// Makes a committed operation's staged secure mutations authoritative.
     ///
     /// Finalization records progress after every SecureStorage mutation. Repeating the call resumes
-    /// at the last durable step, and repeating it after completion is idempotent.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let prepared = store.prepare_generate_identity()?;
-    /// store.commit_operation(prepared.operation.identifier)?;
-    /// // The host transaction committed before finalization.
-    /// assert!(matches!(
-    ///     store.finalize_operation(prepared.operation.identifier)?,
-    ///     KeyStoreOperationStatus::Finalized
-    /// ));
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Operation`] if the operation is unknown or uncommitted, the journal is
-    ///   corrupt, or SecureStorage fails. A failure after finalization starts requires retrying
-    ///   this method; it cannot be aborted safely.
+    /// at the last durable step, and repeating it after completion is idempotent. Once finalization
+    /// starts, retry a failure with this method; the operation can no longer be aborted safely.
     pub fn finalize_operation(
         &self,
-        identifier: KeyStoreOperationIdentifier,
+        id: KeyStoreOperationId,
     ) -> Result<KeyStoreOperationStatus, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let mut storage = self.lock_operation_storage()?;
         let mut journal = load_journal(&**storage)?;
-        let index = record_index(&journal, identifier)?;
+        let index = record_index(&journal, id)?;
         match journal.records[index].status {
             JournalStatus::Prepared | JournalStatus::Aborted => {
                 return Err(KeyStoreOperationError::InvalidTransition {
@@ -569,31 +509,14 @@ impl KeyStore {
     /// caller proves its host transaction did not commit; an ambiguous host result must be
     /// reconciled by identifier first. Repeating an abort is idempotent, while an operation that
     /// started finalizing cannot be rolled back safely.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let prepared = store.prepare_generate_identity()?;
-    /// assert!(matches!(
-    ///     store.abort_operation(prepared.operation.identifier)?,
-    ///     KeyStoreOperationStatus::Aborted
-    /// ));
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Operation`] if the operation is unknown, finalizing, or finalized; the
-    ///   journal is corrupt; or SecureStorage fails.
     pub fn abort_operation(
         &self,
-        identifier: KeyStoreOperationIdentifier,
+        id: KeyStoreOperationId,
     ) -> Result<KeyStoreOperationStatus, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let mut storage = self.lock_operation_storage()?;
         let mut journal = load_journal(&**storage)?;
-        let index = record_index(&journal, identifier)?;
+        let index = record_index(&journal, id)?;
         match journal.records[index].status {
             JournalStatus::Prepared | JournalStatus::Committed => {
                 journal.records[index].scrub_staged_material();
@@ -617,21 +540,6 @@ impl KeyStore {
     /// The host matches each identifier against its durable transaction record. It aborts an
     /// orphaned Prepared or Committed stage whose host transaction did not commit, and finalizes a
     /// Committed or Finalizing operation whose host transaction did commit.
-    ///
-    /// # Examples
-    /// ```
-    /// use roost_core::{InMemorySecureStorage, KeyStore, KeyStoreOperationStatus};
-    ///
-    /// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    /// let prepared = store.prepare_generate_identity()?;
-    /// let unfinished = store.unfinished_operations()?;
-    /// assert_eq!(unfinished[0].operation.identifier, prepared.operation.identifier);
-    /// assert!(matches!(unfinished[0].status, KeyStoreOperationStatus::Prepared));
-    /// # Ok::<(), roost_core::KeyStoreError>(())
-    /// ```
-    ///
-    /// # Errors
-    /// - [`KeyStoreError::Operation`] if the journal is corrupt or SecureStorage fails.
     pub fn unfinished_operations(&self) -> Result<Vec<UnfinishedKeyStoreOperation>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let storage = self.lock_operation_storage()?;
@@ -655,9 +563,7 @@ impl KeyStore {
             .iter()
             .find(|record| record.status.requires_recovery())
         {
-            return Err(KeyStoreOperationError::RecoveryRequired {
-                identifier: record.identifier,
-            });
+            return Err(KeyStoreOperationError::RecoveryRequired { id: record.id });
         }
         Ok(())
     }
@@ -690,9 +596,9 @@ impl KeyStore {
         {
             return Err(KeyStoreOperationError::TooManyUnfinishedOperations);
         }
-        let identifier = generate_identifier(&journal)?;
+        let id = generate_id(&journal)?;
         journal.records.push(JournalRecord {
-            identifier,
+            id,
             status: JournalStatus::Prepared,
             preconditions,
             mutations,
@@ -765,21 +671,15 @@ fn apply_mutation(
     Ok(())
 }
 
-fn generate_identifier(
-    journal: &OperationJournal,
-) -> Result<KeyStoreOperationIdentifier, KeyStoreOperationError> {
-    for _ in 0..IDENTIFIER_GENERATION_ATTEMPTS {
-        let mut bytes = [0u8; OPERATION_IDENTIFIER_LEN];
+fn generate_id(journal: &OperationJournal) -> Result<KeyStoreOperationId, KeyStoreOperationError> {
+    for _ in 0..ID_GENERATION_ATTEMPTS {
+        let mut bytes = [0u8; OPERATION_ID_LEN];
         OsRng
             .try_fill_bytes(&mut bytes)
             .map_err(|_| KeyStoreOperationError::Randomness)?;
-        let identifier = KeyStoreOperationIdentifier(bytes);
-        if journal
-            .records
-            .iter()
-            .all(|record| record.identifier != identifier)
-        {
-            return Ok(identifier);
+        let id = KeyStoreOperationId(bytes);
+        if journal.records.iter().all(|record| record.id != id) {
+            return Ok(id);
         }
     }
     Err(KeyStoreOperationError::Randomness)
@@ -802,23 +702,23 @@ fn prune_terminal_records(journal: &mut OperationJournal) {
 
 fn find_record(
     journal: &OperationJournal,
-    identifier: KeyStoreOperationIdentifier,
+    id: KeyStoreOperationId,
 ) -> Result<&JournalRecord, KeyStoreOperationError> {
     journal
         .records
         .iter()
-        .find(|record| record.identifier == identifier)
+        .find(|record| record.id == id)
         .ok_or(KeyStoreOperationError::NotFound)
 }
 
 fn record_index(
     journal: &OperationJournal,
-    identifier: KeyStoreOperationIdentifier,
+    id: KeyStoreOperationId,
 ) -> Result<usize, KeyStoreOperationError> {
     journal
         .records
         .iter()
-        .position(|record| record.identifier == identifier)
+        .position(|record| record.id == id)
         .ok_or(KeyStoreOperationError::NotFound)
 }
 
@@ -859,7 +759,7 @@ fn encoded_journal_len(journal: &OperationJournal) -> Result<usize, KeyStoreOper
         }
 
         // Identifier, status, progress, and precondition count.
-        len = checked_journal_len(len, OPERATION_IDENTIFIER_LEN + 3)?;
+        len = checked_journal_len(len, OPERATION_ID_LEN + 3)?;
         for precondition in &record.preconditions {
             let key_len = storage_key_len(&precondition.key)?;
             let digest_len = match &precondition.expected_value {
@@ -909,7 +809,7 @@ fn encode_journal(
         "operation record count",
     )?;
     for record in &journal.records {
-        encoded.extend_from_slice(record.identifier.as_bytes());
+        encoded.extend_from_slice(record.id.as_bytes());
         let (status, progress) = match record.status {
             JournalStatus::Prepared => (0, 0),
             JournalStatus::Committed => (1, 0),
@@ -995,11 +895,8 @@ fn decode_journal(bytes: &[u8]) -> Result<OperationJournal, KeyStoreOperationErr
     }
     let mut records = Vec::with_capacity(record_count);
     for _ in 0..record_count {
-        let identifier = KeyStoreOperationIdentifier(decoder.array()?);
-        if records
-            .iter()
-            .any(|record: &JournalRecord| record.identifier == identifier)
-        {
+        let id = KeyStoreOperationId(decoder.array()?);
+        if records.iter().any(|record: &JournalRecord| record.id == id) {
             return Err(KeyStoreOperationError::Corrupt(
                 "operation journal contains duplicate identifiers".into(),
             ));
@@ -1092,7 +989,7 @@ fn decode_journal(bytes: &[u8]) -> Result<OperationJournal, KeyStoreOperationErr
             }
         };
         records.push(JournalRecord {
-            identifier,
+            id,
             status,
             preconditions,
             mutations,

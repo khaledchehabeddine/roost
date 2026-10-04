@@ -1,7 +1,7 @@
 //! Provides one-time X25519 pre-keys for X3DH.
 
-use crate::error::CryptoError;
-use crate::keys::validate_x25519_public_key;
+use crate::keys::KeyBundleError;
+use crate::keys::is_valid_x25519_public_key;
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -17,12 +17,12 @@ pub struct OneTimePreKey {
     #[zeroize(skip)]
     epoch: u32,
     #[zeroize(skip)]
-    created_at: u64,
+    created_at_secs: u64,
 }
 
 impl OneTimePreKey {
     /// Restores a one-time pre-key from secret bytes and stored metadata.
-    pub fn from_secret_bytes(id: u64, secret: [u8; 32], epoch: u32, created_at: u64) -> Self {
+    pub fn from_secret_bytes(id: u64, secret: [u8; 32], epoch: u32, created_at_secs: u64) -> Self {
         let secret_key = StaticSecret::from(secret);
         let public_key = PublicKey::from(&secret_key);
         Self {
@@ -30,7 +30,7 @@ impl OneTimePreKey {
             secret_key,
             public_key,
             epoch,
-            created_at,
+            created_at_secs,
         }
     }
 
@@ -50,8 +50,8 @@ impl OneTimePreKey {
     }
 
     /// Returns the Unix timestamp (seconds) when this pre-key was generated.
-    pub fn created_at(&self) -> u64 {
-        self.created_at
+    pub fn created_at_secs(&self) -> u64 {
+        self.created_at_secs
     }
 
     /// Performs an X25519 Diffie-Hellman exchange between this pre-key's secret and `peer`.
@@ -70,7 +70,7 @@ impl OneTimePreKey {
             id: self.id,
             public_key: self.public_key,
             epoch: self.epoch,
-            created_at: self.created_at,
+            created_at_secs: self.created_at_secs,
         }
     }
 }
@@ -85,7 +85,7 @@ pub struct OneTimePreKeyBundle {
     /// Discovery-key epoch this pre-key was produced under.
     pub epoch: u32,
     /// Unix timestamp in seconds when this pre-key was generated.
-    pub created_at: u64,
+    pub created_at_secs: u64,
 }
 
 impl OneTimePreKeyBundle {
@@ -93,26 +93,23 @@ impl OneTimePreKeyBundle {
     ///
     /// This validates byte lengths only. The epoch must still match the discovery-key bundle used
     /// for session establishment.
-    ///
-    /// # Errors
-    /// - [`CryptoError::InvalidKeyEncoding`] when the public key has the wrong length.
     pub fn from_bytes(
         id: u64,
         public_key: &[u8],
         epoch: u32,
-        created_at: u64,
-    ) -> Result<Self, CryptoError> {
+        created_at_secs: u64,
+    ) -> Result<Self, KeyBundleError> {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
-            .map_err(|_| CryptoError::InvalidKeyEncoding)?;
-        if !validate_x25519_public_key(&public_key_bytes) {
-            return Err(CryptoError::InvalidKeyEncoding);
+            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+        if !is_valid_x25519_public_key(&public_key_bytes) {
+            return Err(KeyBundleError::InvalidKeyEncoding);
         }
         Ok(Self {
             id,
             public_key: PublicKey::from(public_key_bytes),
             epoch,
-            created_at,
+            created_at_secs,
         })
     }
 }
@@ -123,7 +120,7 @@ pub fn generate_one_time_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     id: u64,
     epoch: u32,
-    created_at: u64,
+    created_at_secs: u64,
 ) -> OneTimePreKey {
     let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
@@ -132,7 +129,7 @@ pub fn generate_one_time_prekey<R: RngCore + CryptoRng>(
         secret_key,
         public_key,
         epoch,
-        created_at,
+        created_at_secs,
     }
 }
 
@@ -153,7 +150,7 @@ mod tests {
             one_time_prekey.public().as_bytes()
         );
         assert_eq!(bundle.epoch, one_time_prekey.epoch());
-        assert_eq!(bundle.created_at, one_time_prekey.created_at());
+        assert_eq!(bundle.created_at_secs, one_time_prekey.created_at_secs());
     }
 
     #[test]
@@ -166,21 +163,21 @@ mod tests {
             bundle.id,
             bundle.public_key.as_bytes(),
             bundle.epoch,
-            bundle.created_at,
+            bundle.created_at_secs,
         )
         .unwrap();
 
         assert_eq!(parsed.id, bundle.id);
         assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
         assert_eq!(parsed.epoch, bundle.epoch);
-        assert_eq!(parsed.created_at, bundle.created_at);
+        assert_eq!(parsed.created_at_secs, bundle.created_at_secs);
     }
 
     #[test]
     fn bundle_from_bytes_rejects_wrong_public_key_length() {
         assert!(matches!(
             OneTimePreKeyBundle::from_bytes(9, &[0u8; 31], 3, 1_700_000_000),
-            Err(crate::CryptoError::InvalidKeyEncoding)
+            Err(KeyBundleError::InvalidKeyEncoding)
         ));
     }
 
@@ -193,7 +190,7 @@ mod tests {
             original.id(),
             *original.to_secret_bytes(),
             original.epoch(),
-            original.created_at(),
+            original.created_at_secs(),
         );
         assert_eq!(
             original.diffie_hellman(peer.public()).as_bytes(),

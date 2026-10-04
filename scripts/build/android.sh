@@ -41,6 +41,7 @@ cargo run -p "$CRATE" --bin uniffi-bindgen "${CARGO_ARGS[@]}" -- generate \
     "target/aarch64-linux-android/release/${LIB}.so" \
     --language kotlin \
     --out-dir "$OUT/kotlin"
+find "$OUT/kotlin" -name '*.kt' -exec python3 scripts/build/host_docs.py kotlin {} \;
 
 for TARGET_PAIR in "${TARGETS[@]}"; do
     TARGET="${TARGET_PAIR%%:*}"

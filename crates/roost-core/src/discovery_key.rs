@@ -1,4 +1,3 @@
-use crate::clock::Clock;
 use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
@@ -6,9 +5,11 @@ use roost_crypto::{
     DiscoveryKey, DiscoveryKeyBundle, RecipientDeliveryCapability, Signature, SigningKeyPair,
     generate_discovery_key, generate_recipient_delivery_capability, verify_discovery_key_bundle,
 };
+use roost_protocol::to_unix_secs;
 use std::error::Error;
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::SystemTime;
 use zeroize::Zeroizing;
 
 const DISCOVERY_KEY: &str = "discovery/current";
@@ -20,7 +21,7 @@ const DISCOVERY_KEY_VERSION: u8 = 2;
 // identity signature (64) | created_at (8) | delivery capability (32).
 const DISCOVERY_KEY_BLOB_LEN: usize = 1 + 4 + 32 + 32 + 64 + 8 + 32;
 const CAPABILITY_OFFSET: usize = 141;
-// Identity creation starts at inbox generation 1 (AE-IDN-07).
+// Identity creation starts at inbox generation 1.
 const FIRST_INBOX_GENERATION: u32 = 1;
 
 /// Errors returned by discovery-key operations.
@@ -101,20 +102,14 @@ pub(crate) enum DiscoveryKeyStatus {
 pub(crate) struct DiscoveryKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
-    clock: Arc<dyn Clock>,
 }
 
 impl DiscoveryKeyManager {
     pub(crate) fn new(
         storage: Arc<Mutex<Box<dyn SecureStorage>>>,
         identity: Arc<IdentityManager>,
-        clock: Arc<dyn Clock>,
     ) -> Self {
-        DiscoveryKeyManager {
-            storage,
-            identity,
-            clock,
-        }
+        DiscoveryKeyManager { storage, identity }
     }
 
     // Loads the discovery key and verifies its signature against the identity key.
@@ -131,7 +126,7 @@ impl DiscoveryKeyManager {
         Ok(self.current()?.bundle())
     }
 
-    // Returns the DK→IK binding for `discovery_key` against the stored identity (AE-KEY-04).
+    // Returns the DK→IK binding for `discovery_key` against the stored identity.
     //
     // Recomputed per call rather than persisted. The signature covers only the identity's two
     // public halves — no epoch, no timestamp — so it holds nothing time-varying, and Ed25519 is
@@ -166,6 +161,7 @@ impl DiscoveryKeyManager {
     pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
+        now: SystemTime,
     ) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let identity = self.identity.load_identity()?;
         let epoch = match self.stored_status()? {
@@ -177,10 +173,11 @@ impl DiscoveryKeyManager {
                 ));
             }
         };
-        let now = self.now_secs()?;
-        let discovery_key = generate_discovery_key(rng, identity.signing_key_pair(), epoch, now);
+        let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
+        let discovery_key =
+            generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs);
         // The capability rotates with the discovery key because both belong to one inbox
-        // generation (AE-IDN-07), and they are written in one store so they cannot diverge.
+        // generation, and they are written in one store so they cannot diverge.
         let capability = generate_recipient_delivery_capability(rng);
         let blob = encode_discovery_key(&discovery_key, &capability);
         let mut storage = self.lock_storage()?;
@@ -188,10 +185,10 @@ impl DiscoveryKeyManager {
         Ok(discovery_key)
     }
 
-    // Returns the recipient delivery capability bound to the current inbox generation (AE-IDN-06).
+    // Returns the recipient delivery capability bound to the current inbox generation.
     //
     // Secret-bearing: the caller presents it to authorized contacts and never registers it. Only
-    // its verifier (AE-IDN-10) is registered with the relay.
+    // its verifier is registered with the relay.
     pub(crate) fn current_capability(
         &self,
     ) -> Result<RecipientDeliveryCapability, DiscoveryKeyError> {
@@ -258,12 +255,6 @@ impl DiscoveryKeyManager {
             .lock()
             .map_err(|_| DiscoveryKeyError::LockPoisoned)
     }
-
-    fn now_secs(&self) -> Result<u64, DiscoveryKeyError> {
-        self.clock
-            .now_unix_secs()
-            .map_err(|_| DiscoveryKeyError::Clock)
-    }
 }
 
 fn checked_blob(raw: &[u8]) -> Result<&[u8; DISCOVERY_KEY_BLOB_LEN], DiscoveryKeyError> {
@@ -289,7 +280,7 @@ fn encode_discovery_key(
     blob[5..37].copy_from_slice(&*discovery_key.key_agreement_secret_bytes());
     blob[37..69].copy_from_slice(&*discovery_key.signing_secret_bytes());
     blob[69..133].copy_from_slice(&discovery_key.identity_signature().to_bytes());
-    blob[133..CAPABILITY_OFFSET].copy_from_slice(&discovery_key.created_at().to_be_bytes());
+    blob[133..CAPABILITY_OFFSET].copy_from_slice(&discovery_key.created_at_secs().to_be_bytes());
     blob[CAPABILITY_OFFSET..DISCOVERY_KEY_BLOB_LEN].copy_from_slice(&*capability.to_bytes());
     blob
 }
@@ -328,11 +319,16 @@ fn read_epoch(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::ManualClock;
     use crate::storage::InMemorySecureStorage;
     use rand::rngs::OsRng;
+    use roost_protocol::from_unix_secs;
+    use std::time::SystemTime;
 
     const FIXED_NOW: u64 = 1_700_000_000;
+
+    fn fixed_now() -> SystemTime {
+        from_unix_secs(FIXED_NOW).unwrap()
+    }
 
     struct DiscoveryKeySetup {
         identity: Arc<IdentityManager>,
@@ -347,11 +343,7 @@ mod tests {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
         identity.generate_identity(&mut OsRng).unwrap();
-        let discovery = DiscoveryKeyManager::new(
-            storage,
-            Arc::clone(&identity),
-            Arc::new(ManualClock::new(FIXED_NOW)),
-        );
+        let discovery = DiscoveryKeyManager::new(storage, Arc::clone(&identity));
         DiscoveryKeySetup {
             identity,
             manager: discovery,
@@ -361,7 +353,7 @@ mod tests {
     fn manager_without_identity() -> DiscoveryKeyManager {
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        DiscoveryKeyManager::new(storage, identity, Arc::new(ManualClock::new(FIXED_NOW)))
+        DiscoveryKeyManager::new(storage, identity)
     }
 
     #[test]
@@ -390,7 +382,7 @@ mod tests {
     #[test]
     fn current_returns_corrupt_for_tampered_signature() {
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         // Flip a byte inside the stored signature region.
         let mut blob = discovery
             .lock_storage()
@@ -418,7 +410,7 @@ mod tests {
             discovery.stored_status().unwrap(),
             DiscoveryKeyStatus::Absent
         ));
-        discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         assert!(matches!(
             discovery.stored_status().unwrap(),
             DiscoveryKeyStatus::Present { epoch: 1 }
@@ -440,8 +432,8 @@ mod tests {
             identity,
             manager: discovery,
         } = setup_with_identity();
-        let rotated = discovery.rotate_now(&mut OsRng).unwrap();
-        // Identity creation starts at inbox generation 1, not 0 (AE-IDN-07).
+        let rotated = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        // Identity creation starts at inbox generation 1, not 0.
         assert_eq!(rotated.epoch(), 1);
         let bundle = discovery.current_bundle().unwrap();
         assert_eq!(bundle.epoch, 1);
@@ -450,15 +442,15 @@ mod tests {
     }
 
     /// The discovery key and the delivery capability share one generation, so rotation must
-    /// replace both (AE-IDN-07). A rotation that advanced the generation while leaving the
-    /// capability intact would leave a blocked contact still able to deliver (AE-BLK-08).
+    /// replace both. A rotation that advanced the generation while leaving the
+    /// capability intact would leave a blocked contact still able to deliver.
     #[test]
     fn rotation_replaces_the_delivery_capability() {
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         let before = *discovery.current_capability().unwrap().to_bytes();
 
-        discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         let after = *discovery.current_capability().unwrap().to_bytes();
 
         assert_ne!(before, after);
@@ -467,7 +459,7 @@ mod tests {
     #[test]
     fn capability_survives_a_reload() {
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
 
         let first = *discovery.current_capability().unwrap().to_bytes();
         let second = *discovery.current_capability().unwrap().to_bytes();
@@ -478,17 +470,35 @@ mod tests {
     #[test]
     fn rotate_now_advances_the_generation() {
         let discovery = setup_with_identity().manager;
-        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 1);
-        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 2);
-        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 3);
+        assert_eq!(
+            discovery
+                .rotate_now(&mut OsRng, fixed_now())
+                .unwrap()
+                .epoch(),
+            1
+        );
+        assert_eq!(
+            discovery
+                .rotate_now(&mut OsRng, fixed_now())
+                .unwrap()
+                .epoch(),
+            2
+        );
+        assert_eq!(
+            discovery
+                .rotate_now(&mut OsRng, fixed_now())
+                .unwrap()
+                .epoch(),
+            3
+        );
     }
 
     #[test]
     fn rotate_now_recovers_from_tampered_signature_preserving_epoch() {
         let discovery = setup_with_identity().manager;
         // Reach generation 2 first, so recovery to 3 proves the stored value is read, not reset.
-        discovery.rotate_now(&mut OsRng).unwrap();
-        let rotated = discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        let rotated = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         assert_eq!(rotated.epoch(), 2);
 
         // Corrupt the signature of the generation-2 key.
@@ -510,7 +520,7 @@ mod tests {
             Err(DiscoveryKeyError::Corrupt)
         ));
 
-        let recovered = discovery.rotate_now(&mut OsRng).unwrap();
+        let recovered = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         assert_eq!(recovered.epoch(), 3);
         assert!(discovery.current().is_ok());
     }
@@ -524,7 +534,7 @@ mod tests {
             .store(DISCOVERY_KEY, &[0xAAu8; 50])
             .unwrap();
         assert!(matches!(
-            discovery.rotate_now(&mut OsRng),
+            discovery.rotate_now(&mut OsRng, fixed_now()),
             Err(DiscoveryKeyError::InvalidData(_))
         ));
     }
@@ -533,7 +543,7 @@ mod tests {
     fn rotate_now_without_identity_returns_identity_error() {
         let discovery = manager_without_identity();
         assert!(matches!(
-            discovery.rotate_now(&mut OsRng),
+            discovery.rotate_now(&mut OsRng, fixed_now()),
             Err(DiscoveryKeyError::Identity(IdentityError::NotFound))
         ));
     }
@@ -547,7 +557,13 @@ mod tests {
             .store(DISCOVERY_KEY, &[0xAAu8; 50])
             .unwrap();
         discovery.reset().unwrap();
-        assert_eq!(discovery.rotate_now(&mut OsRng).unwrap().epoch(), 1);
+        assert_eq!(
+            discovery
+                .rotate_now(&mut OsRng, fixed_now())
+                .unwrap()
+                .epoch(),
+            1
+        );
     }
 
     #[test]
@@ -577,7 +593,7 @@ mod tests {
             restored.identity_signature().to_bytes()
         );
         assert_eq!(restored.epoch(), 9);
-        assert_eq!(restored.created_at(), FIXED_NOW);
+        assert_eq!(restored.created_at_secs(), FIXED_NOW);
     }
 
     #[test]
@@ -592,8 +608,8 @@ mod tests {
     #[test]
     fn export_then_restore_blob_preserves_epoch_and_verifies() {
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng).unwrap();
-        let exported = discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        let exported = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         assert_eq!(exported.epoch(), 2);
         let blob = discovery.export_blob().unwrap();
 
@@ -611,7 +627,7 @@ mod tests {
     #[test]
     fn validate_blob_accepts_stored_blob_and_rejects_malformed() {
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng).unwrap();
+        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
         let blob = discovery.export_blob().unwrap();
         assert!(DiscoveryKeyManager::validate_blob(&blob).is_ok());
         assert!(matches!(

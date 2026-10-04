@@ -1,18 +1,18 @@
 //! Provides the recipient delivery capability and its public verifier.
 //!
 //! The capability is a recipient-wide bearer secret: every currently authorized contact holds the
-//! same value, so it identifies the recipient's inbox generation rather than an individual sender
-//! (AE-IDN-06). Aether generates one and hands it to the caller, but never registers, validates, or
-//! transmits it (AE-IDN-09) — the caller registers only the verifier.
+//! same value, so it identifies the recipient's inbox generation rather than an individual sender.
+//! Aether generates one and hands it to the caller, but never registers, validates, or
+//! transmits it — the caller registers only the verifier.
 
 use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-// Domain string for the verifier derivation (AE-IDN-10). Unlike the signature contexts in
-// docs/domain-separation.md this is lowercase-kebab with no trailing colon, because the
-// specification fixes these exact bytes.
+// Domain string for the verifier derivation. Unlike signature contexts such as `AetherDK-v1:`,
+// this is lowercase-kebab with no trailing colon, because Relay derives the same verifier from
+// these exact bytes.
 const VERIFIER_DOMAIN: &[u8] = b"aether-recipient-delivery-capability-v1";
 // Single separator byte between the domain string and the capability.
 const VERIFIER_SEPARATOR: [u8; 1] = [0x00];
@@ -29,13 +29,13 @@ const VERIFIER_LEN: usize = 32;
 pub struct RecipientDeliveryCapability([u8; CAPABILITY_LEN]);
 
 impl RecipientDeliveryCapability {
-    /// Restores a capability from bytes the host previously persisted (AE-IDN-03).
+    /// Restores a capability from bytes the host previously persisted.
     #[must_use]
     pub fn from_bytes(bytes: [u8; CAPABILITY_LEN]) -> Self {
         RecipientDeliveryCapability(bytes)
     }
 
-    /// Exports the capability's secret bytes for host persistence (AE-IDN-03).
+    /// Exports the capability's secret bytes for host persistence.
     ///
     /// The returned bytes are wrapped in [`Zeroizing`] so they are scrubbed when dropped.
     #[must_use]
@@ -43,7 +43,7 @@ impl RecipientDeliveryCapability {
         Zeroizing::new(self.0)
     }
 
-    /// Derives the public verifier registered with the relay (AE-IDN-10).
+    /// Derives the public verifier registered with the relay.
     ///
     /// SHA-256 over the domain string, one `0x00` separator byte, and the capability. Register the
     /// result; never the capability itself.
@@ -93,7 +93,7 @@ impl PartialEq for RecipientDeliveryVerifier {
 
 impl Eq for RecipientDeliveryVerifier {}
 
-/// Generates a fresh 32-byte recipient delivery capability from `rng` (AE-IDN-06).
+/// Generates a fresh 32-byte recipient delivery capability from `rng`.
 ///
 /// Production callers must pass an OS CSPRNG.
 #[must_use]
@@ -115,17 +115,17 @@ mod tests {
         ChaCha20Rng::from_seed([9u8; 32])
     }
 
-    /// Cross-implementation known-answer test for the verifier derivation (AE-IDN-10).
+    /// Cross-implementation known-answer test for the verifier derivation.
     ///
     /// Source: Python `hashlib` SHA-256, which shares no code with the `sha2` crate used in
-    /// production, per `docs/adr/0005-cryptographic-test-vector-derivation.md`.
+    /// production.
     ///
     /// Input: `capability = [0x42; 32]`.
     ///
     /// Preimage: `"aether-recipient-delivery-capability-v1" || 0x00 || capability`, 72 bytes.
     ///
     /// Relay derives this same value from a submitted capability and compares it to the stored
-    /// verifier (REL-RLY-150), so this vector is the contract between the two codebases.
+    /// verifier, so this vector is the contract between the two codebases.
     #[test]
     fn verifier_matches_the_specified_derivation() {
         const EXPECTED_VERIFIER: [u8; 32] = [
@@ -164,7 +164,7 @@ mod tests {
         assert_ne!(*first.to_bytes(), *second.to_bytes());
     }
 
-    /// The host persists the capability and restores it later (AE-IDN-03), so the round trip must
+    /// The host persists the capability and restores it later, so the round trip must
     /// preserve the exact bytes and therefore the verifier the relay already holds.
     #[test]
     fn capability_round_trips_through_secret_bytes() {

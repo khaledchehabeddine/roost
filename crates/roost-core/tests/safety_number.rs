@@ -9,7 +9,7 @@ use roost_core::{
 };
 use roost_crypto::{generate_discovery_key, generate_key_pair, generate_signing_key_pair};
 
-const CREATED_AT: u64 = 1_700_000_000;
+const CREATED_AT_SECS: u64 = 1_700_000_000;
 
 struct Setup {
     local_identity: IdentityKey,
@@ -24,9 +24,9 @@ fn setup() -> Setup {
     let local_key_pair = generate_key_pair(&mut rng);
     let contact_signing = generate_signing_key_pair(&mut rng);
     let contact_key_pair = generate_key_pair(&mut rng);
-    let contact_discovery = generate_discovery_key(&mut rng, &contact_signing, 0, CREATED_AT);
+    let contact_discovery = generate_discovery_key(&mut rng, &contact_signing, 0, CREATED_AT_SECS);
     let contact_rotated_discovery =
-        generate_discovery_key(&mut rng, &contact_signing, 1, CREATED_AT + 60);
+        generate_discovery_key(&mut rng, &contact_signing, 1, CREATED_AT_SECS + 60);
 
     Setup {
         local_identity: IdentityKey {

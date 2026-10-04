@@ -10,36 +10,6 @@
 //!
 //! - `development-certificates` exposes an in-memory certificate authority for local peer
 //!   simulations. Normal artifacts omit the API.
-//!
-//! # Examples
-//!
-//! ```
-//! use roost_client::{
-//!     ClientError, InMemorySecureStorage, Client, PublicationBundle, SecureStorage,
-//! };
-//! use std::sync::Arc;
-//!
-//! # fn publish(_bundle: &PublicationBundle) -> Result<(), ClientError> {
-//! #     Ok(())
-//! # }
-//! let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-//! let store = Client::new(storage);
-//!
-//! if !store.identity().has_identity()? {
-//!     let identity = store.identity().prepare_generate_identity()?;
-//!     store.commit_operation(identity.operation.identifier.clone())?;
-//!     // Commit the host's identity record and operation identifier before finalizing.
-//!     store.finalize_operation(identity.operation.identifier)?;
-//! }
-//!
-//! let signed_prekey = store.identity().prepare_rotate_signed_prekey_now()?;
-//! store.commit_operation(signed_prekey.operation.identifier.clone())?;
-//! // Commit publication work and the operation identifier in the host transaction.
-//! store.finalize_operation(signed_prekey.operation.identifier)?;
-//! let publication = store.identity().current_publication_bundle()?;
-//! publish(&publication)?;
-//! # Ok::<(), ClientError>(())
-//! ```
 
 uniffi::setup_scaffolding!("roost_client");
 
@@ -55,6 +25,7 @@ mod message;
 mod protocol;
 mod records;
 mod storage;
+mod time;
 mod transport_binding;
 
 pub use binding::{verify_discovery_to_identity_binding, verify_identity_key_binding};
@@ -75,7 +46,10 @@ pub use key_store_operation::{
     PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
     PreparedSignedPreKeyRotation, SecureStoragePrecondition, UnfinishedKeyStoreOperation,
 };
-pub use message::{FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial};
+pub use message::{
+    FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial, decode_message,
+    encode_message,
+};
 pub use protocol::{
     AcknowledgmentOutcome, AcknowledgmentResult, BlockedContactAcknowledgmentPolicy,
     BlockedInboundMessageResult, ContactDiscoveryKey, ContactEvent, ContactEventKind,

@@ -6,13 +6,14 @@ use crate::{
 };
 use rand::rngs::OsRng;
 use roost_crypto::{
-    CryptoError, HandshakeEnvelope, IdentityKeyBundle, InitialPlaintext, PreKeyBundle,
-    SealedFramePreKeyReference, SenderIdentityMaterial, Signature, accept_with_associated_data,
-    initiate_with_associated_data, initiator_identity_hint_with_associated_data,
-    verify_discovery_to_identity_binding,
+    HandshakeEnvelope, HandshakeError, IdentityKeyBundle, InitialPlaintext, KeyBundleError,
+    PreKeyBundle, SealedFramePreKeyReference, SenderIdentityMaterial, Signature,
+    accept_with_associated_data, initiate_with_associated_data,
+    initiator_identity_hint_with_associated_data, verify_discovery_to_identity_binding,
 };
 use std::error::Error;
 use std::fmt;
+use std::time::SystemTime;
 use zeroize::Zeroizing;
 
 /// Inputs for starting a new Session as the X3DH initiator.
@@ -21,7 +22,7 @@ pub struct SessionInitiation<'a> {
     pub session_key: ProtocolStateKey,
     /// Responder permanent Identity Key bundle.
     pub responder_identity_key: IdentityKeyBundle,
-    /// The responder's DK→IK binding: its discovery key signing the identity above (AE-KEY-04).
+    /// The responder's DK→IK binding: its discovery key signing the identity above.
     ///
     /// Checked before any handshake work. The IK→DK half travels inside
     /// [`Self::responder_prekey_bundle`] and the handshake verifies it, but that direction alone
@@ -76,12 +77,14 @@ pub struct SessionAcceptanceResult {
 /// Errors returned by Session establishment helpers.
 #[derive(Debug)]
 pub enum SessionEstablishmentError {
-    /// A cryptographic X3DH, sealed-frame, or ratchet operation failed.
-    Crypto(CryptoError),
     /// Loading local discovery-key state failed.
     Discovery(DiscoveryKeyError),
+    /// The X3DH handshake failed.
+    Handshake(HandshakeError),
     /// Loading local identity state failed.
     Identity(IdentityError),
+    /// The peer's Discovery Key does not bind to its Identity Key.
+    KeyBundle(KeyBundleError),
     /// Message conversion failed.
     Message(MessageError),
     /// Loading or consuming local one-time-prekey state failed.
@@ -97,9 +100,10 @@ pub enum SessionEstablishmentError {
 impl fmt::Display for SessionEstablishmentError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Crypto(e) => write!(f, "session establishment crypto: {e}"),
             Self::Discovery(e) => write!(f, "session establishment discovery key: {e}"),
+            Self::Handshake(e) => write!(f, "session establishment handshake: {e}"),
             Self::Identity(e) => write!(f, "session establishment identity: {e}"),
+            Self::KeyBundle(e) => write!(f, "session establishment key bundle: {e}"),
             Self::Message(e) => write!(f, "session establishment message: {e}"),
             Self::OneTimePreKey(e) => write!(f, "session establishment one-time pre-key: {e}"),
             Self::Operation(e) => write!(f, "session establishment prepared operation: {e}"),
@@ -112,9 +116,10 @@ impl fmt::Display for SessionEstablishmentError {
 impl Error for SessionEstablishmentError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Crypto(e) => Some(e),
             Self::Discovery(e) => Some(e),
+            Self::Handshake(e) => Some(e),
             Self::Identity(e) => Some(e),
+            Self::KeyBundle(e) => Some(e),
             Self::Message(e) => Some(e),
             Self::OneTimePreKey(e) => Some(e),
             Self::Operation(e) => Some(e),
@@ -124,9 +129,15 @@ impl Error for SessionEstablishmentError {
     }
 }
 
-impl From<CryptoError> for SessionEstablishmentError {
-    fn from(e: CryptoError) -> Self {
-        Self::Crypto(e)
+impl From<HandshakeError> for SessionEstablishmentError {
+    fn from(e: HandshakeError) -> Self {
+        Self::Handshake(e)
+    }
+}
+
+impl From<KeyBundleError> for SessionEstablishmentError {
+    fn from(e: KeyBundleError) -> Self {
+        Self::KeyBundle(e)
     }
 }
 
@@ -195,15 +206,6 @@ impl KeyStore {
     ///     Ok((result, binding))
     /// }
     /// ```
-    ///
-    /// # Errors
-    /// - [`SessionEstablishmentError::Crypto`] if X3DH initiation or frame encoding fails.
-    /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
-    /// - [`SessionEstablishmentError::Identity`] if local Identity state cannot be loaded.
-    /// - [`SessionEstablishmentError::Message`] if the produced frame cannot be represented as a
-    ///   Core Message.
-    /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
-    /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
     pub fn initiate_session_with_transport_binding(
         &self,
         input: SessionInitiation<'_>,
@@ -213,8 +215,8 @@ impl KeyStore {
         self.ensure_no_recovery_required()?;
 
         // Before any local state is loaded or any handshake work is spent: the
-        // mapping this session is built on has to hold in both directions
-        // (AE-KEY-04). `initiate` checks IK→DK from inside the prekey bundle;
+        // mapping this session is built on has to hold in both directions.
+        // `initiate` checks IK→DK from inside the prekey bundle;
         // nothing but this checks DK→IK, and a bundle that fails it names an
         // identity its discovery key never vouched for.
         verify_discovery_to_identity_binding(
@@ -264,15 +266,6 @@ impl KeyStore {
     /// identity remains a sender claim until
     /// [`Self::prepare_accept_session_with_transport_binding`] checks it against the sealed
     /// envelope's authenticated copy.
-    ///
-    /// # Errors
-    /// - [`SessionEstablishmentError::Crypto`] if the Message is not an initial, is not sealed to
-    ///   this Discovery Key and Transport Binding, or names an invalid identity.
-    /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
-    /// - [`SessionEstablishmentError::Message`] if the Message cannot be encoded.
-    /// - [`SessionEstablishmentError::Operation`] if a committed operation needs recovery.
-    /// - [`SessionEstablishmentError::SignedPreKey`] if the referenced signed pre-key is absent,
-    ///   malformed, expired, or blocked pending inbox rotation.
     pub fn initiator_identity_hint_with_transport_binding(
         &self,
         message: &Message,
@@ -285,12 +278,13 @@ impl KeyStore {
         let envelope = handshake_envelope_from_message(message)?;
         let prekey_reference = envelope
             .prekey_reference
-            .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
+            .ok_or(HandshakeError::EnvelopeDecode)?;
         validate_prekey_selection(&prekey_reference, prekey_selection)?;
         self.0.signed_prekey.prekey_for_reference(
             prekey_reference.discovery_epoch,
-            prekey_selection.signed_prekey_identifier,
+            prekey_selection.signed_prekey_id,
             &prekey_reference.signed_prekey_public_key,
+            SystemTime::now(),
         )?;
         let transport_binding = transport_binding.as_bytes();
         Ok(initiator_identity_hint_with_associated_data(
@@ -307,21 +301,6 @@ impl KeyStore {
     /// One-time-prekey consumption remains staged until
     /// finalization. Commit the operation, atomically persist the returned state updates and
     /// operation identifier, then finalize the secure-storage mutation.
-    ///
-    /// # Errors
-    /// - [`SessionEstablishmentError::Crypto`] if X3DH acceptance, sender proof validation, or
-    ///   frame decoding fails.
-    /// - [`SessionEstablishmentError::Discovery`] if local Discovery Key state cannot be loaded.
-    /// - [`SessionEstablishmentError::Identity`] if local Identity state cannot be loaded.
-    /// - [`SessionEstablishmentError::Message`] if the received Message cannot be encoded for
-    ///   handshake validation.
-    /// - [`SessionEstablishmentError::OneTimePreKey`] if a referenced one-time pre-key is absent,
-    ///   stale, consumed, blocked pending inbox rotation, or cannot be consumed after acceptance.
-    /// - [`SessionEstablishmentError::Operation`] if staging fails or a committed operation needs
-    ///   recovery.
-    /// - [`SessionEstablishmentError::ProtocolState`] if install updates cannot be encoded.
-    /// - [`SessionEstablishmentError::SignedPreKey`] if the referenced signed pre-key is absent,
-    ///   malformed, expired, or blocked pending inbox rotation.
     pub fn prepare_accept_session_with_transport_binding(
         &self,
         input: SessionAcceptance<'_>,
@@ -346,12 +325,13 @@ impl KeyStore {
         let envelope = handshake_envelope_from_message(input.message)?;
         let prekey_reference = envelope
             .prekey_reference
-            .ok_or(CryptoError::HandshakeEnvelopeDecode)?;
+            .ok_or(HandshakeError::EnvelopeDecode)?;
         validate_prekey_selection(&prekey_reference, prekey_selection)?;
         let signed_prekey = self.0.signed_prekey.prekey_for_reference(
             prekey_reference.discovery_epoch,
-            prekey_selection.signed_prekey_identifier,
+            prekey_selection.signed_prekey_id,
             &prekey_reference.signed_prekey_public_key,
+            SystemTime::now(),
         )?;
         let transport_binding = transport_binding.as_bytes();
         let one_time_prekey = match (
@@ -367,7 +347,7 @@ impl KeyStore {
                 )?)
             }
             (Some(_), None) | (None, Some(_)) => {
-                return Err(CryptoError::OneTimePreKeyMismatch.into());
+                return Err(HandshakeError::OneTimePreKeyMismatch.into());
             }
         };
         let mut rng = OsRng;
@@ -413,8 +393,8 @@ impl KeyStore {
     ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
         {
             let selection = PreKeySelection {
-                signed_prekey_identifier: self.0.signed_prekey.current_bundle()?.id,
-                one_time_prekey_identifier: input
+                signed_prekey_id: self.0.signed_prekey.current_bundle(SystemTime::now())?.id,
+                one_time_prekey_id: input
                     .message
                     .prekey_reference
                     .as_ref()
@@ -451,9 +431,9 @@ fn handshake_envelope_from_message(
 fn validate_prekey_selection(
     reference: &SealedFramePreKeyReference,
     selection: PreKeySelection,
-) -> Result<(), CryptoError> {
-    if reference.one_time_prekey_id != selection.one_time_prekey_identifier {
-        return Err(CryptoError::OneTimePreKeyMismatch);
+) -> Result<(), HandshakeError> {
+    if reference.one_time_prekey_id != selection.one_time_prekey_id {
+        return Err(HandshakeError::OneTimePreKeyMismatch);
     }
     Ok(())
 }
@@ -474,7 +454,7 @@ mod tests {
             .collect()
     }
 
-    /// AE-KEY-04 requires both directions before a discovery-key-to-identity
+    /// Both binding directions must hold before a discovery-key-to-identity
     /// mapping is trusted. The IK→DK half rides on the discovery-key bundle and
     /// the handshake already checks it; this is the other half, which proves the
     /// discovery key vouches for the identity rather than merely being named

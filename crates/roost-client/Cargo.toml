@@ -26,7 +26,7 @@ roost-core.workspace = true
 roost-protocol.workspace = true
 # Utility
 rand.workspace = true
-uniffi = { version = "0.31.1", features = ["cli"] }
+uniffi = { workspace = true, features = ["cli"] }
 zeroize.workspace = true
 
 [dev-dependencies]

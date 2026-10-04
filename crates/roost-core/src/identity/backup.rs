@@ -7,7 +7,7 @@
 //! module treats as opaque so discovery-key versioning stays owned by `discovery_key.rs`.
 //!
 //! Envelope: `version(1) | m_cost(4) | t_cost(4) | p_cost(4) | salt(16) | nonce(24)`, then
-//! `XChaCha20-Poly1305(aad = header, plaintext = ik_x25519(32) | ik_ed25519(32) | dk_blob)`.
+//! `XChaCha20-Poly1305(aad = header, plaintext = ik_x25519(32) | ik_ed25519(32) | discovery_key_blob)`.
 
 use super::{IDENTITY_CURRENT_KEY, IdentityError, IdentityManager, encode_identity_key_blob};
 use argon2::{Argon2, Params};
@@ -23,7 +23,7 @@ const BACKUP_FORMAT_VERSION: u8 = 2;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 const HEADER_LEN: usize = 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
-const IK_LEN: usize = 64;
+const IDENTITY_KEY_LEN: usize = 64;
 
 // Argon2id memory cost is in KiB. Memory is the primary brute-force defense; time adds CPU work
 // without raising memory use. Parameters travel in the header so future backups can raise the work
@@ -43,7 +43,7 @@ const MAX_M_COST: u32 = 1 << 20; // 1 GiB; generous headroom above the default f
 const MAX_T_COST: u32 = 16;
 
 // Decrypted backup contents: the identity-key halves and the opaque discovery-key blob.
-type DecryptedBackup = (Zeroizing<[u8; IK_LEN]>, Zeroizing<Vec<u8>>);
+type DecryptedBackup = (Zeroizing<[u8; IDENTITY_KEY_LEN]>, Zeroizing<Vec<u8>>);
 
 impl IdentityManager {
     // Exports the current identity and the given discovery-key blob as an encrypted backup.
@@ -51,15 +51,17 @@ impl IdentityManager {
         &self,
         rng: &mut R,
         passphrase: &str,
-        dk_blob: &[u8],
+        discovery_key_blob: &[u8],
     ) -> Result<Vec<u8>, IdentityError> {
         validate_export_argon2_params(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)?;
         let (x25519_bytes, ed25519_bytes) = self.load_identity_key_bytes()?;
 
-        let mut plaintext = Zeroizing::new(Vec::with_capacity(IK_LEN + dk_blob.len()));
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(
+            IDENTITY_KEY_LEN + discovery_key_blob.len(),
+        ));
         plaintext.extend_from_slice(&*x25519_bytes);
         plaintext.extend_from_slice(&*ed25519_bytes);
-        plaintext.extend_from_slice(dk_blob);
+        plaintext.extend_from_slice(discovery_key_blob);
 
         let salt: [u8; SALT_LEN] = random_bytes(rng)?;
         let nonce_bytes: [u8; NONCE_LEN] = random_bytes(rng)?;
@@ -136,22 +138,25 @@ impl IdentityManager {
             )));
         }
 
-        let ik: [u8; IK_LEN] = plaintext
-            .get(..IK_LEN)
+        let identity_key: [u8; IDENTITY_KEY_LEN] = plaintext
+            .get(..IDENTITY_KEY_LEN)
             .and_then(|bytes| bytes.try_into().ok())
             .ok_or_else(|| {
                 IdentityError::InvalidData("backup plaintext shorter than identity key".into())
             })?;
-        let dk_blob = Zeroizing::new(plaintext[IK_LEN..].to_vec());
-        Ok((Zeroizing::new(ik), dk_blob))
+        let discovery_key_blob = Zeroizing::new(plaintext[IDENTITY_KEY_LEN..].to_vec());
+        Ok((Zeroizing::new(identity_key), discovery_key_blob))
     }
 
     // Stores decrypted identity-key halves as one versioned blob.
-    pub(crate) fn store_decrypted_identity(&self, ik: &[u8; IK_LEN]) -> Result<(), IdentityError> {
-        let x25519 = ik[..32]
+    pub(crate) fn store_decrypted_identity(
+        &self,
+        identity_key: &[u8; IDENTITY_KEY_LEN],
+    ) -> Result<(), IdentityError> {
+        let x25519 = identity_key[..32]
             .try_into()
             .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
-        let ed25519 = ik[32..]
+        let ed25519 = identity_key[32..]
             .try_into()
             .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
         let blob = encode_identity_key_blob(x25519, ed25519);
@@ -274,10 +279,13 @@ mod tests {
         let backup = manager
             .export_encrypted_backup(&mut OsRng, passphrase, &DK_BLOB)
             .unwrap();
-        let (ik, dk_blob) = manager.decrypt_backup(&backup, passphrase).unwrap();
-        let mut plaintext = Zeroizing::new(Vec::with_capacity(IK_LEN + dk_blob.len()));
-        plaintext.extend_from_slice(&*ik);
-        plaintext.extend_from_slice(&dk_blob);
+        let (identity_key, discovery_key_blob) =
+            manager.decrypt_backup(&backup, passphrase).unwrap();
+        let mut plaintext = Zeroizing::new(Vec::with_capacity(
+            IDENTITY_KEY_LEN + discovery_key_blob.len(),
+        ));
+        plaintext.extend_from_slice(&*identity_key);
+        plaintext.extend_from_slice(&discovery_key_blob);
 
         let mut header: [u8; HEADER_LEN] = backup[..HEADER_LEN].try_into().unwrap();
         header[0] = version;
@@ -334,10 +342,11 @@ mod tests {
             .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
             .unwrap();
 
-        let (ik, dk_blob) = manager.decrypt_backup(&backup, "passphrase").unwrap();
-        assert_eq!(&ik[..32], &*expected_x25519);
-        assert_eq!(&ik[32..], &*expected_ed25519);
-        assert_eq!(dk_blob.as_slice(), &DK_BLOB);
+        let (identity_key, discovery_key_blob) =
+            manager.decrypt_backup(&backup, "passphrase").unwrap();
+        assert_eq!(&identity_key[..32], &*expected_x25519);
+        assert_eq!(&identity_key[32..], &*expected_ed25519);
+        assert_eq!(discovery_key_blob.as_slice(), &DK_BLOB);
     }
 
     #[test]

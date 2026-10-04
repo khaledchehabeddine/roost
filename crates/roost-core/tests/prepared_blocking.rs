@@ -16,7 +16,7 @@ use roost_crypto::{
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
-const CREATED_AT: u64 = 1_700_000_000;
+const CREATED_AT_SECS: u64 = 1_700_000_000;
 
 #[derive(Clone)]
 struct SharedSecureStorage(Arc<Mutex<InMemorySecureStorage>>);
@@ -50,7 +50,7 @@ fn peer_contact() -> ContactIdentity {
     let signing = generate_signing_key_pair(&mut rng);
     let agreement = generate_key_pair(&mut rng);
     let _binding = sign_identity_key_binding(&signing, &agreement.public).unwrap();
-    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT);
+    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS);
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *agreement.public.as_bytes(),
@@ -70,12 +70,8 @@ fn setup() -> (
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
     let identity = store.prepare_generate_identity().unwrap();
-    store
-        .commit_operation(identity.operation.identifier)
-        .unwrap();
-    store
-        .finalize_operation(identity.operation.identifier)
-        .unwrap();
+    store.commit_operation(identity.operation.id).unwrap();
+    store.finalize_operation(identity.operation.id).unwrap();
     let engine = ProtocolStateEngine::new();
     let contact = peer_contact();
     let identity_key = contact.identity_key;
@@ -114,15 +110,11 @@ fn prepared_block_commits_contact_and_rotation_without_a_cross_store_partial_sta
     );
     assert_eq!(store.current_discovery_key_bundle().unwrap().epoch, before);
 
-    store
-        .commit_operation(prepared.operation.identifier)
-        .unwrap();
+    store.commit_operation(prepared.operation.id).unwrap();
     snapshot
         .apply_all(prepared.output.contact.state_updates)
         .unwrap();
-    store
-        .finalize_operation(prepared.operation.identifier)
-        .unwrap();
+    store.finalize_operation(prepared.operation.id).unwrap();
 
     assert_eq!(
         store.current_discovery_key_bundle().unwrap().epoch,
@@ -145,12 +137,8 @@ fn failed_host_block_commit_aborts_without_rotating_the_inbox() {
         .prepare_block_contact(&snapshot, identity_key)
         .unwrap();
 
-    store
-        .commit_operation(prepared.operation.identifier)
-        .unwrap();
-    store
-        .abort_operation(prepared.operation.identifier)
-        .unwrap();
+    store.commit_operation(prepared.operation.id).unwrap();
+    store.abort_operation(prepared.operation.id).unwrap();
 
     assert_eq!(store.current_discovery_key_bundle().unwrap().epoch, before);
 }
@@ -163,14 +151,12 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
         let prepared = store
             .prepare_block_contact(&snapshot, identity_key)
             .unwrap();
-        let identifier = prepared.operation.identifier;
+        let id = prepared.operation.id;
         let updates = prepared.output.contact.state_updates;
         assert_eq!(updates.len(), 1);
         let address = updates[0].address().clone();
-        let directory = std::env::temp_dir().join(format!(
-            "roost-host-commit-{}",
-            hex::encode(identifier.as_bytes()),
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("roost-host-commit-{}", hex::encode(id.as_bytes()),));
         std::fs::create_dir(&directory).unwrap();
         let committed_path = directory.join("committed");
         let staged_path = directory.join("staged");
@@ -185,7 +171,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
             .sync_all()
             .unwrap();
 
-        store.commit_operation(identifier).unwrap();
+        store.commit_operation(id).unwrap();
         assert!(updates.iter().all(|update| {
             update
                 .commit_condition()
@@ -194,7 +180,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
         snapshot.apply_all(updates).unwrap();
         let staged = Zeroizing::new(
             postcard::to_allocvec(&(
-                Some(*identifier.as_bytes()),
+                Some(*id.as_bytes()),
                 snapshot.get(&address).unwrap().as_bytes(),
             ))
             .unwrap(),
@@ -225,30 +211,24 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
         let operation = &unfinished[0];
         assert_eq!(operation.status, KeyStoreOperationStatus::Committed);
         let durable = Zeroizing::new(std::fs::read(&committed_path).unwrap());
-        let (host_identifier, blob): (Option<[u8; 16]>, &[u8]) =
-            postcard::from_bytes(&durable).unwrap();
-        let expected_status = if host_identifier == Some(*operation.operation.identifier.as_bytes())
-        {
+        let (host_id, blob): (Option<[u8; 16]>, &[u8]) = postcard::from_bytes(&durable).unwrap();
+        let expected_status = if host_id == Some(*operation.operation.id.as_bytes()) {
             recovered
-                .finalize_operation(operation.operation.identifier)
+                .finalize_operation(operation.operation.id)
                 .unwrap();
             assert_eq!(
                 recovered
-                    .finalize_operation(operation.operation.identifier)
+                    .finalize_operation(operation.operation.id)
                     .unwrap(),
                 KeyStoreOperationStatus::Finalized
             );
             KeyStoreOperationStatus::Finalized
         } else {
-            recovered
-                .abort_operation(operation.operation.identifier)
-                .unwrap();
+            recovered.abort_operation(operation.operation.id).unwrap();
             KeyStoreOperationStatus::Aborted
         };
         assert_eq!(
-            recovered
-                .operation_status(operation.operation.identifier)
-                .unwrap(),
+            recovered.operation_status(operation.operation.id).unwrap(),
             expected_status
         );
         let mut snapshot = ProtocolStateSnapshot::new();

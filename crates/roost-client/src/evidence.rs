@@ -2,10 +2,12 @@
 
 use zeroize::Zeroizing;
 
-use crate::certificate::{DomainSigningKey, domain_signing_keys_to_core};
+use crate::certificate::{DomainSigningKey, domain_signing_keys_to_protocol};
 use crate::error::ClientError;
 use crate::message::PayloadKind;
 use crate::protocol::IdentityKey;
+use crate::time::{millis_from_secs, time_from_millis};
+use std::time::Duration;
 
 /// The authenticated transcript interpretation required by an evidence verifier.
 ///
@@ -66,7 +68,7 @@ pub struct VerifiedEvidenceBundle {
     /// Message ID signed into the Message transcript. Always 16 bytes.
     pub message_id: Vec<u8>,
     /// Sender-observed Unix timestamp signed into the Message transcript.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Payload kind signed into the Message transcript.
     pub payload_kind: PayloadKind,
     /// Accepted plaintext recovered from the authenticated padded payload.
@@ -75,8 +77,8 @@ pub struct VerifiedEvidenceBundle {
     pub sender_identity_key: IdentityKey,
     /// Relay domain authenticated by the transcript-bound sender certificate.
     pub relay_domain: Vec<u8>,
-    /// Certificate expiry authenticated by the domain-signing key.
-    pub certificate_expires_at_secs: u64,
+    /// Certificate expiry authenticated by the domain-signing key, in Unix milliseconds.
+    pub certificate_expires_at_millis: u64,
 }
 
 /// Verifies an Evidence Bundle without device or Session state.
@@ -95,14 +97,14 @@ pub struct VerifiedEvidenceBundle {
 ///
 /// # fn verify(
 /// #     bundle: Vec<u8>,
-/// #     key_identifier: Vec<u8>,
+/// #     key_id: Vec<u8>,
 /// #     verifying_key: Vec<u8>,
 /// # ) -> Result<(), roost_client::ClientError> {
 /// let verified = verify_evidence_bundle(
 ///     bundle,
 ///     EvidenceProfile::MessageTranscriptVersion1,
 ///     vec![DomainSigningKey {
-///         identifier: key_identifier,
+///         id: key_id,
 ///         verifying_key,
 ///         status: DomainSigningKeyStatus::Trusted,
 ///     }],
@@ -129,8 +131,8 @@ pub fn verify_evidence_bundle(
     expected_profile: EvidenceProfile,
     domain_signing_keys: Vec<DomainSigningKey>,
     expected_relay_domain: Vec<u8>,
-    accepted_timestamp_secs: u64,
-    grace_window_secs: u64,
+    accepted_at_millis: u64,
+    grace_window_millis: u64,
 ) -> Result<VerifiedEvidenceBundle, ClientError> {
     let evidence_bundle = Zeroizing::new(evidence_bundle);
     if domain_signing_keys.len() > roost_protocol::MAX_EVIDENCE_DOMAIN_SIGNING_KEYS {
@@ -142,15 +144,15 @@ pub fn verify_evidence_bundle(
             .into(),
         );
     }
-    let core_domain_signing_keys = domain_signing_keys_to_core(&domain_signing_keys)?;
+    let protocol_domain_signing_keys = domain_signing_keys_to_protocol(&domain_signing_keys)?;
     let verified =
         roost_protocol::verify_evidence_bundle(roost_protocol::EvidenceVerificationInput {
             bundle: &evidence_bundle,
-            expected_profile: expected_profile.into(),
-            domain_signing_keys: &core_domain_signing_keys,
+            expected_profile: expected_profile.to_protocol(),
+            domain_signing_keys: &protocol_domain_signing_keys,
             expected_relay_domain: &expected_relay_domain,
-            accepted_timestamp_secs,
-            grace_window_secs,
+            accepted_at: time_from_millis(accepted_at_millis, "accepted_at_millis")?,
+            grace_window: Duration::from_millis(grace_window_millis),
         })?;
     Ok(VerifiedEvidenceBundle {
         profile: expected_profile,
@@ -158,22 +160,25 @@ pub fn verify_evidence_bundle(
         session_key: verified.session_key.clone(),
         recipient_identity_verifying_key: verified.recipient_identity_verifying_key.to_vec(),
         message_id: verified.message_id.as_bytes().to_vec(),
-        timestamp_millis: verified.timestamp_millis,
-        payload_kind: verified.payload_kind.into(),
+        sent_at_millis: verified.sent_at_millis,
+        payload_kind: PayloadKind::from_protocol(verified.payload_kind),
         plaintext: verified.plaintext.to_vec(),
         sender_identity_key: IdentityKey {
             x25519_public_key: verified.sender_identity_key.x25519_public_key.to_vec(),
             ed25519_verifying_key: verified.sender_identity_key.ed25519_verifying_key.to_vec(),
         },
         relay_domain: verified.relay_domain.clone(),
-        certificate_expires_at_secs: verified.certificate_expires_at_secs,
+        certificate_expires_at_millis: millis_from_secs(
+            verified.certificate_expires_at_secs,
+            "certificate expiry",
+        )?,
     })
 }
 
-impl From<EvidenceProfile> for roost_protocol::EvidenceProfile {
-    fn from(value: EvidenceProfile) -> Self {
-        match value {
-            EvidenceProfile::MessageTranscriptVersion1 => Self::MessageTranscriptV1,
+impl EvidenceProfile {
+    fn to_protocol(self) -> roost_protocol::EvidenceProfile {
+        match self {
+            Self::MessageTranscriptVersion1 => roost_protocol::EvidenceProfile::MessageTranscriptV1,
         }
     }
 }

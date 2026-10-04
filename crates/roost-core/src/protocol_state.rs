@@ -20,9 +20,8 @@ use roost_crypto::{
     open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
     verify_discovery_key_bundle, verify_identity_key_bundle,
 };
-use roost_protocol::verify_with_context;
 use roost_protocol::{
-    AcceptedMessageEvidenceInput, EvidenceBundle, MAX_EVIDENCE_GRACE_WINDOW_SECS,
+    AcceptedMessageEvidenceInput, EvidenceBundle, MAX_EVIDENCE_GRACE_WINDOW,
     generate_evidence_bundle,
 };
 use roost_protocol::{
@@ -34,15 +33,18 @@ use roost_protocol::{
     pad_sealed_payload as pad_message_payload, unpad_sealed_payload as unpad_message_payload,
 };
 use roost_protocol::{
-    PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes, validate_x25519_public_key,
+    PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
 };
 #[cfg(test)]
 use roost_protocol::{SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN};
+use roost_protocol::{SignatureError, verify_with_context};
+use roost_protocol::{from_unix_millis, from_unix_secs, to_unix_millis};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
+use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -94,10 +96,6 @@ pub struct ProtocolStateKey(Vec<u8>);
 
 impl ProtocolStateKey {
     /// Creates a protocol-state key from bounded bytes.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::InvalidStateKey`] if the key is empty or exceeds the key length
-    ///   cap.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ProtocolStateError> {
         if bytes.is_empty() {
             return Err(ProtocolStateError::InvalidStateKey {
@@ -132,7 +130,6 @@ impl From<ContactIdentityKey> for ProtocolStateKey {
 }
 
 /// The stable category for an opaque protocol-state blob.
-#[non_exhaustive]
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ProtocolStateKind {
@@ -144,13 +141,12 @@ pub enum ProtocolStateKind {
     PendingAcknowledgments = 4,
     /// Identity-key-addressed contact state.
     ContactState = 5,
-    /// Identity-key-addressed peer inbox authorization (AE-STA-01).
+    /// Identity-key-addressed peer inbox authorization.
     ///
     /// Kept separate from [`Self::ContactState`] because a peer's delivery capability is a bearer
     /// secret, while contact queries return public state for host-owned views and observation.
     PeerInboxAuthorization = 6,
-    /// Identity-key-addressed record of which local inbox generation a contact has been given
-    /// (AE-STA-01).
+    /// Identity-key-addressed record of which local inbox generation a contact has been given.
     ///
     /// Distribution bookkeeping, not key material: the local capability itself lives in secure
     /// storage. This answers "who still holds a superseded capability and must be re-supplied",
@@ -356,9 +352,6 @@ impl ProtocolStateSnapshot {
     }
 
     /// Stores `blob` at `address` in the caller-supplied operation snapshot.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::SnapshotCapacityExceeded`] if a new address would exceed the cap.
     pub fn set(
         &mut self,
         address: ProtocolStateAddress,
@@ -379,9 +372,6 @@ impl ProtocolStateSnapshot {
     /// Applies one update to this in-memory snapshot after host commit.
     ///
     /// The host must enforce the update's condition inside its own durable transaction first.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::SnapshotCapacityExceeded`] if a new address would exceed the cap.
     pub fn apply(&mut self, update: ProtocolStateUpdate) -> Result<(), ProtocolStateError> {
         match update.blob {
             Some(blob) => self.set(update.address, blob),
@@ -396,9 +386,6 @@ impl ProtocolStateSnapshot {
     ///
     /// This operation is not a durable transaction. Earlier snapshot updates remain if a later
     /// update exceeds the entry cap.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::SnapshotCapacityExceeded`] if a new address would exceed the cap.
     pub fn apply_all<I>(&mut self, updates: I) -> Result<(), ProtocolStateError>
     where
         I: IntoIterator<Item = ProtocolStateUpdate>,
@@ -423,7 +410,7 @@ pub struct OutboundPlaintext<'a> {
     /// Recipient X25519 public key bytes. Always 32 bytes.
     pub recipient_public_key: [u8; 32],
     /// Sender-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Plaintext bytes to encrypt.
     pub plaintext: &'a [u8],
 }
@@ -439,7 +426,7 @@ pub struct OutboundAcknowledgment<'a> {
     /// Recipient X25519 public key bytes. Always 32 bytes.
     pub recipient_public_key: [u8; 32],
     /// Receiver-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
 }
 
 /// An outbound Message and all advanced protocol-state updates from one operation.
@@ -447,7 +434,7 @@ pub struct OutboundMessageResult {
     /// Stable identifier sealed inside the produced Message.
     pub message_id: MessageId,
     /// Sender-observed Unix timestamp sealed inside the produced Message.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Payload kind sealed inside the produced Message.
     pub payload_kind: PayloadKind,
     /// Message to hand to the consumer transport after state commit.
@@ -490,19 +477,19 @@ pub struct InboundEncryptedMessage<'a> {
 pub struct InboundSenderCertificateValidation<'a> {
     /// Known domain-signing keys indexed by certificate signing-key identifier.
     pub domain_signing_keys: &'a [DomainSigningKey<'a>],
-    /// Relay domain the recipient expects incoming certificates to name (AE-CRT-01).
+    /// Relay domain the recipient expects incoming certificates to name.
     pub expected_relay_domain: &'a [u8],
     /// Caller-supplied revocation input for the sender Identity Key check.
     pub revocation_state: RevocationState<'a>,
-    /// Caller-supplied Unix timestamp in seconds used for expiry evaluation.
-    pub reference_timestamp_secs: u64,
-    /// Caller-supplied grace window in seconds.
+    /// Caller-supplied time used for expiry evaluation.
+    pub reference_time: SystemTime,
+    /// Caller-supplied grace window.
     ///
     /// The standalone certificate API imposes no ceiling; for its trade-off, see
-    /// [`SenderCertificateValidationInput::grace_window_secs`]. Because an accepted unblocked
+    /// [`SenderCertificateValidationInput::grace_window`]. Because an accepted unblocked
     /// Message includes evidence, this receive path rejects a Message more than 300 seconds past
     /// certificate expiry even when the caller permits a longer grace window.
-    pub grace_window_secs: u64,
+    pub grace_window: Duration,
 }
 
 /// Inbound plaintext and all advanced protocol-state updates from one operation.
@@ -510,7 +497,7 @@ pub struct InboundMessageResult {
     /// Message ID recovered after decrypt.
     pub message_id: MessageId,
     /// Sender-observed Unix timestamp recovered after decrypt.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Payload kind recovered after decrypt.
     pub payload_kind: PayloadKind,
     /// Decrypted plaintext bytes.
@@ -598,9 +585,9 @@ pub struct PendingAcknowledgment {
     /// Original outbound Message waiting for an acknowledgment.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
-    pub first_sent_millis: u64,
+    pub first_sent_at_millis: u64,
     /// Last retry-instruction timestamp in milliseconds, if any.
-    pub last_retry_millis: Option<u64>,
+    pub last_retried_at_millis: Option<u64>,
 }
 
 /// A retry instruction for one still-unacknowledged outbound Message.
@@ -610,9 +597,9 @@ pub struct RetryInstruction {
     /// Message the consumer may retransmit.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
-    pub first_sent_millis: u64,
+    pub first_sent_at_millis: u64,
     /// Previous retry-instruction timestamp in milliseconds, if any.
-    pub last_retry_millis: Option<u64>,
+    pub last_retried_at_millis: Option<u64>,
 }
 
 /// Retry instructions and any pending-state updates produced by one retry query.
@@ -628,7 +615,7 @@ pub struct ClearedAcknowledgment {
     /// Acknowledgment Message ID recovered after decrypt.
     pub message_id: MessageId,
     /// Acknowledgment timestamp recovered after decrypt.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Outbound Message ID cleared from pending state.
     pub acknowledged_message_id: MessageId,
     /// Sender identity material decoded from the acknowledgment.
@@ -646,7 +633,7 @@ pub enum AcknowledgmentOutcome {
         /// Acknowledgment Message ID recovered after decrypt.
         message_id: MessageId,
         /// Acknowledgment timestamp recovered after decrypt.
-        timestamp_millis: u64,
+        sent_at_millis: u64,
         /// Acknowledged Message ID carried inside the encrypted acknowledgment.
         acknowledged_message_id: MessageId,
         /// Sender identity material decoded from the acknowledgment.
@@ -703,12 +690,6 @@ impl ProtocolStateEngine {
     }
 
     /// Creates a stateless protocol-state engine with caller-selected hardening limits.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::InvalidDeduplicationCapacity`] if the deduplication capacity is
-    ///   outside the supported range.
-    /// - [`ProtocolStateError::InvalidHardeningLimit`] if any other limit is zero or above the
-    ///   supported ceiling.
     pub fn with_hardening_limits(
         limits: ProtocolHardeningLimits,
     ) -> Result<Self, ProtocolStateError> {
@@ -726,10 +707,6 @@ impl ProtocolStateEngine {
     }
 
     /// Creates a stateless protocol-state engine with a received-message deduplication capacity.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::InvalidDeduplicationCapacity`] if `capacity` is outside the
-    ///   supported range.
     pub fn with_deduplication_capacity(capacity: usize) -> Result<Self, ProtocolStateError> {
         let limits = ProtocolHardeningLimits {
             deduplication_capacity: capacity,
@@ -752,10 +729,6 @@ impl ProtocolStateEngine {
     ///
     /// The consumer must commit the returned blob before receiving encrypted Messages for that
     /// Identity and must keep using the same Protocol State Blob across library restarts.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobEncode`] if the deduplication-set blob fails to encode or
-    ///   exceeds local caps.
     pub fn initialize_deduplication_set<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -780,10 +753,6 @@ impl ProtocolStateEngine {
     /// The consumer must commit the returned blob before sending encrypted Messages for that
     /// Session. Core reloads this blob for every send, acknowledgment, pending-list, and retry
     /// operation.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobEncode`] if the pending-acknowledgment blob fails to encode or
-    ///   exceeds local caps.
     pub fn initialize_pending_acknowledgments(
         &self,
         key: ProtocolStateKey,
@@ -805,11 +774,6 @@ impl ProtocolStateEngine {
     /// Inbound decryption requires peer sender identity to be bound with
     /// [`Self::set_session_state_with_peer_identity`] or
     /// [`Self::bind_session_state_peer_identity_key`].
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobEncode`] if the wrapped state fails to encode or exceeds local
-    ///   caps.
-    /// - [`ProtocolStateError::Crypto`] if ratchet-state encoding fails.
     pub fn set_session_state(
         &self,
         key: ProtocolStateKey,
@@ -827,11 +791,6 @@ impl ProtocolStateEngine {
     ///
     /// Responders should pass the sender identity returned by X3DH `accept` when installing the
     /// accepted ratchet state for inbound Messages from that peer.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobEncode`] if the wrapped state fails to encode or exceeds local
-    ///   caps.
-    /// - [`ProtocolStateError::Crypto`] if ratchet-state encoding fails.
     pub fn set_session_state_with_peer_identity(
         &self,
         key: ProtocolStateKey,
@@ -846,11 +805,6 @@ impl ProtocolStateEngine {
     ///
     /// Use this when installing a session for a peer whose discovery public key is known without
     /// full sender certificate material.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobEncode`] if the wrapped state fails to encode or exceeds local
-    ///   caps.
-    /// - [`ProtocolStateError::Crypto`] if ratchet-state encoding fails.
     pub fn set_session_state_with_peer_identity_key(
         &self,
         key: ProtocolStateKey,
@@ -875,18 +829,6 @@ impl ProtocolStateEngine {
     ///
     /// Use this when restoring an existing opaque session blob and the peer identity key is known
     /// without full sender certificate material.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::SessionUnrecoverable`] if the Session requires replacement.
-    /// - [`ProtocolStateError::BlobDecode`] if the current-format blob or blob envelope fails to
-    ///   decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the wrapped state fails to encode or exceeds local
-    ///   caps.
-    /// - [`ProtocolStateError::Crypto`] if ratchet-state encoding fails.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if the session is already bound to a
-    ///   different peer sender identity key.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no ratchet/session blob is present.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn bind_session_state_peer_identity_key(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -928,14 +870,6 @@ impl ProtocolStateEngine {
     /// Consumers must build `contact_identity` from authenticated identity material; this method
     /// validates canonical key encodings and the Discovery Key signature, but it cannot prove where
     /// the Identity Key bytes came from.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if an existing contact blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if the Identity Key or Discovery Key encodings
-    ///   are invalid, or the Discovery Key bundle signature does not verify under the contact
-    ///   Identity Key.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn record_contact(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -973,11 +907,6 @@ impl ProtocolStateEngine {
     }
 
     /// Returns the Contact State for one peer Identity Key, if present.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn contact_state(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -992,10 +921,6 @@ impl ProtocolStateEngine {
     }
 
     /// Returns all current Contact State snapshots in address order.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if any contact blob fails to decode.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if any blob version is not supported.
     pub fn contact_states(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1012,13 +937,6 @@ impl ProtocolStateEngine {
     ///
     /// Acceptance moves Pending to Unverified. Calling this for an already accepted contact is an
     /// idempotent no-op.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for `identity_key`.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn accept_contact(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1027,15 +945,17 @@ impl ProtocolStateEngine {
         let address = contact_address(identity_key);
         validate_contact_identity_key(&address, &identity_key)?;
         let mut contact = load_contact_state(snapshot, &address, self.limits)?;
-        if contact.trust_state != ContactTrustState::Pending {
-            return Ok(ContactStateChange {
+        match contact.trust_state {
+            ContactTrustState::Pending => {
+                contact.trust_state = ContactTrustState::Unverified;
+                changed_contact_state(snapshot, address, contact, self.limits)
+            }
+            ContactTrustState::Unverified | ContactTrustState::Verified => Ok(ContactStateChange {
                 contact,
                 state_updates: Vec::new(),
                 event: None,
-            });
+            }),
         }
-        contact.trust_state = ContactTrustState::Unverified;
-        changed_contact_state(snapshot, address, contact, self.limits)
     }
 
     /// Locally blocks a contact without changing its Trust State.
@@ -1043,14 +963,6 @@ impl ProtocolStateEngine {
     /// Blocking is keyed by the contact Identity Key. It refuses new outgoing user Messages and
     /// suppresses consumer-visible inbound plaintext after mandatory sender-certificate validation,
     /// while still accepting the protocol Message.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for
-    ///   `identity_key`.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn block_contact(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1063,14 +975,6 @@ impl ProtocolStateEngine {
     ///
     /// Existing Sessions remain usable after unblock; no handshake is required solely because of
     /// the block/unblock cycle.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for
-    ///   `identity_key`.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn unblock_contact(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1085,15 +989,6 @@ impl ProtocolStateEngine {
     /// `contact_identity_key`. A mismatch is reported explicitly, leaves the stored Trust State
     /// unchanged, and returns no update or event. In-band Messages and acknowledgments never call
     /// this transition.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the contact blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the updated contact blob fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if either Identity Key is not canonical or
-    ///   the contact is still Pending.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no contact blob exists for
-    ///   `contact_identity_key`.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn confirm_contact_safety_number(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1142,19 +1037,14 @@ impl ProtocolStateEngine {
             .map(ContactSafetyNumberConfirmation::Matched)
     }
 
-    /// Records a peer's inbox authorization, refusing to move backwards (AE-CON-05).
+    /// Records a peer's inbox authorization, refusing to move backwards.
     ///
     /// Returns updates to commit, or an empty vector when `generation` is not newer than what is
     /// already stored. Refusing a lower generation matters because an old authorization replayed at
     /// a contact would restore a capability the peer has already rotated away from — the exact
-    /// state a blocked sender would want to reach (AE-BLK-08).
+    /// state a blocked sender would want to reach.
     ///
     /// The capability never enters [`ContactState`], so it is not mirrored to event observers.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the stored authorization fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the new authorization fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
     pub fn record_peer_inbox_authorization(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1189,11 +1079,6 @@ impl ProtocolStateEngine {
     /// Call this only after the in-band authorization update has actually been handed to the
     /// transport, so an app killed mid-re-key resumes rather than skipping contacts. Returns no
     /// updates when the contact already holds this generation or a newer one.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the stored record fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if the new record fails to encode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
     pub fn record_inbox_authorization_delivered(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1222,11 +1107,6 @@ impl ProtocolStateEngine {
     }
 
     /// Returns the local inbox generation `identity_key` was last given, if any.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the stored record fails to decode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn delivered_inbox_authorization(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1242,12 +1122,7 @@ impl ProtocolStateEngine {
     /// A contact qualifies when it has never been given an authorization, or was last given one
     /// older than `current_generation`. **Blocked contacts are always excluded**: re-supplying a
     /// blocked contact would hand back the very capability the rotation revoked and silently undo
-    /// the block (AE-BLK-08). Contacts with no stored contact record are skipped.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if a stored record fails to decode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if a candidate key is not canonical.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a blob version is not supported.
+    /// the block. Contacts with no stored contact record are skipped.
     pub fn contacts_needing_inbox_authorization(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1276,11 +1151,6 @@ impl ProtocolStateEngine {
     }
 
     /// Returns the stored inbox authorization for a peer, if one has been recorded.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the stored authorization fails to decode.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if `identity_key` is not canonical.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn peer_inbox_authorization(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1329,24 +1199,6 @@ impl ProtocolStateEngine {
 
     /// Encrypts plaintext while authenticating a caller-owned Transport Binding.
     /// The caller must retain the exact binding with the returned Message for retransmission.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlockedContact`] if the peer is locally blocked.
-    /// - [`ProtocolStateError::ContactNotAccepted`] if the peer contact is still pending.
-    /// - [`ProtocolStateError::SessionUnrecoverable`] if the Session requires replacement.
-    /// - [`ProtocolStateError::BlobDecode`] if the ratchet/session or pending-acknowledgment blob
-    ///   fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if advanced state fails to encode or exceeds local
-    ///   caps.
-    /// - [`ProtocolStateError::Crypto`] if ratchet encryption or state encoding fails.
-    /// - [`ProtocolStateError::InvalidMessage`] if sender material or sealed-sender content is
-    ///   invalid or exceeds local caps.
-    /// - [`ProtocolStateError::InvalidStateBinding`] if contact or Session state does not match
-    ///   the operation.
-    /// - [`ProtocolStateError::MessageEncode`] if the produced Message fails to encode.
-    /// - [`ProtocolStateError::MissingRequiredState`] if required Session or acknowledgment state
-    ///   is absent.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a required blob version is unsupported.
     pub fn encrypt_message_with_transport_binding(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1377,7 +1229,7 @@ impl ProtocolStateEngine {
                 session_key: &session_key_bytes,
                 recipient_identity_verifying_key: &contact_identity_key.ed25519_verifying_key,
                 id: plaintext.id,
-                timestamp_millis: plaintext.timestamp_millis,
+                sent_at_millis: plaintext.sent_at_millis,
                 payload_kind: PayloadKind::EncryptedText,
                 payload: &padded_plaintext,
                 sender_certificate: &plaintext.sender_identity.certificate,
@@ -1395,7 +1247,7 @@ impl ProtocolStateEngine {
         let ratcheted_payload = encode_ratcheted_payload(&header, &ciphertext);
         let frame_plaintext = encode_message_frame_plaintext(
             plaintext.id,
-            plaintext.timestamp_millis,
+            plaintext.sent_at_millis,
             PayloadKind::EncryptedText,
             &ratcheted_payload,
         )?;
@@ -1416,7 +1268,7 @@ impl ProtocolStateEngine {
             &pending_address,
             &mut pending,
             plaintext.id,
-            plaintext.timestamp_millis,
+            plaintext.sent_at_millis,
             &message,
             self.limits,
         )?;
@@ -1439,7 +1291,7 @@ impl ProtocolStateEngine {
 
         Ok(OutboundMessageResult {
             message_id: plaintext.id,
-            timestamp_millis: plaintext.timestamp_millis,
+            sent_at_millis: plaintext.sent_at_millis,
             payload_kind: PayloadKind::EncryptedText,
             message,
             state_updates: vec![update, pending_update],
@@ -1449,24 +1301,6 @@ impl ProtocolStateEngine {
     /// Receives a Message while authenticating its Transport Binding and the binding used for the
     /// returned acknowledgment.
     /// The caller must retain `acknowledgment_transport_binding` with the returned acknowledgment.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the deduplication-set or ratchet/session blob fails
-    ///   to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if advanced state fails to encode or exceeds local
-    ///   caps.
-    /// - [`ProtocolStateError::Crypto`] if ratchet or sealed-frame cryptography fails.
-    /// - [`ProtocolStateError::InvalidMessage`] if the Message, sender identity, recipient key, or
-    ///   acknowledgment sender material is invalid.
-    /// - [`ProtocolStateError::MessageEncode`] if the inbound Message or acknowledgment fails
-    ///   canonical encoding.
-    /// - [`ProtocolStateError::MissingSenderCertificateValidation`] if a unique Message arrives
-    ///   without validation inputs.
-    /// - [`ProtocolStateError::MissingRequiredState`] if required deduplication or Session state is
-    ///   absent.
-    /// - [`ProtocolStateError::SenderCertificateValidation`] if sender-certificate validation
-    ///   rejects the sealed certificate.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a required blob version is unsupported.
     pub fn decrypt_message_with_transport_bindings<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -1572,7 +1406,7 @@ impl ProtocolStateEngine {
                 session_key: &session_key_bytes,
                 recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
                 id: frame_plaintext.id,
-                timestamp_millis: frame_plaintext.timestamp_millis,
+                sent_at_millis: frame_plaintext.sent_at_millis,
                 payload_kind: frame_plaintext.payload_kind,
                 payload: &decoded.padded_plaintext,
                 sender_certificate: &decoded.sender_identity.certificate,
@@ -1593,7 +1427,7 @@ impl ProtocolStateEngine {
         if !blocked
             && is_certificate_outside_evidence_grace(
                 certificate_expires_at_secs,
-                validation.reference_timestamp_secs,
+                validation.reference_time,
             )
         {
             return Err(ProtocolStateError::SenderCertificateValidation(
@@ -1656,7 +1490,7 @@ impl ProtocolStateEngine {
             session_key: &session_key_bytes,
             recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
             message_id: frame_plaintext.id,
-            timestamp_millis: frame_plaintext.timestamp_millis,
+            sent_at_millis: frame_plaintext.sent_at_millis,
             payload_kind: frame_plaintext.payload_kind,
             padded_payload: &decoded.padded_plaintext,
             sender_certificate: &decoded.sender_identity.certificate,
@@ -1669,7 +1503,7 @@ impl ProtocolStateEngine {
         Ok(InboundMessageOutcome::Accepted(Box::new(
             InboundMessageResult {
                 message_id: frame_plaintext.id,
-                timestamp_millis: frame_plaintext.timestamp_millis,
+                sent_at_millis: frame_plaintext.sent_at_millis,
                 payload_kind: frame_plaintext.payload_kind,
                 plaintext: decoded.plaintext,
                 sender_identity: decoded.sender_identity,
@@ -1681,12 +1515,6 @@ impl ProtocolStateEngine {
     }
 
     /// Returns all pending acknowledgments stored for a Session.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the pending-acknowledgment blob fails to decode.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no pending-acknowledgment blob is
-    ///   present.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
     pub fn pending_acknowledgments(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1700,43 +1528,44 @@ impl ProtocolStateEngine {
             .map(|(message_id, entry)| PendingAcknowledgment {
                 message_id: MessageId::from_bytes(*message_id),
                 message: copy_message(&entry.message),
-                first_sent_millis: entry.first_sent_millis,
-                last_retry_millis: entry.last_retry_millis,
+                first_sent_at_millis: entry.first_sent_at_millis,
+                last_retried_at_millis: entry.last_retried_at_millis,
             })
             .collect())
     }
 
     /// Returns retry instructions for pending acknowledgments whose retry window has elapsed.
     ///
-    /// `now_millis` is caller supplied so retry behavior is deterministic in tests and does not
-    /// read the KeyStore Clock.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if the pending-acknowledgment blob fails to decode.
-    /// - [`ProtocolStateError::BlobEncode`] if updating retry timestamps fails to encode.
-    /// - [`ProtocolStateError::MissingRequiredState`] if no pending-acknowledgment blob is
-    ///   present.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if the blob version is not supported.
+    /// `now` is caller supplied so retry behavior is deterministic in tests and does not read the
+    /// system clock.
     pub fn retry_instructions(
         &self,
         snapshot: &ProtocolStateSnapshot,
         key: ProtocolStateKey,
-        now_millis: u64,
-        retry_window_millis: u64,
+        now: SystemTime,
+        retry_window: Duration,
     ) -> Result<RetryInstructionResult, ProtocolStateError> {
         let address = pending_acknowledgment_address(key);
         let mut pending = load_pending_acknowledgments(snapshot, &address, self.limits)?;
         let mut instructions = Vec::new();
         for (message_id, entry) in pending.pending.iter_mut() {
-            let reference = entry.last_retry_millis.unwrap_or(entry.first_sent_millis);
-            if now_millis >= reference.saturating_add(retry_window_millis) {
+            let reference_millis = entry
+                .last_retried_at_millis
+                .unwrap_or(entry.first_sent_at_millis);
+            let is_due = from_unix_millis(reference_millis).is_some_and(|reference| {
+                now.duration_since(reference)
+                    .is_ok_and(|elapsed| elapsed >= retry_window)
+            });
+            if is_due {
                 instructions.push(RetryInstruction {
                     message_id: MessageId::from_bytes(*message_id),
                     message: copy_message(&entry.message),
-                    first_sent_millis: entry.first_sent_millis,
-                    last_retry_millis: entry.last_retry_millis,
+                    first_sent_at_millis: entry.first_sent_at_millis,
+                    last_retried_at_millis: entry.last_retried_at_millis,
                 });
-                entry.last_retry_millis = Some(now_millis);
+                // `now` is at or after a Unix timestamp here, so only a value beyond `u64`
+                // milliseconds saturates.
+                entry.last_retried_at_millis = Some(to_unix_millis(now).unwrap_or(u64::MAX));
             }
         }
 
@@ -1758,17 +1587,6 @@ impl ProtocolStateEngine {
     }
 
     /// Processes an acknowledgment while authenticating its Transport Binding.
-    ///
-    /// # Errors
-    /// - [`ProtocolStateError::BlobDecode`] if Session or pending-acknowledgment state fails to
-    ///   decode.
-    /// - [`ProtocolStateError::BlobEncode`] if advanced state fails to encode.
-    /// - [`ProtocolStateError::Crypto`] if ratchet or sealed-frame cryptography fails.
-    /// - [`ProtocolStateError::InvalidMessage`] if the acknowledgment or sender identity is
-    ///   invalid.
-    /// - [`ProtocolStateError::MessageEncode`] if the acknowledgment fails canonical encoding.
-    /// - [`ProtocolStateError::MissingRequiredState`] if required state is absent.
-    /// - [`ProtocolStateError::UnsupportedBlobVersion`] if a required blob version is unsupported.
     pub fn process_acknowledgment_with_transport_binding<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -1868,7 +1686,7 @@ impl ProtocolStateEngine {
                 session_key: &session_key_bytes,
                 recipient_identity_verifying_key: &inbound.recipient_identity_verifying_key,
                 id: frame_plaintext.id,
-                timestamp_millis: frame_plaintext.timestamp_millis,
+                sent_at_millis: frame_plaintext.sent_at_millis,
                 payload_kind: frame_plaintext.payload_kind,
                 payload: &decoded.padded_plaintext,
                 sender_certificate: &decoded.sender_identity.certificate,
@@ -1901,7 +1719,7 @@ impl ProtocolStateEngine {
         if cleared {
             Ok(AcknowledgmentOutcome::Cleared(ClearedAcknowledgment {
                 message_id: frame_plaintext.id,
-                timestamp_millis: frame_plaintext.timestamp_millis,
+                sent_at_millis: frame_plaintext.sent_at_millis,
                 acknowledged_message_id,
                 sender_identity: decoded.sender_identity,
                 state_updates,
@@ -1909,7 +1727,7 @@ impl ProtocolStateEngine {
         } else {
             Ok(AcknowledgmentOutcome::Missed {
                 message_id: frame_plaintext.id,
-                timestamp_millis: frame_plaintext.timestamp_millis,
+                sent_at_millis: frame_plaintext.sent_at_millis,
                 acknowledged_message_id,
                 sender_identity: decoded.sender_identity,
                 state_updates,
@@ -1925,7 +1743,6 @@ impl Default for ProtocolStateEngine {
 }
 
 /// Errors returned by protocol-state operations.
-#[non_exhaustive]
 #[derive(Debug)]
 pub enum ProtocolStateError {
     /// The contact is locally blocked.
@@ -1950,8 +1767,14 @@ pub enum ProtocolStateError {
         /// Diagnostic encode context for logs only.
         reason: String,
     },
-    /// A cryptographic operation failed.
-    Crypto(roost_crypto::CryptoError),
+    /// Double Ratchet encryption or decryption failed.
+    Ratchet(roost_crypto::RatchetError),
+    /// A ratchet state failed to encode or decode.
+    RatchetState(roost_crypto::RatchetStateError),
+    /// Sealing or opening a sealed-sender frame failed.
+    SealedFrame(roost_crypto::SealedFrameError),
+    /// A Message transcript signature failed context framing or verification.
+    Signature(SignatureError),
     /// Sender-certificate validation failed during receive.
     SenderCertificateValidation(SenderCertificateValidationError),
     /// A unique encrypted receive was attempted without sender-certificate validation inputs.
@@ -2032,7 +1855,10 @@ impl fmt::Display for ProtocolStateError {
                     "protocol-state blob failed to encode at {address}: {reason}"
                 )
             }
-            Self::Crypto(e) => write!(f, "protocol-state crypto operation failed: {e}"),
+            Self::Ratchet(e) => write!(f, "protocol-state ratchet operation failed: {e}"),
+            Self::RatchetState(e) => write!(f, "protocol-state ratchet state failed: {e}"),
+            Self::SealedFrame(e) => write!(f, "protocol-state sealed frame failed: {e}"),
+            Self::Signature(e) => write!(f, "protocol-state signature failed: {e}"),
             Self::SenderCertificateValidation(e) => {
                 write!(f, "sender certificate validation failed: {e}")
             }
@@ -2082,7 +1908,10 @@ impl fmt::Display for ProtocolStateError {
 impl Error for ProtocolStateError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Crypto(e) => Some(e),
+            Self::Ratchet(e) => Some(e),
+            Self::RatchetState(e) => Some(e),
+            Self::SealedFrame(e) => Some(e),
+            Self::Signature(e) => Some(e),
             Self::SenderCertificateValidation(e) => Some(e),
             Self::MessageEncode(e) => Some(e),
             Self::BlockedContact
@@ -2103,9 +1932,27 @@ impl Error for ProtocolStateError {
     }
 }
 
-impl From<roost_crypto::CryptoError> for ProtocolStateError {
-    fn from(e: roost_crypto::CryptoError) -> Self {
-        Self::Crypto(e)
+impl From<roost_crypto::RatchetError> for ProtocolStateError {
+    fn from(e: roost_crypto::RatchetError) -> Self {
+        Self::Ratchet(e)
+    }
+}
+
+impl From<roost_crypto::RatchetStateError> for ProtocolStateError {
+    fn from(e: roost_crypto::RatchetStateError) -> Self {
+        Self::RatchetState(e)
+    }
+}
+
+impl From<roost_crypto::SealedFrameError> for ProtocolStateError {
+    fn from(e: roost_crypto::SealedFrameError) -> Self {
+        Self::SealedFrame(e)
+    }
+}
+
+impl From<SignatureError> for ProtocolStateError {
+    fn from(e: SignatureError) -> Self {
+        Self::Signature(e)
     }
 }
 
@@ -2376,8 +2223,8 @@ struct LoadedPendingAcknowledgments {
 struct LoadedPendingAcknowledgment {
     message: Message,
     encoded_message: Vec<u8>,
-    first_sent_millis: u64,
-    last_retry_millis: Option<u64>,
+    first_sent_at_millis: u64,
+    last_retried_at_millis: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -2407,8 +2254,8 @@ struct PendingAcknowledgmentsWire<'a> {
 struct PendingAcknowledgmentWire<'a> {
     message_id: [u8; 16],
     encoded_message: &'a [u8],
-    first_sent_millis: u64,
-    last_retry_millis: Option<u64>,
+    first_sent_at_millis: u64,
+    last_retried_at_millis: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -2424,8 +2271,8 @@ struct DecodedPendingAcknowledgmentsWire {
 struct DecodedPendingAcknowledgmentWire {
     message_id: [u8; 16],
     encoded_message: Vec<u8>,
-    first_sent_millis: u64,
-    last_retry_millis: Option<u64>,
+    first_sent_at_millis: u64,
+    last_retried_at_millis: Option<u64>,
 }
 
 fn deserialize_pending_acknowledgment_list<'de, D>(
@@ -2544,7 +2391,7 @@ struct ContactStateWire<'a> {
     discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
     discovery_epoch: u32,
-    discovery_created_at: u64,
+    discovery_created_at_secs: u64,
     discovery_identity_signature: &'a [u8],
     trust_state: ContactTrustState,
     blocked: bool,
@@ -2558,7 +2405,7 @@ struct DecodedContactStateWireV2 {
     discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
     discovery_epoch: u32,
-    discovery_created_at: u64,
+    discovery_created_at_secs: u64,
     discovery_identity_signature: Vec<u8>,
     trust_state: ContactTrustState,
     blocked: bool,
@@ -2580,7 +2427,7 @@ struct DecodedAcknowledgmentPlaintextWire {
 struct MessageFramePlaintextWire<'a> {
     version: u8,
     id: [u8; 16],
-    timestamp_millis: u64,
+    sent_at_millis: u64,
     payload_kind: u8,
     ratcheted_payload: &'a [u8],
 }
@@ -2589,14 +2436,14 @@ struct MessageFramePlaintextWire<'a> {
 struct DecodedMessageFramePlaintextWire {
     version: u8,
     id: [u8; 16],
-    timestamp_millis: u64,
+    sent_at_millis: u64,
     payload_kind: u8,
     ratcheted_payload: Vec<u8>,
 }
 
 struct DecodedMessageFramePlaintext {
     id: MessageId,
-    timestamp_millis: u64,
+    sent_at_millis: u64,
     payload_kind: PayloadKind,
     ratcheted_payload: Vec<u8>,
 }
@@ -2926,8 +2773,8 @@ fn encode_pending_acknowledgments(
         .map(|(message_id, entry)| PendingAcknowledgmentWire {
             message_id: *message_id,
             encoded_message: &entry.encoded_message,
-            first_sent_millis: entry.first_sent_millis,
-            last_retry_millis: entry.last_retry_millis,
+            first_sent_at_millis: entry.first_sent_at_millis,
+            last_retried_at_millis: entry.last_retried_at_millis,
         })
         .collect();
     let payload = Zeroizing::new(
@@ -3107,8 +2954,8 @@ fn decode_pending_acknowledgments_payload(
             LoadedPendingAcknowledgment {
                 message,
                 encoded_message: entry.encoded_message,
-                first_sent_millis: entry.first_sent_millis,
-                last_retry_millis: entry.last_retry_millis,
+                first_sent_at_millis: entry.first_sent_at_millis,
+                last_retried_at_millis: entry.last_retried_at_millis,
             },
         );
         if replaced.is_some() {
@@ -3309,7 +3156,7 @@ fn encode_contact_state(
         discovery_x25519_public_key: contact.identity.discovery_key.x25519_public_key,
         discovery_ed25519_verifying_key: contact.identity.discovery_key.ed25519_verifying_key,
         discovery_epoch: contact.identity.discovery_key.epoch,
-        discovery_created_at: contact.identity.discovery_key.created_at,
+        discovery_created_at_secs: contact.identity.discovery_key.created_at_secs,
         discovery_identity_signature: &contact.identity.discovery_key.identity_signature,
         trust_state: contact.trust_state,
         blocked: contact.blocked,
@@ -3325,8 +3172,9 @@ fn encode_contact_state(
         return Err(ProtocolStateError::BlobEncode {
             address: address.clone(),
             reason: format!(
-                "contact-state blob length exceeds limit: {}",
-                payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN
+                "contact-state blob length {} exceeds limit {}",
+                payload.len() + PROTOCOL_STATE_BLOB_HEADER_LEN,
+                limits.max_protocol_state_blob_len
             ),
         });
     }
@@ -3401,7 +3249,7 @@ fn decoded_contact_state(
                 x25519_public_key: wire.discovery_x25519_public_key,
                 ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
                 epoch: wire.discovery_epoch,
-                created_at: wire.discovery_created_at,
+                created_at_secs: wire.discovery_created_at_secs,
                 identity_signature: wire.discovery_identity_signature.try_into().map_err(|_| {
                     ProtocolStateError::BlobDecode {
                         address: address.clone(),
@@ -3536,14 +3384,14 @@ fn contact_identity_key_is_valid(identity_key: &ContactIdentityKey) -> bool {
 }
 
 fn contact_discovery_key_bundle(discovery_key: &ContactDiscoveryKey) -> Option<DiscoveryKeyBundle> {
-    if !validate_x25519_public_key(&discovery_key.x25519_public_key) {
+    if !is_valid_x25519_public_key(&discovery_key.x25519_public_key) {
         return None;
     }
     Some(DiscoveryKeyBundle {
         public_key: PublicKey::from(discovery_key.x25519_public_key),
         verifying_key: parse_ed25519_verifying_key_bytes(&discovery_key.ed25519_verifying_key)?,
         epoch: discovery_key.epoch,
-        created_at: discovery_key.created_at,
+        created_at_secs: discovery_key.created_at_secs,
         signature: Signature::from_bytes(&discovery_key.identity_signature),
     })
 }
@@ -3552,7 +3400,7 @@ fn contact_discovery_key_is_newer(
     current: &ContactDiscoveryKey,
     candidate: &ContactDiscoveryKey,
 ) -> bool {
-    (candidate.created_at, candidate.epoch) > (current.created_at, current.epoch)
+    (candidate.created_at_secs, candidate.epoch) > (current.created_at_secs, current.epoch)
 }
 
 fn ensure_contact_allows_outbound(
@@ -3611,8 +3459,8 @@ fn inbound_contact_identity_key(
         domain_signing_keys: validation.domain_signing_keys,
         expected_relay_domain: validation.expected_relay_domain,
         revocation_state: validation.revocation_state,
-        reference_timestamp_secs: validation.reference_timestamp_secs,
-        grace_window_secs: validation.grace_window_secs,
+        reference_time: validation.reference_time,
+        grace_window: validation.grace_window,
     })
     .map_err(ProtocolStateError::SenderCertificateValidation)?;
     if validated
@@ -3646,12 +3494,12 @@ fn inbound_contact_identity_key(
     Ok((identity_key, validated.expires_at_secs))
 }
 
-fn is_certificate_outside_evidence_grace(
-    expires_at_secs: u64,
-    reference_timestamp_secs: u64,
-) -> bool {
-    reference_timestamp_secs > expires_at_secs
-        && reference_timestamp_secs - expires_at_secs > MAX_EVIDENCE_GRACE_WINDOW_SECS
+fn is_certificate_outside_evidence_grace(expires_at_secs: u64, reference_time: SystemTime) -> bool {
+    from_unix_secs(expires_at_secs).is_some_and(|expires_at| {
+        reference_time
+            .duration_since(expires_at)
+            .is_ok_and(|elapsed| elapsed > MAX_EVIDENCE_GRACE_WINDOW)
+    })
 }
 
 fn contact_is_blocked(
@@ -3720,7 +3568,7 @@ fn record_pending_acknowledgment(
     address: &ProtocolStateAddress,
     state: &mut LoadedPendingAcknowledgments,
     message_id: MessageId,
-    first_sent_millis: u64,
+    first_sent_at_millis: u64,
     message: &Message,
     limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
@@ -3741,8 +3589,8 @@ fn record_pending_acknowledgment(
         LoadedPendingAcknowledgment {
             message: copy_message(message),
             encoded_message,
-            first_sent_millis,
-            last_retry_millis: None,
+            first_sent_at_millis,
+            last_retried_at_millis: None,
         },
     );
     Ok(())
@@ -3826,7 +3674,7 @@ fn decode_ratcheted_payload(payload: &[u8]) -> Result<(Header, &[u8]), ProtocolS
 
 fn encode_message_frame_plaintext(
     id: MessageId,
-    timestamp_millis: u64,
+    sent_at_millis: u64,
     payload_kind: PayloadKind,
     ratcheted_payload: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
@@ -3834,7 +3682,7 @@ fn encode_message_frame_plaintext(
         postcard::to_stdvec(&MessageFramePlaintextWire {
             version: MESSAGE_FRAME_PLAINTEXT_WIRE_VERSION,
             id: *id.as_bytes(),
-            timestamp_millis,
+            sent_at_millis,
             payload_kind: payload_kind.tag(),
             ratcheted_payload,
         })
@@ -3871,7 +3719,7 @@ fn decode_message_frame_plaintext(
     })?;
     Ok(DecodedMessageFramePlaintext {
         id: MessageId::from_bytes(wire.id),
-        timestamp_millis: wire.timestamp_millis,
+        sent_at_millis: wire.sent_at_millis,
         payload_kind,
         ratcheted_payload: wire.ratcheted_payload,
     })
@@ -3944,8 +3792,7 @@ fn verify_message_transcript(
         &transcript,
         &signature,
     )
-    .map_err(roost_crypto::CryptoError::from)?;
-    Ok(())
+    .map_err(ProtocolStateError::from)
 }
 
 fn encode_validated_sealed_sender_envelope(
@@ -4086,7 +3933,7 @@ fn encrypt_acknowledgment(
             session_key,
             recipient_identity_verifying_key,
             id: acknowledgment.id,
-            timestamp_millis: acknowledgment.timestamp_millis,
+            sent_at_millis: acknowledgment.sent_at_millis,
             payload_kind: PayloadKind::Acknowledgment,
             payload: &padded_plaintext,
             sender_certificate: &acknowledgment.sender_identity.certificate,
@@ -4104,7 +3951,7 @@ fn encrypt_acknowledgment(
     let ratcheted_payload = encode_ratcheted_payload(&header, &ciphertext);
     let frame_plaintext = encode_message_frame_plaintext(
         acknowledgment.id,
-        acknowledgment.timestamp_millis,
+        acknowledgment.sent_at_millis,
         PayloadKind::Acknowledgment,
         &ratcheted_payload,
     )?;
@@ -4496,7 +4343,7 @@ mod tests {
                 session_key: &session_key,
                 recipient_identity_verifying_key: &recipient_identity_verifying_key,
                 id,
-                timestamp_millis: 6,
+                sent_at_millis: 6,
                 payload_kind: PayloadKind::EncryptedText,
                 payload,
                 sender_certificate: &sender_identity.certificate,
@@ -4509,7 +4356,7 @@ mod tests {
             session_key: &session_key,
             recipient_identity_verifying_key: &recipient_identity_verifying_key,
             id,
-            timestamp_millis: 6,
+            sent_at_millis: 6,
             payload_kind: PayloadKind::EncryptedText,
             payload,
             sender_certificate: &sender_identity.certificate,
@@ -4534,7 +4381,7 @@ mod tests {
                 ..valid()
             },
             MessageTranscriptInput {
-                timestamp_millis: 10,
+                sent_at_millis: 10,
                 ..valid()
             },
             MessageTranscriptInput {

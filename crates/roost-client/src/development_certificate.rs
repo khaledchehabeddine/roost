@@ -5,6 +5,7 @@ use crate::certificate::{
 };
 use crate::error::ClientError;
 use crate::records::{Identity, fixed_32};
+use crate::time::whole_secs_from_millis;
 use roost_core::DevelopmentCertificateAuthority as CoreDevelopmentCertificateAuthority;
 use roost_protocol::SenderCertificateIdentityKey;
 use std::sync::Arc;
@@ -50,14 +51,11 @@ impl DevelopmentCertificateAuthority {
     /// ```
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `signing_key_identifier` is empty or longer than 64
+    /// - [`ClientError::InvalidData`] if `signing_key_id` is empty or longer than 64
     ///   bytes.
     #[uniffi::constructor]
-    pub fn new(
-        signing_key_identifier: Vec<u8>,
-        relay_domain: Vec<u8>,
-    ) -> Result<Arc<Self>, ClientError> {
-        let inner = CoreDevelopmentCertificateAuthority::new(signing_key_identifier, relay_domain)
+    pub fn new(signing_key_id: Vec<u8>, relay_domain: Vec<u8>) -> Result<Arc<Self>, ClientError> {
+        let inner = CoreDevelopmentCertificateAuthority::new(signing_key_id, relay_domain)
             .map_err(|e| ClientError::InvalidData {
                 reason: e.to_string(),
             })?;
@@ -80,8 +78,8 @@ impl DevelopmentCertificateAuthority {
     /// let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
     /// let store = Client::new(storage);
     /// let prepared = store.identity().prepare_generate_identity()?;
-    /// store.commit_operation(prepared.operation.identifier.clone())?;
-    /// store.finalize_operation(prepared.operation.identifier)?;
+    /// store.commit_operation(prepared.operation.id.clone())?;
+    /// store.finalize_operation(prepared.operation.id)?;
     /// let identity = prepared.identity;
     /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
     /// let issued = authority.issue(identity, 1_800_000_000)?;
@@ -95,7 +93,7 @@ impl DevelopmentCertificateAuthority {
     pub fn issue(
         &self,
         identity: Identity,
-        expires_at_secs: u64,
+        expires_at_millis: u64,
     ) -> Result<DevelopmentSenderCertificate, ClientError> {
         let identity_key = SenderCertificateIdentityKey {
             x25519_public_key: fixed_32(
@@ -109,7 +107,10 @@ impl DevelopmentCertificateAuthority {
         };
         let issued = self
             .inner
-            .issue(identity_key, expires_at_secs)
+            .issue(
+                identity_key,
+                whole_secs_from_millis(expires_at_millis, "expires_at_millis")?,
+            )
             .map_err(|e| ClientError::InvalidData {
                 reason: e.to_string(),
             })?;
@@ -129,18 +130,18 @@ impl DevelopmentCertificateAuthority {
     /// use roost_client::DevelopmentCertificateAuthority;
     ///
     /// let authority = DevelopmentCertificateAuthority::new(b"relay-loopback".to_vec(), b"relay.example".to_vec())?;
-    /// let validation = authority.sender_certificate_validation(1_700_000_000, 30);
+    /// let validation = authority.sender_certificate_validation(1_700_000_000_000, 30_000);
     /// assert!(validation.revocation_state.available);
     /// # Ok::<(), roost_client::ClientError>(())
     /// ```
     pub fn sender_certificate_validation(
         &self,
-        reference_timestamp_secs: u64,
-        grace_window_secs: u64,
+        reference_time_millis: u64,
+        grace_window_millis: u64,
     ) -> SenderCertificateValidation {
         SenderCertificateValidation {
             domain_signing_keys: vec![DomainSigningKey {
-                identifier: self.inner.signing_key_identifier().to_vec(),
+                id: self.inner.signing_key_id().to_vec(),
                 verifying_key: self.inner.verifying_key().to_vec(),
                 status: DomainSigningKeyStatus::Trusted,
             }],
@@ -149,8 +150,8 @@ impl DevelopmentCertificateAuthority {
                 available: true,
                 revoked_identity_keys: Vec::new(),
             },
-            reference_timestamp_secs,
-            grace_window_secs,
+            reference_time_millis,
+            grace_window_millis,
         }
     }
 }
@@ -170,8 +171,8 @@ mod tests {
             b"relay.example".to_vec(),
         )
         .unwrap();
-        let issued = authority.issue(identity, 1_800_000_000).unwrap();
-        let validation = authority.sender_certificate_validation(1_700_000_000, 0);
+        let issued = authority.issue(identity, 1_800_000_000_000).unwrap();
+        let validation = authority.sender_certificate_validation(1_700_000_000_000, 0);
 
         validate_sender_certificate(
             issued.certificate,
@@ -179,8 +180,8 @@ mod tests {
             validation.domain_signing_keys,
             validation.expected_relay_domain,
             validation.revocation_state,
-            validation.reference_timestamp_secs,
-            validation.grace_window_secs,
+            validation.reference_time_millis,
+            validation.grace_window_millis,
         )
         .unwrap();
     }

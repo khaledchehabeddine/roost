@@ -4,6 +4,7 @@ use crate::client::{Contacts, Messaging};
 use crate::error::ClientError;
 use crate::message::{Message, PayloadKind, SenderIdentityMaterial};
 use crate::records::{fixed_32, fixed_64};
+use crate::time::{millis_from_secs, time_from_millis, whole_secs_from_millis};
 use rand::rngs::OsRng;
 use roost_core::RecipientDeliveryCapability as CoreRecipientDeliveryCapability;
 use roost_core::{
@@ -13,6 +14,7 @@ use roost_core::{
     ProtocolStateSnapshot as CoreProtocolStateSnapshot,
     ProtocolStateUpdate as CoreProtocolStateUpdate,
 };
+use std::time::Duration;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Stable category for an opaque protocol-state blob.
@@ -127,8 +129,8 @@ pub struct ContactDiscoveryKey {
     pub ed25519_verifying_key: Vec<u8>,
     /// Discovery Key epoch.
     pub epoch: u32,
-    /// Signed creation timestamp in Unix seconds.
-    pub created_at: u64,
+    /// Signed creation time in Unix milliseconds, always a whole number of seconds.
+    pub created_at_millis: u64,
     /// Identity-key signature over the Discovery Key bundle. Always 64 bytes.
     pub identity_signature: Vec<u8>,
 }
@@ -238,9 +240,9 @@ pub struct PendingAcknowledgment {
     /// Original outbound Message waiting for acknowledgment.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
-    pub first_sent_millis: u64,
+    pub first_sent_at_millis: u64,
     /// Last retry-instruction timestamp in milliseconds.
-    pub last_retry_millis: Option<u64>,
+    pub last_retried_at_millis: Option<u64>,
 }
 
 /// Retry instruction for an unacknowledged Message.
@@ -251,9 +253,9 @@ pub struct RetryInstruction {
     /// Message the host may retransmit.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
-    pub first_sent_millis: u64,
+    pub first_sent_at_millis: u64,
     /// Previous retry-instruction timestamp in milliseconds.
-    pub last_retry_millis: Option<u64>,
+    pub last_retried_at_millis: Option<u64>,
 }
 
 /// Retry instructions plus pending-state updates.
@@ -271,7 +273,7 @@ pub struct OutboundMessageResult {
     /// Stable outbound Message ID. Always 16 bytes.
     pub message_id: Vec<u8>,
     /// Sender-observed Unix timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Payload kind sealed in the Message.
     pub payload_kind: PayloadKind,
     /// Message to send after durable commit.
@@ -364,7 +366,7 @@ pub struct InboundMessageResult {
     /// Authenticated Message identifier. Always 16 bytes.
     pub message_id: Vec<u8>,
     /// Authenticated sender timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Authenticated payload kind.
     pub payload_kind: PayloadKind,
     /// Plaintext for the host to protect and clear after use.
@@ -498,7 +500,7 @@ pub struct AcknowledgmentResult {
     /// Acknowledgment Message identifier. Always 16 bytes.
     pub message_id: Vec<u8>,
     /// Authenticated sender timestamp in milliseconds.
-    pub timestamp_millis: u64,
+    pub sent_at_millis: u64,
     /// Outbound Message identifier named by the acknowledgment. Always 16 bytes.
     pub acknowledged_message_id: Vec<u8>,
     /// Authenticated sender material.
@@ -532,7 +534,7 @@ impl Messaging {
     /// }
     /// ```
     pub fn hardening_limits(&self) -> ProtocolHardeningLimits {
-        self.inner.protocol_engine().hardening_limits().into()
+        ProtocolHardeningLimits::from_core(self.inner.protocol_engine().hardening_limits())
     }
 
     /// Returns an update that initializes a deduplication set.
@@ -556,11 +558,11 @@ impl Messaging {
         &self,
         key: Vec<u8>,
     ) -> Result<ProtocolStateUpdate, ClientError> {
-        ProtocolStateUpdate::from_core(
+        Ok(ProtocolStateUpdate::from_core(
             self.inner
                 .protocol_engine()
                 .initialize_deduplication_set(&mut OsRng, protocol_key(key)?)?,
-        )
+        ))
     }
 
     /// Returns an update that initializes pending-acknowledgment state.
@@ -584,11 +586,11 @@ impl Messaging {
         &self,
         key: Vec<u8>,
     ) -> Result<ProtocolStateUpdate, ClientError> {
-        ProtocolStateUpdate::from_core(
+        Ok(ProtocolStateUpdate::from_core(
             self.inner
                 .protocol_engine()
                 .initialize_pending_acknowledgments(protocol_key(key)?)?,
-        )
+        ))
     }
 
     /// Returns deletion updates for all protocol-state kinds at the key.
@@ -612,12 +614,13 @@ impl Messaging {
         snapshot: Vec<ProtocolStateEntry>,
         key: Vec<u8>,
     ) -> Result<Vec<ProtocolStateUpdate>, ClientError> {
-        self.inner
+        Ok(self
+            .inner
             .protocol_engine()
             .wipe(&snapshot_input_from_entries(snapshot)?, protocol_key(key)?)
             .into_iter()
             .map(ProtocolStateUpdate::from_core)
-            .collect()
+            .collect())
     }
 
     /// Returns all pending acknowledgments for a Session.
@@ -680,12 +683,14 @@ impl Messaging {
         retry_window_millis: u64,
     ) -> Result<RetryInstructionResult, ClientError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
-        RetryInstructionResult::from_core(self.inner.protocol_engine().retry_instructions(
-            &snapshot,
-            protocol_key(key)?,
-            now_millis,
-            retry_window_millis,
-        )?)
+        Ok(RetryInstructionResult::from_core(
+            self.inner.protocol_engine().retry_instructions(
+                &snapshot,
+                protocol_key(key)?,
+                time_from_millis(now_millis, "now_millis")?,
+                Duration::from_millis(retry_window_millis),
+            )?,
+        ))
     }
 }
 
@@ -747,11 +752,11 @@ impl Contacts {
         identity_key: IdentityKey,
     ) -> Result<Option<ContactState>, ClientError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
-        Ok(self
-            .inner
+        self.inner
             .protocol_engine()
             .contact_state(&snapshot, identity_key.to_core()?)?
-            .map(ContactState::from_core))
+            .map(ContactState::from_core)
+            .transpose()
     }
 
     /// Returns all Contact State snapshots.
@@ -777,13 +782,12 @@ impl Contacts {
         snapshot: Vec<ProtocolStateEntry>,
     ) -> Result<Vec<ContactState>, ClientError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
-        Ok(self
-            .inner
+        self.inner
             .protocol_engine()
             .contact_states(&snapshot)?
             .into_iter()
             .map(ContactState::from_core)
-            .collect())
+            .collect()
     }
 
     /// Accepts a pending contact.
@@ -818,12 +822,12 @@ impl Contacts {
         )
     }
 
-    /// Records a peer's inbox authorization for a generation (AE-CON-05).
+    /// Records a peer's inbox authorization for a generation.
     ///
     /// Returns no updates when `generation` is not newer than what is stored. That refusal is
     /// load-bearing: an old authorization replayed at a contact would restore a capability the
     /// peer has already rotated away from, which is exactly the state a blocked sender wants to
-    /// reach (AE-BLK-08).
+    /// reach.
     ///
     /// # Examples
     /// ```
@@ -853,7 +857,7 @@ impl Contacts {
             &capability,
             "recipient delivery capability",
         )?);
-        updates_from_core(
+        Ok(updates_from_core(
             self.inner
                 .protocol_engine()
                 .record_peer_inbox_authorization(
@@ -862,7 +866,7 @@ impl Contacts {
                     generation,
                     &capability,
                 )?,
-        )
+        ))
     }
 
     /// Returns the stored inbox authorization for a peer, if one has been recorded.
@@ -925,7 +929,7 @@ impl Contacts {
         generation: u32,
     ) -> Result<Vec<ProtocolStateUpdate>, ClientError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
-        updates_from_core(
+        Ok(updates_from_core(
             self.inner
                 .protocol_engine()
                 .record_inbox_authorization_delivered(
@@ -933,14 +937,14 @@ impl Contacts {
                     identity_key.to_core()?,
                     generation,
                 )?,
-        )
+        ))
     }
 
     /// Returns which of `candidates` still need the current inbox generation.
     ///
     /// A contact qualifies when it has never been given an authorization or was last given an
     /// older one. Blocked contacts are always excluded — re-supplying one would hand back the very
-    /// capability the rotation revoked and silently undo the block (AE-BLK-08). Contacts with no
+    /// capability the rotation revoked and silently undo the block. Contacts with no
     /// stored contact record are skipped.
     ///
     /// # Examples
@@ -1120,7 +1124,7 @@ pub(crate) fn snapshot_input_from_entries(
 
     let mut snapshot = CoreProtocolStateSnapshot::new();
     for (kind, key, blob) in entries {
-        let address = CoreProtocolStateAddress::new(kind.into(), protocol_key(key)?);
+        let address = CoreProtocolStateAddress::new(kind.to_core(), protocol_key(key)?);
         if snapshot.get(&address).is_some() {
             return Err(ClientError::InvalidData {
                 reason: "duplicate protocol-state address".into(),
@@ -1132,9 +1136,9 @@ pub(crate) fn snapshot_input_from_entries(
 }
 
 impl ProtocolStateUpdate {
-    pub(crate) fn from_core(update: CoreProtocolStateUpdate) -> Result<Self, ClientError> {
-        Ok(Self {
-            kind: ProtocolStateKind::from_core(update.address().kind())?,
+    pub(crate) fn from_core(update: CoreProtocolStateUpdate) -> Self {
+        Self {
+            kind: ProtocolStateKind::from_core(update.address().kind()),
             key: update.address().key().as_bytes().to_vec(),
             commit_check: match update.commit_condition() {
                 roost_core::ProtocolStateCommitCondition::Absent => {
@@ -1147,34 +1151,19 @@ impl ProtocolStateUpdate {
                 }
             },
             blob: update.blob().map(|blob| blob.as_bytes().to_vec()),
-        })
+        }
     }
 }
 
-pub(crate) fn updates_from_core(
-    updates: Vec<CoreProtocolStateUpdate>,
-) -> Result<Vec<ProtocolStateUpdate>, ClientError> {
+pub(crate) fn updates_from_core(updates: Vec<CoreProtocolStateUpdate>) -> Vec<ProtocolStateUpdate> {
     updates
         .into_iter()
         .map(ProtocolStateUpdate::from_core)
         .collect()
 }
 
-impl From<ProtocolStateKind> for roost_core::ProtocolStateKind {
-    fn from(value: ProtocolStateKind) -> Self {
-        match value {
-            ProtocolStateKind::RatchetSession => Self::RatchetSession,
-            ProtocolStateKind::DeduplicationSet => Self::DeduplicationSet,
-            ProtocolStateKind::PendingAcknowledgments => Self::PendingAcknowledgments,
-            ProtocolStateKind::ContactState => Self::ContactState,
-            ProtocolStateKind::PeerInboxAuthorization => Self::PeerInboxAuthorization,
-            ProtocolStateKind::LocalInboxAuthorization => Self::LocalInboxAuthorization,
-        }
-    }
-}
-
-impl From<roost_core::ProtocolHardeningLimits> for ProtocolHardeningLimits {
-    fn from(value: roost_core::ProtocolHardeningLimits) -> Self {
+impl ProtocolHardeningLimits {
+    fn from_core(value: roost_core::ProtocolHardeningLimits) -> Self {
         Self {
             max_encoded_message_len: value.max_encoded_message_len as u64,
             max_message_payload_len: value.max_message_payload_len as u64,
@@ -1188,11 +1177,11 @@ impl From<roost_core::ProtocolHardeningLimits> for ProtocolHardeningLimits {
     }
 }
 
-impl From<BlockedContactAcknowledgmentPolicy> for roost_core::BlockedContactAcknowledgmentPolicy {
-    fn from(value: BlockedContactAcknowledgmentPolicy) -> Self {
-        match value {
-            BlockedContactAcknowledgmentPolicy::Unreachable => Self::Unreachable,
-            BlockedContactAcknowledgmentPolicy::SilentReceipt => Self::SilentReceipt,
+impl BlockedContactAcknowledgmentPolicy {
+    pub(crate) fn to_core(self) -> roost_core::BlockedContactAcknowledgmentPolicy {
+        match self {
+            Self::Unreachable => roost_core::BlockedContactAcknowledgmentPolicy::Unreachable,
+            Self::SilentReceipt => roost_core::BlockedContactAcknowledgmentPolicy::SilentReceipt,
         }
     }
 }
@@ -1217,14 +1206,17 @@ impl IdentityKey {
 }
 
 impl ContactDiscoveryKey {
-    fn from_core(value: roost_core::ContactDiscoveryKey) -> Self {
-        Self {
+    fn from_core(value: roost_core::ContactDiscoveryKey) -> Result<Self, ClientError> {
+        Ok(Self {
             x25519_public_key: value.x25519_public_key.to_vec(),
             ed25519_verifying_key: value.ed25519_verifying_key.to_vec(),
             epoch: value.epoch,
-            created_at: value.created_at,
+            created_at_millis: millis_from_secs(
+                value.created_at_secs,
+                "contact discovery-key creation time",
+            )?,
             identity_signature: value.identity_signature.to_vec(),
-        }
+        })
     }
 
     fn to_core(&self) -> Result<roost_core::ContactDiscoveryKey, ClientError> {
@@ -1238,7 +1230,10 @@ impl ContactDiscoveryKey {
                 "contact discovery ed25519 verifying key",
             )?,
             epoch: self.epoch,
-            created_at: self.created_at,
+            created_at_secs: whole_secs_from_millis(
+                self.created_at_millis,
+                "contact discovery-key created_at_millis",
+            )?,
             identity_signature: fixed_64(
                 &self.identity_signature,
                 "contact discovery identity signature",
@@ -1248,11 +1243,11 @@ impl ContactDiscoveryKey {
 }
 
 impl ContactIdentity {
-    fn from_core(value: roost_core::ContactIdentity) -> Self {
-        Self {
+    fn from_core(value: roost_core::ContactIdentity) -> Result<Self, ClientError> {
+        Ok(Self {
             identity_key: IdentityKey::from_core(value.identity_key),
-            discovery_key: ContactDiscoveryKey::from_core(value.discovery_key),
-        }
+            discovery_key: ContactDiscoveryKey::from_core(value.discovery_key)?,
+        })
     }
 
     fn to_core(&self) -> Result<roost_core::ContactIdentity, ClientError> {
@@ -1263,8 +1258,8 @@ impl ContactIdentity {
     }
 }
 
-impl From<roost_core::ContactTrustState> for ContactTrustState {
-    fn from(value: roost_core::ContactTrustState) -> Self {
+impl ContactTrustState {
+    fn from_core(value: roost_core::ContactTrustState) -> Self {
         match value {
             roost_core::ContactTrustState::Pending => Self::Pending,
             roost_core::ContactTrustState::Unverified => Self::Unverified,
@@ -1273,33 +1268,23 @@ impl From<roost_core::ContactTrustState> for ContactTrustState {
     }
 }
 
-impl From<ContactTrustState> for roost_core::ContactTrustState {
-    fn from(value: ContactTrustState) -> Self {
-        match value {
-            ContactTrustState::Pending => Self::Pending,
-            ContactTrustState::Unverified => Self::Unverified,
-            ContactTrustState::Verified => Self::Verified,
-        }
-    }
-}
-
 impl ContactState {
-    pub(crate) fn from_core(value: roost_core::ContactState) -> Self {
-        Self {
-            identity: ContactIdentity::from_core(value.identity),
-            trust_state: value.trust_state.into(),
+    pub(crate) fn from_core(value: roost_core::ContactState) -> Result<Self, ClientError> {
+        Ok(Self {
+            identity: ContactIdentity::from_core(value.identity)?,
+            trust_state: ContactTrustState::from_core(value.trust_state),
             blocked: value.blocked,
-        }
+        })
     }
 }
 
 impl ContactEvent {
-    pub(crate) fn from_core(value: roost_core::ContactEvent) -> Self {
+    pub(crate) fn from_core(value: roost_core::ContactEvent) -> Result<Self, ClientError> {
         match value {
-            roost_core::ContactEvent::Changed { contact } => Self {
+            roost_core::ContactEvent::Changed { contact } => Ok(Self {
                 kind: ContactEventKind::Changed,
-                contact: ContactState::from_core(contact),
-            },
+                contact: ContactState::from_core(contact)?,
+            }),
         }
     }
 }
@@ -1307,9 +1292,9 @@ impl ContactEvent {
 impl ContactStateChange {
     pub(crate) fn from_core(value: CoreContactStateChange) -> Result<Self, ClientError> {
         Ok(Self {
-            contact: ContactState::from_core(value.contact),
-            state_updates: updates_from_core(value.state_updates)?,
-            event: value.event.map(ContactEvent::from_core),
+            contact: ContactState::from_core(value.contact)?,
+            state_updates: updates_from_core(value.state_updates),
+            event: value.event.map(ContactEvent::from_core).transpose()?,
         })
     }
 }
@@ -1334,8 +1319,8 @@ impl PendingAcknowledgment {
         Self {
             message_id: value.message_id.as_bytes().to_vec(),
             message: Message::from_core(value.message),
-            first_sent_millis: value.first_sent_millis,
-            last_retry_millis: value.last_retry_millis,
+            first_sent_at_millis: value.first_sent_at_millis,
+            last_retried_at_millis: value.last_retried_at_millis,
         }
     }
 }
@@ -1345,47 +1330,47 @@ impl RetryInstruction {
         Self {
             message_id: value.message_id.as_bytes().to_vec(),
             message: Message::from_core(value.message),
-            first_sent_millis: value.first_sent_millis,
-            last_retry_millis: value.last_retry_millis,
+            first_sent_at_millis: value.first_sent_at_millis,
+            last_retried_at_millis: value.last_retried_at_millis,
         }
     }
 }
 
 impl RetryInstructionResult {
-    fn from_core(value: roost_core::RetryInstructionResult) -> Result<Self, ClientError> {
-        Ok(Self {
+    fn from_core(value: roost_core::RetryInstructionResult) -> Self {
+        Self {
             instructions: value
                 .instructions
                 .into_iter()
                 .map(RetryInstruction::from_core)
                 .collect(),
-            state_updates: updates_from_core(value.state_updates)?,
-        })
+            state_updates: updates_from_core(value.state_updates),
+        }
     }
 }
 
 impl OutboundMessageResult {
-    pub(crate) fn from_core(value: roost_core::OutboundMessageResult) -> Result<Self, ClientError> {
-        Ok(Self {
+    pub(crate) fn from_core(value: roost_core::OutboundMessageResult) -> Self {
+        Self {
             message_id: value.message_id.as_bytes().to_vec(),
-            timestamp_millis: value.timestamp_millis,
-            payload_kind: value.payload_kind.into(),
+            sent_at_millis: value.sent_at_millis,
+            payload_kind: PayloadKind::from_protocol(value.payload_kind),
             message: Message::from_core(value.message),
-            state_updates: updates_from_core(value.state_updates)?,
-        })
+            state_updates: updates_from_core(value.state_updates),
+        }
     }
 }
 
 impl InboundMessageOutcome {
-    pub(crate) fn from_core(value: roost_core::InboundMessageOutcome) -> Result<Self, ClientError> {
-        Ok(match value {
+    pub(crate) fn from_core(value: roost_core::InboundMessageOutcome) -> Self {
+        match value {
             roost_core::InboundMessageOutcome::Accepted(result) => {
-                let state_updates = updates_from_core(result.state_updates)?;
+                let state_updates = updates_from_core(result.state_updates);
                 Self::Accepted {
                     result: InboundMessageResult {
                         message_id: result.message_id.as_bytes().to_vec(),
-                        timestamp_millis: result.timestamp_millis,
-                        payload_kind: result.payload_kind.into(),
+                        sent_at_millis: result.sent_at_millis,
+                        payload_kind: PayloadKind::from_protocol(result.payload_kind),
                         plaintext: result.plaintext.to_vec(),
                         sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
                         evidence_bundle: result.evidence_bundle.as_bytes().to_vec(),
@@ -1397,64 +1382,64 @@ impl InboundMessageOutcome {
             roost_core::InboundMessageOutcome::Blocked(result) => Self::Blocked {
                 result: BlockedInboundMessageResult {
                     acknowledgment: result.acknowledgment.map(Message::from_core),
-                    state_updates: updates_from_core(result.state_updates)?,
+                    state_updates: updates_from_core(result.state_updates),
                 },
             },
             roost_core::InboundMessageOutcome::Duplicate => Self::Duplicate,
             roost_core::InboundMessageOutcome::SessionUnrecoverable(result) => {
                 Self::SessionUnrecoverable {
-                    result: SessionUnrecoverableResult::from_core(*result)?,
+                    result: SessionUnrecoverableResult::from_core(*result),
                 }
             }
-        })
+        }
     }
 }
 
 impl SessionUnrecoverableResult {
-    fn from_core(result: roost_core::SessionUnrecoverableResult) -> Result<Self, ClientError> {
-        Ok(Self {
+    fn from_core(result: roost_core::SessionUnrecoverableResult) -> Self {
+        Self {
             session_key: result.session_key.as_bytes().to_vec(),
             reason: SessionUnrecoverableReason::from_core(result.reason),
             event: result.event.map(SessionEvent::from_core),
-            state_updates: updates_from_core(result.state_updates)?,
-        })
+            state_updates: updates_from_core(result.state_updates),
+        }
     }
 }
 
 impl AcknowledgmentOutcome {
-    pub(crate) fn from_core(value: roost_core::AcknowledgmentOutcome) -> Result<Self, ClientError> {
-        Ok(match value {
+    pub(crate) fn from_core(value: roost_core::AcknowledgmentOutcome) -> Self {
+        match value {
             roost_core::AcknowledgmentOutcome::Cleared(result) => Self::Cleared {
                 result: AcknowledgmentResult {
                     message_id: result.message_id.as_bytes().to_vec(),
-                    timestamp_millis: result.timestamp_millis,
+                    sent_at_millis: result.sent_at_millis,
                     acknowledged_message_id: result.acknowledged_message_id.as_bytes().to_vec(),
                     sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                    state_updates: updates_from_core(result.state_updates)?,
+                    state_updates: updates_from_core(result.state_updates),
                 },
             },
             roost_core::AcknowledgmentOutcome::Missed {
                 message_id,
-                timestamp_millis,
+                sent_at_millis,
                 acknowledged_message_id,
                 sender_identity,
                 state_updates,
             } => Self::Missed {
                 result: AcknowledgmentResult {
                     message_id: message_id.as_bytes().to_vec(),
-                    timestamp_millis,
+                    sent_at_millis,
                     acknowledged_message_id: acknowledged_message_id.as_bytes().to_vec(),
                     sender_identity: SenderIdentityMaterial::from_core(sender_identity),
-                    state_updates: updates_from_core(state_updates)?,
+                    state_updates: updates_from_core(state_updates),
                 },
             },
             roost_core::AcknowledgmentOutcome::Duplicate => Self::Duplicate,
             roost_core::AcknowledgmentOutcome::SessionUnrecoverable(result) => {
                 Self::SessionUnrecoverable {
-                    result: SessionUnrecoverableResult::from_core(*result)?,
+                    result: SessionUnrecoverableResult::from_core(*result),
                 }
             }
-        })
+        }
     }
 }
 
@@ -1483,23 +1468,25 @@ impl SessionUnrecoverableReason {
 }
 
 impl ProtocolStateKind {
-    fn from_core(value: roost_core::ProtocolStateKind) -> Result<Self, ClientError> {
+    fn from_core(value: roost_core::ProtocolStateKind) -> Self {
         match value {
-            roost_core::ProtocolStateKind::RatchetSession => Ok(Self::RatchetSession),
-            roost_core::ProtocolStateKind::DeduplicationSet => Ok(Self::DeduplicationSet),
-            roost_core::ProtocolStateKind::PendingAcknowledgments => {
-                Ok(Self::PendingAcknowledgments)
-            }
-            roost_core::ProtocolStateKind::ContactState => Ok(Self::ContactState),
-            roost_core::ProtocolStateKind::PeerInboxAuthorization => {
-                Ok(Self::PeerInboxAuthorization)
-            }
-            roost_core::ProtocolStateKind::LocalInboxAuthorization => {
-                Ok(Self::LocalInboxAuthorization)
-            }
-            _ => Err(ClientError::UnsupportedVersion {
-                reason: "unknown protocol-state kind".into(),
-            }),
+            roost_core::ProtocolStateKind::RatchetSession => Self::RatchetSession,
+            roost_core::ProtocolStateKind::DeduplicationSet => Self::DeduplicationSet,
+            roost_core::ProtocolStateKind::PendingAcknowledgments => Self::PendingAcknowledgments,
+            roost_core::ProtocolStateKind::ContactState => Self::ContactState,
+            roost_core::ProtocolStateKind::PeerInboxAuthorization => Self::PeerInboxAuthorization,
+            roost_core::ProtocolStateKind::LocalInboxAuthorization => Self::LocalInboxAuthorization,
+        }
+    }
+
+    fn to_core(self) -> roost_core::ProtocolStateKind {
+        match self {
+            Self::RatchetSession => roost_core::ProtocolStateKind::RatchetSession,
+            Self::DeduplicationSet => roost_core::ProtocolStateKind::DeduplicationSet,
+            Self::PendingAcknowledgments => roost_core::ProtocolStateKind::PendingAcknowledgments,
+            Self::ContactState => roost_core::ProtocolStateKind::ContactState,
+            Self::PeerInboxAuthorization => roost_core::ProtocolStateKind::PeerInboxAuthorization,
+            Self::LocalInboxAuthorization => roost_core::ProtocolStateKind::LocalInboxAuthorization,
         }
     }
 }

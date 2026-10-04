@@ -1,12 +1,12 @@
 //! Error mapping for failures crossing the UniFFI boundary.
 
-use roost_core::CryptoError;
 use roost_core::{
-    DiscoveryKeyError, IdentityError, KeyStoreError, KeyStoreOperationError, MessageError,
-    MessageOperationError, OneTimePreKeyError, ProtocolStateError, SafetyNumberError,
+    DiscoveryKeyError, HandshakeError, IdentityError, KeyBundleError, KeyStoreError,
+    KeyStoreOperationError, MessageError, MessageOperationError, OneTimePreKeyError,
+    ProtocolStateError, RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
     SessionEstablishmentError, SignedPreKeyError, StorageError, TransportBindingError,
 };
-use roost_protocol::{EvidenceVerificationError, SenderCertificateValidationError};
+use roost_protocol::{EvidenceVerificationError, SenderCertificateValidationError, SignatureError};
 
 /// Errors surfaced across the UniFFI boundary.
 ///
@@ -70,7 +70,7 @@ pub enum ClientError {
     /// A committed or finalizing KeyStore operation must be recovered before ordinary work.
     OperationRecoveryRequired {
         /// Opaque 16-byte identifier of the operation to recover.
-        operation_identifier: Vec<u8>,
+        operation_id: Vec<u8>,
         /// Diagnostic context for logging only.
         reason: String,
     },
@@ -280,9 +280,9 @@ impl From<KeyStoreOperationError> for ClientError {
             KeyStoreOperationError::Randomness => ClientError::InternalError {
                 reason: "operation identifier generation failed".into(),
             },
-            KeyStoreOperationError::RecoveryRequired { identifier } => {
+            KeyStoreOperationError::RecoveryRequired { id } => {
                 ClientError::OperationRecoveryRequired {
-                    operation_identifier: identifier.as_bytes().to_vec(),
+                    operation_id: id.as_bytes().to_vec(),
                     reason: "recover the identified operation before continuing".into(),
                 }
             }
@@ -307,41 +307,110 @@ impl From<KeyStoreError> for ClientError {
     }
 }
 
-impl From<CryptoError> for ClientError {
-    fn from(e: CryptoError) -> Self {
+impl From<HandshakeError> for ClientError {
+    fn from(e: HandshakeError) -> Self {
         match e {
-            CryptoError::Aead
-            | CryptoError::HandshakeSignedPreKeyMismatch
-            | CryptoError::NonContributorySharedSecret
-            | CryptoError::OneTimePreKeyMismatch
-            | CryptoError::SenderIdentityMismatch
-            | CryptoError::SignatureInvalid => ClientError::AuthenticationFailed {
+            HandshakeError::KeyBundle(source) => source.into(),
+            HandshakeError::Ratchet(source) => source.into(),
+            HandshakeError::SealedFrame(source) => source.into(),
+            HandshakeError::NonContributorySharedSecret
+            | HandshakeError::OneTimePreKeyMismatch
+            | HandshakeError::SenderIdentityMismatch
+            | HandshakeError::SenderProofInvalid
+            | HandshakeError::SignedPreKeyMismatch => ClientError::AuthenticationFailed {
                 reason: e.to_string(),
             },
-            CryptoError::UnsupportedPreKeyBundleVersion(_)
-            | CryptoError::UnsupportedRatchetVersion(_) => ClientError::UnsupportedVersion {
+            HandshakeError::UnsupportedPreKeyBundleVersion(_) => ClientError::UnsupportedVersion {
                 reason: e.to_string(),
             },
-            CryptoError::HandshakeEnvelopeEncode
-            | CryptoError::SealedFrameEncode
-            | CryptoError::InvalidHmacKey
-            | CryptoError::RatchetStateEncode
-            | CryptoError::HkdfExpand => ClientError::InternalError {
+            HandshakeError::EnvelopeEncode | HandshakeError::HkdfExpand => {
+                ClientError::InternalError {
+                    reason: e.to_string(),
+                }
+            }
+            HandshakeError::EnvelopeDecode
+            | HandshakeError::MissingOneTimePreKey
+            | HandshakeError::StalePreKey => ClientError::InvalidData {
                 reason: e.to_string(),
             },
-            CryptoError::HandshakeEnvelopeDecode
-            | CryptoError::SealedFrameDecode
-            | CryptoError::InvalidKeyEncoding
-            | CryptoError::InvalidSignatureContext
-            | CryptoError::InvalidState(_)
-            | CryptoError::MaxSkipExceeded
-            | CryptoError::MaxSkippedKeysExceeded
-            | CryptoError::MissingOneTimePreKey
-            | CryptoError::RatchetStateDecode
-            | CryptoError::StalePreKey => ClientError::InvalidData {
+        }
+    }
+}
+
+impl From<KeyBundleError> for ClientError {
+    fn from(e: KeyBundleError) -> Self {
+        match e {
+            KeyBundleError::Signature(source) => source.into(),
+            KeyBundleError::InvalidKeyEncoding => ClientError::InvalidData {
                 reason: e.to_string(),
             },
-            _ => ClientError::InternalError {
+        }
+    }
+}
+
+impl From<RatchetError> for ClientError {
+    fn from(e: RatchetError) -> Self {
+        match e {
+            RatchetError::Aead | RatchetError::NonContributorySharedSecret => {
+                ClientError::AuthenticationFailed {
+                    reason: e.to_string(),
+                }
+            }
+            RatchetError::HkdfExpand | RatchetError::InvalidHmacKey => ClientError::InternalError {
+                reason: e.to_string(),
+            },
+            RatchetError::InvalidState(_)
+            | RatchetError::MaxSkipExceeded
+            | RatchetError::MaxSkippedKeysExceeded => ClientError::InvalidData {
+                reason: e.to_string(),
+            },
+        }
+    }
+}
+
+impl From<RatchetStateError> for ClientError {
+    fn from(e: RatchetStateError) -> Self {
+        match e {
+            RatchetStateError::UnsupportedVersion(_) => ClientError::UnsupportedVersion {
+                reason: e.to_string(),
+            },
+            RatchetStateError::Encode => ClientError::InternalError {
+                reason: e.to_string(),
+            },
+            RatchetStateError::Decode | RatchetStateError::MaxSkippedKeysExceeded => {
+                ClientError::InvalidData {
+                    reason: e.to_string(),
+                }
+            }
+        }
+    }
+}
+
+impl From<SealedFrameError> for ClientError {
+    fn from(e: SealedFrameError) -> Self {
+        match e {
+            SealedFrameError::Aead | SealedFrameError::NonContributorySharedSecret => {
+                ClientError::AuthenticationFailed {
+                    reason: e.to_string(),
+                }
+            }
+            SealedFrameError::Encode | SealedFrameError::HkdfExpand => ClientError::InternalError {
+                reason: e.to_string(),
+            },
+            SealedFrameError::Decode => ClientError::InvalidData {
+                reason: e.to_string(),
+            },
+        }
+    }
+}
+
+impl From<SignatureError> for ClientError {
+    fn from(e: SignatureError) -> Self {
+        match e {
+            SignatureError::SignatureInvalid => ClientError::AuthenticationFailed {
+                reason: e.to_string(),
+            },
+            SignatureError::InvalidSignatureContext => ClientError::InvalidData {
                 reason: e.to_string(),
             },
         }
@@ -400,8 +469,13 @@ impl From<ProtocolStateError> for ClientError {
             ProtocolStateError::SnapshotCapacityExceeded => ClientError::InvalidData {
                 reason: e.to_string(),
             },
-            ProtocolStateError::Crypto(source) => ClientError::from(source),
-            _ => ClientError::ProtocolStateFault {
+            ProtocolStateError::Ratchet(source) => source.into(),
+            ProtocolStateError::RatchetState(source) => source.into(),
+            ProtocolStateError::SealedFrame(source) => source.into(),
+            ProtocolStateError::Signature(source) => source.into(),
+            ProtocolStateError::BlobDecode { .. }
+            | ProtocolStateError::InvalidStateBinding { .. }
+            | ProtocolStateError::MissingRequiredState { .. } => ClientError::ProtocolStateFault {
                 reason: e.to_string(),
             },
         }
@@ -433,9 +507,6 @@ impl From<EvidenceVerificationError> for ClientError {
             EvidenceVerificationError::SignatureFailure => ClientError::AuthenticationFailed {
                 reason: e.to_string(),
             },
-            _ => ClientError::InternalError {
-                reason: e.to_string(),
-            },
         }
     }
 }
@@ -451,9 +522,10 @@ impl From<SafetyNumberError> for ClientError {
 impl From<SessionEstablishmentError> for ClientError {
     fn from(e: SessionEstablishmentError) -> Self {
         match e {
-            SessionEstablishmentError::Crypto(e) => e.into(),
             SessionEstablishmentError::Discovery(e) => e.into(),
+            SessionEstablishmentError::Handshake(e) => e.into(),
             SessionEstablishmentError::Identity(e) => e.into(),
+            SessionEstablishmentError::KeyBundle(e) => e.into(),
             SessionEstablishmentError::Message(e) => e.into(),
             SessionEstablishmentError::OneTimePreKey(e) => e.into(),
             SessionEstablishmentError::Operation(e) => e.into(),

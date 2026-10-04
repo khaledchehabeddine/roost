@@ -1,10 +1,10 @@
-use crate::{CryptoError, SharedSecret};
+use crate::{RatchetError, SharedSecret};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const RK_INFO: &[u8] = b"AetherRatchet_RK";
+const ROOT_KEY_INFO: &[u8] = b"AetherRatchet_RK";
 const MESSAGE_KEY_INPUT: &[u8] = &[0x01];
 const NEXT_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
@@ -49,51 +49,56 @@ impl MessageKey {
     }
 }
 
-// Root-chain KDF: derives the next root key and a chain key from a root key and DH output.
+// Implements `KDF_RK` from the Double Ratchet specification
+// (https://signal.org/docs/specifications/doubleratchet/): derives the next root key and a chain
+// key from a root key and DH output.
 //
-// Uses HKDF-SHA256 with the root key as salt, DH output as input keying material, and RK_INFO as
-// the info string. Produces 64 bytes of output, split into a 32-byte root key and a 32-byte chain
-// key.
-pub(crate) fn kdf_rk(
+// Uses HKDF-SHA256 with the root key as salt, DH output as input keying material, and
+// ROOT_KEY_INFO as the info string. Produces 64 bytes of output, split into a 32-byte root key and
+// a 32-byte chain key.
+pub(crate) fn derive_root_and_chain_keys(
     root_key: &RootKey,
     dh_output: &SharedSecret,
-) -> Result<(RootKey, ChainKey), CryptoError> {
+) -> Result<(RootKey, ChainKey), RatchetError> {
     let hkdf = Hkdf::<Sha256>::new(Some(&root_key.0), dh_output.as_bytes());
-    let mut okm = Zeroizing::new([0u8; 64]);
-    hkdf.expand(RK_INFO, okm.as_mut())
-        .map_err(|_| CryptoError::HkdfExpand)?;
+    let mut output_keying_material = Zeroizing::new([0u8; 64]);
+    hkdf.expand(ROOT_KEY_INFO, output_keying_material.as_mut())
+        .map_err(|_| RatchetError::HkdfExpand)?;
 
-    let mut rk = Zeroizing::new([0u8; 32]);
-    let mut ck = Zeroizing::new([0u8; 32]);
-    rk.copy_from_slice(&okm[..32]);
-    ck.copy_from_slice(&okm[32..]);
+    let mut next_root_key = Zeroizing::new([0u8; 32]);
+    let mut chain_key = Zeroizing::new([0u8; 32]);
+    next_root_key.copy_from_slice(&output_keying_material[..32]);
+    chain_key.copy_from_slice(&output_keying_material[32..]);
 
-    Ok((RootKey(*rk), ChainKey(*ck)))
+    Ok((RootKey(*next_root_key), ChainKey(*chain_key)))
 }
 
-// Symmetric-chain KDF: derives the next chain key and a message key from a chain key.
+// Implements `KDF_CK` from the Double Ratchet specification: derives the next chain key and a
+// message key from a chain key.
 //
 // Uses HMAC-SHA256 with the chain key as the HMAC key.
-pub(crate) fn kdf_ck(chain_key: &ChainKey) -> Result<(ChainKey, MessageKey), CryptoError> {
-    let mut mac_mk =
-        Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| CryptoError::InvalidHmacKey)?;
-    mac_mk.update(MESSAGE_KEY_INPUT);
-    let mut mk_result = mac_mk.finalize().into_bytes();
+pub(crate) fn derive_chain_and_message_keys(
+    chain_key: &ChainKey,
+) -> Result<(ChainKey, MessageKey), RatchetError> {
+    let mut message_key_mac =
+        Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| RatchetError::InvalidHmacKey)?;
+    message_key_mac.update(MESSAGE_KEY_INPUT);
+    let mut message_key_output = message_key_mac.finalize().into_bytes();
 
-    let mut mac_ck =
-        Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| CryptoError::InvalidHmacKey)?;
-    mac_ck.update(NEXT_CHAIN_KEY_INPUT);
-    let mut ck_result = mac_ck.finalize().into_bytes();
+    let mut chain_key_mac =
+        Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| RatchetError::InvalidHmacKey)?;
+    chain_key_mac.update(NEXT_CHAIN_KEY_INPUT);
+    let mut chain_key_output = chain_key_mac.finalize().into_bytes();
 
-    let mut mk = Zeroizing::new([0u8; 32]);
-    let mut ck = Zeroizing::new([0u8; 32]);
-    mk.copy_from_slice(&mk_result);
-    ck.copy_from_slice(&ck_result);
+    let mut message_key = Zeroizing::new([0u8; 32]);
+    let mut next_chain_key = Zeroizing::new([0u8; 32]);
+    message_key.copy_from_slice(&message_key_output);
+    next_chain_key.copy_from_slice(&chain_key_output);
 
-    mk_result.zeroize();
-    ck_result.zeroize();
+    message_key_output.zeroize();
+    chain_key_output.zeroize();
 
-    Ok((ChainKey(*ck), MessageKey(*mk)))
+    Ok((ChainKey(*next_chain_key), MessageKey(*message_key)))
 }
 
 #[cfg(test)]
@@ -101,37 +106,40 @@ mod tests {
     use super::*;
     use crate::KeyPair;
 
-    /// Expected root key output for the `kdf_rk` KAT.
-    const KDF_RK_KAT_EXPECTED_RK: [u8; 32] = [
+    /// Expected root key output for the `derive_root_and_chain_keys` KAT.
+    const ROOT_AND_CHAIN_KEYS_KAT_EXPECTED_ROOT_KEY: [u8; 32] = [
         0x77, 0x32, 0x6c, 0xfc, 0x61, 0x37, 0x21, 0x8a, 0x4c, 0xd4, 0x42, 0x0a, 0xa3, 0xa7, 0x23,
         0xc0, 0x98, 0x13, 0xb5, 0xe1, 0x42, 0x3f, 0xee, 0x01, 0xed, 0x4e, 0x2c, 0x1e, 0x18, 0xf8,
         0xfd, 0xd2,
     ];
 
-    /// Expected chain key output for the `kdf_rk` KAT.
-    const KDF_RK_KAT_EXPECTED_CK: [u8; 32] = [
+    /// Expected chain key output for the `derive_root_and_chain_keys` KAT.
+    const ROOT_AND_CHAIN_KEYS_KAT_EXPECTED_CHAIN_KEY: [u8; 32] = [
         0x36, 0xf3, 0xf2, 0x4a, 0x90, 0x50, 0x4a, 0x7c, 0x46, 0xfc, 0xfc, 0x6d, 0x69, 0xf8, 0x86,
         0x5e, 0xb1, 0xbd, 0xd3, 0xb2, 0xb9, 0xd4, 0x59, 0xf6, 0x96, 0x03, 0x35, 0x93, 0x80, 0xf4,
         0x48, 0xfa,
     ];
 
-    /// Expected chain key output for the initial `kdf_ck` KAT.
-    const KDF_CK_KAT_EXPECTED_CK_INIT: [u8; 32] = [
+    /// Expected chain key output for the initial `derive_chain_and_message_keys` KAT.
+    const CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_CHAIN_KEY_INIT: [u8; 32] = [
         0x4e, 0xe7, 0xbe, 0x0c, 0x78, 0x72, 0x36, 0x0c, 0xa6, 0x74, 0x14, 0x60, 0x80, 0x81, 0xe9,
         0xbd, 0x60, 0xfd, 0x58, 0x0a, 0x7b, 0xbd, 0x20, 0x97, 0x01, 0xd2, 0xa5, 0xa0, 0xb4, 0x31,
         0x6d, 0x0d,
     ];
 
-    /// Expected message key output for the initial `kdf_ck` KAT.
-    const KDF_CK_KAT_EXPECTED_MK_INIT: [u8; 32] = [
+    /// Expected message key output for the initial `derive_chain_and_message_keys` KAT.
+    const CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_MESSAGE_KEY_INIT: [u8; 32] = [
         0x3d, 0x7a, 0xfb, 0x66, 0x31, 0x24, 0xec, 0xbf, 0x2c, 0x95, 0x3f, 0x86, 0x3d, 0x4f, 0xc8,
         0x79, 0x6e, 0xeb, 0x2d, 0x37, 0x2b, 0x64, 0xaa, 0xd5, 0x86, 0x97, 0xec, 0x52, 0x64, 0x64,
         0x9c, 0xdb,
     ];
 
-    /// Expected chain steps for the `kdf_ck` chain-advancement KAT.
-    const KDF_CK_KAT_EXPECTED_CHAIN_STEPS: [([u8; 32], [u8; 32]); 3] = [
-        (KDF_CK_KAT_EXPECTED_CK_INIT, KDF_CK_KAT_EXPECTED_MK_INIT),
+    /// Expected chain steps for the `derive_chain_and_message_keys` chain-advancement KAT.
+    const CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_CHAIN_STEPS: [([u8; 32], [u8; 32]); 3] = [
+        (
+            CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_CHAIN_KEY_INIT,
+            CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_MESSAGE_KEY_INIT,
+        ),
         (
             [
                 0x4d, 0x86, 0x45, 0x4c, 0x5e, 0xfc, 0xc9, 0xba, 0x57, 0xd8, 0x0a, 0xea, 0xe3, 0xcb,
@@ -165,7 +173,7 @@ mod tests {
         )
     }
 
-    /// Known-answer test for [`kdf_rk`].
+    /// Known-answer test for [`derive_root_and_chain_keys`].
     ///
     /// Source: pyca/cryptography 46 `HKDF.derive` and `X25519PrivateKey.exchange`
     ///
@@ -177,22 +185,29 @@ mod tests {
     /// Derivation:
     /// ```text
     /// dh_output = X25519(alice_secret, public_key(bob_secret))
-    /// okm = HKDF-SHA256(salt = root_key, ikm = dh_output, info = RK_INFO, L = 64)
+    /// output_keying_material = HKDF-SHA256(salt = root_key, input_keying_material = dh_output, info = ROOT_KEY_INFO, L = 64)
     /// ```
     ///
     /// Output:
-    /// - `okm[0..32] = KDF_RK_KAT_EXPECTED_RK`
-    /// - `okm[32..64] = KDF_RK_KAT_EXPECTED_CK`
+    /// - `output_keying_material[0..32] = ROOT_AND_CHAIN_KEYS_KAT_EXPECTED_ROOT_KEY`
+    /// - `output_keying_material[32..64] = ROOT_AND_CHAIN_KEYS_KAT_EXPECTED_CHAIN_KEY`
     #[test]
-    fn kdf_rk_known_answer() {
+    fn derive_root_and_chain_keys_known_answer() {
         let (alice, bob) = fixed_key_pairs();
         let dh_output = alice.diffie_hellman(&bob.public);
-        let (new_rk, new_ck) = kdf_rk(&RootKey([0u8; 32]), &dh_output).unwrap();
-        assert_eq!(new_rk.as_bytes(), &KDF_RK_KAT_EXPECTED_RK);
-        assert_eq!(new_ck.as_bytes(), &KDF_RK_KAT_EXPECTED_CK);
+        let (next_root_key, next_chain_key) =
+            derive_root_and_chain_keys(&RootKey([0u8; 32]), &dh_output).unwrap();
+        assert_eq!(
+            next_root_key.as_bytes(),
+            &ROOT_AND_CHAIN_KEYS_KAT_EXPECTED_ROOT_KEY
+        );
+        assert_eq!(
+            next_chain_key.as_bytes(),
+            &ROOT_AND_CHAIN_KEYS_KAT_EXPECTED_CHAIN_KEY
+        );
     }
 
-    /// Known-answer test for [`kdf_ck`].
+    /// Known-answer test for [`derive_chain_and_message_keys`].
     ///
     /// Source: Python 3.13 standard library `hmac.digest(key, msg, "sha256")`
     ///
@@ -206,16 +221,23 @@ mod tests {
     /// ```
     ///
     /// Output:
-    /// - `message_key = KDF_CK_KAT_EXPECTED_MK_INIT`
-    /// - `next_chain_key = KDF_CK_KAT_EXPECTED_CK_INIT`
+    /// - `message_key = CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_MESSAGE_KEY_INIT`
+    /// - `next_chain_key = CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_CHAIN_KEY_INIT`
     #[test]
-    fn kdf_ck_known_answer() {
-        let (new_ck, mk) = kdf_ck(&ChainKey([0u8; 32])).unwrap();
-        assert_eq!(mk.as_bytes(), &KDF_CK_KAT_EXPECTED_MK_INIT);
-        assert_eq!(new_ck.as_bytes(), &KDF_CK_KAT_EXPECTED_CK_INIT);
+    fn derive_chain_and_message_keys_known_answer() {
+        let (next_chain_key, message_key) =
+            derive_chain_and_message_keys(&ChainKey([0u8; 32])).unwrap();
+        assert_eq!(
+            message_key.as_bytes(),
+            &CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_MESSAGE_KEY_INIT
+        );
+        assert_eq!(
+            next_chain_key.as_bytes(),
+            &CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_CHAIN_KEY_INIT
+        );
     }
 
-    /// Known-answer test for three `kdf_ck` chain-advancement steps.
+    /// Known-answer test for three `derive_chain_and_message_keys` chain-advancement steps.
     ///
     /// Source: Python 3.13 standard library `hmac.digest(key, msg, "sha256")`
     ///
@@ -229,15 +251,27 @@ mod tests {
     ///   ck_{i+1} = HMAC-SHA256(key = ck_i, data = NEXT_CHAIN_KEY_INPUT)
     /// ```
     ///
-    /// Output: `KDF_CK_KAT_EXPECTED_CHAIN_STEPS`
+    /// Output: `CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_CHAIN_STEPS`
     #[test]
-    fn kdf_ck_chain_advancement_known_answer() {
-        let mut ck = ChainKey([0u8; 32]);
-        for (i, (expected_ck, expected_mk)) in KDF_CK_KAT_EXPECTED_CHAIN_STEPS.iter().enumerate() {
-            let (next_ck, mk) = kdf_ck(&ck).unwrap();
-            assert_eq!(next_ck.as_bytes(), expected_ck, "step {i}: ck mismatch");
-            assert_eq!(mk.as_bytes(), expected_mk, "step {i}: mk mismatch");
-            ck = next_ck;
+    fn derive_chain_and_message_keys_chain_advancement_known_answer() {
+        let mut chain_key = ChainKey([0u8; 32]);
+        for (i, (expected_chain_key, expected_message_key)) in
+            CHAIN_AND_MESSAGE_KEYS_KAT_EXPECTED_CHAIN_STEPS
+                .iter()
+                .enumerate()
+        {
+            let (next_chain_key, message_key) = derive_chain_and_message_keys(&chain_key).unwrap();
+            assert_eq!(
+                next_chain_key.as_bytes(),
+                expected_chain_key,
+                "step {i}: chain key mismatch"
+            );
+            assert_eq!(
+                message_key.as_bytes(),
+                expected_message_key,
+                "step {i}: message key mismatch"
+            );
+            chain_key = next_chain_key;
         }
     }
 }

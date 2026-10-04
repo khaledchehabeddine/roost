@@ -62,12 +62,8 @@ impl SecureStorage for SharedSecureStorage {
 fn prepared_inbox_rotation_does_not_advance_authoritative_generation_before_finalize() {
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
     let identity = store.prepare_generate_identity().unwrap();
-    store
-        .commit_operation(identity.operation.identifier)
-        .unwrap();
-    store
-        .finalize_operation(identity.operation.identifier)
-        .unwrap();
+    store.commit_operation(identity.operation.id).unwrap();
+    store.finalize_operation(identity.operation.id).unwrap();
     let before = store.current_discovery_key_bundle().unwrap();
 
     let prepared = store.prepare_rotate_inbox_now().unwrap();
@@ -81,12 +77,8 @@ fn prepared_inbox_rotation_does_not_advance_authoritative_generation_before_fina
         before.epoch + 1
     );
 
-    store
-        .commit_operation(prepared.operation.identifier)
-        .unwrap();
-    store
-        .finalize_operation(prepared.operation.identifier)
-        .unwrap();
+    store.commit_operation(prepared.operation.id).unwrap();
+    store.finalize_operation(prepared.operation.id).unwrap();
     assert_eq!(
         store.current_discovery_key_bundle().unwrap().epoch,
         before.epoch + 1
@@ -98,32 +90,23 @@ fn committed_inbox_rotation_resumes_after_restart_and_failed_finalization() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
     let identity = store.prepare_generate_identity().unwrap();
-    store
-        .commit_operation(identity.operation.identifier)
-        .unwrap();
-    store
-        .finalize_operation(identity.operation.identifier)
-        .unwrap();
+    store.commit_operation(identity.operation.id).unwrap();
+    store.finalize_operation(identity.operation.id).unwrap();
     let before = store.current_discovery_key_bundle().unwrap().epoch;
     let prepared = store.prepare_rotate_inbox_now().unwrap();
-    let host_operation_identifier = prepared.operation.identifier;
-    store.commit_operation(host_operation_identifier).unwrap();
+    let host_operation_id = prepared.operation.id;
+    store.commit_operation(host_operation_id).unwrap();
 
     storage.fail_next_store();
-    assert!(store.finalize_operation(host_operation_identifier).is_err());
+    assert!(store.finalize_operation(host_operation_id).is_err());
     drop(store);
 
     let recovered = storage.key_store();
     let unfinished = recovered.unfinished_operations().unwrap();
     assert_eq!(unfinished.len(), 1);
-    assert_eq!(
-        unfinished[0].operation.identifier,
-        host_operation_identifier
-    );
+    assert_eq!(unfinished[0].operation.id, host_operation_id);
     assert_eq!(unfinished[0].status, KeyStoreOperationStatus::Committed);
-    recovered
-        .finalize_operation(host_operation_identifier)
-        .unwrap();
+    recovered.finalize_operation(host_operation_id).unwrap();
     assert_eq!(
         recovered.current_discovery_key_bundle().unwrap().epoch,
         before + 1
