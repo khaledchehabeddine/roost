@@ -575,7 +575,7 @@ mod tests {
     use rand::rngs::OsRng;
     use roost_crypto::{
         generate_signed_prekey, generate_signed_prekey_for_discovery_key,
-        generate_signing_key_pair, verify_signed_prekey_bundle,
+        generate_signing_key_pair, verify_public_signed_prekey,
     };
     use roost_protocol::from_unix_secs;
 
@@ -713,7 +713,7 @@ mod tests {
             "returned signed pre-key must match persisted bundle",
         );
         let public_discovery_key = discovery.current_public().unwrap();
-        assert!(verify_signed_prekey_bundle(&bundle, &public_discovery_key.verifying_key).is_ok());
+        assert!(verify_public_signed_prekey(&bundle, &public_discovery_key.verifying_key).is_ok());
     }
 
     #[test]

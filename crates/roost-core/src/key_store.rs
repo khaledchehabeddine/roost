@@ -27,7 +27,7 @@ use rand::rngs::OsRng;
 use roost_crypto::OneTimePreKey;
 use roost_crypto::{
     PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
-    RecipientDeliveryCapability, RecipientDeliveryVerifier, Signature, verify_signed_prekey_bundle,
+    RecipientDeliveryCapability, RecipientDeliveryVerifier, Signature, verify_public_signed_prekey,
 };
 use std::error::Error;
 use std::fmt;
@@ -332,7 +332,7 @@ impl KeyStore {
         let discovery_key = discovery_key.public();
         let signed_prekey = self.0.signed_prekey.current_public(SystemTime::now())?;
         // Reject storage rollback/desync before publishing a mismatched pair.
-        verify_signed_prekey_bundle(&signed_prekey, &discovery_key.verifying_key)
+        verify_public_signed_prekey(&signed_prekey, &discovery_key.verifying_key)
             .map_err(|_| SignedPreKeyError::Corrupt)?;
         Ok(PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
@@ -647,7 +647,7 @@ mod tests {
         ONE_TIME_PREKEY_POOL_TARGET, ONE_TIME_PREKEY_REPLENISH_THRESHOLD,
     };
     use crate::storage::{InMemorySecureStorage, StorageError};
-    use roost_crypto::{verify_discovery_key_bundle, verify_discovery_to_identity_binding};
+    use roost_crypto::{verify_discovery_to_identity_binding, verify_public_discovery_key};
     use std::collections::HashSet;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -784,7 +784,7 @@ mod tests {
 
         // IK→DK: the identity authorized this discovery key.
         assert!(
-            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
+            verify_public_discovery_key(&publication.discovery_key, identity.verifying_key())
                 .is_ok()
         );
         // DK→IK: the discovery key authorized this identity.
@@ -806,7 +806,7 @@ mod tests {
         let publication = key_store.rotate_inbox_now().unwrap().publication;
 
         assert!(
-            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
+            verify_public_discovery_key(&publication.discovery_key, identity.verifying_key())
                 .is_ok()
         );
         assert!(
@@ -864,11 +864,11 @@ mod tests {
         let publication = key_store.current_publication_bundle().unwrap();
         assert_eq!(publication.version, roost_crypto::PREKEY_BUNDLE_VERSION);
         assert!(
-            verify_discovery_key_bundle(&publication.discovery_key, identity.verifying_key())
+            verify_public_discovery_key(&publication.discovery_key, identity.verifying_key())
                 .is_ok()
         );
         assert!(
-            verify_signed_prekey_bundle(
+            verify_public_signed_prekey(
                 &publication.signed_prekey,
                 &publication.discovery_key.verifying_key
             )
@@ -1139,7 +1139,7 @@ mod tests {
             first_dk.public_key.as_bytes()
         );
         assert!(
-            verify_signed_prekey_bundle(
+            verify_public_signed_prekey(
                 &rotation.signed_prekey,
                 &rotation.discovery_key.verifying_key
             )
@@ -1241,7 +1241,7 @@ mod tests {
 
         let discovery = key_store.current_discovery_key_bundle().unwrap();
         let prekey = key_store.current_signed_prekey_bundle().unwrap();
-        assert!(verify_signed_prekey_bundle(&prekey, &discovery.verifying_key).is_ok());
+        assert!(verify_public_signed_prekey(&prekey, &discovery.verifying_key).is_ok());
     }
 
     #[test]
@@ -1260,7 +1260,7 @@ mod tests {
         for _ in 0..8 {
             let publication = publisher.current_publication_bundle().unwrap();
             assert!(
-                verify_signed_prekey_bundle(
+                verify_public_signed_prekey(
                     &publication.signed_prekey,
                     &publication.discovery_key.verifying_key
                 )
@@ -1495,11 +1495,11 @@ mod tests {
         assert_eq!(rotation.signed_prekey.id, 0);
         assert_eq!(rotated_bundle.id, 0);
         assert!(
-            verify_discovery_key_bundle(&public_discovery_key, imported_identity.verifying_key())
+            verify_public_discovery_key(&public_discovery_key, imported_identity.verifying_key())
                 .is_ok()
         );
         assert!(
-            verify_signed_prekey_bundle(&rotated_bundle, &public_discovery_key.verifying_key)
+            verify_public_signed_prekey(&rotated_bundle, &public_discovery_key.verifying_key)
                 .is_ok()
         );
     }

@@ -6,8 +6,8 @@ use crate::{
 };
 use rand::rngs::OsRng;
 use roost_crypto::{
-    HandshakeEnvelope, HandshakeError, InitialPlaintext, KeyBundleError, PreKeyBundle,
-    PublicIdentityKey, SealedFramePreKeyReference, SenderIdentityMaterial, Signature,
+    HandshakeEnvelope, HandshakeError, InitialPlaintext, PreKeyBundle, PublicIdentityKey,
+    PublicKeyError, SealedFramePreKeyReference, SenderIdentityMaterial, Signature,
     accept_with_associated_data, initiate_with_associated_data,
     initiator_identity_hint_with_associated_data, verify_discovery_to_identity_binding,
 };
@@ -84,7 +84,7 @@ pub enum SessionEstablishmentError {
     /// Loading local identity state failed.
     Identity(IdentityError),
     /// The peer's Discovery Key does not bind to its Identity Key.
-    KeyBundle(KeyBundleError),
+    PublicKey(PublicKeyError),
     /// Message conversion failed.
     Message(MessageError),
     /// Loading or consuming local one-time-prekey state failed.
@@ -103,7 +103,7 @@ impl fmt::Display for SessionEstablishmentError {
             Self::Discovery(e) => write!(f, "session establishment discovery key: {e}"),
             Self::Handshake(e) => write!(f, "session establishment handshake: {e}"),
             Self::Identity(e) => write!(f, "session establishment identity: {e}"),
-            Self::KeyBundle(e) => write!(f, "session establishment key bundle: {e}"),
+            Self::PublicKey(e) => write!(f, "session establishment public key: {e}"),
             Self::Message(e) => write!(f, "session establishment message: {e}"),
             Self::OneTimePreKey(e) => write!(f, "session establishment one-time pre-key: {e}"),
             Self::Operation(e) => write!(f, "session establishment prepared operation: {e}"),
@@ -119,7 +119,7 @@ impl Error for SessionEstablishmentError {
             Self::Discovery(e) => Some(e),
             Self::Handshake(e) => Some(e),
             Self::Identity(e) => Some(e),
-            Self::KeyBundle(e) => Some(e),
+            Self::PublicKey(e) => Some(e),
             Self::Message(e) => Some(e),
             Self::OneTimePreKey(e) => Some(e),
             Self::Operation(e) => Some(e),
@@ -135,9 +135,9 @@ impl From<HandshakeError> for SessionEstablishmentError {
     }
 }
 
-impl From<KeyBundleError> for SessionEstablishmentError {
-    fn from(e: KeyBundleError) -> Self {
-        Self::KeyBundle(e)
+impl From<PublicKeyError> for SessionEstablishmentError {
+    fn from(e: PublicKeyError) -> Self {
+        Self::PublicKey(e)
     }
 }
 

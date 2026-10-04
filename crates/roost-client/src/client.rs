@@ -1278,8 +1278,8 @@ mod tests {
         PublicIdentityKey as CryptoPublicIdentityKey, PublicKey,
         PublicSignedPreKey as CryptoPublicSignedPreKey,
         RecipientDeliveryCapability as CryptoCapability, Signature, SigningKeyPair, VerifyingKey,
-        verify_discovery_key_bundle, verify_discovery_to_identity_binding,
-        verify_identity_key_bundle, verify_signed_prekey_bundle,
+        verify_discovery_to_identity_binding, verify_public_discovery_key,
+        verify_public_identity_key, verify_public_signed_prekey,
     };
     use roost_protocol::verify_with_context;
     use std::sync::Arc;
@@ -1589,7 +1589,7 @@ mod tests {
         discovery: &FfiPublicDiscoveryKey,
     ) -> CryptoPublicDiscoveryKey {
         let crypto_discovery = public_discovery_key(discovery);
-        assert!(verify_discovery_key_bundle(&crypto_discovery, &verifying_key(identity)).is_ok());
+        assert!(verify_public_discovery_key(&crypto_discovery, &verifying_key(identity)).is_ok());
         crypto_discovery
     }
 
@@ -1598,7 +1598,7 @@ mod tests {
         discovery: &CryptoPublicDiscoveryKey,
     ) {
         let crypto_prekey = public_signed_prekey(signed_prekey);
-        assert!(verify_signed_prekey_bundle(&crypto_prekey, &discovery.verifying_key).is_ok());
+        assert!(verify_public_signed_prekey(&crypto_prekey, &discovery.verifying_key).is_ok());
     }
 
     fn assert_discovery_to_identity_verifies(
@@ -1780,7 +1780,7 @@ mod tests {
         assert_eq!(identity.ed25519_verifying_key.len(), 32);
         assert_eq!(identity.identity_binding_signature.len(), 64);
         verifying_key(&identity);
-        assert!(verify_identity_key_bundle(&public_identity_key(&identity)).is_ok());
+        assert!(verify_public_identity_key(&public_identity_key(&identity)).is_ok());
     }
 
     #[test]

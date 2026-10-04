@@ -3,7 +3,7 @@ use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
     DiscoveryKey, PublicDiscoveryKey, RecipientDeliveryCapability, Signature, SigningKeyPair,
-    generate_discovery_key, generate_recipient_delivery_capability, verify_discovery_key_bundle,
+    generate_discovery_key, generate_recipient_delivery_capability, verify_public_discovery_key,
 };
 use roost_protocol::to_unix_secs;
 use std::error::Error;
@@ -116,7 +116,7 @@ impl DiscoveryKeyManager {
     pub(crate) fn current(&self) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let discovery_key = self.load_stored()?;
         let identity = self.identity.load_identity()?;
-        verify_discovery_key_bundle(&discovery_key.public(), identity.verifying_key())
+        verify_public_discovery_key(&discovery_key.public(), identity.verifying_key())
             .map_err(|_| DiscoveryKeyError::Corrupt)?;
         Ok(discovery_key)
     }
@@ -226,7 +226,7 @@ impl DiscoveryKeyManager {
         let mut signing_secret = Zeroizing::new([0u8; 32]);
         signing_secret.copy_from_slice(&identity_key[32..]);
         let identity_signing = SigningKeyPair::from_signing_bytes(*signing_secret);
-        verify_discovery_key_bundle(&discovery_key.public(), &identity_signing.verifying)
+        verify_public_discovery_key(&discovery_key.public(), &identity_signing.verifying)
             .map_err(|_| DiscoveryKeyError::Corrupt)?;
         Ok(())
     }
@@ -438,7 +438,7 @@ mod tests {
         let bundle = discovery.current_public().unwrap();
         assert_eq!(bundle.epoch, 1);
         let loaded_identity = identity.load_identity().unwrap();
-        assert!(verify_discovery_key_bundle(&bundle, loaded_identity.verifying_key()).is_ok());
+        assert!(verify_public_discovery_key(&bundle, loaded_identity.verifying_key()).is_ok());
     }
 
     /// The discovery key and the delivery capability share one generation, so rotation must

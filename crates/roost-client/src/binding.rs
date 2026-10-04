@@ -18,7 +18,7 @@ use crate::records::{fixed_32, fixed_64};
 use roost_core::{
     PublicIdentityKey as CorePublicIdentityKey, Signature,
     verify_discovery_to_identity_binding as crypto_verify_discovery_to_identity_binding,
-    verify_identity_key_bundle,
+    verify_public_identity_key,
 };
 use roost_protocol::parse_ed25519_verifying_key_bytes;
 
@@ -49,7 +49,7 @@ pub fn verify_identity_key_binding(
         )?,
         &fixed_64(&binding_signature, "identity binding signature")?,
     )?;
-    Ok(verify_identity_key_bundle(&bundle)?)
+    Ok(verify_public_identity_key(&bundle)?)
 }
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (the DK→IK

@@ -1,9 +1,9 @@
 //! Error mapping for failures crossing the UniFFI boundary.
 
 use roost_core::{
-    DiscoveryKeyError, HandshakeError, IdentityError, KeyBundleError, KeyStoreError,
-    KeyStoreOperationError, MessageError, MessageOperationError, OneTimePreKeyError,
-    ProtocolStateError, RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
+    DiscoveryKeyError, HandshakeError, IdentityError, KeyStoreError, KeyStoreOperationError,
+    MessageError, MessageOperationError, OneTimePreKeyError, ProtocolStateError, PublicKeyError,
+    RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
     SessionEstablishmentError, SignedPreKeyError, StorageError, TransportBindingError,
 };
 use roost_protocol::{SenderCertificateValidationError, SignatureError};
@@ -310,7 +310,7 @@ impl From<KeyStoreError> for ClientError {
 impl From<HandshakeError> for ClientError {
     fn from(e: HandshakeError) -> Self {
         match e {
-            HandshakeError::KeyBundle(source) => source.into(),
+            HandshakeError::PublicKey(source) => source.into(),
             HandshakeError::Ratchet(source) => source.into(),
             HandshakeError::SealedFrame(source) => source.into(),
             HandshakeError::NonContributorySharedSecret
@@ -337,11 +337,11 @@ impl From<HandshakeError> for ClientError {
     }
 }
 
-impl From<KeyBundleError> for ClientError {
-    fn from(e: KeyBundleError) -> Self {
+impl From<PublicKeyError> for ClientError {
+    fn from(e: PublicKeyError) -> Self {
         match e {
-            KeyBundleError::Signature(source) => source.into(),
-            KeyBundleError::InvalidKeyEncoding => ClientError::InvalidData {
+            PublicKeyError::Signature(source) => source.into(),
+            PublicKeyError::InvalidKeyEncoding => ClientError::InvalidData {
                 reason: e.to_string(),
             },
         }
@@ -523,7 +523,7 @@ impl From<SessionEstablishmentError> for ClientError {
             SessionEstablishmentError::Discovery(e) => e.into(),
             SessionEstablishmentError::Handshake(e) => e.into(),
             SessionEstablishmentError::Identity(e) => e.into(),
-            SessionEstablishmentError::KeyBundle(e) => e.into(),
+            SessionEstablishmentError::PublicKey(e) => e.into(),
             SessionEstablishmentError::Message(e) => e.into(),
             SessionEstablishmentError::OneTimePreKey(e) => e.into(),
             SessionEstablishmentError::Operation(e) => e.into(),

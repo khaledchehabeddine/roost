@@ -1,10 +1,10 @@
 //! Implements the X3DH handshake that bootstraps Double Ratchet sessions.
 
-use crate::discovery_key::{DiscoveryKey, PublicDiscoveryKey, verify_discovery_key_bundle};
+use crate::discovery_key::{DiscoveryKey, PublicDiscoveryKey, verify_public_discovery_key};
 use crate::double_ratchet::{Header, RatchetError, RatchetState};
 use crate::keys::{
-    KeyBundleError, KeyPair, PublicIdentityKey, PublicKey, SharedSecret, generate_key_pair,
-    is_valid_x25519_public_key, verify_identity_key_bundle,
+    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, generate_key_pair,
+    is_valid_x25519_public_key, verify_public_identity_key,
 };
 use crate::one_time_prekey::{OneTimePreKey, PublicOneTimePreKey};
 use crate::ratchet::RootKey;
@@ -15,7 +15,7 @@ use crate::sealed_frame::{
     open_frame_for_discovery_key_with_associated_data,
     seal_frame_with_ephemeral_key_and_associated_data,
 };
-use crate::signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_signed_prekey_bundle};
+use crate::signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_public_signed_prekey};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -264,18 +264,18 @@ pub fn initiate_with_associated_data<R: RngCore + CryptoRng>(
     message: InitialPlaintext<'_>,
     additional_associated_data: &[u8],
 ) -> Result<(RatchetState, HandshakeEnvelope), HandshakeError> {
-    verify_identity_key_bundle(initiator_identity_key)?;
-    verify_identity_key_bundle(responder_identity_key)?;
+    verify_public_identity_key(initiator_identity_key)?;
+    verify_public_identity_key(responder_identity_key)?;
     if responder_prekey_bundle.version != PREKEY_BUNDLE_VERSION {
         return Err(HandshakeError::UnsupportedPreKeyBundleVersion(
             responder_prekey_bundle.version,
         ));
     }
-    verify_discovery_key_bundle(
+    verify_public_discovery_key(
         &responder_prekey_bundle.discovery_key,
         &responder_identity_key.verifying_key,
     )?;
-    verify_signed_prekey_bundle(
+    verify_public_signed_prekey(
         &responder_prekey_bundle.signed_prekey,
         &responder_prekey_bundle.discovery_key.verifying_key,
     )?;
@@ -406,7 +406,7 @@ pub fn initiator_identity_hint_with_associated_data(
         additional_associated_data,
     )?;
     let decoded = decode_handshake_frame_plaintext(&frame_plaintext)?;
-    verify_identity_key_bundle(&decoded.sender_identity_hint)?;
+    verify_public_identity_key(&decoded.sender_identity_hint)?;
     Ok(decoded.sender_identity_hint)
 }
 
@@ -465,7 +465,7 @@ pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
     responder_one_time_prekey: Option<OneTimePreKey>,
     additional_associated_data: &[u8],
 ) -> Result<(RatchetState, AcceptedInitialMessage), HandshakeError> {
-    verify_identity_key_bundle(responder_identity_key)?;
+    verify_public_identity_key(responder_identity_key)?;
     let prekey_reference = envelope_prekey_reference(envelope)?;
     if prekey_reference.discovery_epoch != responder_discovery_key.epoch()
         || responder_signed_prekey.epoch() != responder_discovery_key.epoch()
@@ -511,7 +511,7 @@ pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
     // is compared against it after decryption.
     let initiator_identity_key =
         expected_initiator_identity_key.unwrap_or(&frame_plaintext.sender_identity_hint);
-    verify_identity_key_bundle(initiator_identity_key)?;
+    verify_public_identity_key(initiator_identity_key)?;
 
     let root_key = derive_root_key_responder(
         &initiator_ephemeral_public_key,
@@ -564,7 +564,7 @@ pub enum HandshakeError {
     /// HKDF-SHA256 rejected the requested output length.
     HkdfExpand,
     /// An Identity Key, Discovery Key, or public signed pre-key failed validation.
-    KeyBundle(KeyBundleError),
+    PublicKey(PublicKeyError),
     /// Handshake envelope names a one-time pre-key that was not supplied.
     MissingOneTimePreKey,
     /// An X25519 exchange produced a non-contributory shared secret.
@@ -593,7 +593,7 @@ impl fmt::Display for HandshakeError {
             Self::EnvelopeDecode => write!(f, "handshake envelope bytes failed to decode"),
             Self::EnvelopeEncode => write!(f, "handshake envelope failed to encode"),
             Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
-            Self::KeyBundle(e) => write!(f, "handshake key bundle validation failed: {e}"),
+            Self::PublicKey(e) => write!(f, "handshake public key validation failed: {e}"),
             Self::MissingOneTimePreKey => write!(f, "handshake one-time pre-key is missing"),
             Self::NonContributorySharedSecret => {
                 write!(f, "x25519 shared secret was non-contributory")
@@ -624,7 +624,7 @@ impl fmt::Display for HandshakeError {
 impl Error for HandshakeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::KeyBundle(e) => Some(e),
+            Self::PublicKey(e) => Some(e),
             Self::Ratchet(e) => Some(e),
             Self::SealedFrame(e) => Some(e),
             Self::EnvelopeDecode
@@ -642,9 +642,9 @@ impl Error for HandshakeError {
     }
 }
 
-impl From<KeyBundleError> for HandshakeError {
-    fn from(error: KeyBundleError) -> Self {
-        Self::KeyBundle(error)
+impl From<PublicKeyError> for HandshakeError {
+    fn from(error: PublicKeyError) -> Self {
+        Self::PublicKey(error)
     }
 }
 
@@ -752,7 +752,7 @@ fn decode_handshake_frame_plaintext(
         return Err(HandshakeError::EnvelopeDecode);
     }
     // `from_bytes` rejects non-canonical encodings; the binding signature over
-    // the two halves is checked by the caller through `verify_identity_key_bundle`,
+    // the two halves is checked by the caller through `verify_public_identity_key`,
     // on whichever bundle it settles on.
     let sender_identity_hint = PublicIdentityKey::from_bytes(
         &wire.sender_identity_key,
@@ -1142,7 +1142,7 @@ fn validate_sender_identity(
         &sender_identity.identity_binding_signature,
     )
     .map_err(|_| HandshakeError::EnvelopeDecode)?;
-    verify_identity_key_bundle(&bundle).map_err(|_| HandshakeError::EnvelopeDecode)?;
+    verify_public_identity_key(&bundle).map_err(|_| HandshakeError::EnvelopeDecode)?;
     if !is_valid_x25519_public_key(&sender_identity.identity_key) {
         return Err(HandshakeError::EnvelopeDecode);
     }
@@ -1849,7 +1849,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(HandshakeError::KeyBundle(KeyBundleError::Signature(
+            Err(HandshakeError::PublicKey(PublicKeyError::Signature(
                 SignatureError::SignatureInvalid
             )))
         ));

@@ -18,7 +18,7 @@ use roost_crypto::{
     DiscoveryKey, Header, PublicDiscoveryKey, PublicIdentityKey, PublicKey, RatchetState,
     RecipientDeliveryCapability, SenderIdentityMaterial, Signature, SigningKeyPair,
     open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
-    verify_discovery_key_bundle, verify_identity_key_bundle,
+    verify_public_discovery_key, verify_public_identity_key,
 };
 use roost_protocol::{
     DomainSigningKey, RevocationState, SenderCertificateValidationError,
@@ -1322,7 +1322,7 @@ impl ProtocolStateEngine {
                 .ok_or_else(|| ProtocolStateError::InvalidMessage {
                     reason: "recipient identity verifying key is not canonical".into(),
                 })?;
-        verify_discovery_key_bundle(
+        verify_public_discovery_key(
             &inbound.recipient_discovery_key.public(),
             &recipient_identity_verifying_key,
         )
@@ -1575,7 +1575,7 @@ impl ProtocolStateEngine {
                 .ok_or_else(|| ProtocolStateError::InvalidMessage {
                     reason: "recipient identity verifying key is not canonical".into(),
                 })?;
-        verify_discovery_key_bundle(
+        verify_public_discovery_key(
             &inbound.recipient_discovery_key.public(),
             &recipient_identity_verifying_key,
         )
@@ -3267,7 +3267,7 @@ fn validate_contact_identity_for_decode(
                 address: address.clone(),
                 reason: "contact identity key is invalid".into(),
             })?;
-    verify_discovery_key_bundle(&bundle, &identity_verifying_key).map_err(|_| {
+    verify_public_discovery_key(&bundle, &identity_verifying_key).map_err(|_| {
         ProtocolStateError::BlobDecode {
             address: address.clone(),
             reason: "contact discovery key signature failed".into(),
@@ -3337,7 +3337,7 @@ fn validate_contact_identity(
                 address: address.clone(),
                 reason: "contact identity key is invalid".into(),
             })?;
-    verify_discovery_key_bundle(&bundle, &identity_verifying_key).map_err(|_| {
+    verify_public_discovery_key(&bundle, &identity_verifying_key).map_err(|_| {
         ProtocolStateError::InvalidStateBinding {
             address: address.clone(),
             reason: "contact discovery key signature failed".into(),
@@ -3975,7 +3975,7 @@ fn validate_sender_identity(
     .map_err(|_| ProtocolStateError::InvalidMessage {
         reason: "sender public identity key encoding is invalid".into(),
     })?;
-    verify_identity_key_bundle(&bundle).map_err(|_| ProtocolStateError::InvalidMessage {
+    verify_public_identity_key(&bundle).map_err(|_| ProtocolStateError::InvalidMessage {
         reason: "sender identity key binding signature failed".into(),
     })?;
     if sender_identity.certificate.len() > limits.max_sender_certificate_len {

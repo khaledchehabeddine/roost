@@ -1,6 +1,6 @@
 //! Provides one-time X25519 pre-keys for X3DH.
 
-use crate::keys::KeyBundleError;
+use crate::keys::PublicKeyError;
 use crate::keys::is_valid_x25519_public_key;
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
@@ -98,12 +98,12 @@ impl PublicOneTimePreKey {
         public_key: &[u8],
         epoch: u32,
         created_at_secs: u64,
-    ) -> Result<Self, KeyBundleError> {
+    ) -> Result<Self, PublicKeyError> {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
-            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
         if !is_valid_x25519_public_key(&public_key_bytes) {
-            return Err(KeyBundleError::InvalidKeyEncoding);
+            return Err(PublicKeyError::InvalidKeyEncoding);
         }
         Ok(Self {
             id,
@@ -177,7 +177,7 @@ mod tests {
     fn public_from_bytes_rejects_wrong_public_key_length() {
         assert!(matches!(
             PublicOneTimePreKey::from_bytes(9, &[0u8; 31], 3, 1_700_000_000),
-            Err(KeyBundleError::InvalidKeyEncoding)
+            Err(PublicKeyError::InvalidKeyEncoding)
         ));
     }
 

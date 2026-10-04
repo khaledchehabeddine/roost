@@ -74,8 +74,8 @@ pub use delivery_capability::{
 };
 pub use discovery_key::{
     DiscoveryKey, PublicDiscoveryKey, generate_discovery_key,
-    generate_signed_prekey_for_discovery_key, verify_discovery_key_bundle,
-    verify_discovery_to_identity_binding,
+    generate_signed_prekey_for_discovery_key, verify_discovery_to_identity_binding,
+    verify_public_discovery_key,
 };
 pub use double_ratchet::{Header, RatchetError, RatchetState, RatchetStateError};
 pub use handshake::{
@@ -86,9 +86,9 @@ pub use handshake::{
     initiator_identity_hint, initiator_identity_hint_with_associated_data,
 };
 pub use keys::{
-    KeyBundleError, KeyPair, PublicIdentityKey, PublicKey, SharedSecret, Signature, SigningKeyPair,
+    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, Signature, SigningKeyPair,
     VerifyingKey, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
-    verify_identity_key_bundle,
+    verify_public_identity_key,
 };
 pub use one_time_prekey::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 pub use sealed_frame::{
@@ -97,5 +97,5 @@ pub use sealed_frame::{
     seal_frame_with_associated_data,
 };
 pub use signed_prekey::{
-    PublicSignedPreKey, SignedPreKey, generate_signed_prekey, verify_signed_prekey_bundle,
+    PublicSignedPreKey, SignedPreKey, generate_signed_prekey, verify_public_signed_prekey,
 };

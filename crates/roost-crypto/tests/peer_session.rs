@@ -6,8 +6,8 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    DiscoveryKey, HandshakeEnvelope, HandshakeError, Header, InitialPlaintext, KeyBundleError,
-    OneTimePreKey, PreKeyBundle, PublicIdentityKey, RatchetError, RatchetState, Signature,
+    DiscoveryKey, HandshakeEnvelope, HandshakeError, Header, InitialPlaintext, OneTimePreKey,
+    PreKeyBundle, PublicIdentityKey, PublicKeyError, RatchetError, RatchetState, Signature,
     SignedPreKey, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
     generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
     initial_associated_data, initiate, sign_identity_key_binding,
@@ -272,7 +272,7 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
     );
     assert!(matches!(
         result,
-        Err(HandshakeError::KeyBundle(KeyBundleError::Signature(
+        Err(HandshakeError::PublicKey(PublicKeyError::Signature(
             SignatureError::SignatureInvalid
         )))
     ));

@@ -77,8 +77,8 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
 mod tests {
     use super::*;
     use crate::{
-        KeyBundleError, KeyPair, PublicIdentityKey, sign_identity_key_binding,
-        verify_identity_key_bundle,
+        KeyPair, PublicIdentityKey, PublicKeyError, sign_identity_key_binding,
+        verify_public_identity_key,
     };
     use ed25519_dalek::Verifier;
     use rand::SeedableRng;
@@ -268,8 +268,8 @@ mod tests {
         };
 
         assert!(matches!(
-            verify_identity_key_bundle(&tampered),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_identity_key(&tampered),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -288,8 +288,8 @@ mod tests {
         };
 
         assert!(matches!(
-            verify_identity_key_bundle(&tampered),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_identity_key(&tampered),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 }

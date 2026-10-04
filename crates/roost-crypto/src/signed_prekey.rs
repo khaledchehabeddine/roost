@@ -1,7 +1,7 @@
 //! Provides signed X25519 pre-keys for the X3DH handshake.
 
 use crate::keys::{
-    KeyBundleError, SigningKeyPair, is_valid_x25519_public_key, verify_with_context,
+    PublicKeyError, SigningKeyPair, is_valid_x25519_public_key, verify_with_context,
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
@@ -106,7 +106,7 @@ impl SignedPreKey {
 /// Public signed pre-key material distributed to peers.
 ///
 /// The signer's verifying key is not embedded. Pass the verifying key to
-/// [`verify_signed_prekey_bundle`].
+/// [`verify_public_signed_prekey`].
 #[derive(Clone, Debug)]
 pub struct PublicSignedPreKey {
     /// X25519 public key used by the peer during handshake root-key derivation.
@@ -129,7 +129,7 @@ pub struct PublicSignedPreKey {
 impl PublicSignedPreKey {
     /// Builds a public signed pre-key from received wire bytes.
     ///
-    /// This validates byte lengths only. Call [`verify_signed_prekey_bundle`] with the discovery
+    /// This validates byte lengths only. Call [`verify_public_signed_prekey`] with the discovery
     /// verifying key to authenticate the public key, epoch, and creation time. The identifier is
     /// authenticated separately only when the host includes it in the initial Transport Binding.
     pub fn from_bytes(
@@ -138,16 +138,16 @@ impl PublicSignedPreKey {
         id: u64,
         epoch: u32,
         created_at_secs: u64,
-    ) -> Result<Self, KeyBundleError> {
+    ) -> Result<Self, PublicKeyError> {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
-            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
         if !is_valid_x25519_public_key(&public_key_bytes) {
-            return Err(KeyBundleError::InvalidKeyEncoding);
+            return Err(PublicKeyError::InvalidKeyEncoding);
         }
         let signature_bytes: [u8; 64] = signature
             .try_into()
-            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
         Ok(Self {
             public_key: PublicKey::from(public_key_bytes),
             signature: Signature::from_bytes(&signature_bytes),
@@ -188,10 +188,10 @@ pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
 }
 
 /// Verifies a public signed pre-key against the verifying key that signed it.
-pub fn verify_signed_prekey_bundle(
+pub fn verify_public_signed_prekey(
     bundle: &PublicSignedPreKey,
     signer_verifying_key: &VerifyingKey,
-) -> Result<(), KeyBundleError> {
+) -> Result<(), PublicKeyError> {
     let payload = signed_prekey_payload(&bundle.public_key, bundle.epoch, bundle.created_at_secs);
     verify_with_context(
         signer_verifying_key,
@@ -243,7 +243,7 @@ mod tests {
         signed.extend_from_slice(&FIXED_EPOCH.to_be_bytes());
         signed.extend_from_slice(&FIXED_CREATED_AT_SECS.to_be_bytes());
         assert_eq!(bundle.signature, signing_key.sign(&signed));
-        assert!(verify_signed_prekey_bundle(&bundle, &signing_key.verifying).is_ok());
+        assert!(verify_public_signed_prekey(&bundle, &signing_key.verifying).is_ok());
     }
 
     #[test]
@@ -287,8 +287,8 @@ mod tests {
         public_key_bytes[0] ^= 0x01;
         bundle.public_key = PublicKey::from(public_key_bytes);
         assert!(matches!(
-            verify_signed_prekey_bundle(&bundle, &signing_key.verifying),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_signed_prekey(&bundle, &signing_key.verifying),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -314,8 +314,8 @@ mod tests {
             created_at_secs: bundle.created_at_secs,
         };
         assert!(matches!(
-            verify_signed_prekey_bundle(&tampered, &signing_key.verifying),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_signed_prekey(&tampered, &signing_key.verifying),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -333,8 +333,8 @@ mod tests {
         );
         let bundle = signed_prekey.public();
         assert!(matches!(
-            verify_signed_prekey_bundle(&bundle, &wrong_signing_key.verifying),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_signed_prekey(&bundle, &wrong_signing_key.verifying),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -358,8 +358,8 @@ mod tests {
             created_at_secs: bundle.created_at_secs,
         };
         assert!(matches!(
-            verify_signed_prekey_bundle(&tampered, &signing_key.verifying),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_signed_prekey(&tampered, &signing_key.verifying),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -383,8 +383,8 @@ mod tests {
             created_at_secs: bundle.created_at_secs + 1,
         };
         assert!(matches!(
-            verify_signed_prekey_bundle(&tampered, &signing_key.verifying),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_signed_prekey(&tampered, &signing_key.verifying),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -402,8 +402,8 @@ mod tests {
             created_at_secs: FIXED_CREATED_AT_SECS,
         };
         assert!(matches!(
-            verify_signed_prekey_bundle(&bundle, &signing_key.verifying),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_signed_prekey(&bundle, &signing_key.verifying),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -446,7 +446,7 @@ mod tests {
                 FIXED_EPOCH,
                 FIXED_CREATED_AT_SECS,
             ),
-            Err(KeyBundleError::InvalidKeyEncoding)
+            Err(PublicKeyError::InvalidKeyEncoding)
         ));
         assert!(matches!(
             PublicSignedPreKey::from_bytes(
@@ -456,7 +456,7 @@ mod tests {
                 FIXED_EPOCH,
                 FIXED_CREATED_AT_SECS,
             ),
-            Err(KeyBundleError::InvalidKeyEncoding)
+            Err(PublicKeyError::InvalidKeyEncoding)
         ));
     }
 
