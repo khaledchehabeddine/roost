@@ -48,6 +48,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Check dependency advisories, licenses, and sources before signing
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses sources
       - name: Download the checked bytes and verify provenance and pins
         run: python3 scripts/release/mobile.py collect target/mobile-candidate
         env:

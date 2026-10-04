@@ -1,0 +1,13 @@
+[advisories]
+yanked = "deny"
+# Add an entry only with a comment naming the advisory and why it does not apply to Roost.
+ignore = []
+
+[licenses]
+# Roost is proprietary. MPL-2.0 is file-level copyleft and comes only from UniFFI.
+allow = ["Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "MIT", "MPL-2.0", "Unicode-3.0"]
+private = { ignore = true }
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,24 @@
+name: Security
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  pull_request:
+    paths: ["**/Cargo.toml", "Cargo.lock", "deny.toml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses sources

@@ -20,10 +20,17 @@ lost-write recovery, binary Transport Binding conversion and canonical evidence 
 also verifies signatures with CryptoKit.
 Rust owns protocol behavior; native suites keep small local inputs for package checks.
 
-The maintainer will enable Dependabot alerts and security updates after this cleanup. Until then,
-there is no automated dependency advisory monitoring. Dependency additions and updates still need
-review of licensing, sources, maintenance and new transitive duplicates. First-party unsafe code
-is denied by workspace Rust lints.
+The Security workflow runs `cargo deny` weekly, on pull requests that change `Cargo.toml`,
+`Cargo.lock` or `deny.toml`, and on demand. `prepare-mobile.yml` runs it again before signing. Run it
+locally after changing dependencies:
+
+```bash
+cargo deny check advisories licenses sources
+```
+
+The maintainer will enable Dependabot alerts and security updates after this cleanup. Dependency
+additions and updates still need review of maintenance and new transitive duplicates. First-party
+unsafe code is denied by workspace Rust lints.
 
 Reproducibility is an on-demand check for toolchain or build-system changes. Final artifact signing
 and checksums remain, but there is no custom gate-evidence packet, SBOM pipeline, duplicate mobile
