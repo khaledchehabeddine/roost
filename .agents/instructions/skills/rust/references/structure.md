@@ -1,6 +1,6 @@
 # Structure
 
-The SDK does many separate things, such as handshake and backups, so grouping code by kind scatters them.
+Roost does many separate things, such as handshake and backups, so grouping code by kind scatters them.
 
 ## Modules and Files
 

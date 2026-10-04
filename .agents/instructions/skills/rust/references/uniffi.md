@@ -1,6 +1,6 @@
 # UniFFI
 
-The app calls the SDK only through generated Swift and Kotlin code, so `roost-client`'s exports are the API.
+The app calls Roost only through generated Swift and Kotlin code, so `roost-client`'s exports are the API.
 
 ## Boundary
 

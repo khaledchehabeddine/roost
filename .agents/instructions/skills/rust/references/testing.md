@@ -1,6 +1,11 @@
 # Testing
 
-Broken SDK code can still round-trip data and reject bad input, so a round trip or an error alone doesn't prove it works.
+Broken code can still round-trip data and reject bad input, so a round trip or an error alone doesn't prove it works.
+
+## What to Test
+
+- Add a test only when an important app flow, a costly failure, or a likely regression would otherwise go unprotected. A change may need none.
+- Test behavior with representative cases, not implementation details or what another test already covers.
 
 ## Names
 
@@ -11,4 +16,4 @@ Broken SDK code can still round-trip data and reject bad input, so a round trip 
 - In tests, use `unwrap` on a call that should succeed, not `?`, since a panic reports its line.
 - Assert the exact error, such as `matches!(result, Err(ExampleError::UnknownVersion))`, not `result.is_err()`.
 - When a failure must leave state unchanged, assert that it did, such as by comparing a value read before and after the call.
-- For each key derivation, signature, and hash the SDK defines, test that changing any one input changes its output.
+- For each key derivation, signature, and hash Roost defines, test that changing any one input changes its output.
