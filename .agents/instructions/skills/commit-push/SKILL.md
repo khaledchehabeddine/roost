@@ -1,4 +1,4 @@
-# Commit and Push
+# Commit Push
 
 Follow [CONTRIBUTING.md](../../../../CONTRIBUTING.md) for Git conventions.
 
