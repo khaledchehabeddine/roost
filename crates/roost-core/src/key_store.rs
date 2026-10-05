@@ -6,9 +6,9 @@ pub use messaging::{
     AcknowledgmentProcessing, MessageDecryption, MessageEncryption, MessageOperationError,
 };
 pub use operation::{
-    KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId, KeyStoreOperationStatus,
-    PreparedKeyStoreOperation, SecureStorageExpectedValue, SecureStoragePrecondition,
-    UnfinishedKeyStoreOperation,
+    JournalCorruption, KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId,
+    KeyStoreOperationStatus, PreparedKeyStoreOperation, SecureStorageExpectedValue,
+    SecureStoragePrecondition, UnfinishedKeyStoreOperation,
 };
 pub use session::{
     SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
@@ -29,88 +29,30 @@ use roost_crypto::{
     PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
     RecipientDeliveryCapability, RecipientDeliveryVerifier, Signature, verify_public_signed_prekey,
 };
-use std::error::Error;
-use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 /// Errors returned by [`KeyStore`] operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum KeyStoreError {
     /// A discovery-key operation failed.
-    Discovery(DiscoveryKeyError),
+    #[error(transparent)]
+    Discovery(#[from] DiscoveryKeyError),
     /// An identity-layer operation failed.
-    Identity(IdentityError),
+    #[error(transparent)]
+    Identity(#[from] IdentityError),
     /// A one-time-pre-key operation failed.
-    OneTimePreKey(OneTimePreKeyError),
+    #[error(transparent)]
+    OneTimePreKey(#[from] OneTimePreKeyError),
     /// A prepared-operation lifecycle step failed.
-    Operation(KeyStoreOperationError),
+    #[error(transparent)]
+    Operation(#[from] KeyStoreOperationError),
     /// A protocol-state operation failed.
-    ProtocolState(crate::protocol_state::ProtocolStateError),
+    #[error(transparent)]
+    ProtocolState(#[from] crate::protocol_state::ProtocolStateError),
     /// A signed-pre-key operation failed.
-    SignedPreKey(SignedPreKeyError),
-}
-
-impl fmt::Display for KeyStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            KeyStoreError::Discovery(e) => write!(f, "discovery key: {e}"),
-            KeyStoreError::Identity(e) => write!(f, "identity: {e}"),
-            KeyStoreError::OneTimePreKey(e) => write!(f, "one-time pre-key: {e}"),
-            KeyStoreError::Operation(e) => write!(f, "prepared operation: {e}"),
-            KeyStoreError::ProtocolState(e) => write!(f, "protocol state: {e}"),
-            KeyStoreError::SignedPreKey(e) => write!(f, "signed pre-key: {e}"),
-        }
-    }
-}
-
-impl Error for KeyStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            KeyStoreError::Discovery(e) => Some(e),
-            KeyStoreError::Identity(e) => Some(e),
-            KeyStoreError::OneTimePreKey(e) => Some(e),
-            KeyStoreError::Operation(e) => Some(e),
-            KeyStoreError::ProtocolState(e) => Some(e),
-            KeyStoreError::SignedPreKey(e) => Some(e),
-        }
-    }
-}
-
-impl From<DiscoveryKeyError> for KeyStoreError {
-    fn from(e: DiscoveryKeyError) -> Self {
-        KeyStoreError::Discovery(e)
-    }
-}
-
-impl From<IdentityError> for KeyStoreError {
-    fn from(e: IdentityError) -> Self {
-        KeyStoreError::Identity(e)
-    }
-}
-
-impl From<crate::protocol_state::ProtocolStateError> for KeyStoreError {
-    fn from(e: crate::protocol_state::ProtocolStateError) -> Self {
-        KeyStoreError::ProtocolState(e)
-    }
-}
-
-impl From<OneTimePreKeyError> for KeyStoreError {
-    fn from(e: OneTimePreKeyError) -> Self {
-        KeyStoreError::OneTimePreKey(e)
-    }
-}
-
-impl From<KeyStoreOperationError> for KeyStoreError {
-    fn from(e: KeyStoreOperationError) -> Self {
-        KeyStoreError::Operation(e)
-    }
-}
-
-impl From<SignedPreKeyError> for KeyStoreError {
-    fn from(e: SignedPreKeyError) -> Self {
-        KeyStoreError::SignedPreKey(e)
-    }
+    #[error(transparent)]
+    SignedPreKey(#[from] SignedPreKeyError),
 }
 
 /// A key publication that verifies as identity -> discovery key -> signed pre-key.
@@ -270,12 +212,7 @@ impl KeyStore {
                 DiscoveryKeyStatus::Present { .. } => {
                     return Err(IdentityError::AlreadyExists.into());
                 }
-                DiscoveryKeyStatus::Malformed => {
-                    return Err(DiscoveryKeyError::InvalidData(
-                        "stored discovery key is malformed, must reset before regenerating".into(),
-                    )
-                    .into());
-                }
+                DiscoveryKeyStatus::Malformed => return Err(DiscoveryKeyError::Malformed.into()),
             },
             Err(e) => return Err(e.into()),
         };
@@ -761,7 +698,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             key_store.generate_identity(),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::InvalidData(_)))
+            Err(KeyStoreError::Discovery(DiscoveryKeyError::Malformed))
         ));
     }
 
@@ -921,8 +858,12 @@ mod tests {
 
         assert!(matches!(
             key_store.generate_one_time_prekeys(1),
-            Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::InvalidData(reason)))
-                if reason.contains("capacity")
+            Err(KeyStoreError::OneTimePreKey(
+                OneTimePreKeyError::BatchExceedsCapacity {
+                    requested: 1,
+                    available: 0
+                }
+            ))
         ));
     }
 
@@ -1228,8 +1169,9 @@ mod tests {
             for _ in 0..8 {
                 match rotate_prekey.rotate_signed_prekey_now() {
                     Ok(_) => rotations += 1,
-                    Err(KeyStoreError::SignedPreKey(SignedPreKeyError::InvalidData(reason)))
-                        if reason.contains("capacity") => {}
+                    Err(KeyStoreError::SignedPreKey(
+                        SignedPreKeyError::RetainedCapacityReached { .. },
+                    )) => {}
                     Err(error) => panic!("unexpected signed pre-key rotation failure: {error}"),
                 }
             }
@@ -1336,6 +1278,28 @@ mod tests {
             current_identity.verifying_key().as_bytes()
         );
         assert!(destination_store.current_public_signed_prekey().is_ok());
+    }
+
+    #[test]
+    fn prepare_backup_import_rejects_unknown_backup_version() {
+        let source_store = store();
+        source_store.generate_identity().unwrap();
+        let mut backup = source_store.export_encrypted_backup("passphrase").unwrap();
+        backup[0] = 0xFF;
+        let destination_store = store();
+
+        let result = destination_store.prepare_backup_import(&backup, "passphrase");
+
+        assert!(matches!(
+            result,
+            Err(KeyStoreError::Identity(
+                IdentityError::UnsupportedBackupVersion(0xFF)
+            ))
+        ));
+        assert!(matches!(
+            destination_store.load_identity(),
+            Err(KeyStoreError::Identity(IdentityError::NotFound))
+        ));
     }
 
     #[test]
@@ -1612,7 +1576,9 @@ mod tests {
 
         assert!(matches!(
             destination_store.import_encrypted_backup(&malformed_backup, "pass"),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::InvalidData(_)))
+            Err(KeyStoreError::Discovery(
+                DiscoveryKeyError::InvalidBlobLength { actual: 50, .. }
+            ))
         ));
 
         let current_identity = destination_store.load_identity().unwrap();

@@ -20,8 +20,6 @@ use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::error::Error;
-use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -555,109 +553,50 @@ pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
 }
 
 /// An error returned while starting, reading, or accepting an X3DH handshake.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
     /// Handshake envelope or sealed first-message bytes are malformed, unsupported, or oversized.
+    #[error("handshake envelope bytes failed to decode")]
     EnvelopeDecode,
     /// Handshake envelope or sealed first message exceeds local caps or fails to encode.
+    #[error("handshake envelope failed to encode")]
     EnvelopeEncode,
     /// HKDF-SHA256 rejected the requested output length.
+    #[error("hkdf-sha256 expand exceeded output limit")]
     HkdfExpand,
     /// An Identity Key, Discovery Key, or public signed pre-key failed validation.
-    PublicKey(PublicKeyError),
+    #[error("handshake public key validation failed")]
+    PublicKey(#[from] PublicKeyError),
     /// Handshake envelope names a one-time pre-key that was not supplied.
+    #[error("handshake one-time pre-key is missing")]
     MissingOneTimePreKey,
     /// An X25519 exchange produced a non-contributory shared secret.
+    #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
     /// Handshake envelope one-time pre-key reference does not match the local one.
+    #[error("handshake envelope one-time pre-key reference does not match local one-time pre-key")]
     OneTimePreKeyMismatch,
     /// Seeding the ratchet or encrypting or decrypting the first message failed.
-    Ratchet(RatchetError),
+    #[error("handshake ratchet operation failed")]
+    Ratchet(#[from] RatchetError),
     /// Sealing or opening the outer sealed-sender frame failed.
-    SealedFrame(SealedFrameError),
+    #[error("handshake sealed frame failed")]
+    SealedFrame(#[from] SealedFrameError),
     /// Sealed sender identity does not match the identity bound into the X3DH root key.
+    #[error("sealed sender identity does not match the x3dh root-bound identity key")]
     SenderIdentityMismatch,
     /// Sealed sender key-possession proof does not validate.
+    #[error("sealed sender proof verification failed")]
     SenderProofInvalid,
     /// Handshake envelope targets a different signed pre-key than the local one.
+    #[error("handshake envelope signed pre-key reference does not match local signed pre-key")]
     SignedPreKeyMismatch,
     /// Pre-key material belongs to a superseded discovery-key epoch.
+    #[error("pre-key belongs to a superseded discovery-key epoch")]
     StalePreKey,
     /// Pre-key bundle uses a format version this build does not understand.
+    #[error("unsupported pre-key bundle format version: {0}")]
     UnsupportedPreKeyBundleVersion(u8),
-}
-
-impl fmt::Display for HandshakeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EnvelopeDecode => write!(f, "handshake envelope bytes failed to decode"),
-            Self::EnvelopeEncode => write!(f, "handshake envelope failed to encode"),
-            Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
-            Self::PublicKey(e) => write!(f, "handshake public key validation failed: {e}"),
-            Self::MissingOneTimePreKey => write!(f, "handshake one-time pre-key is missing"),
-            Self::NonContributorySharedSecret => {
-                write!(f, "x25519 shared secret was non-contributory")
-            }
-            Self::OneTimePreKeyMismatch => write!(
-                f,
-                "handshake envelope one-time pre-key reference does not match local one-time pre-key"
-            ),
-            Self::Ratchet(e) => write!(f, "handshake ratchet operation failed: {e}"),
-            Self::SealedFrame(e) => write!(f, "handshake sealed frame failed: {e}"),
-            Self::SenderIdentityMismatch => write!(
-                f,
-                "sealed sender identity does not match the x3dh root-bound identity key"
-            ),
-            Self::SenderProofInvalid => write!(f, "sealed sender proof verification failed"),
-            Self::SignedPreKeyMismatch => write!(
-                f,
-                "handshake envelope signed pre-key reference does not match local signed pre-key"
-            ),
-            Self::StalePreKey => write!(f, "pre-key belongs to a superseded discovery-key epoch"),
-            Self::UnsupportedPreKeyBundleVersion(version) => {
-                write!(f, "unsupported pre-key bundle format version: {version}")
-            }
-        }
-    }
-}
-
-impl Error for HandshakeError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::PublicKey(e) => Some(e),
-            Self::Ratchet(e) => Some(e),
-            Self::SealedFrame(e) => Some(e),
-            Self::EnvelopeDecode
-            | Self::EnvelopeEncode
-            | Self::HkdfExpand
-            | Self::MissingOneTimePreKey
-            | Self::NonContributorySharedSecret
-            | Self::OneTimePreKeyMismatch
-            | Self::SenderIdentityMismatch
-            | Self::SenderProofInvalid
-            | Self::SignedPreKeyMismatch
-            | Self::StalePreKey
-            | Self::UnsupportedPreKeyBundleVersion(_) => None,
-        }
-    }
-}
-
-impl From<PublicKeyError> for HandshakeError {
-    fn from(error: PublicKeyError) -> Self {
-        Self::PublicKey(error)
-    }
-}
-
-impl From<RatchetError> for HandshakeError {
-    fn from(error: RatchetError) -> Self {
-        Self::Ratchet(error)
-    }
-}
-
-impl From<SealedFrameError> for HandshakeError {
-    fn from(error: SealedFrameError) -> Self {
-        Self::SealedFrame(error)
-    }
 }
 
 fn validate_bundle_epochs(bundle: &PreKeyBundle) -> Result<(), HandshakeError> {

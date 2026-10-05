@@ -1,6 +1,5 @@
 //! Authenticated Message metadata, transcript construction, and sealed payload padding.
 
-use std::{error::Error, fmt};
 use zeroize::Zeroizing;
 
 const PUBLIC_KEY_LEN: usize = 32;
@@ -125,26 +124,15 @@ pub fn message_transcript(
 }
 
 /// An error returned while encoding authenticated Message metadata.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MessageEncodingError {
     /// A transcript field exceeds the supported encoding length.
+    #[error("message transcript field exceeds size limit")]
     PayloadTooLarge,
     /// The payload tag is unknown.
+    #[error("unsupported message payload kind: {0}")]
     UnsupportedPayloadKind(u8),
 }
-
-impl fmt::Display for MessageEncodingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PayloadTooLarge => write!(f, "message transcript field exceeds size limit"),
-            Self::UnsupportedPayloadKind(tag) => {
-                write!(f, "unsupported message payload kind: {tag}")
-            }
-        }
-    }
-}
-
-impl Error for MessageEncodingError {}
 
 /// Prefixes the plaintext length and fills the next supported bucket with zeros.
 pub fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedPayloadError> {
@@ -193,52 +181,33 @@ pub fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedP
 }
 
 /// An error returned by sealed payload padding or decoding.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SealedPayloadError {
     /// Adding the length prefix overflows the platform size.
+    #[error("sealed payload length overflowed")]
     LengthOverflow,
     /// The plaintext does not fit the largest supported bucket.
+    #[error("sealed payload length exceeds limit: {0}")]
     LengthTooLarge(usize),
     /// The plaintext length cannot be encoded in four bytes.
+    #[error("sealed payload length exceeds u32")]
     LengthExceedsU32,
     /// The padded length is not a supported bucket.
+    #[error("sealed payload padding bucket is invalid: {0}")]
     InvalidBucket(usize),
     /// The length prefix is missing.
+    #[error("sealed payload padding is too short")]
     TooShort,
     /// The length prefix is malformed.
+    #[error("sealed payload length prefix is invalid")]
     InvalidLengthPrefix,
     /// The decoded length cannot fit the platform size.
+    #[error("sealed payload length prefix exceeds platform limit")]
     PlatformLimit,
     /// The decoded plaintext extends beyond its bucket.
+    #[error("sealed payload length exceeds padding bucket")]
     LengthExceedsBucket,
     /// The padding contains nonzero bytes.
+    #[error("sealed payload padding is malformed")]
     MalformedPadding,
 }
-
-impl fmt::Display for SealedPayloadError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LengthOverflow => write!(f, "sealed payload length overflowed"),
-            Self::LengthTooLarge(len) => {
-                write!(f, "sealed payload length exceeds limit: {len}")
-            }
-            Self::LengthExceedsU32 => write!(f, "sealed payload length exceeds u32"),
-            Self::InvalidBucket(len) => {
-                write!(f, "sealed payload padding bucket is invalid: {len}")
-            }
-            Self::TooShort => write!(f, "sealed payload padding is too short"),
-            Self::InvalidLengthPrefix => {
-                write!(f, "sealed payload length prefix is invalid")
-            }
-            Self::PlatformLimit => {
-                write!(f, "sealed payload length prefix exceeds platform limit")
-            }
-            Self::LengthExceedsBucket => {
-                write!(f, "sealed payload length exceeds padding bucket")
-            }
-            Self::MalformedPadding => write!(f, "sealed payload padding is malformed"),
-        }
-    }
-}
-
-impl Error for SealedPayloadError {}

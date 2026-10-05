@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt;
 use zeroize::Zeroizing;
 
 /// A key-value storage abstraction for sensitive byte payloads.
@@ -23,21 +22,12 @@ pub trait SecureStorage: Send {
 }
 
 /// Errors returned by [`SecureStorage`] implementations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     /// Platform storage returned an I/O or permission failure.
+    #[error("{0}")]
     IO(String),
 }
-
-impl fmt::Display for StorageError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StorageError::IO(msg) => write!(f, "storage I/O error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for StorageError {}
 
 /// An in-memory [`SecureStorage`] implementation for tests.
 ///

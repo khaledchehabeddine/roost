@@ -10,8 +10,6 @@ use crate::ratchet::{
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // Limits how many message keys one header can force this session to derive.
@@ -456,75 +454,47 @@ impl RatchetState {
 }
 
 /// An error returned while encrypting or decrypting with a [`RatchetState`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RatchetError {
     /// XChaCha20-Poly1305 encryption or decryption failed.
+    #[error("xchacha20-poly1305 encryption or decryption failed")]
     Aead,
     /// HKDF-SHA256 rejected the requested output length.
+    #[error("hkdf-sha256 expand exceeded output limit")]
     HkdfExpand,
     /// HMAC-SHA256 rejected a chain-key input.
+    #[error("hmac-sha256 rejected the provided key")]
     InvalidHmacKey,
     /// Ratchet state violated an internal invariant.
+    #[error("ratchet state invariant violated: {0}")]
     InvalidState(&'static str),
     /// Message header asks to skip too many messages in one ratchet step.
+    #[error("requested message skip exceeds ratchet step limit")]
     MaxSkipExceeded,
     /// Caching skipped message keys would exceed the total skipped-key cap.
+    #[error("cached skipped message keys total exceeds global limit")]
     MaxSkippedKeysExceeded,
     /// An X25519 exchange produced a non-contributory shared secret.
+    #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
 }
 
-impl fmt::Display for RatchetError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Aead => write!(f, "xchacha20-poly1305 encryption or decryption failed"),
-            Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
-            Self::InvalidHmacKey => write!(f, "hmac-sha256 rejected the provided key"),
-            Self::InvalidState(context) => {
-                write!(f, "ratchet state invariant violated: {context}")
-            }
-            Self::MaxSkipExceeded => write!(f, "requested message skip exceeds ratchet step limit"),
-            Self::MaxSkippedKeysExceeded => {
-                write!(f, "cached skipped message keys total exceeds global limit")
-            }
-            Self::NonContributorySharedSecret => {
-                write!(f, "x25519 shared secret was non-contributory")
-            }
-        }
-    }
-}
-
-impl Error for RatchetError {}
-
 /// An error returned while persisting or restoring a [`RatchetState`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RatchetStateError {
     /// Persisted ratchet state bytes failed to decode.
+    #[error("ratchet state bytes failed to decode")]
     Decode,
     /// Ratchet state failed to encode for persistence.
+    #[error("ratchet state failed to encode")]
     Encode,
     /// Persisted ratchet state exceeds the skipped-key cache limit.
+    #[error("cached skipped message keys total exceeds global limit")]
     MaxSkippedKeysExceeded,
     /// Persisted ratchet state uses a format version this build does not understand.
+    #[error("unsupported ratchet state format version: {0}")]
     UnsupportedVersion(u8),
 }
-
-impl fmt::Display for RatchetStateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Decode => write!(f, "ratchet state bytes failed to decode"),
-            Self::Encode => write!(f, "ratchet state failed to encode"),
-            Self::MaxSkippedKeysExceeded => {
-                write!(f, "cached skipped message keys total exceeds global limit")
-            }
-            Self::UnsupportedVersion(version) => {
-                write!(f, "unsupported ratchet state format version: {version}")
-            }
-        }
-    }
-}
-
-impl Error for RatchetStateError {}
 
 fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, RatchetError> {
     if !secret.was_contributory() {

@@ -3,7 +3,6 @@
 use rand::rngs::OsRng;
 use roost_crypto::{SigningKeyPair, generate_signing_key_pair};
 use roost_protocol::{PUBLIC_KEY_LEN, SenderCertificateIdentityKey};
-use std::{error::Error, fmt};
 
 const MAX_RELAY_DOMAIN_LEN: usize = 255;
 const MAX_SIGNING_KEY_ID_LEN: usize = 64;
@@ -30,41 +29,21 @@ pub struct DevelopmentSenderCertificate {
 }
 
 /// Errors returned while constructing development sender certificates.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DevelopmentCertificateError {
     /// The signing-key identifier is empty or exceeds the certificate format limit.
+    #[error("development certificate signing-key identifier is invalid")]
     InvalidSigningKeyId,
     /// The sender Identity Key is not canonically encoded.
+    #[error("development certificate identity key is invalid")]
     InvalidIdentityKey,
     /// The sender Discovery Key is not canonically encoded.
+    #[error("development certificate discovery key is invalid")]
     InvalidDiscoveryKey,
     /// The relay domain is empty or longer than a single length byte can express.
+    #[error("development certificate relay domain is invalid")]
     InvalidRelayDomain,
 }
-
-impl fmt::Display for DevelopmentCertificateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidSigningKeyId => {
-                write!(
-                    f,
-                    "development certificate signing-key identifier is invalid"
-                )
-            }
-            Self::InvalidIdentityKey => {
-                write!(f, "development certificate identity key is invalid")
-            }
-            Self::InvalidDiscoveryKey => {
-                write!(f, "development certificate discovery key is invalid")
-            }
-            Self::InvalidRelayDomain => {
-                write!(f, "development certificate relay domain is invalid")
-            }
-        }
-    }
-}
-
-impl Error for DevelopmentCertificateError {}
 
 impl DevelopmentCertificateAuthority {
     /// Constructs a process-local development certificate authority.

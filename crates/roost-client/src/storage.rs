@@ -85,19 +85,28 @@ impl CoreSecureStorage for SecureStorageAdapter {
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.storage
             .save(key.to_string(), value.to_vec())
-            .map_err(|e| StorageError::IO(e.to_string()))
+            .map_err(host_storage_error)
     }
 
     fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
         self.storage
             .load(key.to_string())
             .map(|opt| opt.map(Zeroizing::new))
-            .map_err(|e| StorageError::IO(e.to_string()))
+            .map_err(host_storage_error)
     }
 
     fn delete(&mut self, key: &str) -> Result<(), StorageError> {
         self.storage
             .remove(key.to_string())
-            .map_err(|e| StorageError::IO(e.to_string()))
+            .map_err(host_storage_error)
+    }
+}
+
+// Keeps the host's own reason, so a storage failure that returns to the host isn't prefixed twice.
+fn host_storage_error(error: RoostError) -> StorageError {
+    if let RoostError::Storage { reason } = error {
+        StorageError::IO(reason)
+    } else {
+        StorageError::IO(error.to_string())
     }
 }

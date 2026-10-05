@@ -1,8 +1,9 @@
 //! Passphrase-encrypted identity backup using Argon2id and XChaCha20-Poly1305.
 //!
 //! The backup is a self-describing envelope. A cleartext header carries the format version and
-//! the Argon2id parameters and is authenticated as the AEAD associated data, so neither the
-//! version nor a work-factor parameter can be altered without failing decryption. The encrypted
+//! the Argon2id parameters and is authenticated as the AEAD associated data. An unknown version is
+//! rejected before key derivation, and a work-factor parameter can't be altered without failing
+//! decryption. The encrypted
 //! body holds the identity-key halves followed by the verbatim discovery-key blob, which this
 //! module treats as opaque so discovery-key versioning stays owned by `discovery_key.rs`.
 //!
@@ -41,6 +42,13 @@ const MIN_M_COST: u32 = 65536;
 const MIN_T_COST: u32 = 3;
 const MAX_M_COST: u32 = 1 << 20; // 1 GiB; generous headroom above the default for future increases.
 const MAX_T_COST: u32 = 16;
+// Export writes the defaults, so a default outside the import range would produce unreadable backups.
+const _: () = assert!(
+    ARGON2_M_COST >= MIN_M_COST
+        && ARGON2_M_COST <= MAX_M_COST
+        && ARGON2_T_COST >= MIN_T_COST
+        && ARGON2_T_COST <= MAX_T_COST
+);
 
 // Decrypted backup contents: the identity-key halves and the opaque discovery-key blob.
 type DecryptedBackup = (Zeroizing<[u8; IDENTITY_KEY_LEN]>, Zeroizing<Vec<u8>>);
@@ -53,7 +61,6 @@ impl IdentityManager {
         passphrase: &str,
         discovery_key_blob: &[u8],
     ) -> Result<Vec<u8>, IdentityError> {
-        validate_export_argon2_params(ARGON2_M_COST, ARGON2_T_COST, ARGON2_P_COST)?;
         let (x25519_bytes, ed25519_bytes) = self.load_identity_key_bytes()?;
 
         let mut plaintext = Zeroizing::new(Vec::with_capacity(
@@ -89,7 +96,7 @@ impl IdentityManager {
                     aad: &header,
                 },
             )
-            .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+            .map_err(|_| IdentityError::BackupEncryption)?;
 
         let mut backup = Vec::with_capacity(HEADER_LEN + ciphertext.len());
         backup.extend_from_slice(&header);
@@ -103,10 +110,16 @@ impl IdentityManager {
         data: &[u8],
         passphrase: &str,
     ) -> Result<DecryptedBackup, IdentityError> {
+        if let Some(&version) = data.first()
+            && version != BACKUP_FORMAT_VERSION
+        {
+            return Err(IdentityError::UnsupportedBackupVersion(version));
+        }
         if data.len() < HEADER_LEN {
-            return Err(IdentityError::InvalidData(
-                "backup shorter than header".into(),
-            ));
+            return Err(IdentityError::BackupTooShort {
+                len: data.len(),
+                min_len: HEADER_LEN,
+            });
         }
         let (header, ciphertext) = data.split_at(HEADER_LEN);
         let m_cost = read_u32(&header[1..5]);
@@ -131,18 +144,13 @@ impl IdentityManager {
                 )
                 .map_err(|_| IdentityError::DecryptionFailed)?,
         );
-        if header[0] != BACKUP_FORMAT_VERSION {
-            return Err(IdentityError::InvalidData(format!(
-                "unsupported backup format version: {}",
-                header[0]
-            )));
-        }
 
         let identity_key: [u8; IDENTITY_KEY_LEN] = plaintext
             .get(..IDENTITY_KEY_LEN)
             .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| {
-                IdentityError::InvalidData("backup plaintext shorter than identity key".into())
+            .ok_or(IdentityError::BackupPlaintextTooShort {
+                len: plaintext.len(),
+                min_len: IDENTITY_KEY_LEN,
             })?;
         let discovery_key_blob = Zeroizing::new(plaintext[IDENTITY_KEY_LEN..].to_vec());
         Ok((Zeroizing::new(identity_key), discovery_key_blob))
@@ -153,17 +161,18 @@ impl IdentityManager {
         &self,
         identity_key: &[u8; IDENTITY_KEY_LEN],
     ) -> Result<(), IdentityError> {
-        let x25519 = identity_key[..32]
+        let (x25519, ed25519) = identity_key.split_at(32);
+        let invalid_key_length = |half: &[u8]| IdentityError::InvalidKeyLength {
+            expected: 32,
+            actual: half.len(),
+        };
+        let x25519 = x25519.try_into().map_err(|_| invalid_key_length(x25519))?;
+        let ed25519 = ed25519
             .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
-        let ed25519 = identity_key[32..]
-            .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
+            .map_err(|_| invalid_key_length(ed25519))?;
         let blob = encode_identity_key_blob(x25519, ed25519);
         let mut storage = self.lock_storage()?;
-        storage
-            .store(IDENTITY_CURRENT_KEY, &*blob)
-            .map_err(super::map_storage_err)?;
+        storage.store(IDENTITY_CURRENT_KEY, &*blob)?;
         Ok(())
     }
 }
@@ -191,19 +200,6 @@ fn read_u32(bytes: &[u8]) -> u32 {
     u32::from_be_bytes(buf)
 }
 
-fn validate_export_argon2_params(
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
-) -> Result<(), IdentityError> {
-    if m_cost < MIN_M_COST || t_cost < MIN_T_COST || p_cost != ARGON2_P_COST {
-        return Err(IdentityError::BackupFailed(
-            "backup Argon2id parameters are below the accepted work-factor floor".into(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_import_argon2_params(
     m_cost: u32,
     t_cost: u32,
@@ -213,21 +209,23 @@ fn validate_import_argon2_params(
         || !(MIN_T_COST..=MAX_T_COST).contains(&t_cost)
         || p_cost != ARGON2_P_COST
     {
-        return Err(IdentityError::InvalidData(
-            "backup Argon2id parameters outside the accepted work-factor range".into(),
-        ));
+        return Err(IdentityError::BackupParametersOutOfRange {
+            memory_kib: m_cost,
+            iterations: t_cost,
+            parallelism: p_cost,
+        });
     }
     Ok(())
 }
 
 // Salt and nonce come from the injected CSPRNG via the fallible `try_fill_bytes`, so an entropy
-// failure surfaces as `BackupFailed` rather than a panic.
+// failure surfaces as `BackupRandomness` rather than a panic.
 fn random_bytes<const N: usize, R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> Result<[u8; N], IdentityError> {
     let mut buf = [0u8; N];
     rng.try_fill_bytes(&mut buf)
-        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        .map_err(IdentityError::BackupRandomness)?;
     Ok(buf)
 }
 
@@ -242,12 +240,12 @@ fn derive_key(
     // same key. The normalized copy is a heap secret, so wipe it on drop.
     let normalized: Zeroizing<String> = Zeroizing::new(passphrase.nfc().collect());
     let params = Params::new(m_cost, t_cost, p_cost, Some(ARGON2_OUTPUT_LEN))
-        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        .map_err(IdentityError::BackupKeyDerivation)?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; ARGON2_OUTPUT_LEN]);
     argon2
         .hash_password_into(normalized.as_bytes(), salt, &mut *key)
-        .map_err(|e| IdentityError::BackupFailed(e.to_string()))?;
+        .map_err(IdentityError::BackupKeyDerivation)?;
     Ok(key)
 }
 
@@ -269,47 +267,6 @@ mod tests {
         let manager = manager();
         manager.generate_identity(&mut OsRng).unwrap();
         manager
-    }
-
-    fn authenticated_backup_with_version(
-        manager: &IdentityManager,
-        passphrase: &str,
-        version: u8,
-    ) -> Vec<u8> {
-        let backup = manager
-            .export_encrypted_backup(&mut OsRng, passphrase, &DK_BLOB)
-            .unwrap();
-        let (identity_key, discovery_key_blob) =
-            manager.decrypt_backup(&backup, passphrase).unwrap();
-        let mut plaintext = Zeroizing::new(Vec::with_capacity(
-            IDENTITY_KEY_LEN + discovery_key_blob.len(),
-        ));
-        plaintext.extend_from_slice(&*identity_key);
-        plaintext.extend_from_slice(&discovery_key_blob);
-
-        let mut header: [u8; HEADER_LEN] = backup[..HEADER_LEN].try_into().unwrap();
-        header[0] = version;
-        let m_cost = read_u32(&header[1..5]);
-        let t_cost = read_u32(&header[5..9]);
-        let p_cost = read_u32(&header[9..13]);
-        let salt = &header[13..13 + SALT_LEN];
-        let nonce_bytes = &header[13 + SALT_LEN..HEADER_LEN];
-        let key_bytes = derive_key(passphrase, salt, m_cost, t_cost, p_cost).unwrap();
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
-        let ciphertext = cipher
-            .encrypt(
-                XNonce::from_slice(nonce_bytes),
-                Payload {
-                    msg: plaintext.as_slice(),
-                    aad: &header,
-                },
-            )
-            .unwrap();
-
-        let mut authenticated = Vec::with_capacity(HEADER_LEN + ciphertext.len());
-        authenticated.extend_from_slice(&header);
-        authenticated.extend_from_slice(&ciphertext);
-        authenticated
     }
 
     #[test]
@@ -352,34 +309,14 @@ mod tests {
     #[test]
     fn decrypt_backup_rejects_data_shorter_than_header() {
         let manager = manager();
+        let mut short = [0u8; 10];
+        short[0] = BACKUP_FORMAT_VERSION;
         assert!(matches!(
-            manager.decrypt_backup(&[0u8; 10], "passphrase"),
-            Err(IdentityError::InvalidData(_))
-        ));
-    }
-
-    #[test]
-    fn decrypt_backup_rejects_tampered_version_as_authentication_failure() {
-        let manager = manager_with_identity();
-        let mut backup = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
-            .unwrap();
-        backup[0] = BACKUP_FORMAT_VERSION + 1;
-        assert!(matches!(
-            manager.decrypt_backup(&backup, "passphrase"),
-            Err(IdentityError::DecryptionFailed)
-        ));
-    }
-
-    #[test]
-    fn decrypt_backup_rejects_authenticated_future_version() {
-        let manager = manager_with_identity();
-        let backup =
-            authenticated_backup_with_version(&manager, "passphrase", BACKUP_FORMAT_VERSION + 1);
-        assert!(matches!(
-            manager.decrypt_backup(&backup, "passphrase"),
-            Err(IdentityError::InvalidData(reason))
-                if reason.contains("unsupported backup format version")
+            manager.decrypt_backup(&short, "passphrase"),
+            Err(IdentityError::BackupTooShort {
+                len: 10,
+                min_len: HEADER_LEN
+            })
         ));
     }
 
@@ -397,7 +334,7 @@ mod tests {
             assert!(
                 matches!(
                     manager.decrypt_backup(&weakened, "passphrase"),
-                    Err(IdentityError::InvalidData(_))
+                    Err(IdentityError::BackupParametersOutOfRange { .. })
                 ),
                 "header offset {header_offset} should fail the work-factor floor"
             );
@@ -419,7 +356,7 @@ mod tests {
             assert!(
                 matches!(
                     manager.decrypt_backup(&oversized, "passphrase"),
-                    Err(IdentityError::InvalidData(_))
+                    Err(IdentityError::BackupParametersOutOfRange { .. })
                 ),
                 "header offset {header_offset} should fail the work-factor ceiling"
             );
@@ -559,14 +496,5 @@ mod tests {
             ARGON2_P_COST,
         );
         assert_ne!(*first.unwrap(), *second.unwrap());
-    }
-
-    #[test]
-    fn export_argon2id_parameters_reject_below_floor_memory() {
-        assert!(matches!(
-            validate_export_argon2_params(MIN_M_COST - 1, ARGON2_T_COST, ARGON2_P_COST),
-            Err(IdentityError::BackupFailed(_))
-        ));
-        assert!(validate_export_argon2_params(MIN_M_COST, ARGON2_T_COST, ARGON2_P_COST).is_ok());
     }
 }

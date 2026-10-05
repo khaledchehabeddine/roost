@@ -3,8 +3,6 @@
 use roost_protocol::{
     PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
 };
-use std::error::Error;
-use std::fmt;
 
 const SAFETY_NUMBER_DOMAIN_TAG: &[u8] = b"AetherSafetyNumber-v1:";
 const SAFETY_NUMBER_DIGITS: usize = 60;
@@ -38,21 +36,12 @@ pub struct SafetyNumber {
 }
 
 /// Errors returned by Safety Number derivation.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SafetyNumberError {
     /// One Identity Key uses a non-canonical or weak public-key encoding.
+    #[error("identity key encoding is invalid")]
     InvalidIdentityKey,
 }
-
-impl fmt::Display for SafetyNumberError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidIdentityKey => write!(f, "identity key encoding is invalid"),
-        }
-    }
-}
-
-impl Error for SafetyNumberError {}
 
 /// Derives the display Safety Number for two permanent Identity Keys.
 ///
