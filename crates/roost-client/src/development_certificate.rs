@@ -94,11 +94,10 @@ impl DevelopmentCertificateAuthority {
     /// Returns validation input that trusts certificates issued by this authority.
     ///
     /// Revocation is explicitly available with an empty local-development set. The caller owns
-    /// the reference timestamp and grace window just like the production validation API.
+    /// the reference timestamp just like the production validation API.
     pub fn sender_certificate_validation(
         &self,
         reference_time_millis: u64,
-        grace_window_millis: u64,
     ) -> SenderCertificateValidation {
         SenderCertificateValidation {
             domain_signing_keys: vec![DomainSigningKey {
@@ -112,7 +111,6 @@ impl DevelopmentCertificateAuthority {
                 revoked_identity_keys: Vec::new(),
             },
             reference_time_millis,
-            grace_window_millis,
         }
     }
 }
@@ -121,30 +119,51 @@ impl DevelopmentCertificateAuthority {
 mod tests {
     use super::*;
     use crate::storage::MemoryStorage;
-    use crate::{IdentityContext, validate_sender_certificate};
+    use crate::{ContextConfiguration, IdentityContext, ValidatedSenderCertificate};
+
+    const EXPIRES_AT_MILLIS: u64 = 1_800_000_000_000;
+
+    fn validate_at(
+        context: &IdentityContext,
+        issued: &DevelopmentSenderCertificate,
+        authority: &DevelopmentCertificateAuthority,
+        reference_time_millis: u64,
+    ) -> Result<ValidatedSenderCertificate, RoostError> {
+        context.validate_sender_certificate(
+            issued.certificate.clone(),
+            issued.signature.clone(),
+            authority.sender_certificate_validation(reference_time_millis),
+        )
+    }
 
     #[test]
-    fn issued_record_validates_through_uniffi_records() {
-        let store = IdentityContext::new(Arc::new(MemoryStorage::default()));
-        let identity = store.generate_identity().unwrap();
-        store.rotate_signed_prekey_now().unwrap();
+    fn expired_certificate_validates_only_within_the_configured_grace() {
+        let default = IdentityContext::new(Arc::new(MemoryStorage::default()));
+        let identity = default.generate_identity().unwrap();
         let authority = DevelopmentCertificateAuthority::new(
             b"relay-loopback".to_vec(),
             b"relay.example".to_vec(),
         )
         .unwrap();
-        let issued = authority.issue(identity, 1_800_000_000_000).unwrap();
-        let validation = authority.sender_certificate_validation(1_700_000_000_000, 0);
-
-        validate_sender_certificate(
-            issued.certificate,
-            issued.signature,
-            validation.domain_signing_keys,
-            validation.expected_relay_domain,
-            validation.revocation_state,
-            validation.reference_time_millis,
-            validation.grace_window_millis,
+        let issued = authority.issue(identity, EXPIRES_AT_MILLIS).unwrap();
+        let graced = IdentityContext::with_configuration(
+            Arc::new(MemoryStorage::default()),
+            ContextConfiguration {
+                certificate_grace_millis: 300_000,
+                ..default.configuration()
+            },
         )
         .unwrap();
+
+        validate_at(&default, &issued, &authority, EXPIRES_AT_MILLIS).unwrap();
+        assert!(matches!(
+            validate_at(&default, &issued, &authority, EXPIRES_AT_MILLIS + 1_000),
+            Err(RoostError::CertificateRejected { .. })
+        ));
+        validate_at(&graced, &issued, &authority, EXPIRES_AT_MILLIS + 300_000).unwrap();
+        assert!(matches!(
+            validate_at(&graced, &issued, &authority, EXPIRES_AT_MILLIS + 301_000),
+            Err(RoostError::CertificateRejected { .. })
+        ));
     }
 }

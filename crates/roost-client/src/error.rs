@@ -440,11 +440,7 @@ impl From<MessageError> for RoostError {
 impl From<ProtocolStateError> for RoostError {
     fn from(e: ProtocolStateError) -> Self {
         match e {
-            ProtocolStateError::SenderCertificateValidation(source) => {
-                RoostError::CertificateRejected {
-                    reason: source.to_string(),
-                }
-            }
+            ProtocolStateError::SenderCertificateValidation(source) => source.into(),
             ProtocolStateError::UnsupportedBlobVersion { .. } => RoostError::UnsupportedVersion {
                 reason: e.to_string(),
             },

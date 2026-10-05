@@ -137,7 +137,8 @@ const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 /// ```
 #[derive(uniffi::Object)]
 pub struct IdentityContext {
-    inner: Arc<CoreKeyStore>,
+    pub(crate) inner: Arc<CoreKeyStore>,
+    revision: u64,
 }
 
 /// Session, Message, acknowledgment, and retry operations for one [`IdentityContext`].
@@ -159,12 +160,26 @@ pub struct Contacts {
 }
 
 /// Protocol settings that every operation of an [`IdentityContext`] uses.
-#[derive(uniffi::Record)]
+///
+/// Every context serving one identity, in the app and its extensions, should use the same
+/// configuration. The host bumps `revision` whenever it changes a setting, here or in its own
+/// certificate trust inputs, so a commit can check that the work it saves used current settings.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct ContextConfiguration {
-    /// Number of received Message digests kept for this identity, from 64 to 2048.
+    /// Number of received Message digests kept for this identity, from 64 to 2048. Defaults to
+    /// 1024.
     pub deduplication_capacity: u64,
-    /// Whether a blocked sender receives an acknowledgment.
+    /// Whether a blocked sender receives an acknowledgment. Defaults to
+    /// [`BlockedContactAcknowledgmentPolicy::Unreachable`](crate::BlockedContactAcknowledgmentPolicy::Unreachable).
     pub blocked_contact_acknowledgment_policy: crate::BlockedContactAcknowledgmentPolicy,
+    /// How long after expiry a sender certificate still validates, in milliseconds, at most
+    /// 300,000. Defaults to zero.
+    ///
+    /// A grace covers clock differences between devices, at the cost of accepting a certificate
+    /// the relay has stopped vouching for.
+    pub certificate_grace_millis: u64,
+    /// The host's number for this configuration, which Roost returns unchanged. Defaults to zero.
+    pub revision: u64,
 }
 
 /// Result of starting a Session through X3DH.
@@ -211,6 +226,7 @@ impl IdentityContext {
             inner: Arc::new(CoreKeyStore::new(Box::new(SecureStorageAdapter::new(
                 secure_storage,
             )))),
+            revision: 0,
         })
     }
 
@@ -219,7 +235,8 @@ impl IdentityContext {
     /// Every context serving the same identity should use the same configuration.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if `deduplication_capacity` is outside its range.
+    /// - [`RoostError::InvalidData`] if `deduplication_capacity` or `certificate_grace_millis` is
+    ///   outside its range.
     #[uniffi::constructor]
     pub fn with_configuration(
         secure_storage: Arc<dyn SecureStorage>,
@@ -235,13 +252,32 @@ impl IdentityContext {
                 configuration
                     .blocked_contact_acknowledgment_policy
                     .to_core(),
-            );
+            )
+            .with_certificate_grace(Duration::from_millis(
+                configuration.certificate_grace_millis,
+            ))?;
         Ok(Arc::new(Self {
             inner: Arc::new(CoreKeyStore::with_protocol_engine(
                 Box::new(SecureStorageAdapter::new(secure_storage)),
                 engine,
             )),
+            revision: configuration.revision,
         }))
+    }
+
+    /// Returns the configuration this context was created with.
+    pub fn configuration(&self) -> ContextConfiguration {
+        let engine = self.inner.protocol_engine();
+        ContextConfiguration {
+            deduplication_capacity: engine.hardening_limits().deduplication_capacity as u64,
+            blocked_contact_acknowledgment_policy:
+                crate::BlockedContactAcknowledgmentPolicy::from_core(
+                    engine.blocked_contact_acknowledgment_policy(),
+                ),
+            // The engine accepts at most five minutes, which fits in u64 milliseconds.
+            certificate_grace_millis: engine.certificate_grace().as_millis() as u64,
+            revision: self.revision,
+        }
     }
 
     /// Returns the messaging group, which shares this context's storage and configuration.
@@ -900,7 +936,6 @@ impl Messaging {
                             revoked_identity_keys,
                         ),
                         reference_time: *reference_time,
-                        grace_window: Duration::from_millis(validation.grace_window_millis),
                     }
                 },
             );
