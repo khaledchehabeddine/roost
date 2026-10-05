@@ -37,12 +37,14 @@ fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed(seed);
     let alice_identity = generate_signing_key_pair(&mut rng);
     let alice_identity_key = public_identity_key(&mut rng, &alice_identity);
-    let alice_discovery_key = generate_discovery_key(&mut rng, &alice_identity, 1, CREATED_AT);
+    let alice_discovery_key =
+        generate_discovery_key(&mut rng, &alice_identity, 1, CREATED_AT).unwrap();
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
-    let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT);
+    let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT).unwrap();
     let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT);
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT)
+            .unwrap();
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT);
     (

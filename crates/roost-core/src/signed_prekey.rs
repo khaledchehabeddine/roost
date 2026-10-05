@@ -3,7 +3,7 @@ use crate::prekey_state::INBOX_ROTATION_REQUIRED_MARKER;
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{PublicSignedPreKey, SignedPreKey, generate_signed_prekey_for_discovery_key};
-use roost_protocol::{from_unix_secs, to_unix_secs};
+use roost_protocol::{SignatureError, from_unix_secs, to_unix_secs};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
@@ -114,6 +114,9 @@ pub enum SignedPreKeyError {
         /// Current signed pre-key's identifier.
         current_id: u64,
     },
+    /// Signing a new signed pre-key with the discovery key failed.
+    #[error("signing the signed pre-key failed")]
+    SignedPreKeySignature(#[source] SignatureError),
     /// More retained signed pre-keys are stored than the limit allows.
     #[error("{count} retained signed pre-keys exceed the limit of {max}")]
     TooManyRetained {
@@ -246,7 +249,8 @@ impl SignedPreKeyManager {
             .checked_add(1)
             .ok_or(SignedPreKeyError::IdentifiersExhausted)?;
         let signed_prekey =
-            generate_signed_prekey_for_discovery_key(rng, &discovery_key, next_id, now_secs);
+            generate_signed_prekey_for_discovery_key(rng, &discovery_key, next_id, now_secs)
+                .map_err(SignedPreKeyError::SignedPreKeySignature)?;
         let mut retained = Vec::new();
         if let Some(mut store) = previous.filter(|_| same_epoch) {
             retained = std::mem::take(&mut store.retained);
@@ -642,7 +646,8 @@ mod tests {
     ) -> SignedPreKey {
         let signing_key = generate_signing_key_pair(&mut OsRng);
         let signed_prekey =
-            generate_signed_prekey(&mut OsRng, &signing_key, 0, FIXED_EPOCH, created_at_secs);
+            generate_signed_prekey(&mut OsRng, &signing_key, 0, FIXED_EPOCH, created_at_secs)
+                .unwrap();
         let blob = encode_signed_prekey(&signed_prekey);
         manager
             .storage
@@ -663,7 +668,8 @@ mod tests {
             &discovery_key,
             0,
             created_at_secs,
-        );
+        )
+        .unwrap();
         let blob = encode_signed_prekey(&signed_prekey);
         setup
             .manager
@@ -1046,7 +1052,8 @@ mod tests {
     fn encode_decode_signed_prekey_round_trip() {
         let identity_signing_key = generate_signing_key_pair(&mut OsRng);
         let original =
-            generate_signed_prekey(&mut OsRng, &identity_signing_key, 0, FIXED_EPOCH, FIXED_NOW);
+            generate_signed_prekey(&mut OsRng, &identity_signing_key, 0, FIXED_EPOCH, FIXED_NOW)
+                .unwrap();
         let blob = encode_signed_prekey(&original);
         assert_eq!(blob.len(), SIGNED_PREKEY_V4_HEADER_LEN);
         let store = decode_signed_prekey_store(&blob).unwrap();
@@ -1072,8 +1079,10 @@ mod tests {
             99,
             FIXED_EPOCH,
             FIXED_NOW - SECONDS_PER_DAY,
-        );
-        let current = generate_signed_prekey(&mut OsRng, &signing_key, 100, FIXED_EPOCH, FIXED_NOW);
+        )
+        .unwrap();
+        let current =
+            generate_signed_prekey(&mut OsRng, &signing_key, 100, FIXED_EPOCH, FIXED_NOW).unwrap();
         let mut blob = Vec::with_capacity(SIGNED_PREKEY_V3_BLOB_LEN);
         blob.push(SIGNED_PREKEY_VERSION_V3);
         encode_legacy_record(&mut blob, &current);
@@ -1098,8 +1107,10 @@ mod tests {
             99,
             FIXED_EPOCH,
             FIXED_NOW - SIGNED_PREKEY_ROTATION_WINDOW_SECS,
-        );
-        let current = generate_signed_prekey(&mut OsRng, &signing_key, 100, FIXED_EPOCH, FIXED_NOW);
+        )
+        .unwrap();
+        let current =
+            generate_signed_prekey(&mut OsRng, &signing_key, 100, FIXED_EPOCH, FIXED_NOW).unwrap();
         let mut blob = Vec::with_capacity(SIGNED_PREKEY_V2_BLOB_LEN);
         blob.push(SIGNED_PREKEY_VERSION_V2);
         encode_legacy_record(&mut blob, &current);
@@ -1125,14 +1136,16 @@ mod tests {
     #[test]
     fn legacy_store_rejects_retained_key_from_different_epoch_before_migration() {
         let signing_key = generate_signing_key_pair(&mut OsRng);
-        let current = generate_signed_prekey(&mut OsRng, &signing_key, 1, FIXED_EPOCH, FIXED_NOW);
+        let current =
+            generate_signed_prekey(&mut OsRng, &signing_key, 1, FIXED_EPOCH, FIXED_NOW).unwrap();
         let retained = generate_signed_prekey(
             &mut OsRng,
             &signing_key,
             0,
             FIXED_EPOCH + 1,
             FIXED_NOW - SECONDS_PER_DAY,
-        );
+        )
+        .unwrap();
         let mut version_two = Vec::with_capacity(SIGNED_PREKEY_V2_BLOB_LEN);
         version_two.push(SIGNED_PREKEY_VERSION_V2);
         encode_legacy_record(&mut version_two, &current);
@@ -1162,7 +1175,8 @@ mod tests {
             &discovery_key,
             u64::MAX - 1,
             FIXED_NOW,
-        );
+        )
+        .unwrap();
         let blob = encode_signed_prekey_store(&StoredSignedPreKeys {
             next_id: u64::MAX,
             current,

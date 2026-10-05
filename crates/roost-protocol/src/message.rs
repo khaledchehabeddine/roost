@@ -11,6 +11,12 @@ pub const SEALED_PAYLOAD_LEN_PREFIX_LEN: usize = 4;
 pub const SEALED_PAYLOAD_BUCKETS: [usize; 12] = [
     32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536,
 ];
+// Longest session key a Message transcript accepts.
+const MAX_TRANSCRIPT_SESSION_KEY_LEN: usize = 96;
+// The transcript authenticates the padded payload, so its limit is the largest bucket.
+const MAX_TRANSCRIPT_PAYLOAD_LEN: usize = SEALED_PAYLOAD_BUCKETS[SEALED_PAYLOAD_BUCKETS.len() - 1];
+// Longest sender certificate a Message transcript accepts.
+const MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 
 /// The UUID-shaped identifier for a Message.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -90,9 +96,9 @@ pub struct MessageTranscriptInput<'a> {
 pub fn message_transcript(
     input: MessageTranscriptInput<'_>,
 ) -> Result<Zeroizing<Vec<u8>>, MessageEncodingError> {
-    if input.session_key.len() > 96
-        || input.payload.len() > 65_536
-        || input.sender_certificate.len() > 16 * 1024
+    if input.session_key.len() > MAX_TRANSCRIPT_SESSION_KEY_LEN
+        || input.payload.len() > MAX_TRANSCRIPT_PAYLOAD_LEN
+        || input.sender_certificate.len() > MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN
     {
         return Err(MessageEncodingError::PayloadTooLarge);
     }

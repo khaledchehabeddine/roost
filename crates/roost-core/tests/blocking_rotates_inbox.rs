@@ -26,7 +26,7 @@ fn peer_contact() -> ContactIdentity {
     let signing = generate_signing_key_pair(&mut rng);
     let agreement = generate_key_pair(&mut rng);
     let _binding = sign_identity_key_binding(&signing, &agreement.public).unwrap();
-    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS);
+    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS).unwrap();
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *agreement.public.as_bytes(),

@@ -214,13 +214,12 @@ impl PublicDiscoveryKey {
 /// Generates a discovery key using `rng`, signed by the identity signing key.
 ///
 /// The X25519 key-agreement secret and the Ed25519 signing key are drawn independently from `rng`.
-#[must_use]
 pub fn generate_discovery_key<R: RngCore + CryptoRng>(
     rng: &mut R,
     identity: &SigningKeyPair,
     epoch: u32,
     created_at_secs: u64,
-) -> DiscoveryKey {
+) -> Result<DiscoveryKey, SignatureError> {
     let key_agreement_secret = StaticSecret::random_from_rng(&mut *rng);
     let key_agreement_public = PublicKey::from(&key_agreement_secret);
     let signing = generate_signing_key_pair(rng);
@@ -230,17 +229,15 @@ pub fn generate_discovery_key<R: RngCore + CryptoRng>(
         epoch,
         created_at_secs,
     );
-    let identity_signature = identity
-        .sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)
-        .expect("non-empty discovery-key signature context");
-    DiscoveryKey {
+    let identity_signature = identity.sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)?;
+    Ok(DiscoveryKey {
         key_agreement_secret,
         signing,
         key_agreement_public,
         epoch,
         created_at_secs,
         identity_signature,
-    }
+    })
 }
 
 /// Verifies a public discovery key was signed by the identity verifying key.
@@ -282,13 +279,12 @@ fn discovery_key_payload(
 /// This keeps the discovery signing key private while producing a signed pre-key that verifies
 /// with [`DiscoveryKey::verifying_key`]. The caller allocates `id` uniquely within this discovery
 /// key's epoch.
-#[must_use]
 pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
     rng: &mut R,
     discovery_key: &DiscoveryKey,
     id: u64,
     created_at_secs: u64,
-) -> SignedPreKey {
+) -> Result<SignedPreKey, SignatureError> {
     generate_signed_prekey(
         rng,
         &discovery_key.signing,
@@ -323,7 +319,8 @@ mod tests {
         let mut rng = seeded_rng();
         let identity = generate_signing_key_pair(&mut rng);
         let discovery_key =
-            generate_discovery_key(&mut rng, &identity, FIXED_EPOCH, FIXED_CREATED_AT_SECS);
+            generate_discovery_key(&mut rng, &identity, FIXED_EPOCH, FIXED_CREATED_AT_SECS)
+                .unwrap();
         DiscoveryKeySetup {
             rng,
             identity,
@@ -576,7 +573,8 @@ mod tests {
             &setup.discovery_key,
             0,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
         assert!(verify_public_signed_prekey(&bundle, setup.discovery_key.verifying_key()).is_ok());
         assert!(matches!(
@@ -626,7 +624,8 @@ mod tests {
             &setup.identity,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
 
         let signature = setup
             .discovery_key

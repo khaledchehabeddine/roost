@@ -7,8 +7,9 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ProtocolStateEngine,
-    ProtocolStateSnapshot,
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateSnapshot,
+    ProtocolStateUpdate, RecipientDeliveryCapability,
 };
 use roost_crypto::{generate_discovery_key, generate_key_pair, generate_signing_key_pair};
 
@@ -18,7 +19,7 @@ fn peer_contact(seed: u8) -> ContactIdentity {
     let mut rng = ChaCha20Rng::from_seed([seed; 32]);
     let signing = generate_signing_key_pair(&mut rng);
     let agreement = generate_key_pair(&mut rng);
-    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS);
+    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS).unwrap();
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *agreement.public.as_bytes(),
@@ -149,4 +150,59 @@ fn delivering_an_older_generation_does_not_move_the_record_backwards() {
             .unwrap(),
         Some(7)
     );
+}
+
+// Stores the update's blob with one extra byte appended, and returns the blob's address.
+fn store_with_trailing_byte(
+    snapshot: &mut ProtocolStateSnapshot,
+    update: &ProtocolStateUpdate,
+) -> ProtocolStateAddress {
+    let mut bytes = update.blob().unwrap().as_bytes().to_vec();
+    bytes.push(0);
+    snapshot
+        .set(
+            update.address().clone(),
+            ProtocolStateBlob::from_bytes(bytes),
+        )
+        .unwrap();
+    update.address().clone()
+}
+
+#[test]
+fn a_delivered_authorization_with_trailing_bytes_is_rejected() {
+    let mut setup = setup();
+    let updates = setup
+        .engine
+        .record_inbox_authorization_delivered(&setup.snapshot, setup.alice, 5)
+        .unwrap();
+    let address = store_with_trailing_byte(&mut setup.snapshot, &updates[0]);
+
+    let result = setup
+        .engine
+        .delivered_inbox_authorization(&setup.snapshot, setup.alice);
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+    ));
+}
+
+#[test]
+fn a_peer_authorization_with_trailing_bytes_is_rejected() {
+    let mut setup = setup();
+    let capability = RecipientDeliveryCapability::from_bytes([7; 32]);
+    let updates = setup
+        .engine
+        .record_peer_inbox_authorization(&setup.snapshot, setup.alice, 5, &capability)
+        .unwrap();
+    let address = store_with_trailing_byte(&mut setup.snapshot, &updates[0]);
+
+    let result = setup
+        .engine
+        .peer_inbox_authorization(&setup.snapshot, setup.alice);
+
+    assert!(matches!(
+        result,
+        Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+    ));
 }

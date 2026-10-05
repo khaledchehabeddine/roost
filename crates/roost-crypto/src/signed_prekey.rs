@@ -5,6 +5,7 @@ use crate::keys::{
 };
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
+use roost_protocol::SignatureError;
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -163,28 +164,25 @@ impl PublicSignedPreKey {
 ///
 /// `id` is stable lookup metadata within one discovery-key epoch. It is not part of the signature
 /// payload; a route-bound caller authenticates it as associated data with the encrypted initial.
-#[must_use]
 pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     signing_key: &SigningKeyPair,
     id: u64,
     epoch: u32,
     created_at_secs: u64,
-) -> SignedPreKey {
+) -> Result<SignedPreKey, SignatureError> {
     let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
     let payload = signed_prekey_payload(&public_key, epoch, created_at_secs);
-    let signature = signing_key
-        .sign_with_context(SIGNED_PREKEY_CONTEXT, &payload)
-        .expect("non-empty signed-pre-key signature context");
-    SignedPreKey {
+    let signature = signing_key.sign_with_context(SIGNED_PREKEY_CONTEXT, &payload)?;
+    Ok(SignedPreKey {
         secret_key,
         public_key,
         signature,
         id,
         epoch,
         created_at_secs,
-    }
+    })
 }
 
 /// Verifies a public signed pre-key against the verifying key that signed it.
@@ -216,7 +214,6 @@ mod tests {
     use crate::keys::{generate_key_pair, generate_signing_key_pair};
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
-    use roost_protocol::SignatureError;
 
     const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
     const FIXED_EPOCH: u32 = 7;
@@ -236,7 +233,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
         let mut signed = b"AetherSPK-v1:".to_vec();
         signed.extend_from_slice(bundle.public_key.as_bytes());
@@ -256,7 +254,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
         assert_eq!(
             bundle.public_key.as_bytes(),
@@ -281,7 +280,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let mut bundle = signed_prekey.public();
         let mut public_key_bytes = *bundle.public_key.as_bytes();
         public_key_bytes[0] ^= 0x01;
@@ -302,7 +302,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
         let mut signature_bytes = bundle.signature.to_bytes();
         signature_bytes[0] ^= 0x01;
@@ -330,7 +331,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
         assert!(matches!(
             verify_public_signed_prekey(&bundle, &wrong_signing_key.verifying),
@@ -348,7 +350,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
         let tampered = PublicSignedPreKey {
             public_key: bundle.public_key,
@@ -373,7 +376,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
         let tampered = PublicSignedPreKey {
             public_key: bundle.public_key,
@@ -417,7 +421,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = signed_prekey.public();
 
         let parsed = PublicSignedPreKey::from_bytes(
@@ -470,7 +475,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),
@@ -502,7 +508,8 @@ mod tests {
             FIXED_ID,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let restored = SignedPreKey::from_secret_bytes(
             *original.to_secret_bytes(),
             original.signature().to_bytes(),

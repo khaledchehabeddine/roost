@@ -24,9 +24,10 @@ fn setup() -> Setup {
     let local_key_pair = generate_key_pair(&mut rng);
     let contact_signing = generate_signing_key_pair(&mut rng);
     let contact_key_pair = generate_key_pair(&mut rng);
-    let contact_discovery = generate_discovery_key(&mut rng, &contact_signing, 0, CREATED_AT_SECS);
+    let contact_discovery =
+        generate_discovery_key(&mut rng, &contact_signing, 0, CREATED_AT_SECS).unwrap();
     let contact_rotated_discovery =
-        generate_discovery_key(&mut rng, &contact_signing, 1, CREATED_AT_SECS + 60);
+        generate_discovery_key(&mut rng, &contact_signing, 1, CREATED_AT_SECS + 60).unwrap();
 
     Setup {
         local_identity: IdentityKey {

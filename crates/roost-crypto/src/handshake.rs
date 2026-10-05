@@ -1164,12 +1164,15 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([0x42u8; 32]);
         let alice_identity = generate_signing_key_pair(&mut rng);
         let alice_identity_key = generated_public_identity_key(&mut rng, &alice_identity);
-        let alice_discovery_key = generate_discovery_key(&mut rng, &alice_identity, 2, FIXED_TS);
+        let alice_discovery_key =
+            generate_discovery_key(&mut rng, &alice_identity, 2, FIXED_TS).unwrap();
         let bob_identity = generate_signing_key_pair(&mut rng);
         let bob_identity_key = generated_public_identity_key(&mut rng, &bob_identity);
-        let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_TS);
+        let bob_discovery_key =
+            generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_TS).unwrap();
         let bob_signed_prekey =
-            generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, FIXED_TS);
+            generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, FIXED_TS)
+                .unwrap();
         let bob_one_time_prekey =
             generate_one_time_prekey(&mut rng, 9, bob_discovery_key.epoch(), FIXED_TS);
         let setup = FullX3dhSetup {
@@ -2069,7 +2072,7 @@ mod tests {
         let impersonated_identity_key = public_identity_key(&mut rng, 0xA7);
         let attacker_signing = generate_signing_key_pair(&mut rng);
         let attacker_discovery_key =
-            generate_discovery_key(&mut rng, &attacker_signing, 5, FIXED_TS);
+            generate_discovery_key(&mut rng, &attacker_signing, 5, FIXED_TS).unwrap();
 
         let initiator_ephemeral_key = generate_key_pair(&mut rng);
         let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
