@@ -15,8 +15,6 @@ type IdentityKeyBytes = (Zeroizing<[u8; 32]>, Zeroizing<[u8; 32]>);
 const IDENTITY_CURRENT_KEY: &str = "identity/current";
 const IDENTITY_KEY_BLOB_VERSION: u8 = 1;
 const IDENTITY_KEY_BLOB_LEN: usize = 1 + 32 + 32;
-const IDENTITY_X25519_KEY: &str = "identity/x25519";
-const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 
 /// Errors returned by identity operations.
 #[derive(Debug, thiserror::Error)]
@@ -71,9 +69,6 @@ pub enum IdentityError {
     /// Signing the binding between the Identity Key's halves failed.
     #[error("signing the identity key binding failed")]
     BindingSignature(#[source] SignatureError),
-    /// Only one of the two identity keys is present in storage.
-    #[error("identity data is corrupt")]
-    Corrupt,
     /// Backup decryption failed because the passphrase or ciphertext was invalid.
     #[error("decryption failed: wrong passphrase or corrupt backup")]
     DecryptionFailed,
@@ -85,7 +80,7 @@ pub enum IdentityError {
         /// Stored length in bytes.
         actual: usize,
     },
-    /// A stored identity key half has the wrong length.
+    /// An identity key half has the wrong length.
     #[error("identity key is {actual} bytes, expected {expected}")]
     InvalidKeyLength {
         /// Expected length in bytes.
@@ -170,8 +165,7 @@ impl IdentityManager {
         rng: &mut R,
     ) -> Result<Identity, IdentityError> {
         let mut storage = self.lock_storage()?;
-        let identity_exists = has_identity_entry(&**storage)?;
-        if identity_exists {
+        if storage.load(IDENTITY_CURRENT_KEY)?.is_some() {
             return Err(IdentityError::AlreadyExists);
         }
 
@@ -199,52 +193,17 @@ impl IdentityManager {
     // Use `KeyStore::prepare_identity_deletion` to clear dependent key material before identity.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
-        storage.delete(IDENTITY_X25519_KEY)?;
-        storage.delete(IDENTITY_ED25519_KEY)?;
         storage.delete(IDENTITY_CURRENT_KEY)?;
         Ok(())
     }
 
     fn load_identity_key_bytes(&self) -> Result<IdentityKeyBytes, IdentityError> {
         let storage = self.lock_storage()?;
-        if let Some(blob) = storage.load(IDENTITY_CURRENT_KEY)? {
-            return decode_identity_key_blob(&blob);
-        }
-
-        let (x25519_vec, ed25519_vec) = match (
-            storage.load(IDENTITY_X25519_KEY)?,
-            storage.load(IDENTITY_ED25519_KEY)?,
-        ) {
-            (None, None) => return Err(IdentityError::NotFound),
-            (Some(_), None) | (None, Some(_)) => return Err(IdentityError::Corrupt),
-            (Some(x25519), Some(ed25519)) => (x25519, ed25519),
-        };
-        let x25519_bytes: [u8; 32] =
-            x25519_vec
-                .as_slice()
-                .try_into()
-                .map_err(|_| IdentityError::InvalidKeyLength {
-                    expected: 32,
-                    actual: x25519_vec.len(),
-                })?;
-        let ed25519_bytes: [u8; 32] =
-            ed25519_vec
-                .as_slice()
-                .try_into()
-                .map_err(|_| IdentityError::InvalidKeyLength {
-                    expected: 32,
-                    actual: ed25519_vec.len(),
-                })?;
-        Ok((Zeroizing::new(x25519_bytes), Zeroizing::new(ed25519_bytes)))
+        let blob = storage
+            .load(IDENTITY_CURRENT_KEY)?
+            .ok_or(IdentityError::NotFound)?;
+        decode_identity_key_blob(&blob)
     }
-}
-
-fn has_identity_entry(storage: &dyn SecureStorage) -> Result<bool, IdentityError> {
-    if storage.load(IDENTITY_CURRENT_KEY)?.is_some() {
-        return Ok(true);
-    }
-    Ok(storage.load(IDENTITY_X25519_KEY)?.is_some()
-        || storage.load(IDENTITY_ED25519_KEY)?.is_some())
 }
 
 fn encode_identity_key_blob(
@@ -316,8 +275,6 @@ mod tests {
         assert_eq!(blob[0], 1);
         assert_eq!(&blob[1..], EXPECTED_CANONICAL_IDENTITY_SECRET);
         assert_ne!(&blob[1..33], &blob[33..IDENTITY_KEY_BLOB_LEN]);
-        assert!(storage.load(IDENTITY_X25519_KEY).unwrap().is_none());
-        assert!(storage.load(IDENTITY_ED25519_KEY).unwrap().is_none());
     }
 
     #[test]
@@ -359,46 +316,6 @@ mod tests {
             generated_identity.verifying_key().as_bytes(),
             loaded_identity.verifying_key().as_bytes()
         );
-    }
-
-    #[test]
-    fn load_identity_reads_legacy_two_entry_identity() {
-        let manager = manager();
-        let mut rng = ChaCha20Rng::from_seed([0x49u8; 32]);
-        let key_pair = generate_key_pair(&mut rng);
-        let signing_key_pair = generate_signing_key_pair(&mut rng);
-        {
-            let mut storage = manager.storage.lock().unwrap();
-            storage
-                .store(IDENTITY_X25519_KEY, &*key_pair.to_secret_bytes())
-                .unwrap();
-            storage
-                .store(IDENTITY_ED25519_KEY, &*signing_key_pair.to_signing_bytes())
-                .unwrap();
-        }
-
-        let loaded_identity = manager.load_identity().unwrap();
-
-        assert_eq!(key_pair.public, *loaded_identity.public_key());
-        assert_eq!(
-            signing_key_pair.verifying.as_bytes(),
-            loaded_identity.verifying_key().as_bytes()
-        );
-    }
-
-    #[test]
-    fn load_identity_returns_corrupt_when_only_one_key_present() {
-        let manager = manager();
-        manager
-            .storage
-            .lock()
-            .unwrap()
-            .store(IDENTITY_X25519_KEY, &[0u8; 32])
-            .unwrap();
-        assert!(matches!(
-            manager.load_identity(),
-            Err(IdentityError::Corrupt)
-        ));
     }
 
     #[test]

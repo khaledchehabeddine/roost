@@ -297,7 +297,8 @@ impl IdentityContext {
     /// Returns the stored identity's public keys, absent when no identity is stored.
     ///
     /// # Errors
-    /// - [`RoostError::Corrupt`] if the identity is only partly stored.
+    /// - [`RoostError::InvalidData`] if the stored identity is malformed.
+    /// - [`RoostError::UnsupportedVersion`] if the stored identity uses an unknown format version.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn identity(&self) -> Result<Option<Identity>, RoostError> {
@@ -663,8 +664,7 @@ impl Messaging {
     /// # Errors
     /// - [`RoostError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
     ///   fails.
-    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
-    ///   fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
     /// - [`RoostError::InvalidData`] if key, Message, certificate, prekey, or Transport Binding
     ///   inputs are malformed.
@@ -722,8 +722,7 @@ impl Messaging {
     /// - [`RoostError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key
     ///   and Transport Binding, the selected one-time-prekey identifier does not match the
     ///   Message, or the named identity's binding signature does not verify.
-    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
-    ///   fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
     /// - [`RoostError::InvalidData`] if the Message or Transport Binding is malformed.
@@ -757,8 +756,7 @@ impl Messaging {
     /// # Errors
     /// - [`RoostError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
     ///   fails.
-    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
-    ///   fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`RoostError::InternalError`] on storage lock poisoning or operation identifier
     ///   generation failure.
@@ -817,10 +815,9 @@ impl Messaging {
     /// - [`RoostError::ContactNotAccepted`] if the peer contact is still pending.
     /// - [`RoostError::TerminalSessionRecovery`] if the Session requires replacement.
     /// - [`RoostError::BlockedContact`] if the contact is locally blocked.
-    /// - [`RoostError::Corrupt`] if stored Identity material is incomplete.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
-    /// - [`RoostError::InvalidData`] if Message identifiers, keys, Message fields, or the
-    ///   Transport Binding are malformed.
+    /// - [`RoostError::InvalidData`] if Message identifiers, keys, Message fields, the Transport
+    ///   Binding, or the stored Identity are malformed.
     /// - [`RoostError::NotFound`] if local Identity material is missing.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::ProtocolStateFault`] if required blobs are missing or malformed.
@@ -877,8 +874,7 @@ impl Messaging {
     /// - [`RoostError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
     ///   authentication fails.
     /// - [`RoostError::CertificateRejected`] if sender-certificate validation rejects the sender.
-    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
-    ///   fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
     /// - [`RoostError::InvalidData`] if Message identifiers, keys, Message fields, or either
     ///   Transport Binding is malformed.
@@ -973,8 +969,7 @@ impl Messaging {
     /// # Errors
     /// - [`RoostError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
     ///   authentication fails.
-    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
-    ///   fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
     /// - [`RoostError::InvalidData`] if Message fields or the Transport Binding are malformed.
     /// - [`RoostError::NotFound`] if local Identity or Discovery Key material is missing.

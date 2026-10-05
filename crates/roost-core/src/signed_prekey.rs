@@ -10,23 +10,13 @@ use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const SIGNED_PREKEY_KEY: &str = "prekey/signed";
-const SIGNED_PREKEY_VERSION_V1: u8 = 1;
-const SIGNED_PREKEY_VERSION_V2: u8 = 2;
-const SIGNED_PREKEY_VERSION_V3: u8 = 3;
 const SIGNED_PREKEY_VERSION: u8 = 4;
-// Record layout: secret (32) | signature (64) | epoch (4) | created_at (8).
-const LEGACY_SIGNED_PREKEY_RECORD_LEN: usize = 32 + 64 + 4 + 8;
-// V1 blob layout: version (1) | current record.
-const SIGNED_PREKEY_V1_BLOB_LEN: usize = 1 + LEGACY_SIGNED_PREKEY_RECORD_LEN;
-// V2 blob layout: version (1) | current record | retained flag (1) | retained record.
-const SIGNED_PREKEY_V2_BLOB_LEN: usize =
-    1 + LEGACY_SIGNED_PREKEY_RECORD_LEN + 1 + LEGACY_SIGNED_PREKEY_RECORD_LEN;
-// V3 blob layout: version (1) | current record | retained flag (1) | retained record | superseded_at (8).
-const SIGNED_PREKEY_V3_BLOB_LEN: usize = SIGNED_PREKEY_V2_BLOB_LEN + 8;
-// V4 record layout: id (8) | legacy record.
-const SIGNED_PREKEY_RECORD_LEN: usize = 8 + LEGACY_SIGNED_PREKEY_RECORD_LEN;
+// Record layout: id (8) | secret (32) | signature (64) | epoch (4) | created_at (8).
+const SIGNED_PREKEY_RECORD_LEN: usize = 8 + 32 + 64 + 4 + 8;
+// Retained record layout: record | superseded_at (8).
 const RETAINED_SIGNED_PREKEY_RECORD_LEN: usize = SIGNED_PREKEY_RECORD_LEN + 8;
-const SIGNED_PREKEY_V4_HEADER_LEN: usize = 1 + 8 + SIGNED_PREKEY_RECORD_LEN + 1;
+// Header layout: version (1) | next_id (8) | current record | retained count (1).
+const SIGNED_PREKEY_HEADER_LEN: usize = 1 + 8 + SIGNED_PREKEY_RECORD_LEN + 1;
 const MAX_RETAINED_SIGNED_PREKEYS: usize = 5;
 const SECONDS_PER_DAY: u64 = 86_400;
 const SIGNED_PREKEY_ROTATION_WINDOW: Duration = Duration::from_secs(7 * SECONDS_PER_DAY);
@@ -74,9 +64,6 @@ pub enum SignedPreKeyError {
         /// Stored length in bytes.
         actual: usize,
     },
-    /// A stored retained-key flag is neither 0 nor 1.
-    #[error("invalid retained signed pre-key flag: {0}")]
-    InvalidRetainedFlag(u8),
     /// The stored next identifier doesn't follow the current signed pre-key's identifier.
     #[error(
         "next signed pre-key identifier {next_id} does not follow current identifier {current_id}"
@@ -287,7 +274,6 @@ impl SignedPreKeyManager {
         let Some(raw) = storage.load(SIGNED_PREKEY_KEY)? else {
             return Ok(None);
         };
-        let is_legacy = raw.first().copied() != Some(SIGNED_PREKEY_VERSION);
         let mut store = decode_signed_prekey_store(&raw)?;
         let retained_count = store.retained.len();
         store.retained.retain(|retained| {
@@ -297,7 +283,7 @@ impl SignedPreKeyManager {
                 SIGNED_PREKEY_RETENTION_WINDOW,
             )
         });
-        if is_legacy || retained_count != store.retained.len() {
+        if retained_count != store.retained.len() {
             let blob = encode_signed_prekey_store(&store);
             storage.store(SIGNED_PREKEY_KEY, &blob)?;
         }
@@ -354,7 +340,7 @@ fn is_expired(timestamp_secs: u64, now: SystemTime, window: Duration) -> bool {
 
 fn encode_signed_prekey_store(store: &StoredSignedPreKeys) -> Zeroizing<Vec<u8>> {
     let mut blob = Zeroizing::new(Vec::with_capacity(
-        SIGNED_PREKEY_V4_HEADER_LEN + store.retained.len() * RETAINED_SIGNED_PREKEY_RECORD_LEN,
+        SIGNED_PREKEY_HEADER_LEN + store.retained.len() * RETAINED_SIGNED_PREKEY_RECORD_LEN,
     ));
     blob.push(SIGNED_PREKEY_VERSION);
     blob.extend_from_slice(&store.next_id.to_be_bytes());
@@ -387,126 +373,42 @@ fn encode_signed_prekey_record(blob: &mut Vec<u8>, signed_prekey: &SignedPreKey)
 fn decode_signed_prekey_record(record: &[u8]) -> SignedPreKey {
     let mut id_bytes = [0u8; 8];
     id_bytes.copy_from_slice(&record[..8]);
-    decode_legacy_signed_prekey_record(&record[8..], u64::from_be_bytes(id_bytes))
-}
-
-fn decode_legacy_signed_prekey_record(record: &[u8], id: u64) -> SignedPreKey {
-    let mut secret = [0u8; 32];
-    secret.copy_from_slice(&record[..32]);
+    let mut secret = Zeroizing::new([0u8; 32]);
+    secret.copy_from_slice(&record[8..40]);
     let mut signature = [0u8; 64];
-    signature.copy_from_slice(&record[32..96]);
+    signature.copy_from_slice(&record[40..104]);
     let mut epoch_bytes = [0u8; 4];
-    epoch_bytes.copy_from_slice(&record[96..100]);
+    epoch_bytes.copy_from_slice(&record[104..108]);
     let mut created_at_bytes = [0u8; 8];
-    created_at_bytes.copy_from_slice(&record[100..LEGACY_SIGNED_PREKEY_RECORD_LEN]);
-    let epoch = u32::from_be_bytes(epoch_bytes);
-    let created_at_secs = u64::from_be_bytes(created_at_bytes);
-    SignedPreKey::from_secret_bytes(secret, signature, id, epoch, created_at_secs)
+    created_at_bytes.copy_from_slice(&record[108..SIGNED_PREKEY_RECORD_LEN]);
+    SignedPreKey::from_secret_bytes(
+        *secret,
+        signature,
+        u64::from_be_bytes(id_bytes),
+        u32::from_be_bytes(epoch_bytes),
+        u64::from_be_bytes(created_at_bytes),
+    )
 }
 
 fn decode_signed_prekey_store(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
     if raw == INBOX_ROTATION_REQUIRED_MARKER {
         return Err(SignedPreKeyError::InboxRotationRequired);
     }
-    let store = match raw.first().copied() {
-        Some(SIGNED_PREKEY_VERSION_V1) => decode_signed_prekey_store_v1(raw),
-        Some(SIGNED_PREKEY_VERSION_V2) => decode_signed_prekey_store_v2(raw),
-        Some(SIGNED_PREKEY_VERSION_V3) => decode_signed_prekey_store_v3(raw),
-        Some(SIGNED_PREKEY_VERSION) => decode_signed_prekey_store_v4(raw),
-        Some(version) => Err(SignedPreKeyError::UnsupportedVersion(version)),
-        None => Err(SignedPreKeyError::BlobTooShort { len: 0, min_len: 1 }),
-    }?;
+    match raw.first().copied() {
+        Some(SIGNED_PREKEY_VERSION) => {}
+        Some(version) => return Err(SignedPreKeyError::UnsupportedVersion(version)),
+        None => return Err(SignedPreKeyError::BlobTooShort { len: 0, min_len: 1 }),
+    }
+    let store = decode_signed_prekey_store_body(raw)?;
     validate_signed_prekey_store(store.next_id, &store.current, &store.retained)?;
     Ok(store)
 }
 
-fn decode_signed_prekey_store_v1(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
-    if raw.len() != SIGNED_PREKEY_V1_BLOB_LEN {
-        return Err(SignedPreKeyError::InvalidBlobLength {
-            expected: SIGNED_PREKEY_V1_BLOB_LEN,
-            actual: raw.len(),
-        });
-    }
-    Ok(StoredSignedPreKeys {
-        next_id: 1,
-        current: decode_legacy_signed_prekey_record(&raw[1..SIGNED_PREKEY_V1_BLOB_LEN], 0),
-        retained: Vec::new(),
-    })
-}
-
-fn decode_signed_prekey_store_v2(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
-    if raw.len() != SIGNED_PREKEY_V2_BLOB_LEN {
-        return Err(SignedPreKeyError::InvalidBlobLength {
-            expected: SIGNED_PREKEY_V2_BLOB_LEN,
-            actual: raw.len(),
-        });
-    }
-    let current_end = 1 + LEGACY_SIGNED_PREKEY_RECORD_LEN;
-    let retained_flag = raw[current_end];
-    let has_retained = match retained_flag {
-        0 => false,
-        1 => true,
-        flag => {
-            return Err(SignedPreKeyError::InvalidRetainedFlag(flag));
-        }
-    };
-    let current = decode_legacy_signed_prekey_record(&raw[1..current_end], u64::from(has_retained));
-    let retained = if has_retained {
-        let retained_start = current_end + 1;
-        let prekey =
-            decode_legacy_signed_prekey_record(&raw[retained_start..SIGNED_PREKEY_V2_BLOB_LEN], 0);
-        vec![RetainedSignedPreKey {
-            superseded_at_secs: current.created_at_secs(),
-            prekey,
-        }]
-    } else {
-        Vec::new()
-    };
-    Ok(StoredSignedPreKeys {
-        next_id: if has_retained { 2 } else { 1 },
-        current,
-        retained,
-    })
-}
-
-fn decode_signed_prekey_store_v3(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
-    if raw.len() != SIGNED_PREKEY_V3_BLOB_LEN {
-        return Err(SignedPreKeyError::InvalidBlobLength {
-            expected: SIGNED_PREKEY_V3_BLOB_LEN,
-            actual: raw.len(),
-        });
-    }
-    let current_end = 1 + LEGACY_SIGNED_PREKEY_RECORD_LEN;
-    let retained = match raw[current_end] {
-        0 => Vec::new(),
-        1 => {
-            let retained_start = current_end + 1;
-            let retained_end = retained_start + LEGACY_SIGNED_PREKEY_RECORD_LEN;
-            let prekey = decode_legacy_signed_prekey_record(&raw[retained_start..retained_end], 0);
-            let mut superseded_at_bytes = [0u8; 8];
-            superseded_at_bytes.copy_from_slice(&raw[retained_end..SIGNED_PREKEY_V3_BLOB_LEN]);
-            vec![RetainedSignedPreKey {
-                prekey,
-                superseded_at_secs: u64::from_be_bytes(superseded_at_bytes),
-            }]
-        }
-        flag => {
-            return Err(SignedPreKeyError::InvalidRetainedFlag(flag));
-        }
-    };
-    let has_retained = !retained.is_empty();
-    Ok(StoredSignedPreKeys {
-        next_id: if has_retained { 2 } else { 1 },
-        current: decode_legacy_signed_prekey_record(&raw[1..current_end], has_retained.into()),
-        retained,
-    })
-}
-
-fn decode_signed_prekey_store_v4(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
-    if raw.len() < SIGNED_PREKEY_V4_HEADER_LEN {
+fn decode_signed_prekey_store_body(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
+    if raw.len() < SIGNED_PREKEY_HEADER_LEN {
         return Err(SignedPreKeyError::BlobTooShort {
             len: raw.len(),
-            min_len: SIGNED_PREKEY_V4_HEADER_LEN,
+            min_len: SIGNED_PREKEY_HEADER_LEN,
         });
     }
     let mut next_id_bytes = [0u8; 8];
@@ -522,7 +424,7 @@ fn decode_signed_prekey_store_v4(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
         });
     }
     let expected_len =
-        SIGNED_PREKEY_V4_HEADER_LEN + retained_count * RETAINED_SIGNED_PREKEY_RECORD_LEN;
+        SIGNED_PREKEY_HEADER_LEN + retained_count * RETAINED_SIGNED_PREKEY_RECORD_LEN;
     if raw.len() != expected_len {
         return Err(SignedPreKeyError::InvalidBlobLength {
             expected: expected_len,
@@ -530,7 +432,7 @@ fn decode_signed_prekey_store_v4(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
         });
     }
     let mut retained = Vec::with_capacity(retained_count);
-    let mut offset = SIGNED_PREKEY_V4_HEADER_LEN;
+    let mut offset = SIGNED_PREKEY_HEADER_LEN;
     for _ in 0..retained_count {
         let prekey_end = offset + SIGNED_PREKEY_RECORD_LEN;
         let prekey = decode_signed_prekey_record(&raw[offset..prekey_end]);
@@ -679,13 +581,6 @@ mod tests {
             .store(SIGNED_PREKEY_KEY, &blob)
             .unwrap();
         signed_prekey
-    }
-
-    fn encode_legacy_record(blob: &mut Vec<u8>, prekey: &SignedPreKey) {
-        blob.extend_from_slice(&*prekey.to_secret_bytes());
-        blob.extend_from_slice(&prekey.signature().to_bytes());
-        blob.extend_from_slice(&prekey.epoch().to_be_bytes());
-        blob.extend_from_slice(&prekey.created_at_secs().to_be_bytes());
     }
 
     #[test]
@@ -1016,7 +911,7 @@ mod tests {
     #[test]
     fn rotate_if_stale_rejects_unsupported_version() {
         let manager = setup_with_discovery_key().manager;
-        let mut blob = [0u8; SIGNED_PREKEY_V4_HEADER_LEN];
+        let mut blob = [0u8; SIGNED_PREKEY_HEADER_LEN];
         blob[0] = 99;
         manager
             .storage
@@ -1055,7 +950,7 @@ mod tests {
             generate_signed_prekey(&mut OsRng, &identity_signing_key, 0, FIXED_EPOCH, FIXED_NOW)
                 .unwrap();
         let blob = encode_signed_prekey(&original);
-        assert_eq!(blob.len(), SIGNED_PREKEY_V4_HEADER_LEN);
+        assert_eq!(blob.len(), SIGNED_PREKEY_HEADER_LEN);
         let store = decode_signed_prekey_store(&blob).unwrap();
         let restored = store.current.clone_for_storage();
         assert_eq!(
@@ -1068,102 +963,6 @@ mod tests {
         );
         assert_eq!(restored.epoch(), original.epoch());
         assert_eq!(restored.created_at_secs(), original.created_at_secs());
-    }
-
-    #[test]
-    fn version_three_store_migrates_retained_and_current_ids() {
-        let signing_key = generate_signing_key_pair(&mut OsRng);
-        let retained = generate_signed_prekey(
-            &mut OsRng,
-            &signing_key,
-            99,
-            FIXED_EPOCH,
-            FIXED_NOW - SECONDS_PER_DAY,
-        )
-        .unwrap();
-        let current =
-            generate_signed_prekey(&mut OsRng, &signing_key, 100, FIXED_EPOCH, FIXED_NOW).unwrap();
-        let mut blob = Vec::with_capacity(SIGNED_PREKEY_V3_BLOB_LEN);
-        blob.push(SIGNED_PREKEY_VERSION_V3);
-        encode_legacy_record(&mut blob, &current);
-        blob.push(1);
-        encode_legacy_record(&mut blob, &retained);
-        blob.extend_from_slice(&FIXED_NOW.to_be_bytes());
-
-        let migrated = decode_signed_prekey_store(&blob).unwrap();
-        assert_eq!(migrated.next_id, 2);
-        assert_eq!(migrated.current.id(), 1);
-        assert_eq!(migrated.retained.len(), 1);
-        assert_eq!(migrated.retained[0].prekey.id(), 0);
-        assert!(decode_signed_prekey_store(&encode_signed_prekey_store(&migrated)).is_ok());
-    }
-
-    #[test]
-    fn version_two_store_retains_key_for_thirty_days_from_current_key_creation() {
-        let signing_key = generate_signing_key_pair(&mut OsRng);
-        let retained = generate_signed_prekey(
-            &mut OsRng,
-            &signing_key,
-            99,
-            FIXED_EPOCH,
-            FIXED_NOW - SIGNED_PREKEY_ROTATION_WINDOW_SECS,
-        )
-        .unwrap();
-        let current =
-            generate_signed_prekey(&mut OsRng, &signing_key, 100, FIXED_EPOCH, FIXED_NOW).unwrap();
-        let mut blob = Vec::with_capacity(SIGNED_PREKEY_V2_BLOB_LEN);
-        blob.push(SIGNED_PREKEY_VERSION_V2);
-        encode_legacy_record(&mut blob, &current);
-        blob.push(1);
-        encode_legacy_record(&mut blob, &retained);
-
-        let migrated = decode_signed_prekey_store(&blob).unwrap();
-        let migrated_retained = &migrated.retained[0];
-
-        assert_eq!(migrated_retained.superseded_at_secs, FIXED_NOW);
-        assert!(!is_expired(
-            migrated_retained.superseded_at_secs,
-            at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS - 1),
-            SIGNED_PREKEY_RETENTION_WINDOW,
-        ));
-        assert!(is_expired(
-            migrated_retained.superseded_at_secs,
-            at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS),
-            SIGNED_PREKEY_RETENTION_WINDOW,
-        ));
-    }
-
-    #[test]
-    fn legacy_store_rejects_retained_key_from_different_epoch_before_migration() {
-        let signing_key = generate_signing_key_pair(&mut OsRng);
-        let current =
-            generate_signed_prekey(&mut OsRng, &signing_key, 1, FIXED_EPOCH, FIXED_NOW).unwrap();
-        let retained = generate_signed_prekey(
-            &mut OsRng,
-            &signing_key,
-            0,
-            FIXED_EPOCH + 1,
-            FIXED_NOW - SECONDS_PER_DAY,
-        )
-        .unwrap();
-        let mut version_two = Vec::with_capacity(SIGNED_PREKEY_V2_BLOB_LEN);
-        version_two.push(SIGNED_PREKEY_VERSION_V2);
-        encode_legacy_record(&mut version_two, &current);
-        version_two.push(1);
-        encode_legacy_record(&mut version_two, &retained);
-        let mut version_three = version_two.clone();
-        version_three[0] = SIGNED_PREKEY_VERSION_V3;
-        version_three.extend_from_slice(&FIXED_NOW.to_be_bytes());
-
-        for blob in [version_two, version_three] {
-            assert!(matches!(
-                decode_signed_prekey_store(&blob),
-                Err(SignedPreKeyError::RetainedEpochMismatch {
-                    retained_epoch,
-                    current_epoch: FIXED_EPOCH,
-                }) if retained_epoch == FIXED_EPOCH + 1
-            ));
-        }
     }
 
     #[test]
@@ -1206,7 +1005,7 @@ mod tests {
             checked_blob(&[SIGNED_PREKEY_VERSION; 50]),
             Err(SignedPreKeyError::BlobTooShort {
                 len: 50,
-                min_len: SIGNED_PREKEY_V4_HEADER_LEN
+                min_len: SIGNED_PREKEY_HEADER_LEN
             })
         ));
     }
@@ -1217,13 +1016,13 @@ mod tests {
         assert!(matches!(
             checked_blob(&[SIGNED_PREKEY_VERSION; 200]),
             Err(SignedPreKeyError::InvalidBlobLength { expected, actual: 200 })
-                if expected == SIGNED_PREKEY_V4_HEADER_LEN + 4 * RETAINED_SIGNED_PREKEY_RECORD_LEN
+                if expected == SIGNED_PREKEY_HEADER_LEN + 4 * RETAINED_SIGNED_PREKEY_RECORD_LEN
         ));
     }
 
     #[test]
     fn checked_blob_rejects_unsupported_version() {
-        let mut blob = [0u8; SIGNED_PREKEY_V4_HEADER_LEN];
+        let mut blob = [0u8; SIGNED_PREKEY_HEADER_LEN];
         blob[0] = 99;
         assert!(matches!(
             checked_blob(&blob),
