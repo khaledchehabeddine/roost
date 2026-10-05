@@ -3,12 +3,13 @@
 use crate::error::ClientError;
 use crate::time::{millis_from_secs, whole_secs_from_millis};
 use roost_core::{
-    DiscoveryKeyBundle as CoreDiscoveryKeyBundle, IdentityKeyBundle as CoreIdentityKeyBundle,
-    OneTimePreKeyBundle as CoreOneTimePreKeyBundle, PreKeyBundle as CorePreKeyBundle, PublicKey,
-    Signature, SignedPreKeyBundle as CoreSignedPreKeyBundle,
+    Identity as CoreIdentity, IdentityError, PublicationBundle as CorePublicationBundle,
 };
 use roost_core::{
-    Identity as CoreIdentity, IdentityError, PublicationBundle as CorePublicationBundle,
+    PreKeyBundle as CorePreKeyBundle, PublicDiscoveryKey as CorePublicDiscoveryKey,
+    PublicIdentityKey as CorePublicIdentityKey, PublicKey,
+    PublicOneTimePreKey as CorePublicOneTimePreKey, PublicSignedPreKey as CorePublicSignedPreKey,
+    Signature,
 };
 
 /// Public identity material exposed through UniFFI.
@@ -26,7 +27,7 @@ pub struct Identity {
 
 impl Identity {
     pub(crate) fn from_core(id: CoreIdentity) -> Result<Self, IdentityError> {
-        let bundle = id.identity_key_bundle()?;
+        let bundle = id.public()?;
         Ok(Identity {
             x25519_public_key: bundle.public_key.as_bytes().to_vec(),
             ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
@@ -34,8 +35,8 @@ impl Identity {
         })
     }
 
-    pub(crate) fn to_core(&self) -> Result<CoreIdentityKeyBundle, ClientError> {
-        CoreIdentityKeyBundle::from_bytes(
+    pub(crate) fn to_core(&self) -> Result<CorePublicIdentityKey, ClientError> {
+        CorePublicIdentityKey::from_bytes(
             &self.x25519_public_key,
             &self.ed25519_verifying_key,
             &self.identity_binding_signature,
@@ -46,23 +47,9 @@ impl Identity {
 
 /// Public signed pre-key material used to start a session.
 ///
-/// Verify this bundle with the matching discovery-key verifying key.
-///
-/// # Examples
-/// ```
-/// use roost_client::SignedPreKeyBundle;
-///
-/// let bundle = SignedPreKeyBundle {
-///     id: u64::MAX,
-///     public_key: vec![0x11; 32],
-///     signature: vec![0x22; 64],
-///     epoch: 7,
-///     created_at_millis: 1_700_000_000_000,
-/// };
-/// assert_eq!(bundle.id, u64::MAX);
-/// ```
+/// Verify this key with the matching discovery-key verifying key.
 #[derive(Clone, uniffi::Record)]
-pub struct SignedPreKeyBundle {
+pub struct PublicSignedPreKey {
     /// Stable unsigned identifier within the discovery-key epoch. A host that needs this lookup
     /// value authenticated as transport metadata must include it in its Transport Binding.
     pub id: u64,
@@ -77,9 +64,9 @@ pub struct SignedPreKeyBundle {
     pub created_at_millis: u64,
 }
 
-impl SignedPreKeyBundle {
-    pub(crate) fn from_core(b: CoreSignedPreKeyBundle) -> Result<Self, ClientError> {
-        Ok(SignedPreKeyBundle {
+impl PublicSignedPreKey {
+    pub(crate) fn from_core(b: CorePublicSignedPreKey) -> Result<Self, ClientError> {
+        Ok(PublicSignedPreKey {
             id: b.id,
             public_key: b.public_key.as_bytes().to_vec(),
             signature: b.signature.to_bytes().to_vec(),
@@ -88,8 +75,8 @@ impl SignedPreKeyBundle {
         })
     }
 
-    pub(crate) fn to_core(&self) -> Result<CoreSignedPreKeyBundle, ClientError> {
-        Ok(CoreSignedPreKeyBundle {
+    pub(crate) fn to_core(&self) -> Result<CorePublicSignedPreKey, ClientError> {
+        Ok(CorePublicSignedPreKey {
             id: self.id,
             public_key: public_key_from_vec(&self.public_key)?,
             signature: signature_from_vec(&self.signature)?,
@@ -105,21 +92,8 @@ impl SignedPreKeyBundle {
 /// Public one-time pre-key material used to start a session.
 ///
 /// The secret half stays in Rust-managed secure storage and is consumed at most once.
-///
-/// # Examples
-/// ```
-/// use roost_client::OneTimePreKeyBundle;
-///
-/// let bundle = OneTimePreKeyBundle {
-///     id: u64::MAX,
-///     public_key: vec![0x11; 32],
-///     epoch: 7,
-///     created_at_millis: 1_700_000_000_000,
-/// };
-/// assert_eq!(bundle.id, u64::MAX);
-/// ```
 #[derive(Clone, uniffi::Record)]
-pub struct OneTimePreKeyBundle {
+pub struct PublicOneTimePreKey {
     /// One-time pre-key identifier within the current discovery-key epoch.
     pub id: u64,
     /// X25519 public key bytes. Always 32 bytes.
@@ -130,9 +104,9 @@ pub struct OneTimePreKeyBundle {
     pub created_at_millis: u64,
 }
 
-impl OneTimePreKeyBundle {
-    pub(crate) fn from_core(b: CoreOneTimePreKeyBundle) -> Result<Self, ClientError> {
-        Ok(OneTimePreKeyBundle {
+impl PublicOneTimePreKey {
+    pub(crate) fn from_core(b: CorePublicOneTimePreKey) -> Result<Self, ClientError> {
+        Ok(PublicOneTimePreKey {
             id: b.id,
             public_key: b.public_key.as_bytes().to_vec(),
             epoch: b.epoch,
@@ -143,19 +117,19 @@ impl OneTimePreKeyBundle {
         })
     }
 
-    pub(crate) fn to_core(&self) -> Result<CoreOneTimePreKeyBundle, ClientError> {
+    pub(crate) fn to_core(&self) -> Result<CorePublicOneTimePreKey, ClientError> {
         let created_at_secs =
             whole_secs_from_millis(self.created_at_millis, "one-time pre-key created_at_millis")?;
-        CoreOneTimePreKeyBundle::from_bytes(self.id, &self.public_key, self.epoch, created_at_secs)
+        CorePublicOneTimePreKey::from_bytes(self.id, &self.public_key, self.epoch, created_at_secs)
             .map_err(ClientError::from)
     }
 }
 
 /// Public discovery-key material a peer uses to verify this identity's signed pre-keys.
 ///
-/// Verify this bundle with the identity verifying key before trusting [`Self::verifying_key`].
+/// Verify this key with the identity verifying key before trusting [`Self::verifying_key`].
 #[derive(Clone, uniffi::Record)]
-pub struct DiscoveryKeyBundle {
+pub struct PublicDiscoveryKey {
     /// X25519 key-agreement public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
     /// Ed25519 verifying key bytes that validate this discovery key's signed pre-keys. Always 32 bytes.
@@ -168,9 +142,9 @@ pub struct DiscoveryKeyBundle {
     pub created_at_millis: u64,
 }
 
-impl DiscoveryKeyBundle {
-    pub(crate) fn from_core(b: CoreDiscoveryKeyBundle) -> Result<Self, ClientError> {
-        Ok(DiscoveryKeyBundle {
+impl PublicDiscoveryKey {
+    pub(crate) fn from_core(b: CorePublicDiscoveryKey) -> Result<Self, ClientError> {
+        Ok(PublicDiscoveryKey {
             public_key: b.public_key.as_bytes().to_vec(),
             verifying_key: b.verifying_key.as_bytes().to_vec(),
             signature: b.signature.to_bytes().to_vec(),
@@ -179,8 +153,8 @@ impl DiscoveryKeyBundle {
         })
     }
 
-    pub(crate) fn to_core(&self) -> Result<CoreDiscoveryKeyBundle, ClientError> {
-        CoreDiscoveryKeyBundle::from_bytes(
+    pub(crate) fn to_core(&self) -> Result<CorePublicDiscoveryKey, ClientError> {
+        CorePublicDiscoveryKey::from_bytes(
             &self.public_key,
             &self.verifying_key,
             self.epoch,
@@ -191,17 +165,17 @@ impl DiscoveryKeyBundle {
     }
 }
 
-/// A publishable discovery-key bundle and signed pre-key pair.
+/// A publishable public discovery key and signed pre-key pair.
 ///
 /// The signed pre-key verifies with the included discovery key.
 #[derive(Clone, uniffi::Record)]
 pub struct PublicationBundle {
     /// Version of the public pre-key bundle format.
     pub version: u8,
-    /// Discovery-key bundle for this publication.
+    /// Public discovery key for this publication.
     ///
     /// Its `signature` field is the IK→DK half of the mutual binding.
-    pub discovery_key: DiscoveryKeyBundle,
+    pub discovery_key: PublicDiscoveryKey,
     /// The DK→IK half of the mutual binding: [`Self::discovery_key`] signing the identity it
     /// belongs to. Always 64 bytes.
     ///
@@ -214,18 +188,18 @@ pub struct PublicationBundle {
     /// Register this value. Never register the capability itself — that is a bearer secret, and
     /// handing it to the relay would defeat the point of committing to it.
     pub recipient_delivery_verifier: Vec<u8>,
-    /// Signed pre-key bundle for this publication.
-    pub signed_prekey: SignedPreKeyBundle,
+    /// Public signed pre-key for this publication.
+    pub signed_prekey: PublicSignedPreKey,
 }
 
 impl PublicationBundle {
     pub(crate) fn from_core(b: CorePublicationBundle) -> Result<Self, ClientError> {
         Ok(PublicationBundle {
             version: b.version,
-            discovery_key: DiscoveryKeyBundle::from_core(b.discovery_key)?,
+            discovery_key: PublicDiscoveryKey::from_core(b.discovery_key)?,
             discovery_to_identity: b.discovery_to_identity.to_bytes().to_vec(),
             recipient_delivery_verifier: b.recipient_delivery_verifier.as_bytes().to_vec(),
-            signed_prekey: SignedPreKeyBundle::from_core(b.signed_prekey)?,
+            signed_prekey: PublicSignedPreKey::from_core(b.signed_prekey)?,
         })
     }
 }
@@ -258,7 +232,7 @@ impl PublicationBundle {
 
     pub(crate) fn to_prekey_bundle(
         &self,
-        one_time_prekey: Option<OneTimePreKeyBundle>,
+        one_time_prekey: Option<PublicOneTimePreKey>,
     ) -> Result<CorePreKeyBundle, ClientError> {
         Ok(CorePreKeyBundle {
             version: self.version,
@@ -266,7 +240,7 @@ impl PublicationBundle {
             signed_prekey: self.signed_prekey.to_core()?,
             one_time_prekey: one_time_prekey
                 .as_ref()
-                .map(OneTimePreKeyBundle::to_core)
+                .map(PublicOneTimePreKey::to_core)
                 .transpose()?,
         })
     }
@@ -309,14 +283,14 @@ mod tests {
             .public
             .as_bytes()
             .to_vec();
-        let signed = SignedPreKeyBundle {
+        let signed = PublicSignedPreKey {
             id: u64::MAX,
             public_key: public_key.clone(),
             signature: vec![0; 64],
             epoch: u32::MAX,
             created_at_millis: u64::MAX / 1_000 * 1_000,
         };
-        let one_time = OneTimePreKeyBundle {
+        let one_time = PublicOneTimePreKey {
             id: u64::MAX,
             public_key,
             epoch: u32::MAX,

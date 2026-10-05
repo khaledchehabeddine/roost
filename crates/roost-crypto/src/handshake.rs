@@ -1,12 +1,12 @@
 //! Implements the X3DH handshake that bootstraps Double Ratchet sessions.
 
-use crate::discovery_key::{DiscoveryKey, DiscoveryKeyBundle, verify_discovery_key_bundle};
+use crate::discovery_key::{DiscoveryKey, PublicDiscoveryKey, verify_public_discovery_key};
 use crate::double_ratchet::{Header, RatchetError, RatchetState};
 use crate::keys::{
-    IdentityKeyBundle, KeyBundleError, KeyPair, PublicKey, SharedSecret, generate_key_pair,
-    is_valid_x25519_public_key, verify_identity_key_bundle,
+    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, generate_key_pair,
+    is_valid_x25519_public_key, verify_public_identity_key,
 };
-use crate::one_time_prekey::{OneTimePreKey, OneTimePreKeyBundle};
+use crate::one_time_prekey::{OneTimePreKey, PublicOneTimePreKey};
 use crate::ratchet::RootKey;
 #[cfg(test)]
 use crate::sealed_frame::seal_frame_with_ephemeral_key;
@@ -15,7 +15,7 @@ use crate::sealed_frame::{
     open_frame_for_discovery_key_with_associated_data,
     seal_frame_with_ephemeral_key_and_associated_data,
 };
-use crate::signed_prekey::{SignedPreKey, SignedPreKeyBundle, verify_signed_prekey_bundle};
+use crate::signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_public_signed_prekey};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -71,11 +71,11 @@ pub struct PreKeyBundle {
     /// Version of the public pre-key bundle format.
     pub version: u8,
     /// Responder discovery key verified by the responder's identity key.
-    pub discovery_key: DiscoveryKeyBundle,
+    pub discovery_key: PublicDiscoveryKey,
     /// Responder signed pre-key verified by the discovery key.
-    pub signed_prekey: SignedPreKeyBundle,
+    pub signed_prekey: PublicSignedPreKey,
     /// Optional one-time pre-key bound to the same discovery-key epoch.
-    pub one_time_prekey: Option<OneTimePreKeyBundle>,
+    pub one_time_prekey: Option<PublicOneTimePreKey>,
 }
 
 /// Sender identity material decoded only after first-message ciphertext authentication succeeds.
@@ -165,7 +165,7 @@ struct DecodedHandshakeFramePlaintext {
     /// claim derives the wrong root key and fails the AEAD, and the sealed
     /// envelope's own copy is compared against it after decryption, so the hint
     /// can only ever select which key is tried, never what is believed.
-    sender_identity_hint: IdentityKeyBundle,
+    sender_identity_hint: PublicIdentityKey,
 }
 
 impl HandshakeEnvelope {
@@ -229,13 +229,13 @@ impl HandshakeEnvelope {
 ///
 /// The initiator's ephemeral key and first ratchet key are drawn from `rng`.
 ///
-/// Pass both parties' permanent identity key bundles. They bind the X25519 and Ed25519 halves and
+/// Pass both parties' permanent public identity keys. They bind the X25519 and Ed25519 halves and
 /// are included in the X3DH root-key derivation.
 pub fn initiate<R: RngCore + CryptoRng>(
     rng: &mut R,
     initiator_discovery_key: &DiscoveryKey,
-    initiator_identity_key: &IdentityKeyBundle,
-    responder_identity_key: &IdentityKeyBundle,
+    initiator_identity_key: &PublicIdentityKey,
+    responder_identity_key: &PublicIdentityKey,
     responder_prekey_bundle: &PreKeyBundle,
     message: InitialPlaintext<'_>,
 ) -> Result<(RatchetState, HandshakeEnvelope), HandshakeError> {
@@ -258,24 +258,24 @@ pub fn initiate<R: RngCore + CryptoRng>(
 pub fn initiate_with_associated_data<R: RngCore + CryptoRng>(
     rng: &mut R,
     initiator_discovery_key: &DiscoveryKey,
-    initiator_identity_key: &IdentityKeyBundle,
-    responder_identity_key: &IdentityKeyBundle,
+    initiator_identity_key: &PublicIdentityKey,
+    responder_identity_key: &PublicIdentityKey,
     responder_prekey_bundle: &PreKeyBundle,
     message: InitialPlaintext<'_>,
     additional_associated_data: &[u8],
 ) -> Result<(RatchetState, HandshakeEnvelope), HandshakeError> {
-    verify_identity_key_bundle(initiator_identity_key)?;
-    verify_identity_key_bundle(responder_identity_key)?;
+    verify_public_identity_key(initiator_identity_key)?;
+    verify_public_identity_key(responder_identity_key)?;
     if responder_prekey_bundle.version != PREKEY_BUNDLE_VERSION {
         return Err(HandshakeError::UnsupportedPreKeyBundleVersion(
             responder_prekey_bundle.version,
         ));
     }
-    verify_discovery_key_bundle(
+    verify_public_discovery_key(
         &responder_prekey_bundle.discovery_key,
         &responder_identity_key.verifying_key,
     )?;
-    verify_signed_prekey_bundle(
+    verify_public_signed_prekey(
         &responder_prekey_bundle.signed_prekey,
         &responder_prekey_bundle.discovery_key.verifying_key,
     )?;
@@ -384,21 +384,21 @@ pub fn initiate_with_associated_data<R: RngCore + CryptoRng>(
 pub fn initiator_identity_hint(
     envelope: &HandshakeEnvelope,
     responder_discovery_key: &DiscoveryKey,
-) -> Result<IdentityKeyBundle, HandshakeError> {
+) -> Result<PublicIdentityKey, HandshakeError> {
     initiator_identity_hint_with_associated_data(envelope, responder_discovery_key, &[])
 }
 
 /// Reads the claimed initiator identity while authenticating caller-supplied transport associated
 /// data in the outer sealed frame.
 ///
-/// Associated-data authentication does not authenticate the claimed initiator. The returned bundle
-/// remains a sender claim until [`accept_with_associated_data`] checks it against the sealed
-/// envelope's authenticated copy.
+/// Associated-data authentication does not authenticate the claimed initiator. The returned
+/// identity key remains a sender claim until [`accept_with_associated_data`] checks it against the
+/// sealed envelope's authenticated copy.
 pub fn initiator_identity_hint_with_associated_data(
     envelope: &HandshakeEnvelope,
     responder_discovery_key: &DiscoveryKey,
     additional_associated_data: &[u8],
-) -> Result<IdentityKeyBundle, HandshakeError> {
+) -> Result<PublicIdentityKey, HandshakeError> {
     validate_envelope_public_fields(&envelope.to_frame())?;
     let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
         responder_discovery_key,
@@ -406,7 +406,7 @@ pub fn initiator_identity_hint_with_associated_data(
         additional_associated_data,
     )?;
     let decoded = decode_handshake_frame_plaintext(&frame_plaintext)?;
-    verify_identity_key_bundle(&decoded.sender_identity_hint)?;
+    verify_public_identity_key(&decoded.sender_identity_hint)?;
     Ok(decoded.sender_identity_hint)
 }
 
@@ -416,7 +416,7 @@ pub fn initiator_identity_hint_with_associated_data(
 ///
 /// `responder_discovery_key` is the local responder's current X25519 discovery key.
 ///
-/// `initiator_identity_key` is the initiator identity bundle that was folded into the X3DH root
+/// `initiator_identity_key` is the initiator public identity key that was folded into the X3DH root
 /// key. The decoded sealed sender identity must match it on both key halves, so the identity the
 /// responder verified and the identity returned to the caller are guaranteed to be the same.
 ///
@@ -427,8 +427,8 @@ pub fn initiator_identity_hint_with_associated_data(
 pub fn accept<R: RngCore + CryptoRng>(
     rng: &mut R,
     envelope: &HandshakeEnvelope,
-    expected_initiator_identity_key: Option<&IdentityKeyBundle>,
-    responder_identity_key: &IdentityKeyBundle,
+    expected_initiator_identity_key: Option<&PublicIdentityKey>,
+    responder_identity_key: &PublicIdentityKey,
     responder_discovery_key: &DiscoveryKey,
     responder_signed_prekey: &SignedPreKey,
     responder_one_time_prekey: Option<OneTimePreKey>,
@@ -458,14 +458,14 @@ pub fn accept<R: RngCore + CryptoRng>(
 pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
     rng: &mut R,
     envelope: &HandshakeEnvelope,
-    expected_initiator_identity_key: Option<&IdentityKeyBundle>,
-    responder_identity_key: &IdentityKeyBundle,
+    expected_initiator_identity_key: Option<&PublicIdentityKey>,
+    responder_identity_key: &PublicIdentityKey,
     responder_discovery_key: &DiscoveryKey,
     responder_signed_prekey: &SignedPreKey,
     responder_one_time_prekey: Option<OneTimePreKey>,
     additional_associated_data: &[u8],
 ) -> Result<(RatchetState, AcceptedInitialMessage), HandshakeError> {
-    verify_identity_key_bundle(responder_identity_key)?;
+    verify_public_identity_key(responder_identity_key)?;
     let prekey_reference = envelope_prekey_reference(envelope)?;
     if prekey_reference.discovery_epoch != responder_discovery_key.epoch()
         || responder_signed_prekey.epoch() != responder_discovery_key.epoch()
@@ -479,7 +479,7 @@ pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
         .prekey_reference
         .map(|reference| reference.signed_prekey_public_key)
         .ok_or(HandshakeError::EnvelopeDecode)?
-        .ct_eq(responder_signed_prekey.public().as_bytes())
+        .ct_eq(responder_signed_prekey.public_key().as_bytes())
         .into();
     if !signed_prekey_matches {
         return Err(HandshakeError::SignedPreKeyMismatch);
@@ -511,7 +511,7 @@ pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
     // is compared against it after decryption.
     let initiator_identity_key =
         expected_initiator_identity_key.unwrap_or(&frame_plaintext.sender_identity_hint);
-    verify_identity_key_bundle(initiator_identity_key)?;
+    verify_public_identity_key(initiator_identity_key)?;
 
     let root_key = derive_root_key_responder(
         &initiator_ephemeral_public_key,
@@ -563,8 +563,8 @@ pub enum HandshakeError {
     EnvelopeEncode,
     /// HKDF-SHA256 rejected the requested output length.
     HkdfExpand,
-    /// An Identity Key, Discovery Key, or signed pre-key bundle failed validation.
-    KeyBundle(KeyBundleError),
+    /// An Identity Key, Discovery Key, or public signed pre-key failed validation.
+    PublicKey(PublicKeyError),
     /// Handshake envelope names a one-time pre-key that was not supplied.
     MissingOneTimePreKey,
     /// An X25519 exchange produced a non-contributory shared secret.
@@ -593,7 +593,7 @@ impl fmt::Display for HandshakeError {
             Self::EnvelopeDecode => write!(f, "handshake envelope bytes failed to decode"),
             Self::EnvelopeEncode => write!(f, "handshake envelope failed to encode"),
             Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
-            Self::KeyBundle(e) => write!(f, "handshake key bundle validation failed: {e}"),
+            Self::PublicKey(e) => write!(f, "handshake public key validation failed: {e}"),
             Self::MissingOneTimePreKey => write!(f, "handshake one-time pre-key is missing"),
             Self::NonContributorySharedSecret => {
                 write!(f, "x25519 shared secret was non-contributory")
@@ -624,7 +624,7 @@ impl fmt::Display for HandshakeError {
 impl Error for HandshakeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::KeyBundle(e) => Some(e),
+            Self::PublicKey(e) => Some(e),
             Self::Ratchet(e) => Some(e),
             Self::SealedFrame(e) => Some(e),
             Self::EnvelopeDecode
@@ -642,9 +642,9 @@ impl Error for HandshakeError {
     }
 }
 
-impl From<KeyBundleError> for HandshakeError {
-    fn from(error: KeyBundleError) -> Self {
-        Self::KeyBundle(error)
+impl From<PublicKeyError> for HandshakeError {
+    fn from(error: PublicKeyError) -> Self {
+        Self::PublicKey(error)
     }
 }
 
@@ -687,7 +687,9 @@ fn validate_envelope_one_time_prekey(
         (Some(_), None, _) | (None, Some(_), _) => Err(HandshakeError::OneTimePreKeyMismatch),
         (Some(_), Some(_), None) => Err(HandshakeError::MissingOneTimePreKey),
         (Some(expected_id), Some(expected_public_key), Some(prekey)) => {
-            let public_matches: bool = expected_public_key.ct_eq(prekey.public().as_bytes()).into();
+            let public_matches: bool = expected_public_key
+                .ct_eq(prekey.public_key().as_bytes())
+                .into();
             if prekey.id() != expected_id || !public_matches {
                 return Err(HandshakeError::OneTimePreKeyMismatch);
             }
@@ -717,7 +719,7 @@ fn validate_envelope_public_fields(frame: &SealedFrame) -> Result<(), HandshakeE
 fn encode_handshake_frame_plaintext(
     header: &Header,
     ciphertext: &[u8],
-    initiator_identity_key: &IdentityKeyBundle,
+    initiator_identity_key: &PublicIdentityKey,
 ) -> Result<Zeroizing<Vec<u8>>, HandshakeError> {
     if ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
         return Err(HandshakeError::EnvelopeEncode);
@@ -750,9 +752,9 @@ fn decode_handshake_frame_plaintext(
         return Err(HandshakeError::EnvelopeDecode);
     }
     // `from_bytes` rejects non-canonical encodings; the binding signature over
-    // the two halves is checked by the caller through `verify_identity_key_bundle`,
+    // the two halves is checked by the caller through `verify_public_identity_key`,
     // on whichever bundle it settles on.
-    let sender_identity_hint = IdentityKeyBundle::from_bytes(
+    let sender_identity_hint = PublicIdentityKey::from_bytes(
         &wire.sender_identity_key,
         &wire.sender_identity_verifying_key,
         &wire.sender_identity_binding_signature,
@@ -769,13 +771,13 @@ fn decode_handshake_frame_plaintext(
     })
 }
 
-// Derives the initiator-side root key from X3DH Diffie-Hellman outputs plus both IK bundles:
-// `discovery_key_shared_secret` = EK_A * DK_B, `signed_prekey_shared_secret` = EK_A * SPK_B, and
-// `one_time_prekey_shared_secret` = EK_A * OPK_B.
+// Derives the initiator-side root key from X3DH Diffie-Hellman outputs plus both public Identity
+// Keys: `discovery_key_shared_secret` = EK_A * DK_B, `signed_prekey_shared_secret` = EK_A * SPK_B,
+// and `one_time_prekey_shared_secret` = EK_A * OPK_B.
 pub(crate) fn derive_root_key_initiator(
     initiator_ephemeral_key: &KeyPair,
-    initiator_identity_key: &IdentityKeyBundle,
-    responder_identity_key: &IdentityKeyBundle,
+    initiator_identity_key: &PublicIdentityKey,
+    responder_identity_key: &PublicIdentityKey,
     responder_discovery_public_key: &PublicKey,
     responder_signed_prekey_public_key: &PublicKey,
     responder_one_time_prekey_public_key: Option<&PublicKey>,
@@ -798,13 +800,13 @@ pub(crate) fn derive_root_key_initiator(
     )
 }
 
-// Derives the responder-side root key from X3DH Diffie-Hellman outputs plus both IK bundles:
-// `discovery_key_shared_secret` = DK_B * EK_A, `signed_prekey_shared_secret` = SPK_B * EK_A, and
-// `one_time_prekey_shared_secret` = OPK_B * EK_A.
+// Derives the responder-side root key from X3DH Diffie-Hellman outputs plus both public Identity
+// Keys: `discovery_key_shared_secret` = DK_B * EK_A, `signed_prekey_shared_secret` = SPK_B * EK_A,
+// and `one_time_prekey_shared_secret` = OPK_B * EK_A.
 pub(crate) fn derive_root_key_responder(
     initiator_ephemeral_public_key: &PublicKey,
-    initiator_identity_key: &IdentityKeyBundle,
-    responder_identity_key: &IdentityKeyBundle,
+    initiator_identity_key: &PublicIdentityKey,
+    responder_identity_key: &PublicIdentityKey,
     responder_discovery_key: &DiscoveryKey,
     responder_signed_prekey: &SignedPreKey,
     responder_one_time_prekey: Option<&OneTimePreKey>,
@@ -836,8 +838,8 @@ fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, Handshake
 
 // Concatenates F_PREFIX || IK_A || IK_B || DH outputs and runs HKDF-SHA256 once.
 fn derive_root_key_from_dh_outputs(
-    initiator_identity_key: &IdentityKeyBundle,
-    responder_identity_key: &IdentityKeyBundle,
+    initiator_identity_key: &PublicIdentityKey,
+    responder_identity_key: &PublicIdentityKey,
     discovery_key_shared_secret: &SharedSecret,
     signed_prekey_shared_secret: &SharedSecret,
     one_time_prekey_shared_secret: Option<&SharedSecret>,
@@ -881,7 +883,7 @@ struct SenderProofTranscriptInput<'a> {
     responder_discovery_public_key: &'a PublicKey,
     responder_discovery_epoch: u32,
     responder_signed_prekey_public_key: &'a PublicKey,
-    responder_one_time_prekey: Option<&'a OneTimePreKeyBundle>,
+    responder_one_time_prekey: Option<&'a PublicOneTimePreKey>,
 }
 
 fn sender_proof_transcript(input: SenderProofTranscriptInput<'_>) -> Zeroizing<Vec<u8>> {
@@ -936,7 +938,7 @@ fn envelope_sender_proof_transcript(
     let one_time_prekey = reference
         .one_time_prekey_id
         .zip(reference.one_time_prekey_public_key)
-        .map(|(id, public_key)| OneTimePreKeyBundle {
+        .map(|(id, public_key)| PublicOneTimePreKey {
             id,
             public_key: PublicKey::from(public_key),
             epoch: reference.discovery_epoch,
@@ -1134,13 +1136,13 @@ fn decode_sealed_sender_envelope(
 fn validate_sender_identity(
     sender_identity: &SenderIdentityMaterial,
 ) -> Result<(), HandshakeError> {
-    let bundle = IdentityKeyBundle::from_bytes(
+    let bundle = PublicIdentityKey::from_bytes(
         &sender_identity.identity_key,
         &sender_identity.identity_verifying_key,
         &sender_identity.identity_binding_signature,
     )
     .map_err(|_| HandshakeError::EnvelopeDecode)?;
-    verify_identity_key_bundle(&bundle).map_err(|_| HandshakeError::EnvelopeDecode)?;
+    verify_public_identity_key(&bundle).map_err(|_| HandshakeError::EnvelopeDecode)?;
     if !is_valid_x25519_public_key(&sender_identity.identity_key) {
         return Err(HandshakeError::EnvelopeDecode);
     }
@@ -1200,7 +1202,7 @@ mod tests {
         DiscoveryKey, generate_discovery_key, generate_signed_prekey_for_discovery_key,
     };
     use crate::keys::{
-        IdentityKeyBundle, KeyPair, SigningKeyPair, generate_key_pair, generate_signing_key_pair,
+        KeyPair, PublicIdentityKey, SigningKeyPair, generate_key_pair, generate_signing_key_pair,
         sign_identity_key_binding,
     };
     use crate::one_time_prekey::{OneTimePreKey, generate_one_time_prekey};
@@ -1211,9 +1213,9 @@ mod tests {
     const FIXED_TS: u64 = 1_700_000_000;
 
     struct FullX3dhSetup {
-        alice_identity_key: IdentityKeyBundle,
+        alice_identity_key: PublicIdentityKey,
         alice_discovery_key: DiscoveryKey,
-        bob_identity_key: IdentityKeyBundle,
+        bob_identity_key: PublicIdentityKey,
         bob_discovery_key: DiscoveryKey,
         bob_signed_prekey: SignedPreKey,
         bob_one_time_prekey: OneTimePreKey,
@@ -1222,10 +1224,10 @@ mod tests {
     fn full_x3dh_setup() -> (FullX3dhSetup, ChaCha20Rng) {
         let mut rng = ChaCha20Rng::from_seed([0x42u8; 32]);
         let alice_identity = generate_signing_key_pair(&mut rng);
-        let alice_identity_key = generated_identity_key_bundle(&mut rng, &alice_identity);
+        let alice_identity_key = generated_public_identity_key(&mut rng, &alice_identity);
         let alice_discovery_key = generate_discovery_key(&mut rng, &alice_identity, 2, FIXED_TS);
         let bob_identity = generate_signing_key_pair(&mut rng);
-        let bob_identity_key = generated_identity_key_bundle(&mut rng, &bob_identity);
+        let bob_identity_key = generated_public_identity_key(&mut rng, &bob_identity);
         let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_TS);
         let bob_signed_prekey =
             generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, FIXED_TS);
@@ -1245,9 +1247,9 @@ mod tests {
     fn full_prekey_bundle(setup: &FullX3dhSetup, include_one_time: bool) -> PreKeyBundle {
         PreKeyBundle {
             version: PREKEY_BUNDLE_VERSION,
-            discovery_key: setup.bob_discovery_key.bundle(),
-            signed_prekey: setup.bob_signed_prekey.bundle(),
-            one_time_prekey: include_one_time.then(|| setup.bob_one_time_prekey.bundle()),
+            discovery_key: setup.bob_discovery_key.public(),
+            signed_prekey: setup.bob_signed_prekey.public(),
+            one_time_prekey: include_one_time.then(|| setup.bob_one_time_prekey.public()),
         }
     }
 
@@ -1259,26 +1261,26 @@ mod tests {
         }
     }
 
-    fn generated_identity_key_bundle(
+    fn generated_public_identity_key(
         rng: &mut ChaCha20Rng,
         signing_key: &SigningKeyPair,
-    ) -> IdentityKeyBundle {
+    ) -> PublicIdentityKey {
         let agreement_key = generate_key_pair(rng);
-        identity_key_bundle_from_parts(signing_key, agreement_key.public)
+        public_identity_key_from_parts(signing_key, agreement_key.public)
     }
 
-    fn identity_key_bundle(rng: &mut ChaCha20Rng, x25519_secret: u8) -> IdentityKeyBundle {
+    fn public_identity_key(rng: &mut ChaCha20Rng, x25519_secret: u8) -> PublicIdentityKey {
         let signing_key = generate_signing_key_pair(rng);
         let agreement_key = KeyPair::from_secret_bytes([x25519_secret; 32]);
-        identity_key_bundle_from_parts(&signing_key, agreement_key.public)
+        public_identity_key_from_parts(&signing_key, agreement_key.public)
     }
 
-    fn identity_key_bundle_from_parts(
+    fn public_identity_key_from_parts(
         signing_key: &SigningKeyPair,
         public_key: PublicKey,
-    ) -> IdentityKeyBundle {
+    ) -> PublicIdentityKey {
         let binding_signature = sign_identity_key_binding(signing_key, &public_key).unwrap();
-        IdentityKeyBundle {
+        PublicIdentityKey {
             public_key,
             verifying_key: signing_key.verifying,
             binding_signature,
@@ -1298,7 +1300,8 @@ mod tests {
             discovery_epoch: setup.bob_discovery_key.epoch(),
             signed_prekey_public_key: *signed_prekey_public_key.as_bytes(),
             one_time_prekey_id: one_time_prekey.map(OneTimePreKey::id),
-            one_time_prekey_public_key: one_time_prekey.map(|prekey| *prekey.public().as_bytes()),
+            one_time_prekey_public_key: one_time_prekey
+                .map(|prekey| *prekey.public_key().as_bytes()),
         }
     }
 
@@ -1338,7 +1341,8 @@ mod tests {
     /// - `bob_one_time_prekey_secret = [0x51; 32]`
     ///
     /// Output: `HKDF(F_PREFIX || IK_A || IK_B || discovery_key_shared_secret ||
-    /// signed_prekey_shared_secret || one_time_prekey_shared_secret, HKDF_INFO_WITH_ONE_TIME_PREKEY)`.
+    /// signed_prekey_shared_secret || one_time_prekey_shared_secret,
+    /// HKDF_INFO_WITH_ONE_TIME_PREKEY)`.
     #[test]
     fn full_x3dh_root_key_known_answer() {
         const EXPECTED_ROOT_KEY: [u8; 32] = [
@@ -1348,12 +1352,12 @@ mod tests {
 
         let alice_ephemeral_key = KeyPair::from_secret_bytes([0x22u8; 32]);
         let alice_identity = SigningKeyPair::from_signing_bytes([0x12u8; 32]);
-        let alice_identity_key = identity_key_bundle_from_parts(
+        let alice_identity_key = public_identity_key_from_parts(
             &alice_identity,
             KeyPair::from_secret_bytes([0x13u8; 32]).public,
         );
         let bob_identity = SigningKeyPair::from_signing_bytes([0x14u8; 32]);
-        let bob_identity_key = identity_key_bundle_from_parts(
+        let bob_identity_key = public_identity_key_from_parts(
             &bob_identity,
             KeyPair::from_secret_bytes([0x15u8; 32]).public,
         );
@@ -1368,8 +1372,8 @@ mod tests {
             &alice_identity_key,
             &bob_identity_key,
             bob_discovery_key.public_key(),
-            bob_signed_prekey.public(),
-            Some(bob_one_time_prekey.public()),
+            bob_signed_prekey.public_key(),
+            Some(bob_one_time_prekey.public_key()),
         )
         .unwrap();
         let responder_root_key = derive_root_key_responder(
@@ -1695,9 +1699,9 @@ mod tests {
             generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch() + 1, FIXED_TS);
         let bundle = PreKeyBundle {
             version: PREKEY_BUNDLE_VERSION,
-            discovery_key: setup.bob_discovery_key.bundle(),
-            signed_prekey: setup.bob_signed_prekey.bundle(),
-            one_time_prekey: Some(stale_one_time_prekey.bundle()),
+            discovery_key: setup.bob_discovery_key.public(),
+            signed_prekey: setup.bob_signed_prekey.public(),
+            one_time_prekey: Some(stale_one_time_prekey.public()),
         };
         assert!(matches!(
             initiate(
@@ -1717,9 +1721,9 @@ mod tests {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = PreKeyBundle {
             version: PREKEY_BUNDLE_VERSION + 1,
-            discovery_key: setup.bob_discovery_key.bundle(),
-            signed_prekey: setup.bob_signed_prekey.bundle(),
-            one_time_prekey: Some(setup.bob_one_time_prekey.bundle()),
+            discovery_key: setup.bob_discovery_key.public(),
+            signed_prekey: setup.bob_signed_prekey.public(),
+            one_time_prekey: Some(setup.bob_one_time_prekey.public()),
         };
 
         assert!(matches!(
@@ -1757,16 +1761,16 @@ mod tests {
     #[test]
     fn initiator_and_responder_derive_identical_root_key() {
         let (setup, mut rng) = full_x3dh_setup();
-        let alice_identity_key = identity_key_bundle(&mut rng, 0x91);
-        let bob_identity_key = identity_key_bundle(&mut rng, 0x92);
+        let alice_identity_key = public_identity_key(&mut rng, 0x91);
+        let bob_identity_key = public_identity_key(&mut rng, 0x92);
         let alice_ephemeral_key = generate_key_pair(&mut rng);
         let initiator_root_key = derive_root_key_initiator(
             &alice_ephemeral_key,
             &alice_identity_key,
             &bob_identity_key,
             setup.bob_discovery_key.public_key(),
-            setup.bob_signed_prekey.public(),
-            Some(setup.bob_one_time_prekey.public()),
+            setup.bob_signed_prekey.public_key(),
+            Some(setup.bob_one_time_prekey.public_key()),
         )
         .unwrap();
         let responder_root_key = derive_root_key_responder(
@@ -1784,9 +1788,9 @@ mod tests {
     #[test]
     fn x3dh_root_changes_when_identity_binding_changes() {
         let (setup, mut rng) = full_x3dh_setup();
-        let alice_identity_key = identity_key_bundle(&mut rng, 0x93);
-        let bob_identity_key = identity_key_bundle(&mut rng, 0x94);
-        let other_bob_identity_key = identity_key_bundle(&mut rng, 0x95);
+        let alice_identity_key = public_identity_key(&mut rng, 0x93);
+        let bob_identity_key = public_identity_key(&mut rng, 0x94);
+        let other_bob_identity_key = public_identity_key(&mut rng, 0x95);
         let alice_ephemeral_key = generate_key_pair(&mut rng);
 
         let root_key = derive_root_key_initiator(
@@ -1794,8 +1798,8 @@ mod tests {
             &alice_identity_key,
             &bob_identity_key,
             setup.bob_discovery_key.public_key(),
-            setup.bob_signed_prekey.public(),
-            Some(setup.bob_one_time_prekey.public()),
+            setup.bob_signed_prekey.public_key(),
+            Some(setup.bob_one_time_prekey.public_key()),
         )
         .unwrap();
         let rebound_root_key = derive_root_key_initiator(
@@ -1803,8 +1807,8 @@ mod tests {
             &alice_identity_key,
             &other_bob_identity_key,
             setup.bob_discovery_key.public_key(),
-            setup.bob_signed_prekey.public(),
-            Some(setup.bob_one_time_prekey.public()),
+            setup.bob_signed_prekey.public_key(),
+            Some(setup.bob_one_time_prekey.public_key()),
         )
         .unwrap();
 
@@ -1833,7 +1837,7 @@ mod tests {
     fn initiate_rejects_bundle_under_wrong_verifying_key() {
         let (setup, mut rng) = full_x3dh_setup();
         let wrong_signing_key = generate_signing_key_pair(&mut rng);
-        let wrong_identity_key = generated_identity_key_bundle(&mut rng, &wrong_signing_key);
+        let wrong_identity_key = generated_public_identity_key(&mut rng, &wrong_signing_key);
         let bundle = full_prekey_bundle(&setup, true);
         let result = initiate(
             &mut rng,
@@ -1845,7 +1849,7 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(HandshakeError::KeyBundle(KeyBundleError::Signature(
+            Err(HandshakeError::PublicKey(PublicKeyError::Signature(
                 SignatureError::SignatureInvalid
             )))
         ));
@@ -1915,7 +1919,7 @@ mod tests {
     fn accept_rejects_malformed_sealed_sender_envelope() {
         let (setup, mut rng) = full_x3dh_setup();
         let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public();
+        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
         let root_key = derive_root_key_initiator(
             &initiator_ephemeral_key,
             &setup.alice_identity_key,
@@ -1962,7 +1966,7 @@ mod tests {
     fn accept_rejects_sender_identity_without_matching_proof() {
         let (setup, mut rng) = full_x3dh_setup();
         let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public();
+        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
         let root_key = derive_root_key_initiator(
             &initiator_ephemeral_key,
             &setup.alice_identity_key,
@@ -2023,7 +2027,7 @@ mod tests {
     fn accept_rejects_non_contributory_sender_identity_key() {
         let (setup, mut rng) = full_x3dh_setup();
         let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public();
+        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
         let root_key = derive_root_key_initiator(
             &initiator_ephemeral_key,
             &setup.alice_identity_key,
@@ -2098,7 +2102,7 @@ mod tests {
             initiator_ephemeral_public_key: &ephemeral.public,
             responder_discovery_public_key: setup.bob_discovery_key.public_key(),
             responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: setup.bob_signed_prekey.public(),
+            responder_signed_prekey_public_key: setup.bob_signed_prekey.public_key(),
             responder_one_time_prekey: None,
         });
         let transcript_b = sender_proof_transcript(SenderProofTranscriptInput {
@@ -2110,7 +2114,7 @@ mod tests {
             initiator_ephemeral_public_key: &ephemeral.public,
             responder_discovery_public_key: setup.bob_discovery_key.public_key(),
             responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: setup.bob_signed_prekey.public(),
+            responder_signed_prekey_public_key: setup.bob_signed_prekey.public_key(),
             responder_one_time_prekey: None,
         });
 
@@ -2123,13 +2127,13 @@ mod tests {
         // The identity folded into the X3DH root, which the responder verifies as the peer.
         let root_bound_identity_key = setup.alice_identity_key.clone();
         // A self-consistent identity the malicious initiator seals in place of the root-bound one.
-        let impersonated_identity_key = identity_key_bundle(&mut rng, 0xA7);
+        let impersonated_identity_key = public_identity_key(&mut rng, 0xA7);
         let attacker_signing = generate_signing_key_pair(&mut rng);
         let attacker_discovery_key =
             generate_discovery_key(&mut rng, &attacker_signing, 5, FIXED_TS);
 
         let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public();
+        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
         let root_key = derive_root_key_initiator(
             &initiator_ephemeral_key,
             &root_bound_identity_key,

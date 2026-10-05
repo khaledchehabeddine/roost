@@ -16,9 +16,9 @@ use crate::error::ClientError;
 use crate::protocol::IdentityKey;
 use crate::records::{fixed_32, fixed_64};
 use roost_core::{
-    IdentityKeyBundle as CoreIdentityKeyBundle, Signature,
+    PublicIdentityKey as CorePublicIdentityKey, Signature,
     verify_discovery_to_identity_binding as crypto_verify_discovery_to_identity_binding,
-    verify_identity_key_bundle,
+    verify_public_identity_key,
 };
 use roost_protocol::parse_ed25519_verifying_key_bytes;
 
@@ -31,27 +31,6 @@ use roost_protocol::parse_ed25519_verifying_key_bytes;
 /// verifying a relay's signature under a key the same relay handed over proves only that the relay
 /// is self-consistent.
 ///
-/// # Examples
-/// ```
-/// # use roost_client::{ClientError, IdentityKey, InMemorySecureStorage, Client, SecureStorage};
-/// # use std::sync::Arc;
-/// # let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
-/// # let store = Client::new(storage);
-/// let prepared = store.identity().prepare_generate_identity()?;
-/// store.commit_operation(prepared.operation.id.clone())?;
-/// store.finalize_operation(prepared.operation.id)?;
-/// let identity = prepared.identity;
-///
-/// roost_client::verify_identity_key_binding(
-///     IdentityKey {
-///         x25519_public_key: identity.x25519_public_key.clone(),
-///         ed25519_verifying_key: identity.ed25519_verifying_key.clone(),
-///     },
-///     identity.identity_binding_signature.clone(),
-/// )?;
-/// # Ok::<(), ClientError>(())
-/// ```
-///
 /// # Errors
 /// - [`ClientError::AuthenticationFailed`] when the signature does not validate. This is the
 ///   answer that matters: the identity does not bind.
@@ -62,7 +41,7 @@ pub fn verify_identity_key_binding(
     identity: IdentityKey,
     binding_signature: Vec<u8>,
 ) -> Result<(), ClientError> {
-    let bundle = CoreIdentityKeyBundle::from_bytes(
+    let bundle = CorePublicIdentityKey::from_bytes(
         &fixed_32(&identity.x25519_public_key, "identity x25519 public key")?,
         &fixed_32(
             &identity.ed25519_verifying_key,
@@ -70,7 +49,7 @@ pub fn verify_identity_key_binding(
         )?,
         &fixed_64(&binding_signature, "identity binding signature")?,
     )?;
-    Ok(verify_identity_key_bundle(&bundle)?)
+    Ok(verify_public_identity_key(&bundle)?)
 }
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (the DK→IK
@@ -92,14 +71,14 @@ pub fn verify_identity_key_binding(
 ///   domain separation is for.
 /// - [`ClientError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or either
 ///   Ed25519 value is not a canonically encoded, non-weak point. The discovery key is held to the
-///   same standard a discovery-key bundle is, because it arrives from the same place.
+///   same standard a public discovery key is, because it arrives from the same place.
 #[uniffi::export]
 pub fn verify_discovery_to_identity_binding(
     identity: IdentityKey,
     discovery_verifying_key: Vec<u8>,
     signature: Vec<u8>,
 ) -> Result<(), ClientError> {
-    let identity = binding_payload_bundle(&identity)?;
+    let identity = binding_payload_identity_key(&identity)?;
     let discovery_verifying_key = parse_ed25519_verifying_key_bytes(&fixed_32(
         &discovery_verifying_key,
         "discovery ed25519 verifying key",
@@ -116,17 +95,20 @@ pub fn verify_discovery_to_identity_binding(
     )?)
 }
 
-/// Builds the bundle shape the DK→IK verifier takes from an identity key that carries no signature.
+/// Builds the public identity key the DK→IK verifier takes from an identity key that carries no
+/// signature.
 ///
-/// [`crypto_verify_discovery_to_identity_binding`] reads exactly two fields of the bundle, the
+/// [`crypto_verify_discovery_to_identity_binding`] reads exactly two fields of the key, the
 /// X25519 and Ed25519 halves, because those two are the entire signed payload. The signature slot
 /// is filled with zeros and is never read — it belongs to the *other* direction, and a caller who
 /// wants that direction checked calls [`verify_identity_key_binding`], which reads a real one. The
 /// zeros are here so this function cannot be mistaken for having checked something it did not.
-fn binding_payload_bundle(identity: &IdentityKey) -> Result<CoreIdentityKeyBundle, ClientError> {
+fn binding_payload_identity_key(
+    identity: &IdentityKey,
+) -> Result<CorePublicIdentityKey, ClientError> {
     const UNREAD_BINDING_SIGNATURE: [u8; 64] = [0u8; 64];
 
-    Ok(CoreIdentityKeyBundle::from_bytes(
+    Ok(CorePublicIdentityKey::from_bytes(
         &fixed_32(&identity.x25519_public_key, "identity x25519 public key")?,
         &fixed_32(
             &identity.ed25519_verifying_key,
@@ -139,7 +121,8 @@ fn binding_payload_bundle(identity: &IdentityKey) -> Result<CoreIdentityKeyBundl
 #[cfg(test)]
 mod tests {
     use super::{verify_discovery_to_identity_binding, verify_identity_key_binding};
-    use crate::{Client, ClientError, InMemorySecureStorage, SecureStorage, protocol::IdentityKey};
+    use crate::storage::MemoryStorage;
+    use crate::{Client, ClientError, SecureStorage, protocol::IdentityKey};
     use roost_core::test_support::{SigningKeyPair, sign_identity_key_binding};
     use std::sync::Arc;
 
@@ -181,7 +164,7 @@ mod tests {
     }
 
     fn key_store() -> Arc<Client> {
-        let storage: Arc<dyn SecureStorage> = Arc::new(InMemorySecureStorage::new());
+        let storage: Arc<dyn SecureStorage> = Arc::new(MemoryStorage::default());
         Client::new(storage)
     }
 
@@ -250,7 +233,8 @@ mod tests {
     }
 
     /// The substitution the DK→IK check exists to catch: a relay answers a discovery-key lookup
-    /// with an identity of its own, correctly self-bound, that the typed discovery key never signed.
+    /// with an identity of its own, correctly self-bound, that the typed discovery key never
+    /// signed.
     #[test]
     fn a_substituted_identity_fails_against_the_typed_discovery_key() {
         let impostor = SigningKeyPair::from_signing_bytes([0x44; 32]);

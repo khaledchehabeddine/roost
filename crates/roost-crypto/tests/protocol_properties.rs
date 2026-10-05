@@ -5,8 +5,8 @@ use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRu
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    DiscoveryKey, HandshakeEnvelope, Header, IdentityKeyBundle, InitialPlaintext, OneTimePreKey,
-    PreKeyBundle, RatchetError, RatchetState, SignedPreKey, SigningKeyPair, accept,
+    DiscoveryKey, HandshakeEnvelope, Header, InitialPlaintext, OneTimePreKey, PreKeyBundle,
+    PublicIdentityKey, RatchetError, RatchetState, SignedPreKey, SigningKeyPair, accept,
     generate_discovery_key, generate_key_pair, generate_one_time_prekey,
     generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
     initiate, sign_identity_key_binding,
@@ -17,9 +17,9 @@ const MAX_SKIP: u32 = 100;
 const SKIPPED_KEY_CAP: usize = 500;
 
 struct Setup {
-    alice_identity_key: IdentityKeyBundle,
+    alice_identity_key: PublicIdentityKey,
     alice_discovery_key: DiscoveryKey,
-    bob_identity_key: IdentityKeyBundle,
+    bob_identity_key: PublicIdentityKey,
     bob_discovery_key: DiscoveryKey,
     bob_signed_prekey: SignedPreKey,
     bob_one_time_prekey: Option<OneTimePreKey>,
@@ -36,10 +36,10 @@ struct TraceBatch {
 fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed(seed);
     let alice_identity = generate_signing_key_pair(&mut rng);
-    let alice_identity_key = identity_key_bundle(&mut rng, &alice_identity);
+    let alice_identity_key = public_identity_key(&mut rng, &alice_identity);
     let alice_discovery_key = generate_discovery_key(&mut rng, &alice_identity, 1, CREATED_AT);
     let bob_identity = generate_signing_key_pair(&mut rng);
-    let bob_identity_key = identity_key_bundle(&mut rng, &bob_identity);
+    let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
     let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT);
     let bob_signed_prekey =
         generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT);
@@ -65,11 +65,11 @@ fn bootstrap(
     plaintext: &[u8],
 ) -> (RatchetState, RatchetState, HandshakeEnvelope) {
     let one_time_prekey_bundle =
-        include_one_time_prekey.then(|| setup.bob_one_time_prekey.as_ref().unwrap().bundle());
+        include_one_time_prekey.then(|| setup.bob_one_time_prekey.as_ref().unwrap().public());
     let prekey_bundle = PreKeyBundle {
         version: roost_crypto::PREKEY_BUNDLE_VERSION,
-        discovery_key: setup.bob_discovery_key.bundle(),
-        signed_prekey: setup.bob_signed_prekey.bundle(),
+        discovery_key: setup.bob_discovery_key.public(),
+        signed_prekey: setup.bob_signed_prekey.public(),
         one_time_prekey: one_time_prekey_bundle,
     };
     let (alice, envelope) = initiate(
@@ -112,10 +112,10 @@ fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
     }
 }
 
-fn identity_key_bundle(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> IdentityKeyBundle {
+fn public_identity_key(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> PublicIdentityKey {
     let agreement_key = generate_key_pair(rng);
     let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
-    IdentityKeyBundle {
+    PublicIdentityKey {
         public_key: agreement_key.public,
         verifying_key: signing_key.verifying,
         binding_signature,

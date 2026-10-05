@@ -1,7 +1,7 @@
 //! Contact identity and trust-state records.
 
 use crate::safety_number::IdentityKey;
-use roost_crypto::{DiscoveryKeyBundle, RecipientDeliveryCapability};
+use roost_crypto::{PublicDiscoveryKey, RecipientDeliveryCapability};
 use roost_protocol::PUBLIC_KEY_LEN;
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +21,7 @@ pub struct ContactDiscoveryKey {
     pub epoch: u32,
     /// Signed creation timestamp used to compare restored storage lineages.
     pub created_at_secs: u64,
-    /// Identity-key signature over the Discovery Key bundle.
+    /// Identity-key signature over the public Discovery Key.
     pub identity_signature: [u8; SIGNATURE_LEN],
 }
 
@@ -33,8 +33,8 @@ impl ContactDiscoveryKey {
     }
 }
 
-impl From<&DiscoveryKeyBundle> for ContactDiscoveryKey {
-    fn from(value: &DiscoveryKeyBundle) -> Self {
+impl From<&PublicDiscoveryKey> for ContactDiscoveryKey {
+    fn from(value: &PublicDiscoveryKey) -> Self {
         Self {
             x25519_public_key: *value.public_key.as_bytes(),
             ed25519_verifying_key: value.verifying_key.to_bytes(),

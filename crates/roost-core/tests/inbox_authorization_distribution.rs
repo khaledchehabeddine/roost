@@ -24,7 +24,7 @@ fn peer_contact(seed: u8) -> ContactIdentity {
             x25519_public_key: *agreement.public.as_bytes(),
             ed25519_verifying_key: signing.verifying.to_bytes(),
         },
-        discovery_key: ContactDiscoveryKey::from(&discovery.bundle()),
+        discovery_key: ContactDiscoveryKey::from(&discovery.public()),
     }
 }
 

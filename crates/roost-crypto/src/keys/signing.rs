@@ -77,8 +77,8 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
 mod tests {
     use super::*;
     use crate::{
-        IdentityKeyBundle, KeyBundleError, KeyPair, sign_identity_key_binding,
-        verify_identity_key_bundle,
+        KeyPair, PublicIdentityKey, PublicKeyError, sign_identity_key_binding,
+        verify_public_identity_key,
     };
     use ed25519_dalek::Verifier;
     use rand::SeedableRng;
@@ -261,15 +261,15 @@ mod tests {
         let other_agreement_key = KeyPair::from_secret_bytes([0x45; 32]);
         let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
 
-        let tampered = IdentityKeyBundle {
+        let tampered = PublicIdentityKey {
             public_key: other_agreement_key.public,
             verifying_key: signing_key.verifying,
             binding_signature: signature,
         };
 
         assert!(matches!(
-            verify_identity_key_bundle(&tampered),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_identity_key(&tampered),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 
@@ -281,15 +281,15 @@ mod tests {
         let agreement_key = KeyPair::from_secret_bytes([0x46; 32]);
         let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
 
-        let tampered = IdentityKeyBundle {
+        let tampered = PublicIdentityKey {
             public_key: agreement_key.public,
             verifying_key: other_signing_key.verifying,
             binding_signature: signature,
         };
 
         assert!(matches!(
-            verify_identity_key_bundle(&tampered),
-            Err(KeyBundleError::Signature(SignatureError::SignatureInvalid))
+            verify_public_identity_key(&tampered),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 }

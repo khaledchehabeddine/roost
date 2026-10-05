@@ -6,8 +6,8 @@ use crate::{
 };
 use rand::rngs::OsRng;
 use roost_crypto::{
-    HandshakeEnvelope, HandshakeError, IdentityKeyBundle, InitialPlaintext, KeyBundleError,
-    PreKeyBundle, SealedFramePreKeyReference, SenderIdentityMaterial, Signature,
+    HandshakeEnvelope, HandshakeError, InitialPlaintext, PreKeyBundle, PublicIdentityKey,
+    PublicKeyError, SealedFramePreKeyReference, SenderIdentityMaterial, Signature,
     accept_with_associated_data, initiate_with_associated_data,
     initiator_identity_hint_with_associated_data, verify_discovery_to_identity_binding,
 };
@@ -20,8 +20,8 @@ use zeroize::Zeroizing;
 pub struct SessionInitiation<'a> {
     /// Session-scoped protocol-state key for the new ratchet/session blob.
     pub session_key: ProtocolStateKey,
-    /// Responder permanent Identity Key bundle.
-    pub responder_identity_key: IdentityKeyBundle,
+    /// Responder permanent public Identity Key.
+    pub responder_identity_key: PublicIdentityKey,
     /// The responder's DK→IK binding: its discovery key signing the identity above.
     ///
     /// Checked before any handshake work. The IK→DK half travels inside
@@ -52,14 +52,14 @@ pub struct SessionInitiationResult {
 pub struct SessionAcceptance<'a> {
     /// Session-scoped protocol-state key for the new ratchet/session blob.
     pub session_key: ProtocolStateKey,
-    /// Initiator permanent Identity Key bundle expected by the caller, or `None`
+    /// Initiator permanent public Identity Key expected by the caller, or `None`
     /// to accept whichever initiator the message names.
     ///
     /// A caller that knows who it expects pins it here and a mismatch fails. A
     /// caller receiving a first message from a stranger cannot know, and passes
     /// `None`; the identity is then read from the handshake frame and still
     /// checked against the sealed envelope's own copy after decryption.
-    pub initiator_identity_key: Option<IdentityKeyBundle>,
+    pub initiator_identity_key: Option<PublicIdentityKey>,
     /// X3DH first message received from the initiator.
     pub message: &'a Message,
 }
@@ -84,7 +84,7 @@ pub enum SessionEstablishmentError {
     /// Loading local identity state failed.
     Identity(IdentityError),
     /// The peer's Discovery Key does not bind to its Identity Key.
-    KeyBundle(KeyBundleError),
+    PublicKey(PublicKeyError),
     /// Message conversion failed.
     Message(MessageError),
     /// Loading or consuming local one-time-prekey state failed.
@@ -103,7 +103,7 @@ impl fmt::Display for SessionEstablishmentError {
             Self::Discovery(e) => write!(f, "session establishment discovery key: {e}"),
             Self::Handshake(e) => write!(f, "session establishment handshake: {e}"),
             Self::Identity(e) => write!(f, "session establishment identity: {e}"),
-            Self::KeyBundle(e) => write!(f, "session establishment key bundle: {e}"),
+            Self::PublicKey(e) => write!(f, "session establishment public key: {e}"),
             Self::Message(e) => write!(f, "session establishment message: {e}"),
             Self::OneTimePreKey(e) => write!(f, "session establishment one-time pre-key: {e}"),
             Self::Operation(e) => write!(f, "session establishment prepared operation: {e}"),
@@ -119,7 +119,7 @@ impl Error for SessionEstablishmentError {
             Self::Discovery(e) => Some(e),
             Self::Handshake(e) => Some(e),
             Self::Identity(e) => Some(e),
-            Self::KeyBundle(e) => Some(e),
+            Self::PublicKey(e) => Some(e),
             Self::Message(e) => Some(e),
             Self::OneTimePreKey(e) => Some(e),
             Self::Operation(e) => Some(e),
@@ -135,9 +135,9 @@ impl From<HandshakeError> for SessionEstablishmentError {
     }
 }
 
-impl From<KeyBundleError> for SessionEstablishmentError {
-    fn from(e: KeyBundleError) -> Self {
-        Self::KeyBundle(e)
+impl From<PublicKeyError> for SessionEstablishmentError {
+    fn from(e: PublicKeyError) -> Self {
+        Self::PublicKey(e)
     }
 }
 
@@ -227,7 +227,7 @@ impl KeyStore {
         let transport_binding = transport_binding.as_bytes();
 
         let identity = self.0.identity.load_identity()?;
-        let identity_key = identity.identity_key_bundle()?;
+        let identity_key = identity.public()?;
         let discovery_key = self.0.discovery.current()?;
         let mut rng = OsRng;
         let (state, envelope) = initiate_with_associated_data(
@@ -271,7 +271,7 @@ impl KeyStore {
         message: &Message,
         transport_binding: &TransportBinding,
         prekey_selection: PreKeySelection,
-    ) -> Result<IdentityKeyBundle, SessionEstablishmentError> {
+    ) -> Result<PublicIdentityKey, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
         let discovery_key = self.0.discovery.current()?;
@@ -320,7 +320,7 @@ impl KeyStore {
     ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
         let _lifecycle = self.lifecycle_guard();
         let identity = self.0.identity.load_identity()?;
-        let identity_key = identity.identity_key_bundle()?;
+        let identity_key = identity.public()?;
         let discovery_key = self.0.discovery.current()?;
         let envelope = handshake_envelope_from_message(input.message)?;
         let prekey_reference = envelope
@@ -393,7 +393,7 @@ impl KeyStore {
     ) -> Result<SessionAcceptanceResult, SessionEstablishmentError> {
         {
             let selection = PreKeySelection {
-                signed_prekey_id: self.0.signed_prekey.current_bundle(SystemTime::now())?.id,
+                signed_prekey_id: self.0.signed_prekey.current_public(SystemTime::now())?.id,
                 one_time_prekey_id: input
                     .message
                     .prekey_reference
@@ -455,7 +455,7 @@ mod tests {
     }
 
     /// Both binding directions must hold before a discovery-key-to-identity
-    /// mapping is trusted. The IK→DK half rides on the discovery-key bundle and
+    /// mapping is trusted. The IK→DK half rides on the public discovery key and
     /// the handshake already checks it; this is the other half, which proves the
     /// discovery key vouches for the identity rather than merely being named
     /// alongside it. Without it, whoever hands over the bundle — the relay, or
@@ -478,7 +478,7 @@ mod tests {
         let result = alice.initiate_session_with_transport_binding(
             SessionInitiation {
                 session_key: ProtocolStateKey::session(SessionId::from_bytes([0x24; 16])),
-                responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                responder_identity_key: bob_identity.public().unwrap(),
                 responder_discovery_to_identity: mallory_publication.discovery_to_identity,
                 responder_prekey_bundle: roost_crypto::PreKeyBundle {
                     version: bob_publication.version,
@@ -514,7 +514,7 @@ mod tests {
             .initiate_session_with_transport_binding(
                 SessionInitiation {
                     session_key: session_key.clone(),
-                    responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                    responder_identity_key: bob_identity.public().unwrap(),
                     responder_discovery_to_identity: bob_publication.discovery_to_identity,
                     responder_prekey_bundle: roost_crypto::PreKeyBundle {
                         version: bob_publication.version,
@@ -542,7 +542,7 @@ mod tests {
         let acceptance = bob
             .accept_session(SessionAcceptance {
                 session_key,
-                initiator_identity_key: Some(alice_identity.identity_key_bundle().unwrap()),
+                initiator_identity_key: Some(alice_identity.public().unwrap()),
                 message: &initiation.message,
             })
             .unwrap();
@@ -575,7 +575,7 @@ mod tests {
             .initiate_session_with_transport_binding(
                 SessionInitiation {
                     session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
-                    responder_identity_key: bob_identity.identity_key_bundle().unwrap(),
+                    responder_identity_key: bob_identity.public().unwrap(),
                     responder_discovery_to_identity: bob_publication.discovery_to_identity,
                     responder_prekey_bundle: roost_crypto::PreKeyBundle {
                         version: bob_publication.version,
@@ -593,14 +593,14 @@ mod tests {
 
         bob.accept_session(SessionAcceptance {
             session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
-            initiator_identity_key: Some(alice_identity.identity_key_bundle().unwrap()),
+            initiator_identity_key: Some(alice_identity.public().unwrap()),
             message: &initiation.message,
         })
         .unwrap();
 
         let second = bob.accept_session(SessionAcceptance {
             session_key: ProtocolStateKey::session(SessionId::from_bytes([0x34; 16])),
-            initiator_identity_key: Some(alice_identity.identity_key_bundle().unwrap()),
+            initiator_identity_key: Some(alice_identity.public().unwrap()),
             message: &initiation.message,
         });
 

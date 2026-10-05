@@ -2,7 +2,7 @@ use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
 use crate::prekey_state::INBOX_ROTATION_REQUIRED_MARKER;
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
-use roost_crypto::{OneTimePreKey, OneTimePreKeyBundle, generate_one_time_prekey};
+use roost_crypto::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 use roost_protocol::to_unix_secs;
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -134,7 +134,7 @@ impl OneTimePreKeyManager {
         &self,
         rng: &mut R,
         now: SystemTime,
-    ) -> Result<Vec<OneTimePreKeyBundle>, OneTimePreKeyError> {
+    ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
         let discovery_key = self.discovery.current()?;
         let epoch = discovery_key.epoch();
         let now_secs = to_unix_secs(now).ok_or(OneTimePreKeyError::Clock)?;
@@ -156,7 +156,7 @@ impl OneTimePreKeyManager {
         rng: &mut R,
         batch_size: usize,
         now: SystemTime,
-    ) -> Result<Vec<OneTimePreKeyBundle>, OneTimePreKeyError> {
+    ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
         let discovery_key = self.discovery.current()?;
         let epoch = discovery_key.epoch();
         let now_secs = to_unix_secs(now).ok_or(OneTimePreKeyError::Clock)?;
@@ -224,7 +224,7 @@ impl OneTimePreKeyManager {
             pool.epoch,
             entry.created_at_secs,
         );
-        let public_matches = prekey.public().as_bytes().ct_eq(public_key).unwrap_u8() == 1;
+        let public_matches = prekey.public_key().as_bytes().ct_eq(public_key).unwrap_u8() == 1;
         if public_matches {
             Ok(prekey)
         } else {
@@ -278,7 +278,7 @@ fn append_batch<R: RngCore + CryptoRng>(
     batch_size: usize,
     epoch: u32,
     created_at_secs: u64,
-) -> Result<Vec<OneTimePreKeyBundle>, OneTimePreKeyError> {
+) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
     let available = MAX_ONE_TIME_PREKEYS - pool.entries.len();
     if batch_size > available {
         return Err(OneTimePreKeyError::InvalidData(format!(
@@ -299,7 +299,7 @@ fn append_batch<R: RngCore + CryptoRng>(
             secret: *one_time_prekey.to_secret_bytes(),
             created_at_secs,
         });
-        bundles.push(one_time_prekey.bundle());
+        bundles.push(one_time_prekey.public());
     }
     Ok(bundles)
 }

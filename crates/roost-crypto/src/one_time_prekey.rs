@@ -1,6 +1,6 @@
 //! Provides one-time X25519 pre-keys for X3DH.
 
-use crate::keys::KeyBundleError;
+use crate::keys::PublicKeyError;
 use crate::keys::is_valid_x25519_public_key;
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
@@ -40,7 +40,7 @@ impl OneTimePreKey {
     }
 
     /// Returns the X25519 public key.
-    pub fn public(&self) -> &PublicKey {
+    pub fn public_key(&self) -> &PublicKey {
         &self.public_key
     }
 
@@ -65,8 +65,8 @@ impl OneTimePreKey {
     }
 
     /// Returns the public form of this one-time pre-key for distribution to peers.
-    pub fn bundle(&self) -> OneTimePreKeyBundle {
-        OneTimePreKeyBundle {
+    pub fn public(&self) -> PublicOneTimePreKey {
+        PublicOneTimePreKey {
             id: self.id,
             public_key: self.public_key,
             epoch: self.epoch,
@@ -77,7 +77,7 @@ impl OneTimePreKey {
 
 /// Public one-time pre-key material distributed to peers.
 #[derive(Clone, Debug)]
-pub struct OneTimePreKeyBundle {
+pub struct PublicOneTimePreKey {
     /// Caller-assigned identifier used by the responder to consume the matching secret key.
     pub id: u64,
     /// X25519 public key used during X3DH root-key derivation.
@@ -88,22 +88,22 @@ pub struct OneTimePreKeyBundle {
     pub created_at_secs: u64,
 }
 
-impl OneTimePreKeyBundle {
-    /// Builds a bundle from received wire bytes.
+impl PublicOneTimePreKey {
+    /// Builds a public one-time pre-key from received wire bytes.
     ///
-    /// This validates byte lengths only. The epoch must still match the discovery-key bundle used
+    /// This validates byte lengths only. The epoch must still match the public discovery key used
     /// for session establishment.
     pub fn from_bytes(
         id: u64,
         public_key: &[u8],
         epoch: u32,
         created_at_secs: u64,
-    ) -> Result<Self, KeyBundleError> {
+    ) -> Result<Self, PublicKeyError> {
         let public_key_bytes: [u8; 32] = public_key
             .try_into()
-            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
         if !is_valid_x25519_public_key(&public_key_bytes) {
-            return Err(KeyBundleError::InvalidKeyEncoding);
+            return Err(PublicKeyError::InvalidKeyEncoding);
         }
         Ok(Self {
             id,
@@ -140,26 +140,26 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     #[test]
-    fn bundle_fields_match_one_time_prekey() {
+    fn public_fields_match_one_time_prekey() {
         let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
         let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
-        let bundle = one_time_prekey.bundle();
+        let bundle = one_time_prekey.public();
         assert_eq!(bundle.id, one_time_prekey.id());
         assert_eq!(
             bundle.public_key.as_bytes(),
-            one_time_prekey.public().as_bytes()
+            one_time_prekey.public_key().as_bytes()
         );
         assert_eq!(bundle.epoch, one_time_prekey.epoch());
         assert_eq!(bundle.created_at_secs, one_time_prekey.created_at_secs());
     }
 
     #[test]
-    fn bundle_from_bytes_round_trip_preserves_fields() {
+    fn public_from_bytes_round_trip_preserves_fields() {
         let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
         let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
-        let bundle = one_time_prekey.bundle();
+        let bundle = one_time_prekey.public();
 
-        let parsed = OneTimePreKeyBundle::from_bytes(
+        let parsed = PublicOneTimePreKey::from_bytes(
             bundle.id,
             bundle.public_key.as_bytes(),
             bundle.epoch,
@@ -174,10 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn bundle_from_bytes_rejects_wrong_public_key_length() {
+    fn public_from_bytes_rejects_wrong_public_key_length() {
         assert!(matches!(
-            OneTimePreKeyBundle::from_bytes(9, &[0u8; 31], 3, 1_700_000_000),
-            Err(KeyBundleError::InvalidKeyEncoding)
+            PublicOneTimePreKey::from_bytes(9, &[0u8; 31], 3, 1_700_000_000),
+            Err(PublicKeyError::InvalidKeyEncoding)
         ));
     }
 
@@ -193,8 +193,8 @@ mod tests {
             original.created_at_secs(),
         );
         assert_eq!(
-            original.diffie_hellman(peer.public()).as_bytes(),
-            restored.diffie_hellman(peer.public()).as_bytes()
+            original.diffie_hellman(peer.public_key()).as_bytes(),
+            restored.diffie_hellman(peer.public_key()).as_bytes()
         );
     }
 }

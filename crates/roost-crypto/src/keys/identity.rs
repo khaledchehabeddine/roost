@@ -1,4 +1,4 @@
-use super::KeyBundleError;
+use super::PublicKeyError;
 use super::dh::PublicKey;
 use super::signing::{Signature, SigningKeyPair, VerifyingKey};
 use roost_protocol::{SignatureError, verify_with_context};
@@ -10,7 +10,7 @@ const SIGNATURE_LEN: usize = 64;
 
 /// Public Identity Key material plus the binding signature for its X25519 half.
 #[derive(Clone, Debug)]
-pub struct IdentityKeyBundle {
+pub struct PublicIdentityKey {
     /// X25519 public key agreement half.
     pub public_key: PublicKey,
     /// Ed25519 verifying key identity half.
@@ -19,27 +19,27 @@ pub struct IdentityKeyBundle {
     pub binding_signature: Signature,
 }
 
-impl IdentityKeyBundle {
-    /// Builds an Identity Key bundle from received boundary bytes.
+impl PublicIdentityKey {
+    /// Builds a public Identity Key from received boundary bytes.
     pub fn from_bytes(
         public_key: &[u8],
         verifying_key: &[u8],
         binding_signature: &[u8],
-    ) -> Result<Self, KeyBundleError> {
+    ) -> Result<Self, PublicKeyError> {
         let public_key: [u8; PUBLIC_KEY_LEN] = public_key
             .try_into()
-            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
         if !is_valid_x25519_public_key(&public_key) {
-            return Err(KeyBundleError::InvalidKeyEncoding);
+            return Err(PublicKeyError::InvalidKeyEncoding);
         }
         let verifying_key: [u8; PUBLIC_KEY_LEN] = verifying_key
             .try_into()
-            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
         let verifying_key = parse_ed25519_verifying_key_bytes(&verifying_key)
-            .ok_or(KeyBundleError::InvalidKeyEncoding)?;
+            .ok_or(PublicKeyError::InvalidKeyEncoding)?;
         let binding_signature: [u8; SIGNATURE_LEN] = binding_signature
             .try_into()
-            .map_err(|_| KeyBundleError::InvalidKeyEncoding)?;
+            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
         Ok(Self {
             public_key: PublicKey::from(public_key),
             verifying_key,
@@ -69,13 +69,13 @@ pub fn sign_identity_key_binding(
 }
 
 /// Verifies that an IK Ed25519 key owns its X25519 public half.
-pub fn verify_identity_key_bundle(bundle: &IdentityKeyBundle) -> Result<(), KeyBundleError> {
+pub fn verify_public_identity_key(bundle: &PublicIdentityKey) -> Result<(), PublicKeyError> {
     if !is_valid_x25519_public_key(bundle.public_key.as_bytes()) {
-        return Err(KeyBundleError::InvalidKeyEncoding);
+        return Err(PublicKeyError::InvalidKeyEncoding);
     }
     let verifying_key_bytes = bundle.verifying_key.to_bytes();
     parse_ed25519_verifying_key_bytes(&verifying_key_bytes)
-        .ok_or(KeyBundleError::InvalidKeyEncoding)?;
+        .ok_or(PublicKeyError::InvalidKeyEncoding)?;
     verify_with_context(
         &bundle.verifying_key,
         IDENTITY_KEY_BINDING_CONTEXT,
