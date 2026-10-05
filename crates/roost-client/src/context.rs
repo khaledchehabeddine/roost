@@ -1,25 +1,25 @@
-//! Identity-scoped Client and focused interfaces sharing one Core context.
+//! The identity context and the messaging and contacts groups that share it.
 
 use crate::SecureStorage;
 use crate::certificate::{
     SenderCertificateValidation, domain_signing_keys_to_protocol, revocation_state_to_protocol,
     revoked_identity_keys_to_protocol,
 };
-use crate::error::ClientError;
-use crate::key_store_operation::{
-    KeyStoreOperation, KeyStoreOperationStatus, PreparedContactBlock, PreparedIdentityGeneration,
-    PreparedInboxRotation, PreparedOneTimePreKeys, PreparedSessionAcceptance,
-    PreparedSignedPreKeyRotation, UnfinishedKeyStoreOperation, operation_id,
-};
+use crate::error::RoostError;
 use crate::message::{Message, SenderIdentityMaterial};
+use crate::operation::{
+    OperationId, OperationStatus, PreparedContactBlock, PreparedIdentity, PreparedInboxRotation,
+    PreparedOneTimePreKeys, PreparedSessionAcceptance, PreparedSignedPreKeyRotation,
+    UnfinishedOperation,
+};
 use crate::protocol::{
-    AcknowledgmentOutcome, ContactStateChange, IdentityKey as FfiIdentityKey,
-    InboundMessageOutcome, OutboundMessageResult, ProtocolStateEntry, ProtocolStateUpdate,
-    protocol_key, snapshot_input_from_entries, updates_from_core,
+    AcknowledgmentOutcome, ContactStateChange, IdentityKey, InboundMessageOutcome,
+    OutboundMessageResult, ProtocolStateEntry, ProtocolStateUpdate, protocol_key,
+    snapshot_input_from_entries, updates_from_core,
 };
 use crate::records::{
-    Identity, InboxRotation, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
-    PublicationBundle, fixed_16, fixed_32,
+    Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle, fixed_16,
+    fixed_32,
 };
 use crate::storage::SecureStorageAdapter;
 use crate::time::time_from_millis;
@@ -36,7 +36,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-/// Largest authentication transcript this keystore will sign, in bytes.
+/// Largest authentication transcript the Identity Key will sign, in bytes.
 ///
 /// A relay authentication transcript is 159 bytes for the HTTP form and 120 for the WebSocket
 /// form, so this leaves room for long request targets while keeping the export from doubling as a
@@ -46,55 +46,122 @@ const MAX_AUTHENTICATION_TRANSCRIPT_LEN: usize = 4096;
 /// ASCII prefix reserved for preimages Aether signs or verifies itself.
 ///
 /// Every signature context and domain tag Aether defines starts with these bytes, so refusing
-/// them keeps [`IdentityOperations::sign_authentication_transcript`] disjoint from all of them. Matched case-insensitively to cover the lowercase hash-domain convention as well.
+/// them keeps [`IdentityContext::sign_authentication_transcript`] disjoint from all of them.
+/// Matched case-insensitively to cover the lowercase hash-domain convention as well.
 const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
 
-/// Identity-scoped entry point for Identity, Messaging, and Contact operations.
+/// One local identity namespace: its keys in SecureStorage and every operation that uses them.
 ///
-/// Keep one Client for each identity namespace. All focused interfaces share its storage and
-/// immutable configuration. The host must serialize each identity's complete load, operation,
-/// and conditional host commit, including across app and extension processes. For prepared
-/// operations, hold that serialization until finalization, abort, or reconciliation after an
-/// ambiguous host commit.
+/// Create one context for each namespace, before or after the identity exists. Its
+/// [`Self::messaging`] and [`Self::contacts`] groups share its storage and configuration. The
+/// context caches no protocol state, so several contexts, including ones in an app extension, can
+/// serve the same identity.
+///
+/// Roost owns the identity's keys, backups, prekeys, and inbox generations, the contents of
+/// Protocol State Blobs, and the journal that makes key changes recoverable. It reads no clock
+/// for certificate checks, does no networking, and keeps no copy of protocol state between calls.
+///
+/// The host owns the [`SecureStorage`] adapter, the database that stores Protocol State Blobs and
+/// operation IDs, and its transactions. It stores the blobs without decoding them or keeping a
+/// copy of its own, and calls Roost outside its database transactions, off the main thread. It
+/// holds one lock that covers every process sharing the identity from preparing an operation until
+/// its host commit is resolved.
+///
+/// # Key Changes
+///
+/// A method whose name starts with `prepare` stages a change in SecureStorage and returns its
+/// output and an [`OperationId`]. Nothing is authoritative until the host:
+///
+/// 1. Calls [`Self::reserve_operation`].
+/// 2. Commits the output with the operation ID in one transaction.
+/// 3. Calls [`Self::finalize_operation`], then publishes the output.
+///
+/// When the commit definitely failed, call [`Self::abort_operation`] instead. When the outcome is
+/// unknown, such as after a lost reply or a cancellation, neither finalize nor abort: recover
+/// first. Releasing a context never aborts its operations.
+///
+/// At startup, and after any unknown outcome, resolve each of [`Self::unfinished_operations`]
+/// against the host's records: finalize a reserved or finalizing operation whose ID the host
+/// committed, abort a prepared or reserved one whose ID it didn't, and stop on anything else. A
+/// host that records finalization itself also checks each committed operation it hasn't marked:
+/// a crash between finalizing and marking leaves [`Self::operation_status`] reporting it
+/// finalized. When SecureStorage has no identity but the host's records still hold one, stop
+/// instead of creating a new identity.
+///
+/// ```swift
+/// for operation in try context.unfinishedOperations() {
+///     switch (operation.status, try database.hasCommitted(operation.id)) {
+///     case (.reserved, true), (.finalizing, true):
+///         try context.finalizeOperation(id: operation.id)
+///     case (.prepared, false), (.reserved, false):
+///         try context.abortOperation(id: operation.id)
+///     default:
+///         throw StartupError.inconsistentStorage
+///     }
+/// }
+/// if try context.identity() == nil {
+///     guard try database.isEmpty() else { throw StartupError.inconsistentStorage }
+///     let prepared = try context.prepareIdentityCreation()
+///     try context.reserveOperation(id: prepared.operationId)
+///     switch try database.saveIdentity(prepared.identity, operationId: prepared.operationId) {
+///     case .committed: try context.finalizeOperation(id: prepared.operationId)
+///     case .conflict: try context.abortOperation(id: prepared.operationId)
+///     case .unknown: throw StartupError.recoveryRequired
+///     }
+/// }
+/// ```
+///
+/// ```kotlin
+/// for (operation in context.unfinishedOperations()) {
+///     val committed = database.hasCommitted(operation.id)
+///     when {
+///         committed && (operation.status == OperationStatus.RESERVED ||
+///             operation.status == OperationStatus.FINALIZING) ->
+///             context.finalizeOperation(operation.id)
+///         !committed && (operation.status == OperationStatus.PREPARED ||
+///             operation.status == OperationStatus.RESERVED) ->
+///             context.abortOperation(operation.id)
+///         else -> throw InconsistentStorage()
+///     }
+/// }
+/// if (context.identity() == null) {
+///     if (!database.isEmpty()) throw InconsistentStorage()
+///     val prepared = context.prepareIdentityCreation()
+///     context.reserveOperation(prepared.operationId)
+///     when (database.saveIdentity(prepared.identity, prepared.operationId)) {
+///         CommitResult.COMMITTED -> context.finalizeOperation(prepared.operationId)
+///         CommitResult.CONFLICT -> context.abortOperation(prepared.operationId)
+///         CommitResult.UNKNOWN -> throw RecoveryRequired()
+///     }
+/// }
+/// ```
 #[derive(uniffi::Object)]
-pub struct Client {
+pub struct IdentityContext {
     inner: Arc<CoreKeyStore>,
 }
 
-/// Identity lifecycle and public key material for one Client.
+/// Session, Message, acknowledgment, and retry operations for one [`IdentityContext`].
 ///
-/// Obtain this handle from [`Client::identity`]. It retains the Client's context and uses its
-/// prepared-operation journal; constructing another storage adapter is unnecessary.
-#[derive(uniffi::Object)]
-pub struct IdentityOperations {
-    pub(crate) inner: Arc<CoreKeyStore>,
-}
-
-/// Session, message, acknowledgment, and retry operations for one Client.
-///
-/// Obtain this handle from [`Client::messaging`]. The host supplies snapshots and exact Transport
-/// Binding bytes, then commits returned updates together with their associated application effects.
+/// The host supplies snapshots and exact Transport Binding bytes, then commits returned updates
+/// together with their associated application effects.
 #[derive(uniffi::Object)]
 pub struct Messaging {
     pub(crate) inner: Arc<CoreKeyStore>,
 }
 
-/// Contact identity, trust, blocking, and inbox authorization for one Client.
+/// Contact identity, trust, blocking, and inbox authorization for one [`IdentityContext`].
 ///
-/// Obtain this handle from [`Client::contacts`]. Queries project host-owned snapshots; state changes
-/// become visible when the host commits and refreshes its store.
+/// Queries read host-owned snapshots; state changes become visible when the host commits and
+/// refreshes its store.
 #[derive(uniffi::Object)]
 pub struct Contacts {
     pub(crate) inner: Arc<CoreKeyStore>,
 }
 
-/// Immutable protocol policy shared by every interface of a Client.
-///
-/// Pass this record to [`Client::with_configuration`] before starting work. Prepared operations
-/// retain the same configuration while staging secure mutations.
+/// Protocol settings that every operation of an [`IdentityContext`] uses.
 #[derive(uniffi::Record)]
-pub struct ClientConfiguration {
-    /// Number of received message digests retained for this identity, within Core's hard cap.
+pub struct ContextConfiguration {
+    /// Number of received Message digests kept for this identity, from 64 to 2048.
     pub deduplication_capacity: u64,
     /// Whether a blocked sender receives an acknowledgment.
     pub blocked_contact_acknowledgment_policy: crate::BlockedContactAcknowledgmentPolicy,
@@ -134,34 +201,32 @@ pub struct SessionAcceptanceResult {
 }
 
 #[uniffi::export]
-impl Client {
-    /// Creates one identity context backed by platform SecureStorage with the default policy.
+impl IdentityContext {
+    /// Creates a context over `secure_storage` with the default configuration.
     ///
-    /// Construction performs no storage I/O. Keep the Client and its interfaces for the identity's
-    /// lifetime. The host serializes operations and commits across every process sharing storage.
+    /// Creating a context reads and writes nothing.
     #[uniffi::constructor]
-    pub fn new(storage: Arc<dyn SecureStorage>) -> Arc<Self> {
+    pub fn new(secure_storage: Arc<dyn SecureStorage>) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::new(CoreKeyStore::new(Box::new(SecureStorageAdapter::new(
-                storage,
+                secure_storage,
             )))),
         })
     }
 
-    /// Creates one identity context with immutable protocol configuration.
+    /// Creates a context over `secure_storage` with `configuration`.
     ///
-    /// Every interface and prepared operation uses this policy. `deduplication_capacity` must be
-    /// between 64 and 2048 inclusive. See [`Client`] for serialization and recovery requirements.
+    /// Every context serving the same identity should use the same configuration.
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if the capacity is outside that range.
+    /// - [`RoostError::InvalidData`] if `deduplication_capacity` is outside its range.
     #[uniffi::constructor]
     pub fn with_configuration(
-        storage: Arc<dyn SecureStorage>,
-        configuration: ClientConfiguration,
-    ) -> Result<Arc<Self>, ClientError> {
+        secure_storage: Arc<dyn SecureStorage>,
+        configuration: ContextConfiguration,
+    ) -> Result<Arc<Self>, RoostError> {
         let capacity = usize::try_from(configuration.deduplication_capacity).map_err(|_| {
-            ClientError::InvalidData {
+            RoostError::InvalidData {
                 reason: "deduplication capacity exceeds platform range".into(),
             }
         })?;
@@ -173,221 +238,96 @@ impl Client {
             );
         Ok(Arc::new(Self {
             inner: Arc::new(CoreKeyStore::with_protocol_engine(
-                Box::new(SecureStorageAdapter::new(storage)),
+                Box::new(SecureStorageAdapter::new(secure_storage)),
                 engine,
             )),
         }))
     }
 
-    /// Returns the identity interface sharing this Client's storage and lifecycle.
-    ///
-    /// The interface retains the context even after the root handle is released.
-    pub fn identity(&self) -> Arc<IdentityOperations> {
-        Arc::new(IdentityOperations {
-            inner: Arc::clone(&self.inner),
-        })
-    }
-
-    /// Returns the messaging interface using this Client's identity and protocol policy.
-    ///
-    /// Pass committed host snapshots to operations and atomically persist updates and effects.
+    /// Returns the messaging group, which shares this context's storage and configuration.
     pub fn messaging(&self) -> Arc<Messaging> {
         Arc::new(Messaging {
             inner: Arc::clone(&self.inner),
         })
     }
 
-    /// Returns the contacts interface sharing this Client's identity and protocol policy.
-    ///
-    /// Reload committed host snapshots for queries, including after another process commits.
+    /// Returns the contacts group, which shares this context's storage and configuration.
     pub fn contacts(&self) -> Arc<Contacts> {
         Arc::new(Contacts {
             inner: Arc::clone(&self.inner),
         })
     }
-}
 
-#[uniffi::export]
-impl Client {
-    /// Returns the durable status of a retained prepared operation.
-    ///
-    /// Use this after an ambiguous lifecycle call or while reconciling startup state. Terminal
-    /// tombstones are retained only within the bounded operation journal, so a sufficiently old
-    /// finalized or aborted identifier may return [`ClientError::NotFound`].
+    /// Returns the stored identity's public keys, absent when no identity is stored.
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
-    /// - [`ClientError::NotFound`] if the operation is no longer retained.
-    /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
-    ///   [`ClientError::Storage`] if the operation journal cannot be read.
-    pub fn operation_status(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(KeyStoreOperationStatus::from_core(
-            self.inner.operation_status(operation_id(&id)?)?,
-        ))
+    /// - [`RoostError::Corrupt`] if the identity is only partly stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn identity(&self) -> Result<Option<Identity>, RoostError> {
+        self.inner
+            .identity()?
+            .map(|identity| Ok(Identity::from_core(identity)?))
+            .transpose()
     }
 
-    /// Validates SecureStorage preconditions and reserves an operation for the host transaction.
+    /// Prepares a new identity with its first Discovery Key and inbox generation.
     ///
-    /// After this succeeds, commit the provisional protocol-state updates and outputs atomically.
-    /// Call [`Self::finalize_operation`] after that host commit. Abort only after proving the host
-    /// transaction did not commit. If the commit result is ambiguous, reload the host operation
-    /// record by identifier and reconcile it through [`Self::unfinished_operations`].
+    /// The host saves the identity with the operation ID, and publishes it only after
+    /// finalization. Finalizing also completes an identity whose earlier creation stopped partway.
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
-    /// - [`ClientError::NotFound`] if the operation is no longer retained.
-    /// - [`ClientError::OperationConflict`] if the operation cannot be committed in its current
-    ///   state.
-    /// - [`ClientError::OperationRecoveryRequired`] if another committed operation needs recovery.
-    /// - [`ClientError::SecureStoragePreconditionChanged`] if authoritative input changed after
-    ///   preparation.
-    /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
-    ///   [`ClientError::Storage`] if the operation journal cannot be updated.
-    pub fn commit_operation(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(KeyStoreOperationStatus::from_core(
-            self.inner.commit_operation(operation_id(&id)?)?,
-        ))
-    }
-
-    /// Makes a committed operation's staged SecureStorage mutations authoritative.
-    ///
-    /// Repeating this call resumes interrupted finalization or returns `Finalized` again.
-    ///
-    /// # Errors
-    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
-    /// - [`ClientError::NotFound`] if the operation is no longer retained.
-    /// - [`ClientError::OperationConflict`] if the operation has not committed or was aborted.
-    /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
-    ///   [`ClientError::Storage`] if staged mutations cannot be resumed.
-    pub fn finalize_operation(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(KeyStoreOperationStatus::from_core(
-            self.inner.finalize_operation(operation_id(&id)?)?,
-        ))
-    }
-
-    /// Discards staged SecureStorage mutations before finalization starts.
-    ///
-    /// A committed operation may be aborted only after proving its host transaction did not commit.
-    /// Reconcile an ambiguous result by identifier instead.
-    ///
-    /// # Errors
-    /// - [`ClientError::InvalidData`] if `id` is not 16 bytes.
-    /// - [`ClientError::NotFound`] if the operation is no longer retained.
-    /// - [`ClientError::OperationConflict`] if finalization already started or completed.
-    /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
-    ///   [`ClientError::Storage`] if the operation journal cannot be updated.
-    pub fn abort_operation(&self, id: Vec<u8>) -> Result<KeyStoreOperationStatus, ClientError> {
-        Ok(KeyStoreOperationStatus::from_core(
-            self.inner.abort_operation(operation_id(&id)?)?,
-        ))
-    }
-
-    /// Returns prepared operations that still need startup recovery.
-    ///
-    /// Match each identifier against the host transaction log. Finalize operations whose host
-    /// transaction committed; abort an orphan only after proving that it did not commit.
-    ///
-    /// # Errors
-    /// - [`ClientError::Corrupt`] | [`ClientError::InternalError`] |
-    ///   [`ClientError::Storage`] if the operation journal cannot be read.
-    pub fn unfinished_operations(&self) -> Result<Vec<UnfinishedKeyStoreOperation>, ClientError> {
-        Ok(self
-            .inner
-            .unfinished_operations()?
-            .into_iter()
-            .map(UnfinishedKeyStoreOperation::from_core)
-            .collect())
-    }
-}
-
-#[uniffi::export]
-impl IdentityOperations {
-    /// Prepares fresh identity material without changing authoritative key entries.
-    ///
-    /// The secret material is staged in Core's recoverable [`SecureStorage`] journal. Commit the
-    /// operation, persist any host-owned output, then finalize it before using the identity.
-    ///
-    /// # Errors
-    /// - [`ClientError::AlreadyExists`] if complete identity and discovery-key material already
-    ///   exist.
-    /// - [`ClientError::Corrupt`] if stored identity key material is incomplete.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored discovery-key or identity bytes are malformed.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] if platform storage returns an error.
-    pub fn prepare_generate_identity(&self) -> Result<PreparedIdentityGeneration, ClientError> {
-        let (operation, identity) = convert_prepared(
+    /// - [`RoostError::AlreadyExists`] if an identity is already stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_identity_creation(&self) -> Result<PreparedIdentity, RoostError> {
+        let (operation_id, identity) = convert_prepared(
             &self.inner,
-            self.inner.prepare_generate_identity()?,
+            self.inner.prepare_identity_creation()?,
             |identity| Ok(Identity::from_core(identity)?),
         )?;
-        Ok(PreparedIdentityGeneration {
-            operation,
+        Ok(PreparedIdentity {
+            operation_id,
             identity,
         })
     }
 
-    /// Loads the stored identity's public material.
+    /// Prepares deletion of the identity and all of its keys.
+    ///
+    /// The host deletes its protocol state for the identity in the transaction that saves the
+    /// operation ID. Preparing deletion with no identity stored still returns an operation.
     ///
     /// # Errors
-    /// - [`ClientError::Corrupt`] if only one of the two key parts is present.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if a stored key has the wrong byte length.
-    /// - [`ClientError::NotFound`] if no identity is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn load_identity(&self) -> Result<Identity, ClientError> {
-        let identity = self.inner.load_identity()?;
-        Ok(Identity::from_core(identity)?)
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_identity_deletion(&self) -> Result<OperationId, RoostError> {
+        Ok(OperationId::from_core(
+            self.inner.prepare_identity_deletion()?.operation.id,
+        ))
     }
 
-    /// Returns `true` when this keystore has identity data in storage.
+    /// Signs a host-built authentication transcript with the Identity Key and returns the
+    /// 64-byte signature.
     ///
-    /// This is a presence check only. Use [`Self::load_identity`] to read and validate the public
-    /// identity.
-    ///
-    /// # Errors
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn has_identity(&self) -> Result<bool, ClientError> {
-        Ok(self.inner.has_identity()?)
-    }
-
-    /// Signs a caller-built authentication transcript with the identity key's Ed25519 half.
-    ///
-    /// The transcript is signed exactly as given — no context is prepended. Callers own their own
-    /// domain separation and put it inside the transcript, which is what a relay authentication
-    /// transcript already does: `Relay-HTTP-Auth-v1` and `Relay-WebSocket-Auth-v1` are literal
-    /// prefixes of the bytes the relay rebuilds and verifies. Prepending a second context here
-    /// would produce a preimage no verifier ever reconstructs, so this operation deliberately does
-    /// not. Aether defines neither the transcript layout nor the verifier, and never inspects the
-    /// fields.
-    ///
-    /// What Aether does enforce is that the result can never be mistaken for one of its own
-    /// signatures. A transcript starting with the reserved ASCII prefix `Aether`, matched
-    /// case-insensitively, is refused, because every preimage Aether signs or verifies begins with
-    /// one of its signature contexts, and every one of those begins with those bytes.
-    /// Without the check this export would be a signing oracle able to mint an identity binding, a
-    /// discovery-to-identity binding, or a message-transcript signature under the local identity
-    /// key from bytes the caller — or whoever supplies the caller — chose.
-    ///
-    /// Returns the 64 signature bytes. Ed25519 signing is deterministic, so an identical
-    /// transcript always yields an identical signature.
+    /// The transcript is signed exactly as given, so the host puts its own domain separation inside
+    /// it, as a relay authentication transcript does with its `Relay-HTTP-Auth-v1` prefix. Roost
+    /// refuses a transcript that starts with `Aether`, in any letter case, because every preimage
+    /// Roost signs starts with that prefix: without the check, this method could sign an identity
+    /// binding or a Message transcript chosen by whoever supplied the bytes. Signing is
+    /// deterministic, so the same transcript always gives the same signature.
     ///
     /// # Errors
-    /// - [`ClientError::Corrupt`] if only one of the two stored identity key parts is present.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if the transcript is empty, longer than 4096 bytes, starts
-    ///   with the reserved `Aether` prefix, or a stored identity key has the wrong byte length.
-    /// - [`ClientError::NotFound`] if no identity is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
+    /// - [`RoostError::InvalidData`] if the transcript is empty, longer than 4096 bytes, or starts
+    ///   with the reserved prefix.
+    /// - [`RoostError::NotFound`] if no identity is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn sign_authentication_transcript(
         &self,
         transcript: Vec<u8>,
-    ) -> Result<Vec<u8>, ClientError> {
+    ) -> Result<Vec<u8>, RoostError> {
         let transcript = Zeroizing::new(transcript);
         check_signable_transcript(&transcript)?;
         Ok(self
@@ -398,72 +338,79 @@ impl IdentityOperations {
             .to_vec())
     }
 
-    /// Returns the currently stored public signed pre-key.
+    /// Returns a passphrase-encrypted backup of the identity and its current Discovery Key.
     ///
-    /// Hand this to peers asking for the bundle they need to start a session.
+    /// Each call runs Argon2id with 64 MiB of memory, so call it off the main thread. The backup is
+    /// about 274 bytes and restores on any device with [`Self::prepare_backup_import`].
     ///
     /// # Errors
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if the stored blob has the wrong length or unsupported
-    ///   version.
-    /// - [`ClientError::NotFound`] if no signed pre-key is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn current_signed_prekey_bundle(&self) -> Result<PublicSignedPreKey, ClientError> {
-        PublicSignedPreKey::from_core(self.inner.current_signed_prekey_bundle()?)
+    /// - [`RoostError::BackupFailed`] if key derivation or encryption fails.
+    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, RoostError> {
+        let passphrase = Zeroizing::new(passphrase);
+        Ok(self.inner.export_encrypted_backup(&passphrase)?)
     }
 
-    /// Returns the current public discovery key, verified against the identity key.
+    /// Prepares replacing this context's identity with the one in `backup`.
     ///
-    /// Publish this alongside the public signed pre-key so peers can verify the trust chain.
+    /// A wrong passphrase or a damaged backup fails here and changes nothing. In the transaction
+    /// that saves the operation ID, the host deletes or replaces all of its protocol state for the
+    /// identity, since Sessions, acknowledgments, and deduplication from before the restore no
+    /// longer apply. After finalization, prekeys and publication stay blocked until
+    /// [`Self::prepare_inbox_rotation`] moves to a new inbox generation, so the restored identity
+    /// never reuses prekey IDs that the backed-up generation published. Each call runs Argon2id
+    /// with 64 MiB of memory.
     ///
     /// # Errors
-    /// - [`ClientError::Corrupt`] if the stored discovery key does not verify or identity keys are
-    ///   incomplete.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if stored discovery-key or identity bytes are malformed.
-    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn current_discovery_key_bundle(&self) -> Result<PublicDiscoveryKey, ClientError> {
-        PublicDiscoveryKey::from_core(self.inner.current_discovery_key_bundle()?)
+    /// - [`RoostError::DecryptionFailed`] if the passphrase is wrong or the backup was altered.
+    /// - [`RoostError::InvalidData`] or [`RoostError::UnsupportedVersion`] if the backup is
+    ///   malformed.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_backup_import(
+        &self,
+        backup: Vec<u8>,
+        passphrase: String,
+    ) -> Result<OperationId, RoostError> {
+        let backup = Zeroizing::new(backup);
+        let passphrase = Zeroizing::new(passphrase);
+        Ok(OperationId::from_core(
+            self.inner
+                .prepare_backup_import(backup.as_slice(), passphrase.as_str())?
+                .operation
+                .id,
+        ))
     }
 
-    /// Returns the current publishable pair (public discovery key + signed pre-key), atomically.
+    /// Returns the current Discovery Key and signed prekey, which verify as one chain.
     ///
-    /// Returns caller-created bundles that verify as a chain. Prefer this over reading the
-    /// public discovery key and signed pre-key separately, which can race a concurrent rotation
-    /// into a pair the peer rejects. Publish both bundles together.
+    /// Publish the two together: reading them separately could pair keys from different rotations,
+    /// which peers reject.
     ///
     /// # Errors
-    /// - [`ClientError::Corrupt`] if stored key material does not verify as a chain.
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored discovery-key, signed-pre-key, or identity bytes
-    ///   are malformed.
-    /// - [`ClientError::NotFound`] if no identity, discovery key, or signed pre-key is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn current_publication_bundle(&self) -> Result<PublicationBundle, ClientError> {
-        PublicationBundle::from_core(self.inner.current_publication_bundle()?)
+    /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain.
+    /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
+    /// - [`RoostError::NotFound`] if no identity, Discovery Key, or signed prekey is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn current_publication(&self) -> Result<PublicationBundle, RoostError> {
+        PublicationBundle::from_core(self.inner.current_publication()?)
     }
 
-    /// Returns the recipient delivery capability for the current inbox generation. Always 32
-    /// bytes.
+    /// Returns the current inbox generation's 32-byte delivery capability.
     ///
-    /// This is a bearer secret. Give it only to authorized contacts over an encrypted channel and
-    /// persist it in platform secure storage. Register
-    /// [`PublicationBundle::recipient_delivery_verifier`] with the relay instead. Roost never
-    /// registers, validates, or transmits a capability.
+    /// The capability is a secret that lets a contact deliver to this inbox. Share it only with
+    /// authorized contacts over an encrypted channel, keep it in secure storage, and register the
+    /// publication's verifier with the relay instead.
     ///
     /// # Errors
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if the stored discovery-key blob is malformed.
-    /// - [`ClientError::NotFound`] if no discovery key is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn current_delivery_capability(&self) -> Result<Vec<u8>, ClientError> {
+    /// - [`RoostError::NotFound`] if no Discovery Key is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn current_delivery_capability(&self) -> Result<Vec<u8>, RoostError> {
         Ok(self
             .inner
             .current_delivery_capability()?
@@ -471,246 +418,202 @@ impl IdentityOperations {
             .to_vec())
     }
 
-    /// Prepares exactly `batch_size` one-time pre-keys for the current discovery-key epoch.
+    /// Prepares a new inbox generation: a new Discovery Key, signed prekey, and delivery
+    /// capability.
     ///
-    /// The returned records contain only public material. The secret halves remain securely staged
-    /// in the recoverable operation journal and become authoritative only on finalization.
-    ///
-    /// # Errors
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored one-time-pre-key data is malformed or the batch
-    ///   exceeds capacity.
-    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_generate_one_time_prekeys(
-        &self,
-        batch_size: u32,
-    ) -> Result<PreparedOneTimePreKeys, ClientError> {
-        let (operation, one_time_prekeys) = convert_prepared(
-            &self.inner,
-            self.inner
-                .prepare_generate_one_time_prekeys(batch_size as usize)?,
-            |one_time_prekeys| {
-                one_time_prekeys
-                    .into_iter()
-                    .map(PublicOneTimePreKey::from_core)
-                    .collect()
-            },
-        )?;
-        Ok(PreparedOneTimePreKeys {
-            operation,
-            one_time_prekeys,
-        })
-    }
-
-    /// Prepares one-time-prekey pool replenishment when it falls below the threshold.
-    ///
-    /// Returns an empty provisional list when the current pool is already above the threshold. The
-    /// returned no-op operation must still be finalized or aborted.
+    /// Rotation clears the old generation's one-time prekeys and invalidates every contact's
+    /// delivery capability, so the host shares the new capability with each contact that should
+    /// keep delivering.
     ///
     /// # Errors
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored one-time-prekey data is malformed.
-    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_replenish_one_time_prekeys(
-        &self,
-    ) -> Result<PreparedOneTimePreKeys, ClientError> {
-        let (operation, one_time_prekeys) = convert_prepared(
+    /// - [`RoostError::NotFound`] if no identity is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_inbox_rotation(&self) -> Result<PreparedInboxRotation, RoostError> {
+        let (operation_id, rotation) = convert_prepared(
             &self.inner,
-            self.inner.prepare_replenish_one_time_prekeys()?,
-            |one_time_prekeys| {
-                one_time_prekeys
-                    .into_iter()
-                    .map(PublicOneTimePreKey::from_core)
-                    .collect()
-            },
-        )?;
-        Ok(PreparedOneTimePreKeys {
-            operation,
-            one_time_prekeys,
-        })
-    }
-
-    /// Prepares a discovery-key, capability, and prekey rotation as one operation.
-    ///
-    /// The discovery-key and signed-pre-key rotations are one operation. Stored one-time pre-keys
-    /// are cleared before the discovery-key epoch advances. Publish both returned bundles together
-    /// so peers can verify the full trust chain.
-    ///
-    /// # Errors
-    /// - [`ClientError::Corrupt`] if the discovery key cannot be verified while creating the
-    ///   signed pre-key.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored discovery-key or identity bytes are malformed.
-    /// - [`ClientError::NotFound`] if no identity is stored.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_rotate_inbox_now(&self) -> Result<PreparedInboxRotation, ClientError> {
-        let (operation, rotation) = convert_prepared(
-            &self.inner,
-            self.inner.prepare_rotate_inbox_now()?,
+            self.inner.prepare_inbox_rotation()?,
             inbox_rotation_from_core,
         )?;
         Ok(PreparedInboxRotation {
-            operation,
+            operation_id,
             rotation,
         })
     }
 
-    /// Prepares signed-prekey rotation if the stored one is missing or stale.
+    /// Prepares a new signed prekey if the current one is missing or stale.
     ///
-    /// Returns the new bundle when rotation occurred, `None` when the stored signed pre-key is
-    /// still fresh. The returned no-op operation must still be finalized or aborted.
-    ///
-    /// Call once at app launch. The returned signed pre-key is signed by the current discovery
-    /// key, so publish it together with that public discovery key. Prefer
-    /// [`Self::current_publication_bundle`] when publishing both keys. `None` means the stored
-    /// signed pre-key is unchanged.
+    /// Call this at launch. Finalize or abort the operation even when it returns no signed prekey.
     ///
     /// # Errors
-    /// - [`ClientError::Corrupt`] if the discovery key does not verify or identity keys are
-    ///   incomplete.
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored signed-pre-key, discovery-key, or identity bytes are
-    ///   malformed.
-    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_rotate_signed_prekey_if_stale(
+    /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
+    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_signed_prekey_rotation_if_stale(
         &self,
-    ) -> Result<PreparedSignedPreKeyRotation, ClientError> {
-        let (operation, signed_prekey) = convert_prepared(
+    ) -> Result<PreparedSignedPreKeyRotation, RoostError> {
+        let (operation_id, signed_prekey) = convert_prepared(
             &self.inner,
-            self.inner.prepare_rotate_signed_prekey_if_stale()?,
+            self.inner.prepare_signed_prekey_rotation_if_stale()?,
             |signed_prekey| signed_prekey.map(PublicSignedPreKey::from_core).transpose(),
         )?;
         Ok(PreparedSignedPreKeyRotation {
-            operation,
+            operation_id,
             signed_prekey,
         })
     }
 
-    /// Prepares immediate signed-prekey rotation regardless of staleness.
-    ///
-    /// Use when the caller needs a fresh bundle independent of the rotation window.
+    /// Prepares a new signed prekey even if the current one is fresh.
     ///
     /// # Errors
-    /// - [`ClientError::Corrupt`] if the discovery key does not verify or identity keys are
-    ///   incomplete.
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::InvalidData`] if stored discovery-key or identity bytes are malformed.
-    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_rotate_signed_prekey_now(
+    /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
+    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_signed_prekey_rotation(
         &self,
-    ) -> Result<PreparedSignedPreKeyRotation, ClientError> {
-        let (operation, signed_prekey) = convert_prepared(
+    ) -> Result<PreparedSignedPreKeyRotation, RoostError> {
+        let (operation_id, signed_prekey) = convert_prepared(
             &self.inner,
-            self.inner.prepare_rotate_signed_prekey_now()?,
+            self.inner.prepare_signed_prekey_rotation()?,
             |signed_prekey| PublicSignedPreKey::from_core(signed_prekey).map(Some),
         )?;
         Ok(PreparedSignedPreKeyRotation {
-            operation,
+            operation_id,
             signed_prekey,
         })
     }
 
-    /// Exports the current identity and discovery key as a passphrase-encrypted blob.
-    ///
-    /// The blob is portable across devices: pass it to another keystore's
-    /// [`Self::prepare_import_encrypted_backup`] with the same `passphrase` to restore the same identity
-    /// and discovery-epoch lineage.
-    ///
-    /// Requires a stored discovery key; if it is missing, regenerate the identity with
-    /// [`Self::prepare_generate_identity`] (which repairs the discovery key) before exporting.
+    /// Prepares exactly `count` one-time prekeys for the current inbox generation.
     ///
     /// # Errors
-    /// - [`ClientError::BackupFailed`] on randomness failure, Argon2id derivation error, or
-    ///   authenticated encryption failure.
-    /// - [`ClientError::Corrupt`] if identity keys are incomplete or the discovery key does not
-    ///   verify against the current identity.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if a stored identity key has the wrong byte length.
-    /// - [`ClientError::NotFound`] if no identity or discovery key is stored.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure when loading an identity.
-    ///
-    /// # Performance
-    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
-    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
-    /// hashing step using 64 MiB memory and 3 iterations.
-    pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, ClientError> {
-        let passphrase = Zeroizing::new(passphrase);
-        Ok(self.inner.export_encrypted_backup(&passphrase)?)
-    }
-
-    /// Prepares restoration of an encrypted identity backup.
-    ///
-    /// The backup is decrypted and the restored discovery key is validated against the restored
-    /// identity before staging changes, so a wrong passphrase or malformed blob leaves the
-    /// existing identity untouched. Commit the operation, atomically wipe or replace host-owned
-    /// Session, deduplication, and pending-acknowledgment state, then finalize. Prekey use stays
-    /// blocked until [`Self::prepare_rotate_inbox_now`] advances the restored identity to a fresh
-    /// inbox generation. This prevents reuse of prekey identifiers that the backed-up generation
-    /// may already have published.
-    ///
-    /// # Errors
-    /// - [`ClientError::BackupFailed`] on Argon2id derivation failure.
-    /// - [`ClientError::DecryptionFailed`] on wrong passphrase or backup authentication failure.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::Corrupt`] if the backup's discovery key is not signed by the backup's
-    ///   identity key.
-    /// - [`ClientError::InvalidData`] on a malformed header, authenticated unsupported version,
-    ///   out-of-range Argon2id parameters, or a malformed discovery-key blob.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure during commit.
-    ///
-    /// # Performance
-    /// The backup blob is about 274 bytes: a versioned header carrying the Argon2id parameters,
-    /// followed by the encrypted identity and discovery keys. Each call runs one Argon2id password
-    /// hashing step using 64 MiB memory and 3 iterations.
-    pub fn prepare_import_encrypted_backup(
+    /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
+    /// - [`RoostError::InvalidData`] if the pool can't hold `count` more prekeys.
+    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_one_time_prekeys(
         &self,
-        data: Vec<u8>,
-        passphrase: String,
-    ) -> Result<KeyStoreOperation, ClientError> {
-        let data = Zeroizing::new(data);
-        let passphrase = Zeroizing::new(passphrase);
-        Ok(KeyStoreOperation::from_core(
-            self.inner
-                .prepare_import_encrypted_backup(data.as_slice(), passphrase.as_str())?
-                .operation,
+        count: u32,
+    ) -> Result<PreparedOneTimePreKeys, RoostError> {
+        let count = usize::try_from(count).map_err(|_| RoostError::InvalidData {
+            reason: "one-time prekey count exceeds platform range".into(),
+        })?;
+        let (operation_id, one_time_prekeys) = convert_prepared(
+            &self.inner,
+            self.inner.prepare_one_time_prekeys(count)?,
+            public_one_time_prekeys_from_core,
+        )?;
+        Ok(PreparedOneTimePreKeys {
+            operation_id,
+            one_time_prekeys,
+        })
+    }
+
+    /// Prepares one-time prekeys to refill the pool once it runs low.
+    ///
+    /// Returns no prekeys while the pool is above its threshold. Finalize or abort the operation
+    /// either way.
+    ///
+    /// # Errors
+    /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
+    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn prepare_one_time_prekey_replenishment(
+        &self,
+    ) -> Result<PreparedOneTimePreKeys, RoostError> {
+        let (operation_id, one_time_prekeys) = convert_prepared(
+            &self.inner,
+            self.inner.prepare_one_time_prekey_replenishment()?,
+            public_one_time_prekeys_from_core,
+        )?;
+        Ok(PreparedOneTimePreKeys {
+            operation_id,
+            one_time_prekeys,
+        })
+    }
+
+    /// Checks that SecureStorage still matches what a prepared operation read, and reserves it for
+    /// the host's commit.
+    ///
+    /// Reserving again is harmless. Until the reserved operation is finalized or aborted, other
+    /// calls return [`RoostError::OperationRecoveryRequired`].
+    ///
+    /// # Errors
+    /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
+    /// - [`RoostError::NotFound`] if no recent operation has this ID.
+    /// - [`RoostError::OperationConflict`] if the operation was aborted.
+    /// - [`RoostError::OperationRecoveryRequired`] if another reserved operation needs recovery.
+    /// - [`RoostError::SecureStoragePreconditionChanged`] if another operation changed the keys
+    ///   this one read. Abort it and prepare again.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn reserve_operation(&self, id: OperationId) -> Result<(), RoostError> {
+        self.inner.reserve_operation(id.to_core()?)?;
+        Ok(())
+    }
+
+    /// Applies a reserved operation's staged changes after the host's commit.
+    ///
+    /// Finalizing again resumes an interrupted finalization, or does nothing once it's done.
+    ///
+    /// # Errors
+    /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
+    /// - [`RoostError::NotFound`] if no recent operation has this ID.
+    /// - [`RoostError::OperationConflict`] if the operation isn't reserved or was aborted.
+    /// - [`RoostError::Storage`] if SecureStorage fails. Finalize again to resume.
+    pub fn finalize_operation(&self, id: OperationId) -> Result<(), RoostError> {
+        self.inner.finalize_operation(id.to_core()?)?;
+        Ok(())
+    }
+
+    /// Discards a prepared or reserved operation's staged changes.
+    ///
+    /// Abort a reserved operation only when the host's commit definitely didn't happen. Aborting
+    /// again does nothing.
+    ///
+    /// # Errors
+    /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
+    /// - [`RoostError::NotFound`] if no recent operation has this ID.
+    /// - [`RoostError::OperationConflict`] if finalization already started.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn abort_operation(&self, id: OperationId) -> Result<(), RoostError> {
+        self.inner.abort_operation(id.to_core()?)?;
+        Ok(())
+    }
+
+    /// Returns an operation's durable phase.
+    ///
+    /// Roost keeps only recent finalized and aborted operations, so an old one returns
+    /// [`RoostError::NotFound`].
+    ///
+    /// # Errors
+    /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
+    /// - [`RoostError::NotFound`] if no recent operation has this ID.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn operation_status(&self, id: OperationId) -> Result<OperationStatus, RoostError> {
+        Ok(OperationStatus::from_core(
+            self.inner.operation_status(id.to_core()?)?,
         ))
     }
 
-    /// Prepares deletion of all stored prekeys, discovery-key, and identity material.
-    ///
-    /// Commit the operation, atomically wipe host-owned protocol state, then finalize. Calling this
-    /// on an empty store still produces an idempotent recoverable operation.
+    /// Returns every operation that is neither finalized nor aborted.
     ///
     /// # Errors
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    pub fn prepare_reset(&self) -> Result<KeyStoreOperation, ClientError> {
-        Ok(KeyStoreOperation::from_core(
-            self.inner.prepare_reset()?.operation,
-        ))
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn unfinished_operations(&self) -> Result<Vec<UnfinishedOperation>, RoostError> {
+        Ok(self
+            .inner
+            .unfinished_operations()?
+            .into_iter()
+            .map(UnfinishedOperation::from_core)
+            .collect())
     }
 }
 
@@ -722,18 +625,18 @@ impl Messaging {
     /// binding for transport retry. Aether does not interpret, transmit, or store the binding.
     ///
     /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
+    /// - [`RoostError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
     ///   fails.
-    /// - [`ClientError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
+    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if key, Message, certificate, prekey, or Transport Binding
+    /// - [`RoostError::InternalError`] on storage lock poisoning.
+    /// - [`RoostError::InvalidData`] if key, Message, certificate, prekey, or Transport Binding
     ///   inputs are malformed.
-    /// - [`ClientError::NotFound`] if local Identity or Discovery Key material is missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if install state cannot be encoded.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    /// - [`ClientError::UnsupportedVersion`] if a prekey bundle, Message, or stored key version is
+    /// - [`RoostError::NotFound`] if local Identity or Discovery Key material is missing.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::ProtocolStateFault`] if install state cannot be encoded.
+    /// - [`RoostError::Storage`] on platform storage failure.
+    /// - [`RoostError::UnsupportedVersion`] if a prekey bundle, Message, or stored key version is
     ///   unsupported.
     #[expect(
         clippy::too_many_arguments,
@@ -749,7 +652,7 @@ impl Messaging {
         sender_signature: Vec<u8>,
         plaintext: Vec<u8>,
         transport_binding: TransportBinding,
-    ) -> Result<SessionInitiationResult, ClientError> {
+    ) -> Result<SessionInitiationResult, RoostError> {
         let sender_certificate = Zeroizing::new(sender_certificate);
         let sender_signature = Zeroizing::new(sender_signature);
         let plaintext = Zeroizing::new(plaintext);
@@ -780,25 +683,25 @@ impl Messaging {
     /// [`Self::prepare_accept_session`] after deriving the host Session key.
     ///
     /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key
+    /// - [`RoostError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key
     ///   and Transport Binding, the selected one-time-prekey identifier does not match the
     ///   Message, or the named identity's binding signature does not verify.
-    /// - [`ClientError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
+    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if the Message or Transport Binding is malformed.
-    /// - [`ClientError::NotFound`] if local Discovery Key or referenced signed-prekey material is
+    /// - [`RoostError::InboxRotationRequired`] after backup restore and before inbox rotation.
+    /// - [`RoostError::InternalError`] on storage lock poisoning.
+    /// - [`RoostError::InvalidData`] if the Message or Transport Binding is malformed.
+    /// - [`RoostError::NotFound`] if local Discovery Key or referenced signed-prekey material is
     ///   missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    /// - [`ClientError::UnsupportedVersion`] if the Message or stored prekey version is unsupported.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] on platform storage failure.
+    /// - [`RoostError::UnsupportedVersion`] if the Message or stored prekey version is unsupported.
     pub fn initiator_identity_hint(
         &self,
         message: Message,
         transport_binding: TransportBinding,
         prekey_selection: PreKeySelection,
-    ) -> Result<Identity, ClientError> {
+    ) -> Result<Identity, RoostError> {
         let core_message = message.to_core()?;
         let transport_binding = transport_binding.into_core()?;
         let bundle = self.inner.initiator_identity_hint_with_transport_binding(
@@ -806,36 +709,32 @@ impl Messaging {
             &transport_binding,
             prekey_selection.to_core(),
         )?;
-        Ok(Identity {
-            x25519_public_key: bundle.public_key.as_bytes().to_vec(),
-            ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
-            identity_binding_signature: bundle.binding_signature.to_bytes().to_vec(),
-        })
+        Ok(Identity::from_public(bundle))
     }
 
     /// Prepares responder-side Session acceptance while authenticating a Transport Binding.
     ///
     /// For a retained superseded signed prekey, the host must first validate that its transport
-    /// accepted the item before supersession. Commit the operation, atomically persist the returned
+    /// accepted the item before supersession. Reserve the operation, atomically persist the returned
     /// state updates and operation identifier, then finalize SecureStorage.
     ///
     /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
+    /// - [`RoostError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
     ///   fails.
-    /// - [`ClientError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
+    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
-    /// - [`ClientError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or operation identifier
+    /// - [`RoostError::InboxRotationRequired`] after backup restore and before inbox rotation.
+    /// - [`RoostError::InternalError`] on storage lock poisoning or operation identifier
     ///   generation failure.
-    /// - [`ClientError::InvalidData`] if the Message, key, prekey, or Transport Binding inputs are
+    /// - [`RoostError::InvalidData`] if the Message, key, prekey, or Transport Binding inputs are
     ///   malformed.
-    /// - [`ClientError::NotFound`] if required local Identity, Discovery Key, signed-prekey, or
+    /// - [`RoostError::NotFound`] if required local Identity, Discovery Key, signed-prekey, or
     ///   one-time-prekey material is missing.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if install state cannot be encoded.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    /// - [`ClientError::UnsupportedVersion`] if the Message, stored prekey, or protocol-state
+    /// - [`RoostError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::ProtocolStateFault`] if install state cannot be encoded.
+    /// - [`RoostError::Storage`] on platform storage failure.
+    /// - [`RoostError::UnsupportedVersion`] if the Message, stored prekey, or protocol-state
     ///   version is unsupported.
     pub fn prepare_accept_session(
         &self,
@@ -844,7 +743,7 @@ impl Messaging {
         message: Message,
         transport_binding: TransportBinding,
         prekey_selection: PreKeySelection,
-    ) -> Result<PreparedSessionAcceptance, ClientError> {
+    ) -> Result<PreparedSessionAcceptance, RoostError> {
         let core_message = message.to_core()?;
         let initiator_identity_key = initiator_identity
             .map(|identity| identity.to_core())
@@ -859,7 +758,7 @@ impl Messaging {
             &transport_binding,
             prekey_selection.to_core(),
         )?;
-        let (operation, acceptance) = convert_prepared(&self.inner, prepared, |result| {
+        let (operation_id, acceptance) = convert_prepared(&self.inner, prepared, |result| {
             let state_updates = updates_from_core(result.state_updates);
             Ok(SessionAcceptanceResult {
                 plaintext: result.plaintext.to_vec(),
@@ -868,7 +767,7 @@ impl Messaging {
             })
         })?;
         Ok(PreparedSessionAcceptance {
-            operation,
+            operation_id,
             acceptance,
         })
     }
@@ -879,18 +778,18 @@ impl Messaging {
     /// binding for retransmission.
     ///
     /// # Errors
-    /// - [`ClientError::ContactNotAccepted`] if the peer contact is still pending.
-    /// - [`ClientError::TerminalSessionRecovery`] if the Session requires replacement.
-    /// - [`ClientError::BlockedContact`] if the contact is locally blocked.
-    /// - [`ClientError::Corrupt`] if stored Identity material is incomplete.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if Message identifiers, keys, Message fields, or the
+    /// - [`RoostError::ContactNotAccepted`] if the peer contact is still pending.
+    /// - [`RoostError::TerminalSessionRecovery`] if the Session requires replacement.
+    /// - [`RoostError::BlockedContact`] if the contact is locally blocked.
+    /// - [`RoostError::Corrupt`] if stored Identity material is incomplete.
+    /// - [`RoostError::InternalError`] on storage lock poisoning.
+    /// - [`RoostError::InvalidData`] if Message identifiers, keys, Message fields, or the
     ///   Transport Binding are malformed.
-    /// - [`ClientError::NotFound`] if local Identity material is missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    /// - [`ClientError::UnsupportedVersion`] if a stored protocol-state version is unsupported.
+    /// - [`RoostError::NotFound`] if local Identity material is missing.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::ProtocolStateFault`] if required blobs are missing or malformed.
+    /// - [`RoostError::Storage`] on platform storage failure.
+    /// - [`RoostError::UnsupportedVersion`] if a stored protocol-state version is unsupported.
     #[expect(
         clippy::too_many_arguments,
         reason = "flat UniFFI export preserves generated binding shape"
@@ -900,14 +799,14 @@ impl Messaging {
         snapshot: Vec<ProtocolStateEntry>,
         session_key: Vec<u8>,
         message_id: Vec<u8>,
-        contact_identity_key: FfiIdentityKey,
+        contact_identity_key: IdentityKey,
         recipient_public_key: Vec<u8>,
         sent_at_millis: u64,
         sender_certificate: Vec<u8>,
         sender_signature: Vec<u8>,
         plaintext: Vec<u8>,
         transport_binding: TransportBinding,
-    ) -> Result<OutboundMessageResult, ClientError> {
+    ) -> Result<OutboundMessageResult, RoostError> {
         let sender_certificate = Zeroizing::new(sender_certificate);
         let sender_signature = Zeroizing::new(sender_signature);
         let plaintext = Zeroizing::new(plaintext);
@@ -939,19 +838,19 @@ impl Messaging {
     /// with any returned acknowledgment Message.
     ///
     /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
+    /// - [`RoostError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
     ///   authentication fails.
-    /// - [`ClientError::CertificateRejected`] if sender-certificate validation rejects the sender.
-    /// - [`ClientError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
+    /// - [`RoostError::CertificateRejected`] if sender-certificate validation rejects the sender.
+    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if Message identifiers, keys, Message fields, or either
+    /// - [`RoostError::InternalError`] on storage lock poisoning.
+    /// - [`RoostError::InvalidData`] if Message identifiers, keys, Message fields, or either
     ///   Transport Binding is malformed.
-    /// - [`ClientError::NotFound`] if local Identity or Discovery Key material is missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    /// - [`ClientError::UnsupportedVersion`] if the Message or a stored protocol-state version is
+    /// - [`RoostError::NotFound`] if local Identity or Discovery Key material is missing.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::ProtocolStateFault`] if required blobs are missing or malformed.
+    /// - [`RoostError::Storage`] on platform storage failure.
+    /// - [`RoostError::UnsupportedVersion`] if the Message or a stored protocol-state version is
     ///   unsupported.
     #[expect(
         clippy::too_many_arguments,
@@ -971,7 +870,7 @@ impl Messaging {
         sender_certificate_validation: Option<SenderCertificateValidation>,
         message_transport_binding: TransportBinding,
         acknowledgment_transport_binding: TransportBinding,
-    ) -> Result<InboundMessageOutcome, ClientError> {
+    ) -> Result<InboundMessageOutcome, RoostError> {
         let acknowledgment_sender_certificate = Zeroizing::new(acknowledgment_sender_certificate);
         let acknowledgment_sender_signature = Zeroizing::new(acknowledgment_sender_signature);
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -1037,17 +936,17 @@ impl Messaging {
     /// Commit returned updates before clearing local transport retry state.
     ///
     /// # Errors
-    /// - [`ClientError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
+    /// - [`RoostError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
     ///   authentication fails.
-    /// - [`ClientError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
+    /// - [`RoostError::Corrupt`] if stored Identity or Discovery Key material is incomplete or
     ///   fails its binding checks.
-    /// - [`ClientError::InternalError`] on storage lock poisoning.
-    /// - [`ClientError::InvalidData`] if Message fields or the Transport Binding are malformed.
-    /// - [`ClientError::NotFound`] if local Identity or Discovery Key material is missing.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if required blobs are missing or malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
-    /// - [`ClientError::UnsupportedVersion`] if the Message or a stored protocol-state version is
+    /// - [`RoostError::InternalError`] on storage lock poisoning.
+    /// - [`RoostError::InvalidData`] if Message fields or the Transport Binding are malformed.
+    /// - [`RoostError::NotFound`] if local Identity or Discovery Key material is missing.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::ProtocolStateFault`] if required blobs are missing or malformed.
+    /// - [`RoostError::Storage`] on platform storage failure.
+    /// - [`RoostError::UnsupportedVersion`] if the Message or a stored protocol-state version is
     ///   unsupported.
     pub fn process_acknowledgment(
         &self,
@@ -1055,7 +954,7 @@ impl Messaging {
         session_key: Vec<u8>,
         message: Message,
         transport_binding: TransportBinding,
-    ) -> Result<AcknowledgmentOutcome, ClientError> {
+    ) -> Result<AcknowledgmentOutcome, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let message = message.to_core()?;
         let transport_binding = transport_binding.into_core()?;
@@ -1087,52 +986,54 @@ impl Contacts {
     /// Blocking an already-blocked contact performs no rotation, so repeating the call does not
     /// churn every contact's capability. Its no-op operation must still be finalized or aborted.
     ///
-    /// Commit the operation, atomically persist `PreparedContactBlock.block.contact` and any
+    /// Reserve the operation, atomically persist `PreparedContactBlock.block.contact` and any
     /// host-owned publication work, then finalize the staged SecureStorage rotation. Abort only
     /// after proving the host transaction did not commit.
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `identity_key` has the wrong length.
-    /// - [`ClientError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`ClientError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`ClientError::OperationRecoveryRequired`] if a committed operation needs recovery.
-    /// - [`ClientError::ProtocolStateFault`] if no contact is stored for `identity_key`, or its
+    /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
+    /// - [`RoostError::InternalError`] on storage lock poisoning or system clock anomaly.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::ProtocolStateFault`] if no contact is stored for `identity_key`, or its
     ///   blob is malformed.
-    /// - [`ClientError::Storage`] on platform storage failure.
+    /// - [`RoostError::Storage`] on platform storage failure.
     pub fn prepare_block_contact(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
-        identity_key: FfiIdentityKey,
-    ) -> Result<PreparedContactBlock, ClientError> {
+        identity_key: IdentityKey,
+    ) -> Result<PreparedContactBlock, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let prepared = self
             .inner
             .prepare_block_contact(&snapshot, identity_key.to_core()?)?;
-        let (operation, block) = convert_prepared(&self.inner, prepared, |blocked| {
+        let (operation_id, block) = convert_prepared(&self.inner, prepared, |blocked| {
             Ok(ContactBlock {
                 contact: ContactStateChange::from_core(blocked.contact)?,
                 rotation: blocked.rotation.map(inbox_rotation_from_core).transpose()?,
             })
         })?;
-        Ok(PreparedContactBlock { operation, block })
+        Ok(PreparedContactBlock {
+            operation_id,
+            block,
+        })
     }
 }
 
 fn convert_prepared<T, U>(
     store: &CoreKeyStore,
     prepared: CorePreparedKeyStoreOperation<T>,
-    convert: impl FnOnce(T) -> Result<U, ClientError>,
-) -> Result<(KeyStoreOperation, U), ClientError> {
+    convert: impl FnOnce(T) -> Result<U, RoostError>,
+) -> Result<(OperationId, U), RoostError> {
     let id = prepared.operation.id;
-    let operation = KeyStoreOperation::from_core(prepared.operation);
     match convert(prepared.output) {
-        Ok(output) => Ok((operation, output)),
+        Ok(output) => Ok((OperationId::from_core(id), output)),
         // A conversion failure hides the prepared output from the host. Abort its journal record,
         // or return the identifier so the host can reconcile an uncertain cleanup after restart.
         Err(error) => match store.abort_operation(id) {
             Ok(_) => Err(error),
-            Err(abort_error) => Err(ClientError::OperationRecoveryRequired {
-                operation_id: id.as_bytes().to_vec(),
+            Err(abort_error) => Err(RoostError::OperationRecoveryRequired {
+                operation_id: OperationId::from_core(id),
                 reason: format!(
                     "prepared output conversion failed and cleanup also failed: {abort_error}"
                 ),
@@ -1140,26 +1041,36 @@ fn convert_prepared<T, U>(
         },
     }
 }
+
 fn inbox_rotation_from_core(
     rotation: roost_core::InboxRotation,
-) -> Result<InboxRotation, ClientError> {
+) -> Result<InboxRotation, RoostError> {
     Ok(InboxRotation {
         publication: PublicationBundle::from_core(rotation.publication)?,
         capability: rotation.capability.to_bytes().to_vec(),
     })
 }
 
+fn public_one_time_prekeys_from_core(
+    one_time_prekeys: Vec<roost_core::PublicOneTimePreKey>,
+) -> Result<Vec<PublicOneTimePreKey>, RoostError> {
+    one_time_prekeys
+        .into_iter()
+        .map(PublicOneTimePreKey::from_core)
+        .collect()
+}
+
 // Bounds what the identity key will sign for a caller-defined purpose. The prefix rule is the
 // security-relevant half: it keeps this export's preimages disjoint from every signature context
 // Aether defines, so no signature it produces can satisfy an Aether verifier.
-fn check_signable_transcript(transcript: &[u8]) -> Result<(), ClientError> {
+fn check_signable_transcript(transcript: &[u8]) -> Result<(), RoostError> {
     if transcript.is_empty() {
-        return Err(ClientError::InvalidData {
+        return Err(RoostError::InvalidData {
             reason: "authentication transcript is empty".into(),
         });
     }
     if transcript.len() > MAX_AUTHENTICATION_TRANSCRIPT_LEN {
-        return Err(ClientError::InvalidData {
+        return Err(RoostError::InvalidData {
             reason: format!(
                 "authentication transcript exceeds {MAX_AUTHENTICATION_TRANSCRIPT_LEN} bytes"
             ),
@@ -1169,7 +1080,7 @@ fn check_signable_transcript(transcript: &[u8]) -> Result<(), ClientError> {
     if transcript.len() >= reserved
         && transcript[..reserved].eq_ignore_ascii_case(RESERVED_AETHER_DOMAIN_PREFIX)
     {
-        return Err(ClientError::InvalidData {
+        return Err(RoostError::InvalidData {
             reason: "authentication transcript starts with the reserved Aether domain prefix"
                 .into(),
         });
@@ -1178,57 +1089,51 @@ fn check_signable_transcript(transcript: &[u8]) -> Result<(), ClientError> {
 }
 
 #[cfg(test)]
-impl Client {
-    fn complete_prepared<T>(
-        &self,
-        operation: KeyStoreOperation,
-        output: T,
-    ) -> Result<T, ClientError> {
-        self.commit_operation(operation.id.clone())?;
-        self.finalize_operation(operation.id)?;
+impl IdentityContext {
+    fn complete_prepared<T>(&self, id: OperationId, output: T) -> Result<T, RoostError> {
+        self.reserve_operation(id.clone())?;
+        self.finalize_operation(id)?;
         Ok(output)
     }
 
-    pub(crate) fn generate_identity(&self) -> Result<Identity, ClientError> {
-        let prepared = self.identity().prepare_generate_identity()?;
-        self.complete_prepared(prepared.operation, prepared.identity)
+    pub(crate) fn generate_identity(&self) -> Result<Identity, RoostError> {
+        let prepared = self.prepare_identity_creation()?;
+        self.complete_prepared(prepared.operation_id, prepared.identity)
     }
 
     pub(crate) fn generate_one_time_prekeys(
         &self,
         batch_size: u32,
-    ) -> Result<Vec<PublicOneTimePreKey>, ClientError> {
-        let prepared = self
-            .identity()
-            .prepare_generate_one_time_prekeys(batch_size)?;
-        self.complete_prepared(prepared.operation, prepared.one_time_prekeys)
+    ) -> Result<Vec<PublicOneTimePreKey>, RoostError> {
+        let prepared = self.prepare_one_time_prekeys(batch_size)?;
+        self.complete_prepared(prepared.operation_id, prepared.one_time_prekeys)
     }
 
     pub(crate) fn replenish_one_time_prekeys(
         &self,
-    ) -> Result<Vec<PublicOneTimePreKey>, ClientError> {
-        let prepared = self.identity().prepare_replenish_one_time_prekeys()?;
-        self.complete_prepared(prepared.operation, prepared.one_time_prekeys)
+    ) -> Result<Vec<PublicOneTimePreKey>, RoostError> {
+        let prepared = self.prepare_one_time_prekey_replenishment()?;
+        self.complete_prepared(prepared.operation_id, prepared.one_time_prekeys)
     }
 
-    pub(crate) fn rotate_inbox_now(&self) -> Result<InboxRotation, ClientError> {
-        let prepared = self.identity().prepare_rotate_inbox_now()?;
-        self.complete_prepared(prepared.operation, prepared.rotation)
+    pub(crate) fn rotate_inbox_now(&self) -> Result<InboxRotation, RoostError> {
+        let prepared = self.prepare_inbox_rotation()?;
+        self.complete_prepared(prepared.operation_id, prepared.rotation)
     }
 
     pub(crate) fn rotate_signed_prekey_if_stale(
         &self,
-    ) -> Result<Option<PublicSignedPreKey>, ClientError> {
-        let prepared = self.identity().prepare_rotate_signed_prekey_if_stale()?;
-        self.complete_prepared(prepared.operation, prepared.signed_prekey)
+    ) -> Result<Option<PublicSignedPreKey>, RoostError> {
+        let prepared = self.prepare_signed_prekey_rotation_if_stale()?;
+        self.complete_prepared(prepared.operation_id, prepared.signed_prekey)
     }
 
-    pub(crate) fn rotate_signed_prekey_now(&self) -> Result<PublicSignedPreKey, ClientError> {
-        let prepared = self.identity().prepare_rotate_signed_prekey_now()?;
-        let signed_prekey = prepared.signed_prekey.ok_or(ClientError::InternalError {
+    pub(crate) fn rotate_signed_prekey_now(&self) -> Result<PublicSignedPreKey, RoostError> {
+        let prepared = self.prepare_signed_prekey_rotation()?;
+        let signed_prekey = prepared.signed_prekey.ok_or(RoostError::InternalError {
             reason: "forced signed-prekey rotation returned no bundle".into(),
         })?;
-        self.complete_prepared(prepared.operation, signed_prekey)
+        self.complete_prepared(prepared.operation_id, signed_prekey)
     }
 
     pub(crate) fn accept_session(
@@ -1236,9 +1141,9 @@ impl Client {
         session_key: Vec<u8>,
         initiator_identity: Option<Identity>,
         message: Message,
-    ) -> Result<SessionAcceptanceResult, ClientError> {
+    ) -> Result<SessionAcceptanceResult, RoostError> {
         let selection = crate::PreKeySelection {
-            signed_prekey_id: self.identity().current_signed_prekey_bundle()?.id,
+            signed_prekey_id: self.current_publication()?.signed_prekey.id,
             one_time_prekey_id: message
                 .prekey_reference
                 .as_ref()
@@ -1253,16 +1158,16 @@ impl Client {
             },
             selection,
         )?;
-        self.complete_prepared(prepared.operation, prepared.acceptance)
+        self.complete_prepared(prepared.operation_id, prepared.acceptance)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, KeyStoreOperationStatus, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
+    use super::{IdentityContext, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
     use crate::storage::MemoryStorage;
     use crate::{
-        ClientError, SecureStorage,
+        RoostError, SecureStorage,
         protocol::{
             ContactDiscoveryKey, ContactIdentity, IdentityKey, ProtocolStateEntry,
             ProtocolStateKind, ProtocolStateUpdate,
@@ -1404,12 +1309,11 @@ mod tests {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
         let transcript = relay_http_transcript(
-            &identity.ed25519_verifying_key,
+            &identity.key.signing_key,
             &hex32(REL_RLY_18_KAT_BODY_DIGEST_HEX),
         );
 
         let signature_bytes = store
-            .identity()
             .sign_authentication_transcript(transcript.clone())
             .unwrap();
 
@@ -1431,10 +1335,7 @@ mod tests {
         }
         // Ed25519 is deterministic, so a host retrying the same challenge resends the same proof.
         assert_eq!(
-            store
-                .identity()
-                .sign_authentication_transcript(transcript)
-                .unwrap(),
+            store.sign_authentication_transcript(transcript).unwrap(),
             signature_bytes
         );
     }
@@ -1450,10 +1351,10 @@ mod tests {
 
         for context in AETHER_DOMAIN_REGISTRY {
             let mut preimage = context.as_bytes().to_vec();
-            preimage.extend_from_slice(&identity.x25519_public_key);
-            preimage.extend_from_slice(&identity.ed25519_verifying_key);
-            match store.identity().sign_authentication_transcript(preimage) {
-                Err(ClientError::InvalidData { .. }) => {}
+            preimage.extend_from_slice(&identity.key.agreement_key);
+            preimage.extend_from_slice(&identity.key.signing_key);
+            match store.sign_authentication_transcript(preimage) {
+                Err(RoostError::InvalidData { .. }) => {}
                 Err(error) => panic!("expected InvalidData for {context}, got {error}"),
                 Ok(_) => panic!("expected InvalidData for {context}"),
             }
@@ -1465,21 +1366,18 @@ mod tests {
         let store = key_store();
         store.generate_identity().unwrap();
 
-        match store.identity().sign_authentication_transcript(Vec::new()) {
-            Err(ClientError::InvalidData { .. }) => {}
+        match store.sign_authentication_transcript(Vec::new()) {
+            Err(RoostError::InvalidData { .. }) => {}
             other => panic!("expected InvalidData for an empty transcript, got {other:?}"),
         }
-        match store.identity().sign_authentication_transcript(vec![
-            0x41;
-            MAX_AUTHENTICATION_TRANSCRIPT_LEN
-                + 1
-        ]) {
-            Err(ClientError::InvalidData { .. }) => {}
+        match store
+            .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN + 1])
+        {
+            Err(RoostError::InvalidData { .. }) => {}
             other => panic!("expected InvalidData past the length cap, got {other:?}"),
         }
         assert!(
             store
-                .identity()
                 .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN])
                 .is_ok()
         );
@@ -1489,72 +1387,29 @@ mod tests {
     fn sign_authentication_transcript_requires_a_stored_identity() {
         let store = key_store();
 
-        match store
-            .identity()
-            .sign_authentication_transcript(b"Relay-HTTP-Auth-v1".to_vec())
-        {
-            Err(ClientError::NotFound) => {}
+        match store.sign_authentication_transcript(b"Relay-HTTP-Auth-v1".to_vec()) {
+            Err(RoostError::NotFound) => {}
             other => panic!("expected NotFound without an identity, got {other:?}"),
         }
     }
 
-    fn key_store() -> Arc<Client> {
+    fn key_store() -> Arc<IdentityContext> {
         let storage: Arc<dyn SecureStorage> = Arc::new(MemoryStorage::default());
-        Client::new(storage)
-    }
-
-    #[test]
-    fn prepared_identity_lifecycle_crosses_the_uniffi_boundary() {
-        let store = key_store();
-        let prepared = store.identity().prepare_generate_identity().unwrap();
-        let id = prepared.operation.id.clone();
-
-        assert_eq!(id.len(), 16);
-        assert!(!prepared.operation.secure_storage_preconditions.is_empty());
-        assert!(matches!(
-            store.operation_status(id.clone()).unwrap(),
-            KeyStoreOperationStatus::Prepared
-        ));
-        assert!(!store.identity().has_identity().unwrap());
-
-        assert!(matches!(
-            store.commit_operation(id.clone()).unwrap(),
-            KeyStoreOperationStatus::Committed
-        ));
-        assert!(matches!(
-            store.identity().has_identity(),
-            Err(ClientError::OperationRecoveryRequired {
-                operation_id,
-                ..
-            }) if operation_id == id
-        ));
-
-        assert!(matches!(
-            store.finalize_operation(id.clone()).unwrap(),
-            KeyStoreOperationStatus::Finalized
-        ));
-        assert!(matches!(
-            store.finalize_operation(id).unwrap(),
-            KeyStoreOperationStatus::Finalized
-        ));
-        assert_eq!(
-            store.identity().load_identity().unwrap().x25519_public_key,
-            prepared.identity.x25519_public_key
-        );
+        IdentityContext::new(storage)
     }
 
     fn verifying_key(identity: &FfiIdentity) -> VerifyingKey {
         VerifyingKey::from_bytes(
-            &<[u8; 32]>::try_from(identity.ed25519_verifying_key.as_slice()).unwrap(),
+            &<[u8; 32]>::try_from(identity.key.signing_key.as_slice()).unwrap(),
         )
         .unwrap()
     }
 
     fn public_identity_key(identity: &FfiIdentity) -> CryptoPublicIdentityKey {
         CryptoPublicIdentityKey::from_bytes(
-            &identity.x25519_public_key,
-            &identity.ed25519_verifying_key,
-            &identity.identity_binding_signature,
+            &identity.key.agreement_key,
+            &identity.key.signing_key,
+            &identity.binding_signature,
         )
         .unwrap()
     }
@@ -1638,8 +1493,8 @@ mod tests {
         key_store.generate_identity().unwrap();
         key_store.rotate_signed_prekey_now().unwrap();
 
-        let publication = key_store.identity().current_publication_bundle().unwrap();
-        let capability = key_store.identity().current_delivery_capability().unwrap();
+        let publication = key_store.current_publication().unwrap();
+        let capability = key_store.current_delivery_capability().unwrap();
 
         assert_eq!(publication.recipient_delivery_verifier.len(), 32);
         assert_eq!(capability.len(), 32);
@@ -1664,7 +1519,7 @@ mod tests {
         let identity = key_store.generate_identity().unwrap();
         key_store.rotate_signed_prekey_now().unwrap();
 
-        let publication = key_store.identity().current_publication_bundle().unwrap();
+        let publication = key_store.current_publication().unwrap();
 
         assert_eq!(publication.discovery_to_identity.len(), 64);
         assert_ne!(publication.discovery_to_identity, vec![0u8; 64]);
@@ -1677,10 +1532,12 @@ mod tests {
     }
 
     fn identity_key(identity: &FfiIdentity) -> IdentityKey {
-        IdentityKey {
-            x25519_public_key: identity.x25519_public_key.clone(),
-            ed25519_verifying_key: identity.ed25519_verifying_key.clone(),
-        }
+        identity.key.clone()
+    }
+
+    fn current_discovery_key(store: &IdentityContext) -> FfiPublicDiscoveryKey {
+        FfiPublicDiscoveryKey::from_core(store.inner.current_public_discovery_key().unwrap())
+            .unwrap()
     }
 
     fn contact_identity(
@@ -1745,7 +1602,7 @@ mod tests {
 
     #[test]
     fn wipe_returns_only_active_protocol_state_kinds() {
-        let engine = Client::new(Arc::new(MemoryStorage::default())).messaging();
+        let engine = IdentityContext::new(Arc::new(MemoryStorage::default())).messaging();
 
         let updates = engine.wipe(Vec::new(), vec![0x44; 16]).unwrap();
 
@@ -1776,9 +1633,9 @@ mod tests {
     fn generate_identity_returns_ffi_safe_public_keys() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        assert_eq!(identity.x25519_public_key.len(), 32);
-        assert_eq!(identity.ed25519_verifying_key.len(), 32);
-        assert_eq!(identity.identity_binding_signature.len(), 64);
+        assert_eq!(identity.key.agreement_key.len(), 32);
+        assert_eq!(identity.key.signing_key.len(), 32);
+        assert_eq!(identity.binding_signature.len(), 64);
         verifying_key(&identity);
         assert!(verify_public_identity_key(&public_identity_key(&identity)).is_ok());
     }
@@ -1791,7 +1648,7 @@ mod tests {
             .rotate_signed_prekey_if_stale()
             .unwrap()
             .expect("first rotate must produce a bundle");
-        let discovery = store.identity().current_discovery_key_bundle().unwrap();
+        let discovery = current_discovery_key(&store);
         let crypto_discovery = assert_discovery_key_verifies(&identity, &discovery);
         assert_signed_prekey_verifies(&signed_prekey, &crypto_discovery);
     }
@@ -1801,7 +1658,7 @@ mod tests {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
-        let publication = store.identity().current_publication_bundle().unwrap();
+        let publication = store.current_publication().unwrap();
         assert_publication_verifies(&identity, &publication);
     }
 
@@ -1809,7 +1666,7 @@ mod tests {
     fn generate_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        let discovery = store.identity().current_discovery_key_bundle().unwrap();
+        let discovery = current_discovery_key(&store);
         let bundles = store.generate_one_time_prekeys(3).unwrap();
 
         assert_eq!(bundles.len(), 3);
@@ -1826,7 +1683,7 @@ mod tests {
     fn rotate_inbox_now_advances_epoch_and_returns_verifiable_records() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        let initial_discovery = store.identity().current_discovery_key_bundle().unwrap();
+        let initial_discovery = current_discovery_key(&store);
         let rotation = store.rotate_inbox_now().unwrap();
         assert_eq!(
             rotation.publication.discovery_key.epoch,
@@ -1837,7 +1694,7 @@ mod tests {
         assert_eq!(rotation.capability.len(), 32);
         assert_eq!(
             rotation.capability,
-            store.identity().current_delivery_capability().unwrap()
+            store.current_delivery_capability().unwrap()
         );
     }
 
@@ -1845,7 +1702,7 @@ mod tests {
     fn replenish_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        let discovery = store.identity().current_discovery_key_bundle().unwrap();
+        let discovery = current_discovery_key(&store);
         let bundles = store.replenish_one_time_prekeys().unwrap();
 
         assert_eq!(bundles.len(), 100);
@@ -1862,7 +1719,7 @@ mod tests {
         let alice_identity = alice.generate_identity().unwrap();
         let bob_identity = bob.generate_identity().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.identity().current_publication_bundle().unwrap();
+        let bob_publication = bob.current_publication().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
 
         let session_key = vec![0x44; 16];
@@ -1904,7 +1761,7 @@ mod tests {
         let alice_identity = alice.generate_identity().unwrap();
         let bob_identity = bob.generate_identity().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.identity().current_publication_bundle().unwrap();
+        let bob_publication = bob.current_publication().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
         let session_key = vec![0x55; 16];
         let initiation = alice
@@ -1930,7 +1787,7 @@ mod tests {
             )
             .unwrap();
 
-        let engine = Client::new(Arc::new(MemoryStorage::default())).messaging();
+        let engine = IdentityContext::new(Arc::new(MemoryStorage::default())).messaging();
         let mut alice_snapshot = Vec::new();
         apply_updates(&mut alice_snapshot, initiation.state_updates);
         let change = alice
@@ -1983,8 +1840,8 @@ mod tests {
         let bob_identity = bob.generate_identity().unwrap();
         alice.rotate_signed_prekey_now().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let alice_publication = alice.identity().current_publication_bundle().unwrap();
-        let bob_publication = bob.identity().current_publication_bundle().unwrap();
+        let alice_publication = alice.current_publication().unwrap();
+        let bob_publication = bob.current_publication().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
         let session_key = vec![0x66; 16];
         let initiation = alice
@@ -2010,7 +1867,7 @@ mod tests {
             )
             .unwrap();
 
-        let engine = Client::new(Arc::new(MemoryStorage::default())).messaging();
+        let engine = IdentityContext::new(Arc::new(MemoryStorage::default())).messaging();
         let mut alice_snapshot = Vec::new();
         apply_updates(&mut alice_snapshot, initiation.state_updates);
         let change = alice
@@ -2075,7 +1932,7 @@ mod tests {
         );
 
         match result {
-            Err(ClientError::InvalidData { .. }) => {}
+            Err(RoostError::InvalidData { .. }) => {}
             Err(error) => panic!("expected InvalidData, got {error}"),
             Ok(_) => panic!("expected InvalidData"),
         }

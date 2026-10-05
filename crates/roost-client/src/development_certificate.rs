@@ -3,7 +3,7 @@
 use crate::certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
 };
-use crate::error::ClientError;
+use crate::error::RoostError;
 use crate::records::{Identity, fixed_32};
 use crate::time::whole_secs_from_millis;
 use roost_core::DevelopmentCertificateAuthority as CoreDevelopmentCertificateAuthority;
@@ -41,12 +41,12 @@ impl DevelopmentCertificateAuthority {
     /// peer's certificate plus the validation input used by receivers.
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if `signing_key_id` is empty or longer than 64
+    /// - [`RoostError::InvalidData`] if `signing_key_id` is empty or longer than 64
     ///   bytes.
     #[uniffi::constructor]
-    pub fn new(signing_key_id: Vec<u8>, relay_domain: Vec<u8>) -> Result<Arc<Self>, ClientError> {
+    pub fn new(signing_key_id: Vec<u8>, relay_domain: Vec<u8>) -> Result<Arc<Self>, RoostError> {
         let inner = CoreDevelopmentCertificateAuthority::new(signing_key_id, relay_domain)
-            .map_err(|e| ClientError::InvalidData {
+            .map_err(|e| RoostError::InvalidData {
                 reason: e.to_string(),
             })?;
         Ok(Arc::new(Self { inner }))
@@ -54,26 +54,26 @@ impl DevelopmentCertificateAuthority {
 
     /// Issues a development certificate for initialized public identity and discovery material.
     ///
-    /// Callers should read both values from the same initialized [`Client`](crate::Client).
+    /// Read the identity from the same [`IdentityContext`](crate::IdentityContext) that publishes it.
     /// The certificate expires at the caller-supplied Unix timestamp and is accepted only by
     /// validation input from this authority.
     ///
     /// # Errors
-    /// - [`ClientError::InvalidData`] if an identity or discovery public key is the wrong length,
+    /// - [`RoostError::InvalidData`] if an identity or discovery public key is the wrong length,
     ///   is not canonically encoded, or is a weak key.
     pub fn issue(
         &self,
         identity: Identity,
         expires_at_millis: u64,
-    ) -> Result<DevelopmentSenderCertificate, ClientError> {
+    ) -> Result<DevelopmentSenderCertificate, RoostError> {
         let identity_key = SenderCertificateIdentityKey {
             x25519_public_key: fixed_32(
-                &identity.x25519_public_key,
-                "development certificate identity X25519 public key",
+                &identity.key.agreement_key,
+                "development certificate identity agreement key",
             )?,
             ed25519_verifying_key: fixed_32(
-                &identity.ed25519_verifying_key,
-                "development certificate identity Ed25519 verifying key",
+                &identity.key.signing_key,
+                "development certificate identity signing key",
             )?,
         };
         let issued = self
@@ -82,7 +82,7 @@ impl DevelopmentCertificateAuthority {
                 identity_key,
                 whole_secs_from_millis(expires_at_millis, "expires_at_millis")?,
             )
-            .map_err(|e| ClientError::InvalidData {
+            .map_err(|e| RoostError::InvalidData {
                 reason: e.to_string(),
             })?;
         Ok(DevelopmentSenderCertificate {
@@ -121,11 +121,11 @@ impl DevelopmentCertificateAuthority {
 mod tests {
     use super::*;
     use crate::storage::MemoryStorage;
-    use crate::{Client, validate_sender_certificate};
+    use crate::{IdentityContext, validate_sender_certificate};
 
     #[test]
     fn issued_record_validates_through_uniffi_records() {
-        let store = Client::new(Arc::new(MemoryStorage::default()));
+        let store = IdentityContext::new(Arc::new(MemoryStorage::default()));
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
         let authority = DevelopmentCertificateAuthority::new(

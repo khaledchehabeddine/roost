@@ -1,5 +1,7 @@
 #![allow(dead_code, unreachable_pub)]
 
+pub mod host_identity;
+
 use roost_protocol::from_unix_secs;
 use std::collections::BTreeMap;
 use std::time::Duration;

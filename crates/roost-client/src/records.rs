@@ -1,6 +1,7 @@
 //! UniFFI public identity and publication records.
 
-use crate::error::ClientError;
+use crate::error::RoostError;
+use crate::protocol::IdentityKey;
 use crate::time::{millis_from_secs, whole_secs_from_millis};
 use roost_core::{
     Identity as CoreIdentity, IdentityError, PublicationBundle as CorePublicationBundle,
@@ -12,43 +13,45 @@ use roost_core::{
     Signature,
 };
 
-/// Public identity material exposed through UniFFI.
-///
-/// Contains only public key material and is safe to cache or send to peers.
-#[derive(Clone, uniffi::Record)]
+/// An identity's public keys, safe to cache or send to peers.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct Identity {
-    /// X25519 public key bytes. Always 32 bytes.
-    pub x25519_public_key: Vec<u8>,
-    /// Ed25519 verifying key bytes. Always 32 bytes.
-    pub ed25519_verifying_key: Vec<u8>,
-    /// Ed25519 signature binding the X25519 and Ed25519 identity halves. Always 64 bytes.
-    pub identity_binding_signature: Vec<u8>,
+    /// The Identity Key.
+    pub key: IdentityKey,
+    /// The signature that binds the Identity Key's agreement key to its signing key. Always 64
+    /// bytes.
+    pub binding_signature: Vec<u8>,
 }
 
 impl Identity {
-    pub(crate) fn from_core(id: CoreIdentity) -> Result<Self, IdentityError> {
-        let bundle = id.public()?;
-        Ok(Identity {
-            x25519_public_key: bundle.public_key.as_bytes().to_vec(),
-            ed25519_verifying_key: bundle.verifying_key.as_bytes().to_vec(),
-            identity_binding_signature: bundle.binding_signature.to_bytes().to_vec(),
-        })
+    pub(crate) fn from_core(identity: CoreIdentity) -> Result<Self, IdentityError> {
+        Ok(Self::from_public(identity.public()?))
     }
 
-    pub(crate) fn to_core(&self) -> Result<CorePublicIdentityKey, ClientError> {
+    pub(crate) fn from_public(public: CorePublicIdentityKey) -> Self {
+        Identity {
+            key: IdentityKey {
+                agreement_key: public.public_key.as_bytes().to_vec(),
+                signing_key: public.verifying_key.as_bytes().to_vec(),
+            },
+            binding_signature: public.binding_signature.to_bytes().to_vec(),
+        }
+    }
+
+    pub(crate) fn to_core(&self) -> Result<CorePublicIdentityKey, RoostError> {
         CorePublicIdentityKey::from_bytes(
-            &self.x25519_public_key,
-            &self.ed25519_verifying_key,
-            &self.identity_binding_signature,
+            &self.key.agreement_key,
+            &self.key.signing_key,
+            &self.binding_signature,
         )
-        .map_err(ClientError::from)
+        .map_err(RoostError::from)
     }
 }
 
 /// Public signed pre-key material used to start a session.
 ///
 /// Verify this key with the matching discovery-key verifying key.
-#[derive(Clone, uniffi::Record)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicSignedPreKey {
     /// Stable unsigned identifier within the discovery-key epoch. A host that needs this lookup
     /// value authenticated as transport metadata must include it in its Transport Binding.
@@ -65,7 +68,7 @@ pub struct PublicSignedPreKey {
 }
 
 impl PublicSignedPreKey {
-    pub(crate) fn from_core(b: CorePublicSignedPreKey) -> Result<Self, ClientError> {
+    pub(crate) fn from_core(b: CorePublicSignedPreKey) -> Result<Self, RoostError> {
         Ok(PublicSignedPreKey {
             id: b.id,
             public_key: b.public_key.as_bytes().to_vec(),
@@ -75,7 +78,7 @@ impl PublicSignedPreKey {
         })
     }
 
-    pub(crate) fn to_core(&self) -> Result<CorePublicSignedPreKey, ClientError> {
+    pub(crate) fn to_core(&self) -> Result<CorePublicSignedPreKey, RoostError> {
         Ok(CorePublicSignedPreKey {
             id: self.id,
             public_key: public_key_from_vec(&self.public_key)?,
@@ -92,7 +95,7 @@ impl PublicSignedPreKey {
 /// Public one-time pre-key material used to start a session.
 ///
 /// The secret half stays in Rust-managed secure storage and is consumed at most once.
-#[derive(Clone, uniffi::Record)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicOneTimePreKey {
     /// One-time pre-key identifier within the current discovery-key epoch.
     pub id: u64,
@@ -105,7 +108,7 @@ pub struct PublicOneTimePreKey {
 }
 
 impl PublicOneTimePreKey {
-    pub(crate) fn from_core(b: CorePublicOneTimePreKey) -> Result<Self, ClientError> {
+    pub(crate) fn from_core(b: CorePublicOneTimePreKey) -> Result<Self, RoostError> {
         Ok(PublicOneTimePreKey {
             id: b.id,
             public_key: b.public_key.as_bytes().to_vec(),
@@ -117,18 +120,18 @@ impl PublicOneTimePreKey {
         })
     }
 
-    pub(crate) fn to_core(&self) -> Result<CorePublicOneTimePreKey, ClientError> {
+    pub(crate) fn to_core(&self) -> Result<CorePublicOneTimePreKey, RoostError> {
         let created_at_secs =
             whole_secs_from_millis(self.created_at_millis, "one-time pre-key created_at_millis")?;
         CorePublicOneTimePreKey::from_bytes(self.id, &self.public_key, self.epoch, created_at_secs)
-            .map_err(ClientError::from)
+            .map_err(RoostError::from)
     }
 }
 
 /// Public discovery-key material a peer uses to verify this identity's signed pre-keys.
 ///
 /// Verify this key with the identity verifying key before trusting [`Self::verifying_key`].
-#[derive(Clone, uniffi::Record)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicDiscoveryKey {
     /// X25519 key-agreement public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
@@ -143,7 +146,7 @@ pub struct PublicDiscoveryKey {
 }
 
 impl PublicDiscoveryKey {
-    pub(crate) fn from_core(b: CorePublicDiscoveryKey) -> Result<Self, ClientError> {
+    pub(crate) fn from_core(b: CorePublicDiscoveryKey) -> Result<Self, RoostError> {
         Ok(PublicDiscoveryKey {
             public_key: b.public_key.as_bytes().to_vec(),
             verifying_key: b.verifying_key.as_bytes().to_vec(),
@@ -153,7 +156,7 @@ impl PublicDiscoveryKey {
         })
     }
 
-    pub(crate) fn to_core(&self) -> Result<CorePublicDiscoveryKey, ClientError> {
+    pub(crate) fn to_core(&self) -> Result<CorePublicDiscoveryKey, RoostError> {
         CorePublicDiscoveryKey::from_bytes(
             &self.public_key,
             &self.verifying_key,
@@ -161,14 +164,14 @@ impl PublicDiscoveryKey {
             whole_secs_from_millis(self.created_at_millis, "discovery-key created_at_millis")?,
             &self.signature,
         )
-        .map_err(ClientError::from)
+        .map_err(RoostError::from)
     }
 }
 
 /// A publishable public discovery key and signed pre-key pair.
 ///
 /// The signed pre-key verifies with the included discovery key.
-#[derive(Clone, uniffi::Record)]
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicationBundle {
     /// Version of the public pre-key bundle format.
     pub version: u8,
@@ -193,7 +196,7 @@ pub struct PublicationBundle {
 }
 
 impl PublicationBundle {
-    pub(crate) fn from_core(b: CorePublicationBundle) -> Result<Self, ClientError> {
+    pub(crate) fn from_core(b: CorePublicationBundle) -> Result<Self, RoostError> {
         Ok(PublicationBundle {
             version: b.version,
             discovery_key: PublicDiscoveryKey::from_core(b.discovery_key)?,
@@ -223,7 +226,7 @@ impl PublicationBundle {
     /// Separate from [`Self::to_prekey_bundle`] because [`CorePreKeyBundle`] has no field for it:
     /// the binding is verified against the responder identity, which a prekey bundle does not
     /// carry. Session initiation checks it before any handshake work.
-    pub(crate) fn discovery_to_identity_signature(&self) -> Result<Signature, ClientError> {
+    pub(crate) fn discovery_to_identity_signature(&self) -> Result<Signature, RoostError> {
         Ok(Signature::from_bytes(&fixed_64(
             &self.discovery_to_identity,
             "discovery_to_identity",
@@ -233,7 +236,7 @@ impl PublicationBundle {
     pub(crate) fn to_prekey_bundle(
         &self,
         one_time_prekey: Option<PublicOneTimePreKey>,
-    ) -> Result<CorePreKeyBundle, ClientError> {
+    ) -> Result<CorePreKeyBundle, RoostError> {
         Ok(CorePreKeyBundle {
             version: self.version,
             discovery_key: self.discovery_key.to_core()?,
@@ -246,29 +249,29 @@ impl PublicationBundle {
     }
 }
 
-pub(crate) fn fixed_32(bytes: &[u8], label: &str) -> Result<[u8; 32], ClientError> {
-    bytes.try_into().map_err(|_| ClientError::InvalidData {
+pub(crate) fn fixed_32(bytes: &[u8], label: &str) -> Result<[u8; 32], RoostError> {
+    bytes.try_into().map_err(|_| RoostError::InvalidData {
         reason: format!("{label} must be 32 bytes"),
     })
 }
 
-pub(crate) fn fixed_16(bytes: &[u8], label: &str) -> Result<[u8; 16], ClientError> {
-    bytes.try_into().map_err(|_| ClientError::InvalidData {
+pub(crate) fn fixed_16(bytes: &[u8], label: &str) -> Result<[u8; 16], RoostError> {
+    bytes.try_into().map_err(|_| RoostError::InvalidData {
         reason: format!("{label} must be 16 bytes"),
     })
 }
 
-pub(crate) fn fixed_64(bytes: &[u8], label: &str) -> Result<[u8; 64], ClientError> {
-    bytes.try_into().map_err(|_| ClientError::InvalidData {
+pub(crate) fn fixed_64(bytes: &[u8], label: &str) -> Result<[u8; 64], RoostError> {
+    bytes.try_into().map_err(|_| RoostError::InvalidData {
         reason: format!("{label} must be 64 bytes"),
     })
 }
 
-fn public_key_from_vec(bytes: &[u8]) -> Result<PublicKey, ClientError> {
+fn public_key_from_vec(bytes: &[u8]) -> Result<PublicKey, RoostError> {
     Ok(PublicKey::from(fixed_32(bytes, "public key")?))
 }
 
-fn signature_from_vec(bytes: &[u8]) -> Result<Signature, ClientError> {
+fn signature_from_vec(bytes: &[u8]) -> Result<Signature, RoostError> {
     Ok(Signature::from_bytes(&fixed_64(bytes, "signature")?))
 }
 

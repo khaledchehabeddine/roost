@@ -12,9 +12,9 @@
 //! own context and rebuilds the payload from the identity key it was handed, so a caller chooses
 //! neither the context nor the shape of the signed bytes.
 
-use crate::error::ClientError;
+use crate::error::RoostError;
 use crate::protocol::IdentityKey;
-use crate::records::{fixed_32, fixed_64};
+use crate::records::{Identity, fixed_32, fixed_64};
 use roost_core::{
     PublicIdentityKey as CorePublicIdentityKey, Signature,
     verify_discovery_to_identity_binding as crypto_verify_discovery_to_identity_binding,
@@ -22,7 +22,8 @@ use roost_core::{
 };
 use roost_protocol::parse_ed25519_verifying_key_bytes;
 
-/// Verifies that an identity key vouches for its own X25519 half (the IK self-binding).
+/// Verifies that an identity's binding signature ties its agreement key to its signing key (the IK
+/// self-binding).
 ///
 /// This is the `AetherIKBinding-v1:` direction. It says only that whoever holds the Ed25519 half
 /// claimed the X25519 half beside it; it says nothing about which discovery key, if any, points at
@@ -32,24 +33,13 @@ use roost_protocol::parse_ed25519_verifying_key_bytes;
 /// is self-consistent.
 ///
 /// # Errors
-/// - [`ClientError::AuthenticationFailed`] when the signature does not validate. This is the
+/// - [`RoostError::AuthenticationFailed`] when the signature does not validate. This is the
 ///   answer that matters: the identity does not bind.
-/// - [`ClientError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or the
+/// - [`RoostError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or the
 ///   Ed25519 half does not decompress to a valid point.
 #[uniffi::export]
-pub fn verify_identity_key_binding(
-    identity: IdentityKey,
-    binding_signature: Vec<u8>,
-) -> Result<(), ClientError> {
-    let bundle = CorePublicIdentityKey::from_bytes(
-        &fixed_32(&identity.x25519_public_key, "identity x25519 public key")?,
-        &fixed_32(
-            &identity.ed25519_verifying_key,
-            "identity ed25519 verifying key",
-        )?,
-        &fixed_64(&binding_signature, "identity binding signature")?,
-    )?;
-    Ok(verify_public_identity_key(&bundle)?)
+pub fn verify_identity_key_binding(identity: Identity) -> Result<(), RoostError> {
+    Ok(verify_public_identity_key(&identity.to_core()?)?)
 }
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (the DK→IK
@@ -66,10 +56,10 @@ pub fn verify_identity_key_binding(
 /// resolving an unknown identity wants both.
 ///
 /// # Errors
-/// - [`ClientError::AuthenticationFailed`] when the signature does not validate — including when
+/// - [`RoostError::AuthenticationFailed`] when the signature does not validate — including when
 ///   it is a perfectly good signature made under the other identity context, which is what the
 ///   domain separation is for.
-/// - [`ClientError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or either
+/// - [`RoostError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or either
 ///   Ed25519 value is not a canonically encoded, non-weak point. The discovery key is held to the
 ///   same standard a public discovery key is, because it arrives from the same place.
 #[uniffi::export]
@@ -77,13 +67,13 @@ pub fn verify_discovery_to_identity_binding(
     identity: IdentityKey,
     discovery_verifying_key: Vec<u8>,
     signature: Vec<u8>,
-) -> Result<(), ClientError> {
+) -> Result<(), RoostError> {
     let identity = binding_payload_identity_key(&identity)?;
     let discovery_verifying_key = parse_ed25519_verifying_key_bytes(&fixed_32(
         &discovery_verifying_key,
         "discovery ed25519 verifying key",
     )?)
-    .ok_or_else(|| ClientError::InvalidData {
+    .ok_or_else(|| RoostError::InvalidData {
         reason: "discovery ed25519 verifying key is not a canonical, non-weak point".into(),
     })?;
     let signature =
@@ -105,15 +95,13 @@ pub fn verify_discovery_to_identity_binding(
 /// zeros are here so this function cannot be mistaken for having checked something it did not.
 fn binding_payload_identity_key(
     identity: &IdentityKey,
-) -> Result<CorePublicIdentityKey, ClientError> {
+) -> Result<CorePublicIdentityKey, RoostError> {
     const UNREAD_BINDING_SIGNATURE: [u8; 64] = [0u8; 64];
 
+    let key = identity.to_core()?;
     Ok(CorePublicIdentityKey::from_bytes(
-        &fixed_32(&identity.x25519_public_key, "identity x25519 public key")?,
-        &fixed_32(
-            &identity.ed25519_verifying_key,
-            "identity ed25519 verifying key",
-        )?,
+        &key.x25519_public_key,
+        &key.ed25519_verifying_key,
         &UNREAD_BINDING_SIGNATURE,
     )?)
 }
@@ -122,7 +110,7 @@ fn binding_payload_identity_key(
 mod tests {
     use super::{verify_discovery_to_identity_binding, verify_identity_key_binding};
     use crate::storage::MemoryStorage;
-    use crate::{Client, ClientError, SecureStorage, protocol::IdentityKey};
+    use crate::{Identity, IdentityContext, RoostError, SecureStorage, protocol::IdentityKey};
     use roost_core::test_support::{SigningKeyPair, sign_identity_key_binding};
     use std::sync::Arc;
 
@@ -148,8 +136,8 @@ mod tests {
 
     fn vector_identity() -> IdentityKey {
         IdentityKey {
-            x25519_public_key: IDENTITY_X25519.to_vec(),
-            ed25519_verifying_key: SigningKeyPair::from_signing_bytes(IDENTITY_SIGNING_SECRET)
+            agreement_key: IDENTITY_X25519.to_vec(),
+            signing_key: SigningKeyPair::from_signing_bytes(IDENTITY_SIGNING_SECRET)
                 .verifying
                 .to_bytes()
                 .to_vec(),
@@ -163,9 +151,9 @@ mod tests {
             .to_vec()
     }
 
-    fn key_store() -> Arc<Client> {
+    fn key_store() -> Arc<IdentityContext> {
         let storage: Arc<dyn SecureStorage> = Arc::new(MemoryStorage::default());
-        Client::new(storage)
+        IdentityContext::new(storage)
     }
 
     #[test]
@@ -189,7 +177,7 @@ mod tests {
             discovery_verifying_key(),
             tampered.to_vec(),
         ) {
-            Err(ClientError::AuthenticationFailed { .. }) => {}
+            Err(RoostError::AuthenticationFailed { .. }) => {}
             other => {
                 panic!("expected AuthenticationFailed for a tampered signature, got {other:?}")
             }
@@ -214,20 +202,20 @@ mod tests {
             identity_signing.verifying.to_bytes().to_vec(),
             self_binding.to_bytes().to_vec(),
         ) {
-            Err(ClientError::AuthenticationFailed { .. }) => {}
+            Err(RoostError::AuthenticationFailed { .. }) => {}
             other => panic!("expected AuthenticationFailed across contexts, got {other:?}"),
         }
 
         // And the DK→IK vector must not pass as a self-binding, checked under the discovery key
         // that made it, so that only the context can be what rejects it.
-        match verify_identity_key_binding(
-            IdentityKey {
-                x25519_public_key: IDENTITY_X25519.to_vec(),
-                ed25519_verifying_key: discovery_signing.verifying.to_bytes().to_vec(),
+        match verify_identity_key_binding(Identity {
+            key: IdentityKey {
+                agreement_key: IDENTITY_X25519.to_vec(),
+                signing_key: discovery_signing.verifying.to_bytes().to_vec(),
             },
-            DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
-        ) {
-            Err(ClientError::AuthenticationFailed { .. }) => {}
+            binding_signature: DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+        }) {
+            Err(RoostError::AuthenticationFailed { .. }) => {}
             other => panic!("expected AuthenticationFailed across contexts, got {other:?}"),
         }
     }
@@ -239,19 +227,16 @@ mod tests {
     fn a_substituted_identity_fails_against_the_typed_discovery_key() {
         let impostor = SigningKeyPair::from_signing_bytes([0x44; 32]);
         let impostor_identity = IdentityKey {
-            x25519_public_key: IDENTITY_X25519.to_vec(),
-            ed25519_verifying_key: impostor.verifying.to_bytes().to_vec(),
+            agreement_key: IDENTITY_X25519.to_vec(),
+            signing_key: impostor.verifying.to_bytes().to_vec(),
         };
         let self_binding = sign_identity_key_binding(&impostor, &IDENTITY_X25519.into()).unwrap();
 
         // The impostor's own self-binding holds — substitution does not fail here.
-        verify_identity_key_binding(
-            IdentityKey {
-                x25519_public_key: impostor_identity.x25519_public_key.clone(),
-                ed25519_verifying_key: impostor_identity.ed25519_verifying_key.clone(),
-            },
-            self_binding.to_bytes().to_vec(),
-        )
+        verify_identity_key_binding(Identity {
+            key: impostor_identity.clone(),
+            binding_signature: self_binding.to_bytes().to_vec(),
+        })
         .expect("a self-consistent impostor identity self-binds");
 
         // It fails here, which is the only place it can.
@@ -260,7 +245,7 @@ mod tests {
             discovery_verifying_key(),
             DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
         ) {
-            Err(ClientError::AuthenticationFailed { .. }) => {}
+            Err(RoostError::AuthenticationFailed { .. }) => {}
             other => {
                 panic!("expected AuthenticationFailed for a substituted identity, got {other:?}")
             }
@@ -271,14 +256,8 @@ mod tests {
     fn a_generated_identity_verifies_through_the_export() {
         let identity = key_store().generate_identity().unwrap();
 
-        verify_identity_key_binding(
-            IdentityKey {
-                x25519_public_key: identity.x25519_public_key,
-                ed25519_verifying_key: identity.ed25519_verifying_key,
-            },
-            identity.identity_binding_signature,
-        )
-        .expect("Aether's own identity must satisfy Aether's own exported verifier");
+        verify_identity_key_binding(identity)
+            .expect("Aether's own identity must satisfy Aether's own exported verifier");
     }
 
     #[test]
@@ -326,8 +305,8 @@ mod tests {
                 "short identity agreement key",
                 verify_discovery_to_identity_binding(
                     IdentityKey {
-                        x25519_public_key: vec![0u8; 16],
-                        ed25519_verifying_key: identity.ed25519_verifying_key.clone(),
+                        agreement_key: vec![0u8; 16],
+                        signing_key: identity.signing_key.clone(),
                     },
                     discovery_verifying_key(),
                     DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
@@ -335,17 +314,17 @@ mod tests {
             ),
             (
                 "off-curve identity verifying key",
-                verify_identity_key_binding(
-                    IdentityKey {
-                        x25519_public_key: identity.x25519_public_key.clone(),
-                        ed25519_verifying_key: vec![0xFF; 32],
+                verify_identity_key_binding(Identity {
+                    key: IdentityKey {
+                        agreement_key: identity.agreement_key.clone(),
+                        signing_key: vec![0xFF; 32],
                     },
-                    vec![0u8; 64],
-                ),
+                    binding_signature: vec![0u8; 64],
+                }),
             ),
         ] {
             match result {
-                Err(ClientError::InvalidData { .. }) => {}
+                Err(RoostError::InvalidData { .. }) => {}
                 other => panic!("expected InvalidData for {label}, got {other:?}"),
             }
         }

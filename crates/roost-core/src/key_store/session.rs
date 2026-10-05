@@ -299,7 +299,7 @@ impl KeyStore {
     /// accepted the item before supersession.
     ///
     /// One-time-prekey consumption remains staged until
-    /// finalization. Commit the operation, atomically persist the returned state updates and
+    /// finalization. Reserve the operation, atomically persist the returned state updates and
     /// operation identifier, then finalize the secure-storage mutation.
     pub fn prepare_accept_session_with_transport_binding(
         &self,
@@ -471,9 +471,9 @@ mod tests {
         mallory.generate_identity().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
         mallory.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_publication = bob.current_publication().unwrap();
         // Mallory's DK→IK signature: valid bytes over the wrong identity.
-        let mallory_publication = mallory.current_publication_bundle().unwrap();
+        let mallory_publication = mallory.current_publication().unwrap();
 
         let result = alice.initiate_session_with_transport_binding(
             SessionInitiation {
@@ -506,7 +506,7 @@ mod tests {
         let alice_identity = alice.generate_identity().unwrap();
         let bob_identity = bob.generate_identity().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_publication = bob.current_publication().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
 
         let session_key = ProtocolStateKey::session(SessionId::from_bytes([0x22; 16]));
@@ -568,7 +568,7 @@ mod tests {
         let alice_identity = alice.generate_identity().unwrap();
         let bob_identity = bob.generate_identity().unwrap();
         bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.current_publication_bundle().unwrap();
+        let bob_publication = bob.current_publication().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
 
         let initiation = alice

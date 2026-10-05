@@ -10,7 +10,7 @@ use roost_core::{
 };
 
 fn finalize<T>(store: &KeyStore, prepared: &roost_core::PreparedKeyStoreOperation<T>) {
-    store.commit_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
     store.finalize_operation(prepared.operation.id).unwrap();
 }
 
@@ -18,15 +18,15 @@ fn finalize<T>(store: &KeyStore, prepared: &roost_core::PreparedKeyStoreOperatio
 fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
     let alice = KeyStore::new(Box::new(InMemorySecureStorage::new()));
     let bob = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    let alice_identity = alice.prepare_generate_identity().unwrap();
+    let alice_identity = alice.prepare_identity_creation().unwrap();
     finalize(&alice, &alice_identity);
-    let bob_identity = bob.prepare_generate_identity().unwrap();
+    let bob_identity = bob.prepare_identity_creation().unwrap();
     finalize(&bob, &bob_identity);
-    let signed_prekey = bob.prepare_rotate_signed_prekey_now().unwrap();
+    let signed_prekey = bob.prepare_signed_prekey_rotation().unwrap();
     finalize(&bob, &signed_prekey);
-    let one_time_prekeys = bob.prepare_generate_one_time_prekeys(1).unwrap();
+    let one_time_prekeys = bob.prepare_one_time_prekeys(1).unwrap();
     finalize(&bob, &one_time_prekeys);
-    let bob_publication = bob.current_publication_bundle().unwrap();
+    let bob_publication = bob.current_publication().unwrap();
     let bob_one_time_prekey = one_time_prekeys.output[0].clone();
     let transport_binding =
         TransportBinding::new(b"consumer-owned initial binding".to_vec()).unwrap();
@@ -55,7 +55,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
             &transport_binding,
         )
         .unwrap();
-    let replacement_signed_prekey = bob.prepare_rotate_signed_prekey_now().unwrap();
+    let replacement_signed_prekey = bob.prepare_signed_prekey_rotation().unwrap();
     assert_eq!(
         replacement_signed_prekey.output.id,
         prekey_selection.signed_prekey_id + 1
@@ -128,7 +128,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
 
     finalize(&bob, &accepted);
     assert!(matches!(
-        bob.commit_operation(stale.operation.id),
+        bob.reserve_operation(stale.operation.id),
         Err(KeyStoreError::Operation(
             KeyStoreOperationError::PreconditionChanged { .. }
         ))

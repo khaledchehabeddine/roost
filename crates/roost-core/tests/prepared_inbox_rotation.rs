@@ -1,7 +1,7 @@
 //! Prepared inbox rotation across the public KeyStore and SecureStorage seam.
 //!
 //! The scenario proves that a newly returned inbox generation remains provisional until the
-//! prepared secure mutation is committed and finalized, including restart recovery after a
+//! prepared secure mutation is reserved and finalized, including restart recovery after a
 //! failed finalization transition.
 
 use roost_core::{
@@ -61,15 +61,15 @@ impl SecureStorage for SharedSecureStorage {
 #[test]
 fn prepared_inbox_rotation_does_not_advance_authoritative_generation_before_finalize() {
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    let identity = store.prepare_generate_identity().unwrap();
-    store.commit_operation(identity.operation.id).unwrap();
+    let identity = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(identity.operation.id).unwrap();
     store.finalize_operation(identity.operation.id).unwrap();
-    let before = store.current_discovery_key_bundle().unwrap();
+    let before = store.current_public_discovery_key().unwrap();
 
-    let prepared = store.prepare_rotate_inbox_now().unwrap();
+    let prepared = store.prepare_inbox_rotation().unwrap();
 
     assert_eq!(
-        store.current_discovery_key_bundle().unwrap().epoch,
+        store.current_public_discovery_key().unwrap().epoch,
         before.epoch
     );
     assert_eq!(
@@ -77,25 +77,25 @@ fn prepared_inbox_rotation_does_not_advance_authoritative_generation_before_fina
         before.epoch + 1
     );
 
-    store.commit_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.operation.id).unwrap();
     store.finalize_operation(prepared.operation.id).unwrap();
     assert_eq!(
-        store.current_discovery_key_bundle().unwrap().epoch,
+        store.current_public_discovery_key().unwrap().epoch,
         before.epoch + 1
     );
 }
 
 #[test]
-fn committed_inbox_rotation_resumes_after_restart_and_failed_finalization() {
+fn reserved_inbox_rotation_resumes_after_restart_and_failed_finalization() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
-    let identity = store.prepare_generate_identity().unwrap();
-    store.commit_operation(identity.operation.id).unwrap();
+    let identity = store.prepare_identity_creation().unwrap();
+    store.reserve_operation(identity.operation.id).unwrap();
     store.finalize_operation(identity.operation.id).unwrap();
-    let before = store.current_discovery_key_bundle().unwrap().epoch;
-    let prepared = store.prepare_rotate_inbox_now().unwrap();
+    let before = store.current_public_discovery_key().unwrap().epoch;
+    let prepared = store.prepare_inbox_rotation().unwrap();
     let host_operation_id = prepared.operation.id;
-    store.commit_operation(host_operation_id).unwrap();
+    store.reserve_operation(host_operation_id).unwrap();
 
     storage.fail_next_store();
     assert!(store.finalize_operation(host_operation_id).is_err());
@@ -105,10 +105,10 @@ fn committed_inbox_rotation_resumes_after_restart_and_failed_finalization() {
     let unfinished = recovered.unfinished_operations().unwrap();
     assert_eq!(unfinished.len(), 1);
     assert_eq!(unfinished[0].operation.id, host_operation_id);
-    assert_eq!(unfinished[0].status, KeyStoreOperationStatus::Committed);
+    assert_eq!(unfinished[0].status, KeyStoreOperationStatus::Reserved);
     recovered.finalize_operation(host_operation_id).unwrap();
     assert_eq!(
-        recovered.current_discovery_key_bundle().unwrap().epoch,
+        recovered.current_public_discovery_key().unwrap().epoch,
         before + 1
     );
 }

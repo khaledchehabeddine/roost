@@ -52,7 +52,7 @@ pub enum SecureStorageExpectedValue {
 pub struct SecureStoragePrecondition {
     /// Stable SecureStorage entry name.
     pub key: String,
-    /// Expected authoritative value at commit time.
+    /// Expected authoritative value when the operation is reserved.
     pub expected_value: SecureStorageExpectedValue,
 }
 
@@ -64,7 +64,7 @@ pub struct SecureStoragePrecondition {
 pub struct KeyStoreOperation {
     /// Stable identifier persisted by the host with its atomic transaction.
     pub id: KeyStoreOperationId,
-    /// SecureStorage inputs checked before the operation is committed.
+    /// SecureStorage inputs checked when the operation is reserved.
     pub secure_storage_preconditions: Vec<SecureStoragePrecondition>,
 }
 
@@ -79,10 +79,10 @@ pub struct PreparedKeyStoreOperation<T> {
 /// Durable phase of a prepared KeyStore operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyStoreOperationStatus {
-    /// Secret mutations are staged and may be committed or aborted.
+    /// Secret mutations are staged and may be reserved or aborted.
     Prepared,
     /// Preconditions matched and the host may commit its durable transaction.
-    Committed,
+    Reserved,
     /// Secure mutations are being made authoritative and recovery must resume finalization.
     Finalizing,
     /// Every secure mutation is authoritative.
@@ -123,7 +123,7 @@ pub enum KeyStoreOperationError {
     },
     /// The OS CSPRNG could not produce an operation identifier.
     Randomness,
-    /// A previously committed operation must be finalized or aborted before more work proceeds.
+    /// A previously reserved operation must be finalized or aborted before more work proceeds.
     RecoveryRequired {
         /// Identifier of the unfinished operation.
         id: KeyStoreOperationId,
@@ -176,7 +176,7 @@ impl From<StorageError> for KeyStoreOperationError {
 #[derive(Clone, Copy, Zeroize)]
 enum JournalStatus {
     Prepared,
-    Committed,
+    Reserved,
     Finalizing { next_mutation: u8 },
     Finalized,
     Aborted,
@@ -186,7 +186,7 @@ impl JournalStatus {
     fn public(self) -> KeyStoreOperationStatus {
         match self {
             Self::Prepared => KeyStoreOperationStatus::Prepared,
-            Self::Committed => KeyStoreOperationStatus::Committed,
+            Self::Reserved => KeyStoreOperationStatus::Reserved,
             Self::Finalizing { .. } => KeyStoreOperationStatus::Finalizing,
             Self::Finalized => KeyStoreOperationStatus::Finalized,
             Self::Aborted => KeyStoreOperationStatus::Aborted,
@@ -196,12 +196,12 @@ impl JournalStatus {
     fn is_unfinished(self) -> bool {
         matches!(
             self,
-            Self::Prepared | Self::Committed | Self::Finalizing { .. }
+            Self::Prepared | Self::Reserved | Self::Finalizing { .. }
         )
     }
 
     fn requires_recovery(self) -> bool {
-        matches!(self, Self::Committed | Self::Finalizing { .. })
+        matches!(self, Self::Reserved | Self::Finalizing { .. })
     }
 }
 
@@ -409,12 +409,12 @@ impl KeyStore {
 
     /// Validates secure inputs and reserves an operation for the host transaction.
     ///
-    /// Calling this repeatedly after a successful commit is idempotent. The caller must next
+    /// Calling this repeatedly after a successful reservation is idempotent. The caller must next
     /// commit the returned Protocol State updates and outputs atomically, then call
     /// [`Self::finalize_operation`]. Abort only after proving the host transaction did not commit.
     /// If the host result is ambiguous, reload its operation record and reconcile it through
     /// [`Self::unfinished_operations`].
-    pub fn commit_operation(
+    pub fn reserve_operation(
         &self,
         id: KeyStoreOperationId,
     ) -> Result<KeyStoreOperationStatus, KeyStoreError> {
@@ -433,22 +433,22 @@ impl KeyStore {
                     return Err(KeyStoreOperationError::RecoveryRequired { id: record.id }.into());
                 }
                 validate_preconditions(&**storage, &journal.records[index].preconditions)?;
-                journal.records[index].status = JournalStatus::Committed;
+                journal.records[index].status = JournalStatus::Reserved;
                 store_journal(&mut **storage, &journal)?;
-                Ok(KeyStoreOperationStatus::Committed)
+                Ok(KeyStoreOperationStatus::Reserved)
             }
-            JournalStatus::Committed => Ok(KeyStoreOperationStatus::Committed),
+            JournalStatus::Reserved => Ok(KeyStoreOperationStatus::Reserved),
             JournalStatus::Finalizing { .. } => Ok(KeyStoreOperationStatus::Finalizing),
             JournalStatus::Finalized => Ok(KeyStoreOperationStatus::Finalized),
             JournalStatus::Aborted => Err(KeyStoreOperationError::InvalidTransition {
                 status: status.public(),
-                action: "commit",
+                action: "reserve",
             }
             .into()),
         }
     }
 
-    /// Makes a committed operation's staged secure mutations authoritative.
+    /// Makes a reserved operation's staged secure mutations authoritative.
     ///
     /// Finalization records progress after every SecureStorage mutation. Repeating the call resumes
     /// at the last durable step, and repeating it after completion is idempotent. Once finalization
@@ -470,7 +470,7 @@ impl KeyStore {
                 .into());
             }
             JournalStatus::Finalized => return Ok(KeyStoreOperationStatus::Finalized),
-            JournalStatus::Committed => {
+            JournalStatus::Reserved => {
                 journal.records[index].status = JournalStatus::Finalizing { next_mutation: 0 };
                 store_journal(&mut **storage, &journal)?;
             }
@@ -505,7 +505,7 @@ impl KeyStore {
 
     /// Discards staged material before finalization starts.
     ///
-    /// Prepared operations may be aborted. A committed operation may be aborted only after the
+    /// Prepared operations may be aborted. A reserved operation may be aborted only after the
     /// caller proves its host transaction did not commit; an ambiguous host result must be
     /// reconciled by identifier first. Repeating an abort is idempotent, while an operation that
     /// started finalizing cannot be rolled back safely.
@@ -518,7 +518,7 @@ impl KeyStore {
         let mut journal = load_journal(&**storage)?;
         let index = record_index(&journal, id)?;
         match journal.records[index].status {
-            JournalStatus::Prepared | JournalStatus::Committed => {
+            JournalStatus::Prepared | JournalStatus::Reserved => {
                 journal.records[index].scrub_staged_material();
                 journal.records[index].status = JournalStatus::Aborted;
                 store_journal(&mut **storage, &journal)?;
@@ -538,8 +538,8 @@ impl KeyStore {
     /// Returns every prepared operation that still needs host recovery.
     ///
     /// The host matches each identifier against its durable transaction record. It aborts an
-    /// orphaned Prepared or Committed stage whose host transaction did not commit, and finalizes a
-    /// Committed or Finalizing operation whose host transaction did commit.
+    /// orphaned Prepared or Reserved stage whose host transaction did not commit, and finalizes a
+    /// Reserved or Finalizing operation whose host transaction did commit.
     pub fn unfinished_operations(&self) -> Result<Vec<UnfinishedKeyStoreOperation>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let storage = self.lock_operation_storage()?;
@@ -812,7 +812,7 @@ fn encode_journal(
         encoded.extend_from_slice(record.id.as_bytes());
         let (status, progress) = match record.status {
             JournalStatus::Prepared => (0, 0),
-            JournalStatus::Committed => (1, 0),
+            JournalStatus::Reserved => (1, 0),
             JournalStatus::Finalizing { next_mutation } => (2, next_mutation),
             JournalStatus::Finalized => (3, 0),
             JournalStatus::Aborted => (4, 0),
@@ -972,7 +972,7 @@ fn decode_journal(bytes: &[u8]) -> Result<OperationJournal, KeyStoreOperationErr
         }
         let status = match status_tag {
             0 if progress == 0 => JournalStatus::Prepared,
-            1 if progress == 0 => JournalStatus::Committed,
+            1 if progress == 0 => JournalStatus::Reserved,
             2 if usize::from(progress) <= mutations.len() => JournalStatus::Finalizing {
                 next_mutation: progress,
             },

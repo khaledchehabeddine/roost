@@ -193,7 +193,7 @@ impl SignedPreKeyManager {
         }
     }
 
-    // Clears only the signed prekey. `KeyStore::prepare_reset` coordinates the full key lifecycle.
+    // Clears only the signed prekey. `KeyStore::prepare_identity_deletion` coordinates the full key lifecycle.
     pub(crate) fn reset(&self) -> Result<(), SignedPreKeyError> {
         let mut storage = self.lock_storage()?;
         Ok(storage.delete(SIGNED_PREKEY_KEY)?)

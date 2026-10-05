@@ -25,6 +25,8 @@
   - Avoid: user, account, profile
 - **Identity Backup**: A passphrase-encrypted copy of an Identity's keys that restores the Identity onto a new Device.
   - Avoid: account backup
+- **Identity Context**: Roost's handle on one local identity namespace, which shares its SecureStorage and configuration and keeps no protocol state.
+  - Avoid: client, keystore
 - **Identity Key (IK)**: The permanent key pair that anchors an Identity and signs its Discovery Key.
   - Avoid: master key, root key
 - **Identity Secret Blob**: The SecureStorage entry that holds an Identity Key's secret halves.
@@ -45,7 +47,7 @@
   - Avoid: prekey reference
 - **PreKey State**: The stored secrets for an Identity's current Discovery Key and its prekeys.
   - Avoid: protocol state blob, prekey cache
-- **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app finalizes or aborts after committing its own state.
+- **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app reserves before committing its own state, then finalizes or aborts.
   - Avoid: database transaction, deferred write
 - **Protocol State Blob**: Opaque state, including secrets, that Roost produces and the app stores between operations.
   - Avoid: cache
