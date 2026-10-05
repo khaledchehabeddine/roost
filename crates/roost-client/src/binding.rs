@@ -111,30 +111,16 @@ mod tests {
     use super::{verify_discovery_to_identity_binding, verify_identity_key_binding};
     use crate::storage::MemoryStorage;
     use crate::{Identity, IdentityContext, RoostError, SecureStorage, protocol::IdentityKey};
-    use roost_core::test_support::{SigningKeyPair, sign_identity_key_binding};
+    use roost_crypto::{
+        DiscoveryKey, PublicIdentityKey, Signature, SigningKeyPair, sign_identity_key_binding,
+    };
     use std::sync::Arc;
 
-    /// Aether's published cross-implementation vector for `AetherDKToIK-v1:`.
-    ///
-    /// Source: `discovery_to_identity_binding_known_answer` in
-    /// `crates/roost-crypto/src/discovery_key.rs`, and
-    /// derived from the RFC 8032 reference implementation rather than from `ed25519-dalek`.
-    /// Pinning it here means the *exported* path agrees with that independent derivation,
-    /// not merely with `roost-crypto`.
-    ///
-    /// Inputs: `discovery_signing_secret = [0x33; 32]`, `identity_signing_secret = [0x11; 32]`,
-    /// `ik_x25519 = [0x22; 32]`.
     const IDENTITY_X25519: [u8; 32] = [0x22; 32];
     const IDENTITY_SIGNING_SECRET: [u8; 32] = [0x11; 32];
     const DISCOVERY_SIGNING_SECRET: [u8; 32] = [0x33; 32];
-    const DISCOVERY_TO_IDENTITY_SIGNATURE: [u8; 64] = [
-        23, 176, 66, 29, 223, 45, 7, 68, 91, 59, 148, 206, 50, 223, 115, 109, 194, 201, 106, 32,
-        137, 187, 191, 19, 110, 197, 48, 245, 250, 62, 46, 60, 44, 33, 24, 225, 68, 168, 87, 141,
-        199, 190, 216, 91, 107, 9, 172, 19, 103, 128, 236, 209, 71, 214, 224, 71, 59, 0, 112, 9,
-        51, 239, 0, 0,
-    ];
 
-    fn vector_identity() -> IdentityKey {
+    fn fixed_identity() -> IdentityKey {
         IdentityKey {
             agreement_key: IDENTITY_X25519.to_vec(),
             signing_key: SigningKeyPair::from_signing_bytes(IDENTITY_SIGNING_SECRET)
@@ -142,6 +128,22 @@ mod tests {
                 .to_bytes()
                 .to_vec(),
         }
+    }
+
+    // Signs `fixed_identity()` with the discovery signing key, as a peer's discovery key does.
+    // The DK→IK signature covers only the identity's two public halves, so the discovery key's
+    // other fields and the identity's own binding signature take placeholder values.
+    fn discovery_to_identity_signature() -> Vec<u8> {
+        let identity = PublicIdentityKey {
+            public_key: IDENTITY_X25519.into(),
+            verifying_key: SigningKeyPair::from_signing_bytes(IDENTITY_SIGNING_SECRET).verifying,
+            binding_signature: Signature::from_bytes(&[0; 64]),
+        };
+        DiscoveryKey::from_secret_bytes([0; 32], DISCOVERY_SIGNING_SECRET, 0, 0, [0; 64])
+            .sign_identity_binding(&identity)
+            .unwrap()
+            .to_bytes()
+            .to_vec()
     }
 
     fn discovery_verifying_key() -> Vec<u8> {
@@ -157,25 +159,24 @@ mod tests {
     }
 
     #[test]
-    fn discovery_to_identity_known_answer_verifies_through_the_export() {
+    fn discovery_to_identity_binding_verifies_through_the_export() {
         verify_discovery_to_identity_binding(
-            vector_identity(),
+            fixed_identity(),
             discovery_verifying_key(),
-            DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+            discovery_to_identity_signature(),
         )
-        .expect("the published cross-implementation vector must verify");
+        .expect("a discovery key's binding for the identity it signed must verify");
     }
 
-    /// A golden test that cannot fail is worse than none.
     #[test]
-    fn discovery_to_identity_known_answer_fails_with_one_byte_altered() {
-        let mut tampered = DISCOVERY_TO_IDENTITY_SIGNATURE;
+    fn discovery_to_identity_binding_fails_with_one_byte_altered() {
+        let mut tampered = discovery_to_identity_signature();
         tampered[0] ^= 0x01;
 
         match verify_discovery_to_identity_binding(
-            vector_identity(),
+            fixed_identity(),
             discovery_verifying_key(),
-            tampered.to_vec(),
+            tampered,
         ) {
             Err(RoostError::AuthenticationFailed { .. }) => {}
             other => {
@@ -198,7 +199,7 @@ mod tests {
         // The real self-binding must not pass as a discovery-to-identity binding, even when it is
         // checked under the key that actually made it.
         match verify_discovery_to_identity_binding(
-            vector_identity(),
+            fixed_identity(),
             identity_signing.verifying.to_bytes().to_vec(),
             self_binding.to_bytes().to_vec(),
         ) {
@@ -206,14 +207,14 @@ mod tests {
             other => panic!("expected AuthenticationFailed across contexts, got {other:?}"),
         }
 
-        // And the DK→IK vector must not pass as a self-binding, checked under the discovery key
+        // And the DK→IK signature must not pass as a self-binding, checked under the discovery key
         // that made it, so that only the context can be what rejects it.
         match verify_identity_key_binding(Identity {
             key: IdentityKey {
                 agreement_key: IDENTITY_X25519.to_vec(),
                 signing_key: discovery_signing.verifying.to_bytes().to_vec(),
             },
-            binding_signature: DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+            binding_signature: discovery_to_identity_signature(),
         }) {
             Err(RoostError::AuthenticationFailed { .. }) => {}
             other => panic!("expected AuthenticationFailed across contexts, got {other:?}"),
@@ -243,7 +244,7 @@ mod tests {
         match verify_discovery_to_identity_binding(
             impostor_identity,
             discovery_verifying_key(),
-            DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+            discovery_to_identity_signature(),
         ) {
             Err(RoostError::AuthenticationFailed { .. }) => {}
             other => {
@@ -262,21 +263,21 @@ mod tests {
 
     #[test]
     fn malformed_input_is_invalid_data_not_a_failed_binding() {
-        let identity = vector_identity();
+        let identity = fixed_identity();
 
         for (label, result) in [
             (
                 "short discovery key",
                 verify_discovery_to_identity_binding(
-                    vector_identity(),
+                    fixed_identity(),
                     vec![0u8; 31],
-                    DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+                    discovery_to_identity_signature(),
                 ),
             ),
             (
                 "short signature",
                 verify_discovery_to_identity_binding(
-                    vector_identity(),
+                    fixed_identity(),
                     discovery_verifying_key(),
                     vec![0u8; 63],
                 ),
@@ -284,9 +285,9 @@ mod tests {
             (
                 "non-canonically encoded discovery key",
                 verify_discovery_to_identity_binding(
-                    vector_identity(),
+                    fixed_identity(),
                     vec![0xFF; 32],
-                    DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+                    discovery_to_identity_signature(),
                 ),
             ),
             // A small-order key is the one that is not merely malformed: signatures under it
@@ -296,9 +297,9 @@ mod tests {
             (
                 "weak discovery key",
                 verify_discovery_to_identity_binding(
-                    vector_identity(),
+                    fixed_identity(),
                     vec![0u8; 32],
-                    DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+                    discovery_to_identity_signature(),
                 ),
             ),
             (
@@ -309,7 +310,7 @@ mod tests {
                         signing_key: identity.signing_key.clone(),
                     },
                     discovery_verifying_key(),
-                    DISCOVERY_TO_IDENTITY_SIGNATURE.to_vec(),
+                    discovery_to_identity_signature(),
                 ),
             ),
             (

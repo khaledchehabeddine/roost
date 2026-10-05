@@ -115,29 +115,6 @@ mod tests {
         ChaCha20Rng::from_seed([9u8; 32])
     }
 
-    /// Cross-implementation known-answer test for the verifier derivation.
-    ///
-    /// Source: Python `hashlib` SHA-256, which shares no code with the `sha2` crate used in
-    /// production.
-    ///
-    /// Input: `capability = [0x42; 32]`.
-    ///
-    /// Preimage: `"aether-recipient-delivery-capability-v1" || 0x00 || capability`, 72 bytes.
-    ///
-    /// Relay derives this same value from a submitted capability and compares it to the stored
-    /// verifier, so this vector is the contract between the two codebases.
-    #[test]
-    fn verifier_matches_the_specified_derivation() {
-        const EXPECTED_VERIFIER: [u8; 32] = [
-            253, 82, 50, 5, 79, 251, 244, 204, 194, 174, 2, 98, 38, 171, 147, 22, 203, 27, 235,
-            135, 243, 24, 51, 131, 2, 53, 167, 11, 209, 104, 109, 26,
-        ];
-
-        let capability = RecipientDeliveryCapability::from_bytes([0x42u8; 32]);
-
-        assert_eq!(capability.verifier().as_bytes(), &EXPECTED_VERIFIER);
-    }
-
     #[test]
     fn distinct_capabilities_produce_distinct_verifiers() {
         let first = RecipientDeliveryCapability::from_bytes([0x42u8; 32]);

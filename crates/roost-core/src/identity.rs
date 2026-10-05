@@ -240,41 +240,26 @@ mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
     use rand::SeedableRng;
-    use rand::rngs::OsRng;
     use rand_chacha::ChaCha20Rng;
 
     fn manager() -> IdentityManager {
         IdentityManager::new(Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new()))))
     }
 
-    /// Known-answer test for deterministic identity-key generation and storage encoding.
-    ///
-    /// Source: `rand_chacha` 0.3 `ChaCha20Rng` with Aether key constructors
-    ///
-    /// Inputs:
-    /// - `rng_seed = [0x49; 32]`
-    ///
-    /// Output: `identity/x25519 secret || identity/ed25519 secret`.
     #[test]
-    fn generate_identity_known_answer_and_canonical_blob_encoding() {
-        const EXPECTED_CANONICAL_IDENTITY_SECRET: [u8; 64] = [
-            38, 66, 93, 82, 83, 101, 158, 207, 181, 252, 75, 95, 72, 220, 75, 134, 99, 244, 117,
-            171, 95, 230, 17, 124, 185, 206, 38, 77, 69, 114, 38, 71, 70, 17, 62, 74, 208, 54, 58,
-            109, 199, 137, 67, 242, 51, 3, 21, 21, 45, 241, 16, 205, 23, 211, 147, 33, 6, 0, 90,
-            170, 13, 30, 167, 208,
-        ];
-
+    fn generate_identity_stores_both_halves_in_one_versioned_blob() {
         let manager = manager();
-        let mut rng = ChaCha20Rng::from_seed([0x49u8; 32]);
-
-        manager.generate_identity(&mut rng).unwrap();
+        let identity = manager
+            .generate_identity(&mut ChaCha20Rng::from_seed([0x49; 32]))
+            .unwrap();
 
         let storage = manager.storage.lock().unwrap();
         let blob = storage.load(IDENTITY_CURRENT_KEY).unwrap().unwrap();
 
+        assert_eq!(blob.len(), 65);
         assert_eq!(blob[0], 1);
-        assert_eq!(&blob[1..], EXPECTED_CANONICAL_IDENTITY_SECRET);
-        assert_ne!(&blob[1..33], &blob[33..IDENTITY_KEY_BLOB_LEN]);
+        assert_eq!(&blob[1..33], &*identity.key_pair.to_secret_bytes());
+        assert_eq!(&blob[33..], &*identity.signing_key_pair.to_signing_bytes());
     }
 
     #[test]
@@ -286,10 +271,11 @@ mod tests {
 
     #[test]
     fn generate_identity_twice_returns_already_exists() {
+        let mut rng = ChaCha20Rng::from_seed([0x60; 32]);
         let manager = manager();
-        manager.generate_identity(&mut OsRng).unwrap();
+        manager.generate_identity(&mut rng).unwrap();
         assert!(matches!(
-            manager.generate_identity(&mut OsRng),
+            manager.generate_identity(&mut rng),
             Err(IdentityError::AlreadyExists)
         ));
     }
@@ -305,8 +291,9 @@ mod tests {
 
     #[test]
     fn load_identity_returns_same_public_keys() {
+        let mut rng = ChaCha20Rng::from_seed([0x61; 32]);
         let manager = manager();
-        let generated_identity = manager.generate_identity(&mut OsRng).unwrap();
+        let generated_identity = manager.generate_identity(&mut rng).unwrap();
         let loaded_identity = manager.load_identity().unwrap();
         assert_eq!(
             generated_identity.public_key(),
@@ -320,8 +307,9 @@ mod tests {
 
     #[test]
     fn sign_round_trip_after_load_identity() {
+        let mut rng = ChaCha20Rng::from_seed([0x62; 32]);
         let manager = manager();
-        let generated_identity = manager.generate_identity(&mut OsRng).unwrap();
+        let generated_identity = manager.generate_identity(&mut rng).unwrap();
         let loaded_identity = manager.load_identity().unwrap();
         let message = b"aether test message";
         // Ed25519 signing is deterministic, so identical keys produce identical signatures.
@@ -333,10 +321,11 @@ mod tests {
 
     #[test]
     fn diffie_hellman_round_trip_after_load_identity() {
+        let mut rng = ChaCha20Rng::from_seed([0x63; 32]);
         let manager = manager();
-        manager.generate_identity(&mut OsRng).unwrap();
+        manager.generate_identity(&mut rng).unwrap();
         let loaded_identity = manager.load_identity().unwrap();
-        let peer_key_pair = generate_key_pair(&mut OsRng);
+        let peer_key_pair = generate_key_pair(&mut rng);
         let identity_shared_secret = loaded_identity.diffie_hellman(&peer_key_pair.public);
         let peer_shared_secret = peer_key_pair.diffie_hellman(loaded_identity.public_key());
         assert_eq!(

@@ -496,7 +496,8 @@ mod tests {
     use super::*;
     use crate::identity::IdentityManager;
     use crate::storage::InMemorySecureStorage;
-    use rand::rngs::OsRng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
     use roost_crypto::{
         generate_signed_prekey, generate_signed_prekey_for_discovery_key,
         generate_signing_key_pair, verify_public_signed_prekey,
@@ -523,11 +524,12 @@ mod tests {
     }
 
     fn setup_with_discovery_key() -> SignedPreKeySetup {
+        let mut rng = ChaCha20Rng::from_seed([0x90; 32]);
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        identity.generate_identity(&mut OsRng).unwrap();
+        identity.generate_identity(&mut rng).unwrap();
         let discovery = Arc::new(DiscoveryKeyManager::new(Arc::clone(&storage), identity));
-        discovery.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        discovery.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
         let signed_prekey = SignedPreKeyManager::new(storage, Arc::clone(&discovery));
         SignedPreKeySetup {
             discovery,
@@ -546,9 +548,10 @@ mod tests {
         manager: &SignedPreKeyManager,
         created_at_secs: u64,
     ) -> SignedPreKey {
-        let signing_key = generate_signing_key_pair(&mut OsRng);
+        let mut rng = ChaCha20Rng::from_seed([0x91; 32]);
+        let signing_key = generate_signing_key_pair(&mut rng);
         let signed_prekey =
-            generate_signed_prekey(&mut OsRng, &signing_key, 0, FIXED_EPOCH, created_at_secs)
+            generate_signed_prekey(&mut rng, &signing_key, 0, FIXED_EPOCH, created_at_secs)
                 .unwrap();
         let blob = encode_signed_prekey(&signed_prekey);
         manager
@@ -564,14 +567,11 @@ mod tests {
         setup: &SignedPreKeySetup,
         created_at_secs: u64,
     ) -> SignedPreKey {
+        let mut rng = ChaCha20Rng::from_seed([0x92; 32]);
         let discovery_key = setup.discovery.current().unwrap();
-        let signed_prekey = generate_signed_prekey_for_discovery_key(
-            &mut OsRng,
-            &discovery_key,
-            0,
-            created_at_secs,
-        )
-        .unwrap();
+        let signed_prekey =
+            generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, 0, created_at_secs)
+                .unwrap();
         let blob = encode_signed_prekey(&signed_prekey);
         setup
             .manager
@@ -620,9 +620,10 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_seeds_first_signed_prekey_under_discovery_key() {
+        let mut rng = ChaCha20Rng::from_seed([0x93; 32]);
         let SignedPreKeySetup { discovery, manager } = setup_with_discovery_key();
         let rotated = manager
-            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+            .rotate_if_stale(&mut rng, at(FIXED_NOW))
             .unwrap()
             .expect("first call must rotate");
         let bundle = manager.current_public(at(FIXED_NOW)).unwrap();
@@ -637,15 +638,16 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_keeps_fresh_signed_prekey() {
+        let mut rng = ChaCha20Rng::from_seed([0x94; 32]);
         let manager = setup_with_discovery_key().manager;
         assert!(
             manager
-                .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+                .rotate_if_stale(&mut rng, at(FIXED_NOW))
                 .unwrap()
                 .is_some()
         );
         let initial_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
-        let second_rotation = manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let second_rotation = manager.rotate_if_stale(&mut rng, at(FIXED_NOW)).unwrap();
         assert!(
             second_rotation.is_none(),
             "fresh signed pre-key must not rotate"
@@ -656,14 +658,15 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_replaces_backdated_signed_prekey() {
+        let mut rng = ChaCha20Rng::from_seed([0x95; 32]);
         let manager = setup_with_discovery_key().manager;
-        manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)).unwrap();
+        manager.rotate_if_stale(&mut rng, at(FIXED_NOW)).unwrap();
         let backdated_created_at_secs =
             FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_SECS + SECONDS_PER_DAY);
         let stale_signed_prekey =
             store_signed_prekey_with_created_at(&manager, backdated_created_at_secs);
         let rotated = manager
-            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+            .rotate_if_stale(&mut rng, at(FIXED_NOW))
             .unwrap()
             .expect("backdated signed pre-key must trigger rotation");
         let rotated_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
@@ -680,13 +683,14 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_rotates_at_weekly_boundary() {
+        let mut rng = ChaCha20Rng::from_seed([0x96; 32]);
         let setup = setup_with_discovery_key();
         let created_at_secs = FIXED_NOW - SIGNED_PREKEY_ROTATION_WINDOW_SECS;
         let stale = store_current_discovery_signed_prekey_with_created_at(&setup, created_at_secs);
 
         let rotated = setup
             .manager
-            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+            .rotate_if_stale(&mut rng, at(FIXED_NOW))
             .unwrap()
             .expect("weekly boundary must rotate");
 
@@ -699,6 +703,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_retains_backdated_prekey_for_thirty_days_after_supersession() {
+        let mut rng = ChaCha20Rng::from_seed([0x97; 32]);
         let setup = setup_with_discovery_key();
         let backdated_created_at_secs =
             FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_SECS + SECONDS_PER_DAY);
@@ -709,7 +714,7 @@ mod tests {
 
         setup
             .manager
-            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+            .rotate_if_stale(&mut rng, at(FIXED_NOW))
             .unwrap()
             .expect("backdated signed pre-key must trigger rotation");
 
@@ -740,11 +745,12 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_keeps_slightly_future_signed_prekey() {
+        let mut rng = ChaCha20Rng::from_seed([0x98; 32]);
         let manager = setup_with_discovery_key().manager;
         let signed_prekey = store_signed_prekey_with_created_at(&manager, FIXED_NOW + 100_000);
         assert!(
             manager
-                .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+                .rotate_if_stale(&mut rng, at(FIXED_NOW))
                 .unwrap()
                 .is_none()
         );
@@ -754,13 +760,14 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_replaces_far_future_signed_prekey() {
+        let mut rng = ChaCha20Rng::from_seed([0x99; 32]);
         let manager = setup_with_discovery_key().manager;
         let signed_prekey = store_signed_prekey_with_created_at(
             &manager,
             FIXED_NOW + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10,
         );
         let rotated = manager
-            .rotate_if_stale(&mut OsRng, at(FIXED_NOW))
+            .rotate_if_stale(&mut rng, at(FIXED_NOW))
             .unwrap()
             .expect("far-future signed pre-key must trigger rotation");
         let public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
@@ -770,9 +777,10 @@ mod tests {
 
     #[test]
     fn rotate_now_retains_immediately_superseded_prekey_inside_retention_window() {
+        let mut rng = ChaCha20Rng::from_seed([0x9a; 32]);
         let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
-        let second = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let first = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
+        let second = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
 
         let retained = setup
             .manager
@@ -797,10 +805,11 @@ mod tests {
 
     #[test]
     fn rotate_now_retains_multiple_superseded_prekeys() {
+        let mut rng = ChaCha20Rng::from_seed([0x9b; 32]);
         let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
-        let second = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
-        let third = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let first = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
+        let second = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
+        let third = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
 
         assert!(
             setup
@@ -837,9 +846,10 @@ mod tests {
 
     #[test]
     fn retained_prekey_expires_at_thirty_day_boundary() {
+        let mut rng = ChaCha20Rng::from_seed([0x9c; 32]);
         let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
-        setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let first = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
+        setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
         assert!(
             setup
                 .manager
@@ -874,8 +884,9 @@ mod tests {
 
     #[test]
     fn prekey_lookup_rejects_wrong_id_for_matching_public_key() {
+        let mut rng = ChaCha20Rng::from_seed([0x9d; 32]);
         let setup = setup_with_discovery_key();
-        let prekey = setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+        let prekey = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
 
         assert!(matches!(
             setup.manager.prekey_for_reference(
@@ -890,14 +901,15 @@ mod tests {
 
     #[test]
     fn rotate_now_refuses_to_discard_unexpired_retained_prekeys() {
+        let mut rng = ChaCha20Rng::from_seed([0x9e; 32]);
         let setup = setup_with_discovery_key();
         for _ in 0..=MAX_RETAINED_SIGNED_PREKEYS {
-            setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)).unwrap();
+            setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
         }
         let current = setup.manager.current(at(FIXED_NOW)).unwrap();
 
         assert!(matches!(
-            setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
+            setup.manager.rotate_now(&mut rng, at(FIXED_NOW)),
             Err(SignedPreKeyError::RetainedCapacityReached {
                 max: MAX_RETAINED_SIGNED_PREKEYS
             })
@@ -910,6 +922,7 @@ mod tests {
 
     #[test]
     fn rotate_if_stale_rejects_unsupported_version() {
+        let mut rng = ChaCha20Rng::from_seed([0x9f; 32]);
         let manager = setup_with_discovery_key().manager;
         let mut blob = [0u8; SIGNED_PREKEY_HEADER_LEN];
         blob[0] = 99;
@@ -920,34 +933,37 @@ mod tests {
             .store(SIGNED_PREKEY_KEY, &blob)
             .unwrap();
         assert!(matches!(
-            manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)),
+            manager.rotate_if_stale(&mut rng, at(FIXED_NOW)),
             Err(SignedPreKeyError::UnsupportedVersion(_))
         ));
     }
 
     #[test]
     fn rotate_if_stale_without_discovery_key_returns_not_found() {
+        let mut rng = ChaCha20Rng::from_seed([0xa0; 32]);
         let manager = manager_without_discovery_key();
         assert!(matches!(
-            manager.rotate_if_stale(&mut OsRng, at(FIXED_NOW)),
+            manager.rotate_if_stale(&mut rng, at(FIXED_NOW)),
             Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
 
     #[test]
     fn rotate_now_without_discovery_key_returns_not_found() {
+        let mut rng = ChaCha20Rng::from_seed([0xa1; 32]);
         let manager = manager_without_discovery_key();
         assert!(matches!(
-            manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
+            manager.rotate_now(&mut rng, at(FIXED_NOW)),
             Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
 
     #[test]
     fn encode_decode_signed_prekey_round_trip() {
-        let identity_signing_key = generate_signing_key_pair(&mut OsRng);
+        let mut rng = ChaCha20Rng::from_seed([0xa2; 32]);
+        let identity_signing_key = generate_signing_key_pair(&mut rng);
         let original =
-            generate_signed_prekey(&mut OsRng, &identity_signing_key, 0, FIXED_EPOCH, FIXED_NOW)
+            generate_signed_prekey(&mut rng, &identity_signing_key, 0, FIXED_EPOCH, FIXED_NOW)
                 .unwrap();
         let blob = encode_signed_prekey(&original);
         assert_eq!(blob.len(), SIGNED_PREKEY_HEADER_LEN);
@@ -967,10 +983,11 @@ mod tests {
 
     #[test]
     fn rotation_rejects_exhausted_signed_prekey_id_space() {
+        let mut rng = ChaCha20Rng::from_seed([0xa3; 32]);
         let setup = setup_with_discovery_key();
         let discovery_key = setup.discovery.current().unwrap();
         let current = generate_signed_prekey_for_discovery_key(
-            &mut OsRng,
+            &mut rng,
             &discovery_key,
             u64::MAX - 1,
             FIXED_NOW,
@@ -990,7 +1007,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
+            setup.manager.rotate_now(&mut rng, at(FIXED_NOW)),
             Err(SignedPreKeyError::IdentifiersExhausted)
         ));
         assert_eq!(

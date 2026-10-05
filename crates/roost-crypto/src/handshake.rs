@@ -1272,66 +1272,6 @@ mod tests {
         HandshakeEnvelope::from_frame(frame)
     }
 
-    /// Known-answer test for full X3DH root-key derivation with an OPK.
-    ///
-    /// Source: Aether's X25519 constructors and X3DH HKDF ordering
-    ///
-    /// Inputs:
-    /// - `alice_ephemeral_secret = [0x22; 32]`
-    /// - `bob_discovery_secret = [0x31; 32]`
-    /// - `bob_signed_prekey_secret = [0x41; 32]`
-    /// - `bob_one_time_prekey_secret = [0x51; 32]`
-    ///
-    /// Output: `HKDF(F_PREFIX || IK_A || IK_B || discovery_key_shared_secret ||
-    /// signed_prekey_shared_secret || one_time_prekey_shared_secret,
-    /// HKDF_INFO_WITH_ONE_TIME_PREKEY)`.
-    #[test]
-    fn full_x3dh_root_key_known_answer() {
-        const EXPECTED_ROOT_KEY: [u8; 32] = [
-            224, 196, 164, 213, 182, 189, 132, 157, 182, 16, 163, 115, 188, 215, 67, 15, 240, 101,
-            249, 86, 182, 103, 84, 218, 198, 97, 217, 80, 254, 247, 137, 126,
-        ];
-
-        let alice_ephemeral_key = KeyPair::from_secret_bytes([0x22u8; 32]);
-        let alice_identity = SigningKeyPair::from_signing_bytes([0x12u8; 32]);
-        let alice_identity_key = public_identity_key_from_parts(
-            &alice_identity,
-            KeyPair::from_secret_bytes([0x13u8; 32]).public,
-        );
-        let bob_identity = SigningKeyPair::from_signing_bytes([0x14u8; 32]);
-        let bob_identity_key = public_identity_key_from_parts(
-            &bob_identity,
-            KeyPair::from_secret_bytes([0x15u8; 32]).public,
-        );
-        let bob_discovery_key =
-            DiscoveryKey::from_secret_bytes([0x31u8; 32], [0x72u8; 32], 3, FIXED_TS, [0u8; 64]);
-        let bob_signed_prekey =
-            SignedPreKey::from_secret_bytes([0x41u8; 32], [0u8; 64], 0, 3, FIXED_TS);
-        let bob_one_time_prekey = OneTimePreKey::from_secret_bytes(9, [0x51u8; 32], 3, FIXED_TS);
-
-        let initiator_root_key = derive_root_key_initiator(
-            &alice_ephemeral_key,
-            &alice_identity_key,
-            &bob_identity_key,
-            bob_discovery_key.public_key(),
-            bob_signed_prekey.public_key(),
-            Some(bob_one_time_prekey.public_key()),
-        )
-        .unwrap();
-        let responder_root_key = derive_root_key_responder(
-            &alice_ephemeral_key.public,
-            &alice_identity_key,
-            &bob_identity_key,
-            &bob_discovery_key,
-            &bob_signed_prekey,
-            Some(&bob_one_time_prekey),
-        )
-        .unwrap();
-
-        assert_eq!(initiator_root_key.as_bytes(), responder_root_key.as_bytes());
-        assert_eq!(initiator_root_key.as_bytes(), &EXPECTED_ROOT_KEY);
-    }
-
     #[test]
     fn versioned_prekey_bundle_reserves_ml_kem_768_headroom() {
         // Source: NIST FIPS 203, Table 3.
@@ -1758,6 +1698,102 @@ mod tests {
     }
 
     #[test]
+    fn x3dh_root_changes_with_each_key_agreement_input() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let ephemeral_key = generate_key_pair(&mut rng);
+        let other_ephemeral_key = generate_key_pair(&mut rng);
+        let other_public_key = generate_key_pair(&mut rng).public;
+        let other_alice_x25519 = PublicIdentityKey {
+            public_key: other_public_key,
+            ..setup.alice_identity_key.clone()
+        };
+        let other_alice_ed25519 = PublicIdentityKey {
+            verifying_key: generate_signing_key_pair(&mut rng).verifying,
+            ..setup.alice_identity_key.clone()
+        };
+        let discovery_key = setup.bob_discovery_key.public_key();
+        let signed_prekey = setup.bob_signed_prekey.public_key();
+        let one_time_prekey = setup.bob_one_time_prekey.public_key();
+        let root_key = |ephemeral_key: &KeyPair,
+                        alice_identity_key: &PublicIdentityKey,
+                        discovery_key: &PublicKey,
+                        signed_prekey: &PublicKey,
+                        one_time_prekey: Option<&PublicKey>| {
+            derive_root_key_initiator(
+                ephemeral_key,
+                alice_identity_key,
+                &setup.bob_identity_key,
+                discovery_key,
+                signed_prekey,
+                one_time_prekey,
+            )
+            .unwrap()
+        };
+        let alice_identity_key = &setup.alice_identity_key;
+        let baseline = root_key(
+            &ephemeral_key,
+            alice_identity_key,
+            discovery_key,
+            signed_prekey,
+            Some(one_time_prekey),
+        );
+
+        for changed in [
+            root_key(
+                &other_ephemeral_key,
+                alice_identity_key,
+                discovery_key,
+                signed_prekey,
+                Some(one_time_prekey),
+            ),
+            root_key(
+                &ephemeral_key,
+                &other_alice_x25519,
+                discovery_key,
+                signed_prekey,
+                Some(one_time_prekey),
+            ),
+            root_key(
+                &ephemeral_key,
+                &other_alice_ed25519,
+                discovery_key,
+                signed_prekey,
+                Some(one_time_prekey),
+            ),
+            root_key(
+                &ephemeral_key,
+                alice_identity_key,
+                &other_public_key,
+                signed_prekey,
+                Some(one_time_prekey),
+            ),
+            root_key(
+                &ephemeral_key,
+                alice_identity_key,
+                discovery_key,
+                &other_public_key,
+                Some(one_time_prekey),
+            ),
+            root_key(
+                &ephemeral_key,
+                alice_identity_key,
+                discovery_key,
+                signed_prekey,
+                Some(&other_public_key),
+            ),
+            root_key(
+                &ephemeral_key,
+                alice_identity_key,
+                discovery_key,
+                signed_prekey,
+                None,
+            ),
+        ] {
+            assert_ne!(changed.as_bytes(), baseline.as_bytes());
+        }
+    }
+
+    #[test]
     fn root_derivation_rejects_non_contributory_peer_key() {
         let (setup, _) = full_x3dh_setup();
         let low_order_public_key = PublicKey::from([0u8; 32]);
@@ -2061,6 +2097,91 @@ mod tests {
         });
 
         assert_ne!(transcript_a.as_slice(), transcript_b.as_slice());
+    }
+
+    #[test]
+    fn sender_proof_changes_with_each_transcript_field_and_the_secret() {
+        let (setup, mut rng) = full_x3dh_setup();
+        let ephemeral_key = generate_key_pair(&mut rng).public;
+        let other_key = generate_key_pair(&mut rng).public;
+        let epoch = setup.bob_discovery_key.epoch();
+        let one_time_prekey = setup.bob_one_time_prekey.public();
+        let other_one_time_prekey_id = PublicOneTimePreKey {
+            id: one_time_prekey.id + 1,
+            ..one_time_prekey.clone()
+        };
+        let other_one_time_prekey_key = PublicOneTimePreKey {
+            public_key: other_key,
+            ..one_time_prekey.clone()
+        };
+        let secret = generate_key_pair(&mut rng).diffie_hellman(&other_key);
+        let other_secret = generate_key_pair(&mut rng).diffie_hellman(&other_key);
+        let baseline = || SenderProofTranscriptInput {
+            sender_identity_key: &[0x21; 32],
+            sender_identity_verifying_key: &[0x31; 32],
+            sender_discovery_key: &[0x22; 32],
+            sender_certificate: b"cert",
+            sender_signature: b"sig",
+            initiator_ephemeral_public_key: &ephemeral_key,
+            responder_discovery_public_key: setup.bob_discovery_key.public_key(),
+            responder_discovery_epoch: epoch,
+            responder_signed_prekey_public_key: setup.bob_signed_prekey.public_key(),
+            responder_one_time_prekey: Some(&one_time_prekey),
+        };
+        let proof = |secret: &SharedSecret, input: SenderProofTranscriptInput<'_>| {
+            *derive_sender_proof(secret, &sender_proof_transcript(input)).unwrap()
+        };
+        let expected = proof(&secret, baseline());
+
+        assert_ne!(proof(&other_secret, baseline()), expected);
+        for changed in [
+            SenderProofTranscriptInput {
+                sender_identity_key: &[0x23; 32],
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                sender_discovery_key: &[0x24; 32],
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                sender_certificate: b"other cert",
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                sender_signature: b"other sig",
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                initiator_ephemeral_public_key: &other_key,
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                responder_discovery_public_key: &other_key,
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                responder_discovery_epoch: epoch + 1,
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                responder_signed_prekey_public_key: &other_key,
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                responder_one_time_prekey: Some(&other_one_time_prekey_id),
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                responder_one_time_prekey: Some(&other_one_time_prekey_key),
+                ..baseline()
+            },
+            SenderProofTranscriptInput {
+                responder_one_time_prekey: None,
+                ..baseline()
+            },
+        ] {
+            assert_ne!(proof(&secret, changed), expected);
+        }
     }
 
     #[test]

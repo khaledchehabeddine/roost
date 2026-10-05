@@ -363,6 +363,7 @@ fn validate_prekey_selection(
 mod tests {
     use super::*;
     use crate::{InMemorySecureStorage, ProtocolStateKind, SessionId};
+    use roost_protocol::SignatureError;
 
     fn store() -> KeyStore {
         KeyStore::new(Box::new(InMemorySecureStorage::new()))
@@ -415,7 +416,12 @@ mod tests {
         );
 
         assert!(
-            result.is_err(),
+            matches!(
+                result,
+                Err(SessionEstablishmentError::PublicKey(
+                    PublicKeyError::Signature(SignatureError::SignatureInvalid)
+                ))
+            ),
             "a DK→IK signature over another identity must not establish a session"
         );
     }

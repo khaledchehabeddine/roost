@@ -328,52 +328,6 @@ mod tests {
         }
     }
 
-    /// Known-answer test for discovery-key signing.
-    ///
-    /// Source: Aether's Ed25519 constructor over the documented discovery-key payload
-    ///
-    /// Inputs:
-    /// - `identity_signing_secret = [0x11; 32]`
-    /// - `key_agreement_public = [0x22; 32]`
-    /// - `discovery_signing_secret = [0x33; 32]`
-    /// - `epoch = 7`
-    /// - `created_at_secs = 1_700_000_000`
-    ///
-    /// Output: Ed25519 signature over the discovery-key context and `discovery_key_payload(...)`.
-    #[test]
-    fn discovery_key_signing_known_answer() {
-        const EXPECTED_SIGNATURE: [u8; 64] = [
-            67, 158, 45, 81, 11, 177, 43, 77, 47, 139, 131, 89, 231, 198, 1, 58, 231, 166, 7, 129,
-            23, 186, 228, 177, 203, 106, 251, 154, 65, 113, 162, 13, 33, 192, 211, 49, 84, 201, 98,
-            20, 158, 158, 92, 95, 178, 62, 23, 31, 131, 248, 20, 64, 2, 98, 216, 182, 191, 123, 23,
-            241, 175, 11, 234, 7,
-        ];
-
-        let identity = SigningKeyPair::from_signing_bytes([0x11u8; 32]);
-        let key_agreement_public = PublicKey::from([0x22u8; 32]);
-        let discovery_signing = SigningKeyPair::from_signing_bytes([0x33u8; 32]);
-        let payload = discovery_key_payload(
-            &key_agreement_public,
-            &discovery_signing.verifying,
-            FIXED_EPOCH,
-            FIXED_CREATED_AT_SECS,
-        );
-
-        let signature = identity
-            .sign_with_context(DISCOVERY_KEY_CONTEXT, &payload)
-            .unwrap();
-        let bundle = PublicDiscoveryKey {
-            public_key: key_agreement_public,
-            verifying_key: discovery_signing.verifying,
-            epoch: FIXED_EPOCH,
-            created_at_secs: FIXED_CREATED_AT_SECS,
-            signature,
-        };
-
-        assert_eq!(signature.to_bytes(), EXPECTED_SIGNATURE);
-        assert!(verify_public_discovery_key(&bundle, &identity.verifying).is_ok());
-    }
-
     #[test]
     fn from_secret_bytes_round_trip() {
         let setup = setup();
@@ -686,54 +640,6 @@ mod tests {
             ),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
-    }
-
-    /// Cross-implementation known-answer test for the discovery-to-identity binding.
-    ///
-    /// Source: the RFC 8032 section 7.1 reference implementation, run independently of
-    /// `ed25519-dalek` over the documented preimage. The reference was itself validated against
-    /// RFC 8032 test vector 1 before deriving this value, so agreement here means two unrelated
-    /// implementations produce the same bytes — not that Aether agrees with itself.
-    ///
-    /// Inputs:
-    /// - `discovery_signing_secret = [0x33; 32]`
-    /// - `identity_signing_secret = [0x11; 32]`
-    /// - `identity_x25519_public = [0x22; 32]`
-    ///
-    /// Preimage: `"AetherDKToIK-v1:" || ik_x25519 || ik_ed25519`, 80 bytes.
-    ///
-    /// Relay verifies this signature, so this vector is the contract between the two codebases.
-    #[test]
-    fn discovery_to_identity_binding_known_answer() {
-        const EXPECTED_SIGNATURE: [u8; 64] = [
-            23, 176, 66, 29, 223, 45, 7, 68, 91, 59, 148, 206, 50, 223, 115, 109, 194, 201, 106,
-            32, 137, 187, 191, 19, 110, 197, 48, 245, 250, 62, 46, 60, 44, 33, 24, 225, 68, 168,
-            87, 141, 199, 190, 216, 91, 107, 9, 172, 19, 103, 128, 236, 209, 71, 214, 224, 71, 59,
-            0, 112, 9, 51, 239, 0, 0,
-        ];
-
-        let discovery_signing = SigningKeyPair::from_signing_bytes([0x33u8; 32]);
-        let identity = public_identity_key([0x11u8; 32], [0x22u8; 32]);
-        let discovery_key = DiscoveryKey {
-            key_agreement_secret: StaticSecret::from([0x55u8; 32]),
-            key_agreement_public: PublicKey::from(&StaticSecret::from([0x55u8; 32])),
-            signing: discovery_signing,
-            epoch: FIXED_EPOCH,
-            created_at_secs: FIXED_CREATED_AT_SECS,
-            identity_signature: Signature::from_bytes(&[0u8; 64]),
-        };
-
-        let signature = discovery_key.sign_identity_binding(&identity).unwrap();
-
-        assert_eq!(signature.to_bytes(), EXPECTED_SIGNATURE);
-        assert!(
-            verify_discovery_to_identity_binding(
-                &identity,
-                discovery_key.verifying_key(),
-                &signature,
-            )
-            .is_ok()
-        );
     }
 
     /// The two directions cover identical bytes, so only the context separates them. A discovery

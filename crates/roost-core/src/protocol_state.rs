@@ -4028,16 +4028,17 @@ mod tests {
         DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
         MIN_DEDUPLICATION_CAPACITY, MessageTranscriptInput, PayloadKind, ProtocolHardeningLimits,
         ProtocolStateError, SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN,
-        SESSION_STATE_WIRE_VERSION, SessionStateWire, SessionStatusWire, contains_digest,
-        decode_session_state, deduplication_digest, pad_sealed_payload,
-        record_deduplication_digest, sign_message_transcript, unpad_sealed_payload,
-        verify_message_transcript,
+        SESSION_STATE_WIRE_VERSION, SessionStateWire, SessionStatusWire, acknowledgment_digest,
+        contains_digest, decode_session_state, deduplication_digest, pad_sealed_payload,
+        protocol_state_blob_digest, record_deduplication_digest, sign_message_transcript,
+        unpad_sealed_payload, verify_message_transcript,
     };
     use crate::{
         MessageId, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind,
         SenderIdentityMaterial, SessionId,
     };
     use roost_crypto::{KeyPair, SigningKeyPair, sign_identity_key_binding};
+    use roost_protocol::SignatureError;
     use zeroize::Zeroizing;
 
     #[test]
@@ -4113,6 +4114,38 @@ mod tests {
             deduplication_digest(&digest_key, b"transport-binding:second", encoded_message);
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn different_encrypted_bytes_under_the_same_key_and_binding_have_different_digests() {
+        let digest_key = [1u8; DEDUPLICATION_KEY_LEN];
+
+        let first = deduplication_digest(&digest_key, b"transport-binding", b"first message");
+        let second = deduplication_digest(&digest_key, b"transport-binding", b"second message");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn acknowledgment_digest_changes_with_each_input() {
+        let expected = acknowledgment_digest(b"transport-binding", b"encoded message");
+
+        assert_ne!(
+            acknowledgment_digest(b"other-binding", b"encoded message"),
+            expected
+        );
+        assert_ne!(
+            acknowledgment_digest(b"transport-binding", b"other message"),
+            expected
+        );
+    }
+
+    #[test]
+    fn protocol_state_blob_digest_changes_with_the_blob() {
+        assert_ne!(
+            protocol_state_blob_digest(b"first blob"),
+            protocol_state_blob_digest(b"second blob")
+        );
     }
 
     #[test]
@@ -4293,7 +4326,12 @@ mod tests {
             },
         ];
         for input in cases {
-            assert!(verify_message_transcript(&sender_identity, input, &signature_bytes).is_err());
+            assert!(matches!(
+                verify_message_transcript(&sender_identity, input, &signature_bytes),
+                Err(ProtocolStateError::Signature(
+                    SignatureError::SignatureInvalid
+                ))
+            ));
         }
     }
 }

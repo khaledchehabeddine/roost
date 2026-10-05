@@ -583,6 +583,8 @@ mod tests {
         ONE_TIME_PREKEY_POOL_TARGET, ONE_TIME_PREKEY_REPLENISH_THRESHOLD,
     };
     use crate::storage::{InMemorySecureStorage, StorageError};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
     use roost_crypto::{verify_discovery_to_identity_binding, verify_public_discovery_key};
     use std::collections::HashSet;
     use std::sync::Barrier;
@@ -1139,7 +1141,12 @@ mod tests {
         assert!(key_store.rotate_signed_prekey_if_stale().unwrap().is_some());
 
         should_fail.store(true, Ordering::SeqCst);
-        assert!(key_store.rotate_inbox_now().is_err());
+        assert!(matches!(
+            key_store.rotate_inbox_now(),
+            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::Storage(
+                StorageError::IO(_)
+            )))
+        ));
         should_fail.store(false, Ordering::SeqCst);
 
         assert_eq!(key_store.current_public_discovery_key().unwrap().epoch, 2);
@@ -1223,11 +1230,10 @@ mod tests {
         let source_store = store();
         source_store.generate_identity().unwrap();
         let backup = source_store.export_encrypted_backup("right").unwrap();
-        assert!(
-            destination_store
-                .import_encrypted_backup(&backup, "wrong")
-                .is_err()
-        );
+        assert!(matches!(
+            destination_store.import_encrypted_backup(&backup, "wrong"),
+            Err(KeyStoreError::Identity(IdentityError::DecryptionFailed))
+        ));
 
         let current_identity = destination_store.load_identity().unwrap();
         let current_signed_prekey = destination_store
@@ -1246,6 +1252,7 @@ mod tests {
 
     #[test]
     fn import_with_mismatched_discovery_key_leaves_state_untouched() {
+        let mut rng = ChaCha20Rng::from_seed([0xe0; 32]);
         let source_store = store();
         source_store.generate_identity().unwrap();
         let other_store = store();
@@ -1254,7 +1261,7 @@ mod tests {
         let mismatched_backup = source_store
             .0
             .identity
-            .export_encrypted_backup(&mut OsRng, "pass", &other_discovery_blob)
+            .export_encrypted_backup(&mut rng, "pass", &other_discovery_blob)
             .unwrap();
 
         let destination_store = store();
@@ -1391,11 +1398,12 @@ mod tests {
         let backup = source_store.export_encrypted_backup("pass").unwrap();
 
         fail_blob_store.store(true, Ordering::SeqCst);
-        assert!(
-            destination_store
-                .import_encrypted_backup(&backup, "pass")
-                .is_err()
-        );
+        assert!(matches!(
+            destination_store.import_encrypted_backup(&backup, "pass"),
+            Err(KeyStoreError::Identity(IdentityError::Storage(
+                StorageError::IO(_)
+            )))
+        ));
         assert!(matches!(
             destination_store.load_identity(),
             Err(KeyStoreError::Identity(IdentityError::NotFound))
@@ -1554,13 +1562,14 @@ mod tests {
 
     #[test]
     fn import_with_malformed_discovery_blob_leaves_state_untouched() {
+        let mut rng = ChaCha20Rng::from_seed([0xe1; 32]);
         // Build an authentic backup whose discovery-key region is structurally invalid.
         let source_storage: SharedStorage =
             Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())));
         let source_identity = IdentityManager::new(source_storage);
-        source_identity.generate_identity(&mut OsRng).unwrap();
+        source_identity.generate_identity(&mut rng).unwrap();
         let malformed_backup = source_identity
-            .export_encrypted_backup(&mut OsRng, "pass", &[0xAAu8; 50])
+            .export_encrypted_backup(&mut rng, "pass", &[0xAAu8; 50])
             .unwrap();
 
         let destination_store = store();

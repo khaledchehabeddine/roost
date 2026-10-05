@@ -99,7 +99,10 @@ fn sealed_frame_aad_binds_transport_visible_fields() {
     let mut wrong_prekey = frame.clone();
     wrong_prekey.prekey_reference = Some(prekey_reference());
 
-    assert!(open_frame(&recipient, &wrong_version).is_err());
+    assert!(matches!(
+        open_frame(&recipient, &wrong_version),
+        Err(SealedFrameError::Decode)
+    ));
     assert!(matches!(
         open_frame(&other_recipient, &wrong_recipient),
         Err(SealedFrameError::Aead)

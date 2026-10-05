@@ -4,9 +4,9 @@
 //! and that two preparations from the same prekey state cannot both commit.
 
 use roost_core::{
-    InMemorySecureStorage, KeyStore, KeyStoreError, KeyStoreOperationError, PreKeySelection,
-    ProtocolStateKey, SessionAcceptance, SessionEstablishmentError, SessionId, SessionInitiation,
-    SignedPreKeyError, TransportBinding,
+    HandshakeError, InMemorySecureStorage, KeyStore, KeyStoreError, KeyStoreOperationError,
+    OneTimePreKeyError, PreKeySelection, ProtocolStateKey, SealedFrameError, SessionAcceptance,
+    SessionEstablishmentError, SessionId, SessionInitiation, SignedPreKeyError, TransportBinding,
 };
 
 fn finalize<T>(store: &KeyStore, prepared: &roost_core::PreparedKeyStoreOperation<T>) {
@@ -85,7 +85,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
 
     let changed_transport_binding =
         TransportBinding::new(b"consumer-owned changed binding".to_vec()).unwrap();
-    assert!(
+    assert!(matches!(
         bob.prepare_accept_session_with_transport_binding(
             SessionAcceptance {
                 session_key: session_key.clone(),
@@ -94,9 +94,11 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
             },
             &changed_transport_binding,
             prekey_selection,
-        )
-        .is_err()
-    );
+        ),
+        Err(SessionEstablishmentError::Handshake(
+            HandshakeError::SealedFrame(SealedFrameError::Aead)
+        ))
+    ));
     let wrong_signed_prekey = PreKeySelection {
         signed_prekey_id: prekey_selection.signed_prekey_id + 1,
         ..prekey_selection
@@ -134,12 +136,14 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         ))
     ));
     bob.abort_operation(stale.operation.id).unwrap();
-    assert!(
+    assert!(matches!(
         bob.prepare_accept_session_with_transport_binding(
             input(),
             &transport_binding,
             prekey_selection,
-        )
-        .is_err()
-    );
+        ),
+        Err(SessionEstablishmentError::OneTimePreKey(
+            OneTimePreKeyError::NotFound
+        ))
+    ));
 }

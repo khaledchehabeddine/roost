@@ -396,7 +396,8 @@ mod tests {
     use super::*;
     use crate::identity::IdentityManager;
     use crate::storage::InMemorySecureStorage;
-    use rand::rngs::OsRng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
     use roost_protocol::from_unix_secs;
     use std::time::SystemTime;
 
@@ -416,11 +417,12 @@ mod tests {
     }
 
     fn setup_with_discovery_key() -> OneTimePreKeySetup {
+        let mut rng = ChaCha20Rng::from_seed([0xd0; 32]);
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        identity.generate_identity(&mut OsRng).unwrap();
+        identity.generate_identity(&mut rng).unwrap();
         let discovery = Arc::new(DiscoveryKeyManager::new(Arc::clone(&storage), identity));
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         let manager = OneTimePreKeyManager::new(storage, Arc::clone(&discovery));
         OneTimePreKeySetup { discovery, manager }
     }
@@ -446,8 +448,9 @@ mod tests {
 
     #[test]
     fn replenish_creates_initial_pool() {
+        let mut rng = ChaCha20Rng::from_seed([0xd1; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let bundles = manager.replenish(&mut OsRng, fixed_now()).unwrap();
+        let bundles = manager.replenish(&mut rng, fixed_now()).unwrap();
         assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
         assert!(
             bundles
@@ -458,11 +461,9 @@ mod tests {
 
     #[test]
     fn consume_one_time_prekey_consumes_secret_once() {
+        let mut rng = ChaCha20Rng::from_seed([0xd2; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let bundle = manager
-            .replenish(&mut OsRng, fixed_now())
-            .unwrap()
-            .remove(0);
+        let bundle = manager.replenish(&mut rng, fixed_now()).unwrap().remove(0);
         let prekey = manager
             .consume_one_time_prekey(discovery.current().unwrap().epoch(), bundle.id)
             .unwrap();
@@ -475,9 +476,10 @@ mod tests {
 
     #[test]
     fn generate_batch_creates_exact_caller_size_under_current_epoch() {
+        let mut rng = ChaCha20Rng::from_seed([0xd3; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let first = manager.generate_batch(&mut OsRng, 3, fixed_now()).unwrap();
-        let second = manager.generate_batch(&mut OsRng, 2, fixed_now()).unwrap();
+        let first = manager.generate_batch(&mut rng, 3, fixed_now()).unwrap();
+        let second = manager.generate_batch(&mut rng, 2, fixed_now()).unwrap();
         let epoch = discovery.current().unwrap().epoch();
 
         assert_eq!(first.len(), 3);
@@ -500,14 +502,15 @@ mod tests {
 
     #[test]
     fn generate_batch_rejects_capacity_overflow_without_mutating_pool() {
+        let mut rng = ChaCha20Rng::from_seed([0xd4; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
         let full_batch = manager
-            .generate_batch(&mut OsRng, ONE_TIME_PREKEY_POOL_TARGET, fixed_now())
+            .generate_batch(&mut rng, ONE_TIME_PREKEY_POOL_TARGET, fixed_now())
             .unwrap();
         let epoch = discovery.current().unwrap().epoch();
 
         assert!(matches!(
-            manager.generate_batch(&mut OsRng, 1, fixed_now()),
+            manager.generate_batch(&mut rng, 1, fixed_now()),
             Err(OneTimePreKeyError::BatchExceedsCapacity {
                 requested: 1,
                 available: 0
@@ -524,6 +527,7 @@ mod tests {
 
     #[test]
     fn generate_batch_rejects_id_overflow_without_mutating_pool() {
+        let mut rng = ChaCha20Rng::from_seed([0xd5; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
         let epoch = discovery.current().unwrap().epoch();
         let mut raw = encoded_pool_header(u64::MAX, 0);
@@ -536,7 +540,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            manager.generate_batch(&mut OsRng, 1, fixed_now()),
+            manager.generate_batch(&mut rng, 1, fixed_now()),
             Err(OneTimePreKeyError::IdentifiersExhausted)
         ));
         assert_eq!(

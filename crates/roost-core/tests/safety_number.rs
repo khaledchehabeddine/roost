@@ -80,6 +80,86 @@ fn safety_number_derivation_is_deterministic_and_order_independent() {
     );
 }
 
+/// Pinned on purpose, unlike Roost's other derivations: people compare Safety Numbers across app
+/// versions, so a change to the derivation or the display must fail here before it ships.
+#[test]
+fn safety_number_matches_expected_hash_and_display() {
+    let bytes = |hex: &str| -> [u8; 32] { hex::decode(hex).unwrap().try_into().unwrap() };
+    let first = IdentityKey {
+        x25519_public_key: bytes(
+            "cea8522b478dd6836e54235f6e425a69fd8a07e0113a6393390235298aa76207",
+        ),
+        ed25519_verifying_key: bytes(
+            "734cce51a84fbd45336303ce2a3cb6d7cdcb6703d5eb80f1eacf42613487a8f0",
+        ),
+    };
+    let second = IdentityKey {
+        x25519_public_key: bytes(
+            "3d4dafeef11bf354d5038ed7987cfcaa441845be52f1b8d14c4b4a4e2389f56b",
+        ),
+        ed25519_verifying_key: bytes(
+            "b12661824d74f494a38a1dda9d0594e1f4cdd049af4f283d42145c82d9819142",
+        ),
+    };
+    let number = derive_safety_number(first, second).unwrap();
+    assert_eq!(
+        number.raw_bytes,
+        bytes("349f7fdde676ae10533bd755edcfebb10a8513ff988597e9c4979ddd9fad1cdd")
+    );
+    assert_eq!(
+        number.grouped_decimal,
+        "32361 23425 39384 52205 48501 64357 11666 54322 91485 22401 21720 41437"
+    );
+    assert_eq!(
+        derive_safety_number(second, first).unwrap().raw_bytes,
+        number.raw_bytes
+    );
+}
+
+#[test]
+fn safety_number_changes_with_each_identity_key_half() {
+    let setup = setup();
+    let mut rng = ChaCha20Rng::from_seed([0x5A; 32]);
+    let other_x25519 = *generate_key_pair(&mut rng).public.as_bytes();
+    let other_ed25519 = generate_signing_key_pair(&mut rng).verifying.to_bytes();
+    let local = setup.local_identity;
+    let contact = setup.contact_identity;
+    let expected = derive_safety_number(local, contact).unwrap();
+
+    for (first, second) in [
+        (
+            IdentityKey {
+                x25519_public_key: other_x25519,
+                ..local
+            },
+            contact,
+        ),
+        (
+            IdentityKey {
+                ed25519_verifying_key: other_ed25519,
+                ..local
+            },
+            contact,
+        ),
+        (
+            local,
+            IdentityKey {
+                x25519_public_key: other_x25519,
+                ..contact
+            },
+        ),
+        (
+            local,
+            IdentityKey {
+                ed25519_verifying_key: other_ed25519,
+                ..contact
+            },
+        ),
+    ] {
+        assert_ne!(derive_safety_number(first, second).unwrap(), expected);
+    }
+}
+
 #[test]
 fn safety_number_derivation_rejects_non_canonical_identity_key() {
     let setup = setup();

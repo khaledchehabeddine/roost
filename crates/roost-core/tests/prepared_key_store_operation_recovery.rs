@@ -13,6 +13,15 @@ use zeroize::Zeroizing;
 
 const OPERATION_JOURNAL_KEY: &str = "operation/journal";
 
+fn is_storage_failure<T>(result: Result<T, KeyStoreError>) -> bool {
+    matches!(
+        result,
+        Err(KeyStoreError::Operation(KeyStoreOperationError::Storage(
+            StorageError::IO(_)
+        )))
+    )
+}
+
 #[derive(Clone)]
 struct SharedSecureStorage {
     state: Arc<Mutex<StorageState>>,
@@ -162,7 +171,9 @@ fn prepared_journal_transition_recovers_from_before_and_after_apply_failures() {
         let storage = SharedSecureStorage::new();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
-        assert!(storage.key_store().prepare_identity_creation().is_err());
+        assert!(is_storage_failure(
+            storage.key_store().prepare_identity_creation()
+        ));
 
         let recovered = storage.key_store();
         let unfinished = recovered.unfinished_operations().unwrap();
@@ -188,7 +199,9 @@ fn reserved_journal_transition_recovers_from_before_and_after_apply_failures() {
         let prepared = store.prepare_identity_creation().unwrap();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
-        assert!(store.reserve_operation(prepared.operation.id).is_err());
+        assert!(is_storage_failure(
+            store.reserve_operation(prepared.operation.id)
+        ));
 
         let recovered = storage.key_store();
         let expected = match timing {
@@ -214,7 +227,9 @@ fn finalizing_journal_transition_recovers_from_before_and_after_apply_failures()
         store.reserve_operation(prepared.operation.id).unwrap();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
-        assert!(store.finalize_operation(prepared.operation.id).is_err());
+        assert!(is_storage_failure(
+            store.finalize_operation(prepared.operation.id)
+        ));
 
         let recovered = storage.key_store();
         let expected = match timing {
@@ -240,7 +255,9 @@ fn progress_checkpoint_recovers_from_before_and_after_apply_failures() {
         // Skip the Finalizing write, then fail the first durable progress checkpoint.
         storage.fail_store(OPERATION_JOURNAL_KEY, 1, timing);
 
-        assert!(store.finalize_operation(prepared.operation.id).is_err());
+        assert!(is_storage_failure(
+            store.finalize_operation(prepared.operation.id)
+        ));
         assert_eq!(storage.successful_stores("discovery/current"), 1);
         drop(store);
 
@@ -283,7 +300,9 @@ fn finalized_journal_transition_recovers_from_before_and_after_apply_failures() 
         // A no-op has only Finalizing and Finalized journal writes.
         storage.fail_store(OPERATION_JOURNAL_KEY, 1, timing);
 
-        assert!(store.finalize_operation(prepared.operation.id).is_err());
+        assert!(is_storage_failure(
+            store.finalize_operation(prepared.operation.id)
+        ));
 
         let recovered = storage.key_store();
         let expected = match timing {
@@ -307,7 +326,9 @@ fn aborted_journal_transition_recovers_from_before_and_after_apply_failures() {
         let prepared = store.prepare_identity_creation().unwrap();
         storage.fail_store(OPERATION_JOURNAL_KEY, 0, timing);
 
-        assert!(store.abort_operation(prepared.operation.id).is_err());
+        assert!(is_storage_failure(
+            store.abort_operation(prepared.operation.id)
+        ));
 
         let recovered = storage.key_store();
         let expected = match timing {
@@ -387,7 +408,9 @@ fn interrupted_finalization_resumes_from_durable_progress() {
     // Persist Finalizing, apply the first mutation, persist its progress, then fail the second
     // mutation. Recovery must resume at the second mutation instead of replaying the first.
     storage.fail_after_stores(3);
-    assert!(store.finalize_operation(prepared.operation.id).is_err());
+    assert!(is_storage_failure(
+        store.finalize_operation(prepared.operation.id)
+    ));
     assert_eq!(storage.successful_stores("discovery/current"), 1);
     drop(store);
 
@@ -409,7 +432,9 @@ fn applied_store_with_ambiguous_failure_is_safely_replayed() {
     store.reserve_operation(prepared.operation.id).unwrap();
 
     storage.fail_store_after_apply("discovery/current");
-    assert!(store.finalize_operation(prepared.operation.id).is_err());
+    assert!(is_storage_failure(
+        store.finalize_operation(prepared.operation.id)
+    ));
     assert_eq!(storage.successful_stores("discovery/current"), 1);
     drop(store);
 
@@ -438,7 +463,9 @@ fn applied_delete_with_ambiguous_failure_is_safely_replayed() {
     store.reserve_operation(reset.operation.id).unwrap();
 
     storage.fail_delete_after_apply("discovery/current");
-    assert!(store.finalize_operation(reset.operation.id).is_err());
+    assert!(is_storage_failure(
+        store.finalize_operation(reset.operation.id)
+    ));
     assert_eq!(storage.successful_deletes("discovery/current"), 1);
     drop(store);
 

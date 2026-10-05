@@ -525,6 +525,33 @@ mod tests {
         }
     }
 
+    #[test]
+    fn encoded_certificate_changes_with_each_signed_field() {
+        let identity = identity_key();
+        let other_x25519 = SenderCertificateIdentityKey {
+            x25519_public_key: [0x12; PUBLIC_KEY_LEN],
+            ..identity
+        };
+        let other_ed25519 = SenderCertificateIdentityKey {
+            ed25519_verifying_key: signing_key(0x22).verifying_key().to_bytes(),
+            ..identity
+        };
+        let encode = |id: &[u8], relay_domain: &[u8], identity_key, expires_at_secs| {
+            encode_sender_certificate(id, relay_domain, identity_key, expires_at_secs).unwrap()
+        };
+        let expected = encode(PRIMARY_ID, RELAY_DOMAIN, identity, NOW_SECS);
+
+        for changed in [
+            encode(SECONDARY_ID, RELAY_DOMAIN, identity, NOW_SECS),
+            encode(PRIMARY_ID, OTHER_RELAY_DOMAIN, identity, NOW_SECS),
+            encode(PRIMARY_ID, RELAY_DOMAIN, other_x25519, NOW_SECS),
+            encode(PRIMARY_ID, RELAY_DOMAIN, other_ed25519, NOW_SECS),
+            encode(PRIMARY_ID, RELAY_DOMAIN, identity, NOW_SECS + 1),
+        ] {
+            assert_ne!(changed, expected);
+        }
+    }
+
     /// A certificate issued for one relay must not validate at another, even when both relays
     /// trust the same domain-signing key. Without the signed relay domain this replay succeeded,
     /// which is why the domain is part of the signed content.

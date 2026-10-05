@@ -67,3 +67,16 @@ pub fn identity_key_encoding(
     encoding[offset + PUBLIC_KEY_LEN..].copy_from_slice(ed25519_verifying_key);
     encoding
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_key_encoding_changes_with_each_half() {
+        let expected = identity_key_encoding(&[0x01; 32], &[0x02; 32]);
+
+        assert_ne!(identity_key_encoding(&[0x03; 32], &[0x02; 32]), expected);
+        assert_ne!(identity_key_encoding(&[0x01; 32], &[0x03; 32]), expected);
+    }
+}

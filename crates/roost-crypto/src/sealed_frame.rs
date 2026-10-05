@@ -453,3 +453,17 @@ fn validate_prekey_reference(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_key_and_nonce_change_with_the_secret() {
+        let (key, nonce) = expand_frame_secret(&[0x01; 32]).unwrap();
+        let (other_key, other_nonce) = expand_frame_secret(&[0x02; 32]).unwrap();
+
+        assert_ne!(*other_key, *key);
+        assert_ne!(other_nonce, nonce);
+    }
+}

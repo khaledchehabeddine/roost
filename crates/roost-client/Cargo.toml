@@ -31,9 +31,7 @@ uniffi = { workspace = true, features = ["cli"] }
 zeroize.workspace = true
 
 [dev-dependencies]
-roost-core = { workspace = true, features = ["test-support"] }
-# Utility
-hex.workspace = true
+roost-crypto.workspace = true
 
 [lints]
 workspace = true
