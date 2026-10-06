@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Compile the generated Swift API and Rust library into the Roost binary distribution.
+# Compile the generated Swift API and Rust library into the Roost XCFramework and zip it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 OUT="$ROOT/target/xcframework"
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
+ZIP="$ROOT/target/ios-distribution/Roost-v$VERSION.xcframework.zip"
 MIN_IOS="${ROOST_IOS_DEPLOYMENT_TARGET:-13.0}"
 cd "$ROOT"
 
-for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+for target in aarch64-apple-ios aarch64-apple-ios-sim; do
     if [[ ! -d "$(rustc --print sysroot)/lib/rustlib/$target/lib" ]]; then
         rustup target add "$target"
     fi
@@ -41,7 +42,7 @@ MODULE
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleIdentifier</key><string>io.github.relaynet.roost</string>
+<key>CFBundleIdentifier</key><string>com.chirp.roost</string>
 <key>CFBundleName</key><string>Roost</string>
 <key>CFBundleExecutable</key><string>Roost</string>
 <key>CFBundlePackageType</key><string>FMWK</string>
@@ -63,16 +64,20 @@ PLIST
 }
 
 build_framework aarch64-apple-ios "arm64-apple-ios$MIN_IOS" iphoneos ios-arm64
-build_framework aarch64-apple-ios-sim "arm64-apple-ios$MIN_IOS-simulator" iphonesimulator sim-arm64
-build_framework x86_64-apple-ios "x86_64-apple-ios$MIN_IOS-simulator" iphonesimulator sim-x86_64
+build_framework aarch64-apple-ios-sim "arm64-apple-ios$MIN_IOS-simulator" iphonesimulator ios-arm64-simulator
 
-mkdir -p "$OUT/ios-arm64_x86_64-simulator"
-cp -R "$OUT/sim-arm64/Roost.framework" "$OUT/ios-arm64_x86_64-simulator/"
-cp "$OUT/sim-x86_64/Roost.framework/Modules/Roost.swiftmodule/"* \
-    "$OUT/ios-arm64_x86_64-simulator/Roost.framework/Modules/Roost.swiftmodule/"
-lipo -create "$OUT/sim-arm64/Roost.framework/Roost" "$OUT/sim-x86_64/Roost.framework/Roost" \
-    -output "$OUT/ios-arm64_x86_64-simulator/Roost.framework/Roost"
 xcodebuild -create-xcframework \
     -framework "$OUT/ios-arm64/Roost.framework" \
-    -framework "$OUT/ios-arm64_x86_64-simulator/Roost.framework" \
+    -framework "$OUT/ios-arm64-simulator/Roost.framework" \
     -output "$OUT/Roost.xcframework"
+
+rm -f "$ZIP"
+mkdir -p "$(dirname "$ZIP")"
+(cd "$OUT" && zip -qry "$ZIP" Roost.xcframework)
+
+# Ship only the arm64 device and arm64 simulator slices.
+for slice in ios-arm64 ios-arm64-simulator; do
+    [[ "$(lipo -archs "$OUT/Roost.xcframework/$slice/Roost.framework/Roost")" == arm64 ]]
+done
+[[ "$(zipinfo -1 "$ZIP" '*/Roost.framework/Roost' | wc -l)" -eq 2 ]]
+printf 'XCFramework archive: %s\n' "$ZIP"

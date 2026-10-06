@@ -9,12 +9,11 @@ plugins {
 }
 
 val roostVersion = providers.gradleProperty("roostVersion").get()
-val roostArtifactId = providers.gradleProperty("roostArtifactId").get()
 val generatedKotlinDir = rootProject.layout.projectDirectory.dir("../../target/android/kotlin")
 val generatedJniLibsDir = rootProject.layout.projectDirectory.dir("../../target/android/jniLibs")
 
 android {
-    namespace = "io.github.relaynet.roost"
+    namespace = "com.chirp.roost"
     compileSdk = 36
 
     defaultConfig {
@@ -41,7 +40,9 @@ android {
     }
 
     publishing {
-        singleVariant("release")
+        singleVariant("release") {
+            withSourcesJar()
+        }
     }
 }
 
@@ -59,6 +60,12 @@ publishing {
             name = "Local"
             url = uri(rootProject.file("../../target/android/maven"))
         }
+        // The release workflow passes GitHubPackagesUsername and GitHubPackagesPassword.
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/chirp-org/roost-kotlin")
+            credentials(PasswordCredentials::class)
+        }
     }
 }
 
@@ -66,8 +73,8 @@ afterEvaluate {
     val publishingExtension = extensions.getByType<PublishingExtension>()
     publishingExtension.publications.create<MavenPublication>("release") {
         from(components["release"])
-        groupId = "io.github.relaynet"
-        artifactId = roostArtifactId
+        groupId = "com.chirp"
+        artifactId = "roost"
         version = roostVersion
 
         pom {
@@ -81,9 +88,4 @@ afterEvaluate {
 tasks.withType<AbstractArchiveTask>().configureEach {
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
-}
-
-// The distribution uploads the checked AAR and POM, with no separate Gradle module metadata.
-tasks.withType<GenerateModuleMetadata>().configureEach {
-    enabled = false
 }

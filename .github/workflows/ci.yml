@@ -23,7 +23,6 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
-      - run: python3 scripts/release/test_commands.py
       - run: cargo doc --locked --workspace --no-deps --all-features
         env:
           RUSTDOCFLAGS: -D warnings

@@ -1,5 +1,5 @@
 [bindings.kotlin]
-package_name = "io.github.relaynet.roost"
+package_name = "com.chirp.roost"
 
 [bindings.swift]
 module_name = "Roost"

@@ -1,0 +1,135 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  # A manual run builds both packages without publishing them.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: macos-26
+    env:
+      SWIFT_REPO: chirp-org/roost-swift
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the workspace version
+        run: |
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "ZIP=target/ios-distribution/Roost-v$version.xcframework.zip" >> "$GITHUB_ENV"
+      - name: Require a main commit tagged with the workspace version
+        if: github.event_name == 'push'
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "v$VERSION" ]]; then
+            echo "::error::$GITHUB_REF_NAME doesn't match the workspace version $VERSION"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$GITHUB_REF_NAME isn't on main"
+            exit 1
+          fi
+      - run: rustup show active-toolchain
+      - name: Build the XCFramework zip
+        run: scripts/build/xcframework.sh
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '9.5.0'
+      - uses: android-actions/setup-android@v3
+      - name: Install the Android SDK packages
+        run: |
+          ndk=28.2.13676358
+          sdkmanager "ndk;$ndk" "platforms;android-36" "build-tools;36.0.0"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ndk" >> "$GITHUB_ENV"
+      - run: cargo install cargo-ndk --version 4.1.2 --locked
+      - name: Build the AAR
+        run: scripts/build/android-aar.sh
+
+      # Until the last step, a failure leaves only a draft release, a tag, and a package version,
+      # and you can delete all three. Publishing the release locks its zip and tag.
+      - name: Attach the zip to a draft roost-swift release
+        id: draft
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.ROOST_PUBLISH_TOKEN }}
+        run: |
+          name="$(basename "$ZIP")"
+          release_id="$(gh api "repos/$SWIFT_REPO/releases" -f tag_name="v$VERSION" -f name="Roost v$VERSION" -F draft=true --jq .id)"
+          asset_id="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $GH_TOKEN" -H 'Content-Type: application/zip' \
+            --data-binary "@$ZIP" \
+            "https://uploads.github.com/repos/$SWIFT_REPO/releases/$release_id/assets?name=$name" | jq .id)"
+          echo "release-id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "asset-id=$asset_id" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push'
+        with:
+          repository: ${{ env.SWIFT_REPO }}
+          token: ${{ secrets.ROOST_PUBLISH_TOKEN }}
+          path: roost-swift
+      # The tag must point at Package.swift before the release is published, or publishing
+      # creates the tag on main and locks it there. SwiftPM needs the URL to end in .zip, and the
+      # API reads only the asset ID before the dash.
+      - name: Tag roost-swift with a Package.swift for the zip
+        if: github.event_name == 'push'
+        working-directory: roost-swift
+        env:
+          ASSET_ID: ${{ steps.draft.outputs.asset-id }}
+        run: |
+          revision="$(git -C "$GITHUB_WORKSPACE" rev-parse HEAD)"
+          checksum="$(shasum -a 256 "$GITHUB_WORKSPACE/$ZIP" | awk '{ print $1 }')"
+          cat > Package.swift <<PACKAGE
+          // swift-tools-version: 5.9
+          // Roost source: $revision
+          import PackageDescription
+
+          let package = Package(
+              name: "Roost",
+              platforms: [.iOS(.v13)],
+              products: [.library(name: "Roost", targets: ["Roost"])],
+              targets: [.binaryTarget(
+                  name: "Roost",
+                  url: "https://api.github.com/repos/$SWIFT_REPO/releases/assets/$ASSET_ID-Roost-v$VERSION.xcframework.zip",
+                  checksum: "$checksum"
+              )]
+          )
+          PACKAGE
+          git add Package.swift
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit --quiet -m "chore: release Roost $VERSION" -m "- Point Package.swift at the v$VERSION XCFramework"
+          git tag "v$VERSION"
+          git push origin "refs/tags/v$VERSION"
+      - name: Publish the AAR to roost-kotlin's GitHub Packages
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.ROOST_PUBLISH_TOKEN }}
+          ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ secrets.ROOST_PUBLISH_TOKEN }}
+        run: |
+          ORG_GRADLE_PROJECT_GitHubPackagesUsername="$(gh api user --jq .login)"
+          export ORG_GRADLE_PROJECT_GitHubPackagesUsername
+          gradle --no-daemon -p packaging/android -ProostVersion="$VERSION" \
+            :roost:publishReleasePublicationToGitHubPackagesRepository
+      - name: Publish the roost-swift release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.ROOST_PUBLISH_TOKEN }}
+          RELEASE_ID: ${{ steps.draft.outputs.release-id }}
+        run: gh api --method PATCH "repos/$SWIFT_REPO/releases/$RELEASE_ID" -F draft=false --silent

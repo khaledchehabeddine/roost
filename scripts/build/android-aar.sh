@@ -4,26 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$ROOT"
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
-ARTIFACT="roost"
-case "${ROOST_CARGO_FEATURES:-}" in
-    "") ;;
-    development-certificates) ARTIFACT="roost-development" ;;
-    *) echo "unsupported ROOST_CARGO_FEATURES" >&2; exit 2 ;;
-esac
 scripts/build/android.sh
-"${GRADLE_BIN:-gradle}" --no-daemon -p packaging/android \
-    -ProostVersion="$VERSION" -ProostArtifactId="$ARTIFACT" \
+"${GRADLE_BIN:-gradle}" --no-daemon -p packaging/android -ProostVersion="$VERSION" \
     :roost:publishReleasePublicationToLocalRepository
-AAR="$ROOT/target/android/maven/io/github/relaynet/$ARTIFACT/$VERSION/$ARTIFACT-$VERSION.aar"
+PACKAGE="$ROOT/target/android/maven/com/chirp/roost/$VERSION"
+AAR="$PACKAGE/roost-$VERSION.aar"
 CLASSES="$(unzip -p "$AAR" classes.jar | jar --list)"
-[[ "$CLASSES" == *io/github/relaynet/roost/IdentityContext.class* ]]
-if [[ "$ARTIFACT" == roost ]]; then
-    [[ "$CLASSES" != *io/github/relaynet/roost/DevelopmentCertificateAuthority.class* ]]
-else
-    [[ "$CLASSES" == *io/github/relaynet/roost/DevelopmentCertificateAuthority.class* ]]
-fi
-# Every shipped ABI must be present, even though the consumer runs on one emulator.
-for abi in arm64-v8a armeabi-v7a x86_64; do
+[[ "$CLASSES" == *com/chirp/roost/IdentityContext.class* ]]
+# Every shipped ABI must be present, and no other.
+[[ "$(zipinfo -1 "$AAR" 'jni/*.so' | wc -l)" -eq 2 ]]
+for abi in arm64-v8a x86_64; do
     unzip -p "$AAR" "jni/$abi/libroost_client.so" | cmp - "target/android/jniLibs/$abi/libroost_client.so"
 done
+# Gradle resolves the module metadata, and IDEs read the sources jar.
+[[ -f "$PACKAGE/roost-$VERSION.module" && -f "$PACKAGE/roost-$VERSION-sources.jar" ]]
 printf 'Android Maven package: %s\n' "$AAR"
