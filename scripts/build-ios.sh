@@ -48,7 +48,7 @@ MODULE
 </dict></plist>
 PLIST
     xcrun --sdk "$sdk_name" swiftc "$OUT/generated/Roost.swift" \
-        -target "$swift_target" -parse-as-library \
+        -O -target "$swift_target" -parse-as-library \
         -module-name Roost -swift-version 5 -enable-library-evolution -import-underlying-module \
         -F "$OUT/$identifier" -module-cache-path "$OUT/module-cache" \
         -emit-library -emit-module \
