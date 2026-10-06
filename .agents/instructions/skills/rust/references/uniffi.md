@@ -6,6 +6,7 @@ The app calls Roost only through generated Swift and Kotlin code, so `roost-clie
 
 - Keep every UniFFI attribute and host-type conversion in `roost-client`.
 - Write a UniFFI record's conversions as crate-private methods, such as `from_core` and `to_core`, not `From` impls, which can't be made private.
+- Regenerate the bindings after editing an export's doc comment, since UniFFI counts doc comments in its API checksums and stale bindings fail to load.
 
 ## Types
 
