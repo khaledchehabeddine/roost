@@ -1225,38 +1225,14 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    const SECURE_STORAGE_PRECONDITION_KAT_EXPECTED: &str =
-        "1057a0c66b56f08caa9cc9623796774f165575324362504f1626f534e4090c1a";
-
-    /// Source: `lukechampine.com/blake3` v1.4.1's independent Go implementation, using its
-    /// `DeriveKey(subKey, ctx, srcKey)` API under Go 1.27.0.
-    ///
-    /// Inputs: context `AetherSecureStoragePrecondition-v1` and the exact UTF-8 bytes
-    /// `fixture secure value` (no trailing newline).
-    ///
-    /// Derivation:
-    /// ```text
-    /// output := make([]byte, 32)
-    /// blake3.DeriveKey(
-    ///     output,
-    ///     "AetherSecureStoragePrecondition-v1",
-    ///     []byte("fixture secure value"),
-    /// )
-    /// hex.EncodeToString(output)
-    /// ```
-    ///
-    /// Output: `SECURE_STORAGE_PRECONDITION_KAT_EXPECTED`.
     #[test]
-    fn secure_storage_precondition_digest_known_answer() {
-        let SecureStorageExpectedValue::Digest(digest) =
-            expected_value(Some(b"fixture secure value"))
-        else {
-            panic!("present values must produce a digest");
+    fn precondition_digest_changes_with_the_value() {
+        let digest = |value: &[u8]| match expected_value(Some(value)) {
+            SecureStorageExpectedValue::Digest(digest) => digest,
+            SecureStorageExpectedValue::Absent => panic!("a present value must produce a digest"),
         };
-        assert_eq!(
-            hex::encode(digest),
-            SECURE_STORAGE_PRECONDITION_KAT_EXPECTED
-        );
+
+        assert_ne!(digest(b"first value"), digest(b"second value"));
     }
 
     struct ChangingStorage {

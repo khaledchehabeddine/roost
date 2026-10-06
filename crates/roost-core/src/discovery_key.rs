@@ -289,7 +289,8 @@ fn read_epoch(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> u32 {
 mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
-    use rand::rngs::OsRng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
     use roost_protocol::from_unix_secs;
     use std::time::SystemTime;
 
@@ -309,9 +310,10 @@ mod tests {
     }
 
     fn setup_with_identity() -> DiscoveryKeySetup {
+        let mut rng = ChaCha20Rng::from_seed([0xb0; 32]);
         let storage = shared_storage();
         let identity = Arc::new(IdentityManager::new(Arc::clone(&storage)));
-        identity.generate_identity(&mut OsRng).unwrap();
+        identity.generate_identity(&mut rng).unwrap();
         let discovery = DiscoveryKeyManager::new(storage, Arc::clone(&identity));
         DiscoveryKeySetup {
             identity,
@@ -353,8 +355,9 @@ mod tests {
 
     #[test]
     fn current_returns_corrupt_for_tampered_signature() {
+        let mut rng = ChaCha20Rng::from_seed([0xb1; 32]);
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         // Flip a byte inside the stored signature region.
         let mut blob = discovery
             .lock_storage()
@@ -377,12 +380,13 @@ mod tests {
 
     #[test]
     fn stored_status_reports_absent_present_and_malformed() {
+        let mut rng = ChaCha20Rng::from_seed([0xb2; 32]);
         let discovery = setup_with_identity().manager;
         assert!(matches!(
             discovery.stored_status().unwrap(),
             DiscoveryKeyStatus::Absent
         ));
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         assert!(matches!(
             discovery.stored_status().unwrap(),
             DiscoveryKeyStatus::Present { epoch: 1 }
@@ -400,11 +404,12 @@ mod tests {
 
     #[test]
     fn rotate_now_establishes_generation_one_and_verifies() {
+        let mut rng = ChaCha20Rng::from_seed([0xb3; 32]);
         let DiscoveryKeySetup {
             identity,
             manager: discovery,
         } = setup_with_identity();
-        let rotated = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        let rotated = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         // Identity creation starts at inbox generation 1, not 0.
         assert_eq!(rotated.epoch(), 1);
         let bundle = discovery.current_public().unwrap();
@@ -418,11 +423,12 @@ mod tests {
     /// capability intact would leave a blocked contact still able to deliver.
     #[test]
     fn rotation_replaces_the_delivery_capability() {
+        let mut rng = ChaCha20Rng::from_seed([0xb4; 32]);
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         let before = *discovery.current_capability().unwrap().to_bytes();
 
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         let after = *discovery.current_capability().unwrap().to_bytes();
 
         assert_ne!(before, after);
@@ -430,8 +436,9 @@ mod tests {
 
     #[test]
     fn capability_survives_a_reload() {
+        let mut rng = ChaCha20Rng::from_seed([0xb5; 32]);
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
 
         let first = *discovery.current_capability().unwrap().to_bytes();
         let second = *discovery.current_capability().unwrap().to_bytes();
@@ -441,36 +448,29 @@ mod tests {
 
     #[test]
     fn rotate_now_advances_the_generation() {
+        let mut rng = ChaCha20Rng::from_seed([0xb6; 32]);
         let discovery = setup_with_identity().manager;
         assert_eq!(
-            discovery
-                .rotate_now(&mut OsRng, fixed_now())
-                .unwrap()
-                .epoch(),
+            discovery.rotate_now(&mut rng, fixed_now()).unwrap().epoch(),
             1
         );
         assert_eq!(
-            discovery
-                .rotate_now(&mut OsRng, fixed_now())
-                .unwrap()
-                .epoch(),
+            discovery.rotate_now(&mut rng, fixed_now()).unwrap().epoch(),
             2
         );
         assert_eq!(
-            discovery
-                .rotate_now(&mut OsRng, fixed_now())
-                .unwrap()
-                .epoch(),
+            discovery.rotate_now(&mut rng, fixed_now()).unwrap().epoch(),
             3
         );
     }
 
     #[test]
     fn rotate_now_recovers_from_tampered_signature_preserving_epoch() {
+        let mut rng = ChaCha20Rng::from_seed([0xb7; 32]);
         let discovery = setup_with_identity().manager;
         // Reach generation 2 first, so recovery to 3 proves the stored value is read, not reset.
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
-        let rotated = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        let rotated = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         assert_eq!(rotated.epoch(), 2);
 
         // Corrupt the signature of the generation-2 key.
@@ -492,13 +492,14 @@ mod tests {
             Err(DiscoveryKeyError::Corrupt)
         ));
 
-        let recovered = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        let recovered = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         assert_eq!(recovered.epoch(), 3);
         assert!(discovery.current().is_ok());
     }
 
     #[test]
     fn rotate_now_rejects_malformed_blob() {
+        let mut rng = ChaCha20Rng::from_seed([0xb8; 32]);
         let discovery = setup_with_identity().manager;
         discovery
             .lock_storage()
@@ -506,22 +507,24 @@ mod tests {
             .store(DISCOVERY_KEY, &[0xAAu8; 50])
             .unwrap();
         assert!(matches!(
-            discovery.rotate_now(&mut OsRng, fixed_now()),
+            discovery.rotate_now(&mut rng, fixed_now()),
             Err(DiscoveryKeyError::Malformed)
         ));
     }
 
     #[test]
     fn rotate_now_without_identity_returns_identity_error() {
+        let mut rng = ChaCha20Rng::from_seed([0xb9; 32]);
         let discovery = manager_without_identity();
         assert!(matches!(
-            discovery.rotate_now(&mut OsRng, fixed_now()),
+            discovery.rotate_now(&mut rng, fixed_now()),
             Err(DiscoveryKeyError::Identity(IdentityError::NotFound))
         ));
     }
 
     #[test]
     fn reset_clears_malformed_blob_then_rotation_starts_at_zero() {
+        let mut rng = ChaCha20Rng::from_seed([0xba; 32]);
         let discovery = setup_with_identity().manager;
         discovery
             .lock_storage()
@@ -530,21 +533,19 @@ mod tests {
             .unwrap();
         discovery.reset().unwrap();
         assert_eq!(
-            discovery
-                .rotate_now(&mut OsRng, fixed_now())
-                .unwrap()
-                .epoch(),
+            discovery.rotate_now(&mut rng, fixed_now()).unwrap().epoch(),
             1
         );
     }
 
     #[test]
     fn encode_decode_round_trip() {
+        let mut rng = ChaCha20Rng::from_seed([0xbb; 32]);
         let identity = setup_with_identity().identity;
         let loaded = identity.load_identity().unwrap();
         let original =
-            generate_discovery_key(&mut OsRng, loaded.signing_key_pair(), 9, FIXED_NOW).unwrap();
-        let capability = generate_recipient_delivery_capability(&mut OsRng);
+            generate_discovery_key(&mut rng, loaded.signing_key_pair(), 9, FIXED_NOW).unwrap();
+        let capability = generate_recipient_delivery_capability(&mut rng);
         let blob = encode_discovery_key(&original, &capability);
         assert_eq!(blob.len(), DISCOVERY_KEY_BLOB_LEN);
         let restored = decode_discovery_key(&blob);
@@ -580,9 +581,10 @@ mod tests {
 
     #[test]
     fn export_then_restore_blob_preserves_epoch_and_verifies() {
+        let mut rng = ChaCha20Rng::from_seed([0xbc; 32]);
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
-        let exported = discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        let exported = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         assert_eq!(exported.epoch(), 2);
         let blob = discovery.export_blob().unwrap();
 
@@ -599,8 +601,9 @@ mod tests {
 
     #[test]
     fn validate_blob_accepts_stored_blob_and_rejects_malformed() {
+        let mut rng = ChaCha20Rng::from_seed([0xbd; 32]);
         let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut OsRng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         let blob = discovery.export_blob().unwrap();
         assert!(DiscoveryKeyManager::validate_blob(&blob).is_ok());
         assert!(matches!(

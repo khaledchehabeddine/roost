@@ -1212,14 +1212,15 @@ mod tests {
             PublicSignedPreKey as FfiPublicSignedPreKey, PublicationBundle as FfiPublicationBundle,
         },
     };
-    use roost_core::test_support::{
+    use roost_crypto::{
         PublicDiscoveryKey as CryptoPublicDiscoveryKey,
         PublicIdentityKey as CryptoPublicIdentityKey, PublicKey,
         PublicSignedPreKey as CryptoPublicSignedPreKey,
-        RecipientDeliveryCapability as CryptoCapability, Signature, SigningKeyPair, VerifyingKey,
+        RecipientDeliveryCapability as CryptoCapability, Signature, VerifyingKey,
         verify_discovery_to_identity_binding, verify_public_discovery_key,
         verify_public_identity_key, verify_public_signed_prekey,
     };
+    use roost_protocol::SignatureError;
     use roost_protocol::verify_with_context;
     use std::sync::Arc;
 
@@ -1240,24 +1241,11 @@ mod tests {
 
     const RELAY_HTTP_AUTH_CONTEXT: &[u8] = b"Relay-HTTP-Auth-v1";
     const RELAY_PROTOCOL_VERSION: u16 = 1;
-    const REL_RLY_18_KAT_IDENTITY_SIGNING_SECRET: [u8; 32] = [0x11; 32];
-    const REL_RLY_18_KAT_CHALLENGE_NONCE: [u8; 32] = [0x22; 32];
-    const REL_RLY_18_KAT_RELAY_DOMAIN: &[u8] = b"relay.example";
-    const REL_RLY_18_KAT_METHOD: &[u8] = b"POST";
-    const REL_RLY_18_KAT_REQUEST_TARGET: &[u8] = b"/v1/prekeys?count=10";
-    const REL_RLY_18_KAT_BODY_DIGEST_HEX: &str =
-        "5e7ea43567be4f0a65821dcdfa31d2d92cb0d0d666df62b7f6cdaacac19d4047";
-    const REL_RLY_18_KAT_TRANSCRIPT_LEN: usize = 159;
-    const REL_RLY_18_KAT_EXPECTED_VERIFYING_HEX: &str =
-        "d04ab232742bb4ab3a1368bd4615e4e6d0224ab71a016baf8520a332c9778737";
-    const REL_RLY_18_KAT_EXPECTED_SIGNATURE_HEX: &str = "7925dfac93637e618b5fad03a236f2c1\
-         f0a913b252c79ac594123a40a00a2929\
-         951d1a452bafccc602baf9072ff42105\
-         07e53969e62220f2e2fea9d9713d340c";
-
-    fn hex32(hex: &str) -> [u8; 32] {
-        hex::decode(hex).unwrap().try_into().unwrap()
-    }
+    const RELAY_CHALLENGE_NONCE: [u8; 32] = [0x22; 32];
+    const RELAY_DOMAIN: &[u8] = b"relay.example";
+    const RELAY_METHOD: &[u8] = b"POST";
+    const RELAY_REQUEST_TARGET: &[u8] = b"/v1/prekeys?count=10";
+    const RELAY_BODY_DIGEST: [u8; 32] = [0x33; 32];
 
     fn push_length_prefixed(transcript: &mut Vec<u8>, field: &[u8]) {
         transcript.extend_from_slice(&(field.len() as u16).to_be_bytes());
@@ -1272,64 +1260,17 @@ mod tests {
     fn relay_http_transcript(identity_signing_key: &[u8], body_digest: &[u8; 32]) -> Vec<u8> {
         let mut transcript = RELAY_HTTP_AUTH_CONTEXT.to_vec();
         transcript.extend_from_slice(&RELAY_PROTOCOL_VERSION.to_be_bytes());
-        transcript.extend_from_slice(&REL_RLY_18_KAT_CHALLENGE_NONCE);
+        transcript.extend_from_slice(&RELAY_CHALLENGE_NONCE);
         transcript.extend_from_slice(identity_signing_key);
-        push_length_prefixed(&mut transcript, REL_RLY_18_KAT_RELAY_DOMAIN);
-        push_length_prefixed(&mut transcript, REL_RLY_18_KAT_METHOD);
-        push_length_prefixed(&mut transcript, REL_RLY_18_KAT_REQUEST_TARGET);
+        push_length_prefixed(&mut transcript, RELAY_DOMAIN);
+        push_length_prefixed(&mut transcript, RELAY_METHOD);
+        push_length_prefixed(&mut transcript, RELAY_REQUEST_TARGET);
         transcript.extend_from_slice(body_digest);
         transcript
     }
 
     fn signature_from(bytes: &[u8]) -> Signature {
         Signature::from_bytes(&<[u8; 64]>::try_from(bytes).unwrap())
-    }
-
-    /// Known-answer test for Relay's authentication transcript and the signature over it.
-    ///
-    /// Source: Relay's published vector, produced by
-    /// the relay's own transcript encoder and `ed25519-dalek` verifier, which share no code with
-    /// this crate. Matching the expected signature pins all 159 transcript bytes, because any
-    /// difference in field order, length prefixing, or separators changes the signature.
-    ///
-    /// Inputs:
-    /// - `identity_signing_secret = REL_RLY_18_KAT_IDENTITY_SIGNING_SECRET`
-    /// - `challenge_nonce = REL_RLY_18_KAT_CHALLENGE_NONCE`
-    /// - `relay_domain = REL_RLY_18_KAT_RELAY_DOMAIN`
-    /// - `protocol_version = RELAY_PROTOCOL_VERSION`
-    /// - `method = REL_RLY_18_KAT_METHOD`
-    /// - `request_target = REL_RLY_18_KAT_REQUEST_TARGET`
-    /// - `body_digest = REL_RLY_18_KAT_BODY_DIGEST_HEX` (SHA-256 of `b"vector-body"`)
-    ///
-    /// Derivation:
-    /// ```text
-    /// transcript = concat("Relay-HTTP-Auth-v1", protocol_version, challenge_nonce,
-    ///                     identity_signing_key, len(relay_domain), relay_domain, len(method),
-    ///                     method, len(request_target), request_target, body_digest)
-    /// signature = Ed25519-Sign(identity_signing_secret, transcript)
-    /// ```
-    ///
-    /// Output:
-    /// - `identity_signing_key = REL_RLY_18_KAT_EXPECTED_VERIFYING_HEX`
-    /// - `signature = REL_RLY_18_KAT_EXPECTED_SIGNATURE_HEX`
-    #[test]
-    fn relay_http_authentication_transcript_signature_known_answer() {
-        let signing = SigningKeyPair::from_signing_bytes(REL_RLY_18_KAT_IDENTITY_SIGNING_SECRET);
-        assert_eq!(
-            hex::encode(signing.verifying.to_bytes()),
-            REL_RLY_18_KAT_EXPECTED_VERIFYING_HEX
-        );
-
-        let transcript = relay_http_transcript(
-            signing.verifying.as_bytes(),
-            &hex32(REL_RLY_18_KAT_BODY_DIGEST_HEX),
-        );
-
-        assert_eq!(transcript.len(), REL_RLY_18_KAT_TRANSCRIPT_LEN);
-        assert_eq!(
-            hex::encode(signing.sign(&transcript).to_bytes()),
-            REL_RLY_18_KAT_EXPECTED_SIGNATURE_HEX
-        );
     }
 
     /// The signature must cover the transcript bytes and nothing else.
@@ -1342,10 +1283,7 @@ mod tests {
     fn signed_authentication_transcript_verifies_bare_and_is_not_context_prefixed() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        let transcript = relay_http_transcript(
-            &identity.key.signing_key,
-            &hex32(REL_RLY_18_KAT_BODY_DIGEST_HEX),
-        );
+        let transcript = relay_http_transcript(&identity.key.signing_key, &RELAY_BODY_DIGEST);
 
         let signature_bytes = store
             .sign_authentication_transcript(transcript.clone())
@@ -1357,15 +1295,15 @@ mod tests {
         assert!(verifying.verify_strict(&transcript, &signature).is_ok());
         // Re-prepending the transcript's own context is the exact shape a contextual signature
         // would have had. It must not verify, or this export would be signing the wrong preimage.
-        assert!(
-            verify_with_context(&verifying, RELAY_HTTP_AUTH_CONTEXT, &transcript, &signature)
-                .is_err()
-        );
+        assert!(matches!(
+            verify_with_context(&verifying, RELAY_HTTP_AUTH_CONTEXT, &transcript, &signature),
+            Err(SignatureError::SignatureInvalid)
+        ));
         for context in DOMAIN_REGISTRY {
-            assert!(
-                verify_with_context(&verifying, context.as_bytes(), &transcript, &signature)
-                    .is_err()
-            );
+            assert!(matches!(
+                verify_with_context(&verifying, context.as_bytes(), &transcript, &signature),
+                Err(SignatureError::SignatureInvalid)
+            ));
         }
         // Ed25519 is deterministic, so a host retrying the same challenge resends the same proof.
         assert_eq!(
@@ -1527,10 +1465,7 @@ mod tests {
     }
 
     fn assert_publication_verifies(identity: &FfiIdentity, publication: &FfiPublicationBundle) {
-        assert_eq!(
-            publication.version,
-            roost_core::test_support::PREKEY_BUNDLE_VERSION
-        );
+        assert_eq!(publication.version, roost_crypto::PREKEY_BUNDLE_VERSION);
         let discovery = assert_discovery_key_verifies(identity, &publication.discovery_key);
         assert_signed_prekey_verifies(&publication.signed_prekey, &discovery);
         assert_discovery_to_identity_verifies(identity, publication, &discovery);

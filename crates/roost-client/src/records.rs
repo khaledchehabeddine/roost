@@ -278,7 +278,7 @@ fn signature_from_vec(bytes: &[u8]) -> Result<Signature, RoostError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roost_core::test_support::KeyPair;
+    use roost_crypto::KeyPair;
 
     #[test]
     fn prekey_records_preserve_unsigned_id_boundaries() {

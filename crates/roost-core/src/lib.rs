@@ -107,15 +107,3 @@ pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_saf
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
 pub use transport_binding::{PreKeySelection, TransportBinding, TransportBindingError};
-
-/// Crypto inputs used by Client's Rust adapter tests.
-#[cfg(feature = "test-support")]
-#[doc(hidden)]
-pub mod test_support {
-    pub use roost_crypto::{
-        KeyPair, PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicIdentityKey, PublicKey,
-        PublicSignedPreKey, RecipientDeliveryCapability, Signature, SigningKeyPair, VerifyingKey,
-        sign_identity_key_binding, verify_discovery_to_identity_binding,
-        verify_public_discovery_key, verify_public_identity_key, verify_public_signed_prekey,
-    };
-}

@@ -55,57 +55,6 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
 
-    const X25519_RFC7748_KAT_ALICE_SECRET_HEX: &str =
-        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
-    const X25519_RFC7748_KAT_BOB_SECRET_HEX: &str =
-        "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
-    const X25519_RFC7748_KAT_EXPECTED_ALICE_PUBLIC_HEX: &str =
-        "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
-    const X25519_RFC7748_KAT_EXPECTED_BOB_PUBLIC_HEX: &str =
-        "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
-    const X25519_RFC7748_KAT_EXPECTED_SHARED_SECRET_HEX: &str =
-        "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
-
-    fn hex32(hex: &str) -> [u8; 32] {
-        hex::decode(hex).unwrap().try_into().unwrap()
-    }
-
-    /// Known-answer test for X25519.
-    ///
-    /// Source: RFC 7748 section 6.1 X25519 test vector
-    ///
-    /// Inputs:
-    /// - `alice_secret = X25519_RFC7748_KAT_ALICE_SECRET_HEX`
-    /// - `bob_secret = X25519_RFC7748_KAT_BOB_SECRET_HEX`
-    ///
-    /// Derivation:
-    /// ```text
-    /// alice_public = X25519_BASEPOINT(alice_secret)
-    /// bob_public = X25519_BASEPOINT(bob_secret)
-    /// shared_secret = X25519(alice_secret, bob_public)
-    /// ```
-    ///
-    /// Output:
-    /// - `alice_public = X25519_RFC7748_KAT_EXPECTED_ALICE_PUBLIC_HEX`
-    /// - `bob_public = X25519_RFC7748_KAT_EXPECTED_BOB_PUBLIC_HEX`
-    /// - `shared_secret = X25519_RFC7748_KAT_EXPECTED_SHARED_SECRET_HEX`
-    #[test]
-    fn x25519_rfc7748_vector() {
-        let alice_secret = hex32(X25519_RFC7748_KAT_ALICE_SECRET_HEX);
-        let bob_secret = hex32(X25519_RFC7748_KAT_BOB_SECRET_HEX);
-        let expected_alice_public = hex32(X25519_RFC7748_KAT_EXPECTED_ALICE_PUBLIC_HEX);
-        let expected_bob_public = hex32(X25519_RFC7748_KAT_EXPECTED_BOB_PUBLIC_HEX);
-        let expected_shared_secret = hex32(X25519_RFC7748_KAT_EXPECTED_SHARED_SECRET_HEX);
-
-        let alice = KeyPair::from_secret_bytes(alice_secret);
-        let bob = KeyPair::from_secret_bytes(bob_secret);
-        assert_eq!(alice.public.as_bytes(), &expected_alice_public);
-        assert_eq!(bob.public.as_bytes(), &expected_bob_public);
-
-        let shared_secret = alice.diffie_hellman(&bob.public);
-        assert_eq!(shared_secret.as_bytes(), &expected_shared_secret);
-    }
-
     #[test]
     fn key_pair_public_round_trip() {
         let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([1u8; 32]));

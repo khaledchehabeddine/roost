@@ -253,7 +253,8 @@ fn derive_key(
 mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
-    use rand::rngs::OsRng;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
     use std::sync::{Arc, Mutex};
 
     // An arbitrary opaque "discovery-key blob" — this module never inspects its bytes.
@@ -264,28 +265,31 @@ mod tests {
     }
 
     fn manager_with_identity() -> IdentityManager {
+        let mut rng = ChaCha20Rng::from_seed([0x70; 32]);
         let manager = manager();
-        manager.generate_identity(&mut OsRng).unwrap();
+        manager.generate_identity(&mut rng).unwrap();
         manager
     }
 
     #[test]
     fn export_backup_without_identity_returns_not_found() {
+        let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
         let manager = manager();
         assert!(matches!(
-            manager.export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB),
+            manager.export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB),
             Err(IdentityError::NotFound)
         ));
     }
 
     #[test]
     fn each_export_uses_fresh_salt_and_nonce() {
+        let mut rng = ChaCha20Rng::from_seed([0x72; 32]);
         let manager = manager_with_identity();
         let first = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
         let second = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
         // Nonce reuse would break XChaCha20-Poly1305 confidentiality.
         assert_ne!(first, second);
@@ -293,10 +297,11 @@ mod tests {
 
     #[test]
     fn export_decrypt_round_trip_recovers_identity_and_discovery_blob() {
+        let mut rng = ChaCha20Rng::from_seed([0x73; 32]);
         let manager = manager_with_identity();
         let (expected_x25519, expected_ed25519) = manager.load_identity_key_bytes().unwrap();
         let backup = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
 
         let (identity_key, discovery_key_blob) =
@@ -322,9 +327,10 @@ mod tests {
 
     #[test]
     fn decrypt_backup_rejects_parameters_below_floor() {
+        let mut rng = ChaCha20Rng::from_seed([0x74; 32]);
         let manager = manager_with_identity();
         let backup = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
         // m_cost and t_cost fail below their floor; p_cost must equal 1, so any other value fails.
         for (header_offset, weakened_value) in [(1usize, 1u32), (5, 1), (9, 2)] {
@@ -343,9 +349,10 @@ mod tests {
 
     #[test]
     fn decrypt_backup_rejects_parameters_above_ceiling() {
+        let mut rng = ChaCha20Rng::from_seed([0x75; 32]);
         let manager = manager_with_identity();
         let backup = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
         // An oversized m_cost or t_cost must be rejected before Argon2id allocates, so a hostile
         // header cannot exhaust memory on import.
@@ -365,9 +372,10 @@ mod tests {
 
     #[test]
     fn decrypt_backup_rejects_tampered_in_range_kdf_metadata() {
+        let mut rng = ChaCha20Rng::from_seed([0x76; 32]);
         let manager = manager_with_identity();
         let mut backup = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
         backup[5..9].copy_from_slice(&(ARGON2_T_COST + 1).to_be_bytes());
         assert!(matches!(
@@ -378,9 +386,10 @@ mod tests {
 
     #[test]
     fn decrypt_backup_rejects_tampered_header_field() {
+        let mut rng = ChaCha20Rng::from_seed([0x77; 32]);
         let manager = manager_with_identity();
         let backup = manager
-            .export_encrypted_backup(&mut OsRng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
         // Flip a salt byte: the header is the AEAD associated data, so authentication must fail.
         let mut tampered = backup.clone();
@@ -393,9 +402,10 @@ mod tests {
 
     #[test]
     fn decrypt_backup_with_wrong_passphrase_returns_decryption_failed() {
+        let mut rng = ChaCha20Rng::from_seed([0x78; 32]);
         let manager = manager_with_identity();
         let backup = manager
-            .export_encrypted_backup(&mut OsRng, "correct-passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "correct-passphrase", &DK_BLOB)
             .unwrap();
         assert!(matches!(
             manager.decrypt_backup(&backup, "wrong-passphrase"),
@@ -405,9 +415,10 @@ mod tests {
 
     #[test]
     fn decrypt_backup_wrong_passphrase_error_formats_are_redacted() {
+        let mut rng = ChaCha20Rng::from_seed([0x79; 32]);
         let manager = manager_with_identity();
         let backup = manager
-            .export_encrypted_backup(&mut OsRng, "correct-passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "correct-passphrase", &DK_BLOB)
             .unwrap();
         let err = manager
             .decrypt_backup(&backup, "wrong-passphrase-secret")
@@ -427,9 +438,10 @@ mod tests {
 
     #[test]
     fn decrypt_backup_tampered_ciphertext_error_formats_are_redacted() {
+        let mut rng = ChaCha20Rng::from_seed([0x7a; 32]);
         let manager = manager_with_identity();
         let mut backup = manager
-            .export_encrypted_backup(&mut OsRng, "correct-passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "correct-passphrase", &DK_BLOB)
             .unwrap();
         let last = backup.len() - 1;
         backup[last] ^= 0xAA;
@@ -450,10 +462,11 @@ mod tests {
 
     #[test]
     fn normalization_form_does_not_change_derived_key() {
+        let mut rng = ChaCha20Rng::from_seed([0x7b; 32]);
         let manager = manager_with_identity();
         // U+00E9 (é, NFC) and "e" + U+0301 (combining acute, NFD) normalize to the same key.
         let backup = manager
-            .export_encrypted_backup(&mut OsRng, "caf\u{00e9}", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "caf\u{00e9}", &DK_BLOB)
             .unwrap();
         assert!(manager.decrypt_backup(&backup, "cafe\u{0301}").is_ok());
     }
@@ -496,5 +509,27 @@ mod tests {
             ARGON2_P_COST,
         );
         assert_ne!(*first.unwrap(), *second.unwrap());
+    }
+
+    // Uses costs far below the import floor, which only the import path enforces, to stay fast.
+    #[test]
+    fn argon2id_key_changes_with_the_salt_and_each_cost() {
+        const M_COST: u32 = 64;
+        const T_COST: u32 = 1;
+        const P_COST: u32 = 1;
+        let salt = [0x01u8; SALT_LEN];
+        let key = |salt: &[u8], m_cost, t_cost, p_cost| {
+            *derive_key("passphrase", salt, m_cost, t_cost, p_cost).unwrap()
+        };
+        let expected = key(&salt, M_COST, T_COST, P_COST);
+
+        for changed in [
+            key(&[0x02; SALT_LEN], M_COST, T_COST, P_COST),
+            key(&salt, M_COST + 1, T_COST, P_COST),
+            key(&salt, M_COST, T_COST + 1, P_COST),
+            key(&salt, M_COST, T_COST, P_COST + 1),
+        ] {
+            assert_ne!(changed, expected);
+        }
     }
 }

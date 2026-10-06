@@ -5,7 +5,8 @@
 //! failed finalization transition.
 
 use roost_core::{
-    InMemorySecureStorage, KeyStore, KeyStoreOperationStatus, SecureStorage, StorageError,
+    InMemorySecureStorage, KeyStore, KeyStoreError, KeyStoreOperationError,
+    KeyStoreOperationStatus, SecureStorage, StorageError,
 };
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
@@ -98,7 +99,12 @@ fn reserved_inbox_rotation_resumes_after_restart_and_failed_finalization() {
     store.reserve_operation(host_operation_id).unwrap();
 
     storage.fail_next_store();
-    assert!(store.finalize_operation(host_operation_id).is_err());
+    assert!(matches!(
+        store.finalize_operation(host_operation_id),
+        Err(KeyStoreError::Operation(KeyStoreOperationError::Storage(
+            StorageError::IO(_)
+        )))
+    ));
     drop(store);
 
     let recovered = storage.key_store();
