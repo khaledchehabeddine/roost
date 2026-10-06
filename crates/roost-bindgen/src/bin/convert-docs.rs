@@ -15,7 +15,6 @@ use std::env;
 use std::fs;
 use std::process::ExitCode;
 
-/// A binding's host language, tagged as in a doc example's code fence.
 #[derive(Clone, Copy, PartialEq)]
 enum Language {
     Swift,
@@ -86,7 +85,7 @@ fn filter_examples_and_links(binding: &str, language: Language) -> Result<Vec<St
             skipped_block = true;
             continue;
         }
-        // Removing a block between two blank doc lines would leave them adjacent.
+        // Dropping a block between two blank lines would leave them adjacent, so skip the second.
         if skipped_block && is_blank(line) && kept.last().is_some_and(|last| is_blank(last)) {
             skipped_block = false;
             continue;
@@ -153,7 +152,7 @@ fn host_name(path: &str, language: Language, binding: &str) -> Result<String, St
     {
         name = format!("{}.{name}", host_type(parent, language, binding));
     }
-    // KDoc resolves [Name] links; Swift symbol links need full DocC signatures, so use code voice.
+    // KDoc resolves [Name] links. DocC needs full symbol signatures, so Swift gets code voice.
     Ok(match language {
         Language::Swift => format!("`{name}`"),
         Language::Kotlin => format!("[{name}]"),
@@ -194,7 +193,7 @@ fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<Str
         let line = &lines[i];
         if let Some(prefix) = errors_heading(line) {
             i += 1;
-            // Rustdoc style often puts a blank line between the heading and its bullets.
+            // Rustdoc style often leaves a blank line after the heading.
             while lines.get(i).is_some_and(|line| is_blank(line)) {
                 i += 1;
             }
@@ -211,7 +210,7 @@ fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<Str
             if bullets.is_empty() {
                 return Err("# Errors section without bullets".to_owned());
             }
-            // Drop the blank line that separated the section, keeping one between neighbors.
+            // Moving the section out would leave a doubled blank line, or one before `*/`.
             let section_ends = lines
                 .get(i)
                 .is_none_or(|next| is_blank(next) || is_comment_end(next));

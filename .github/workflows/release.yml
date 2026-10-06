@@ -63,8 +63,8 @@ jobs:
       - name: Build the AAR
         run: scripts/build-android.sh
 
-      # Until the last step, a failure leaves only a draft release, a tag, and a package version,
-      # and you can delete all three. Publishing the release locks its zip and tag.
+      # The release publishes last because publishing locks its zip and tag. Until then, a failed
+      # run leaves a draft release, a tag and a package version, and you can delete all three.
       - name: Attach the zip to a draft roost-swift release
         id: draft
         if: github.event_name == 'push'
@@ -85,9 +85,9 @@ jobs:
           repository: ${{ env.SWIFT_REPO }}
           token: ${{ secrets.ROOST_PUBLISH_TOKEN }}
           path: roost-swift
-      # The tag must point at Package.swift before the release is published, or publishing
-      # creates the tag on main and locks it there. SwiftPM needs the URL to end in .zip, and the
-      # API reads only the asset ID before the dash.
+      # Push the tag before publishing the release, or publishing creates the tag on main and
+      # locks it there. SwiftPM needs the URL to end in .zip, and the API ignores everything after
+      # the asset ID.
       - name: Tag roost-swift with a Package.swift for the zip
         if: github.event_name == 'push'
         working-directory: roost-swift

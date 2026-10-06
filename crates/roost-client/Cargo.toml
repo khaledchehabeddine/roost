@@ -19,6 +19,7 @@ roost-protocol.workspace = true
 # Utility
 rand.workspace = true
 thiserror.workspace = true
+# Leave out the cli feature, which would link UniFFI's generator into the XCFramework
 uniffi.workspace = true
 zeroize.workspace = true
 

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# Build the Rust library and its generated Swift API into a zipped XCFramework.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OUT="$ROOT/target/ios"
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
 ZIP="$OUT/Roost-v$VERSION.xcframework.zip"
-# Matches .iOS(.v13) in the Package.swift that release.yml writes.
+# Keep in step with .iOS(.v13) in the Package.swift that release.yml writes.
 MIN_IOS=13.0
 cd "$ROOT"
 

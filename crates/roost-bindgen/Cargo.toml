@@ -5,7 +5,6 @@ publish.workspace = true
 version.workspace = true
 
 [dependencies]
-# Kept out of roost-client so the generator never links into the shipped libraries
 uniffi = { workspace = true, features = ["cli"] }
 
 [lints]

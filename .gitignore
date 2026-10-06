@@ -1,7 +1,7 @@
 # Cargo/Rust
 target
 
-# Android packaging
+# Android
 android/.gradle/
 android/.kotlin/
 android/build/

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Build the Rust library and its generated Kotlin API into a local Maven AAR.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
