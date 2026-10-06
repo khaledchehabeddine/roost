@@ -1,4 +1,4 @@
-//! Adapts the Rust doc comments in a generated UniFFI binding to its host language.
+//! Converts the Rust doc comments in a generated UniFFI binding to Swift or Kotlin conventions.
 //!
 //! UniFFI copies Rust doc comments into Swift and Kotlin unchanged. For the given language this:
 //!
@@ -9,7 +9,7 @@
 //! - turns a `# Errors` section into Swift's `- Throws:` field or Kotlin's `@throws` tags at the end
 //!   of the comment.
 //!
-//! Usage: `host-docs <swift|kotlin> <binding>` rewrites the binding in place.
+//! Usage: `convert-docs <swift|kotlin> <binding>` rewrites the binding in place.
 
 use std::env;
 use std::fs;
@@ -42,29 +42,29 @@ fn main() -> ExitCode {
     };
     let result = fs::read_to_string(path)
         .map_err(|error| error.to_string())
-        .and_then(|binding| adapt(&binding, language))
-        .and_then(|adapted| fs::write(path, adapted).map_err(|error| error.to_string()));
+        .and_then(|binding| convert(&binding, language))
+        .and_then(|converted| fs::write(path, converted).map_err(|error| error.to_string()));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("host-docs: {path}: {error}");
+            eprintln!("convert-docs: {path}: {error}");
             ExitCode::FAILURE
         }
     }
 }
 
 fn usage() -> ExitCode {
-    eprintln!("usage: host-docs <swift|kotlin> <binding>");
+    eprintln!("usage: convert-docs <swift|kotlin> <binding>");
     ExitCode::FAILURE
 }
 
-fn adapt(binding: &str, language: Language) -> Result<String, String> {
+fn convert(binding: &str, language: Language) -> Result<String, String> {
     let lines = filter_examples_and_links(binding, language)?;
-    let mut adapted = move_errors_to_throws(&lines, language)?.join("\n");
+    let mut converted = move_errors_to_throws(&lines, language)?.join("\n");
     if binding.ends_with('\n') {
-        adapted.push('\n');
+        converted.push('\n');
     }
-    Ok(adapted)
+    Ok(converted)
 }
 
 fn filter_examples_and_links(binding: &str, language: Language) -> Result<Vec<String>, String> {
@@ -395,8 +395,8 @@ mod tests {
             " * ```",
             " */",
         ]);
-        assert_eq!(adapt(&binding, Language::Swift).unwrap(), swift);
-        assert_eq!(adapt(&binding, Language::Kotlin).unwrap(), kotlin);
+        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
+        assert_eq!(convert(&binding, Language::Kotlin).unwrap(), kotlin);
     }
 
     #[test]
@@ -413,7 +413,7 @@ mod tests {
             "     * `IdentityContext`.",
             "     */",
         ]);
-        assert_eq!(adapt(&binding, Language::Swift).unwrap(), swift);
+        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
     }
 
     #[test]
@@ -438,7 +438,7 @@ mod tests {
             " */",
             "sealed class RoostException",
         ]);
-        assert_eq!(adapt(&binding, Language::Kotlin).unwrap(), kotlin);
+        assert_eq!(convert(&binding, Language::Kotlin).unwrap(), kotlin);
     }
 
     #[test]
@@ -463,7 +463,7 @@ mod tests {
             "     *   - `RoostError.InvalidData` if a key or the reference time is malformed.",
             "     */",
         ]);
-        assert_eq!(adapt(&binding, Language::Swift).unwrap(), swift);
+        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
     }
 
     #[test]
@@ -489,7 +489,7 @@ mod tests {
             "     */",
             "sealed class RoostException",
         ]);
-        assert_eq!(adapt(&binding, Language::Kotlin).unwrap(), kotlin);
+        assert_eq!(convert(&binding, Language::Kotlin).unwrap(), kotlin);
     }
 
     #[test]
@@ -514,14 +514,14 @@ mod tests {
             " *   - `RoostError.InvalidData` if the key is malformed.",
             " */",
         ]);
-        assert_eq!(adapt(&binding, Language::Swift).unwrap(), swift);
+        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
     }
 
     #[test]
     fn rejects_an_unterminated_example_block() {
         let binding = text(&["/**", " * ```swift", " * let a = 1", " */"]);
-        assert!(adapt(&binding, Language::Swift).is_err());
-        assert!(adapt(&binding, Language::Kotlin).is_err());
+        assert!(convert(&binding, Language::Swift).is_err());
+        assert!(convert(&binding, Language::Kotlin).is_err());
     }
 
     #[test]
@@ -533,12 +533,12 @@ mod tests {
             " * Fails when storage fails.",
             " */",
         ]);
-        assert!(adapt(&binding, Language::Swift).is_err());
+        assert!(convert(&binding, Language::Swift).is_err());
     }
 
     #[test]
     fn rejects_a_kotlin_errors_bullet_without_an_error_name() {
         let binding = text(&["/**", " * # Errors", " * - When storage fails.", " */"]);
-        assert!(adapt(&binding, Language::Kotlin).is_err());
+        assert!(convert(&binding, Language::Kotlin).is_err());
     }
 }

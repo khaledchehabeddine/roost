@@ -34,7 +34,7 @@ the libraries. All five crates share one workspace version and remain unpublishe
 
 | Crate | Owns | Direct Roost dependencies |
 | --- | --- | --- |
-| `roost-bindgen` | Swift and Kotlin binding generation and its doc adaptation | None |
+| `roost-bindgen` | Swift and Kotlin binding generation and doc conversion | None |
 | `roost-client` | Mobile UniFFI declarations and adapters | `roost-core`, `roost-protocol` |
 | `roost-core` | Identity lifecycle, messaging, contacts, state transitions, storage recovery | `roost-crypto`, `roost-protocol` |
 | `roost-crypto` | Keys, X3DH, Double Ratchet, encryption | `roost-protocol` |
