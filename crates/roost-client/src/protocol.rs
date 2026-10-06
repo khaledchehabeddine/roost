@@ -749,9 +749,9 @@ impl Contacts {
     /// the caller. Commit a matching confirmation's updates before showing the peer as verified.
     ///
     /// # Errors
-    /// - [`RoostError::Corrupt`] if stored local Identity material is incomplete or malformed.
     /// - [`RoostError::InternalError`] if a storage lock is poisoned or a state update cannot encode.
-    /// - [`RoostError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
+    /// - [`RoostError::InvalidData`] if the stored local Identity is malformed, or peer key lengths
+    ///   or snapshot bounds are invalid.
     /// - [`RoostError::NotFound`] if the context has no local Identity.
     /// - [`RoostError::OperationRecoveryRequired`] if a committed secure operation needs recovery.
     /// - [`RoostError::ProtocolStateFault`] if peer keys are not canonical, or the contact is missing, unaccepted, or corrupt.

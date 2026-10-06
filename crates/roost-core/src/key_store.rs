@@ -222,7 +222,7 @@ impl KeyStore {
 
     /// Returns the stored [`Identity`], or `None` when no identity is stored.
     ///
-    /// A storage fault or a partly stored identity is an error, not `None`.
+    /// A storage fault or a malformed Identity Secret Blob is an error, not `None`.
     pub fn identity(&self) -> Result<Option<Identity>, KeyStoreError> {
         match self.load_identity() {
             Ok(identity) => Ok(Some(identity)),
@@ -592,8 +592,6 @@ mod tests {
     // Storage keys are duplicated from the manager modules so tests can inspect and tamper.
     const DISCOVERY_KEY: &str = "discovery/current";
     const IDENTITY_CURRENT_KEY: &str = "identity/current";
-    const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
-    const IDENTITY_X25519_KEY: &str = "identity/x25519";
     const SIGNED_PREKEY: &str = "prekey/signed";
 
     type SharedStorage = Arc<Mutex<Box<dyn SecureStorage>>>;
@@ -1312,12 +1310,7 @@ mod tests {
 
         impl SecureStorage for CountingIdentityWriteStorage {
             fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
-                if self.fail_enabled.load(Ordering::SeqCst)
-                    && matches!(
-                        key,
-                        IDENTITY_CURRENT_KEY | IDENTITY_ED25519_KEY | IDENTITY_X25519_KEY
-                    )
-                {
+                if self.fail_enabled.load(Ordering::SeqCst) && key == IDENTITY_CURRENT_KEY {
                     let writes = self.writes.fetch_add(1, Ordering::SeqCst) + 1;
                     if writes == 2 {
                         return Err(StorageError::IO("injected identity store failure".into()));

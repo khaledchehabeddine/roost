@@ -51,7 +51,7 @@ pub enum RoostError {
     /// A contact must be accepted before sending.
     #[error("contact is not accepted")]
     ContactNotAccepted,
-    /// Stored identity, discovery key, or signed pre-key material is corrupt or incomplete.
+    /// Stored discovery-key, signed-pre-key, or prepared-operation material is corrupt.
     #[error("stored key material is corrupt")]
     Corrupt,
     /// Backup decryption failed because the passphrase or backup bytes did not authenticate.
@@ -186,7 +186,6 @@ impl From<IdentityError> for RoostError {
             IdentityError::UnsupportedVersion(_) | IdentityError::UnsupportedBackupVersion(_) => {
                 RoostError::UnsupportedVersion { reason }
             }
-            IdentityError::Corrupt => RoostError::Corrupt,
             IdentityError::DecryptionFailed => RoostError::DecryptionFailed,
             IdentityError::BackupParametersOutOfRange { .. }
             | IdentityError::BackupPlaintextTooShort { .. }
@@ -216,7 +215,6 @@ impl From<SignedPreKeyError> for RoostError {
             | SignedPreKeyError::DuplicateRetainedId(_)
             | SignedPreKeyError::IdentifiersExhausted
             | SignedPreKeyError::InvalidBlobLength { .. }
-            | SignedPreKeyError::InvalidRetainedFlag(_)
             | SignedPreKeyError::NextIdMismatch { .. }
             | SignedPreKeyError::RetainedCapacityReached { .. }
             | SignedPreKeyError::RetainedEpochMismatch { .. }
