@@ -142,7 +142,7 @@ pub enum ProtocolStateKind {
     /// Kept separate from [`Self::ContactState`] because a peer's delivery capability is a bearer
     /// secret, while contact queries return public state for host-owned views and observation.
     PeerInboxAuthorization = 6,
-    /// Identity-key-addressed record of which local inbox generation a contact has been given.
+    /// Identity-key-addressed record of the latest local epoch whose capability a contact holds.
     ///
     /// Distribution bookkeeping, not key material: the local capability itself lives in secure
     /// storage. This answers "who still holds a superseded capability and must be re-supplied",
@@ -1058,8 +1058,8 @@ impl ProtocolStateEngine {
 
     /// Records a peer's inbox authorization, refusing to move backwards.
     ///
-    /// Returns updates to commit, or an empty vector when `generation` is not newer than what is
-    /// already stored. Refusing a lower generation matters because an old authorization replayed at
+    /// Returns updates to commit, or an empty vector when `epoch` is not newer than what is
+    /// already stored. Refusing a lower epoch matters because an old authorization replayed at
     /// a contact would restore a capability the peer has already rotated away from — the exact
     /// state a blocked sender would want to reach.
     ///
@@ -1068,19 +1068,19 @@ impl ProtocolStateEngine {
         &self,
         snapshot: &ProtocolStateSnapshot,
         identity_key: ContactIdentityKey,
-        generation: u32,
+        epoch: u32,
         capability: &RecipientDeliveryCapability,
     ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
         let address = peer_inbox_authorization_address(identity_key);
         validate_contact_identity_key(&address, &identity_key)?;
         if let Some(stored) = load_peer_inbox_authorization(snapshot, &address)?
-            && generation <= stored.generation
+            && epoch <= stored.epoch
         {
             return Ok(Vec::new());
         }
         let wire = PeerInboxAuthorizationWire {
             version: PEER_INBOX_AUTHORIZATION_VERSION,
-            generation,
+            epoch,
             capability: *capability.to_bytes(),
         };
         let blob = postcard::to_stdvec(&wire).map_err(|e| ProtocolStateError::BlobEncode {
@@ -1093,27 +1093,27 @@ impl ProtocolStateEngine {
         ])
     }
 
-    /// Records that `identity_key` has been given local inbox generation `generation`.
+    /// Records that `identity_key` has been given the delivery capability for local epoch `epoch`.
     ///
     /// Call this only after the in-band authorization update has actually been handed to the
     /// transport, so an app killed mid-re-key resumes rather than skipping contacts. Returns no
-    /// updates when the contact already holds this generation or a newer one.
+    /// updates when the contact already holds this epoch's capability or a newer one.
     pub fn record_inbox_authorization_delivered(
         &self,
         snapshot: &ProtocolStateSnapshot,
         identity_key: ContactIdentityKey,
-        generation: u32,
+        epoch: u32,
     ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
         let address = local_inbox_authorization_address(identity_key);
         validate_contact_identity_key(&address, &identity_key)?;
         if let Some(delivered) = load_delivered_inbox_authorization(snapshot, &address)?
-            && generation <= delivered
+            && epoch <= delivered
         {
             return Ok(Vec::new());
         }
         let wire = LocalInboxAuthorizationWire {
             version: LOCAL_INBOX_AUTHORIZATION_VERSION,
-            generation,
+            epoch,
         };
         let blob = postcard::to_stdvec(&wire).map_err(|e| ProtocolStateError::BlobEncode {
             address: address.clone(),
@@ -1125,7 +1125,7 @@ impl ProtocolStateEngine {
         ])
     }
 
-    /// Returns the local inbox generation `identity_key` was last given, if any.
+    /// Returns the latest local epoch whose capability `identity_key` was given, if any.
     pub fn delivered_inbox_authorization(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -1136,16 +1136,16 @@ impl ProtocolStateEngine {
         load_delivered_inbox_authorization(snapshot, &address)
     }
 
-    /// Returns which of `candidates` still need the current inbox generation.
+    /// Returns which of `candidates` still need the current epoch's delivery capability.
     ///
     /// A contact qualifies when it has never been given an authorization, or was last given one
-    /// older than `current_generation`. **Blocked contacts are always excluded**: re-supplying a
+    /// older than `current_epoch`. **Blocked contacts are always excluded**: re-supplying a
     /// blocked contact would hand back the very capability the rotation revoked and silently undo
     /// the block. Contacts with no stored contact record are skipped.
     pub fn contacts_needing_inbox_authorization(
         &self,
         snapshot: &ProtocolStateSnapshot,
-        current_generation: u32,
+        current_epoch: u32,
         candidates: &[ContactIdentityKey],
     ) -> Result<Vec<ContactIdentityKey>, ProtocolStateError> {
         let mut stale = Vec::new();
@@ -1162,7 +1162,7 @@ impl ProtocolStateEngine {
                 snapshot,
                 &local_inbox_authorization_address(*identity_key),
             )?;
-            if delivered.is_none_or(|delivered| delivered < current_generation) {
+            if delivered.is_none_or(|delivered| delivered < current_epoch) {
                 stale.push(*identity_key);
             }
         }
@@ -1896,7 +1896,7 @@ fn load_delivered_inbox_authorization(
     };
     let wire: LocalInboxAuthorizationWire =
         decode_inbox_authorization(address, blob, LOCAL_INBOX_AUTHORIZATION_VERSION)?;
-    Ok(Some(wire.generation))
+    Ok(Some(wire.epoch))
 }
 
 fn load_peer_inbox_authorization(
@@ -1909,7 +1909,7 @@ fn load_peer_inbox_authorization(
     let wire: PeerInboxAuthorizationWire =
         decode_inbox_authorization(address, blob, PEER_INBOX_AUTHORIZATION_VERSION)?;
     Ok(Some(PeerInboxAuthorization {
-        generation: wire.generation,
+        epoch: wire.epoch,
         capability: RecipientDeliveryCapability::from_bytes(wire.capability),
     }))
 }
@@ -2274,14 +2274,14 @@ where
 #[derive(Deserialize, Serialize)]
 struct LocalInboxAuthorizationWire {
     version: u8,
-    generation: u32,
+    epoch: u32,
 }
 
 // Persistence requires serialization; `ZeroizeOnDrop` scrubs the temporary bearer-secret copy.
 #[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 struct PeerInboxAuthorizationWire {
     version: u8,
-    generation: u32,
+    epoch: u32,
     capability: [u8; 32],
 }
 

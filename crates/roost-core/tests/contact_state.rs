@@ -948,7 +948,7 @@ fn peer_inbox_authorization_round_trips_through_protocol_state() {
         .peer_inbox_authorization(&snapshot, setup.bob_identity)
         .unwrap()
         .unwrap();
-    assert_eq!(stored.generation, 4);
+    assert_eq!(stored.epoch, 4);
     assert_eq!(*stored.capability.to_bytes(), *capability.to_bytes());
 }
 
@@ -1003,20 +1003,17 @@ fn peer_inbox_authorization_refuses_to_go_backwards() {
         .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 6, &superseded)
         .unwrap();
 
-    assert!(
-        updates.is_empty(),
-        "a lower generation must produce no update"
-    );
+    assert!(updates.is_empty(), "a lower epoch must produce no update");
     let stored = engine
         .peer_inbox_authorization(&snapshot, setup.bob_identity)
         .unwrap()
         .unwrap();
-    assert_eq!(stored.generation, 7);
+    assert_eq!(stored.epoch, 7);
     assert_eq!(*stored.capability.to_bytes(), *current.to_bytes());
 }
 
 #[test]
-fn peer_inbox_authorization_advances_on_a_higher_generation() {
+fn peer_inbox_authorization_advances_on_a_higher_epoch() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let mut snapshot = ProtocolStateSnapshot::new();
@@ -1050,6 +1047,6 @@ fn peer_inbox_authorization_advances_on_a_higher_generation() {
         .peer_inbox_authorization(&snapshot, setup.bob_identity)
         .unwrap()
         .unwrap();
-    assert_eq!(stored.generation, 2);
+    assert_eq!(stored.epoch, 2);
     assert_eq!(*stored.capability.to_bytes(), *rotated.to_bytes());
 }

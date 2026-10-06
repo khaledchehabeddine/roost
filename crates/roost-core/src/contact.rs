@@ -110,12 +110,12 @@ pub enum ContactSafetyNumberConfirmation {
 /// capability is the peer's bearer secret, so this deliberately does not live in [`ContactState`],
 /// which is available through public contact queries.
 ///
-/// `generation` is the peer's inbox generation the capability belongs to. It exists so a replayed
+/// `epoch` is the peer's Discovery Key epoch the capability belongs to. It exists so a replayed
 /// older authorization can be recognized and refused rather than silently rolling a contact back to
 /// a capability they have already rotated away from.
 pub struct PeerInboxAuthorization {
-    /// The peer inbox generation this authorization belongs to.
-    pub generation: u32,
-    /// The peer's recipient delivery capability for that generation.
+    /// The peer's Discovery Key epoch this authorization belongs to.
+    pub epoch: u32,
+    /// The peer's recipient delivery capability for that epoch.
     pub capability: RecipientDeliveryCapability,
 }

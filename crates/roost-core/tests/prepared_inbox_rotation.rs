@@ -1,6 +1,6 @@
 //! Prepared inbox rotation across the public KeyStore and SecureStorage seam.
 //!
-//! The scenario proves that a newly returned inbox generation remains provisional until the
+//! The scenario proves that a newly returned inbox rotation remains provisional until the
 //! prepared secure mutation is reserved and finalized, including restart recovery after a
 //! failed finalization transition.
 
@@ -60,7 +60,7 @@ impl SecureStorage for SharedSecureStorage {
 }
 
 #[test]
-fn prepared_inbox_rotation_does_not_advance_authoritative_generation_before_finalize() {
+fn prepared_inbox_rotation_does_not_advance_authoritative_epoch_before_finalize() {
     let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
     let identity = store.prepare_identity_creation().unwrap();
     store.reserve_operation(identity.operation.id).unwrap();

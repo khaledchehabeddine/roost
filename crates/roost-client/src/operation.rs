@@ -126,14 +126,14 @@ pub struct PreparedOneTimePreKeys {
     pub one_time_prekeys: Vec<PublicOneTimePreKey>,
 }
 
-/// A new inbox generation, provisional until its operation is finalized.
+/// An inbox rotation, provisional until its operation is finalized.
 ///
-/// The previous generation stays current until finalization.
+/// The previous Discovery Key stays current until finalization.
 #[derive(uniffi::Record)]
 pub struct PreparedInboxRotation {
-    /// The operation that makes the new generation current.
+    /// The operation that makes the new Discovery Key current.
     pub operation_id: OperationId,
-    /// The new generation's publication and delivery capability.
+    /// The new inbox's publication and delivery capability.
     pub rotation: InboxRotation,
 }
 
