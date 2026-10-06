@@ -71,10 +71,10 @@ With Xcode, `scripts/build/xcframework.sh` writes
 `target/ios-distribution/Roost-v<version>.xcframework.zip` with an arm64 device slice and an arm64
 simulator slice.
 
-With JDK 17, Gradle 9.5.0, Android SDK 36, NDK r28c, and `cargo-ndk` 4.1.2, and with `ANDROID_HOME`
-and `ANDROID_NDK_HOME` set, `scripts/build/android-aar.sh` writes the `com.chirp:roost` AAR for
-arm64-v8a and x86_64 under `target/android/maven/`, with its POM, Gradle module metadata, and sources
-jar.
+With JDK 17 or newer, Gradle 9.5.0, Android SDK 36, NDK r28c, and `cargo-ndk` 4.1.2, and with
+`ANDROID_HOME` and `ANDROID_NDK_HOME` set, `scripts/build/android-aar.sh` writes the
+`com.chirp:roost` AAR for arm64-v8a and x86_64 under `target/android/maven/`, with its POM, Gradle
+module metadata, and sources jar.
 
 To test a package, run `./check.sh <roost-checkout>` in `roost-swift` or `roost-kotlin`.
 

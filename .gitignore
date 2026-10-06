@@ -2,9 +2,10 @@
 target
 
 # Android packaging
-packaging/android/.gradle/
-packaging/android/**/build/
-packaging/android/local.properties
+android/.gradle/
+android/.kotlin/
+android/build/
+android/local.properties
 
 # Claude Code
 .claude/agent-memory-local/
