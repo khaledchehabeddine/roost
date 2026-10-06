@@ -43,12 +43,12 @@ use zeroize::Zeroizing;
 /// bulk document signer.
 const MAX_AUTHENTICATION_TRANSCRIPT_LEN: usize = 4096;
 
-/// ASCII prefix reserved for preimages Aether signs or verifies itself.
+/// ASCII prefixes reserved for preimages Roost signs or verifies itself.
 ///
-/// Every signature context and domain tag Aether defines starts with these bytes, so refusing
+/// Every signature context and domain tag Roost defines starts with one of these, so refusing
 /// them keeps [`IdentityContext::sign_authentication_transcript`] disjoint from all of them.
 /// Matched case-insensitively to cover the lowercase hash-domain convention as well.
-const RESERVED_AETHER_DOMAIN_PREFIX: &[u8] = b"Aether";
+const RESERVED_DOMAIN_PREFIXES: [&str; 2] = ["Aether", "Roost"];
 
 /// One local identity namespace: its keys in SecureStorage and every operation that uses them.
 ///
@@ -349,14 +349,14 @@ impl IdentityContext {
     ///
     /// The transcript is signed exactly as given, so the host puts its own domain separation inside
     /// it, as a relay authentication transcript does with its `Relay-HTTP-Auth-v1` prefix. Roost
-    /// refuses a transcript that starts with `Aether`, in any letter case, because every preimage
-    /// Roost signs starts with that prefix: without the check, this method could sign an identity
-    /// binding or a Message transcript chosen by whoever supplied the bytes. Signing is
+    /// refuses a transcript that starts with `Aether` or `Roost`, in any letter case, because every
+    /// preimage Roost signs starts with one of them: without the check, this method could sign an
+    /// identity binding or a Message transcript chosen by whoever supplied the bytes. Signing is
     /// deterministic, so the same transcript always gives the same signature.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if the transcript is empty, longer than 4096 bytes, or starts
-    ///   with the reserved prefix.
+    ///   with a reserved prefix.
     /// - [`RoostError::NotFound`] if no identity is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -1098,7 +1098,7 @@ fn public_one_time_prekeys_from_core(
 
 // Bounds what the identity key will sign for a caller-defined purpose. The prefix rule is the
 // security-relevant half: it keeps this export's preimages disjoint from every signature context
-// Aether defines, so no signature it produces can satisfy an Aether verifier.
+// Roost defines, so no signature it produces can satisfy a Roost verifier.
 fn check_signable_transcript(transcript: &[u8]) -> Result<(), RoostError> {
     if transcript.is_empty() {
         return Err(RoostError::InvalidData {
@@ -1112,14 +1112,17 @@ fn check_signable_transcript(transcript: &[u8]) -> Result<(), RoostError> {
             ),
         });
     }
-    let reserved = RESERVED_AETHER_DOMAIN_PREFIX.len();
-    if transcript.len() >= reserved
-        && transcript[..reserved].eq_ignore_ascii_case(RESERVED_AETHER_DOMAIN_PREFIX)
-    {
-        return Err(RoostError::InvalidData {
-            reason: "authentication transcript starts with the reserved Aether domain prefix"
-                .into(),
-        });
+    for prefix in RESERVED_DOMAIN_PREFIXES {
+        if transcript
+            .get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix.as_bytes()))
+        {
+            return Err(RoostError::InvalidData {
+                reason: format!(
+                    "authentication transcript starts with the reserved {prefix} domain prefix"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -1225,9 +1228,9 @@ mod tests {
     use roost_protocol::verify_with_context;
     use std::sync::Arc;
 
-    /// Every Ed25519 signature context and canonical-encoding domain tag Aether defines, plus the
-    /// one lowercase hash domain, as of v0.11.0.
-    const AETHER_DOMAIN_REGISTRY: [&str; 10] = [
+    /// Every Ed25519 signature context and canonical-encoding domain tag Roost defines, plus the
+    /// protocol-state commit and lowercase hash domains.
+    const DOMAIN_REGISTRY: [&str; 10] = [
         "AetherIKBinding-v1:",
         "AetherDK-v1:",
         "AetherDKToIK-v1:",
@@ -1236,7 +1239,7 @@ mod tests {
         "AetherIK-v1:",
         "AetherSafetyNumber-v1:",
         "AetherSenderCertificate-v2:",
-        "AetherProtocolStateCommit-v1:",
+        "RoostProtocolStateCommit-v1:",
         "aether-recipient-delivery-capability-v1",
     ];
 
@@ -1363,7 +1366,7 @@ mod tests {
             verify_with_context(&verifying, RELAY_HTTP_AUTH_CONTEXT, &transcript, &signature)
                 .is_err()
         );
-        for context in AETHER_DOMAIN_REGISTRY {
+        for context in DOMAIN_REGISTRY {
             assert!(
                 verify_with_context(&verifying, context.as_bytes(), &transcript, &signature)
                     .is_err()
@@ -1377,15 +1380,16 @@ mod tests {
     }
 
     /// An unrestricted "sign these bytes with the identity key" export would be a signing oracle
-    /// over Aether's own preimages: the identity key is what signs identity bindings,
-    /// discovery-key bindings, and message transcripts. Every context Aether signs or verifies
-    /// under starts with `Aether`, so refusing that prefix makes the two preimage sets disjoint.
+    /// over Roost's own preimages: the identity key is what signs identity bindings,
+    /// discovery-key bindings, and message transcripts. Every context Roost signs or verifies
+    /// under starts with `Aether` or `Roost`, so refusing those prefixes makes the two preimage
+    /// sets disjoint.
     #[test]
-    fn sign_authentication_transcript_refuses_reserved_aether_preimages() {
+    fn sign_authentication_transcript_refuses_reserved_preimages() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
 
-        for context in AETHER_DOMAIN_REGISTRY {
+        for context in DOMAIN_REGISTRY {
             let mut preimage = context.as_bytes().to_vec();
             preimage.extend_from_slice(&identity.key.agreement_key);
             preimage.extend_from_slice(&identity.key.signing_key);
@@ -1393,6 +1397,23 @@ mod tests {
                 Err(RoostError::InvalidData { .. }) => {}
                 Err(error) => panic!("expected InvalidData for {context}, got {error}"),
                 Ok(_) => panic!("expected InvalidData for {context}"),
+            }
+        }
+    }
+
+    /// Roost names its labels with an `Aether` or `Roost` prefix, and both are refused in any
+    /// letter case.
+    #[test]
+    fn sign_authentication_transcript_refuses_reserved_prefixes_in_any_case() {
+        let store = key_store();
+        store.generate_identity().unwrap();
+
+        for prefix in ["Aether", "aether", "AETHER", "Roost", "roost", "ROOST"] {
+            let mut transcript = prefix.as_bytes().to_vec();
+            transcript.extend_from_slice(&[0x41; 32]);
+            match store.sign_authentication_transcript(transcript) {
+                Err(RoostError::InvalidData { .. }) => {}
+                other => panic!("expected InvalidData for {prefix}, got {other:?}"),
             }
         }
     }

@@ -32,11 +32,12 @@ fn setup() -> Setup {
     let alice_identity = generate_signing_key_pair(&mut rng);
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key_pair = generate_key_pair(&mut rng);
-    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS);
+    let bob_discovery =
+        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS).unwrap();
     let bob_rotated_discovery =
-        generate_discovery_key(&mut rng, &bob_identity, 1, CREATED_AT_SECS + 60);
+        generate_discovery_key(&mut rng, &bob_identity, 1, CREATED_AT_SECS + 60).unwrap();
     let bob_restored_discovery =
-        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS + 120);
+        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS + 120).unwrap();
     let alice_identity_key_pair = generate_key_pair(&mut rng);
 
     Setup {
@@ -88,7 +89,7 @@ fn alternate_contact_identity() -> ContactIdentity {
     let mut rng = ChaCha20Rng::from_seed([0x31; 32]);
     let identity = generate_signing_key_pair(&mut rng);
     let identity_key_pair = generate_key_pair(&mut rng);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS).unwrap();
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *identity_key_pair.public.as_bytes(),

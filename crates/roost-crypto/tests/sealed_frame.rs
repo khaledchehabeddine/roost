@@ -16,7 +16,7 @@ fn recipient_key() -> KeyPair {
 fn sealed_frame_authenticates_external_associated_data() {
     let mut rng = ChaCha20Rng::from_seed([0x10; 32]);
     let signing_key = generate_signing_key_pair(&mut rng);
-    let recipient = generate_discovery_key(&mut rng, &signing_key, 1, 1_700_000_000);
+    let recipient = generate_discovery_key(&mut rng, &signing_key, 1, 1_700_000_000).unwrap();
     let frame = seal_frame_with_associated_data(
         &mut rng,
         recipient.public_key(),

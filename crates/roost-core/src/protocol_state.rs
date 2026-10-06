@@ -1895,17 +1895,7 @@ fn load_delivered_inbox_authorization(
         return Ok(None);
     };
     let wire: LocalInboxAuthorizationWire =
-        postcard::from_bytes(blob.as_bytes()).map_err(|e| ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: e.to_string(),
-        })?;
-    if wire.version != LOCAL_INBOX_AUTHORIZATION_VERSION {
-        return Err(ProtocolStateError::UnsupportedBlobVersion {
-            address: address.clone(),
-            major: wire.version,
-            minor: 0,
-        });
-    }
+        decode_inbox_authorization(address, blob, LOCAL_INBOX_AUTHORIZATION_VERSION)?;
     Ok(Some(wire.generation))
 }
 
@@ -1917,21 +1907,41 @@ fn load_peer_inbox_authorization(
         return Ok(None);
     };
     let wire: PeerInboxAuthorizationWire =
-        postcard::from_bytes(blob.as_bytes()).map_err(|e| ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: e.to_string(),
-        })?;
-    if wire.version != PEER_INBOX_AUTHORIZATION_VERSION {
-        return Err(ProtocolStateError::UnsupportedBlobVersion {
-            address: address.clone(),
-            major: wire.version,
-            minor: 0,
-        });
-    }
+        decode_inbox_authorization(address, blob, PEER_INBOX_AUTHORIZATION_VERSION)?;
     Ok(Some(PeerInboxAuthorization {
         generation: wire.generation,
         capability: RecipientDeliveryCapability::from_bytes(wire.capability),
     }))
+}
+
+// Checks the leading version byte before decoding the rest, then rejects leftover bytes.
+fn decode_inbox_authorization<T: serde::de::DeserializeOwned>(
+    address: &ProtocolStateAddress,
+    blob: &ProtocolStateBlob,
+    version: u8,
+) -> Result<T, ProtocolStateError> {
+    let bytes = blob.as_bytes();
+    if let Some(&stored_version) = bytes.first()
+        && stored_version != version
+    {
+        return Err(ProtocolStateError::UnsupportedBlobVersion {
+            address: address.clone(),
+            major: stored_version,
+            minor: 0,
+        });
+    }
+    let (wire, trailing) =
+        postcard::take_from_bytes(bytes).map_err(|e| ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: e.to_string(),
+        })?;
+    if !trailing.is_empty() {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!("inbox authorization has {} trailing bytes", trailing.len()),
+        });
+    }
+    Ok(wire)
 }
 
 fn validate_persisted_deduplication_capacity(

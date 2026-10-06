@@ -52,6 +52,9 @@ pub enum DiscoveryKeyError {
     /// The stored discovery key is malformed and must be reset before a new one replaces it.
     #[error("stored discovery key is malformed")]
     Malformed,
+    /// Signing a new discovery key with the identity key failed.
+    #[error("signing the discovery key failed")]
+    DiscoveryKeySignature(#[source] SignatureError),
     /// The internal storage lock was poisoned by a panicked thread.
     #[error("internal lock poisoned")]
     LockPoisoned,
@@ -140,7 +143,8 @@ impl DiscoveryKeyManager {
         };
         let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
         let discovery_key =
-            generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs);
+            generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs)
+                .map_err(DiscoveryKeyError::DiscoveryKeySignature)?;
         // The capability rotates with the discovery key because both belong to one inbox
         // generation, and they are written in one store so they cannot diverge.
         let capability = generate_recipient_delivery_capability(rng);
@@ -538,7 +542,8 @@ mod tests {
     fn encode_decode_round_trip() {
         let identity = setup_with_identity().identity;
         let loaded = identity.load_identity().unwrap();
-        let original = generate_discovery_key(&mut OsRng, loaded.signing_key_pair(), 9, FIXED_NOW);
+        let original =
+            generate_discovery_key(&mut OsRng, loaded.signing_key_pair(), 9, FIXED_NOW).unwrap();
         let capability = generate_recipient_delivery_capability(&mut OsRng);
         let blob = encode_discovery_key(&original, &capability);
         assert_eq!(blob.len(), DISCOVERY_KEY_BLOB_LEN);

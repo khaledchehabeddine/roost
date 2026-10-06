@@ -205,9 +205,9 @@ impl From<SignedPreKeyError> for RoostError {
     fn from(e: SignedPreKeyError) -> Self {
         let reason = reason_from_chain(&e);
         match e {
-            SignedPreKeyError::Clock | SignedPreKeyError::LockPoisoned => {
-                RoostError::InternalError { reason }
-            }
+            SignedPreKeyError::Clock
+            | SignedPreKeyError::LockPoisoned
+            | SignedPreKeyError::SignedPreKeySignature(_) => RoostError::InternalError { reason },
             SignedPreKeyError::Corrupt => RoostError::Corrupt,
             SignedPreKeyError::Discovery(e) => RoostError::from(e).with_reason(reason),
             SignedPreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
@@ -256,9 +256,9 @@ impl From<DiscoveryKeyError> for RoostError {
     fn from(e: DiscoveryKeyError) -> Self {
         let reason = reason_from_chain(&e);
         match e {
-            DiscoveryKeyError::Clock | DiscoveryKeyError::LockPoisoned => {
-                RoostError::InternalError { reason }
-            }
+            DiscoveryKeyError::Clock
+            | DiscoveryKeyError::LockPoisoned
+            | DiscoveryKeyError::DiscoveryKeySignature(_) => RoostError::InternalError { reason },
             DiscoveryKeyError::Corrupt => RoostError::Corrupt,
             DiscoveryKeyError::Identity(e) => RoostError::from(e).with_reason(reason),
             DiscoveryKeyError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
@@ -381,9 +381,9 @@ impl From<RatchetStateError> for RoostError {
         match e {
             RatchetStateError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
             RatchetStateError::Encode => RoostError::InternalError { reason },
-            RatchetStateError::Decode | RatchetStateError::MaxSkippedKeysExceeded => {
-                RoostError::InvalidData { reason }
-            }
+            RatchetStateError::Decode
+            | RatchetStateError::MaxSkippedKeysExceeded
+            | RatchetStateError::TrailingBytes { .. } => RoostError::InvalidData { reason },
         }
     }
 }

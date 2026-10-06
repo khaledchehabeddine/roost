@@ -195,7 +195,7 @@ impl RatchetState {
         associated_data: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, RatchetError> {
         if let Some(plaintext) =
-            self.try_skipped_message_keys(ciphertext, header, associated_data)?
+            self.decrypt_with_skipped_message_key(ciphertext, header, associated_data)?
         {
             return Ok(plaintext);
         }
@@ -261,9 +261,18 @@ impl RatchetState {
                 .collect(),
             next_skipped_key_sequence: self.next_skipped_key_sequence,
         };
-        postcard::to_stdvec(&wire)
-            .map(Zeroizing::new)
-            .map_err(|_| RatchetStateError::Encode)
+        // Sized up front so the encoder writes into zeroizing memory and never grows a buffer that
+        // could leave secret copies behind.
+        let len = postcard::experimental::serialized_size(&wire)
+            .map_err(|_| RatchetStateError::Encode)?;
+        let mut bytes = Zeroizing::new(vec![0; len]);
+        let written = postcard::to_slice(&wire, &mut bytes)
+            .map_err(|_| RatchetStateError::Encode)?
+            .len();
+        if written != len {
+            return Err(RatchetStateError::Encode);
+        }
+        Ok(bytes)
     }
 
     /// Restores a session state from a blob produced by [`Self::to_bytes`].
@@ -275,8 +284,11 @@ impl RatchetState {
         if version != RATCHET_STATE_VERSION {
             return Err(RatchetStateError::UnsupportedVersion(version));
         }
-        let wire: RatchetStateWire =
-            postcard::from_bytes(bytes).map_err(|_| RatchetStateError::Decode)?;
+        let (wire, rest): (RatchetStateWire, &[u8]) =
+            postcard::take_from_bytes(bytes).map_err(|_| RatchetStateError::Decode)?;
+        if !rest.is_empty() {
+            return Err(RatchetStateError::TrailingBytes { len: rest.len() });
+        }
         if wire.skipped_message_keys.len() > MAX_SKIPPED_KEYS_TOTAL {
             return Err(RatchetStateError::MaxSkippedKeysExceeded);
         }
@@ -337,7 +349,7 @@ impl RatchetState {
     }
 
     // Puts the skipped key back when authentication fails, so tampered replays cannot burn it.
-    fn try_skipped_message_keys(
+    fn decrypt_with_skipped_message_key(
         &mut self,
         ciphertext: &[u8],
         header: &Header,
@@ -491,6 +503,12 @@ pub enum RatchetStateError {
     /// Persisted ratchet state exceeds the skipped-key cache limit.
     #[error("cached skipped message keys total exceeds global limit")]
     MaxSkippedKeysExceeded,
+    /// Persisted ratchet state has bytes left over after decoding.
+    #[error("ratchet state has {len} trailing bytes")]
+    TrailingBytes {
+        /// Number of bytes left over.
+        len: usize,
+    },
     /// Persisted ratchet state uses a format version this build does not understand.
     #[error("unsupported ratchet state format version: {0}")]
     UnsupportedVersion(u8),
@@ -1037,6 +1055,17 @@ mod tests {
         assert!(matches!(
             RatchetState::from_bytes(&bytes),
             Err(RatchetStateError::UnsupportedVersion(0xFF))
+        ));
+    }
+
+    #[test]
+    fn from_bytes_rejects_trailing_bytes() {
+        let (initiator, _, _, _) = setup_pair();
+        let mut bytes = initiator.to_bytes().unwrap().to_vec();
+        bytes.push(0);
+        assert!(matches!(
+            RatchetState::from_bytes(&bytes),
+            Err(RatchetStateError::TrailingBytes { len: 1 })
         ));
     }
 

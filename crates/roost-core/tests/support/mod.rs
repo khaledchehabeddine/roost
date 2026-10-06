@@ -387,10 +387,13 @@ pub fn setup(seed: [u8; 32]) -> Setup {
     let bob_identity = generate_signing_key_pair(&mut rng);
     let alice_identity_key = public_identity_key(&mut rng, &alice_identity);
     let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
-    let alice_discovery = generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT_SECS);
-    let bob_discovery = generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS);
+    let alice_discovery =
+        generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT_SECS).unwrap();
+    let bob_discovery =
+        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS).unwrap();
     let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT_SECS);
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT_SECS)
+            .unwrap();
     let bob_one_time_prekey =
         generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT_SECS);
     let prekey_bundle = PreKeyBundle {
@@ -450,6 +453,7 @@ fn discovery_key(signing_key: &SigningKeyPair, seed: u8) -> DiscoveryKey {
         0,
         CREATED_AT_SECS,
     )
+    .unwrap()
 }
 
 fn contact_identity(tag: u8, signing_key: &SigningKeyPair, discovery_seed: u8) -> ContactIdentity {

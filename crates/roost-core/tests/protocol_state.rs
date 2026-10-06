@@ -131,9 +131,9 @@ fn contact_identities() -> (ContactIdentity, ContactIdentity) {
     let identity = test_sender_identity_signing_key(0xa1);
     let identity_key_pair = test_identity_key_pair(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS).unwrap();
     let rotated_discovery_key =
-        generate_discovery_key(&mut rng, &identity, 1, CREATED_AT_SECS + 60);
+        generate_discovery_key(&mut rng, &identity, 1, CREATED_AT_SECS + 60).unwrap();
     let identity_key = ContactIdentityKey {
         x25519_public_key: *identity_key_pair.public.as_bytes(),
         ed25519_verifying_key: identity.verifying.to_bytes(),
@@ -157,7 +157,7 @@ fn accepted_contact_identity() -> ContactIdentity {
 fn accepted_contact_discovery_key() -> DiscoveryKey {
     let identity = test_sender_identity_signing_key(0xa1);
     let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
-    generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS)
+    generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS).unwrap()
 }
 
 fn accepted_contact_discovery_key_ref() -> &'static DiscoveryKey {
@@ -176,6 +176,7 @@ fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
         0,
         CREATED_AT_SECS,
     )
+    .unwrap()
 }
 
 fn acknowledgment_recipient_discovery_key_ref() -> &'static DiscoveryKey {
@@ -246,7 +247,7 @@ fn alternate_contact_identity() -> ContactIdentity {
     let identity = test_sender_identity_signing_key(0x77);
     let identity_key_pair = test_identity_key_pair(0x77);
     let mut rng = ChaCha20Rng::from_seed([0x73; 32]);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS);
+    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS).unwrap();
     ContactIdentity {
         identity_key: ContactIdentityKey {
             x25519_public_key: *identity_key_pair.public.as_bytes(),
