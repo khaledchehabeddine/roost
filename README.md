@@ -72,7 +72,7 @@ rate limiting, transport retries, or deniable mode. Roost makes no side-channel 
 With Xcode, `scripts/build-ios.sh` writes `target/ios/Roost-v<version>.xcframework.zip` with an
 arm64 device slice and an arm64 simulator slice.
 
-With JDK 17 or newer, Gradle 9.5.0 on your `PATH`, Android SDK 36, NDK r28c, and `cargo-ndk` 4.1.2,
+With JDK 17 or newer, Gradle 9.6.0 on your `PATH`, Android SDK 36, NDK r30, and `cargo-ndk` 4.1.2,
 and with `ANDROID_HOME` and `ANDROID_NDK_HOME` set, `scripts/build-android.sh` writes the
 `com.chirp:roost` AAR for arm64-v8a and x86_64 under `target/android/maven/`, with its POM, Gradle
 module metadata, and sources jar.

@@ -1,5 +1,5 @@
 plugins {
-    id("com.android.library") version "9.2.0"
+    id("com.android.library") version "9.4.1"
     `maven-publish`
 }
 
@@ -28,7 +28,7 @@ android {
 }
 
 dependencies {
-    api("net.java.dev.jna:jna:5.18.1@aar")
+    api("net.java.dev.jna:jna:5.19.1@aar")
 }
 
 publishing {
