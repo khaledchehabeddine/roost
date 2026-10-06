@@ -26,6 +26,7 @@ roost-core.workspace = true
 roost-protocol.workspace = true
 # Utility
 rand.workspace = true
+thiserror.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 zeroize.workspace = true
 

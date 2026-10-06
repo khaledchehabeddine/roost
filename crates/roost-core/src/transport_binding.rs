@@ -1,8 +1,5 @@
 //! Defines opaque caller-owned bytes authenticated with encrypted Messages.
 
-use std::error::Error;
-use std::fmt;
-
 const MAX_TRANSPORT_BINDING_LEN: usize = 1024;
 
 /// Opaque public bytes supplied by a Caller-Owned Transport.
@@ -53,11 +50,13 @@ pub struct PreKeySelection {
 }
 
 /// Errors returned while constructing a [`TransportBinding`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TransportBindingError {
     /// The caller supplied no bytes for an explicitly bound operation.
+    #[error("transport binding is empty")]
     Empty,
     /// The caller-supplied value exceeded the supported size limit.
+    #[error("transport binding length {length} exceeds {maximum}")]
     TooLong {
         /// Supplied byte length.
         length: usize,
@@ -65,16 +64,3 @@ pub enum TransportBindingError {
         maximum: usize,
     },
 }
-
-impl fmt::Display for TransportBindingError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => write!(f, "transport binding is empty"),
-            Self::TooLong { length, maximum } => {
-                write!(f, "transport binding length {length} exceeds {maximum}")
-            }
-        }
-    }
-}
-
-impl Error for TransportBindingError {}

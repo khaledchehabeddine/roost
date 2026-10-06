@@ -45,10 +45,13 @@ fn identity_reports_a_storage_failure_instead_of_absence() {
     let context = IdentityContext::new(storage.clone());
 
     storage.fail_next_load();
-    assert!(matches!(
-        context.identity(),
-        Err(RoostError::Storage { .. })
-    ));
+    match context.identity() {
+        Err(RoostError::Storage { reason }) => assert_eq!(
+            reason,
+            "prepared-operation storage failed: keychain unavailable"
+        ),
+        other => panic!("expected a storage error, got {other:?}"),
+    }
     assert_eq!(context.identity().unwrap(), None);
 }
 
@@ -90,6 +93,20 @@ fn restored_backup_publishes_only_after_inbox_rotation() {
     let one_time_prekeys = restored.prepare_one_time_prekeys(4).unwrap();
     assert_eq!(one_time_prekeys.one_time_prekeys.len(), 4);
     complete(&restored, one_time_prekeys.operation_id);
+}
+
+#[test]
+fn backup_import_reports_an_unknown_backup_version() {
+    let source = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let created = source.prepare_identity_creation().unwrap();
+    complete(&source, created.operation_id);
+    let mut backup = source.export_encrypted_backup(PASSPHRASE.into()).unwrap();
+    backup[0] = 0xFF;
+
+    let restored = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let result = restored.prepare_backup_import(backup, PASSPHRASE.into());
+
+    assert!(matches!(result, Err(RoostError::UnsupportedVersion { .. })));
 }
 
 #[test]

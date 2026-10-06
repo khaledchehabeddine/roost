@@ -11,8 +11,6 @@ use roost_crypto::{
     accept_with_associated_data, initiate_with_associated_data,
     initiator_identity_hint_with_associated_data, verify_discovery_to_identity_binding,
 };
-use std::error::Error;
-use std::fmt;
 use std::time::SystemTime;
 use zeroize::Zeroizing;
 
@@ -75,112 +73,35 @@ pub struct SessionAcceptanceResult {
 }
 
 /// Errors returned by Session establishment helpers.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SessionEstablishmentError {
     /// Loading local discovery-key state failed.
-    Discovery(DiscoveryKeyError),
+    #[error(transparent)]
+    Discovery(#[from] DiscoveryKeyError),
     /// The X3DH handshake failed.
-    Handshake(HandshakeError),
+    #[error(transparent)]
+    Handshake(#[from] HandshakeError),
     /// Loading local identity state failed.
-    Identity(IdentityError),
+    #[error(transparent)]
+    Identity(#[from] IdentityError),
     /// The peer's Discovery Key does not bind to its Identity Key.
-    PublicKey(PublicKeyError),
+    #[error(transparent)]
+    PublicKey(#[from] PublicKeyError),
     /// Message conversion failed.
-    Message(MessageError),
+    #[error(transparent)]
+    Message(#[from] MessageError),
     /// Loading or consuming local one-time-prekey state failed.
-    OneTimePreKey(OneTimePreKeyError),
+    #[error(transparent)]
+    OneTimePreKey(#[from] OneTimePreKeyError),
     /// Preparing the recoverable secure mutation failed.
-    Operation(KeyStoreOperationError),
+    #[error(transparent)]
+    Operation(#[from] KeyStoreOperationError),
     /// Encoding install updates failed.
-    ProtocolState(ProtocolStateError),
+    #[error(transparent)]
+    ProtocolState(#[from] ProtocolStateError),
     /// Loading local signed-prekey state failed.
-    SignedPreKey(SignedPreKeyError),
-}
-
-impl fmt::Display for SessionEstablishmentError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Discovery(e) => write!(f, "session establishment discovery key: {e}"),
-            Self::Handshake(e) => write!(f, "session establishment handshake: {e}"),
-            Self::Identity(e) => write!(f, "session establishment identity: {e}"),
-            Self::PublicKey(e) => write!(f, "session establishment public key: {e}"),
-            Self::Message(e) => write!(f, "session establishment message: {e}"),
-            Self::OneTimePreKey(e) => write!(f, "session establishment one-time pre-key: {e}"),
-            Self::Operation(e) => write!(f, "session establishment prepared operation: {e}"),
-            Self::ProtocolState(e) => write!(f, "session establishment protocol state: {e}"),
-            Self::SignedPreKey(e) => write!(f, "session establishment signed pre-key: {e}"),
-        }
-    }
-}
-
-impl Error for SessionEstablishmentError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Discovery(e) => Some(e),
-            Self::Handshake(e) => Some(e),
-            Self::Identity(e) => Some(e),
-            Self::PublicKey(e) => Some(e),
-            Self::Message(e) => Some(e),
-            Self::OneTimePreKey(e) => Some(e),
-            Self::Operation(e) => Some(e),
-            Self::ProtocolState(e) => Some(e),
-            Self::SignedPreKey(e) => Some(e),
-        }
-    }
-}
-
-impl From<HandshakeError> for SessionEstablishmentError {
-    fn from(e: HandshakeError) -> Self {
-        Self::Handshake(e)
-    }
-}
-
-impl From<PublicKeyError> for SessionEstablishmentError {
-    fn from(e: PublicKeyError) -> Self {
-        Self::PublicKey(e)
-    }
-}
-
-impl From<DiscoveryKeyError> for SessionEstablishmentError {
-    fn from(e: DiscoveryKeyError) -> Self {
-        Self::Discovery(e)
-    }
-}
-
-impl From<IdentityError> for SessionEstablishmentError {
-    fn from(e: IdentityError) -> Self {
-        Self::Identity(e)
-    }
-}
-
-impl From<MessageError> for SessionEstablishmentError {
-    fn from(e: MessageError) -> Self {
-        Self::Message(e)
-    }
-}
-
-impl From<OneTimePreKeyError> for SessionEstablishmentError {
-    fn from(e: OneTimePreKeyError) -> Self {
-        Self::OneTimePreKey(e)
-    }
-}
-
-impl From<KeyStoreOperationError> for SessionEstablishmentError {
-    fn from(e: KeyStoreOperationError) -> Self {
-        Self::Operation(e)
-    }
-}
-
-impl From<ProtocolStateError> for SessionEstablishmentError {
-    fn from(e: ProtocolStateError) -> Self {
-        Self::ProtocolState(e)
-    }
-}
-
-impl From<SignedPreKeyError> for SessionEstablishmentError {
-    fn from(e: SignedPreKeyError) -> Self {
-        Self::SignedPreKey(e)
-    }
+    #[error(transparent)]
+    SignedPreKey(#[from] SignedPreKeyError),
 }
 
 impl KeyStore {

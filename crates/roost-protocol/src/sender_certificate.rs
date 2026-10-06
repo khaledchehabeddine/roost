@@ -7,8 +7,6 @@ use crate::key_encoding::{
 };
 use crate::unix_time::from_unix_secs;
 use ed25519_dalek::{Signature, VerifyingKey};
-use std::error::Error;
-use std::fmt;
 use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 
@@ -115,29 +113,40 @@ pub struct ValidatedSenderCertificate {
 }
 
 /// Errors returned by sender certificate validation.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SenderCertificateValidationError {
     /// Certificate bytes are malformed.
+    #[error("sender certificate is malformed")]
     MalformedCertificate,
     /// The certificate names a different relay domain than the recipient expects.
+    #[error("sender certificate names an unexpected relay domain")]
     RelayDomainMismatch,
     /// A public-key byte field is not canonically encoded.
+    #[error("sender certificate key encoding is invalid")]
     InvalidKeyEncoding,
     /// The certificate names no known signing-key identifier.
+    #[error("sender certificate signing-key identifier is unknown")]
     UnknownSigningKeyId,
     /// The certificate names a known but currently untrusted signing-key identifier.
+    #[error("sender certificate signing-key identifier is untrusted")]
     UntrustedSigningKeyId,
     /// The trusted-key set contains the same signing-key identifier more than once.
+    #[error("sender certificate signing-key identifier is duplicated")]
     DuplicateSigningKeyId,
     /// The certificate signature does not verify under the matching trusted signing key.
+    #[error("sender certificate signature failed")]
     SignatureFailure,
     /// The revocation source is unavailable, so no revocation verdict is possible.
+    #[error("sender certificate revocation state is unavailable")]
     RevocationStateUnavailable,
     /// The certificate Identity Key is currently revoked.
+    #[error("sender certificate identity key is revoked")]
     RevokedIdentityKey,
     /// The certificate is expired outside the supplied grace window.
+    #[error("sender certificate is expired")]
     ExpiredCertificate,
     /// The supplied grace window exceeds [`MAX_CERTIFICATE_GRACE_WINDOW`].
+    #[error("sender certificate grace window {grace_window:?} exceeds {max:?}")]
     GraceWindowTooLarge {
         /// Grace window the caller supplied.
         grace_window: Duration,
@@ -145,39 +154,6 @@ pub enum SenderCertificateValidationError {
         max: Duration,
     },
 }
-
-impl fmt::Display for SenderCertificateValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MalformedCertificate => write!(f, "sender certificate is malformed"),
-            Self::RelayDomainMismatch => {
-                write!(f, "sender certificate names an unexpected relay domain")
-            }
-            Self::InvalidKeyEncoding => write!(f, "sender certificate key encoding is invalid"),
-            Self::UnknownSigningKeyId => {
-                write!(f, "sender certificate signing-key identifier is unknown")
-            }
-            Self::UntrustedSigningKeyId => {
-                write!(f, "sender certificate signing-key identifier is untrusted")
-            }
-            Self::DuplicateSigningKeyId => {
-                write!(f, "sender certificate signing-key identifier is duplicated")
-            }
-            Self::SignatureFailure => write!(f, "sender certificate signature failed"),
-            Self::RevocationStateUnavailable => {
-                write!(f, "sender certificate revocation state is unavailable")
-            }
-            Self::RevokedIdentityKey => write!(f, "sender certificate identity key is revoked"),
-            Self::ExpiredCertificate => write!(f, "sender certificate is expired"),
-            Self::GraceWindowTooLarge { grace_window, max } => write!(
-                f,
-                "sender certificate grace window {grace_window:?} exceeds {max:?}"
-            ),
-        }
-    }
-}
-
-impl Error for SenderCertificateValidationError {}
 
 struct ParsedSenderCertificate<'a> {
     signing_key_id: &'a [u8],

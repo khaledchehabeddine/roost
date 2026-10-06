@@ -5,8 +5,6 @@ use rand::{CryptoRng, RngCore};
 use roost_crypto::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 use roost_protocol::to_unix_secs;
 use std::collections::BTreeSet;
-use std::error::Error;
-use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 use subtle::ConstantTimeEq;
@@ -24,78 +22,78 @@ const ONE_TIME_PREKEY_POOL_HEADER_LEN: usize = 1 + 4 + 8 + 2;
 const ONE_TIME_PREKEY_ENTRY_LEN: usize = 8 + 32 + 8;
 
 /// Errors returned by one-time-pre-key operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum OneTimePreKeyError {
     /// Stored data uses an unsupported format version.
+    #[error("unsupported stored format version: {0}")]
     UnsupportedVersion(u8),
     /// The system clock is before the Unix epoch.
+    #[error("system clock is before Unix epoch")]
     Clock,
     /// Loading the discovery key returned a [`DiscoveryKeyError`].
-    Discovery(DiscoveryKeyError),
+    #[error("loading the discovery key failed")]
+    Discovery(#[from] DiscoveryKeyError),
     /// Backup restoration requires a new inbox generation before prekeys may be used.
+    #[error("inbox rotation required before using restored pre-key state")]
     InboxRotationRequired,
-    /// Stored one-time-pre-key pool data is malformed.
-    InvalidData(String),
+    /// A requested batch doesn't fit the pool's free slots.
+    #[error("one-time pre-key batch of {requested} exceeds the {available} free slots")]
+    BatchExceedsCapacity {
+        /// Requested batch size.
+        requested: usize,
+        /// Free slots in the pool.
+        available: usize,
+    },
+    /// The stored pool is shorter than its header.
+    #[error("one-time pre-key pool is {len} bytes, shorter than {min_len}")]
+    BlobTooShort {
+        /// Stored length in bytes.
+        len: usize,
+        /// Shortest accepted length in bytes.
+        min_len: usize,
+    },
+    /// The stored pool repeats an identifier.
+    #[error("duplicate one-time pre-key identifier {0}")]
+    DuplicateId(u64),
+    /// Every one-time-pre-key identifier has been used.
+    #[error("one-time pre-key identifier space exhausted")]
+    IdentifiersExhausted,
+    /// A stored one-time pre-key's identifier isn't below the pool's next identifier.
+    #[error("one-time pre-key identifier {id} is not below next identifier {next_id}")]
+    IdNotBelowNextId {
+        /// Stored identifier.
+        id: u64,
+        /// Pool's next identifier.
+        next_id: u64,
+    },
+    /// The stored pool's length doesn't match its entry count.
+    #[error("one-time pre-key pool is {actual} bytes, expected {expected}")]
+    InvalidBlobLength {
+        /// Expected length in bytes.
+        expected: usize,
+        /// Stored length in bytes.
+        actual: usize,
+    },
     /// The internal storage lock was poisoned by a panicked thread.
+    #[error("internal lock poisoned")]
     LockPoisoned,
     /// The requested one-time pre-key is absent or already consumed.
+    #[error("one-time pre-key not found")]
     NotFound,
     /// The requested one-time pre-key belongs to another discovery-key epoch.
+    #[error("one-time pre-key belongs to a superseded discovery-key epoch")]
     StaleEpoch,
+    /// The stored pool holds more one-time pre-keys than the limit allows.
+    #[error("{count} stored one-time pre-keys exceed the limit of {max}")]
+    TooManyPreKeys {
+        /// Stored count.
+        count: usize,
+        /// Largest accepted count.
+        max: usize,
+    },
     /// The underlying [`SecureStorage`] returned an error.
-    Storage(StorageError),
-}
-
-impl fmt::Display for OneTimePreKeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OneTimePreKeyError::UnsupportedVersion(version) => {
-                write!(f, "unsupported stored format version: {version}")
-            }
-            OneTimePreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
-            OneTimePreKeyError::Discovery(e) => write!(f, "discovery key: {e}"),
-            OneTimePreKeyError::InboxRotationRequired => {
-                write!(
-                    f,
-                    "inbox rotation required before using restored pre-key state"
-                )
-            }
-            OneTimePreKeyError::InvalidData(reason) => {
-                write!(f, "invalid one-time pre-key data: {reason}")
-            }
-            OneTimePreKeyError::LockPoisoned => write!(f, "internal lock poisoned"),
-            OneTimePreKeyError::NotFound => write!(f, "one-time pre-key not found"),
-            OneTimePreKeyError::StaleEpoch => {
-                write!(
-                    f,
-                    "one-time pre-key belongs to a superseded discovery-key epoch"
-                )
-            }
-            OneTimePreKeyError::Storage(e) => write!(f, "storage: {e}"),
-        }
-    }
-}
-
-impl Error for OneTimePreKeyError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            OneTimePreKeyError::Discovery(e) => Some(e),
-            OneTimePreKeyError::Storage(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<DiscoveryKeyError> for OneTimePreKeyError {
-    fn from(e: DiscoveryKeyError) -> Self {
-        OneTimePreKeyError::Discovery(e)
-    }
-}
-
-impl From<StorageError> for OneTimePreKeyError {
-    fn from(e: StorageError) -> Self {
-        OneTimePreKeyError::Storage(e)
-    }
+    #[error("one-time pre-key storage failed")]
+    Storage(#[from] StorageError),
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -281,18 +279,20 @@ fn append_batch<R: RngCore + CryptoRng>(
 ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
     let available = MAX_ONE_TIME_PREKEYS - pool.entries.len();
     if batch_size > available {
-        return Err(OneTimePreKeyError::InvalidData(format!(
-            "one-time pre-key batch exceeds capacity: requested {batch_size}, available {available}"
-        )));
+        return Err(OneTimePreKeyError::BatchExceedsCapacity {
+            requested: batch_size,
+            available,
+        });
     }
 
     let mut bundles = Vec::with_capacity(batch_size);
     for _ in 0..batch_size {
         let id = pool.next_id;
         // A corrupt stored counter can still overflow.
-        pool.next_id = pool.next_id.checked_add(1).ok_or_else(|| {
-            OneTimePreKeyError::InvalidData("one-time pre-key id overflow".into())
-        })?;
+        pool.next_id = pool
+            .next_id
+            .checked_add(1)
+            .ok_or(OneTimePreKeyError::IdentifiersExhausted)?;
         let one_time_prekey = generate_one_time_prekey(rng, id, epoch, created_at_secs);
         pool.entries.push(OneTimePreKeyEntry {
             id,
@@ -326,10 +326,10 @@ fn decode_pool(raw: &[u8]) -> Result<OneTimePreKeyPool, OneTimePreKeyError> {
         return Err(OneTimePreKeyError::InboxRotationRequired);
     }
     if raw.len() < ONE_TIME_PREKEY_POOL_HEADER_LEN {
-        return Err(OneTimePreKeyError::InvalidData(format!(
-            "expected at least {ONE_TIME_PREKEY_POOL_HEADER_LEN} bytes, got {}",
-            raw.len()
-        )));
+        return Err(OneTimePreKeyError::BlobTooShort {
+            len: raw.len(),
+            min_len: ONE_TIME_PREKEY_POOL_HEADER_LEN,
+        });
     }
     if raw[0] != ONE_TIME_PREKEY_POOL_VERSION {
         return Err(OneTimePreKeyError::UnsupportedVersion(raw[0]));
@@ -338,16 +338,17 @@ fn decode_pool(raw: &[u8]) -> Result<OneTimePreKeyPool, OneTimePreKeyError> {
     count_bytes.copy_from_slice(&raw[13..15]);
     let count = u16::from_be_bytes(count_bytes) as usize;
     if count > MAX_ONE_TIME_PREKEYS {
-        return Err(OneTimePreKeyError::InvalidData(format!(
-            "one-time pre-key count exceeds limit: {count}"
-        )));
+        return Err(OneTimePreKeyError::TooManyPreKeys {
+            count,
+            max: MAX_ONE_TIME_PREKEYS,
+        });
     }
     let expected_len = ONE_TIME_PREKEY_POOL_HEADER_LEN + count * ONE_TIME_PREKEY_ENTRY_LEN;
     if raw.len() != expected_len {
-        return Err(OneTimePreKeyError::InvalidData(format!(
-            "expected {expected_len} bytes, got {}",
-            raw.len()
-        )));
+        return Err(OneTimePreKeyError::InvalidBlobLength {
+            expected: expected_len,
+            actual: raw.len(),
+        });
     }
 
     let mut epoch_bytes = [0u8; 4];
@@ -364,14 +365,10 @@ fn decode_pool(raw: &[u8]) -> Result<OneTimePreKeyPool, OneTimePreKeyError> {
         id_bytes.copy_from_slice(&raw[offset..offset + 8]);
         let id = u64::from_be_bytes(id_bytes);
         if id >= next_id {
-            return Err(OneTimePreKeyError::InvalidData(format!(
-                "one-time pre-key id is not below next id: {id}"
-            )));
+            return Err(OneTimePreKeyError::IdNotBelowNextId { id, next_id });
         }
         if !ids.insert(id) {
-            return Err(OneTimePreKeyError::InvalidData(format!(
-                "duplicate one-time pre-key id: {id}"
-            )));
+            return Err(OneTimePreKeyError::DuplicateId(id));
         }
         offset += 8;
         let mut secret = [0u8; 32];
@@ -511,7 +508,10 @@ mod tests {
 
         assert!(matches!(
             manager.generate_batch(&mut OsRng, 1, fixed_now()),
-            Err(OneTimePreKeyError::InvalidData(reason)) if reason.contains("capacity")
+            Err(OneTimePreKeyError::BatchExceedsCapacity {
+                requested: 1,
+                available: 0
+            })
         ));
         assert_eq!(
             manager
@@ -537,7 +537,7 @@ mod tests {
 
         assert!(matches!(
             manager.generate_batch(&mut OsRng, 1, fixed_now()),
-            Err(OneTimePreKeyError::InvalidData(reason)) if reason.contains("overflow")
+            Err(OneTimePreKeyError::IdentifiersExhausted)
         ));
         assert_eq!(
             manager
@@ -564,7 +564,8 @@ mod tests {
         );
         assert!(matches!(
             decode_pool(&raw),
-            Err(OneTimePreKeyError::InvalidData(_))
+            Err(OneTimePreKeyError::TooManyPreKeys { count, max: MAX_ONE_TIME_PREKEYS })
+                if count == MAX_ONE_TIME_PREKEYS + 1
         ));
     }
 
@@ -575,7 +576,10 @@ mod tests {
         raw[13..15].copy_from_slice(&1u16.to_be_bytes());
         assert!(matches!(
             decode_pool(&raw),
-            Err(OneTimePreKeyError::InvalidData(_))
+            Err(OneTimePreKeyError::InvalidBlobLength {
+                expected,
+                actual: ONE_TIME_PREKEY_POOL_HEADER_LEN,
+            }) if expected == ONE_TIME_PREKEY_POOL_HEADER_LEN + ONE_TIME_PREKEY_ENTRY_LEN
         ));
     }
 
@@ -586,7 +590,7 @@ mod tests {
         raw.extend_from_slice(&encoded_entry(0, 2));
         assert!(matches!(
             decode_pool(&raw),
-            Err(OneTimePreKeyError::InvalidData(_))
+            Err(OneTimePreKeyError::DuplicateId(0))
         ));
     }
 
@@ -596,7 +600,7 @@ mod tests {
         raw.extend_from_slice(&encoded_entry(1, 1));
         assert!(matches!(
             decode_pool(&raw),
-            Err(OneTimePreKeyError::InvalidData(_))
+            Err(OneTimePreKeyError::IdNotBelowNextId { id: 1, next_id: 1 })
         ));
     }
 }

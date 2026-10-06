@@ -6,8 +6,7 @@ use roost_crypto::{
     KeyPair, PublicIdentityKey, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
     generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
 };
-use std::error::Error;
-use std::fmt;
+use roost_protocol::SignatureError;
 use std::sync::{Arc, Mutex, MutexGuard};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
@@ -20,55 +19,89 @@ const IDENTITY_X25519_KEY: &str = "identity/x25519";
 const IDENTITY_ED25519_KEY: &str = "identity/ed25519";
 
 /// Errors returned by identity operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum IdentityError {
     /// Stored data uses an unsupported format version.
+    #[error("unsupported stored format version: {0}")]
     UnsupportedVersion(u8),
+    /// An encrypted backup uses a format version this build does not understand.
+    #[error("unsupported backup format version: {0}")]
+    UnsupportedBackupVersion(u8),
     /// An identity is already stored.
+    #[error("identity already exists")]
     AlreadyExists,
-    /// Encrypted backup creation failed during randomness, key derivation, or encryption.
-    BackupFailed(String),
+    /// Encrypting the backup failed.
+    #[error("backup encryption failed")]
+    BackupEncryption,
+    /// Argon2id failed to derive the backup key.
+    #[error("backup key derivation failed")]
+    BackupKeyDerivation(#[source] argon2::Error),
+    /// A backup's Argon2id parameters are outside the range this build accepts.
+    #[error(
+        "backup Argon2id parameters are out of range: {memory_kib} KiB, {iterations} iterations, \
+         parallelism {parallelism}"
+    )]
+    BackupParametersOutOfRange {
+        /// Memory cost in KiB.
+        memory_kib: u32,
+        /// Number of iterations.
+        iterations: u32,
+        /// Degree of parallelism.
+        parallelism: u32,
+    },
+    /// A decrypted backup is too short to hold an Identity Key.
+    #[error("decrypted backup is {len} bytes, shorter than {min_len}")]
+    BackupPlaintextTooShort {
+        /// Decrypted length in bytes.
+        len: usize,
+        /// Shortest accepted length in bytes.
+        min_len: usize,
+    },
+    /// The random number generator failed while creating a backup.
+    #[error("backup randomness failed")]
+    BackupRandomness(#[source] rand::Error),
+    /// A backup is too short to hold its header.
+    #[error("backup is {len} bytes, shorter than its {min_len}-byte header")]
+    BackupTooShort {
+        /// Backup length in bytes.
+        len: usize,
+        /// Header length in bytes.
+        min_len: usize,
+    },
+    /// Signing the binding between the Identity Key's halves failed.
+    #[error("signing the identity key binding failed")]
+    BindingSignature(#[source] SignatureError),
     /// Only one of the two identity keys is present in storage.
+    #[error("identity data is corrupt")]
     Corrupt,
     /// Backup decryption failed because the passphrase or ciphertext was invalid.
+    #[error("decryption failed: wrong passphrase or corrupt backup")]
     DecryptionFailed,
-    /// Stored identity or backup bytes are malformed.
-    InvalidData(String),
+    /// The stored Identity Secret Blob has the wrong length.
+    #[error("identity secret blob is {actual} bytes, expected {expected}")]
+    InvalidBlobLength {
+        /// Expected length in bytes.
+        expected: usize,
+        /// Stored length in bytes.
+        actual: usize,
+    },
+    /// A stored identity key half has the wrong length.
+    #[error("identity key is {actual} bytes, expected {expected}")]
+    InvalidKeyLength {
+        /// Expected length in bytes.
+        expected: usize,
+        /// Stored length in bytes.
+        actual: usize,
+    },
     /// The internal storage lock was poisoned by a panicked thread.
+    #[error("internal lock poisoned")]
     LockPoisoned,
     /// No identity is stored.
+    #[error("no identity found")]
     NotFound,
     /// The underlying [`SecureStorage`] returned an error.
-    Storage(StorageError),
-}
-
-impl fmt::Display for IdentityError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            IdentityError::UnsupportedVersion(version) => {
-                write!(f, "unsupported stored format version: {version}")
-            }
-            IdentityError::AlreadyExists => write!(f, "identity already exists"),
-            IdentityError::BackupFailed(reason) => write!(f, "backup failed: {reason}"),
-            IdentityError::Corrupt => write!(f, "identity data is corrupt"),
-            IdentityError::DecryptionFailed => {
-                write!(f, "decryption failed: wrong passphrase or corrupt backup")
-            }
-            IdentityError::InvalidData(reason) => write!(f, "invalid identity data: {reason}"),
-            IdentityError::LockPoisoned => write!(f, "internal lock poisoned"),
-            IdentityError::NotFound => write!(f, "no identity found"),
-            IdentityError::Storage(err) => write!(f, "storage error: {err}"),
-        }
-    }
-}
-
-impl Error for IdentityError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            IdentityError::Storage(e) => Some(e),
-            _ => None,
-        }
-    }
+    #[error("identity storage failed")]
+    Storage(#[from] StorageError),
 }
 
 /// A local identity containing X25519 and Ed25519 key pairs.
@@ -93,9 +126,8 @@ impl Identity {
     /// together.
     pub fn public(&self) -> Result<PublicIdentityKey, IdentityError> {
         let binding_signature =
-            sign_identity_key_binding(&self.signing_key_pair, &self.key_pair.public).map_err(
-                |_| IdentityError::InvalidData("identity binding signature failed".into()),
-            )?;
+            sign_identity_key_binding(&self.signing_key_pair, &self.key_pair.public)
+                .map_err(IdentityError::BindingSignature)?;
         Ok(PublicIdentityKey {
             public_key: PublicKey::from(*self.key_pair.public.as_bytes()),
             verifying_key: self.signing_key_pair.verifying,
@@ -149,9 +181,7 @@ impl IdentityManager {
             &key_pair.to_secret_bytes(),
             &signing_key_pair.to_signing_bytes(),
         );
-        storage
-            .store(IDENTITY_CURRENT_KEY, &*blob)
-            .map_err(map_storage_err)?;
+        storage.store(IDENTITY_CURRENT_KEY, &*blob)?;
         Ok(Identity {
             key_pair,
             signing_key_pair,
@@ -169,65 +199,52 @@ impl IdentityManager {
     // Use `KeyStore::prepare_identity_deletion` to clear dependent key material before identity.
     pub(crate) fn reset(&self) -> Result<(), IdentityError> {
         let mut storage = self.lock_storage()?;
-        storage
-            .delete(IDENTITY_X25519_KEY)
-            .map_err(map_storage_err)?;
-        storage
-            .delete(IDENTITY_ED25519_KEY)
-            .map_err(map_storage_err)?;
-        storage
-            .delete(IDENTITY_CURRENT_KEY)
-            .map_err(map_storage_err)?;
+        storage.delete(IDENTITY_X25519_KEY)?;
+        storage.delete(IDENTITY_ED25519_KEY)?;
+        storage.delete(IDENTITY_CURRENT_KEY)?;
         Ok(())
     }
 
     fn load_identity_key_bytes(&self) -> Result<IdentityKeyBytes, IdentityError> {
         let storage = self.lock_storage()?;
-        if let Some(blob) = storage
-            .load(IDENTITY_CURRENT_KEY)
-            .map_err(map_storage_err)?
-        {
+        if let Some(blob) = storage.load(IDENTITY_CURRENT_KEY)? {
             return decode_identity_key_blob(&blob);
         }
 
         let (x25519_vec, ed25519_vec) = match (
-            storage.load(IDENTITY_X25519_KEY).map_err(map_storage_err)?,
-            storage
-                .load(IDENTITY_ED25519_KEY)
-                .map_err(map_storage_err)?,
+            storage.load(IDENTITY_X25519_KEY)?,
+            storage.load(IDENTITY_ED25519_KEY)?,
         ) {
             (None, None) => return Err(IdentityError::NotFound),
             (Some(_), None) | (None, Some(_)) => return Err(IdentityError::Corrupt),
             (Some(x25519), Some(ed25519)) => (x25519, ed25519),
         };
-        let x25519_bytes: [u8; 32] = x25519_vec
-            .as_slice()
-            .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid X25519 key length".into()))?;
-        let ed25519_bytes: [u8; 32] = ed25519_vec
-            .as_slice()
-            .try_into()
-            .map_err(|_| IdentityError::InvalidData("invalid Ed25519 key length".into()))?;
+        let x25519_bytes: [u8; 32] =
+            x25519_vec
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityError::InvalidKeyLength {
+                    expected: 32,
+                    actual: x25519_vec.len(),
+                })?;
+        let ed25519_bytes: [u8; 32] =
+            ed25519_vec
+                .as_slice()
+                .try_into()
+                .map_err(|_| IdentityError::InvalidKeyLength {
+                    expected: 32,
+                    actual: ed25519_vec.len(),
+                })?;
         Ok((Zeroizing::new(x25519_bytes), Zeroizing::new(ed25519_bytes)))
     }
 }
 
 fn has_identity_entry(storage: &dyn SecureStorage) -> Result<bool, IdentityError> {
-    if storage
-        .load(IDENTITY_CURRENT_KEY)
-        .map_err(map_storage_err)?
-        .is_some()
-    {
+    if storage.load(IDENTITY_CURRENT_KEY)?.is_some() {
         return Ok(true);
     }
-    Ok(storage
-        .load(IDENTITY_X25519_KEY)
-        .map_err(map_storage_err)?
-        .is_some()
-        || storage
-            .load(IDENTITY_ED25519_KEY)
-            .map_err(map_storage_err)?
-            .is_some())
+    Ok(storage.load(IDENTITY_X25519_KEY)?.is_some()
+        || storage.load(IDENTITY_ED25519_KEY)?.is_some())
 }
 
 fn encode_identity_key_blob(
@@ -242,12 +259,12 @@ fn encode_identity_key_blob(
 }
 
 fn decode_identity_key_blob(raw: &[u8]) -> Result<IdentityKeyBytes, IdentityError> {
-    let blob: &[u8; IDENTITY_KEY_BLOB_LEN] = raw.try_into().map_err(|_| {
-        IdentityError::InvalidData(format!(
-            "expected {IDENTITY_KEY_BLOB_LEN} bytes, got {}",
-            raw.len()
-        ))
-    })?;
+    let blob: &[u8; IDENTITY_KEY_BLOB_LEN] =
+        raw.try_into()
+            .map_err(|_| IdentityError::InvalidBlobLength {
+                expected: IDENTITY_KEY_BLOB_LEN,
+                actual: raw.len(),
+            })?;
     if blob[0] != IDENTITY_KEY_BLOB_VERSION {
         return Err(IdentityError::UnsupportedVersion(blob[0]));
     }
@@ -257,10 +274,6 @@ fn decode_identity_key_blob(raw: &[u8]) -> Result<IdentityKeyBytes, IdentityErro
     let mut ed25519 = [0u8; 32];
     ed25519.copy_from_slice(&blob[33..IDENTITY_KEY_BLOB_LEN]);
     Ok((Zeroizing::new(x25519), Zeroizing::new(ed25519)))
-}
-
-fn map_storage_err(e: StorageError) -> IdentityError {
-    IdentityError::Storage(e)
 }
 
 #[cfg(test)]

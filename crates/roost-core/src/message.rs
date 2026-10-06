@@ -1,6 +1,3 @@
-use std::error::Error;
-use std::fmt;
-
 use crate::hardening::ProtocolHardeningLimits;
 use roost_crypto::{SealedFrame, SealedFramePreKeyReference};
 
@@ -95,43 +92,30 @@ impl Message {
 }
 
 /// An error returned by message encoding or decoding.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MessageError {
     /// Message bytes failed structural decoding.
+    #[error("message bytes failed to decode")]
     Decode,
     /// Encoded message bytes exceed the configured size cap.
+    #[error("message bytes exceed size limit")]
     EncodedTooLarge,
     /// Message bytes failed to encode.
+    #[error("message failed to encode")]
     Encode,
     /// A public-key field did not contain exactly 32 bytes.
+    #[error("message public key field is invalid")]
     InvalidPublicKey,
     /// The payload exceeds the message payload size cap.
+    #[error("message payload exceeds size limit")]
     PayloadTooLarge,
     /// Encoded message bytes use a payload-kind tag this build does not understand.
+    #[error("unsupported message payload kind: {0}")]
     UnsupportedPayloadKind(u8),
     /// Encoded message bytes use a format version this build does not understand.
+    #[error("unsupported message format version: {0}")]
     UnsupportedVersion(u8),
 }
-
-impl fmt::Display for MessageError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MessageError::Decode => write!(f, "message bytes failed to decode"),
-            MessageError::EncodedTooLarge => write!(f, "message bytes exceed size limit"),
-            MessageError::Encode => write!(f, "message failed to encode"),
-            MessageError::InvalidPublicKey => write!(f, "message public key field is invalid"),
-            MessageError::PayloadTooLarge => write!(f, "message payload exceeds size limit"),
-            MessageError::UnsupportedPayloadKind(kind) => {
-                write!(f, "unsupported message payload kind: {kind}")
-            }
-            MessageError::UnsupportedVersion(version) => {
-                write!(f, "unsupported message format version: {version}")
-            }
-        }
-    }
-}
-
-impl Error for MessageError {}
 
 #[cfg(test)]
 mod tests {

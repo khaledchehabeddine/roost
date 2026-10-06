@@ -5,9 +5,7 @@ use roost_crypto::{
     DiscoveryKey, PublicDiscoveryKey, RecipientDeliveryCapability, Signature, SigningKeyPair,
     generate_discovery_key, generate_recipient_delivery_capability, verify_public_discovery_key,
 };
-use roost_protocol::to_unix_secs;
-use std::error::Error;
-use std::fmt;
+use roost_protocol::{SignatureError, to_unix_secs};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 use zeroize::Zeroizing;
@@ -25,71 +23,44 @@ const CAPABILITY_OFFSET: usize = 141;
 const FIRST_INBOX_GENERATION: u32 = 1;
 
 /// Errors returned by discovery-key operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DiscoveryKeyError {
     /// Stored data uses an unsupported format version.
+    #[error("unsupported stored format version: {0}")]
     UnsupportedVersion(u8),
     /// The system clock is before the Unix epoch.
+    #[error("system clock is before Unix epoch")]
     Clock,
     /// The stored discovery key's signature does not verify against the identity key.
+    #[error("stored discovery-key signature does not match the identity key")]
     Corrupt,
     /// Loading the identity for discovery-key signing or verification returned an
     /// [`IdentityError`].
-    Identity(IdentityError),
-    /// Stored discovery-key data is malformed.
-    InvalidData(String),
+    #[error("loading the identity failed")]
+    Identity(#[from] IdentityError),
+    /// Signing the discovery-to-identity binding failed.
+    #[error("signing the discovery-to-identity binding failed")]
+    IdentityBindingSignature(#[source] SignatureError),
+    /// A discovery-key blob has the wrong length.
+    #[error("discovery-key blob is {actual} bytes, expected {expected}")]
+    InvalidBlobLength {
+        /// Expected length in bytes.
+        expected: usize,
+        /// Supplied length in bytes.
+        actual: usize,
+    },
+    /// The stored discovery key is malformed and must be reset before a new one replaces it.
+    #[error("stored discovery key is malformed")]
+    Malformed,
     /// The internal storage lock was poisoned by a panicked thread.
+    #[error("internal lock poisoned")]
     LockPoisoned,
     /// No discovery key is stored.
+    #[error("no discovery key stored")]
     NotFound,
     /// The underlying [`SecureStorage`] returned an error.
-    Storage(StorageError),
-}
-
-impl fmt::Display for DiscoveryKeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DiscoveryKeyError::UnsupportedVersion(version) => {
-                write!(f, "unsupported stored format version: {version}")
-            }
-            DiscoveryKeyError::Clock => write!(f, "system clock is before Unix epoch"),
-            DiscoveryKeyError::Corrupt => {
-                write!(
-                    f,
-                    "stored discovery-key signature does not match the identity key"
-                )
-            }
-            DiscoveryKeyError::Identity(e) => write!(f, "identity: {e}"),
-            DiscoveryKeyError::InvalidData(reason) => {
-                write!(f, "invalid discovery-key data: {reason}")
-            }
-            DiscoveryKeyError::LockPoisoned => write!(f, "internal lock poisoned"),
-            DiscoveryKeyError::NotFound => write!(f, "no discovery key stored"),
-            DiscoveryKeyError::Storage(e) => write!(f, "storage: {e}"),
-        }
-    }
-}
-
-impl Error for DiscoveryKeyError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            DiscoveryKeyError::Identity(e) => Some(e),
-            DiscoveryKeyError::Storage(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<IdentityError> for DiscoveryKeyError {
-    fn from(e: IdentityError) -> Self {
-        DiscoveryKeyError::Identity(e)
-    }
-}
-
-impl From<StorageError> for DiscoveryKeyError {
-    fn from(e: StorageError) -> Self {
-        DiscoveryKeyError::Storage(e)
-    }
+    #[error("discovery-key storage failed")]
+    Storage(#[from] StorageError),
 }
 
 pub(crate) enum DiscoveryKeyStatus {
@@ -139,9 +110,7 @@ impl DiscoveryKeyManager {
         let identity = self.identity.load_identity()?;
         discovery_key
             .sign_identity_binding(&identity.public()?)
-            .map_err(|e| {
-                DiscoveryKeyError::InvalidData(format!("discovery-to-identity binding: {e}"))
-            })
+            .map_err(DiscoveryKeyError::IdentityBindingSignature)
     }
 
     pub(crate) fn stored_status(&self) -> Result<DiscoveryKeyStatus, DiscoveryKeyError> {
@@ -167,11 +136,7 @@ impl DiscoveryKeyManager {
         let epoch = match self.stored_status()? {
             DiscoveryKeyStatus::Absent => FIRST_INBOX_GENERATION,
             DiscoveryKeyStatus::Present { epoch } => epoch.saturating_add(1),
-            DiscoveryKeyStatus::Malformed => {
-                return Err(DiscoveryKeyError::InvalidData(
-                    "stored discovery key is malformed, must reset before rotating".into(),
-                ));
-            }
+            DiscoveryKeyStatus::Malformed => return Err(DiscoveryKeyError::Malformed),
         };
         let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
         let discovery_key =
@@ -258,12 +223,12 @@ impl DiscoveryKeyManager {
 }
 
 fn checked_blob(raw: &[u8]) -> Result<&[u8; DISCOVERY_KEY_BLOB_LEN], DiscoveryKeyError> {
-    let blob: &[u8; DISCOVERY_KEY_BLOB_LEN] = raw.try_into().map_err(|_| {
-        DiscoveryKeyError::InvalidData(format!(
-            "expected {DISCOVERY_KEY_BLOB_LEN} bytes, got {}",
-            raw.len()
-        ))
-    })?;
+    let blob: &[u8; DISCOVERY_KEY_BLOB_LEN] =
+        raw.try_into()
+            .map_err(|_| DiscoveryKeyError::InvalidBlobLength {
+                expected: DISCOVERY_KEY_BLOB_LEN,
+                actual: raw.len(),
+            })?;
     if blob[0] != DISCOVERY_KEY_VERSION {
         return Err(DiscoveryKeyError::UnsupportedVersion(blob[0]));
     }
@@ -366,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn current_returns_invalid_data_for_malformed_blob() {
+    fn current_rejects_blob_of_wrong_length() {
         let discovery = setup_with_identity().manager;
         discovery
             .lock_storage()
@@ -375,7 +340,10 @@ mod tests {
             .unwrap();
         assert!(matches!(
             discovery.current(),
-            Err(DiscoveryKeyError::InvalidData(_))
+            Err(DiscoveryKeyError::InvalidBlobLength {
+                expected: DISCOVERY_KEY_BLOB_LEN,
+                actual: 50
+            })
         ));
     }
 
@@ -535,7 +503,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             discovery.rotate_now(&mut OsRng, fixed_now()),
-            Err(DiscoveryKeyError::InvalidData(_))
+            Err(DiscoveryKeyError::Malformed)
         ));
     }
 
@@ -632,7 +600,10 @@ mod tests {
         assert!(DiscoveryKeyManager::validate_blob(&blob).is_ok());
         assert!(matches!(
             DiscoveryKeyManager::validate_blob(&[0xAAu8; 50]),
-            Err(DiscoveryKeyError::InvalidData(_))
+            Err(DiscoveryKeyError::InvalidBlobLength {
+                expected: DISCOVERY_KEY_BLOB_LEN,
+                actual: 50
+            })
         ));
     }
 
@@ -641,7 +612,10 @@ mod tests {
         let discovery = setup_with_identity().manager;
         assert!(matches!(
             discovery.restore_from_blob(&[0xAAu8; 50]),
-            Err(DiscoveryKeyError::InvalidData(_))
+            Err(DiscoveryKeyError::InvalidBlobLength {
+                expected: DISCOVERY_KEY_BLOB_LEN,
+                actual: 50
+            })
         ));
     }
 }

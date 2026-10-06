@@ -1,28 +1,18 @@
 //! Shared context framing and Ed25519 verification.
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use std::{error::Error, fmt};
 use zeroize::Zeroizing;
 
 /// An error returned while framing or verifying a signature.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SignatureError {
     /// The signature context is empty or the combined length overflows.
+    #[error("signature context is invalid")]
     InvalidSignatureContext,
     /// The signature does not authenticate the supplied bytes.
+    #[error("signature verification failed")]
     SignatureInvalid,
 }
-
-impl fmt::Display for SignatureError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidSignatureContext => write!(f, "signature context is invalid"),
-            Self::SignatureInvalid => write!(f, "signature verification failed"),
-        }
-    }
-}
-
-impl Error for SignatureError {}
 
 /// Verifies a signature over caller-supplied `context || message` bytes.
 pub fn verify_with_context(

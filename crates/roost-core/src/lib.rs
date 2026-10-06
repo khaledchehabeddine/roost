@@ -75,11 +75,12 @@ pub use hardening::{
 };
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
-    AcknowledgmentProcessing, ContactBlock, InboxRotation, KeyStore, KeyStoreError,
-    KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId, KeyStoreOperationStatus,
-    MessageDecryption, MessageEncryption, MessageOperationError, PreparedKeyStoreOperation,
-    PublicationBundle, SecureStorageExpectedValue, SecureStoragePrecondition, SessionAcceptance,
-    SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
+    AcknowledgmentProcessing, ContactBlock, InboxRotation, JournalCorruption, KeyStore,
+    KeyStoreError, KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId,
+    KeyStoreOperationStatus, MessageDecryption, MessageEncryption, MessageOperationError,
+    PreparedKeyStoreOperation, PublicationBundle, SecureStorageExpectedValue,
+    SecureStoragePrecondition, SessionAcceptance, SessionAcceptanceResult,
+    SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
     UnfinishedKeyStoreOperation,
 };
 pub use message::{Message, MessageError};

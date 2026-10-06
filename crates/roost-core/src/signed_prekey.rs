@@ -4,8 +4,6 @@ use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{PublicSignedPreKey, SignedPreKey, generate_signed_prekey_for_discovery_key};
 use roost_protocol::{from_unix_secs, to_unix_secs};
-use std::error::Error;
-use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
@@ -37,78 +35,102 @@ const SIGNED_PREKEY_RETENTION_WINDOW: Duration = Duration::from_secs(30 * SECOND
 const FUTURE_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(30 * SECONDS_PER_DAY);
 
 /// Errors returned by signed-pre-key operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SignedPreKeyError {
     /// Stored data uses an unsupported format version.
+    #[error("unsupported stored format version: {0}")]
     UnsupportedVersion(u8),
     /// The system clock is before the Unix epoch.
+    #[error("system clock is before Unix epoch")]
     Clock,
     /// The stored signed pre-key's signature does not verify against the current discovery key.
+    #[error("stored signed pre-key signature does not match the discovery key")]
     Corrupt,
     /// Loading the discovery key for signed-pre-key rotation returned a [`DiscoveryKeyError`].
-    Discovery(DiscoveryKeyError),
+    #[error("loading the discovery key failed")]
+    Discovery(#[from] DiscoveryKeyError),
     /// Backup restoration requires a new inbox generation before prekeys may be used.
+    #[error("inbox rotation required before using restored pre-key state")]
     InboxRotationRequired,
-    /// Stored signed-pre-key data is malformed.
-    InvalidData(String),
+    /// A stored signed-pre-key blob is shorter than its format requires.
+    #[error("signed pre-key blob is {len} bytes, shorter than {min_len}")]
+    BlobTooShort {
+        /// Stored length in bytes.
+        len: usize,
+        /// Shortest accepted length in bytes.
+        min_len: usize,
+    },
+    /// The stored retained signed pre-keys repeat an identifier.
+    #[error("duplicate retained signed pre-key identifier {0}")]
+    DuplicateRetainedId(u64),
+    /// Every signed-pre-key identifier in this epoch has been used.
+    #[error("signed pre-key identifier space exhausted")]
+    IdentifiersExhausted,
+    /// A stored signed-pre-key blob has the wrong length for its contents.
+    #[error("signed pre-key blob is {actual} bytes, expected {expected}")]
+    InvalidBlobLength {
+        /// Expected length in bytes.
+        expected: usize,
+        /// Stored length in bytes.
+        actual: usize,
+    },
+    /// A stored retained-key flag is neither 0 nor 1.
+    #[error("invalid retained signed pre-key flag: {0}")]
+    InvalidRetainedFlag(u8),
+    /// The stored next identifier doesn't follow the current signed pre-key's identifier.
+    #[error(
+        "next signed pre-key identifier {next_id} does not follow current identifier {current_id}"
+    )]
+    NextIdMismatch {
+        /// Stored next identifier.
+        next_id: u64,
+        /// Current signed pre-key's identifier.
+        current_id: u64,
+    },
+    /// Rotating would discard a retained signed pre-key that hasn't expired.
+    #[error("retained signed pre-key capacity of {max} reached")]
+    RetainedCapacityReached {
+        /// Largest number of retained signed pre-keys.
+        max: usize,
+    },
+    /// A stored retained signed pre-key belongs to a different epoch than the current one.
+    #[error(
+        "retained signed pre-key epoch {retained_epoch} differs from current epoch {current_epoch}"
+    )]
+    RetainedEpochMismatch {
+        /// Retained signed pre-key's epoch.
+        retained_epoch: u32,
+        /// Current signed pre-key's epoch.
+        current_epoch: u32,
+    },
+    /// A stored retained signed pre-key isn't older than the current one.
+    #[error(
+        "retained signed pre-key identifier {retained_id} is not older than current identifier \
+         {current_id}"
+    )]
+    RetainedIdNotOlder {
+        /// Retained signed pre-key's identifier.
+        retained_id: u64,
+        /// Current signed pre-key's identifier.
+        current_id: u64,
+    },
+    /// More retained signed pre-keys are stored than the limit allows.
+    #[error("{count} retained signed pre-keys exceed the limit of {max}")]
+    TooManyRetained {
+        /// Stored count.
+        count: usize,
+        /// Largest accepted count.
+        max: usize,
+    },
     /// The internal storage lock was poisoned by a panicked thread.
+    #[error("internal lock poisoned")]
     LockPoisoned,
     /// No signed pre-key is stored.
+    #[error("no signed pre-key stored")]
     NotFound,
     /// The underlying [`SecureStorage`] returned an error.
-    Storage(StorageError),
-}
-
-impl fmt::Display for SignedPreKeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SignedPreKeyError::UnsupportedVersion(version) => {
-                write!(f, "unsupported stored format version: {version}")
-            }
-            SignedPreKeyError::Clock => write!(f, "system clock is before Unix epoch"),
-            SignedPreKeyError::Corrupt => {
-                write!(
-                    f,
-                    "stored signed pre-key signature does not match the discovery key"
-                )
-            }
-            SignedPreKeyError::Discovery(e) => write!(f, "discovery key: {e}"),
-            SignedPreKeyError::InboxRotationRequired => {
-                write!(
-                    f,
-                    "inbox rotation required before using restored pre-key state"
-                )
-            }
-            SignedPreKeyError::InvalidData(reason) => {
-                write!(f, "invalid signed pre-key data: {reason}")
-            }
-            SignedPreKeyError::LockPoisoned => write!(f, "internal lock poisoned"),
-            SignedPreKeyError::NotFound => write!(f, "no signed pre-key stored"),
-            SignedPreKeyError::Storage(e) => write!(f, "storage: {e}"),
-        }
-    }
-}
-
-impl Error for SignedPreKeyError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            SignedPreKeyError::Discovery(e) => Some(e),
-            SignedPreKeyError::Storage(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<DiscoveryKeyError> for SignedPreKeyError {
-    fn from(e: DiscoveryKeyError) -> Self {
-        SignedPreKeyError::Discovery(e)
-    }
-}
-
-impl From<StorageError> for SignedPreKeyError {
-    fn from(e: StorageError) -> Self {
-        SignedPreKeyError::Storage(e)
-    }
+    #[error("signed pre-key storage failed")]
+    Storage(#[from] StorageError),
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -220,18 +242,18 @@ impl SignedPreKeyManager {
             .as_ref()
             .filter(|_| same_epoch)
             .map_or(0, |store| store.next_id);
-        let following_id = next_id.checked_add(1).ok_or_else(|| {
-            SignedPreKeyError::InvalidData("signed pre-key identifier space exhausted".into())
-        })?;
+        let following_id = next_id
+            .checked_add(1)
+            .ok_or(SignedPreKeyError::IdentifiersExhausted)?;
         let signed_prekey =
             generate_signed_prekey_for_discovery_key(rng, &discovery_key, next_id, now_secs);
         let mut retained = Vec::new();
         if let Some(mut store) = previous.filter(|_| same_epoch) {
             retained = std::mem::take(&mut store.retained);
             if retained.len() == MAX_RETAINED_SIGNED_PREKEYS {
-                return Err(SignedPreKeyError::InvalidData(
-                    "retained signed pre-key capacity reached".into(),
-                ));
+                return Err(SignedPreKeyError::RetainedCapacityReached {
+                    max: MAX_RETAINED_SIGNED_PREKEYS,
+                });
             }
             retained.push(RetainedSignedPreKey {
                 prekey: store.current.clone_for_storage(),
@@ -388,9 +410,7 @@ fn decode_signed_prekey_store(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedP
         Some(SIGNED_PREKEY_VERSION_V3) => decode_signed_prekey_store_v3(raw),
         Some(SIGNED_PREKEY_VERSION) => decode_signed_prekey_store_v4(raw),
         Some(version) => Err(SignedPreKeyError::UnsupportedVersion(version)),
-        None => Err(SignedPreKeyError::InvalidData(
-            "expected signed pre-key version byte, got empty blob".into(),
-        )),
+        None => Err(SignedPreKeyError::BlobTooShort { len: 0, min_len: 1 }),
     }?;
     validate_signed_prekey_store(store.next_id, &store.current, &store.retained)?;
     Ok(store)
@@ -398,10 +418,10 @@ fn decode_signed_prekey_store(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedP
 
 fn decode_signed_prekey_store_v1(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
     if raw.len() != SIGNED_PREKEY_V1_BLOB_LEN {
-        return Err(SignedPreKeyError::InvalidData(format!(
-            "expected {SIGNED_PREKEY_V1_BLOB_LEN} bytes, got {}",
-            raw.len()
-        )));
+        return Err(SignedPreKeyError::InvalidBlobLength {
+            expected: SIGNED_PREKEY_V1_BLOB_LEN,
+            actual: raw.len(),
+        });
     }
     Ok(StoredSignedPreKeys {
         next_id: 1,
@@ -412,10 +432,10 @@ fn decode_signed_prekey_store_v1(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
 
 fn decode_signed_prekey_store_v2(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
     if raw.len() != SIGNED_PREKEY_V2_BLOB_LEN {
-        return Err(SignedPreKeyError::InvalidData(format!(
-            "expected {SIGNED_PREKEY_V2_BLOB_LEN} bytes, got {}",
-            raw.len()
-        )));
+        return Err(SignedPreKeyError::InvalidBlobLength {
+            expected: SIGNED_PREKEY_V2_BLOB_LEN,
+            actual: raw.len(),
+        });
     }
     let current_end = 1 + LEGACY_SIGNED_PREKEY_RECORD_LEN;
     let retained_flag = raw[current_end];
@@ -423,9 +443,7 @@ fn decode_signed_prekey_store_v2(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
         0 => false,
         1 => true,
         flag => {
-            return Err(SignedPreKeyError::InvalidData(format!(
-                "invalid retained signed pre-key flag: {flag}"
-            )));
+            return Err(SignedPreKeyError::InvalidRetainedFlag(flag));
         }
     };
     let current = decode_legacy_signed_prekey_record(&raw[1..current_end], u64::from(has_retained));
@@ -449,10 +467,10 @@ fn decode_signed_prekey_store_v2(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
 
 fn decode_signed_prekey_store_v3(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
     if raw.len() != SIGNED_PREKEY_V3_BLOB_LEN {
-        return Err(SignedPreKeyError::InvalidData(format!(
-            "expected {SIGNED_PREKEY_V3_BLOB_LEN} bytes, got {}",
-            raw.len()
-        )));
+        return Err(SignedPreKeyError::InvalidBlobLength {
+            expected: SIGNED_PREKEY_V3_BLOB_LEN,
+            actual: raw.len(),
+        });
     }
     let current_end = 1 + LEGACY_SIGNED_PREKEY_RECORD_LEN;
     let retained = match raw[current_end] {
@@ -469,9 +487,7 @@ fn decode_signed_prekey_store_v3(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
             }]
         }
         flag => {
-            return Err(SignedPreKeyError::InvalidData(format!(
-                "invalid retained signed pre-key flag: {flag}"
-            )));
+            return Err(SignedPreKeyError::InvalidRetainedFlag(flag));
         }
     };
     let has_retained = !retained.is_empty();
@@ -484,10 +500,10 @@ fn decode_signed_prekey_store_v3(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
 
 fn decode_signed_prekey_store_v4(raw: &[u8]) -> Result<StoredSignedPreKeys, SignedPreKeyError> {
     if raw.len() < SIGNED_PREKEY_V4_HEADER_LEN {
-        return Err(SignedPreKeyError::InvalidData(format!(
-            "expected at least {SIGNED_PREKEY_V4_HEADER_LEN} bytes, got {}",
-            raw.len()
-        )));
+        return Err(SignedPreKeyError::BlobTooShort {
+            len: raw.len(),
+            min_len: SIGNED_PREKEY_V4_HEADER_LEN,
+        });
     }
     let mut next_id_bytes = [0u8; 8];
     next_id_bytes.copy_from_slice(&raw[1..9]);
@@ -496,17 +512,18 @@ fn decode_signed_prekey_store_v4(raw: &[u8]) -> Result<StoredSignedPreKeys, Sign
     let current = decode_signed_prekey_record(&raw[9..current_end]);
     let retained_count = usize::from(raw[current_end]);
     if retained_count > MAX_RETAINED_SIGNED_PREKEYS {
-        return Err(SignedPreKeyError::InvalidData(format!(
-            "retained signed pre-key count {retained_count} exceeds {MAX_RETAINED_SIGNED_PREKEYS}"
-        )));
+        return Err(SignedPreKeyError::TooManyRetained {
+            count: retained_count,
+            max: MAX_RETAINED_SIGNED_PREKEYS,
+        });
     }
     let expected_len =
         SIGNED_PREKEY_V4_HEADER_LEN + retained_count * RETAINED_SIGNED_PREKEY_RECORD_LEN;
     if raw.len() != expected_len {
-        return Err(SignedPreKeyError::InvalidData(format!(
-            "expected {expected_len} bytes for {retained_count} retained signed pre-keys, got {}",
-            raw.len()
-        )));
+        return Err(SignedPreKeyError::InvalidBlobLength {
+            expected: expected_len,
+            actual: raw.len(),
+        });
     }
     let mut retained = Vec::with_capacity(retained_count);
     let mut offset = SIGNED_PREKEY_V4_HEADER_LEN;
@@ -535,28 +552,29 @@ fn validate_signed_prekey_store(
     retained: &[RetainedSignedPreKey],
 ) -> Result<(), SignedPreKeyError> {
     if current.id().checked_add(1) != Some(next_id) {
-        return Err(SignedPreKeyError::InvalidData(
-            "next identifier does not follow current signed pre-key identifier".into(),
-        ));
+        return Err(SignedPreKeyError::NextIdMismatch {
+            next_id,
+            current_id: current.id(),
+        });
     }
     for (index, entry) in retained.iter().enumerate() {
         if entry.prekey.epoch() != current.epoch() {
-            return Err(SignedPreKeyError::InvalidData(
-                "retained signed pre-key epoch differs from current epoch".into(),
-            ));
+            return Err(SignedPreKeyError::RetainedEpochMismatch {
+                retained_epoch: entry.prekey.epoch(),
+                current_epoch: current.epoch(),
+            });
         }
         if entry.prekey.id() >= current.id() {
-            return Err(SignedPreKeyError::InvalidData(
-                "retained signed pre-key identifier is not older than current identifier".into(),
-            ));
+            return Err(SignedPreKeyError::RetainedIdNotOlder {
+                retained_id: entry.prekey.id(),
+                current_id: current.id(),
+            });
         }
         if retained[..index]
             .iter()
             .any(|other| other.prekey.id() == entry.prekey.id())
         {
-            return Err(SignedPreKeyError::InvalidData(
-                "duplicate retained signed pre-key identifier".into(),
-            ));
+            return Err(SignedPreKeyError::DuplicateRetainedId(entry.prekey.id()));
         }
     }
     Ok(())
@@ -979,7 +997,9 @@ mod tests {
 
         assert!(matches!(
             setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
-            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("capacity")
+            Err(SignedPreKeyError::RetainedCapacityReached {
+                max: MAX_RETAINED_SIGNED_PREKEYS
+            })
         ));
         assert_eq!(
             setup.manager.current(at(FIXED_NOW)).unwrap().id(),
@@ -1125,7 +1145,10 @@ mod tests {
         for blob in [version_two, version_three] {
             assert!(matches!(
                 decode_signed_prekey_store(&blob),
-                Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("epoch")
+                Err(SignedPreKeyError::RetainedEpochMismatch {
+                    retained_epoch,
+                    current_epoch: FIXED_EPOCH,
+                }) if retained_epoch == FIXED_EPOCH + 1
             ));
         }
     }
@@ -1155,7 +1178,7 @@ mod tests {
 
         assert!(matches!(
             setup.manager.rotate_now(&mut OsRng, at(FIXED_NOW)),
-            Err(SignedPreKeyError::InvalidData(reason)) if reason.contains("exhausted")
+            Err(SignedPreKeyError::IdentifiersExhausted)
         ));
         assert_eq!(
             setup.manager.current(at(FIXED_NOW)).unwrap().id(),
@@ -1167,15 +1190,20 @@ mod tests {
     fn checked_blob_rejects_short_blob() {
         assert!(matches!(
             checked_blob(&[SIGNED_PREKEY_VERSION; 50]),
-            Err(SignedPreKeyError::InvalidData(_))
+            Err(SignedPreKeyError::BlobTooShort {
+                len: 50,
+                min_len: SIGNED_PREKEY_V4_HEADER_LEN
+            })
         ));
     }
 
     #[test]
     fn checked_blob_rejects_long_blob() {
+        // The retained-count byte reads as 4, so the length must fit four retained records.
         assert!(matches!(
             checked_blob(&[SIGNED_PREKEY_VERSION; 200]),
-            Err(SignedPreKeyError::InvalidData(_))
+            Err(SignedPreKeyError::InvalidBlobLength { expected, actual: 200 })
+                if expected == SIGNED_PREKEY_V4_HEADER_LEN + 4 * RETAINED_SIGNED_PREKEY_RECORD_LEN
         ));
     }
 

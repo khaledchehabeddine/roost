@@ -8,8 +8,6 @@ use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use std::error::Error;
-use std::fmt;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -267,35 +265,24 @@ pub fn open_frame_for_discovery_key_with_associated_data(
 }
 
 /// An error returned while encoding, decoding, sealing, or opening a [`SealedFrame`].
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum SealedFrameError {
     /// XChaCha20-Poly1305 encryption, decryption, or authentication failed.
+    #[error("xchacha20-poly1305 encryption or decryption failed")]
     Aead,
     /// Frame bytes or fields are malformed, unsupported, oversized, or target another recipient.
+    #[error("sealed-sender frame bytes failed to decode")]
     Decode,
     /// Frame fields, ciphertext, or additional associated data exceed local caps or fail to encode.
+    #[error("sealed-sender frame failed to encode")]
     Encode,
     /// HKDF-SHA256 rejected the requested output length.
+    #[error("hkdf-sha256 expand exceeded output limit")]
     HkdfExpand,
     /// An X25519 exchange produced a non-contributory shared secret.
+    #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
 }
-
-impl fmt::Display for SealedFrameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Aead => write!(f, "xchacha20-poly1305 encryption or decryption failed"),
-            Self::Decode => write!(f, "sealed-sender frame bytes failed to decode"),
-            Self::Encode => write!(f, "sealed-sender frame failed to encode"),
-            Self::HkdfExpand => write!(f, "hkdf-sha256 expand exceeded output limit"),
-            Self::NonContributorySharedSecret => {
-                write!(f, "x25519 shared secret was non-contributory")
-            }
-        }
-    }
-}
-
-impl Error for SealedFrameError {}
 
 #[derive(Deserialize, Serialize)]
 struct SealedFrameWire {

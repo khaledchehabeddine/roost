@@ -39,7 +39,6 @@ use roost_protocol::{from_unix_millis, to_unix_millis};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
-use std::error::Error;
 use std::fmt;
 use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
@@ -1738,17 +1737,22 @@ impl Default for ProtocolStateEngine {
 }
 
 /// Errors returned by protocol-state operations.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ProtocolStateError {
     /// The contact is locally blocked.
+    #[error("contact is blocked")]
     BlockedContact,
     /// The contact must be accepted before sending.
+    #[error("contact is not accepted")]
     ContactNotAccepted,
     /// A terminal Session must be replaced by a fresh handshake.
+    #[error("session is unrecoverable")]
     SessionUnrecoverable,
     /// The operation snapshot exceeds its entry cap.
+    #[error("protocol-state snapshot capacity exceeded")]
     SnapshotCapacityExceeded,
     /// A persisted blob failed structural decoding.
+    #[error("protocol-state blob failed to decode at {address}: {reason}")]
     BlobDecode {
         /// Address whose blob failed to decode.
         address: ProtocolStateAddress,
@@ -1756,6 +1760,7 @@ pub enum ProtocolStateError {
         reason: String,
     },
     /// A protocol-state blob failed encoding.
+    #[error("protocol-state blob failed to encode at {address}: {reason}")]
     BlobEncode {
         /// Address whose blob failed to encode.
         address: ProtocolStateAddress,
@@ -1763,23 +1768,31 @@ pub enum ProtocolStateError {
         reason: String,
     },
     /// Double Ratchet encryption or decryption failed.
-    Ratchet(roost_crypto::RatchetError),
+    #[error("protocol-state ratchet operation failed")]
+    Ratchet(#[from] roost_crypto::RatchetError),
     /// A ratchet state failed to encode or decode.
-    RatchetState(roost_crypto::RatchetStateError),
+    #[error("protocol-state ratchet state failed")]
+    RatchetState(#[from] roost_crypto::RatchetStateError),
     /// Sealing or opening a sealed-sender frame failed.
-    SealedFrame(roost_crypto::SealedFrameError),
+    #[error("protocol-state sealed frame failed")]
+    SealedFrame(#[from] roost_crypto::SealedFrameError),
     /// A Message transcript signature failed context framing or verification.
-    Signature(SignatureError),
+    #[error("protocol-state signature failed")]
+    Signature(#[from] SignatureError),
     /// Sender-certificate validation failed during receive.
-    SenderCertificateValidation(SenderCertificateValidationError),
+    #[error("sender certificate validation failed")]
+    SenderCertificateValidation(#[source] SenderCertificateValidationError),
     /// A unique encrypted receive was attempted without sender-certificate validation inputs.
+    #[error("missing sender certificate validation input")]
     MissingSenderCertificateValidation,
     /// A Message did not carry the expected ratcheted payload.
+    #[error("invalid message: {reason}")]
     InvalidMessage {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
     /// Received-message deduplication capacity is outside supported bounds.
+    #[error("invalid deduplication capacity: {capacity} outside {minimum}..={maximum}")]
     InvalidDeduplicationCapacity {
         /// Requested capacity.
         capacity: usize,
@@ -1789,6 +1802,7 @@ pub enum ProtocolStateError {
         maximum: usize,
     },
     /// A configured hardening limit is outside supported bounds.
+    #[error("invalid hardening limit for {name}: {value} outside {minimum}..={maximum}")]
     InvalidHardeningLimit {
         /// Name of the rejected limit.
         name: &'static str,
@@ -1800,8 +1814,10 @@ pub enum ProtocolStateError {
         maximum: usize,
     },
     /// A Message failed canonical encoding.
-    MessageEncode(MessageError),
+    #[error("protocol-state message encoding failed")]
+    MessageEncode(#[source] MessageError),
     /// A state binding operation would violate an existing protocol-state invariant.
+    #[error("invalid protocol-state binding at {address}: {reason}")]
     InvalidStateBinding {
         /// Address whose binding invariant would be violated.
         address: ProtocolStateAddress,
@@ -1809,16 +1825,19 @@ pub enum ProtocolStateError {
         reason: String,
     },
     /// A protocol-state key is malformed.
+    #[error("invalid protocol-state key: {reason}")]
     InvalidStateKey {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
     /// A required protocol-state blob was absent from the consumer snapshot.
+    #[error("missing required protocol-state blob at {address}")]
     MissingRequiredState {
         /// Address that must be present before the operation.
         address: ProtocolStateAddress,
     },
     /// A persisted blob used a version this build does not support.
+    #[error("unsupported protocol-state blob version at {address}: {major}.{minor}")]
     UnsupportedBlobVersion {
         /// Address whose blob version is unsupported.
         address: ProtocolStateAddress,
@@ -1827,128 +1846,6 @@ pub enum ProtocolStateError {
         /// Minor version read from the blob envelope.
         minor: u8,
     },
-}
-
-impl fmt::Display for ProtocolStateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::BlockedContact => write!(f, "contact is blocked"),
-            Self::ContactNotAccepted => write!(f, "contact is not accepted"),
-            Self::SessionUnrecoverable => write!(f, "session is unrecoverable"),
-            Self::SnapshotCapacityExceeded => {
-                write!(f, "protocol-state snapshot capacity exceeded")
-            }
-            Self::BlobDecode { address, reason } => {
-                write!(
-                    f,
-                    "protocol-state blob failed to decode at {address}: {reason}"
-                )
-            }
-            Self::BlobEncode { address, reason } => {
-                write!(
-                    f,
-                    "protocol-state blob failed to encode at {address}: {reason}"
-                )
-            }
-            Self::Ratchet(e) => write!(f, "protocol-state ratchet operation failed: {e}"),
-            Self::RatchetState(e) => write!(f, "protocol-state ratchet state failed: {e}"),
-            Self::SealedFrame(e) => write!(f, "protocol-state sealed frame failed: {e}"),
-            Self::Signature(e) => write!(f, "protocol-state signature failed: {e}"),
-            Self::SenderCertificateValidation(e) => {
-                write!(f, "sender certificate validation failed: {e}")
-            }
-            Self::MissingSenderCertificateValidation => {
-                write!(f, "missing sender certificate validation input")
-            }
-            Self::InvalidMessage { reason } => write!(f, "invalid message: {reason}"),
-            Self::InvalidDeduplicationCapacity {
-                capacity,
-                minimum,
-                maximum,
-            } => write!(
-                f,
-                "invalid deduplication capacity: {capacity} outside {minimum}..={maximum}"
-            ),
-            Self::InvalidHardeningLimit {
-                name,
-                value,
-                minimum,
-                maximum,
-            } => write!(
-                f,
-                "invalid hardening limit for {name}: {value} outside {minimum}..={maximum}"
-            ),
-            Self::InvalidStateBinding { address, reason } => {
-                write!(f, "invalid protocol-state binding at {address}: {reason}")
-            }
-            Self::InvalidStateKey { reason } => write!(f, "invalid protocol-state key: {reason}"),
-            Self::MessageEncode(e) => write!(f, "message failed to encode: {e}"),
-            Self::MissingRequiredState { address } => {
-                write!(f, "missing required protocol-state blob at {address}")
-            }
-            Self::UnsupportedBlobVersion {
-                address,
-                major,
-                minor,
-            } => {
-                write!(
-                    f,
-                    "unsupported protocol-state blob version at {address}: {major}.{minor}"
-                )
-            }
-        }
-    }
-}
-
-impl Error for ProtocolStateError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Ratchet(e) => Some(e),
-            Self::RatchetState(e) => Some(e),
-            Self::SealedFrame(e) => Some(e),
-            Self::Signature(e) => Some(e),
-            Self::SenderCertificateValidation(e) => Some(e),
-            Self::MessageEncode(e) => Some(e),
-            Self::BlockedContact
-            | Self::ContactNotAccepted
-            | Self::SessionUnrecoverable
-            | Self::SnapshotCapacityExceeded
-            | Self::BlobDecode { .. }
-            | Self::BlobEncode { .. }
-            | Self::InvalidDeduplicationCapacity { .. }
-            | Self::InvalidHardeningLimit { .. }
-            | Self::InvalidMessage { .. }
-            | Self::InvalidStateBinding { .. }
-            | Self::InvalidStateKey { .. }
-            | Self::MissingSenderCertificateValidation
-            | Self::MissingRequiredState { .. }
-            | Self::UnsupportedBlobVersion { .. } => None,
-        }
-    }
-}
-
-impl From<roost_crypto::RatchetError> for ProtocolStateError {
-    fn from(e: roost_crypto::RatchetError) -> Self {
-        Self::Ratchet(e)
-    }
-}
-
-impl From<roost_crypto::RatchetStateError> for ProtocolStateError {
-    fn from(e: roost_crypto::RatchetStateError) -> Self {
-        Self::RatchetState(e)
-    }
-}
-
-impl From<roost_crypto::SealedFrameError> for ProtocolStateError {
-    fn from(e: roost_crypto::SealedFrameError) -> Self {
-        Self::SealedFrame(e)
-    }
-}
-
-impl From<SignatureError> for ProtocolStateError {
-    fn from(e: SignatureError) -> Self {
-        Self::Signature(e)
-    }
 }
 
 /// Computes the digest used by protocol-state commit conditions.

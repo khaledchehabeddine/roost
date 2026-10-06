@@ -7,8 +7,6 @@ use crate::{
     TransportBinding,
 };
 use roost_crypto::SenderIdentityMaterial;
-use std::error::Error;
-use std::fmt;
 
 /// Inputs for encrypting an established-session Message with stored local identity material.
 pub struct MessageEncryption<'a> {
@@ -67,62 +65,20 @@ pub struct AcknowledgmentProcessing<'a> {
 }
 
 /// Errors returned by established-session message helpers.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum MessageOperationError {
     /// Loading local discovery-key state failed.
-    Discovery(DiscoveryKeyError),
+    #[error(transparent)]
+    Discovery(#[from] DiscoveryKeyError),
     /// Loading local identity state failed.
-    Identity(IdentityError),
+    #[error(transparent)]
+    Identity(#[from] IdentityError),
     /// A committed KeyStore operation must be recovered before local keys can be used.
-    Operation(KeyStoreOperationError),
+    #[error(transparent)]
+    Operation(#[from] KeyStoreOperationError),
     /// Protocol-state or message processing failed.
-    ProtocolState(ProtocolStateError),
-}
-
-impl fmt::Display for MessageOperationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Discovery(e) => write!(f, "message operation discovery key: {e}"),
-            Self::Identity(e) => write!(f, "message operation identity: {e}"),
-            Self::Operation(e) => write!(f, "message operation prepared operation: {e}"),
-            Self::ProtocolState(e) => write!(f, "message operation protocol state: {e}"),
-        }
-    }
-}
-
-impl Error for MessageOperationError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Discovery(e) => Some(e),
-            Self::Identity(e) => Some(e),
-            Self::Operation(e) => Some(e),
-            Self::ProtocolState(e) => Some(e),
-        }
-    }
-}
-
-impl From<DiscoveryKeyError> for MessageOperationError {
-    fn from(e: DiscoveryKeyError) -> Self {
-        Self::Discovery(e)
-    }
-}
-
-impl From<IdentityError> for MessageOperationError {
-    fn from(e: IdentityError) -> Self {
-        Self::Identity(e)
-    }
-}
-
-impl From<KeyStoreOperationError> for MessageOperationError {
-    fn from(e: KeyStoreOperationError) -> Self {
-        Self::Operation(e)
-    }
-}
-
-impl From<ProtocolStateError> for MessageOperationError {
-    fn from(e: ProtocolStateError) -> Self {
-        Self::ProtocolState(e)
-    }
+    #[error(transparent)]
+    ProtocolState(#[from] ProtocolStateError),
 }
 
 impl KeyStore {

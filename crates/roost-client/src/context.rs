@@ -1070,7 +1070,8 @@ fn convert_prepared<T, U>(
             Err(abort_error) => Err(RoostError::OperationRecoveryRequired {
                 operation_id: OperationId::from_core(id),
                 reason: format!(
-                    "prepared output conversion failed and cleanup also failed: {abort_error}"
+                    "prepared output conversion failed and cleanup also failed: {}",
+                    crate::error::reason_from_chain(&abort_error)
                 ),
             }),
         },
