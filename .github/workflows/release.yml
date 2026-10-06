@@ -31,7 +31,7 @@ jobs:
         run: |
           version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
           echo "VERSION=$version" >> "$GITHUB_ENV"
-          echo "ZIP=target/ios-distribution/Roost-v$version.xcframework.zip" >> "$GITHUB_ENV"
+          echo "ZIP=target/ios/Roost-v$version.xcframework.zip" >> "$GITHUB_ENV"
       - name: Require a main commit tagged with the workspace version
         if: github.event_name == 'push'
         run: |
@@ -45,7 +45,7 @@ jobs:
           fi
       - run: rustup show active-toolchain
       - name: Build the XCFramework zip
-        run: scripts/build/xcframework.sh
+        run: scripts/build-ios.sh
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -61,7 +61,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/$ndk" >> "$GITHUB_ENV"
       - run: cargo install cargo-ndk --version 4.1.2 --locked
       - name: Build the AAR
-        run: scripts/build/android-aar.sh
+        run: scripts/build-android.sh
 
       # Until the last step, a failure leaves only a draft release, a tag, and a package version,
       # and you can delete all three. Publishing the release locks its zip and tag.

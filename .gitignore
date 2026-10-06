@@ -5,7 +5,6 @@ target
 android/.gradle/
 android/.kotlin/
 android/build/
-android/local.properties
 
 # Claude Code
 .claude/agent-memory-local/

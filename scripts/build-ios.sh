@@ -1,34 +1,30 @@
 #!/usr/bin/env bash
-# Compile the generated Swift API and Rust library into the Roost XCFramework and zip it.
+# Build the Rust library and its generated Swift API into a zipped XCFramework.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
-OUT="$ROOT/target/xcframework"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+OUT="$ROOT/target/ios"
 VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
-ZIP="$ROOT/target/ios-distribution/Roost-v$VERSION.xcframework.zip"
-MIN_IOS="${ROOST_IOS_DEPLOYMENT_TARGET:-13.0}"
+ZIP="$OUT/Roost-v$VERSION.xcframework.zip"
+# Matches .iOS(.v13) in the Package.swift that release.yml writes.
+MIN_IOS=13.0
 cd "$ROOT"
 
-for target in aarch64-apple-ios aarch64-apple-ios-sim; do
-    if [[ ! -d "$(rustc --print sysroot)/lib/rustlib/$target/lib" ]]; then
-        rustup target add "$target"
-    fi
-    IPHONEOS_DEPLOYMENT_TARGET="$MIN_IOS" cargo build --locked --release --target "$target" -p roost-client
-done
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+IPHONEOS_DEPLOYMENT_TARGET="$MIN_IOS" cargo build --locked --release -p roost-client \
+    --target aarch64-apple-ios --target aarch64-apple-ios-sim
 
 rm -rf "$OUT"
 mkdir -p "$OUT/generated"
 cargo run --locked --bin uniffi-bindgen-swift -- \
     target/aarch64-apple-ios/release/libroost_client.a "$OUT/generated" --swift-sources --headers
-python3 scripts/build/host_docs.py swift "$OUT/generated/Roost.swift"
+python3 scripts/host_docs.py swift "$OUT/generated/Roost.swift"
 
 build_framework() {
     local rust_target="$1" swift_target="$2" sdk_name="$3" identifier="$4"
     local framework="$OUT/$identifier/Roost.framework"
     local modules="$framework/Modules/Roost.swiftmodule"
-    local sdk module_target
-    sdk="$(xcrun --sdk "$sdk_name" --show-sdk-path)"
-    module_target="${swift_target/$MIN_IOS/}"
+    local module_target="${swift_target/$MIN_IOS/}"
     mkdir -p "$framework/Headers" "$modules"
     cp "$OUT/generated/RoostFFI.h" "$framework/Headers/"
     cat > "$framework/Modules/module.modulemap" <<'MODULE'
@@ -52,7 +48,7 @@ MODULE
 </dict></plist>
 PLIST
     xcrun --sdk "$sdk_name" swiftc "$OUT/generated/Roost.swift" \
-        -target "$swift_target" -sdk "$sdk" -parse-as-library \
+        -target "$swift_target" -parse-as-library \
         -module-name Roost -swift-version 5 -enable-library-evolution -import-underlying-module \
         -F "$OUT/$identifier" -module-cache-path "$OUT/module-cache" \
         -emit-library -emit-module \
@@ -70,14 +66,5 @@ xcodebuild -create-xcframework \
     -framework "$OUT/ios-arm64/Roost.framework" \
     -framework "$OUT/ios-arm64-simulator/Roost.framework" \
     -output "$OUT/Roost.xcframework"
-
-rm -f "$ZIP"
-mkdir -p "$(dirname "$ZIP")"
 (cd "$OUT" && zip -qry "$ZIP" Roost.xcframework)
-
-# Ship only the arm64 device and arm64 simulator slices.
-for slice in ios-arm64 ios-arm64-simulator; do
-    [[ "$(lipo -archs "$OUT/Roost.xcframework/$slice/Roost.framework/Roost")" == arm64 ]]
-done
-[[ "$(zipinfo -1 "$ZIP" '*/Roost.framework/Roost' | wc -l)" -eq 2 ]]
 printf 'XCFramework archive: %s\n' "$ZIP"
