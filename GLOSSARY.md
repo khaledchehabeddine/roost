@@ -17,8 +17,8 @@
   - Avoid: client, installation, instance
 - **Discovery Key (DK)**: A rotatable key pair, signed by the Identity Key, that peers use to start Sessions with an Identity.
   - Avoid: prekey, ephemeral key
-- **Epoch**: A Discovery Key's generation number, which goes up with each rotation.
-  - Avoid: inbox counter
+- **Epoch**: The number of a Discovery Key and the inbox it serves, which goes up each time the inbox rotates.
+  - Avoid: inbox generation, inbox counter
 - **Event**: A record of a state change that stays provisional until the app commits the matching updates.
   - Avoid: notification, callback
 - **Identity**: A participant on one Device, identified by a permanent Identity Key and a rotatable Discovery Key.
@@ -53,6 +53,7 @@
   - Avoid: cache
 - **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a peer's inbox authorization.
   - Avoid: table, bucket, namespace
+- **Relay Domain**: The domain name of a Relay. A Sender Certificate names one, and a recipient refuses a certificate that names a different Relay than it expects.
 - **Retry Instruction**: A notice telling the app to resend a Message that is still unacknowledged.
   - Avoid: resend job
 - **Safety Number**: A number derived from two Identity Keys that two people compare outside the app to verify each other.

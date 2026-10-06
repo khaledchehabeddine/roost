@@ -1,4 +1,4 @@
-//! Tracks which contacts still hold a superseded inbox generation.
+//! Tracks which contacts still hold a delivery capability from a superseded epoch.
 //!
 //! After an inbox rotation every contact holds a stale delivery capability and must be re-supplied
 //! in band — except a blocked one, who must never be. This exercises that bookkeeping through the
@@ -60,7 +60,7 @@ fn setup() -> Setup {
 }
 
 #[test]
-fn a_contact_needs_authorization_until_the_current_generation_is_delivered() {
+fn a_contact_needs_authorization_until_the_current_epoch_is_delivered() {
     let mut setup = setup();
 
     let stale = setup
@@ -125,7 +125,7 @@ fn a_blocked_contact_is_never_listed_for_re_key() {
 }
 
 #[test]
-fn delivering_an_older_generation_does_not_move_the_record_backwards() {
+fn delivering_an_older_epoch_does_not_move_the_record_backwards() {
     let mut setup = setup();
     setup
         .snapshot

@@ -1,7 +1,7 @@
 //! Provides the recipient delivery capability and its public verifier.
 //!
 //! The capability is a recipient-wide bearer secret: every currently authorized contact holds the
-//! same value, so it identifies the recipient's inbox generation rather than an individual sender.
+//! same value, so it identifies the recipient's inbox rather than an individual sender.
 //! Aether generates one and hands it to the caller, but never registers, validates, or
 //! transmits it — the caller registers only the verifier.
 
@@ -20,7 +20,7 @@ const VERIFIER_SEPARATOR: [u8; 1] = [0x00];
 const CAPABILITY_LEN: usize = 32;
 const VERIFIER_LEN: usize = 32;
 
-/// A recipient-wide bearer secret authorizing delivery to one inbox generation.
+/// A recipient-wide bearer secret authorizing delivery to one inbox until it rotates.
 ///
 /// Secret-bearing: hold it only as long as needed and persist it through platform secure storage.
 /// Deliberately not `Clone`, `Debug`, or `Serialize` — a bearer secret that reaches a log or an

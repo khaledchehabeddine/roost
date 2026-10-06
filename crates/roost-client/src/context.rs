@@ -57,7 +57,7 @@ const RESERVED_DOMAIN_PREFIXES: [&str; 2] = ["Aether", "Roost"];
 /// context caches no protocol state, so several contexts, including ones in an app extension, can
 /// serve the same identity.
 ///
-/// Roost owns the identity's keys, backups, prekeys, and inbox generations, the contents of
+/// Roost owns the identity's keys, backups, prekeys, and inbox rotations, the contents of
 /// Protocol State Blobs, and the journal that makes key changes recoverable. It reads no clock
 /// for certificate checks, does no networking, and keeps no copy of protocol state between calls.
 ///
@@ -308,7 +308,7 @@ impl IdentityContext {
             .transpose()
     }
 
-    /// Prepares a new identity with its first Discovery Key and inbox generation.
+    /// Prepares a new identity and its first Discovery Key.
     ///
     /// The host saves the identity with the operation ID, and publishes it only after
     /// finalization. Finalizing also completes an identity whose earlier creation stopped partway.
@@ -396,9 +396,9 @@ impl IdentityContext {
     /// that saves the operation ID, the host deletes or replaces all of its protocol state for the
     /// identity, since Sessions, acknowledgments, and deduplication from before the restore no
     /// longer apply. After finalization, prekeys and publication stay blocked until
-    /// [`Self::prepare_inbox_rotation`] moves to a new inbox generation, so the restored identity
-    /// never reuses prekey IDs that the backed-up generation published. Each call runs Argon2id
-    /// with 64 MiB of memory.
+    /// [`Self::prepare_inbox_rotation`] moves to the next Discovery Key epoch, so the restored
+    /// identity never reuses prekey IDs already published under the backed-up one. Each call runs
+    /// Argon2id with 64 MiB of memory.
     ///
     /// # Errors
     /// - [`RoostError::DecryptionFailed`] if the passphrase is wrong or the backup was altered.
@@ -437,7 +437,7 @@ impl IdentityContext {
         PublicationBundle::from_core(self.inner.current_publication()?)
     }
 
-    /// Returns the current inbox generation's 32-byte delivery capability.
+    /// Returns the current inbox's 32-byte delivery capability.
     ///
     /// The capability is a secret that lets a contact deliver to this inbox. Share it only with
     /// authorized contacts over an encrypted channel, keep it in secure storage, and register the
@@ -455,10 +455,10 @@ impl IdentityContext {
             .to_vec())
     }
 
-    /// Prepares a new inbox generation: a new Discovery Key, signed prekey, and delivery
-    /// capability.
+    /// Prepares an inbox rotation: a Discovery Key at the next epoch, a signed prekey, and a
+    /// delivery capability.
     ///
-    /// Rotation clears the old generation's one-time prekeys and invalidates every contact's
+    /// Rotation clears the previous inbox's one-time prekeys and invalidates every contact's
     /// delivery capability, so the host shares the new capability with each contact that should
     /// keep delivering.
     ///
@@ -525,7 +525,7 @@ impl IdentityContext {
         })
     }
 
-    /// Prepares exactly `count` one-time prekeys for the current inbox generation.
+    /// Prepares exactly `count` one-time prekeys for the current Discovery Key.
     ///
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.

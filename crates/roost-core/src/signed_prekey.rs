@@ -39,7 +39,7 @@ pub enum SignedPreKeyError {
     /// Loading the discovery key for signed-pre-key rotation returned a [`DiscoveryKeyError`].
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
-    /// Backup restoration requires a new inbox generation before prekeys may be used.
+    /// Backup restoration requires an inbox rotation before prekeys may be used.
     #[error("inbox rotation required before using restored pre-key state")]
     InboxRotationRequired,
     /// A stored signed-pre-key blob is shorter than its format requires.

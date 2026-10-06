@@ -88,7 +88,7 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
             .unwrap(),
     );
     snapshot.apply_all(first.contact.state_updates).unwrap();
-    let generation_after_first = key_store.current_public_discovery_key().unwrap().epoch;
+    let epoch_after_first = key_store.current_public_discovery_key().unwrap().epoch;
 
     let prepared = key_store
         .prepare_block_contact(&snapshot, identity_key)
@@ -108,6 +108,6 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
     ));
     assert_eq!(
         key_store.current_public_discovery_key().unwrap().epoch,
-        generation_after_first
+        epoch_after_first
     );
 }

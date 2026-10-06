@@ -126,7 +126,7 @@ impl DiscoveryKey {
     /// The signature covers only the two identity public halves — no epoch, no timestamp. The
     /// IK→DK direction needs an epoch because one permanent identity key signs many discovery keys
     /// over its lifetime; this direction does not, because a fresh discovery key is minted per
-    /// inbox generation and so already identifies the generation it belongs to.
+    /// epoch and so already identifies the epoch it belongs to.
     pub fn sign_identity_binding(
         &self,
         identity: &PublicIdentityKey,

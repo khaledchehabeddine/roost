@@ -33,7 +33,7 @@ pub enum ProtocolStateKind {
     /// Separate from [`Self::ContactState`] because it holds the peer's delivery capability, a
     /// bearer secret that must not ride along with the public contact snapshot.
     PeerInboxAuthorization,
-    /// Identity-key-addressed record of which local inbox generation a contact has been given.
+    /// Identity-key-addressed record of the latest local epoch whose capability a contact holds.
     LocalInboxAuthorization,
 }
 
@@ -173,15 +173,15 @@ pub struct ContactEvent {
     pub contact: ContactState,
 }
 
-/// A peer's recipient delivery capability for one of its inbox generations.
+/// A peer's recipient delivery capability for one of its Discovery Key epochs.
 ///
 /// Deliberately not [`Clone`]: [`Self::capability`] is a bearer secret, and every clone is another
 /// heap copy nothing scrubs. Hand it straight to the relay submission that needs it.
 #[derive(uniffi::Record)]
 pub struct PeerInboxAuthorization {
-    /// The peer inbox generation this authorization belongs to.
-    pub generation: u32,
-    /// The peer's recipient delivery capability for that generation. Always 32 bytes, and secret.
+    /// The peer's Discovery Key epoch this authorization belongs to.
+    pub epoch: u32,
+    /// The peer's recipient delivery capability for that epoch. Always 32 bytes, and secret.
     pub capability: Vec<u8>,
 }
 
@@ -623,9 +623,9 @@ impl Contacts {
         )
     }
 
-    /// Records a peer's inbox authorization for a generation.
+    /// Records a peer's inbox authorization for an epoch.
     ///
-    /// Returns no updates when `generation` is not newer than what is stored. That refusal is
+    /// Returns no updates when `epoch` is not newer than what is stored. That refusal is
     /// load-bearing: an old authorization replayed at a contact would restore a capability the
     /// peer has already rotated away from, which is exactly the state a blocked sender wants to
     /// reach.
@@ -639,7 +639,7 @@ impl Contacts {
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         identity_key: IdentityKey,
-        generation: u32,
+        epoch: u32,
         capability: Vec<u8>,
     ) -> Result<Vec<ProtocolStateUpdate>, RoostError> {
         let capability = Zeroizing::new(capability);
@@ -654,7 +654,7 @@ impl Contacts {
                 .record_peer_inbox_authorization(
                     &snapshot,
                     identity_key.to_core()?,
-                    generation,
+                    epoch,
                     &capability,
                 )?,
         ))
@@ -677,12 +677,12 @@ impl Contacts {
             .protocol_engine()
             .peer_inbox_authorization(&snapshot, identity_key.to_core()?)?
             .map(|stored| PeerInboxAuthorization {
-                generation: stored.generation,
+                epoch: stored.epoch,
                 capability: stored.capability.to_bytes().to_vec(),
             }))
     }
 
-    /// Records that a contact has been given local inbox generation `generation`.
+    /// Records that a contact has been given the delivery capability for local epoch `epoch`.
     ///
     /// Call this only once the authorization update has actually reached transport. Recording it
     /// earlier would let an app killed mid-re-key resume past a contact that never received
@@ -697,21 +697,17 @@ impl Contacts {
         &self,
         snapshot: Vec<ProtocolStateEntry>,
         identity_key: IdentityKey,
-        generation: u32,
+        epoch: u32,
     ) -> Result<Vec<ProtocolStateUpdate>, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         Ok(updates_from_core(
             self.inner
                 .protocol_engine()
-                .record_inbox_authorization_delivered(
-                    &snapshot,
-                    identity_key.to_core()?,
-                    generation,
-                )?,
+                .record_inbox_authorization_delivered(&snapshot, identity_key.to_core()?, epoch)?,
         ))
     }
 
-    /// Returns which of `candidates` still need the current inbox generation.
+    /// Returns which of `candidates` still need the current epoch's delivery capability.
     ///
     /// A contact qualifies when it has never been given an authorization or was last given an
     /// older one. Blocked contacts are always excluded — re-supplying one would hand back the very
@@ -725,7 +721,7 @@ impl Contacts {
     pub fn contacts_needing_inbox_authorization(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
-        current_generation: u32,
+        current_epoch: u32,
         candidates: Vec<IdentityKey>,
     ) -> Result<Vec<IdentityKey>, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -736,7 +732,7 @@ impl Contacts {
         Ok(self
             .inner
             .protocol_engine()
-            .contacts_needing_inbox_authorization(&snapshot, current_generation, &candidates)?
+            .contacts_needing_inbox_authorization(&snapshot, current_epoch, &candidates)?
             .into_iter()
             .map(IdentityKey::from_core)
             .collect())

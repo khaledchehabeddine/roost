@@ -185,7 +185,7 @@ pub struct PublicationBundle {
     /// Publish this alongside the discovery key. A relay verifies both directions before accepting
     /// a registration and rejects it when either fails.
     pub discovery_to_identity: Vec<u8>,
-    /// Public commitment to this inbox generation's recipient delivery capability. Always 32
+    /// Public commitment to this inbox's recipient delivery capability. Always 32
     /// bytes.
     ///
     /// Register this value. Never register the capability itself — that is a bearer secret, and
@@ -210,13 +210,13 @@ impl PublicationBundle {
 /// Everything one inbox rotation produces.
 ///
 /// Publish and register [`Self::publication`]; persist [`Self::capability`] in secure storage and
-/// give it only to authorized contacts. The two are returned together so a new generation cannot be
-/// published while contacts still hold the previous generation's capability.
+/// give it only to authorized contacts. The two are returned together so a new inbox cannot be
+/// published while contacts still hold the previous inbox's capability.
 #[derive(Clone, uniffi::Record)]
 pub struct InboxRotation {
-    /// Material to publish and register for the new generation.
+    /// Material to publish and register for the new inbox.
     pub publication: PublicationBundle,
-    /// The new generation's recipient delivery capability. Always 32 bytes, and secret.
+    /// The new inbox's recipient delivery capability. Always 32 bytes, and secret.
     pub capability: Vec<u8>,
 }
 

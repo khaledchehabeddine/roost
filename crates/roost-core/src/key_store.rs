@@ -74,7 +74,7 @@ pub struct PublicationBundle {
     /// peer that starts from a discovery key verifies it to learn the identity really was
     /// authorized by that discovery key.
     pub discovery_to_identity: Signature,
-    /// Public commitment to the recipient delivery capability of this inbox generation.
+    /// Public commitment to the recipient delivery capability of this inbox.
     ///
     /// Register this with the relay. The capability it commits to is a bearer secret and is
     /// reached only through [`KeyStore::current_delivery_capability`].
@@ -85,14 +85,14 @@ pub struct PublicationBundle {
 
 /// Everything one inbox rotation produces.
 ///
-/// A rotation advances the inbox generation and replaces the discovery key, its mutual binding
+/// A rotation advances the epoch and replaces the discovery key, its mutual binding
 /// signatures, the prekey bundle, and the recipient delivery capability together. Both halves are
-/// returned from the one call so a caller cannot publish the new generation while still
-/// distributing the previous generation's capability.
+/// returned from the one call so a caller cannot publish the new inbox while still
+/// distributing the previous inbox's capability.
 pub struct InboxRotation {
-    /// Material to publish and register, including the new generation and verifier.
+    /// Material to publish and register, including the new Discovery Key and verifier.
     pub publication: PublicationBundle,
-    /// The new generation's bearer secret, to persist and share with authorized contacts.
+    /// The new inbox's bearer secret, to persist and share with authorized contacts.
     ///
     /// Deliberately kept out of [`PublicationBundle`]: everything in that struct is meant to be
     /// published, and a secret sitting inside it is one careless `publish(bundle)` away from
@@ -303,7 +303,7 @@ impl KeyStore {
         })
     }
 
-    /// Returns the recipient delivery capability for the current inbox generation.
+    /// Returns the recipient delivery capability for the current inbox.
     ///
     /// Secret-bearing. Give it only to authorized contacts through an encrypted channel, and
     /// register [`PublicationBundle::recipient_delivery_verifier`] instead — Aether never
@@ -371,10 +371,10 @@ impl KeyStore {
 
     /// Prepares rotation of the whole inbox.
     ///
-    /// Advances the inbox generation, replaces the discovery key and the recipient delivery
-    /// capability together, clears generation-bound one-time pre-keys, and returns both the
+    /// Advances the epoch, replaces the discovery key and the recipient delivery
+    /// capability together, clears epoch-bound one-time pre-keys, and returns both the
     /// publishable material and the new capability. A preparation failure discards the staged
-    /// changes, leaving the previous authoritative inbox generation intact.
+    /// changes, leaving the previous authoritative inbox intact.
     ///
     /// This invalidates every contact's delivery authorization — that is what makes it the
     /// mechanism behind blocking, and why it is not merely a discovery-key rotation.
@@ -470,8 +470,8 @@ impl KeyStore {
     /// material untouched. Reserve this operation, atomically wipe or replace host-owned Session,
     /// deduplication, and pending-acknowledgment state, then finalize. The restored identity keeps
     /// the discovery-key epoch lineage from the backup, but prekey generation and publication stay
-    /// blocked until [`Self::prepare_inbox_rotation`] advances to a fresh generation. This avoids
-    /// reusing prekey identifiers that the backed-up generation may already have published.
+    /// blocked until [`Self::prepare_inbox_rotation`] advances to the next epoch. This avoids
+    /// reusing prekey identifiers already published under the backed-up epoch.
     pub fn prepare_backup_import(
         &self,
         data: &[u8],
@@ -618,8 +618,8 @@ mod tests {
     }
 
     /// One operation must return everything a rotation produces. Returning the
-    /// publishable material without the capability invites a caller to publish a new generation
-    /// while still handing contacts the previous generation's secret.
+    /// publishable material without the capability invites a caller to publish a new inbox
+    /// while still handing contacts the previous inbox's secret.
     #[test]
     fn inbox_rotation_returns_publication_and_capability_together() {
         let key_store = store();
@@ -671,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_identity_persists_discovery_key_at_generation_one() {
+    fn generate_identity_persists_discovery_key_at_epoch_one() {
         let key_store = store();
         key_store.generate_identity().unwrap();
         let bundle = key_store.current_public_discovery_key().unwrap();
@@ -1486,8 +1486,8 @@ mod tests {
             .import_encrypted_backup(&backup, "pass")
             .unwrap();
 
-        // The restored discovery key keeps the source generation lineage instead of resetting to
-        // the first generation, and verifies against the restored identity.
+        // The restored discovery key keeps the source epoch lineage instead of resetting to
+        // the first epoch, and verifies against the restored identity.
         assert_eq!(
             destination_store
                 .current_public_discovery_key()

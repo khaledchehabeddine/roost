@@ -33,7 +33,7 @@ pub enum OneTimePreKeyError {
     /// Loading the discovery key returned a [`DiscoveryKeyError`].
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
-    /// Backup restoration requires a new inbox generation before prekeys may be used.
+    /// Backup restoration requires an inbox rotation before prekeys may be used.
     #[error("inbox rotation required before using restored pre-key state")]
     InboxRotationRequired,
     /// A requested batch doesn't fit the pool's free slots.

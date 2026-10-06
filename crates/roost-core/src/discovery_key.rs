@@ -12,15 +12,15 @@ use zeroize::Zeroizing;
 
 const DISCOVERY_KEY: &str = "discovery/current";
 // Version 2 added the recipient delivery capability. A version 1 blob is rejected by the length
-// check in `checked_blob` before the version byte is even read; it predates the inbox generation
-// model and has no capability to migrate, so the host must reset and re-register.
+// check in `checked_blob` before the version byte is even read; it has no capability to migrate,
+// so the host must reset and re-register.
 const DISCOVERY_KEY_VERSION: u8 = 2;
-// Blob layout: version (1) | generation (4) | x25519 secret (32) | ed25519 secret (32) |
+// Blob layout: version (1) | epoch (4) | x25519 secret (32) | ed25519 secret (32) |
 // identity signature (64) | created_at (8) | delivery capability (32).
 const DISCOVERY_KEY_BLOB_LEN: usize = 1 + 4 + 32 + 32 + 64 + 8 + 32;
 const CAPABILITY_OFFSET: usize = 141;
-// Identity creation starts at inbox generation 1.
-const FIRST_INBOX_GENERATION: u32 = 1;
+// Identity creation starts at epoch 1.
+const FIRST_EPOCH: u32 = 1;
 
 /// Errors returned by discovery-key operations.
 #[derive(Debug, thiserror::Error)]
@@ -137,7 +137,7 @@ impl DiscoveryKeyManager {
     ) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let identity = self.identity.load_identity()?;
         let epoch = match self.stored_status()? {
-            DiscoveryKeyStatus::Absent => FIRST_INBOX_GENERATION,
+            DiscoveryKeyStatus::Absent => FIRST_EPOCH,
             DiscoveryKeyStatus::Present { epoch } => epoch.saturating_add(1),
             DiscoveryKeyStatus::Malformed => return Err(DiscoveryKeyError::Malformed),
         };
@@ -145,8 +145,8 @@ impl DiscoveryKeyManager {
         let discovery_key =
             generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs)
                 .map_err(DiscoveryKeyError::DiscoveryKeySignature)?;
-        // The capability rotates with the discovery key because both belong to one inbox
-        // generation, and they are written in one store so they cannot diverge.
+        // The capability rotates with the discovery key because both belong to one epoch, and
+        // they are written in one store so they cannot diverge.
         let capability = generate_recipient_delivery_capability(rng);
         let blob = encode_discovery_key(&discovery_key, &capability);
         let mut storage = self.lock_storage()?;
@@ -154,7 +154,7 @@ impl DiscoveryKeyManager {
         Ok(discovery_key)
     }
 
-    // Returns the recipient delivery capability bound to the current inbox generation.
+    // Returns the recipient delivery capability bound to the current epoch.
     //
     // Secret-bearing: the caller presents it to authorized contacts and never registers it. Only
     // its verifier is registered with the relay.
@@ -403,14 +403,14 @@ mod tests {
     }
 
     #[test]
-    fn rotate_now_establishes_generation_one_and_verifies() {
+    fn rotate_now_establishes_epoch_one_and_verifies() {
         let mut rng = ChaCha20Rng::from_seed([0xb3; 32]);
         let DiscoveryKeySetup {
             identity,
             manager: discovery,
         } = setup_with_identity();
         let rotated = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        // Identity creation starts at inbox generation 1, not 0.
+        // Identity creation starts at epoch 1, not 0.
         assert_eq!(rotated.epoch(), 1);
         let bundle = discovery.current_public().unwrap();
         assert_eq!(bundle.epoch, 1);
@@ -418,8 +418,8 @@ mod tests {
         assert!(verify_public_discovery_key(&bundle, loaded_identity.verifying_key()).is_ok());
     }
 
-    /// The discovery key and the delivery capability share one generation, so rotation must
-    /// replace both. A rotation that advanced the generation while leaving the
+    /// The discovery key and the delivery capability share one epoch, so rotation must
+    /// replace both. A rotation that advanced the epoch while leaving the
     /// capability intact would leave a blocked contact still able to deliver.
     #[test]
     fn rotation_replaces_the_delivery_capability() {
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_now_advances_the_generation() {
+    fn rotate_now_advances_the_epoch() {
         let mut rng = ChaCha20Rng::from_seed([0xb6; 32]);
         let discovery = setup_with_identity().manager;
         assert_eq!(
@@ -468,12 +468,12 @@ mod tests {
     fn rotate_now_recovers_from_tampered_signature_preserving_epoch() {
         let mut rng = ChaCha20Rng::from_seed([0xb7; 32]);
         let discovery = setup_with_identity().manager;
-        // Reach generation 2 first, so recovery to 3 proves the stored value is read, not reset.
+        // Reach epoch 2 first, so recovery to 3 proves the stored value is read, not reset.
         discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         let rotated = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         assert_eq!(rotated.epoch(), 2);
 
-        // Corrupt the signature of the generation-2 key.
+        // Corrupt the signature of the epoch-2 key.
         let mut blob = discovery
             .lock_storage()
             .unwrap()
