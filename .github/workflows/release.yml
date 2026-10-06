@@ -125,7 +125,7 @@ jobs:
         run: |
           ORG_GRADLE_PROJECT_GitHubPackagesUsername="$(gh api user --jq .login)"
           export ORG_GRADLE_PROJECT_GitHubPackagesUsername
-          gradle --no-daemon -p android -ProostVersion="$VERSION" publishReleasePublicationToGitHubPackagesRepository
+          gradle --no-daemon -p android -Pversion="$VERSION" publishReleasePublicationToGitHubPackagesRepository
       - name: Publish the roost-swift release
         if: github.event_name == 'push'
         env:

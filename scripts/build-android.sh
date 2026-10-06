@@ -12,5 +12,5 @@ cargo ndk -t arm64-v8a -t x86_64 -o "$OUT/jniLibs" build --locked --release -p r
 cargo run --locked --bin uniffi-bindgen -- generate \
     target/aarch64-linux-android/release/libroost_client.so --language kotlin --no-format --out-dir "$OUT/kotlin"
 cargo run --locked --bin convert-docs -- kotlin "$OUT/kotlin/com/chirp/roost/roost_client.kt"
-gradle --no-daemon -p android -ProostVersion="$VERSION" publishReleasePublicationToLocalRepository
+gradle --no-daemon -p android -Pversion="$VERSION" publishReleasePublicationToLocalRepository
 printf 'Android Maven package: %s\n' "$OUT/maven/com/chirp/roost/$VERSION/roost-$VERSION.aar"
