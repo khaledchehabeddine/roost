@@ -825,6 +825,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
+name = "roost-bindgen"
+version = "0.16.0"
+dependencies = [
+ "uniffi",
+]
+
+[[package]]
 name = "roost-client"
 version = "0.16.0"
 dependencies = [

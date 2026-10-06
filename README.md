@@ -29,10 +29,12 @@ CI runs the checks in [`ci.yml`](.github/workflows/ci.yml) on every pull request
 
 Only `roost-client` is a supported consumer entry crate, and Swift and Kotlin use its UniFFI
 bindings. Core, Crypto, and Protocol are implementation dependencies, not separate SDKs or release
-products. All four crates share one workspace version and remain unpublished on crates.io.
+products. `roost-bindgen` holds the build tools that generate those bindings, so they never ship in
+the libraries. All five crates share one workspace version and remain unpublished on crates.io.
 
 | Crate | Owns | Direct Roost dependencies |
 | --- | --- | --- |
+| `roost-bindgen` | Swift and Kotlin binding generation and its doc adaptation | None |
 | `roost-client` | Mobile UniFFI declarations and adapters | `roost-core`, `roost-protocol` |
 | `roost-core` | Identity lifecycle, messaging, contacts, state transitions, storage recovery | `roost-crypto`, `roost-protocol` |
 | `roost-crypto` | Keys, X3DH, Double Ratchet, encryption | `roost-protocol` |
