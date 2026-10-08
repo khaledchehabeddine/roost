@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 OUT="$ROOT/target/ios"
-VERSION="$(awk -F '"' '/^version = / { print $2; exit }' "$ROOT/Cargo.toml")"
+VERSION=0.16.0
 ZIP="$OUT/Roost-v$VERSION.xcframework.zip"
 # Keep in step with .iOS(.v13) in the Package.swift that release.yml writes.
 MIN_IOS=13.0

@@ -4,6 +4,7 @@ plugins {
 }
 
 group = "com.chirp"
+version = "0.16.0"
 
 android {
     namespace = "com.chirp.roost"

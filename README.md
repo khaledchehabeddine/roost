@@ -74,12 +74,14 @@ arm64 device slice and an arm64 simulator slice.
 
 With JDK 17 or newer, Gradle 9.6.0 on your `PATH`, Android SDK 36, NDK r30, and `cargo-ndk` 4.1.2,
 and with `ANDROID_HOME` and `ANDROID_NDK_HOME` set, `scripts/build-android.sh` writes the
-`com.chirp:roost` AAR for arm64-v8a and x86_64 under `target/android/maven/`, with its POM, Gradle
-module metadata, and sources jar.
+`com.chirp:roost` AAR for arm64-v8a under `target/android/maven/`, with its POM, Gradle module
+metadata, and sources jar.
 
 To test a package, run `./check.sh <roost-checkout>` in `roost-swift` or `roost-kotlin`.
 
 ## Releasing
+
+Bump the version in `Cargo.toml`, `android/build.gradle.kts`, and `scripts/build-ios.sh` together.
 
 1. Pick a `main` commit whose Rust CI passed, and run `./check.sh <roost-checkout>` on it in
    `roost-swift` and `roost-kotlin`.
