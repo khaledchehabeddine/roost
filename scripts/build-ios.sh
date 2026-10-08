@@ -13,7 +13,6 @@ cargo run --locked --bin uniffi-bindgen -- generate \
     target/aarch64-apple-ios/release/libroost_client.a \
     --language swift --no-format --out-dir target/ios/generated
 cargo run --locked --bin convert-docs -- swift target/ios/generated/Roost.swift
-
 mkdir -p target/ios/headers
 cp target/ios/generated/RoostFFI.h target/ios/headers/
 cp target/ios/generated/RoostFFI.modulemap target/ios/headers/module.modulemap
