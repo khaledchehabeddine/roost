@@ -69,8 +69,9 @@ rate limiting, transport retries, or deniable mode. Roost makes no side-channel 
 
 ## Mobile Packages
 
-With Xcode, `scripts/build-ios.sh` writes `target/ios/Roost-v<version>.xcframework.zip` with an
-arm64 device slice and an arm64 simulator slice.
+With Xcode, `scripts/build-ios.sh` writes `target/ios/RoostFFI-v<version>.xcframework.zip`, the Rust
+library for an arm64 device and an arm64 simulator, and the Swift bindings to
+`target/ios/generated/Roost.swift`.
 
 With JDK 17 or newer, Gradle 9.6.0 on your `PATH`, Android SDK 36, NDK r30, and `cargo-ndk` 4.1.2,
 and with `ANDROID_HOME` and `ANDROID_NDK_HOME` set, `scripts/build-android.sh` writes the
@@ -89,8 +90,9 @@ Bump the version in `Cargo.toml`, `android/build.gradle.kts`, and `scripts/build
 
 The [Release](.github/workflows/release.yml) workflow rejects a tag that isn't on `main` or doesn't
 match the workspace version. It builds both packages and attaches the zip to a draft `roost-swift`
-release. Then it tags `roost-swift` with a `Package.swift` that points at the zip and pins its
-checksum, publishes `com.chirp:roost` to `roost-kotlin`'s GitHub Packages, and publishes the release.
+release. Then it tags `roost-swift` with the Swift bindings and a `Package.swift` that points at the
+zip and pins its checksum, publishes `com.chirp:roost` to `roost-kotlin`'s GitHub Packages, and
+publishes the release.
 Run the workflow manually to build both packages without publishing them.
 
 Publishing needs a `ROOST_PUBLISH_TOKEN` repository secret. It must be a classic personal access
