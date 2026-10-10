@@ -9,6 +9,7 @@ version = "0.16.0"
 android {
     namespace = "com.chirp.roost"
     compileSdk = 36
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         minSdk = 21

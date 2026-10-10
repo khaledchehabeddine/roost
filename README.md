@@ -73,7 +73,7 @@ With Xcode, `scripts/build-ios.sh` writes `target/ios/RoostFFI-v<version>.xcfram
 library for an arm64 device and an arm64 simulator, and the Swift bindings to
 `target/ios/generated/Roost.swift`.
 
-With JDK 17 or newer, Gradle 9.6.0 on your `PATH`, Android SDK 36, NDK r30, and `cargo-ndk` 4.1.2,
+With JDK 17 or newer, Gradle 9.8.1 on your `PATH`, Android SDK 36, NDK r29, and `cargo-ndk` 4.1.2,
 and with `ANDROID_HOME` and `ANDROID_NDK_HOME` set, `scripts/build-android.sh` writes the
 `com.chirp:roost` AAR for arm64-v8a under `target/android/maven/`, with its POM, Gradle module
 metadata, and sources jar.
@@ -88,17 +88,18 @@ Bump the version in `Cargo.toml`, `android/build.gradle.kts`, and `scripts/build
    `roost-swift` and `roost-kotlin`.
 2. Push the tag `v<workspace version>` on that commit.
 
-The [Release](.github/workflows/release.yml) workflow rejects a tag that isn't on `main` or doesn't
-match the workspace version. It builds both packages and attaches the zip to a draft `roost-swift`
-release. Then it tags `roost-swift` with the Swift bindings and a `Package.swift` that points at the
-zip and pins its checksum, publishes `com.chirp:roost` to `roost-kotlin`'s GitHub Packages, and
-publishes the release.
-Run the workflow manually to build both packages without publishing them.
+The [Release](.github/workflows/release.yml) workflow builds both packages and publishes
+`com.chirp:roost` to `roost-kotlin`'s GitHub Packages. Then it attaches the zip to a draft
+`roost-swift` release, tags `roost-swift` with the Swift bindings and a `Package.swift`, filled in
+from `ios/Package.swift`, that points at the zip and pins its checksum, and publishes the release.
 
-Publishing needs a `ROOST_PUBLISH_TOKEN` repository secret. It must be a classic personal access
-token with the `repo` and `write:packages` scopes, because the GitHub Packages Maven registry accepts
-no other kind. `roost-swift` needs immutable releases, which lock the zip and the tag once the
-release is published.
+Publishing needs two repository secrets. `SWIFT_PUBLISH_TOKEN` is a fine-grained personal access
+token for `roost-swift` only, with read and write access to contents. Fine-grained tokens expire, so
+renew it before its date. `KOTLIN_PUBLISH_TOKEN` is a classic personal access token with only the
+`write:packages` scope, because the GitHub Packages Maven registry accepts no other kind. Create it
+from `https://github.com/settings/tokens/new?scopes=write:packages`, which leaves out the `repo`
+scope that GitHub otherwise adds. `roost-swift` needs immutable releases, which lock the zip and the
+tag once the release is published.
 
 If a run fails before it publishes the release, delete the draft release, the `roost-swift` tag, and
 the package version if it exists, then re-run the workflow. If the fix needs a new commit, move the
