@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/roost-bindgen",
     "crates/roost-core",
     "crates/roost-crypto",
     "crates/roost-client",
@@ -36,7 +37,7 @@ zeroize = "1.8.2"
 postcard = { version = "1.1.3", default-features = false, features = ["use-std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 # Bindings
-uniffi = "0.31.1"
+uniffi = "0.32.2"
 # Errors
 thiserror = "2.0.18"
 # Text

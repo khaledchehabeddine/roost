@@ -8,14 +8,6 @@ version.workspace = true
 crate-type = ["cdylib", "rlib", "staticlib"]
 name = "roost_client"
 
-[[bin]]
-name = "uniffi-bindgen"
-path = "uniffi-bindgen.rs"
-
-[[bin]]
-name = "uniffi-bindgen-swift"
-path = "uniffi-bindgen-swift.rs"
-
 [features]
 default = []
 development-certificates = ["roost-core/development-certificates"]
@@ -27,7 +19,8 @@ roost-protocol.workspace = true
 # Utility
 rand.workspace = true
 thiserror.workspace = true
-uniffi = { workspace = true, features = ["cli"] }
+# Leave out the cli feature, which would link UniFFI's generator into the XCFramework
+uniffi.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

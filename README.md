@@ -23,17 +23,18 @@ Generate documentation:
 cargo doc --workspace --open
 ```
 
-CI runs the checks in [`ci.yml`](.github/workflows/ci.yml) on every pull request. The release-command
-tests need Python 3.11 or newer.
+CI runs the checks in [`ci.yml`](.github/workflows/ci.yml) on every pull request.
 
 ## Architecture
 
 Only `roost-client` is a supported consumer entry crate, and Swift and Kotlin use its UniFFI
 bindings. Core, Crypto, and Protocol are implementation dependencies, not separate SDKs or release
-products. All four crates share one workspace version and remain unpublished on crates.io.
+products. `roost-bindgen` holds the build tools that generate those bindings, so they never ship in
+the libraries. All five crates share one workspace version and remain unpublished on crates.io.
 
 | Crate | Owns | Direct Roost dependencies |
 | --- | --- | --- |
+| `roost-bindgen` | Swift and Kotlin binding generation and doc conversion | None |
 | `roost-client` | Mobile UniFFI declarations and adapters | `roost-core`, `roost-protocol` |
 | `roost-core` | Identity lifecycle, messaging, contacts, state transitions, storage recovery | `roost-crypto`, `roost-protocol` |
 | `roost-crypto` | Keys, X3DH, Double Ratchet, encryption | `roost-protocol` |
@@ -64,38 +65,46 @@ says what Roost and the host each own, and rustdoc has each method's contract. T
 
 Roost doesn't hide transport metadata, so Transport Bindings, routing, timing, IP addresses, and push
 tokens stay visible to the transport. It can't protect secrets on a compromised device, and it has no
-rate limiting, transport retries, or deniable mode. Release signatures prove who built a package,
-not runtime privacy, and no side-channel proof is claimed.
+rate limiting, transport retries, or deniable mode. Roost makes no side-channel claims.
 
 ## Mobile Packages
 
-With Xcode and an iOS simulator runtime, `scripts/build/ios-package.sh` writes
-`target/ios-distribution/Roost-v<version>.xcframework.zip`.
+With Xcode, `scripts/build-ios.sh` writes `target/ios/RoostFFI-v<version>.xcframework.zip`, the Rust
+library for an arm64 device and an arm64 simulator, and the Swift bindings to
+`target/ios/generated/Roost.swift`.
 
-With JDK 17, Gradle 9.5.0, Android SDK 36, NDK r28c, and `cargo-ndk` 4.1.2, and with `ANDROID_HOME`
-and `ANDROID_NDK_HOME` set, `scripts/build/android-aar.sh` writes the AAR and POM under
-`target/android/maven/`. Set `ROOST_CARGO_FEATURES=development-certificates` to build the local-only
-`roost-development` package instead.
+With JDK 17 or newer, Gradle 9.8.1 on your `PATH`, Android SDK 36, NDK r29, and `cargo-ndk` 4.1.2,
+and with `ANDROID_HOME` and `ANDROID_NDK_HOME` set, `scripts/build-android.sh` writes the
+`com.chirp:roost` AAR for arm64-v8a under `target/android/maven/`, with its POM, Gradle module
+metadata, and sources jar.
 
 To test a package, run `./check.sh <roost-checkout>` in `roost-swift` or `roost-kotlin`.
 
 ## Releasing
 
-Release from a `main` commit whose Rust CI passed:
+Bump the version in `Cargo.toml`, `android/build.gradle.kts`, and `scripts/build-ios.sh` together.
 
-1. Dispatch **Package consumption** in `roost-swift` and `roost-kotlin` with that commit, then pin
-   the SHA-256 of the XCFramework ZIP, AAR, and POM they checked.
-2. Dispatch **Prepare signed mobile candidates** with both run IDs and the pins. It signs the
-   checked bytes without rebuilding them.
-3. With `ROOST_SOURCE_REVISION`, `ROOST_SWIFT_RUN`, `ROOST_KOTLIN_RUN`, and `ROOST_SHA256_JSON` set,
-   run `python3 scripts/release/mobile.py fetch <new-dir> --run <run-id>/<attempt>`, then
-   `./check.sh <roost-checkout> <new-dir>` in each package repository.
-4. Dispatch **Publish verified mobile candidates** with the same inputs. After a partial failure,
-   rerun it, and it uploads only what's missing. Changed bytes need a new version.
+1. Pick a `main` commit whose Rust CI passed, and run `./check.sh <roost-checkout>` on it in
+   `roost-swift` and `roost-kotlin`.
+2. Push the tag `v<workspace version>` on that commit.
 
-Publishing needs `ROOST_READ_TOKEN` with read access to all three repositories, a `signing`
-environment with the release key, and a `release` environment with `ROOST_PUBLISH_TOKEN`, both
-restricted to `main`. All three repositories need immutable releases and protected `v*` tags.
+The [Release](.github/workflows/release.yml) workflow builds both packages and publishes
+`com.chirp:roost` to `roost-kotlin`'s GitHub Packages. Then it attaches the zip to a draft
+`roost-swift` release, tags `roost-swift` with the Swift bindings and a `Package.swift`, filled in
+from `ios/Package.swift`, that points at the zip and pins its checksum, and publishes the release.
+
+Publishing needs two repository secrets. `SWIFT_PUBLISH_TOKEN` is a fine-grained personal access
+token for `roost-swift` only, with read and write access to contents. Fine-grained tokens expire, so
+renew it before its date. `KOTLIN_PUBLISH_TOKEN` is a classic personal access token with only the
+`write:packages` scope, because the GitHub Packages Maven registry accepts no other kind. Create it
+from `https://github.com/settings/tokens/new?scopes=write:packages`, which leaves out the `repo`
+scope that GitHub otherwise adds. `roost-swift` needs immutable releases, which lock the zip and the
+tag once the release is published.
+
+If a run fails before it publishes the release, delete the draft release, the `roost-swift` tag, and
+the package version if it exists, then re-run the workflow. If the fix needs a new commit, move the
+tag to that commit, which starts a new run. Once the release is published, changed bytes need a new
+version.
 
 ## Docs
 

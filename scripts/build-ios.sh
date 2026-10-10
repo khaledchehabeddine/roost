@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+VERSION=0.16.0
+MIN_IOS=15.0
+
+rm -rf target/ios
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+IPHONEOS_DEPLOYMENT_TARGET="$MIN_IOS" cargo build --locked --release -p roost-client \
+    --target aarch64-apple-ios --target aarch64-apple-ios-sim
+cargo run --locked --bin uniffi-bindgen -- generate \
+    target/aarch64-apple-ios/release/libroost_client.a \
+    --language swift --no-format --out-dir target/ios/generated
+cargo run --locked --bin convert-docs -- swift target/ios/generated/Roost.swift
+mkdir -p target/ios/headers
+cp target/ios/generated/RoostFFI.h target/ios/headers/
+cp target/ios/generated/RoostFFI.modulemap target/ios/headers/module.modulemap
+xcodebuild -create-xcframework \
+    -library target/aarch64-apple-ios/release/libroost_client.a -headers target/ios/headers \
+    -library target/aarch64-apple-ios-sim/release/libroost_client.a -headers target/ios/headers \
+    -output target/ios/RoostFFI.xcframework
+(cd target/ios && zip -qr "RoostFFI-v$VERSION.xcframework.zip" RoostFFI.xcframework)

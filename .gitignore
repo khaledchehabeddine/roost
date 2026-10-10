@@ -1,12 +1,16 @@
-# Cargo/Rust
+# Rust
 target
 
-# Android packaging
-packaging/android/.gradle/
-packaging/android/**/build/
-packaging/android/local.properties
+# Kotlin
+android/.gradle/
+android/.kotlin/
+android/build/
 
-# Claude Code
+# Swift
+ios/.build/
+ios/.swiftpm/
+
+# Claude
 .claude/agent-memory-local/
 .claude/settings.local.json
 .claude/worktrees/
@@ -14,8 +18,8 @@ packaging/android/local.properties
 # Codex
 .codex/config.local.toml
 
+# JetBrains
+.idea/
+
 # macOS
 .DS_Store
-
-# RustRover
-.idea/

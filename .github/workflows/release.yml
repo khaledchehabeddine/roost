@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-26
+    env:
+      TAG: ${{ github.ref_name }}
+      GH_REPO: chirp-org/roost-swift
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: '9.8.1'
+          cache-disabled: true
+      - run: cargo install cargo-ndk --version 4.1.2 --locked
+      - run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865" scripts/build-android.sh
+      - run: scripts/build-ios.sh
+
+      - name: Publish to roost-kotlin
+        env:
+          ORG_GRADLE_PROJECT_GitHubPackagesUsername: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ secrets.KOTLIN_PUBLISH_TOKEN }}
+        run: gradle -p android publishReleasePublicationToGitHubPackagesRepository
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.GH_REPO }}
+          token: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
+          path: roost-swift
+      - name: Tag roost-swift
+        working-directory: roost-swift
+        env:
+          GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
+        run: |
+          zip="../target/ios/RoostFFI-$TAG.xcframework.zip"
+          gh release create "$TAG" "$zip" --draft
+          # SwiftPM needs the API URL for a private repo. It must also end in .zip.
+          url="$(gh release view "$TAG" --json assets --jq '.assets[0] | .apiUrl + "-" + .name')"
+          checksum="$(swift package compute-checksum "$zip")"
+          sed "s|{TAG}|$TAG|; s|{URL}|$url|; s|{CHECKSUM}|$checksum|" \
+            ../ios/Package.swift > Package.swift
+          mkdir -p Sources/Roost
+          cp ../target/ios/generated/Roost.swift Sources/Roost/
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Package.swift Sources/Roost/Roost.swift
+          git commit -m "chore: release Roost $TAG"
+          git push origin "HEAD:refs/tags/$TAG"
+      - name: Publish roost-swift
+        env:
+          GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
+        run: gh release edit "$TAG" --draft=false
