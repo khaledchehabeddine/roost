@@ -258,7 +258,7 @@ mod tests {
         let identity = key_store().generate_identity().unwrap();
 
         verify_identity_key_binding(identity)
-            .expect("Aether's own identity must satisfy Aether's own exported verifier");
+            .expect("Roost's own identity must satisfy Roost's own exported verifier");
     }
 
     #[test]
@@ -292,7 +292,7 @@ mod tests {
             ),
             // A small-order key is the one that is not merely malformed: signatures under it
             // verify for keys nobody controls, so an export that accepted one would report a
-            // binding that binds nothing. Every other Aether entry point refuses it, and this one
+            // binding that binds nothing. Every other Roost entry point refuses it, and this one
             // has to as well — it is the entry point that takes a key straight from a relay.
             (
                 "weak discovery key",

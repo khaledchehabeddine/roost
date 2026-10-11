@@ -7,7 +7,7 @@ use roost_core::{
 
 /// Opaque public bytes authenticated with one encrypted Message.
 ///
-/// The host defines the bytes and their meaning. Aether authenticates them, but never interprets,
+/// The host defines the bytes and their meaning. Roost authenticates them, but never interprets,
 /// transmits, or stores them. Established-Message and acknowledgment receive paths also include
 /// the bytes in deduplication. Retain the exact value with an outbound Message and supply it again
 /// for receive or retransmission.

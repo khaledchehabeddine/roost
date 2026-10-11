@@ -311,7 +311,7 @@ mod tests {
         let manager = manager();
         let generated_identity = manager.generate_identity(&mut rng).unwrap();
         let loaded_identity = manager.load_identity().unwrap();
-        let message = b"aether test message";
+        let message = b"roost test message";
         // Ed25519 signing is deterministic, so identical keys produce identical signatures.
         assert_eq!(
             generated_identity.sign(message).to_bytes(),

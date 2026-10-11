@@ -2,7 +2,7 @@
 //!
 //! The capability is a recipient-wide bearer secret: every currently authorized contact holds the
 //! same value, so it identifies the recipient's inbox rather than an individual sender.
-//! Aether generates one and hands it to the caller, but never registers, validates, or
+//! Roost generates one and hands it to the caller, but never registers, validates, or
 //! transmits it — the caller registers only the verifier.
 
 use rand::{CryptoRng, RngCore};

@@ -663,7 +663,7 @@ impl Messaging {
     /// Starts a new Session while authenticating a caller-owned Transport Binding.
     ///
     /// Commit the returned state updates atomically with the returned Message and retain the exact
-    /// binding for transport retry. Aether does not interpret, transmit, or store the binding.
+    /// binding for transport retry. Roost does not interpret, transmit, or store the binding.
     ///
     /// # Errors
     /// - [`RoostError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
