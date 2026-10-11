@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "com.chirp"
-version = "0.16.0"
+version = file("../Cargo.toml").readLines().first { it.startsWith("version = ") }.split('"')[1]
 
 android {
     namespace = "com.chirp.roost"
