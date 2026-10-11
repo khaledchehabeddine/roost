@@ -32,9 +32,11 @@ cargo build
 
 Bump the version in `Cargo.toml`.
 
-Tag the commit on `main` with the same version:
+Tag the latest commit on `main`:
 
 ```bash
-git tag vX.Y.Z
-git push origin vX.Y.Z
+git fetch origin main
+version=v$(git show origin/main:Cargo.toml | grep -m1 '^version' | cut -d'"' -f2)
+git tag "$version" origin/main
+git push origin "$version"
 ```
