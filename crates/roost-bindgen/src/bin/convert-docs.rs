@@ -519,8 +519,9 @@ mod tests {
     #[test]
     fn rejects_an_unterminated_example_block() {
         let binding = text(&["/**", " * ```swift", " * let a = 1", " */"]);
-        assert!(convert(&binding, Language::Swift).is_err());
-        assert!(convert(&binding, Language::Kotlin).is_err());
+        let unterminated = Err("unterminated doc example block".to_owned());
+        assert_eq!(convert(&binding, Language::Swift), unterminated);
+        assert_eq!(convert(&binding, Language::Kotlin), unterminated);
     }
 
     #[test]
@@ -532,12 +533,18 @@ mod tests {
             " * Fails when storage fails.",
             " */",
         ]);
-        assert!(convert(&binding, Language::Swift).is_err());
+        assert_eq!(
+            convert(&binding, Language::Swift),
+            Err("# Errors section without bullets".to_owned())
+        );
     }
 
     #[test]
     fn rejects_a_kotlin_errors_bullet_without_an_error_name() {
         let binding = text(&["/**", " * # Errors", " * - When storage fails.", " */"]);
-        assert!(convert(&binding, Language::Kotlin).is_err());
+        assert_eq!(
+            convert(&binding, Language::Kotlin),
+            Err("# Errors bullet without an error name: When storage fails.".to_owned())
+        );
     }
 }

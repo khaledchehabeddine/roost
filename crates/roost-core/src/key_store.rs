@@ -306,7 +306,7 @@ impl KeyStore {
     /// Returns the recipient delivery capability for the current inbox.
     ///
     /// Secret-bearing. Give it only to authorized contacts through an encrypted channel, and
-    /// register [`PublicationBundle::recipient_delivery_verifier`] instead — Aether never
+    /// register [`PublicationBundle::recipient_delivery_verifier`] instead — Roost never
     /// registers, validates, or transmits a capability.
     pub fn current_delivery_capability(
         &self,

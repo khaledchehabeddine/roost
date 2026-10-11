@@ -4,10 +4,6 @@ edition.workspace = true
 publish.workspace = true
 version.workspace = true
 
-[features]
-default = []
-development-certificates = []
-
 [dependencies]
 # Local
 roost-crypto.workspace = true

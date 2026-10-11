@@ -8,10 +8,6 @@ version.workspace = true
 crate-type = ["cdylib", "rlib", "staticlib"]
 name = "roost_client"
 
-[features]
-default = []
-development-certificates = ["roost-core/development-certificates"]
-
 [dependencies]
 # Local
 roost-core.workspace = true

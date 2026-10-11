@@ -113,7 +113,7 @@ mod tests {
     #[test]
     fn sign_and_verify_round_trip() {
         let key_pair = generated_key_pair();
-        let message = b"aether test message";
+        let message = b"roost test message";
         let signature = key_pair.sign(message);
         assert!(key_pair.verifying.verify(message, &signature).is_ok());
     }

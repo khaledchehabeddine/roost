@@ -22,8 +22,7 @@ pub use message::{
 pub use sender_certificate::{
     DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, RevocationState,
     SenderCertificateIdentityKey, SenderCertificateValidationError,
-    SenderCertificateValidationInput, ValidatedSenderCertificate, encode_sender_certificate,
-    validate_sender_certificate,
+    SenderCertificateValidationInput, ValidatedSenderCertificate, validate_sender_certificate,
 };
 pub use signature::{SignatureError, contextual_message, verify_with_context};
 pub use unix_time::{from_unix_millis, from_unix_secs, to_unix_millis, to_unix_secs};

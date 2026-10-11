@@ -4,14 +4,23 @@ mod support;
 
 use roost_client::{
     BlockedContactAcknowledgmentPolicy, ContactDiscoveryKey, ContactIdentity,
-    ContactSafetyNumberConfirmationKind, ContactTrustState, ContextConfiguration, IdentityContext,
-    OperationId, OperationStatus, ProtocolStateEntry, ProtocolStateUpdate, RoostError,
-    derive_safety_number,
+    ContactSafetyNumberConfirmationKind, ContactTrustState, ContextConfiguration, DomainSigningKey,
+    DomainSigningKeyStatus, IdentityContext, IdentityKey, OperationId, OperationStatus,
+    ProtocolStateEntry, ProtocolStateUpdate, RevocationState, RoostError,
+    SenderCertificateValidation, ValidatedSenderCertificate, derive_safety_number,
 };
+use roost_crypto::{KeyPair, SigningKeyPair};
+use roost_protocol::SenderCertificateValidationError;
 use std::sync::Arc;
 use support::MemoryStorage;
 
 const PASSPHRASE: &str = "correct horse battery staple";
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
+const CERTIFICATE_VERSION: u8 = 2;
+const DOMAIN_SIGNING_KEY_ID: &[u8] = b"relay-signing-key";
+const CERTIFICATE_RELAY_DOMAIN: &[u8] = b"relay.example";
+const CERTIFICATE_EXPIRES_AT_SECS: u64 = 1_800_000_000;
+const CERTIFICATE_EXPIRES_AT_MILLIS: u64 = CERTIFICATE_EXPIRES_AT_SECS * 1_000;
 
 /// Reserves and finalizes an operation, as a host does around its own commit.
 fn complete(context: &IdentityContext, id: OperationId) {
@@ -192,6 +201,139 @@ fn configuration_rejects_certificate_grace_above_five_minutes() {
         },
     );
     assert!(matches!(result, Err(RoostError::InvalidData { .. })));
+}
+
+/// A Sender Certificate signed by a relay's domain key, with the keys a host checks it against.
+struct SignedSenderCertificate {
+    identity_key: IdentityKey,
+    certificate: Vec<u8>,
+    signature: Vec<u8>,
+    domain_verifying_key: Vec<u8>,
+}
+
+impl SignedSenderCertificate {
+    fn new() -> Self {
+        let identity_key = IdentityKey {
+            agreement_key: KeyPair::from_secret_bytes([0x31; 32])
+                .public
+                .as_bytes()
+                .to_vec(),
+            signing_key: SigningKeyPair::from_signing_bytes([0x21; 32])
+                .verifying
+                .to_bytes()
+                .to_vec(),
+        };
+        // Encoded as a relay's domain authority does before signing.
+        let certificate = [
+            CERTIFICATE_DOMAIN_TAG,
+            &[CERTIFICATE_VERSION],
+            &[u8::try_from(DOMAIN_SIGNING_KEY_ID.len()).unwrap()],
+            DOMAIN_SIGNING_KEY_ID,
+            &[u8::try_from(CERTIFICATE_RELAY_DOMAIN.len()).unwrap()],
+            CERTIFICATE_RELAY_DOMAIN,
+            &identity_key.agreement_key,
+            &identity_key.signing_key,
+            &CERTIFICATE_EXPIRES_AT_SECS.to_be_bytes(),
+        ]
+        .concat();
+        let domain_signing_key = SigningKeyPair::from_signing_bytes([0x41; 32]);
+        Self {
+            identity_key,
+            signature: domain_signing_key.sign(&certificate).to_bytes().to_vec(),
+            certificate,
+            domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
+        }
+    }
+
+    /// Returns validation input that trusts the domain key and revokes nothing.
+    fn validation(&self, reference_time_millis: u64) -> SenderCertificateValidation {
+        SenderCertificateValidation {
+            domain_signing_keys: vec![DomainSigningKey {
+                id: DOMAIN_SIGNING_KEY_ID.to_vec(),
+                verifying_key: self.domain_verifying_key.clone(),
+                status: DomainSigningKeyStatus::Trusted,
+            }],
+            expected_relay_domain: CERTIFICATE_RELAY_DOMAIN.to_vec(),
+            revocation_state: RevocationState {
+                available: true,
+                revoked_identity_keys: Vec::new(),
+            },
+            reference_time_millis,
+        }
+    }
+
+    fn validate_at(
+        &self,
+        context: &IdentityContext,
+        reference_time_millis: u64,
+    ) -> Result<ValidatedSenderCertificate, RoostError> {
+        context.validate_sender_certificate(
+            self.certificate.clone(),
+            self.signature.clone(),
+            self.validation(reference_time_millis),
+        )
+    }
+}
+
+#[track_caller]
+fn assert_rejected_for(
+    result: Result<ValidatedSenderCertificate, RoostError>,
+    expected: SenderCertificateValidationError,
+) {
+    match result {
+        Err(RoostError::CertificateRejected { reason }) => assert_eq!(reason, expected.to_string()),
+        Err(error) => panic!("expected CertificateRejected, got {error:?}"),
+        Ok(_) => panic!("expected CertificateRejected, got a validated certificate"),
+    }
+}
+
+#[test]
+fn expired_sender_certificate_validates_only_within_the_configured_grace() {
+    let signed = SignedSenderCertificate::new();
+    let default = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let graced_configuration = configuration();
+    let grace_millis = graced_configuration.certificate_grace_millis;
+    let graced = IdentityContext::with_configuration(
+        Arc::new(MemoryStorage::default()),
+        graced_configuration,
+    )
+    .unwrap();
+
+    let validated = signed
+        .validate_at(&default, CERTIFICATE_EXPIRES_AT_MILLIS)
+        .unwrap();
+    assert_eq!(validated.identity_key, signed.identity_key);
+    assert_eq!(validated.relay_domain, CERTIFICATE_RELAY_DOMAIN);
+    assert_eq!(validated.expires_at_millis, CERTIFICATE_EXPIRES_AT_MILLIS);
+    assert_rejected_for(
+        signed.validate_at(&default, CERTIFICATE_EXPIRES_AT_MILLIS + 1),
+        SenderCertificateValidationError::ExpiredCertificate,
+    );
+    signed
+        .validate_at(&graced, CERTIFICATE_EXPIRES_AT_MILLIS + grace_millis)
+        .unwrap();
+    assert_rejected_for(
+        signed.validate_at(&graced, CERTIFICATE_EXPIRES_AT_MILLIS + grace_millis + 1),
+        SenderCertificateValidationError::ExpiredCertificate,
+    );
+}
+
+#[test]
+fn sender_certificate_is_rejected_when_revocation_is_unavailable() {
+    let signed = SignedSenderCertificate::new();
+    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let validation = SenderCertificateValidation {
+        revocation_state: RevocationState {
+            available: false,
+            revoked_identity_keys: Vec::new(),
+        },
+        ..signed.validation(CERTIFICATE_EXPIRES_AT_MILLIS)
+    };
+
+    assert_rejected_for(
+        context.validate_sender_certificate(signed.certificate, signed.signature, validation),
+        SenderCertificateValidationError::RevocationStateUnavailable,
+    );
 }
 
 #[test]

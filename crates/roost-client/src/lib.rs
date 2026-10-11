@@ -2,19 +2,12 @@
 //!
 //! Hosts create one [`IdentityContext`] per identity namespace over their own [`SecureStorage`].
 //! Its documentation says what Roost and the host each own.
-//!
-//! # Feature flags
-//!
-//! - `development-certificates` exposes an in-memory certificate authority for local peer
-//!   simulations. Normal artifacts omit the API.
 
 uniffi::setup_scaffolding!("roost_client");
 
 mod binding;
 mod certificate;
 mod context;
-#[cfg(feature = "development-certificates")]
-mod development_certificate;
 mod error;
 mod message;
 mod operation;
@@ -33,8 +26,6 @@ pub use context::{
     ContactBlock, Contacts, ContextConfiguration, IdentityContext, Messaging,
     SessionAcceptanceResult, SessionInitiationResult,
 };
-#[cfg(feature = "development-certificates")]
-pub use development_certificate::{DevelopmentCertificateAuthority, DevelopmentSenderCertificate};
 pub use error::RoostError;
 pub use message::{
     FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial, decode_message,

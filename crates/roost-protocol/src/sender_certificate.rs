@@ -192,12 +192,9 @@ pub fn validate_sender_certificate(
     }
     let verifying_key = parse_ed25519_verifying_key(domain_signing_key.verifying_key)?;
     let signature = parse_signature(input.signature)?;
-    if verifying_key
+    verifying_key
         .verify_strict(input.certificate, &signature)
-        .is_err()
-    {
-        return Err(SenderCertificateValidationError::SignatureFailure);
-    }
+        .map_err(|_| SenderCertificateValidationError::SignatureFailure)?;
     let RevocationState::Available(revoked_identity_keys) = input.revocation_state else {
         return Err(SenderCertificateValidationError::RevocationStateUnavailable);
     };
@@ -376,8 +373,9 @@ fn certificate_is_expired(
     })
 }
 
-/// Encodes the public certificate fields for a domain authority to sign.
-pub fn encode_sender_certificate(
+/// Encodes the public certificate fields the way a domain authority does before signing.
+#[cfg(test)]
+fn encode_sender_certificate(
     signing_key_id: &[u8],
     relay_domain: &[u8],
     identity_key: SenderCertificateIdentityKey,

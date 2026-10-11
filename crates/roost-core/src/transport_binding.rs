@@ -40,7 +40,7 @@ impl TransportBinding {
 ///
 /// The caller obtains these identifiers from the recipient publication and supplies them again
 /// when receiving a Transport-Bound initial Message. Core uses them only to select and validate
-/// Aether-owned prekey state; it does not infer any transport encoding from them.
+/// Roost-owned prekey state; it does not infer any transport encoding from them.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreKeySelection {
     /// Identifier of the selected signed pre-key within one Discovery Key Epoch.
