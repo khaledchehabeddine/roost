@@ -30,8 +30,6 @@ cargo build
 
 ## Releasing
 
-Release a new version:
-
 ```bash
 scripts/release.sh X.Y.Z
 ```
