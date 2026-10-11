@@ -5,10 +5,10 @@
 //! replay tracking, and transport framing.
 //!
 //! The identity key signs the public discovery key. The discovery key signs the public signed
-//! pre-key. Initiators verify both responder signatures, use [`initiate`] and [`accept`] to create
-//! the first [`RatchetState`], then use the ratchet to encrypt messages. X3DH includes a one-time
-//! pre-key when one is available. Sender identity material is revealed only after the sealed first
-//! message decrypts successfully.
+//! pre-key. Initiators verify both responder signatures, use [`initiate_with_associated_data`] and
+//! [`accept_with_associated_data`] to create the first [`RatchetState`], then use the ratchet to
+//! encrypt messages. X3DH includes a one-time pre-key when one is available. Sender identity
+//! material is revealed only after the sealed first message decrypts successfully.
 //!
 //! # Secret handling
 //!
@@ -57,7 +57,7 @@
 //! - Handshake envelopes carry no replay marker. Replay detection belongs above this crate.
 //! - Re-handshake policy belongs above this crate. A new handshake starts a new session.
 //! - This crate has no signed-pre-key storage. Delayed handshake envelopes require the caller to
-//!   retain and pass the matching key to [`accept`].
+//!   retain and pass the matching key to [`accept_with_associated_data`].
 
 mod delivery_capability;
 mod discovery_key;
@@ -80,10 +80,9 @@ pub use discovery_key::{
 pub use double_ratchet::{Header, RatchetError, RatchetState, RatchetStateError};
 pub use handshake::{
     AcceptedInitialMessage, HandshakeEnvelope, HandshakeError, InitialPlaintext,
-    PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM, PREKEY_BUNDLE_VERSION, PreKeyBundle,
-    SenderIdentityMaterial, X3DH_ADDITIVE_SHARED_SECRET_HEADROOM, accept,
-    accept_with_associated_data, initial_associated_data, initiate, initiate_with_associated_data,
-    initiator_identity_hint, initiator_identity_hint_with_associated_data,
+    PREKEY_BUNDLE_VERSION, PreKeyBundle, SenderIdentityMaterial, accept_with_associated_data,
+    initial_associated_data, initiate_with_associated_data,
+    initiator_identity_hint_with_associated_data,
 };
 pub use keys::{
     KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, Signature, SigningKeyPair,
@@ -92,9 +91,8 @@ pub use keys::{
 };
 pub use one_time_prekey::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 pub use sealed_frame::{
-    SealedFrame, SealedFrameError, SealedFramePreKeyReference, open_frame,
-    open_frame_for_discovery_key, open_frame_for_discovery_key_with_associated_data, seal_frame,
-    seal_frame_with_associated_data,
+    SealedFrame, SealedFrameError, SealedFramePreKeyReference,
+    open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
 };
 pub use signed_prekey::{
     PublicSignedPreKey, SignedPreKey, generate_signed_prekey, verify_public_signed_prekey,

@@ -137,7 +137,7 @@ impl KeyStore {
 
         // Before any local state is loaded or any handshake work is spent: the
         // mapping this session is built on has to hold in both directions.
-        // `initiate` checks IK→DK from inside the prekey bundle;
+        // `initiate_with_associated_data` checks IK→DK from inside the prekey bundle;
         // nothing but this checks DK→IK, and a bundle that fails it names an
         // identity its discovery key never vouched for.
         verify_discovery_to_identity_binding(
@@ -362,7 +362,7 @@ fn validate_prekey_selection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{InMemorySecureStorage, ProtocolStateKind, SessionId};
+    use crate::{InMemorySecureStorage, ProtocolStateKind};
     use roost_protocol::SignatureError;
 
     fn store() -> KeyStore {
@@ -399,7 +399,7 @@ mod tests {
 
         let result = alice.initiate_session_with_transport_binding(
             SessionInitiation {
-                session_key: ProtocolStateKey::session(SessionId::from_bytes([0x24; 16])),
+                session_key: ProtocolStateKey::from_bytes(vec![0x24; 16]).unwrap(),
                 responder_identity_key: bob_identity.public().unwrap(),
                 responder_discovery_to_identity: mallory_publication.discovery_to_identity,
                 responder_prekey_bundle: roost_crypto::PreKeyBundle {
@@ -436,7 +436,7 @@ mod tests {
         let bob_publication = bob.current_publication().unwrap();
         let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
 
-        let session_key = ProtocolStateKey::session(SessionId::from_bytes([0x22; 16]));
+        let session_key = ProtocolStateKey::from_bytes(vec![0x22; 16]).unwrap();
         let initiation = alice
             .initiate_session_with_transport_binding(
                 SessionInitiation {
@@ -501,7 +501,7 @@ mod tests {
         let initiation = alice
             .initiate_session_with_transport_binding(
                 SessionInitiation {
-                    session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
+                    session_key: ProtocolStateKey::from_bytes(vec![0x33; 16]).unwrap(),
                     responder_identity_key: bob_identity.public().unwrap(),
                     responder_discovery_to_identity: bob_publication.discovery_to_identity,
                     responder_prekey_bundle: roost_crypto::PreKeyBundle {
@@ -519,14 +519,14 @@ mod tests {
             .unwrap();
 
         bob.accept_session(SessionAcceptance {
-            session_key: ProtocolStateKey::session(SessionId::from_bytes([0x33; 16])),
+            session_key: ProtocolStateKey::from_bytes(vec![0x33; 16]).unwrap(),
             initiator_identity_key: Some(alice_identity.public().unwrap()),
             message: &initiation.message,
         })
         .unwrap();
 
         let second = bob.accept_session(SessionAcceptance {
-            session_key: ProtocolStateKey::session(SessionId::from_bytes([0x34; 16])),
+            session_key: ProtocolStateKey::from_bytes(vec![0x34; 16]).unwrap(),
             initiator_identity_key: Some(alice_identity.public().unwrap()),
             message: &initiation.message,
         });

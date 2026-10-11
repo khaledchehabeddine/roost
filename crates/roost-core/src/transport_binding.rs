@@ -12,9 +12,6 @@ const MAX_TRANSPORT_BINDING_LEN: usize = 1024;
 pub struct TransportBinding(Vec<u8>);
 
 impl TransportBinding {
-    /// Maximum number of caller-owned bytes authenticated with one Message.
-    pub const MAX_LEN: usize = MAX_TRANSPORT_BINDING_LEN;
-
     /// Creates a non-empty Transport Binding within the supported size limit.
     pub fn new(bytes: Vec<u8>) -> Result<Self, TransportBindingError> {
         if bytes.is_empty() {

@@ -166,7 +166,6 @@ impl OneTimePreKeyManager {
         Ok(bundles)
     }
 
-    #[allow(dead_code)]
     pub(crate) fn consume_one_time_prekey(
         &self,
         epoch: u32,

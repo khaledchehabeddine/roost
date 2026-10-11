@@ -71,11 +71,6 @@ impl DiscoveryKey {
         &self.key_agreement_public
     }
 
-    /// Returns the Ed25519 verifying key that validates this discovery key's signed pre-keys.
-    pub fn verifying_key(&self) -> &VerifyingKey {
-        &self.signing.verifying
-    }
-
     /// Returns the rotation epoch.
     pub fn epoch(&self) -> u32 {
         self.epoch
@@ -277,8 +272,8 @@ fn discovery_key_payload(
 /// Generates a signed pre-key signed by `discovery_key`.
 ///
 /// This keeps the discovery signing key private while producing a signed pre-key that verifies
-/// with [`DiscoveryKey::verifying_key`]. The caller allocates `id` uniquely within this discovery
-/// key's epoch.
+/// with [`PublicDiscoveryKey::verifying_key`]. The caller allocates `id` uniquely within this
+/// discovery key's epoch.
 pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
     rng: &mut R,
     discovery_key: &DiscoveryKey,
@@ -344,8 +339,8 @@ mod tests {
             original.public_key().as_bytes()
         );
         assert_eq!(
-            restored.verifying_key().as_bytes(),
-            original.verifying_key().as_bytes()
+            restored.public().verifying_key.as_bytes(),
+            original.public().verifying_key.as_bytes()
         );
         assert_eq!(restored.epoch(), original.epoch());
         assert_eq!(restored.created_at_secs(), original.created_at_secs());
@@ -365,7 +360,7 @@ mod tests {
         );
         assert_eq!(
             bundle.verifying_key.as_bytes(),
-            setup.discovery_key.verifying_key().as_bytes()
+            setup.discovery_key.public().verifying_key.as_bytes()
         );
         assert_eq!(bundle.epoch, FIXED_EPOCH);
         assert_eq!(bundle.created_at_secs, FIXED_CREATED_AT_SECS);
@@ -530,7 +525,10 @@ mod tests {
         )
         .unwrap();
         let bundle = signed_prekey.public();
-        assert!(verify_public_signed_prekey(&bundle, setup.discovery_key.verifying_key()).is_ok());
+        assert!(
+            verify_public_signed_prekey(&bundle, &setup.discovery_key.public().verifying_key)
+                .is_ok()
+        );
         assert!(matches!(
             verify_public_signed_prekey(&bundle, &setup.identity.verifying),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
@@ -562,7 +560,7 @@ mod tests {
         assert!(
             verify_discovery_to_identity_binding(
                 &identity,
-                setup.discovery_key.verifying_key(),
+                &setup.discovery_key.public().verifying_key,
                 &signature,
             )
             .is_ok()
@@ -589,7 +587,7 @@ mod tests {
         assert!(matches!(
             verify_discovery_to_identity_binding(
                 &identity,
-                other_discovery.verifying_key(),
+                &other_discovery.public().verifying_key,
                 &signature,
             ),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
@@ -604,7 +602,7 @@ mod tests {
             .discovery_key
             .sign_identity_binding(&identity)
             .unwrap();
-        let verifying_key = setup.discovery_key.verifying_key();
+        let verifying_key = &setup.discovery_key.public().verifying_key;
 
         let mut tampered_x25519 = public_identity_key([0x11u8; 32], [0x22u8; 32]);
         let mut public_key_bytes = *tampered_x25519.public_key.as_bytes();
@@ -635,7 +633,7 @@ mod tests {
         assert!(matches!(
             verify_discovery_to_identity_binding(
                 &identity,
-                setup.discovery_key.verifying_key(),
+                &setup.discovery_key.public().verifying_key,
                 &signature,
             ),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
@@ -656,7 +654,7 @@ mod tests {
         assert!(matches!(
             verify_discovery_to_identity_binding(
                 &identity,
-                setup.discovery_key.verifying_key(),
+                &setup.discovery_key.public().verifying_key,
                 &signature,
             ),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))

@@ -50,8 +50,6 @@ pub struct SealedFrame {
 }
 
 impl SealedFrame {
-    /// Current sealed-frame wire version.
-    pub const VERSION: u8 = SEALED_FRAME_VERSION;
     /// Maximum encoded sealed-frame byte length accepted before Postcard parsing.
     pub const MAX_ENCODED_LEN: usize = MAX_SEALED_FRAME_ENCODED_LEN;
 
@@ -87,16 +85,6 @@ impl SealedFrame {
         validate_frame(&frame, FrameValidation::Decode)?;
         Ok(frame)
     }
-}
-
-/// Encrypts plaintext into a sealed-sender frame for `recipient_public_key`.
-pub fn seal_frame<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    recipient_public_key: &PublicKey,
-    prekey_reference: Option<SealedFramePreKeyReference>,
-    plaintext: &[u8],
-) -> Result<SealedFrame, SealedFrameError> {
-    seal_frame_with_associated_data(rng, recipient_public_key, prekey_reference, plaintext, &[])
 }
 
 /// Encrypts plaintext while authenticating caller-supplied transport associated data.
@@ -175,57 +163,6 @@ pub(crate) fn seal_frame_with_ephemeral_key_and_associated_data(
         ciphertext,
         ..frame
     })
-}
-
-/// Opens a sealed-sender frame for the local recipient Discovery Key.
-pub fn open_frame(
-    recipient_key: &KeyPair,
-    frame: &SealedFrame,
-) -> Result<Zeroizing<Vec<u8>>, SealedFrameError> {
-    open_frame_with_associated_data(recipient_key, frame, &[])
-}
-
-/// Opens a sealed-sender frame while authenticating caller-supplied transport associated data.
-fn open_frame_with_associated_data(
-    recipient_key: &KeyPair,
-    frame: &SealedFrame,
-    additional_associated_data: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, SealedFrameError> {
-    validate_frame(frame, FrameValidation::Decode)?;
-    let recipient_matches: bool = frame
-        .recipient_public_key
-        .ct_eq(recipient_key.public.as_bytes())
-        .into();
-    if !recipient_matches {
-        return Err(SealedFrameError::Decode);
-    }
-
-    let ephemeral_public_key = PublicKey::from(frame.ephemeral_public_key);
-    let shared_secret = recipient_key.diffie_hellman(&ephemeral_public_key);
-    if !shared_secret.was_contributory() {
-        return Err(SealedFrameError::NonContributorySharedSecret);
-    }
-    let (key, nonce) = expand_frame_secret(shared_secret.as_bytes())?;
-    let aad = frame_associated_data(frame, additional_associated_data, FrameValidation::Decode)?;
-    let cipher = XChaCha20Poly1305::new((&*key).into());
-    cipher
-        .decrypt(
-            XNonce::from_slice(&nonce),
-            Payload {
-                msg: &frame.ciphertext,
-                aad: &aad,
-            },
-        )
-        .map(Zeroizing::new)
-        .map_err(|_| SealedFrameError::Aead)
-}
-
-/// Opens a sealed-sender frame for the local recipient Discovery Key.
-pub fn open_frame_for_discovery_key(
-    recipient_key: &DiscoveryKey,
-    frame: &SealedFrame,
-) -> Result<Zeroizing<Vec<u8>>, SealedFrameError> {
-    open_frame_for_discovery_key_with_associated_data(recipient_key, frame, &[])
 }
 
 /// Opens a sealed-sender frame for a Discovery Key while authenticating caller-supplied transport

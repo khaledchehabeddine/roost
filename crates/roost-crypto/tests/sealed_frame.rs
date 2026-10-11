@@ -3,13 +3,25 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    KeyPair, SealedFrame, SealedFrameError, SealedFramePreKeyReference, generate_discovery_key,
-    generate_signing_key_pair, open_frame, open_frame_for_discovery_key_with_associated_data,
-    seal_frame, seal_frame_with_associated_data,
+    DiscoveryKey, KeyPair, SealedFrame, SealedFrameError, SealedFramePreKeyReference,
+    generate_discovery_key, generate_signing_key_pair,
+    open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
 };
 
-fn recipient_key() -> KeyPair {
-    KeyPair::from_secret_bytes([0x42; 32])
+fn recipient_discovery_key(seed: u8) -> DiscoveryKey {
+    let mut rng = ChaCha20Rng::from_seed([seed; 32]);
+    let signing_key = generate_signing_key_pair(&mut rng);
+    generate_discovery_key(&mut rng, &signing_key, 1, 1_700_000_000).unwrap()
+}
+
+// Reads the version a real sealed frame carries, so a version bump doesn't leave these tests
+// building frames that fail for the wrong reason.
+fn current_frame_version() -> u8 {
+    let mut rng = ChaCha20Rng::from_seed([0x14; 32]);
+    let recipient = recipient_discovery_key(0x42);
+    seal_frame_with_associated_data(&mut rng, recipient.public_key(), None, b"", &[])
+        .unwrap()
+        .version
 }
 
 #[test]
@@ -62,22 +74,28 @@ fn prekey_reference() -> SealedFramePreKeyReference {
 #[test]
 fn sealed_frame_round_trip_with_prekey_reference() {
     let mut rng = ChaCha20Rng::from_seed([0x11; 32]);
-    let recipient = recipient_key();
-    let frame = seal_frame(
+    let recipient = recipient_discovery_key(0x42);
+    let frame = seal_frame_with_associated_data(
         &mut rng,
-        &recipient.public,
+        recipient.public_key(),
         Some(prekey_reference()),
         b"sealed payload",
+        &[],
     )
     .unwrap();
     let encoded = frame.to_bytes().unwrap();
     let decoded = SealedFrame::from_bytes(&encoded).unwrap();
 
-    assert_eq!(decoded.recipient_public_key, *recipient.public.as_bytes());
+    assert_eq!(
+        decoded.recipient_public_key,
+        *recipient.public_key().as_bytes()
+    );
     assert_eq!(decoded.prekey_reference, Some(prekey_reference()));
     assert_ne!(decoded.ephemeral_public_key, [0u8; 32]);
     assert_eq!(
-        open_frame(&recipient, &decoded).unwrap().as_slice(),
+        open_frame_for_discovery_key_with_associated_data(&recipient, &decoded, &[])
+            .unwrap()
+            .as_slice(),
         b"sealed payload"
     );
 }
@@ -85,14 +103,21 @@ fn sealed_frame_round_trip_with_prekey_reference() {
 #[test]
 fn sealed_frame_aad_binds_transport_visible_fields() {
     let mut rng = ChaCha20Rng::from_seed([0x12; 32]);
-    let recipient = recipient_key();
-    let other_recipient = KeyPair::from_secret_bytes([0x44; 32]);
-    let frame = seal_frame(&mut rng, &recipient.public, None, b"metadata-bound").unwrap();
+    let recipient = recipient_discovery_key(0x42);
+    let other_recipient = recipient_discovery_key(0x44);
+    let frame = seal_frame_with_associated_data(
+        &mut rng,
+        recipient.public_key(),
+        None,
+        b"metadata-bound",
+        &[],
+    )
+    .unwrap();
 
     let mut wrong_version = frame.clone();
     wrong_version.version = wrong_version.version.wrapping_add(1);
     let mut wrong_recipient = frame.clone();
-    wrong_recipient.recipient_public_key = *other_recipient.public.as_bytes();
+    wrong_recipient.recipient_public_key = *other_recipient.public_key().as_bytes();
     let mut wrong_ephemeral = frame.clone();
     wrong_ephemeral.ephemeral_public_key =
         *KeyPair::from_secret_bytes([0x45; 32]).public.as_bytes();
@@ -100,16 +125,16 @@ fn sealed_frame_aad_binds_transport_visible_fields() {
     wrong_prekey.prekey_reference = Some(prekey_reference());
 
     assert!(matches!(
-        open_frame(&recipient, &wrong_version),
+        open_frame_for_discovery_key_with_associated_data(&recipient, &wrong_version, &[]),
         Err(SealedFrameError::Decode)
     ));
     assert!(matches!(
-        open_frame(&other_recipient, &wrong_recipient),
+        open_frame_for_discovery_key_with_associated_data(&other_recipient, &wrong_recipient, &[]),
         Err(SealedFrameError::Aead)
     ));
     for tampered in [wrong_ephemeral, wrong_prekey] {
         assert!(matches!(
-            open_frame(&recipient, &tampered),
+            open_frame_for_discovery_key_with_associated_data(&recipient, &tampered, &[]),
             Err(SealedFrameError::Aead)
         ));
     }
@@ -128,7 +153,7 @@ fn sealed_frame_from_bytes_rejects_oversized_before_decode() {
 #[test]
 fn sealed_frame_rejects_invalid_public_keys() {
     let mut frame = SealedFrame {
-        version: SealedFrame::VERSION,
+        version: current_frame_version(),
         recipient_public_key: [0u8; 32],
         prekey_reference: None,
         ephemeral_public_key: [0x42; 32],
@@ -137,7 +162,7 @@ fn sealed_frame_rejects_invalid_public_keys() {
 
     assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
 
-    frame.recipient_public_key = *recipient_key().public.as_bytes();
+    frame.recipient_public_key = *recipient_discovery_key(0x42).public_key().as_bytes();
     frame.ephemeral_public_key = [0u8; 32];
     assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
 }
@@ -148,8 +173,8 @@ fn sealed_frame_rejects_mismatched_one_time_prekey_reference_halves() {
     reference.one_time_prekey_public_key = None;
 
     let frame = SealedFrame {
-        version: SealedFrame::VERSION,
-        recipient_public_key: *recipient_key().public.as_bytes(),
+        version: current_frame_version(),
+        recipient_public_key: *recipient_discovery_key(0x42).public_key().as_bytes(),
         prekey_reference: Some(reference),
         ephemeral_public_key: *KeyPair::from_secret_bytes([0x52; 32]).public.as_bytes(),
         ciphertext: vec![0x61; 16],
@@ -161,12 +186,14 @@ fn sealed_frame_rejects_mismatched_one_time_prekey_reference_halves() {
 #[test]
 fn sealed_frame_open_rejects_recipient_key_mismatch() {
     let mut rng = ChaCha20Rng::from_seed([0x13; 32]);
-    let recipient = recipient_key();
-    let other_recipient = KeyPair::from_secret_bytes([0x43; 32]);
-    let frame = seal_frame(&mut rng, &recipient.public, None, b"payload").unwrap();
+    let recipient = recipient_discovery_key(0x42);
+    let other_recipient = recipient_discovery_key(0x43);
+    let frame =
+        seal_frame_with_associated_data(&mut rng, recipient.public_key(), None, b"payload", &[])
+            .unwrap();
 
     assert!(matches!(
-        open_frame(&other_recipient, &frame),
+        open_frame_for_discovery_key_with_associated_data(&other_recipient, &frame, &[]),
         Err(SealedFrameError::Decode)
     ));
 }
