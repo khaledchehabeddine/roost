@@ -87,7 +87,7 @@ pub use protocol_state::{
     PendingAcknowledgment, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition,
     ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
     ProtocolStateSnapshot, ProtocolStateUpdate, RetryInstruction, RetryInstructionResult,
-    SessionEvent, SessionId, SessionUnrecoverableReason, SessionUnrecoverableResult,
+    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult,
     protocol_state_blob_digest,
 };
 pub use roost_crypto::{

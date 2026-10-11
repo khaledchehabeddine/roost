@@ -29,12 +29,14 @@ fn transport_binding_rejects_empty_bytes() {
 
 #[test]
 fn transport_binding_enforces_the_external_associated_data_limit() {
-    assert!(TransportBinding::new(vec![0x41; TransportBinding::MAX_LEN]).is_ok());
+    const MAX_LEN: usize = 1024;
+
+    assert!(TransportBinding::new(vec![0x41; MAX_LEN]).is_ok());
     assert_eq!(
-        TransportBinding::new(vec![0x41; TransportBinding::MAX_LEN + 1]),
+        TransportBinding::new(vec![0x41; MAX_LEN + 1]),
         Err(TransportBindingError::TooLong {
-            length: TransportBinding::MAX_LEN + 1,
-            maximum: TransportBinding::MAX_LEN,
+            length: MAX_LEN + 1,
+            maximum: MAX_LEN,
         })
     );
 }

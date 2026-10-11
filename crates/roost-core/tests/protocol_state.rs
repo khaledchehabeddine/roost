@@ -11,7 +11,7 @@ use roost_core::{
     MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, Message, MessageError,
     OutboundAcknowledgment, OutboundPlaintext, ProtocolHardeningLimits, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionEvent, SessionId,
+    ProtocolStateKind, ProtocolStateSnapshot, SenderIdentityMaterial, SessionEvent,
     SessionUnrecoverableReason, SessionUnrecoverableResult,
 };
 use roost_crypto::{
@@ -108,7 +108,7 @@ fn sender_identity_signing_key_for_contact(identity: ContactIdentityKey) -> Sign
 }
 
 fn key() -> ProtocolStateKey {
-    ProtocolStateKey::session(SessionId::from_bytes([9u8; 16]))
+    ProtocolStateKey::from_bytes(vec![9u8; 16]).unwrap()
 }
 
 fn deduplication_key() -> ProtocolStateKey {
@@ -3712,7 +3712,7 @@ fn message_transcript_signature_rejects_session_key_transplant() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
-    let other_key = ProtocolStateKey::session(SessionId::from_bytes([0x19; 16]));
+    let other_key = ProtocolStateKey::from_bytes(vec![0x19; 16]).unwrap();
     let deduplication_key = deduplication_key();
     let sender_identity = sender_identity(1);
     let acknowledgment_sender_identity = acknowledgment_sender_identity();
@@ -3854,7 +3854,7 @@ fn acknowledgment_transcript_signature_rejects_session_key_transplant() {
     let setup = setup();
     let engine = ProtocolStateEngine::new();
     let key = key();
-    let other_key = ProtocolStateKey::session(SessionId::from_bytes([0x1a; 16]));
+    let other_key = ProtocolStateKey::from_bytes(vec![0x1a; 16]).unwrap();
     let deduplication_key = deduplication_key();
     let sender = validated_sender_for_contact(accepted_contact_identity());
     let domain_keys = [sender.domain_signing_key()];

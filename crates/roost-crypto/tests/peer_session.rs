@@ -8,9 +8,10 @@ use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
     DiscoveryKey, HandshakeEnvelope, HandshakeError, Header, InitialPlaintext, OneTimePreKey,
     PreKeyBundle, PublicIdentityKey, PublicKeyError, RatchetError, RatchetState, Signature,
-    SignedPreKey, SigningKeyPair, accept, generate_discovery_key, generate_key_pair,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initial_associated_data, initiate, sign_identity_key_binding,
+    SignedPreKey, SigningKeyPair, accept_with_associated_data, generate_discovery_key,
+    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initial_associated_data, initiate_with_associated_data,
+    sign_identity_key_binding,
 };
 use roost_protocol::SignatureError;
 
@@ -73,17 +74,18 @@ fn bootstrap(
             .as_ref()
             .map(OneTimePreKey::public),
     };
-    let (alice, envelope) = initiate(
+    let (alice, envelope) = initiate_with_associated_data(
         rng,
         &setup.alice_discovery_key,
         &setup.alice_identity_key,
         &setup.bob_identity_key,
         &prekey_bundle,
         initial_plaintext(plaintext),
+        &[],
     )
     .unwrap();
     let bob_one_time_prekey = setup.bob_one_time_prekey.take();
-    let (bob, _) = accept(
+    let (bob, _) = accept_with_associated_data(
         rng,
         &envelope,
         Some(&setup.alice_identity_key),
@@ -91,6 +93,7 @@ fn bootstrap(
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
+        &[],
     )
     .unwrap();
     (alice, bob, envelope)
@@ -153,19 +156,20 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
             .as_ref()
             .map(OneTimePreKey::public),
     };
-    let (mut alice, envelope) = initiate(
+    let (mut alice, envelope) = initiate_with_associated_data(
         &mut rng,
         &setup.alice_discovery_key,
         &setup.alice_identity_key,
         &setup.bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"hello serialized Bob"),
+        &[],
     )
     .unwrap();
     let envelope_bytes = envelope.to_bytes().unwrap();
     let decoded_envelope = HandshakeEnvelope::from_bytes(&envelope_bytes).unwrap();
     let bob_one_time_prekey = setup.bob_one_time_prekey.take();
-    let (mut bob, decrypted) = accept(
+    let (mut bob, decrypted) = accept_with_associated_data(
         &mut rng,
         &decoded_envelope,
         Some(&setup.alice_identity_key),
@@ -173,6 +177,7 @@ fn serialized_handshake_envelope_establishes_session_and_reply() {
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
+        &[],
     )
     .unwrap();
     assert_eq!(decrypted.plaintext.as_slice(), b"hello serialized Bob");
@@ -263,13 +268,14 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
             .as_ref()
             .map(OneTimePreKey::public),
     };
-    let result = initiate(
+    let result = initiate_with_associated_data(
         &mut rng,
         &setup.alice_discovery_key,
         &setup.alice_identity_key,
         &setup.bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"payload"),
+        &[],
     );
     assert!(matches!(
         result,

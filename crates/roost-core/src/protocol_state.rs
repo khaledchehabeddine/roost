@@ -68,24 +68,6 @@ const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
 const PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP: usize = 64;
 const PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP: usize = 64;
 
-/// The UUID-shaped identifier for a cryptographic Session.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SessionId([u8; 16]);
-
-impl SessionId {
-    /// Creates a session identifier from UUID bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(bytes)
-    }
-
-    /// Returns the UUID bytes for this identifier.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        &self.0
-    }
-}
-
 /// The consumer-defined key portion of a protocol-state address.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProtocolStateKey(Vec<u8>);
@@ -104,12 +86,6 @@ impl ProtocolStateKey {
             });
         }
         Ok(Self(bytes))
-    }
-
-    /// Creates a protocol-state key for a Session.
-    #[must_use]
-    pub fn session(session_id: SessionId) -> Self {
-        Self(session_id.as_bytes().to_vec())
     }
 
     /// Returns the key bytes.
@@ -808,7 +784,7 @@ impl ProtocolStateEngine {
     /// Returns an update that stores a Ratchet session state bound to the expected peer sender
     /// identity material.
     ///
-    /// Responders should pass the sender identity returned by X3DH `accept` when installing the
+    /// Responders should pass the sender identity returned by X3DH acceptance when installing the
     /// accepted ratchet state for inbound Messages from that peer.
     pub fn set_session_state_with_peer_identity(
         &self,
@@ -4035,7 +4011,7 @@ mod tests {
     };
     use crate::{
         MessageId, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind,
-        SenderIdentityMaterial, SessionId,
+        SenderIdentityMaterial,
     };
     use roost_crypto::{KeyPair, SigningKeyPair, sign_identity_key_binding};
     use roost_protocol::SignatureError;
@@ -4045,7 +4021,7 @@ mod tests {
     fn non_current_session_blob_versions_are_faults() {
         let address = ProtocolStateAddress::new(
             ProtocolStateKind::RatchetSession,
-            ProtocolStateKey::session(SessionId::from_bytes([9; 16])),
+            ProtocolStateKey::from_bytes(vec![9; 16]).unwrap(),
         );
         for (major, minor) in [(2, 0), (0, 1), (1, 1)] {
             let blob = ProtocolStateBlob::from_bytes(vec![major, minor, 0xaa]);
@@ -4062,7 +4038,7 @@ mod tests {
     fn nested_ratchet_decode_failure_does_not_echo_state_bytes() {
         let address = ProtocolStateAddress::new(
             ProtocolStateKind::RatchetSession,
-            ProtocolStateKey::session(SessionId::from_bytes([9; 16])),
+            ProtocolStateKey::from_bytes(vec![9; 16]).unwrap(),
         );
         let mut bytes = vec![
             CURRENT_PROTOCOL_STATE_BLOB_MAJOR,

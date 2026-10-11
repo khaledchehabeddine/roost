@@ -1,6 +1,6 @@
 # Protocol DoS Limits
 
-All denial-of-service limits live in one public settings object that Core reads. Defaults, ceilings, and the trade-offs for low-end devices can then be reviewed in one place. Apps that don't change the settings get fixed defaults, and transport limits, such as rate limits, stay with the app.
+Core reads its adjustable denial-of-service limits from one public settings object, so defaults, ceilings, and the trade-offs for low-end devices can be reviewed in one place. Apps can change only the size of the Deduplication Set and get fixed defaults for the rest. Transport limits, such as rate limits, stay with the app.
 
 ## Alternatives
 

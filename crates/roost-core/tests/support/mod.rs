@@ -12,14 +12,13 @@ use roost_core::{
     InboundMessageOutcome, InboundSenderCertificateValidation, Message, OutboundAcknowledgment,
     OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
     ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    ProtocolStateUpdate, SenderIdentityMaterial, SessionId, SessionUnrecoverableResult,
-    TransportBinding,
+    ProtocolStateUpdate, SenderIdentityMaterial, SessionUnrecoverableResult, TransportBinding,
 };
 use roost_crypto::{
     DiscoveryKey, InitialPlaintext, KeyPair, PreKeyBundle, PublicIdentityKey, RatchetState,
-    SigningKeyPair, accept, generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initiate,
-    sign_identity_key_binding,
+    SigningKeyPair, accept_with_associated_data, generate_discovery_key, generate_key_pair,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initiate_with_associated_data, sign_identity_key_binding,
 };
 use roost_protocol::{
     DomainSigningKey, DomainSigningKeyStatus, MessageId, RevocationState,
@@ -187,7 +186,7 @@ impl ProtocolFixture {
             vec![0xb5; 64],
         );
         let mut fixture = Self {
-            session_key: ProtocolStateKey::session(SessionId::from_bytes([9; 16])),
+            session_key: ProtocolStateKey::from_bytes(vec![9; 16]).unwrap(),
             deduplication_key: ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap(),
             alice_store: HostStore::default(),
             bob_store: HostStore::default(),
@@ -402,16 +401,17 @@ pub fn setup(seed: [u8; 32]) -> Setup {
         signed_prekey: bob_signed_prekey.public(),
         one_time_prekey: Some(bob_one_time_prekey.public()),
     };
-    let (alice_state, envelope) = initiate(
+    let (alice_state, envelope) = initiate_with_associated_data(
         &mut rng,
         &alice_discovery,
         &alice_identity_key,
         &bob_identity_key,
         &prekey_bundle,
         initial_plaintext(b"initial"),
+        &[],
     )
     .unwrap();
-    let (bob_state, plaintext) = accept(
+    let (bob_state, plaintext) = accept_with_associated_data(
         &mut rng,
         &envelope,
         Some(&alice_identity_key),
@@ -419,6 +419,7 @@ pub fn setup(seed: [u8; 32]) -> Setup {
         &bob_discovery,
         &bob_signed_prekey,
         Some(bob_one_time_prekey),
+        &[],
     )
     .unwrap();
     assert_eq!(plaintext.plaintext.as_slice(), b"initial");

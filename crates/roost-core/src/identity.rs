@@ -3,7 +3,7 @@ mod backup;
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    KeyPair, PublicIdentityKey, PublicKey, SharedSecret, Signature, SigningKeyPair, VerifyingKey,
+    KeyPair, PublicIdentityKey, PublicKey, Signature, SigningKeyPair, VerifyingKey,
     generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
 };
 use roost_protocol::SignatureError;
@@ -128,12 +128,6 @@ impl Identity {
             verifying_key: self.signing_key_pair.verifying,
             binding_signature,
         })
-    }
-
-    /// Performs an X25519 Diffie–Hellman exchange with the given [`PublicKey`] and returns the
-    /// [`SharedSecret`].
-    pub fn diffie_hellman(&self, their_public: &PublicKey) -> SharedSecret {
-        self.key_pair.diffie_hellman(their_public)
     }
 
     /// Signs `message` with the Ed25519 signing key and returns the [`Signature`].
@@ -316,21 +310,6 @@ mod tests {
         assert_eq!(
             generated_identity.sign(message).to_bytes(),
             loaded_identity.sign(message).to_bytes()
-        );
-    }
-
-    #[test]
-    fn diffie_hellman_round_trip_after_load_identity() {
-        let mut rng = ChaCha20Rng::from_seed([0x63; 32]);
-        let manager = manager();
-        manager.generate_identity(&mut rng).unwrap();
-        let loaded_identity = manager.load_identity().unwrap();
-        let peer_key_pair = generate_key_pair(&mut rng);
-        let identity_shared_secret = loaded_identity.diffie_hellman(&peer_key_pair.public);
-        let peer_shared_secret = peer_key_pair.diffie_hellman(loaded_identity.public_key());
-        assert_eq!(
-            identity_shared_secret.as_bytes(),
-            peer_shared_secret.as_bytes()
         );
     }
 }

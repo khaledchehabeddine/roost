@@ -122,12 +122,14 @@ mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
-    use roost_crypto::{KeyPair, seal_frame};
+    use roost_crypto::{KeyPair, seal_frame_with_associated_data};
 
     fn message() -> Message {
         let mut rng = ChaCha20Rng::from_seed([1u8; 32]);
         let recipient = KeyPair::from_secret_bytes([3u8; PUBLIC_KEY_LEN]);
-        let frame = seal_frame(&mut rng, &recipient.public, None, b"payload").unwrap();
+        let frame =
+            seal_frame_with_associated_data(&mut rng, &recipient.public, None, b"payload", &[])
+                .unwrap();
         Message::from_frame(frame)
     }
 
@@ -146,7 +148,7 @@ mod tests {
         }
 
         postcard::to_stdvec(&SenderVisibleWireV1 {
-            version: SealedFrame::VERSION,
+            version: message().version,
             id: [1u8; 16],
             sender_public_key: vec![2u8; PUBLIC_KEY_LEN],
             recipient_public_key: vec![3u8; PUBLIC_KEY_LEN],
@@ -159,7 +161,7 @@ mod tests {
 
     fn old_message() -> Message {
         Message {
-            version: SealedFrame::VERSION,
+            version: message().version,
             recipient_public_key: [3u8; PUBLIC_KEY_LEN],
             prekey_reference: None,
             ephemeral_public_key: [4u8; PUBLIC_KEY_LEN],
@@ -210,7 +212,7 @@ mod tests {
 
     #[test]
     fn from_bytes_rejects_malformed_postcard() {
-        let bytes = vec![SealedFrame::VERSION, 0xff];
+        let bytes = vec![message().version, 0xff];
 
         assert_decode_error(&bytes, MessageError::Decode);
     }

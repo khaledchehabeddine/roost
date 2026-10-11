@@ -313,7 +313,6 @@ impl CloneForSignedPreKeyStorage for SignedPreKey {
     }
 }
 
-#[allow(dead_code)]
 fn matching_prekey(
     prekey: &SignedPreKey,
     epoch: u32,

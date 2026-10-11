@@ -6,10 +6,10 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
     DiscoveryKey, HandshakeEnvelope, Header, InitialPlaintext, OneTimePreKey, PreKeyBundle,
-    PublicIdentityKey, RatchetError, RatchetState, SignedPreKey, SigningKeyPair, accept,
-    generate_discovery_key, generate_key_pair, generate_one_time_prekey,
-    generate_signed_prekey_for_discovery_key, generate_signing_key_pair, initial_associated_data,
-    initiate, sign_identity_key_binding,
+    PublicIdentityKey, RatchetError, RatchetState, SignedPreKey, SigningKeyPair,
+    accept_with_associated_data, generate_discovery_key, generate_key_pair,
+    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    initial_associated_data, initiate_with_associated_data, sign_identity_key_binding,
 };
 
 const CREATED_AT: u64 = 1_700_000_000;
@@ -74,18 +74,19 @@ fn bootstrap(
         signed_prekey: setup.bob_signed_prekey.public(),
         one_time_prekey: one_time_prekey_bundle,
     };
-    let (alice, envelope) = initiate(
+    let (alice, envelope) = initiate_with_associated_data(
         rng,
         &setup.alice_discovery_key,
         &setup.alice_identity_key,
         &setup.bob_identity_key,
         &prekey_bundle,
         initial_plaintext(plaintext),
+        &[],
     )
     .unwrap();
     let bob_one_time_prekey =
         include_one_time_prekey.then(|| setup.bob_one_time_prekey.take().unwrap());
-    let (bob, decrypted) = accept(
+    let (bob, decrypted) = accept_with_associated_data(
         rng,
         &envelope,
         Some(&setup.alice_identity_key),
@@ -93,6 +94,7 @@ fn bootstrap(
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
+        &[],
     )
     .unwrap();
     assert_eq!(decrypted.plaintext.as_slice(), plaintext);

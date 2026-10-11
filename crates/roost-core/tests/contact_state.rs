@@ -8,7 +8,7 @@ use roost_core::{
     ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey, ContactTrustState,
     IdentityKey, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
     ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    SenderIdentityMaterial, SessionId, derive_safety_number,
+    SenderIdentityMaterial, derive_safety_number,
 };
 use roost_crypto::{
     KeyPair, RecipientDeliveryCapability, SigningKeyPair, generate_discovery_key,
@@ -57,7 +57,7 @@ fn setup() -> Setup {
 }
 
 fn session_key() -> ProtocolStateKey {
-    ProtocolStateKey::session(SessionId::from_bytes([9u8; 16]))
+    ProtocolStateKey::from_bytes(vec![9u8; 16]).unwrap()
 }
 
 fn sender_identity() -> SenderIdentityMaterial {

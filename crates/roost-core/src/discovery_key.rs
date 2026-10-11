@@ -559,8 +559,8 @@ mod tests {
             restored.public_key().as_bytes()
         );
         assert_eq!(
-            original.verifying_key().as_bytes(),
-            restored.verifying_key().as_bytes(),
+            original.public().verifying_key.as_bytes(),
+            restored.public().verifying_key.as_bytes(),
         );
         assert_eq!(
             original.identity_signature().to_bytes(),

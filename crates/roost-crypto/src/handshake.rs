@@ -30,10 +30,6 @@ const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:with-opk";
 /// Current public pre-key bundle format version.
 pub const PREKEY_BUNDLE_VERSION: u8 = 1;
-/// Additive public-key headroom reserved in a future versioned pre-key bundle.
-pub const PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM: usize = 1184;
-/// Additive shared-secret headroom reserved in future X3DH KDF input.
-pub const X3DH_ADDITIVE_SHARED_SECRET_HEADROOM: usize = 32;
 /// The outer sealed-frame version. Must track `SEALED_FRAME_VERSION`, which is
 /// what actually rejects a frame on decode; this constant is the handshake's
 /// own assertion about the envelope it produces.
@@ -187,8 +183,8 @@ impl HandshakeEnvelope {
 
     /// Restores a handshake envelope from bytes produced by [`Self::to_bytes`].
     ///
-    /// This validates only structural decoding. [`accept`] authenticates the envelope against
-    /// verified discovery and pre-key material.
+    /// This validates only structural decoding. [`accept_with_associated_data`] authenticates the
+    /// envelope against verified discovery and pre-key material.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, HandshakeError> {
         if bytes.len() > MAX_HANDSHAKE_ENVELOPE_LEN {
             return Err(HandshakeError::EnvelopeDecode);
@@ -223,33 +219,12 @@ impl HandshakeEnvelope {
     }
 }
 
-/// Starts a handshake as the initiator and encrypts the first message.
-///
-/// The initiator's ephemeral key and first ratchet key are drawn from `rng`.
-///
-/// Pass both parties' permanent public identity keys. They bind the X25519 and Ed25519 halves and
-/// are included in the X3DH root-key derivation.
-pub fn initiate<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    initiator_discovery_key: &DiscoveryKey,
-    initiator_identity_key: &PublicIdentityKey,
-    responder_identity_key: &PublicIdentityKey,
-    responder_prekey_bundle: &PreKeyBundle,
-    message: InitialPlaintext<'_>,
-) -> Result<(RatchetState, HandshakeEnvelope), HandshakeError> {
-    initiate_with_associated_data(
-        rng,
-        initiator_discovery_key,
-        initiator_identity_key,
-        responder_identity_key,
-        responder_prekey_bundle,
-        message,
-        &[],
-    )
-}
-
 /// Starts a handshake and authenticates caller-supplied transport associated data in the outer
 /// sealed frame.
+///
+/// The initiator's ephemeral key and first ratchet key are drawn from `rng`. Pass both parties'
+/// permanent public identity keys. They bind the X25519 and Ed25519 halves and are included in the
+/// X3DH root-key derivation.
 ///
 /// The responder must pass identical bytes to [`accept_with_associated_data`] or
 /// [`initiator_identity_hint_with_associated_data`].
@@ -365,29 +340,14 @@ pub fn initiate_with_associated_data<R: RngCore + CryptoRng>(
     Ok((state, envelope))
 }
 
-/// Reads the initiator's Identity Key out of a handshake envelope, without
-/// accepting it.
-///
-/// This exists because a caller has to know *who* sent a first message before it
-/// can accept one: session state is addressed by a key derived from both
-/// identities, and [`accept`] takes that address as an input. Calling `accept`
-/// speculatively to find out is not an option — it consumes the referenced
-/// one-time prekey, so a second call with the right address would fail.
-///
-/// Opens only the layer sealed to `responder_discovery_key`, so it consumes
-/// nothing and reveals nothing to anyone without that key. The binding
-/// signature over the two halves is checked here; everything else about the
-/// sender is unverified until [`accept`] compares this against the sealed
-/// envelope's own copy.
-pub fn initiator_identity_hint(
-    envelope: &HandshakeEnvelope,
-    responder_discovery_key: &DiscoveryKey,
-) -> Result<PublicIdentityKey, HandshakeError> {
-    initiator_identity_hint_with_associated_data(envelope, responder_discovery_key, &[])
-}
-
 /// Reads the claimed initiator identity while authenticating caller-supplied transport associated
 /// data in the outer sealed frame.
+///
+/// A caller has to know who sent a first message before it can accept one, because Session state
+/// is addressed by a key derived from both identities. Calling [`accept_with_associated_data`]
+/// speculatively would consume the referenced one-time prekey. This opens only the layer sealed to
+/// `responder_discovery_key`, so it consumes nothing, and checks the binding signature over the
+/// claimed identity's two halves.
 ///
 /// Associated-data authentication does not authenticate the claimed initiator. The returned
 /// identity key remains a sender claim until [`accept_with_associated_data`] checks it against the
@@ -408,47 +368,18 @@ pub fn initiator_identity_hint_with_associated_data(
     Ok(decoded.sender_identity_hint)
 }
 
-/// Accepts a handshake envelope and decrypts the first message.
-///
-/// The responder's first ratchet key is drawn from `rng` during the initial DH ratchet step.
-///
-/// `responder_discovery_key` is the local responder's current X25519 discovery key.
-///
-/// `initiator_identity_key` is the initiator public identity key that was folded into the X3DH root
-/// key. The decoded sealed sender identity must match it on both key halves, so the identity the
-/// responder verified and the identity returned to the caller are guaranteed to be the same.
-///
-/// This function checks that the envelope targets `responder_signed_prekey` and verifies the
-/// sealed sender key-possession proof, but it does not verify the signed pre-key signature or
-/// validate the sender certificate. Sender identity material is returned only after the
-/// first-message ciphertext authenticates and decrypts.
-pub fn accept<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    envelope: &HandshakeEnvelope,
-    expected_initiator_identity_key: Option<&PublicIdentityKey>,
-    responder_identity_key: &PublicIdentityKey,
-    responder_discovery_key: &DiscoveryKey,
-    responder_signed_prekey: &SignedPreKey,
-    responder_one_time_prekey: Option<OneTimePreKey>,
-) -> Result<(RatchetState, AcceptedInitialMessage), HandshakeError> {
-    accept_with_associated_data(
-        rng,
-        envelope,
-        expected_initiator_identity_key,
-        responder_identity_key,
-        responder_discovery_key,
-        responder_signed_prekey,
-        responder_one_time_prekey,
-        &[],
-    )
-}
-
 /// Accepts a handshake while authenticating caller-supplied transport associated data in the
 /// outer sealed frame.
 ///
-/// As with [`accept`], this verifies that the envelope targets `responder_signed_prekey` and checks
-/// the sender key-possession proof, but it does not verify the signed-prekey signature or validate
-/// the sender certificate.
+/// The responder's first ratchet key is drawn from `rng`. The X3DH root key binds
+/// `expected_initiator_identity_key`, or the envelope's claimed identity when it is `None`. The
+/// sealed sender identity must match that key on both halves, so the identity the responder
+/// verified and the identity returned to the caller are the same.
+///
+/// This verifies that the envelope targets `responder_signed_prekey` and checks the sender
+/// key-possession proof, but it does not verify the signed-prekey signature or validate the sender
+/// certificate. Sender identity material is returned only after the first-message ciphertext
+/// authenticates and decrypts.
 #[expect(
     clippy::too_many_arguments,
     reason = "route binding adds one explicit input to the established X3DH acceptance seam"
@@ -1273,22 +1204,6 @@ mod tests {
     }
 
     #[test]
-    fn versioned_prekey_bundle_reserves_ml_kem_768_headroom() {
-        // Source: NIST FIPS 203, Table 3.
-        const ML_KEM_768_ENCAPSULATION_KEY_LEN: usize = 1184;
-        const ML_KEM_768_SHARED_SECRET_LEN: usize = 32;
-
-        let (setup, _) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-
-        assert_eq!(bundle.version, PREKEY_BUNDLE_VERSION);
-        const {
-            assert!(ML_KEM_768_ENCAPSULATION_KEY_LEN <= PREKEY_BUNDLE_ADDITIVE_PUBLIC_KEY_HEADROOM);
-            assert!(ML_KEM_768_SHARED_SECRET_LEN <= X3DH_ADDITIVE_SHARED_SECRET_HEADROOM);
-        }
-    }
-
-    #[test]
     fn full_x3dh_associated_data_binds_responder_discovery_key_and_epoch() {
         let (setup, _) = full_x3dh_setup();
         let associated_data = initial_associated_data(
@@ -1310,20 +1225,21 @@ mod tests {
         let (setup, mut rng) = full_x3dh_setup();
         let plaintext = b"hello full x3dh";
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(plaintext),
+            &[],
         )
         .unwrap();
         assert_eq!(
             envelope_reference(&envelope).one_time_prekey_id,
             Some(setup.bob_one_time_prekey.id())
         );
-        let (_, decrypted) = accept(
+        let (_, decrypted) = accept_with_associated_data(
             &mut rng,
             &envelope,
             Some(&setup.alice_identity_key),
@@ -1331,6 +1247,7 @@ mod tests {
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
             Some(setup.bob_one_time_prekey),
+            &[],
         )
         .unwrap();
         assert_eq!(decrypted.plaintext.as_slice(), plaintext);
@@ -1340,13 +1257,14 @@ mod tests {
     fn handshake_envelope_does_not_expose_initiator_discovery_key() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"hello sealed x3dh"),
+            &[],
         )
         .unwrap();
 
@@ -1364,16 +1282,17 @@ mod tests {
         let (setup, mut rng) = full_x3dh_setup();
         let plaintext = b"hello sealed identity";
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"hello sealed identity"),
+            &[],
         )
         .unwrap();
-        let (_, decrypted) = accept(
+        let (_, decrypted) = accept_with_associated_data(
             &mut rng,
             &envelope,
             Some(&setup.alice_identity_key),
@@ -1381,6 +1300,7 @@ mod tests {
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
             Some(setup.bob_one_time_prekey),
+            &[],
         )
         .unwrap();
 
@@ -1400,25 +1320,28 @@ mod tests {
     ///
     /// A caller addresses session state by a key derived from both identities,
     /// so it has to know who sent a message before it can accept one — and
-    /// `accept` consumes the referenced one-time prekey, so it cannot be called
-    /// speculatively to find out. Reading the hint costs nothing and consumes
-    /// nothing: it opens only the layer sealed to the responder's own Discovery
-    /// Key.
+    /// `accept_with_associated_data` consumes the referenced one-time prekey, so
+    /// it cannot be called speculatively to find out. Reading the hint costs
+    /// nothing and consumes nothing: it opens only the layer sealed to the
+    /// responder's own Discovery Key.
     #[test]
     fn the_initiator_identity_is_readable_before_accepting() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"hello stranger"),
+            &[],
         )
         .unwrap();
 
-        let hint = initiator_identity_hint(&envelope, &setup.bob_discovery_key).unwrap();
+        let hint =
+            initiator_identity_hint_with_associated_data(&envelope, &setup.bob_discovery_key, &[])
+                .unwrap();
 
         assert_eq!(
             hint.public_key.as_bytes(),
@@ -1431,7 +1354,7 @@ mod tests {
 
         // Nothing was consumed: the accept that follows still finds its
         // one-time prekey, which is the whole point of peeking separately.
-        let (_, decrypted) = accept(
+        let (_, decrypted) = accept_with_associated_data(
             &mut rng,
             &envelope,
             None,
@@ -1439,6 +1362,7 @@ mod tests {
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
             Some(setup.bob_one_time_prekey),
+            &[],
         )
         .unwrap();
         assert_eq!(decrypted.plaintext.as_slice(), b"hello stranger");
@@ -1458,17 +1382,18 @@ mod tests {
         let (setup, mut rng) = full_x3dh_setup();
         let plaintext = b"hello stranger";
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(plaintext),
+            &[],
         )
         .unwrap();
 
-        let (_, decrypted) = accept(
+        let (_, decrypted) = accept_with_associated_data(
             &mut rng,
             &envelope,
             None,
@@ -1476,6 +1401,7 @@ mod tests {
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
             Some(setup.bob_one_time_prekey),
+            &[],
         )
         .unwrap();
 
@@ -1495,17 +1421,18 @@ mod tests {
         let (setup, mut rng) = full_x3dh_setup();
         let plaintext = b"hello signed prekey only";
         let bundle = full_prekey_bundle(&setup, false);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(plaintext),
+            &[],
         )
         .unwrap();
         assert_eq!(envelope_reference(&envelope).one_time_prekey_id, None);
-        let (_, decrypted) = accept(
+        let (_, decrypted) = accept_with_associated_data(
             &mut rng,
             &envelope,
             Some(&setup.alice_identity_key),
@@ -1513,6 +1440,7 @@ mod tests {
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(decrypted.plaintext.as_slice(), plaintext);
@@ -1522,17 +1450,18 @@ mod tests {
     fn accept_rejects_missing_one_time_prekey() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"payload"),
+            &[],
         )
         .unwrap();
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&setup.alice_identity_key),
@@ -1540,6 +1469,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 None,
+                &[],
             ),
             Err(HandshakeError::MissingOneTimePreKey)
         ));
@@ -1551,17 +1481,18 @@ mod tests {
         let wrong_one_time_prekey =
             generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch(), FIXED_TS);
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"payload"),
+            &[],
         )
         .unwrap();
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&setup.alice_identity_key),
@@ -1569,6 +1500,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 Some(wrong_one_time_prekey),
+                &[],
             ),
             Err(HandshakeError::OneTimePreKeyMismatch)
         ));
@@ -1586,13 +1518,14 @@ mod tests {
             one_time_prekey: Some(stale_one_time_prekey.public()),
         };
         assert!(matches!(
-            initiate(
+            initiate_with_associated_data(
                 &mut rng,
                 &setup.alice_discovery_key,
                 &setup.alice_identity_key,
                 &setup.bob_identity_key,
                 &bundle,
                 initial_plaintext(b"payload"),
+                &[],
             ),
             Err(HandshakeError::StalePreKey)
         ));
@@ -1609,13 +1542,14 @@ mod tests {
         };
 
         assert!(matches!(
-            initiate(
+            initiate_with_associated_data(
                 &mut rng,
                 &setup.alice_discovery_key,
                 &setup.alice_identity_key,
                 &setup.bob_identity_key,
                 &bundle,
                 initial_plaintext(b"payload"),
+                &[],
             ),
             Err(HandshakeError::UnsupportedPreKeyBundleVersion(version))
                 if version == PREKEY_BUNDLE_VERSION + 1
@@ -1628,13 +1562,14 @@ mod tests {
         let bundle = full_prekey_bundle(&setup, true);
         let oversized_plaintext = vec![0u8; MAX_HANDSHAKE_SEALED_SENDER_CONTENT_LEN + 1];
 
-        let result = initiate(
+        let result = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(&oversized_plaintext),
+            &[],
         );
 
         assert!(matches!(result, Err(HandshakeError::EnvelopeEncode)));
@@ -1817,13 +1752,14 @@ mod tests {
         let wrong_signing_key = generate_signing_key_pair(&mut rng);
         let wrong_identity_key = generated_public_identity_key(&mut rng, &wrong_signing_key);
         let bundle = full_prekey_bundle(&setup, true);
-        let result = initiate(
+        let result = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &wrong_identity_key,
             &bundle,
             initial_plaintext(b"payload"),
+            &[],
         );
         assert!(matches!(
             result,
@@ -1837,13 +1773,14 @@ mod tests {
     fn accept_rejects_mismatched_signed_prekey_public_key() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, false);
-        let (_, mut envelope) = initiate(
+        let (_, mut envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"payload"),
+            &[],
         )
         .unwrap();
         envelope
@@ -1852,7 +1789,7 @@ mod tests {
             .unwrap()
             .signed_prekey_public_key[0] ^= 0x01;
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&setup.alice_identity_key),
@@ -1860,6 +1797,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 None,
+                &[],
             ),
             Err(HandshakeError::SignedPreKeyMismatch)
         ));
@@ -1869,18 +1807,19 @@ mod tests {
     fn accept_rejects_tampered_ciphertext() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, false);
-        let (_, mut envelope) = initiate(
+        let (_, mut envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"tamper me"),
+            &[],
         )
         .unwrap();
         envelope.ciphertext[0] ^= 0xFF;
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&setup.alice_identity_key),
@@ -1888,6 +1827,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 None,
+                &[],
             ),
             Err(HandshakeError::SealedFrame(SealedFrameError::Aead))
         ));
@@ -1927,7 +1867,7 @@ mod tests {
         );
 
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&setup.alice_identity_key),
@@ -1935,6 +1875,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 None,
+                &[],
             ),
             Err(HandshakeError::EnvelopeDecode)
         ));
@@ -1988,7 +1929,7 @@ mod tests {
         );
 
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&setup.alice_identity_key),
@@ -1996,6 +1937,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 None,
+                &[],
             ),
             Err(HandshakeError::SenderProofInvalid)
         ));
@@ -2049,7 +1991,7 @@ mod tests {
         );
 
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&setup.alice_identity_key),
@@ -2057,6 +1999,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 None,
+                &[],
             ),
             Err(HandshakeError::EnvelopeDecode)
         ));
@@ -2259,7 +2202,7 @@ mod tests {
         );
 
         assert!(matches!(
-            accept(
+            accept_with_associated_data(
                 &mut rng,
                 &envelope,
                 Some(&root_bound_identity_key),
@@ -2267,6 +2210,7 @@ mod tests {
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 None,
+                &[],
             ),
             Err(HandshakeError::SenderIdentityMismatch)
         ));
@@ -2277,19 +2221,20 @@ mod tests {
         let (setup, mut rng) = full_x3dh_setup();
         let plaintext = b"serialize me";
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(plaintext),
+            &[],
         )
         .unwrap();
         let bytes = envelope.to_bytes().unwrap();
 
         let decoded_envelope = HandshakeEnvelope::from_bytes(&bytes).unwrap();
-        let (_, decrypted) = accept(
+        let (_, decrypted) = accept_with_associated_data(
             &mut rng,
             &decoded_envelope,
             Some(&setup.alice_identity_key),
@@ -2297,6 +2242,7 @@ mod tests {
             &setup.bob_discovery_key,
             &setup.bob_signed_prekey,
             Some(setup.bob_one_time_prekey),
+            &[],
         )
         .unwrap();
         assert_eq!(decrypted.plaintext.as_slice(), plaintext);
@@ -2306,13 +2252,14 @@ mod tests {
     fn envelope_from_bytes_rejects_trailing_bytes() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate(
+        let (_, envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"payload"),
+            &[],
         )
         .unwrap();
         let mut bytes = envelope.to_bytes().unwrap();
@@ -2346,13 +2293,14 @@ mod tests {
     fn envelope_to_bytes_rejects_missing_prekey_reference() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, mut envelope) = initiate(
+        let (_, mut envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"payload"),
+            &[],
         )
         .unwrap();
         envelope.prekey_reference = None;
@@ -2415,13 +2363,14 @@ mod tests {
     fn envelope_wire_api_rejects_oversized_ciphertext() {
         let (setup, mut rng) = full_x3dh_setup();
         let bundle = full_prekey_bundle(&setup, true);
-        let (_, mut envelope) = initiate(
+        let (_, mut envelope) = initiate_with_associated_data(
             &mut rng,
             &setup.alice_discovery_key,
             &setup.alice_identity_key,
             &setup.bob_identity_key,
             &bundle,
             initial_plaintext(b"payload"),
+            &[],
         )
         .unwrap();
         envelope.ciphertext = vec![0u8; MAX_HANDSHAKE_CIPHERTEXT_LEN + 1];

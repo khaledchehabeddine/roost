@@ -6,7 +6,7 @@
 use roost_core::{
     HandshakeError, InMemorySecureStorage, KeyStore, KeyStoreError, KeyStoreOperationError,
     OneTimePreKeyError, PreKeySelection, ProtocolStateKey, SealedFrameError, SessionAcceptance,
-    SessionEstablishmentError, SessionId, SessionInitiation, SignedPreKeyError, TransportBinding,
+    SessionEstablishmentError, SessionInitiation, SignedPreKeyError, TransportBinding,
 };
 
 fn finalize<T>(store: &KeyStore, prepared: &roost_core::PreparedKeyStoreOperation<T>) {
@@ -35,7 +35,7 @@ fn prepared_session_acceptance_consumes_one_time_prekey_only_after_finalize() {
         one_time_prekey_id: Some(bob_one_time_prekey.id),
     };
 
-    let session_key = ProtocolStateKey::session(SessionId::from_bytes([0x22; 16]));
+    let session_key = ProtocolStateKey::from_bytes(vec![0x22; 16]).unwrap();
     let initial = alice
         .initiate_session_with_transport_binding(
             SessionInitiation {
