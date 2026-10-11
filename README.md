@@ -4,10 +4,10 @@ The cryptographic core for private, end-to-end encrypted messaging apps.
 
 ## Setup
 
-Install rustup:
+Install the tools:
 
 ```bash
-brew install rustup
+brew install rustup cargo-edit
 echo 'export PATH="$(brew --prefix)/opt/rustup/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
@@ -30,13 +30,8 @@ cargo build
 
 ## Releasing
 
-Bump the version in `Cargo.toml`.
-
-Tag the latest commit on `main`:
+Release a new version:
 
 ```bash
-git fetch origin main
-version=v$(git show origin/main:Cargo.toml | grep -m1 '^version' | cut -d'"' -f2)
-git tag "$version" origin/main
-git push origin "$version"
+scripts/release.sh X.Y.Z
 ```
