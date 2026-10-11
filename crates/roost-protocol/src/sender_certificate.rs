@@ -192,12 +192,9 @@ pub fn validate_sender_certificate(
     }
     let verifying_key = parse_ed25519_verifying_key(domain_signing_key.verifying_key)?;
     let signature = parse_signature(input.signature)?;
-    if verifying_key
+    verifying_key
         .verify_strict(input.certificate, &signature)
-        .is_err()
-    {
-        return Err(SenderCertificateValidationError::SignatureFailure);
-    }
+        .map_err(|_| SenderCertificateValidationError::SignatureFailure)?;
     let RevocationState::Available(revoked_identity_keys) = input.revocation_state else {
         return Err(SenderCertificateValidationError::RevocationStateUnavailable);
     };
