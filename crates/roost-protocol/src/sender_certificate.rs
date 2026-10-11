@@ -376,8 +376,9 @@ fn certificate_is_expired(
     })
 }
 
-/// Encodes the public certificate fields for a domain authority to sign.
-pub fn encode_sender_certificate(
+/// Encodes the public certificate fields the way a domain authority does before signing.
+#[cfg(test)]
+fn encode_sender_certificate(
     signing_key_id: &[u8],
     relay_domain: &[u8],
     identity_key: SenderCertificateIdentityKey,

@@ -42,8 +42,6 @@
 //! ```
 
 mod contact;
-#[cfg(feature = "development-certificates")]
-mod development_certificate;
 mod discovery_key;
 mod hardening;
 mod identity;
@@ -63,10 +61,6 @@ pub use contact::{
     ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey,
     ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
     PeerInboxAuthorization,
-};
-#[cfg(feature = "development-certificates")]
-pub use development_certificate::{
-    DevelopmentCertificateAuthority, DevelopmentCertificateError, DevelopmentSenderCertificate,
 };
 pub use discovery_key::DiscoveryKeyError;
 pub use hardening::{
