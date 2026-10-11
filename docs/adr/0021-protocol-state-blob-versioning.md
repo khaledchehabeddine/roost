@@ -1,6 +1,6 @@
 # Protocol State Blob Versioning
 
-Each Protocol State Blob starts with a version that Core checks before decoding the rest, so Core can reject an unknown format before touching Session state. An unknown version is an error, never a reason to reset or migrate silently. Until a release promises that stored data survives upgrades, Core reads only the current format.
+Each Protocol State Blob starts with a version that Core checks before decoding the rest, so Core can reject an unknown format before touching Session state. That version is the blob's only one and covers everything inside it. An unknown version is an error, never a reason to reset or migrate silently. Until a release promises that stored data survives upgrades, Core reads only the current format.
 
 ## Alternatives
 
