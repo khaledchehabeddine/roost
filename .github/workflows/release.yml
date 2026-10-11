@@ -41,7 +41,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
         run: |
-          zip="../target/ios/RoostFFI-$TAG.xcframework.zip"
+          zip="../target/ios/RoostFFI.xcframework.zip"
           gh release create "$TAG" "$zip" --draft
           # SwiftPM needs the API URL for a private repo. It must also end in .zip.
           url="$(gh release view "$TAG" --json assets --jq '.assets[0] | .apiUrl + "-" + .name')"

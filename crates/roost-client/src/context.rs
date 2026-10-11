@@ -67,6 +67,10 @@ const RESERVED_DOMAIN_PREFIXES: [&str; 2] = ["Aether", "Roost"];
 /// holds one lock that covers every process sharing the identity from preparing an operation until
 /// its host commit is resolved.
 ///
+/// The host protects stored blobs like identity keys, and keeps blobs, keys, passphrases, and
+/// plaintext out of logs. Roost's tests don't cover the host's adapter or transactions, so the
+/// host tests them itself.
+///
 /// # Key Changes
 ///
 /// A method whose name starts with `prepare` stages a change in SecureStorage and returns its

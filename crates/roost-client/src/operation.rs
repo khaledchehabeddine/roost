@@ -40,9 +40,9 @@ impl OperationId {
             return Err(invalid());
         }
         let mut bytes = [0u8; OPERATION_ID_DIGITS / 2];
-        for (byte, pair) in bytes.iter_mut().zip(digits.chunks_exact(2)) {
-            let high = hex_digit(pair[0]).ok_or_else(invalid)?;
-            let low = hex_digit(pair[1]).ok_or_else(invalid)?;
+        for (byte, &[high, low]) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
+            let high = hex_digit(high).ok_or_else(invalid)?;
+            let low = hex_digit(low).ok_or_else(invalid)?;
             *byte = (high << 4) | low;
         }
         Ok(CoreKeyStoreOperationId::from_bytes(bytes))

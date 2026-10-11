@@ -2,7 +2,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION=0.16.0
 MIN_IOS=15.0
 
 rm -rf target/ios
@@ -20,4 +19,4 @@ xcodebuild -create-xcframework \
     -library target/aarch64-apple-ios/release/libroost_client.a -headers target/ios/headers \
     -library target/aarch64-apple-ios-sim/release/libroost_client.a -headers target/ios/headers \
     -output target/ios/RoostFFI.xcframework
-(cd target/ios && zip -qr "RoostFFI-v$VERSION.xcframework.zip" RoostFFI.xcframework)
+(cd target/ios && zip -qr RoostFFI.xcframework.zip RoostFFI.xcframework)

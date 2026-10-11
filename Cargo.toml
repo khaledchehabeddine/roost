@@ -57,3 +57,6 @@ wildcard_enum_match_arm = "warn"
 
 [workspace.lints.rustdoc]
 missing_crate_level_docs = "warn"
+
+[profile.dev.package."*"]
+opt-level = 1
