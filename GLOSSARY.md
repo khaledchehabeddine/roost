@@ -5,6 +5,8 @@
 - **Blocking**: A local choice to hide a contact's Messages, separate from Trust State and certificate revocation.
   - Avoid: revocation, distrust, blocklist
 - **Caller-Owned Transport**: The app's own networking, authentication, and retries, which carry the Messages Roost produces.
+- **Commit Condition**: The state a record must still be in when the app commits an operation's result, either unchanged since Roost read it or still absent.
+  - Avoid: precondition, version check, lock
 - **Contact Identity**: The Identity Key and current Discovery Key that identify a peer.
   - Avoid: account, profile
 - **Dead Session**: A Session that an authenticated failure has made unrecoverable, so only a new X3DH exchange can replace it.
@@ -25,7 +27,7 @@
   - Avoid: user, account, profile
 - **Identity Backup**: A passphrase-encrypted copy of an Identity's keys that restores the Identity onto a new Device.
   - Avoid: account backup
-- **Identity Context**: Roost's handle on one local identity namespace, which shares its SecureStorage and configuration and keeps no protocol state.
+- **Identity Context**: Roost's handle on one local identity namespace, which shares its SecureStorage and keeps no protocol state or settings.
   - Avoid: client, keystore
 - **Identity Key (IK)**: The permanent key pair that anchors an Identity and signs its Discovery Key.
   - Avoid: master key, root key
@@ -37,6 +39,8 @@
   - Avoid: payload, packet
 - **MessageID**: The identifier of one Message within a Session.
   - Avoid: uuid, packet id
+- **Message Operation**: One attempt to encrypt or decrypt a Message, which asks the app for the state it needs and returns its result once.
+  - Avoid: transaction, job
 - **Message Transcript**: The bytes a sender signs for each Message after the handshake, binding it to its recipient, Session, and sender certificate.
   - Avoid: associated data
 - **Pending Acknowledgment**: The stored record of a sent Message still waiting for its Acknowledgment Artifact.
