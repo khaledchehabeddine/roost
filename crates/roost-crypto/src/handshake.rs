@@ -1,63 +1,34 @@
-//! Implements the X3DH handshake that bootstraps Double Ratchet sessions.
+//! Implements the X3DH handshake that starts Double Ratchet Sessions, and the proof that a first
+//! Message's sender holds their Identity Key.
 
 use crate::discovery_key::{DiscoveryKey, PublicDiscoveryKey, verify_public_discovery_key};
-use crate::double_ratchet::{Header, RatchetError, RatchetState};
+use crate::double_ratchet::{RatchetError, RatchetState};
 use crate::keys::{
     KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, generate_key_pair,
-    is_valid_x25519_public_key, verify_public_identity_key,
+    verify_public_identity_key,
 };
 use crate::one_time_prekey::{OneTimePreKey, PublicOneTimePreKey};
 use crate::ratchet::RootKey;
-#[cfg(test)]
-use crate::sealed_frame::seal_frame_with_ephemeral_key;
-use crate::sealed_frame::{
-    SealedFrame, SealedFrameError, SealedFramePreKeyReference,
-    open_frame_for_discovery_key_with_associated_data,
-    seal_frame_with_ephemeral_key_and_associated_data,
-};
+use crate::sealed_frame::SealedFramePreKeyReference;
 use crate::signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_public_signed_prekey};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
-use serde::{Deserialize, Serialize};
+use roost_protocol::SessionId;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::Zeroizing;
 
 // Fixed prefix on the HKDF input. Future incompatible handshake derivations should change these
 // bytes so peers fail during the first decrypt.
 const F_PREFIX: [u8; 32] = [0xFF; 32];
 const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:with-opk";
+const SESSION_ID_INFO: &[u8] = b"RoostSessionId-v1:";
+const SENDER_PROOF_CONTEXT: &[u8] = b"AetherX3DH-v1:sender-proof:";
 /// Current public pre-key bundle format version.
 pub const PREKEY_BUNDLE_VERSION: u8 = 1;
-/// The outer sealed-frame version. Must track `SEALED_FRAME_VERSION`, which is
-/// what actually rejects a frame on decode; this constant is the handshake's
-/// own assertion about the envelope it produces.
-const HANDSHAKE_ENVELOPE_VERSION: u8 = 1;
-
-/// The version of the plaintext *inside* the sealed frame, which is a separate
-/// format from the frame carrying it — the two were previously the same constant
-/// and agreed only because both were 1.
-///
-/// Version 2 carries the initiator's Identity Key so a responder can open a
-/// first message from a sender it has never seen. Version 1 is not accepted:
-/// nothing has shipped, and supporting it would mean keeping a path on which a
-/// stranger's message is permanently unopenable.
-const HANDSHAKE_FRAME_PLAINTEXT_VERSION: u8 = 2;
-const MAX_HANDSHAKE_ENVELOPE_LEN: usize = 16 * 1024;
-const MAX_HANDSHAKE_CIPHERTEXT_LEN: usize = 8 * 1024;
-const XCHACHA20_POLY1305_TAG_LEN: usize = 16;
-const SEALED_SENDER_ENVELOPE_VERSION: u8 = 1;
-const SENDER_PROOF_LEN: usize = 32;
-const SEALED_SENDER_ENCODING_OVERHEAD_CAP: usize = 64;
-const MAX_HANDSHAKE_SEALED_SENDER_ENVELOPE_LEN: usize =
-    MAX_HANDSHAKE_CIPHERTEXT_LEN - XCHACHA20_POLY1305_TAG_LEN;
-const MAX_HANDSHAKE_SEALED_SENDER_CONTENT_LEN: usize = MAX_HANDSHAKE_SEALED_SENDER_ENVELOPE_LEN
-    - 32
-    - SENDER_PROOF_LEN
-    - SEALED_SENDER_ENCODING_OVERHEAD_CAP;
-const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
-const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
+/// Length of the proof a first Message carries.
+pub const SENDER_PROOF_LEN: usize = 32;
 
 /// Public pre-key material used by the initiator to start an X3DH session.
 #[derive(Clone, Debug)]
@@ -72,172 +43,41 @@ pub struct PreKeyBundle {
     pub one_time_prekey: Option<PublicOneTimePreKey>,
 }
 
-/// Sender identity material decoded only after first-message ciphertext authentication succeeds.
-///
-/// `Clone` is intentional for post-decryption metadata handoff; owned opaque bytes zeroize on drop.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub struct SenderIdentityMaterial {
-    /// Sender Identity Key X25519 public bytes. Always 32 bytes.
-    #[zeroize(skip)]
-    pub identity_key: [u8; 32],
-    /// Sender Identity Key Ed25519 verifying-key bytes. Always 32 bytes.
-    #[zeroize(skip)]
-    pub identity_verifying_key: [u8; 32],
-    /// Ed25519 signature binding `identity_key` to `identity_verifying_key`.
-    pub identity_binding_signature: Vec<u8>,
-    /// Opaque sender certificate bytes for future validation.
-    pub certificate: Vec<u8>,
-    /// Opaque sender signature bytes for future validation.
-    pub signature: Vec<u8>,
+/// The public half of a handshake, which the initiator sends until the responder replies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Handshake {
+    /// The initiator's ephemeral X25519 public key.
+    pub base_key: PublicKey,
+    /// The responder Discovery Key the handshake targets.
+    pub responder_discovery_key: PublicKey,
+    /// The responder prekeys the handshake used.
+    pub prekey_reference: SealedFramePreKeyReference,
 }
 
-/// Plaintext and sender material for an outbound X3DH first message.
-pub struct InitialPlaintext<'a> {
-    /// Opaque sender certificate bytes sealed into the first message.
+/// What a first Message's sender proof covers besides the handshake.
+pub struct SenderProofTranscript<'a> {
+    /// The handshake the proof belongs to.
+    pub handshake: &'a Handshake,
+    /// The sender's Identity Key, whose agreement half makes the proof.
+    pub sender_identity_key: &'a PublicIdentityKey,
+    /// The sender's Discovery Key, sealed with the proof so the recipient can reply.
+    pub sender_discovery_key: &'a PublicDiscoveryKey,
+    /// The sender certificate sealed with the proof.
     pub sender_certificate: &'a [u8],
-    /// Opaque sender signature bytes sealed into the first message.
-    pub sender_signature: &'a [u8],
-    /// First application plaintext bytes.
-    pub plaintext: &'a [u8],
+    /// The domain signature over the sender certificate.
+    pub sender_certificate_signature: &'a [u8],
 }
 
-/// Decrypted X3DH first message and sealed sender material.
-pub struct AcceptedInitialMessage {
-    /// Decrypted first-message plaintext bytes.
-    pub plaintext: Zeroizing<Vec<u8>>,
-    /// Opaque sender identity material decoded from the sealed-sender envelope.
-    pub sender_identity: SenderIdentityMaterial,
-}
-
-/// A serialized handshake request from an initiator to a responder.
-#[derive(Clone, Debug)]
-pub struct HandshakeEnvelope {
-    /// Sealed-frame wire version.
-    pub version: u8,
-    /// Recipient Discovery Key X25519 public key.
-    pub recipient_public_key: [u8; 32],
-    /// X3DH prekey reference targeted by the initiator.
-    pub prekey_reference: Option<SealedFramePreKeyReference>,
-    /// Initiator's X25519 ephemeral public key.
-    pub ephemeral_public_key: [u8; 32],
-    /// AEAD ciphertext for the sealed initial ratchet payload.
-    pub ciphertext: Vec<u8>,
-}
-
-#[derive(Serialize)]
-struct HandshakeFramePlaintextWire<'a> {
-    version: u8,
-    sender_identity_key: [u8; 32],
-    sender_identity_verifying_key: [u8; 32],
-    sender_identity_binding_signature: &'a [u8],
-    ratchet_public_key: [u8; 32],
-    previous_chain_length: u32,
-    message_number: u32,
-    ciphertext: &'a [u8],
-}
-
-#[derive(Deserialize)]
-struct DecodedHandshakeFramePlaintextWire {
-    version: u8,
-    sender_identity_key: [u8; 32],
-    sender_identity_verifying_key: [u8; 32],
-    sender_identity_binding_signature: Vec<u8>,
-    ratchet_public_key: [u8; 32],
-    previous_chain_length: u32,
-    message_number: u32,
-    ciphertext: Vec<u8>,
-}
-
-struct DecodedHandshakeFramePlaintext {
-    header: Header,
-    ciphertext: Vec<u8>,
-    /// The initiator's Identity Key, carried in the layer sealed to the
-    /// responder's Discovery Key so a recipient who has never seen this sender
-    /// can still derive the root key (the mutual binding is checked on decode).
-    ///
-    /// Unauthenticated at this layer — a sender may claim anything. A false
-    /// claim derives the wrong root key and fails the AEAD, and the sealed
-    /// envelope's own copy is compared against it after decryption, so the hint
-    /// can only ever select which key is tried, never what is believed.
-    sender_identity_hint: PublicIdentityKey,
-}
-
-impl HandshakeEnvelope {
-    /// Serializes this handshake envelope for transport.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, HandshakeError> {
-        if self.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
-            return Err(HandshakeError::EnvelopeEncode);
-        }
-        let frame = self.to_frame();
-        if frame.prekey_reference.is_none() {
-            return Err(HandshakeError::EnvelopeEncode);
-        }
-        let bytes = frame
-            .to_bytes()
-            .map_err(|_| HandshakeError::EnvelopeEncode)?;
-        if bytes.len() > MAX_HANDSHAKE_ENVELOPE_LEN {
-            return Err(HandshakeError::EnvelopeEncode);
-        }
-        Ok(bytes)
-    }
-
-    /// Restores a handshake envelope from bytes produced by [`Self::to_bytes`].
-    ///
-    /// This validates only structural decoding. [`accept_with_associated_data`] authenticates the
-    /// envelope against verified discovery and pre-key material.
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self, HandshakeError> {
-        if bytes.len() > MAX_HANDSHAKE_ENVELOPE_LEN {
-            return Err(HandshakeError::EnvelopeDecode);
-        }
-
-        let frame = SealedFrame::from_bytes(bytes).map_err(|_| HandshakeError::EnvelopeDecode)?;
-        if frame.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
-            return Err(HandshakeError::EnvelopeDecode);
-        }
-        validate_envelope_public_fields(&frame)?;
-        Ok(Self::from_frame(frame))
-    }
-
-    fn from_frame(frame: SealedFrame) -> Self {
-        Self {
-            version: frame.version,
-            recipient_public_key: frame.recipient_public_key,
-            prekey_reference: frame.prekey_reference,
-            ephemeral_public_key: frame.ephemeral_public_key,
-            ciphertext: frame.ciphertext,
-        }
-    }
-
-    fn to_frame(&self) -> SealedFrame {
-        SealedFrame {
-            version: self.version,
-            recipient_public_key: self.recipient_public_key,
-            prekey_reference: self.prekey_reference,
-            ephemeral_public_key: self.ephemeral_public_key,
-            ciphertext: self.ciphertext.clone(),
-        }
-    }
-}
-
-/// Starts a handshake and authenticates caller-supplied transport associated data in the outer
-/// sealed frame.
+/// Starts a Session with the responder whose bundle the initiator fetched.
 ///
-/// The initiator's ephemeral key and first ratchet key are drawn from `rng`. Pass both parties'
-/// permanent public identity keys. They bind the X25519 and Ed25519 halves and are included in the
-/// X3DH root-key derivation.
-///
-/// The responder must pass identical bytes to [`accept_with_associated_data`] or
-/// [`initiator_identity_hint_with_associated_data`].
-pub fn initiate_with_associated_data<R: RngCore + CryptoRng>(
+/// The initiator's base key and first ratchet key are drawn from `rng`. The bundle's Discovery Key
+/// must be signed by `responder_identity_key` and its signed prekey by that Discovery Key. Both
+/// peers derive the returned [`SessionId`], and nobody else can.
+pub fn initiate_handshake<R: RngCore + CryptoRng>(
     rng: &mut R,
-    initiator_discovery_key: &DiscoveryKey,
-    initiator_identity_key: &PublicIdentityKey,
     responder_identity_key: &PublicIdentityKey,
     responder_prekey_bundle: &PreKeyBundle,
-    message: InitialPlaintext<'_>,
-    additional_associated_data: &[u8],
-) -> Result<(RatchetState, HandshakeEnvelope), HandshakeError> {
-    verify_public_identity_key(initiator_identity_key)?;
+) -> Result<(RatchetState, SessionId, Handshake), HandshakeError> {
     verify_public_identity_key(responder_identity_key)?;
     if responder_prekey_bundle.version != PREKEY_BUNDLE_VERSION {
         return Err(HandshakeError::UnsupportedPreKeyBundleVersion(
@@ -254,273 +94,163 @@ pub fn initiate_with_associated_data<R: RngCore + CryptoRng>(
     )?;
     validate_bundle_epochs(responder_prekey_bundle)?;
 
-    let initiator_ephemeral_key = generate_key_pair(rng);
-    let responder_signed_prekey_public_key = responder_prekey_bundle.signed_prekey.public_key;
-
-    let root_key = derive_root_key_initiator(
-        &initiator_ephemeral_key,
-        initiator_identity_key,
-        responder_identity_key,
-        &responder_prekey_bundle.discovery_key.public_key,
-        &responder_signed_prekey_public_key,
-        responder_prekey_bundle
-            .one_time_prekey
-            .as_ref()
-            .map(|prekey| &prekey.public_key),
+    let base_key = generate_key_pair(rng);
+    let signed_prekey_public_key = responder_prekey_bundle.signed_prekey.public_key;
+    let one_time_prekey = responder_prekey_bundle.one_time_prekey.as_ref();
+    let discovery_key_shared_secret = checked_shared_secret(
+        base_key.diffie_hellman(&responder_prekey_bundle.discovery_key.public_key),
     )?;
-    let mut state =
-        RatchetState::init_initiator(rng, root_key, &responder_signed_prekey_public_key)?;
-
-    let associated_data = initial_associated_data(
-        &responder_prekey_bundle.discovery_key.public_key,
-        responder_prekey_bundle.discovery_key.epoch,
-    );
-    let sender_identity_key = *initiator_identity_key.public_key.as_bytes();
-    let sender_discovery_key = *initiator_discovery_key.public_key().as_bytes();
-    let sender_proof_placeholder = [0u8; SENDER_PROOF_LEN];
-    validate_sender_material_lengths(
-        &initiator_identity_key.binding_signature.to_bytes(),
-        message.sender_certificate,
-        message.sender_signature,
-        &sender_proof_placeholder,
-        message.plaintext,
-        HandshakeError::EnvelopeEncode,
+    let signed_prekey_shared_secret =
+        checked_shared_secret(base_key.diffie_hellman(&signed_prekey_public_key))?;
+    let one_time_prekey_shared_secret = one_time_prekey
+        .map(|prekey| checked_shared_secret(base_key.diffie_hellman(&prekey.public_key)))
+        .transpose()?;
+    let (root_key, session_id) = derive_root_key_and_session_id(
+        &discovery_key_shared_secret,
+        &signed_prekey_shared_secret,
+        one_time_prekey_shared_secret.as_ref(),
     )?;
-    let sender_proof_secret = checked_shared_secret(
-        initiator_discovery_key.diffie_hellman(&responder_signed_prekey_public_key),
-    )?;
-    let sender_proof_transcript = sender_proof_transcript(SenderProofTranscriptInput {
-        sender_identity_key: &sender_identity_key,
-        sender_identity_verifying_key: initiator_identity_key.verifying_key.as_bytes(),
-        sender_discovery_key: &sender_discovery_key,
-        sender_certificate: message.sender_certificate,
-        sender_signature: message.sender_signature,
-        initiator_ephemeral_public_key: &initiator_ephemeral_key.public,
-        responder_discovery_public_key: &responder_prekey_bundle.discovery_key.public_key,
-        responder_discovery_epoch: responder_prekey_bundle.discovery_key.epoch,
-        responder_signed_prekey_public_key: &responder_signed_prekey_public_key,
-        responder_one_time_prekey: responder_prekey_bundle.one_time_prekey.as_ref(),
-    });
-    let sender_proof = derive_sender_proof(&sender_proof_secret, &sender_proof_transcript)?;
-    let sealed = encode_sealed_sender_envelope(SealedSenderEnvelopeInput {
-        sender_identity_key,
-        sender_identity_verifying_key: *initiator_identity_key.verifying_key.as_bytes(),
-        sender_identity_binding_signature: initiator_identity_key.binding_signature.to_bytes(),
-        sender_discovery_key,
-        sender_certificate: message.sender_certificate,
-        sender_signature: message.sender_signature,
-        sender_proof: sender_proof.as_ref(),
-        plaintext: message.plaintext,
-    })?;
-    let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data)?;
-    let frame_plaintext =
-        encode_handshake_frame_plaintext(&header, &ciphertext, initiator_identity_key)?;
-    let prekey_reference = SealedFramePreKeyReference {
-        discovery_epoch: responder_prekey_bundle.discovery_key.epoch,
-        signed_prekey_public_key: *responder_signed_prekey_public_key.as_bytes(),
-        one_time_prekey_id: responder_prekey_bundle
-            .one_time_prekey
-            .as_ref()
-            .map(|prekey| prekey.id),
-        one_time_prekey_public_key: responder_prekey_bundle
-            .one_time_prekey
-            .as_ref()
-            .map(|prekey| *prekey.public_key.as_bytes()),
+    let state = RatchetState::init_initiator(rng, root_key, &signed_prekey_public_key)?;
+    let handshake = Handshake {
+        base_key: base_key.public,
+        responder_discovery_key: responder_prekey_bundle.discovery_key.public_key,
+        prekey_reference: SealedFramePreKeyReference {
+            discovery_epoch: responder_prekey_bundle.discovery_key.epoch,
+            signed_prekey_public_key: *signed_prekey_public_key.as_bytes(),
+            one_time_prekey_id: one_time_prekey.map(|prekey| prekey.id),
+            one_time_prekey_public_key: one_time_prekey.map(|prekey| *prekey.public_key.as_bytes()),
+        },
     };
-    let frame = seal_frame_with_ephemeral_key_and_associated_data(
-        &initiator_ephemeral_key,
-        &responder_prekey_bundle.discovery_key.public_key,
-        Some(prekey_reference),
-        &frame_plaintext,
-        additional_associated_data,
-    )?;
-    let envelope = HandshakeEnvelope::from_frame(frame);
-    envelope.to_bytes()?;
-
-    Ok((state, envelope))
+    Ok((state, session_id, handshake))
 }
 
-/// Reads the claimed initiator identity while authenticating caller-supplied transport associated
-/// data in the outer sealed frame.
+/// Accepts a handshake with the responder's Discovery Key and the prekeys the handshake names.
 ///
-/// A caller has to know who sent a first message before it can accept one, because Session state
-/// is addressed by a key derived from both identities. Calling [`accept_with_associated_data`]
-/// speculatively would consume the referenced one-time prekey. This opens only the layer sealed to
-/// `responder_discovery_key`, so it consumes nothing, and checks the binding signature over the
-/// claimed identity's two halves.
-///
-/// Associated-data authentication does not authenticate the claimed initiator. The returned
-/// identity key remains a sender claim until [`accept_with_associated_data`] checks it against the
-/// sealed envelope's authenticated copy.
-pub fn initiator_identity_hint_with_associated_data(
-    envelope: &HandshakeEnvelope,
-    responder_discovery_key: &DiscoveryKey,
-    additional_associated_data: &[u8],
-) -> Result<PublicIdentityKey, HandshakeError> {
-    validate_envelope_public_fields(&envelope.to_frame())?;
-    let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
-        responder_discovery_key,
-        &envelope.to_frame(),
-        additional_associated_data,
-    )?;
-    let decoded = decode_handshake_frame_plaintext(&frame_plaintext)?;
-    verify_public_identity_key(&decoded.sender_identity_hint)?;
-    Ok(decoded.sender_identity_hint)
-}
-
-/// Accepts a handshake while authenticating caller-supplied transport associated data in the
-/// outer sealed frame.
-///
-/// The responder's first ratchet key is drawn from `rng`. The X3DH root key binds
-/// `expected_initiator_identity_key`, or the envelope's claimed identity when it is `None`. The
-/// sealed sender identity must match that key on both halves, so the identity the responder
-/// verified and the identity returned to the caller are the same.
-///
-/// This verifies that the envelope targets `responder_signed_prekey` and checks the sender
-/// key-possession proof, but it does not verify the signed-prekey signature or validate the sender
-/// certificate. Sender identity material is returned only after the first-message ciphertext
-/// authenticates and decrypts.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "route binding adds one explicit input to the established X3DH acceptance seam"
-)]
-pub fn accept_with_associated_data<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    envelope: &HandshakeEnvelope,
-    expected_initiator_identity_key: Option<&PublicIdentityKey>,
-    responder_identity_key: &PublicIdentityKey,
+/// This authenticates nobody: the caller checks the sender's proof with
+/// [`verify_sender_proof`] after the first Message decrypts.
+pub fn accept_handshake(
+    handshake: &Handshake,
     responder_discovery_key: &DiscoveryKey,
     responder_signed_prekey: &SignedPreKey,
     responder_one_time_prekey: Option<OneTimePreKey>,
-    additional_associated_data: &[u8],
-) -> Result<(RatchetState, AcceptedInitialMessage), HandshakeError> {
-    verify_public_identity_key(responder_identity_key)?;
-    let prekey_reference = envelope_prekey_reference(envelope)?;
-    if prekey_reference.discovery_epoch != responder_discovery_key.epoch()
+) -> Result<(RatchetState, SessionId), HandshakeError> {
+    let reference = handshake.prekey_reference;
+    let discovery_key_matches: bool = handshake
+        .responder_discovery_key
+        .as_bytes()
+        .ct_eq(responder_discovery_key.public_key().as_bytes())
+        .into();
+    if !discovery_key_matches {
+        return Err(HandshakeError::DiscoveryKeyMismatch);
+    }
+    if reference.discovery_epoch != responder_discovery_key.epoch()
         || responder_signed_prekey.epoch() != responder_discovery_key.epoch()
     {
         return Err(HandshakeError::StalePreKey);
     }
-    if envelope.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
-        return Err(HandshakeError::EnvelopeDecode);
-    }
-    let signed_prekey_matches: bool = envelope
-        .prekey_reference
-        .map(|reference| reference.signed_prekey_public_key)
-        .ok_or(HandshakeError::EnvelopeDecode)?
+    let signed_prekey_matches: bool = reference
+        .signed_prekey_public_key
         .ct_eq(responder_signed_prekey.public_key().as_bytes())
         .into();
     if !signed_prekey_matches {
         return Err(HandshakeError::SignedPreKeyMismatch);
     }
-
     let responder_one_time_prekey =
-        validate_envelope_one_time_prekey(envelope, responder_one_time_prekey)?;
+        validate_one_time_prekey(&reference, responder_one_time_prekey)?;
 
-    let initiator_ephemeral_public_key = PublicKey::from(envelope.ephemeral_public_key);
-
-    let associated_data = initial_associated_data(
-        responder_discovery_key.public_key(),
-        responder_discovery_key.epoch(),
-    );
-    // Opened before the root key is derived, and that ordering is the whole
-    // point: this layer is sealed to the responder's own Discovery Key, so it
-    // is readable without knowing the sender, and it names the sender the root
-    // key needs. Deriving first would require already knowing the answer.
-    let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
-        responder_discovery_key,
-        &envelope.to_frame(),
-        additional_associated_data,
-    )?;
-    let frame_plaintext = decode_handshake_frame_plaintext(&frame_plaintext)?;
-
-    // A caller that names an expected initiator pins it; one that does not —
-    // a message request from a stranger — takes the frame's claim. Either way
-    // the binding signature is verified here and the sealed envelope's own copy
-    // is compared against it after decryption.
-    let initiator_identity_key =
-        expected_initiator_identity_key.unwrap_or(&frame_plaintext.sender_identity_hint);
-    verify_public_identity_key(initiator_identity_key)?;
-
-    let root_key = derive_root_key_responder(
-        &initiator_ephemeral_public_key,
-        initiator_identity_key,
-        responder_identity_key,
-        responder_discovery_key,
-        responder_signed_prekey,
-        responder_one_time_prekey.as_ref(),
+    let base_key = &handshake.base_key;
+    let discovery_key_shared_secret =
+        checked_shared_secret(responder_discovery_key.diffie_hellman(base_key))?;
+    let signed_prekey_shared_secret =
+        checked_shared_secret(responder_signed_prekey.diffie_hellman(base_key))?;
+    let one_time_prekey_shared_secret = responder_one_time_prekey
+        .as_ref()
+        .map(|prekey| checked_shared_secret(prekey.diffie_hellman(base_key)))
+        .transpose()?;
+    let (root_key, session_id) = derive_root_key_and_session_id(
+        &discovery_key_shared_secret,
+        &signed_prekey_shared_secret,
+        one_time_prekey_shared_secret.as_ref(),
     )?;
     let signed_prekey_key_pair =
         KeyPair::from_secret_bytes(*responder_signed_prekey.to_secret_bytes());
-    let mut state = RatchetState::init_responder(root_key, signed_prekey_key_pair);
-    let sealed = state.ratchet_decrypt(
-        rng,
-        &frame_plaintext.ciphertext,
-        &frame_plaintext.header,
-        &associated_data,
-    )?;
-    let decoded = decode_sealed_sender_envelope(&sealed)?;
-    let sender_identity = &decoded.message.sender_identity;
-    let identity_matches: bool = (sender_identity
-        .identity_key
-        .ct_eq(initiator_identity_key.public_key.as_bytes())
-        & sender_identity
-            .identity_verifying_key
-            .ct_eq(initiator_identity_key.verifying_key.as_bytes()))
-    .into();
-    if !identity_matches {
-        return Err(HandshakeError::SenderIdentityMismatch);
-    }
-    verify_sender_proof(
-        envelope,
-        responder_discovery_key.public_key(),
-        responder_signed_prekey,
-        &decoded.message.sender_identity,
-        &decoded.sender_discovery_key,
-        &decoded.sender_proof,
-    )?;
-
-    Ok((state, decoded.message))
+    let state = RatchetState::init_responder(root_key, signed_prekey_key_pair);
+    Ok((state, session_id))
 }
 
-/// An error returned while starting, reading, or accepting an X3DH handshake.
+/// Proves that the sender holds the Identity Key named in `transcript`.
+///
+/// Only the holder of the responder's signed prekey can check the proof, so unlike a signature it
+/// doesn't let the recipient prove to anyone else who contacted them.
+pub fn prove_sender(
+    sender_identity_key_pair: &KeyPair,
+    transcript: &SenderProofTranscript<'_>,
+) -> Result<Zeroizing<[u8; SENDER_PROOF_LEN]>, HandshakeError> {
+    let signed_prekey_public_key = PublicKey::from(
+        transcript
+            .handshake
+            .prekey_reference
+            .signed_prekey_public_key,
+    );
+    let secret =
+        checked_shared_secret(sender_identity_key_pair.diffie_hellman(&signed_prekey_public_key))?;
+    derive_sender_proof(&secret, &sender_proof_transcript(transcript)?)
+}
+
+/// Checks a first Message's proof with the signed prekey its handshake used.
+pub fn verify_sender_proof(
+    responder_signed_prekey: &SignedPreKey,
+    transcript: &SenderProofTranscript<'_>,
+    proof: &[u8; SENDER_PROOF_LEN],
+) -> Result<(), HandshakeError> {
+    let secret = checked_shared_secret(
+        responder_signed_prekey.diffie_hellman(&transcript.sender_identity_key.public_key),
+    )?;
+    let expected = derive_sender_proof(&secret, &sender_proof_transcript(transcript)?)?;
+    let proof_matches: bool = expected.as_ref().ct_eq(proof).into();
+    if !proof_matches {
+        return Err(HandshakeError::SenderProofInvalid);
+    }
+    Ok(())
+}
+
+/// An error returned while starting or accepting an X3DH handshake or checking its proof.
 #[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
-    /// Handshake envelope or sealed first-message bytes are malformed, unsupported, or oversized.
-    #[error("handshake envelope bytes failed to decode")]
-    EnvelopeDecode,
-    /// Handshake envelope or sealed first message exceeds local caps or fails to encode.
-    #[error("handshake envelope failed to encode")]
-    EnvelopeEncode,
+    /// The handshake targets a different Discovery Key than the responder's.
+    #[error("handshake targets another discovery key")]
+    DiscoveryKeyMismatch,
     /// HKDF-SHA256 rejected the requested output length.
     #[error("hkdf-sha256 expand exceeded output limit")]
     HkdfExpand,
     /// An Identity Key, Discovery Key, or public signed pre-key failed validation.
     #[error("handshake public key validation failed")]
     PublicKey(#[from] PublicKeyError),
-    /// Handshake envelope names a one-time pre-key that was not supplied.
+    /// Handshake names a one-time pre-key that was not supplied.
     #[error("handshake one-time pre-key is missing")]
     MissingOneTimePreKey,
     /// An X25519 exchange produced a non-contributory shared secret.
     #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
-    /// Handshake envelope one-time pre-key reference does not match the local one.
-    #[error("handshake envelope one-time pre-key reference does not match local one-time pre-key")]
+    /// Handshake one-time pre-key reference does not match the local one.
+    #[error("handshake one-time pre-key reference does not match local one-time pre-key")]
     OneTimePreKeyMismatch,
-    /// Seeding the ratchet or encrypting or decrypting the first message failed.
+    /// Seeding the ratchet failed.
     #[error("handshake ratchet operation failed")]
     Ratchet(#[from] RatchetError),
-    /// Sealing or opening the outer sealed-sender frame failed.
-    #[error("handshake sealed frame failed")]
-    SealedFrame(#[from] SealedFrameError),
-    /// Sealed sender identity does not match the identity bound into the X3DH root key.
-    #[error("sealed sender identity does not match the x3dh root-bound identity key")]
-    SenderIdentityMismatch,
-    /// Sealed sender key-possession proof does not validate.
-    #[error("sealed sender proof verification failed")]
+    /// A sender proof transcript field is too long to encode.
+    #[error("sender proof field is {len} bytes, longer than {max}")]
+    SenderProofFieldTooLong {
+        /// Field length in bytes.
+        len: usize,
+        /// Longest encodable length in bytes.
+        max: usize,
+    },
+    /// The sender key-possession proof does not validate.
+    #[error("sender proof verification failed")]
     SenderProofInvalid,
-    /// Handshake envelope targets a different signed pre-key than the local one.
-    #[error("handshake envelope signed pre-key reference does not match local signed pre-key")]
+    /// Handshake targets a different signed pre-key than the local one.
+    #[error("handshake signed pre-key reference does not match local signed pre-key")]
     SignedPreKeyMismatch,
     /// Pre-key material belongs to a superseded discovery-key epoch.
     #[error("pre-key belongs to a superseded discovery-key epoch")]
@@ -543,11 +273,10 @@ fn validate_bundle_epochs(bundle: &PreKeyBundle) -> Result<(), HandshakeError> {
     Ok(())
 }
 
-fn validate_envelope_one_time_prekey(
-    envelope: &HandshakeEnvelope,
+fn validate_one_time_prekey(
+    reference: &SealedFramePreKeyReference,
     one_time_prekey: Option<OneTimePreKey>,
 ) -> Result<Option<OneTimePreKey>, HandshakeError> {
-    let reference = envelope_prekey_reference(envelope)?;
     match (
         reference.one_time_prekey_id,
         reference.one_time_prekey_public_key,
@@ -571,134 +300,6 @@ fn validate_envelope_one_time_prekey(
     }
 }
 
-fn envelope_prekey_reference(
-    envelope: &HandshakeEnvelope,
-) -> Result<SealedFramePreKeyReference, HandshakeError> {
-    envelope
-        .prekey_reference
-        .ok_or(HandshakeError::EnvelopeDecode)
-}
-
-fn validate_envelope_public_fields(frame: &SealedFrame) -> Result<(), HandshakeError> {
-    if frame.version != HANDSHAKE_ENVELOPE_VERSION || frame.prekey_reference.is_none() {
-        return Err(HandshakeError::EnvelopeDecode);
-    }
-    Ok(())
-}
-
-fn encode_handshake_frame_plaintext(
-    header: &Header,
-    ciphertext: &[u8],
-    initiator_identity_key: &PublicIdentityKey,
-) -> Result<Zeroizing<Vec<u8>>, HandshakeError> {
-    if ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN {
-        return Err(HandshakeError::EnvelopeEncode);
-    }
-    Ok(Zeroizing::new(
-        postcard::to_stdvec(&HandshakeFramePlaintextWire {
-            version: HANDSHAKE_FRAME_PLAINTEXT_VERSION,
-            sender_identity_key: *initiator_identity_key.public_key.as_bytes(),
-            sender_identity_verifying_key: *initiator_identity_key.verifying_key.as_bytes(),
-            sender_identity_binding_signature: &initiator_identity_key.binding_signature.to_bytes(),
-            ratchet_public_key: *header.public_key.as_bytes(),
-            previous_chain_length: header.previous_chain_length,
-            message_number: header.message_number,
-            ciphertext,
-        })
-        .map_err(|_| HandshakeError::EnvelopeEncode)?,
-    ))
-}
-
-fn decode_handshake_frame_plaintext(
-    bytes: &[u8],
-) -> Result<DecodedHandshakeFramePlaintext, HandshakeError> {
-    let (wire, trailing): (DecodedHandshakeFramePlaintextWire, &[u8]) =
-        postcard::take_from_bytes(bytes).map_err(|_| HandshakeError::EnvelopeDecode)?;
-    if !trailing.is_empty()
-        || wire.version != HANDSHAKE_FRAME_PLAINTEXT_VERSION
-        || wire.ciphertext.len() > MAX_HANDSHAKE_CIPHERTEXT_LEN
-        || !is_valid_x25519_public_key(&wire.ratchet_public_key)
-    {
-        return Err(HandshakeError::EnvelopeDecode);
-    }
-    // `from_bytes` rejects non-canonical encodings; the binding signature over
-    // the two halves is checked by the caller through `verify_public_identity_key`,
-    // on whichever bundle it settles on.
-    let sender_identity_hint = PublicIdentityKey::from_bytes(
-        &wire.sender_identity_key,
-        &wire.sender_identity_verifying_key,
-        &wire.sender_identity_binding_signature,
-    )
-    .map_err(|_| HandshakeError::EnvelopeDecode)?;
-    Ok(DecodedHandshakeFramePlaintext {
-        header: Header {
-            public_key: PublicKey::from(wire.ratchet_public_key),
-            previous_chain_length: wire.previous_chain_length,
-            message_number: wire.message_number,
-        },
-        ciphertext: wire.ciphertext,
-        sender_identity_hint,
-    })
-}
-
-// Derives the initiator-side root key from X3DH Diffie-Hellman outputs plus both public Identity
-// Keys: `discovery_key_shared_secret` = EK_A * DK_B, `signed_prekey_shared_secret` = EK_A * SPK_B,
-// and `one_time_prekey_shared_secret` = EK_A * OPK_B.
-pub(crate) fn derive_root_key_initiator(
-    initiator_ephemeral_key: &KeyPair,
-    initiator_identity_key: &PublicIdentityKey,
-    responder_identity_key: &PublicIdentityKey,
-    responder_discovery_public_key: &PublicKey,
-    responder_signed_prekey_public_key: &PublicKey,
-    responder_one_time_prekey_public_key: Option<&PublicKey>,
-) -> Result<RootKey, HandshakeError> {
-    let discovery_key_shared_secret = checked_shared_secret(
-        initiator_ephemeral_key.diffie_hellman(responder_discovery_public_key),
-    )?;
-    let signed_prekey_shared_secret = checked_shared_secret(
-        initiator_ephemeral_key.diffie_hellman(responder_signed_prekey_public_key),
-    )?;
-    let one_time_prekey_shared_secret = responder_one_time_prekey_public_key
-        .map(|public_key| checked_shared_secret(initiator_ephemeral_key.diffie_hellman(public_key)))
-        .transpose()?;
-    derive_root_key_from_dh_outputs(
-        initiator_identity_key,
-        responder_identity_key,
-        &discovery_key_shared_secret,
-        &signed_prekey_shared_secret,
-        one_time_prekey_shared_secret.as_ref(),
-    )
-}
-
-// Derives the responder-side root key from X3DH Diffie-Hellman outputs plus both public Identity
-// Keys: `discovery_key_shared_secret` = DK_B * EK_A, `signed_prekey_shared_secret` = SPK_B * EK_A,
-// and `one_time_prekey_shared_secret` = OPK_B * EK_A.
-pub(crate) fn derive_root_key_responder(
-    initiator_ephemeral_public_key: &PublicKey,
-    initiator_identity_key: &PublicIdentityKey,
-    responder_identity_key: &PublicIdentityKey,
-    responder_discovery_key: &DiscoveryKey,
-    responder_signed_prekey: &SignedPreKey,
-    responder_one_time_prekey: Option<&OneTimePreKey>,
-) -> Result<RootKey, HandshakeError> {
-    let discovery_key_shared_secret = checked_shared_secret(
-        responder_discovery_key.diffie_hellman(initiator_ephemeral_public_key),
-    )?;
-    let signed_prekey_shared_secret = checked_shared_secret(
-        responder_signed_prekey.diffie_hellman(initiator_ephemeral_public_key),
-    )?;
-    let one_time_prekey_shared_secret = responder_one_time_prekey
-        .map(|prekey| checked_shared_secret(prekey.diffie_hellman(initiator_ephemeral_public_key)))
-        .transpose()?;
-    derive_root_key_from_dh_outputs(
-        initiator_identity_key,
-        responder_identity_key,
-        &discovery_key_shared_secret,
-        &signed_prekey_shared_secret,
-        one_time_prekey_shared_secret.as_ref(),
-    )
-}
-
 fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, HandshakeError> {
     if !secret.was_contributory() {
         return Err(HandshakeError::NonContributorySharedSecret);
@@ -706,128 +307,93 @@ fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, Handshake
     Ok(secret)
 }
 
-// Concatenates F_PREFIX || IK_A || IK_B || DH outputs and runs HKDF-SHA256 once.
-fn derive_root_key_from_dh_outputs(
-    initiator_identity_key: &PublicIdentityKey,
-    responder_identity_key: &PublicIdentityKey,
+// Runs HKDF-SHA256 once over F_PREFIX || DH outputs and expands the root key and the SessionID
+// under separate labels.
+//
+// Using no salt means the RFC 5869 zero salt. That is acceptable here because the input keying
+// material is already uniformly random and the info strings provide domain separation.
+fn derive_root_key_and_session_id(
     discovery_key_shared_secret: &SharedSecret,
     signed_prekey_shared_secret: &SharedSecret,
     one_time_prekey_shared_secret: Option<&SharedSecret>,
-) -> Result<RootKey, HandshakeError> {
-    let initiator_identity_encoding = initiator_identity_key.canonical_encoding();
-    let responder_identity_encoding = responder_identity_key.canonical_encoding();
-    let capacity = F_PREFIX.len()
-        + initiator_identity_encoding.len()
-        + responder_identity_encoding.len()
-        + 32
-        + 32
-        + one_time_prekey_shared_secret.map_or(0, |_| 32);
-    let mut input_keying_material: Zeroizing<Vec<u8>> =
-        Zeroizing::new(Vec::with_capacity(capacity));
-    input_keying_material.extend_from_slice(&F_PREFIX);
-    input_keying_material.extend_from_slice(&initiator_identity_encoding);
-    input_keying_material.extend_from_slice(&responder_identity_encoding);
-    input_keying_material.extend_from_slice(discovery_key_shared_secret.as_bytes());
-    input_keying_material.extend_from_slice(signed_prekey_shared_secret.as_bytes());
-    if let Some(one_time_prekey_shared_secret) = one_time_prekey_shared_secret {
-        input_keying_material.extend_from_slice(one_time_prekey_shared_secret.as_bytes());
-        derive_root_key_from_input_keying_material(
-            &input_keying_material,
-            HKDF_INFO_WITH_ONE_TIME_PREKEY,
-        )
-    } else {
-        derive_root_key_from_input_keying_material(
-            &input_keying_material,
+) -> Result<(RootKey, SessionId), HandshakeError> {
+    let mut input_keying_material = Zeroizing::new([0u8; 32 * 4]);
+    input_keying_material[..32].copy_from_slice(&F_PREFIX);
+    input_keying_material[32..64].copy_from_slice(discovery_key_shared_secret.as_bytes());
+    input_keying_material[64..96].copy_from_slice(signed_prekey_shared_secret.as_bytes());
+    let (input_keying_material, root_key_info) = match one_time_prekey_shared_secret {
+        Some(secret) => {
+            input_keying_material[96..].copy_from_slice(secret.as_bytes());
+            (&input_keying_material[..], HKDF_INFO_WITH_ONE_TIME_PREKEY)
+        }
+        None => (
+            &input_keying_material[..96],
             HKDF_INFO_WITHOUT_ONE_TIME_PREKEY,
-        )
-    }
+        ),
+    };
+    let hkdf = Hkdf::<Sha256>::new(None, input_keying_material);
+    let mut root_key = Zeroizing::new([0u8; 32]);
+    hkdf.expand(root_key_info, root_key.as_mut())
+        .map_err(|_| HandshakeError::HkdfExpand)?;
+    let mut session_id = [0u8; 16];
+    hkdf.expand(SESSION_ID_INFO, &mut session_id)
+        .map_err(|_| HandshakeError::HkdfExpand)?;
+    Ok((
+        RootKey::from_bytes(*root_key),
+        SessionId::from_bytes(session_id),
+    ))
 }
 
-struct SenderProofTranscriptInput<'a> {
-    sender_identity_key: &'a [u8; 32],
-    sender_identity_verifying_key: &'a [u8; 32],
-    sender_discovery_key: &'a [u8; 32],
-    sender_certificate: &'a [u8],
-    sender_signature: &'a [u8],
-    initiator_ephemeral_public_key: &'a PublicKey,
-    responder_discovery_public_key: &'a PublicKey,
-    responder_discovery_epoch: u32,
-    responder_signed_prekey_public_key: &'a PublicKey,
-    responder_one_time_prekey: Option<&'a PublicOneTimePreKey>,
-}
-
-fn sender_proof_transcript(input: SenderProofTranscriptInput<'_>) -> Zeroizing<Vec<u8>> {
-    let one_time_prekey_len = input.responder_one_time_prekey.map_or(1, |_| 1 + 8 + 32);
+fn sender_proof_transcript(
+    input: &SenderProofTranscript<'_>,
+) -> Result<Zeroizing<Vec<u8>>, HandshakeError> {
+    let handshake = input.handshake;
+    let reference = handshake.prekey_reference;
     let mut transcript = Zeroizing::new(Vec::with_capacity(
-        b"AetherX3DH-v1:sender-proof:".len()
-            + 32
+        SENDER_PROOF_CONTEXT.len()
+            + 32 * 8
             + 4
-            + 32
-            + 32
-            + one_time_prekey_len
-            + 32
-            + 32
-            + 32
+            + 1
+            + 8
             + 4
             + input.sender_certificate.len()
             + 4
-            + input.sender_signature.len(),
+            + input.sender_certificate_signature.len(),
     ));
-    transcript.extend_from_slice(b"AetherX3DH-v1:sender-proof:");
-    transcript.extend_from_slice(input.initiator_ephemeral_public_key.as_bytes());
-    transcript.extend_from_slice(input.responder_discovery_public_key.as_bytes());
-    transcript.extend_from_slice(&input.responder_discovery_epoch.to_be_bytes());
-    transcript.extend_from_slice(input.responder_signed_prekey_public_key.as_bytes());
-    if let Some(one_time_prekey) = input.responder_one_time_prekey {
-        transcript.push(1);
-        transcript.extend_from_slice(&one_time_prekey.id.to_be_bytes());
-        transcript.extend_from_slice(one_time_prekey.public_key.as_bytes());
-    } else {
-        transcript.push(0);
+    transcript.extend_from_slice(SENDER_PROOF_CONTEXT);
+    transcript.extend_from_slice(handshake.base_key.as_bytes());
+    transcript.extend_from_slice(handshake.responder_discovery_key.as_bytes());
+    transcript.extend_from_slice(&reference.discovery_epoch.to_be_bytes());
+    transcript.extend_from_slice(&reference.signed_prekey_public_key);
+    match (
+        reference.one_time_prekey_id,
+        reference.one_time_prekey_public_key,
+    ) {
+        (Some(id), Some(public_key)) => {
+            transcript.push(1);
+            transcript.extend_from_slice(&id.to_be_bytes());
+            transcript.extend_from_slice(&public_key);
+        }
+        (None, None) => transcript.push(0),
+        (Some(_), None) | (None, Some(_)) => return Err(HandshakeError::OneTimePreKeyMismatch),
     }
-    transcript.extend_from_slice(input.sender_identity_key);
-    transcript.extend_from_slice(input.sender_identity_verifying_key);
-    transcript.extend_from_slice(input.sender_discovery_key);
-    extend_len_prefixed(&mut transcript, input.sender_certificate);
-    extend_len_prefixed(&mut transcript, input.sender_signature);
-    transcript
+    transcript.extend_from_slice(input.sender_identity_key.public_key.as_bytes());
+    transcript.extend_from_slice(input.sender_identity_key.verifying_key.as_bytes());
+    transcript.extend_from_slice(input.sender_discovery_key.public_key.as_bytes());
+    transcript.extend_from_slice(input.sender_discovery_key.verifying_key.as_bytes());
+    extend_len_prefixed(&mut transcript, input.sender_certificate)?;
+    extend_len_prefixed(&mut transcript, input.sender_certificate_signature)?;
+    Ok(transcript)
 }
 
-fn extend_len_prefixed(transcript: &mut Vec<u8>, bytes: &[u8]) {
-    transcript.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+fn extend_len_prefixed(transcript: &mut Vec<u8>, bytes: &[u8]) -> Result<(), HandshakeError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| HandshakeError::SenderProofFieldTooLong {
+        len: bytes.len(),
+        max: u32::MAX as usize,
+    })?;
+    transcript.extend_from_slice(&len.to_be_bytes());
     transcript.extend_from_slice(bytes);
-}
-
-fn envelope_sender_proof_transcript(
-    envelope: &HandshakeEnvelope,
-    responder_discovery_public_key: &PublicKey,
-    sender_identity: &SenderIdentityMaterial,
-    sender_discovery_key: &[u8; 32],
-) -> Result<Zeroizing<Vec<u8>>, HandshakeError> {
-    let reference = envelope_prekey_reference(envelope)?;
-    let one_time_prekey = reference
-        .one_time_prekey_id
-        .zip(reference.one_time_prekey_public_key)
-        .map(|(id, public_key)| PublicOneTimePreKey {
-            id,
-            public_key: PublicKey::from(public_key),
-            epoch: reference.discovery_epoch,
-            created_at_secs: 0,
-        });
-    let initiator_ephemeral_public_key = PublicKey::from(envelope.ephemeral_public_key);
-    let responder_signed_prekey_public_key = PublicKey::from(reference.signed_prekey_public_key);
-    Ok(sender_proof_transcript(SenderProofTranscriptInput {
-        sender_identity_key: &sender_identity.identity_key,
-        sender_identity_verifying_key: &sender_identity.identity_verifying_key,
-        sender_discovery_key,
-        sender_certificate: &sender_identity.certificate,
-        sender_signature: &sender_identity.signature,
-        initiator_ephemeral_public_key: &initiator_ephemeral_public_key,
-        responder_discovery_public_key,
-        responder_discovery_epoch: reference.discovery_epoch,
-        responder_signed_prekey_public_key: &responder_signed_prekey_public_key,
-        responder_one_time_prekey: one_time_prekey.as_ref(),
-    }))
+    Ok(())
 }
 
 fn derive_sender_proof(
@@ -841,230 +407,6 @@ fn derive_sender_proof(
     Ok(proof)
 }
 
-fn verify_sender_proof(
-    envelope: &HandshakeEnvelope,
-    responder_discovery_public_key: &PublicKey,
-    responder_signed_prekey: &SignedPreKey,
-    sender_identity: &SenderIdentityMaterial,
-    sender_discovery_key: &[u8; 32],
-    actual_proof: &[u8],
-) -> Result<(), HandshakeError> {
-    if actual_proof.len() != SENDER_PROOF_LEN {
-        return Err(HandshakeError::EnvelopeDecode);
-    }
-    let sender_identity_key = PublicKey::from(*sender_discovery_key);
-    let sender_proof_secret =
-        checked_shared_secret(responder_signed_prekey.diffie_hellman(&sender_identity_key))?;
-    let transcript = envelope_sender_proof_transcript(
-        envelope,
-        responder_discovery_public_key,
-        sender_identity,
-        sender_discovery_key,
-    )?;
-    let expected_proof = derive_sender_proof(&sender_proof_secret, &transcript)?;
-    let proof_matches: bool = expected_proof.as_ref().ct_eq(actual_proof).into();
-    if !proof_matches {
-        return Err(HandshakeError::SenderProofInvalid);
-    }
-    Ok(())
-}
-
-/// Returns the associated data for the first ratcheted message.
-///
-/// The bytes are the responder discovery public key and responder discovery-key epoch in
-/// big-endian order.
-#[must_use]
-pub fn initial_associated_data(
-    responder_discovery_public_key: &PublicKey,
-    responder_discovery_epoch: u32,
-) -> [u8; 36] {
-    let mut associated_data = [0u8; 36];
-    associated_data[..32].copy_from_slice(responder_discovery_public_key.as_bytes());
-    associated_data[32..].copy_from_slice(&responder_discovery_epoch.to_be_bytes());
-    associated_data
-}
-
-#[derive(Serialize)]
-struct SealedSenderEnvelopeWire<'a> {
-    version: u8,
-    sender_identity_key: [u8; 32],
-    sender_identity_verifying_key: [u8; 32],
-    sender_identity_binding_signature: &'a [u8],
-    sender_discovery_key: [u8; 32],
-    sender_certificate: &'a [u8],
-    sender_signature: &'a [u8],
-    sender_proof: &'a [u8],
-    plaintext: &'a [u8],
-}
-
-#[derive(Deserialize)]
-struct DecodedSealedSenderEnvelopeWire {
-    version: u8,
-    sender_identity_key: [u8; 32],
-    sender_identity_verifying_key: [u8; 32],
-    sender_identity_binding_signature: Vec<u8>,
-    sender_discovery_key: [u8; 32],
-    sender_certificate: Vec<u8>,
-    sender_signature: Vec<u8>,
-    sender_proof: Vec<u8>,
-    plaintext: Vec<u8>,
-}
-
-struct DecodedSealedSenderEnvelope {
-    message: AcceptedInitialMessage,
-    sender_discovery_key: [u8; 32],
-    sender_proof: Zeroizing<Vec<u8>>,
-}
-
-struct SealedSenderEnvelopeInput<'a> {
-    sender_identity_key: [u8; 32],
-    sender_identity_verifying_key: [u8; 32],
-    sender_identity_binding_signature: [u8; 64],
-    sender_discovery_key: [u8; 32],
-    sender_certificate: &'a [u8],
-    sender_signature: &'a [u8],
-    sender_proof: &'a [u8],
-    plaintext: &'a [u8],
-}
-
-fn encode_sealed_sender_envelope(
-    input: SealedSenderEnvelopeInput<'_>,
-) -> Result<Zeroizing<Vec<u8>>, HandshakeError> {
-    if input.sender_proof.len() != SENDER_PROOF_LEN {
-        return Err(HandshakeError::EnvelopeEncode);
-    }
-    validate_sender_material_lengths(
-        &input.sender_identity_binding_signature,
-        input.sender_certificate,
-        input.sender_signature,
-        input.sender_proof,
-        input.plaintext,
-        HandshakeError::EnvelopeEncode,
-    )?;
-    let sealed = Zeroizing::new(
-        postcard::to_stdvec(&SealedSenderEnvelopeWire {
-            version: SEALED_SENDER_ENVELOPE_VERSION,
-            sender_identity_key: input.sender_identity_key,
-            sender_identity_verifying_key: input.sender_identity_verifying_key,
-            sender_identity_binding_signature: &input.sender_identity_binding_signature,
-            sender_discovery_key: input.sender_discovery_key,
-            sender_certificate: input.sender_certificate,
-            sender_signature: input.sender_signature,
-            sender_proof: input.sender_proof,
-            plaintext: input.plaintext,
-        })
-        .map_err(|_| HandshakeError::EnvelopeEncode)?,
-    );
-    if sealed.len() > MAX_HANDSHAKE_SEALED_SENDER_ENVELOPE_LEN {
-        return Err(HandshakeError::EnvelopeEncode);
-    }
-    Ok(sealed)
-}
-
-fn decode_sealed_sender_envelope(
-    bytes: &[u8],
-) -> Result<DecodedSealedSenderEnvelope, HandshakeError> {
-    let (wire, trailing): (DecodedSealedSenderEnvelopeWire, &[u8]) =
-        postcard::take_from_bytes(bytes).map_err(|_| HandshakeError::EnvelopeDecode)?;
-    let plaintext = Zeroizing::new(wire.plaintext);
-    let sender_proof = Zeroizing::new(wire.sender_proof);
-    let sender_identity = SenderIdentityMaterial {
-        identity_key: wire.sender_identity_key,
-        identity_verifying_key: wire.sender_identity_verifying_key,
-        identity_binding_signature: wire.sender_identity_binding_signature,
-        certificate: wire.sender_certificate,
-        signature: wire.sender_signature,
-    };
-    if !trailing.is_empty()
-        || wire.version != SEALED_SENDER_ENVELOPE_VERSION
-        || !is_valid_x25519_public_key(&wire.sender_discovery_key)
-    {
-        return Err(HandshakeError::EnvelopeDecode);
-    }
-    if sender_proof.len() != SENDER_PROOF_LEN {
-        return Err(HandshakeError::EnvelopeDecode);
-    }
-    validate_sender_identity(&sender_identity)?;
-    validate_sender_material_lengths(
-        &sender_identity.identity_binding_signature,
-        &sender_identity.certificate,
-        &sender_identity.signature,
-        &sender_proof,
-        &plaintext,
-        HandshakeError::EnvelopeDecode,
-    )?;
-    Ok(DecodedSealedSenderEnvelope {
-        message: AcceptedInitialMessage {
-            plaintext,
-            sender_identity,
-        },
-        sender_discovery_key: wire.sender_discovery_key,
-        sender_proof,
-    })
-}
-
-fn validate_sender_identity(
-    sender_identity: &SenderIdentityMaterial,
-) -> Result<(), HandshakeError> {
-    let bundle = PublicIdentityKey::from_bytes(
-        &sender_identity.identity_key,
-        &sender_identity.identity_verifying_key,
-        &sender_identity.identity_binding_signature,
-    )
-    .map_err(|_| HandshakeError::EnvelopeDecode)?;
-    verify_public_identity_key(&bundle).map_err(|_| HandshakeError::EnvelopeDecode)?;
-    if !is_valid_x25519_public_key(&sender_identity.identity_key) {
-        return Err(HandshakeError::EnvelopeDecode);
-    }
-    validate_sender_material_lengths(
-        &sender_identity.identity_binding_signature,
-        &sender_identity.certificate,
-        &sender_identity.signature,
-        &[],
-        &[],
-        HandshakeError::EnvelopeDecode,
-    )
-}
-
-fn validate_sender_material_lengths(
-    identity_binding_signature: &[u8],
-    certificate: &[u8],
-    signature: &[u8],
-    proof: &[u8],
-    plaintext: &[u8],
-    error: HandshakeError,
-) -> Result<(), HandshakeError> {
-    let content_len = certificate
-        .len()
-        .checked_add(identity_binding_signature.len())
-        .and_then(|len| len.checked_add(signature.len()))
-        .and_then(|len| len.checked_add(proof.len()))
-        .and_then(|len| len.checked_add(plaintext.len()));
-    if identity_binding_signature.len() != 64
-        || certificate.len() > MAX_SENDER_CERTIFICATE_LEN
-        || signature.len() > MAX_SENDER_SIGNATURE_LEN
-        || content_len.is_none_or(|len| len > MAX_HANDSHAKE_SEALED_SENDER_CONTENT_LEN)
-    {
-        return Err(error);
-    }
-    Ok(())
-}
-
-// Derives the 32-byte ratchet root key from identity-bound X3DH input keying material.
-//
-// Using no salt means the RFC 5869 zero salt. That is acceptable here because the input keying
-// material is already uniformly random and the info string provides domain separation.
-fn derive_root_key_from_input_keying_material(
-    input_keying_material: &[u8],
-    info: &[u8],
-) -> Result<RootKey, HandshakeError> {
-    let hkdf = Hkdf::<Sha256>::new(None, input_keying_material);
-    let mut output_keying_material = Zeroizing::new([0u8; 32]);
-    hkdf.expand(info, output_keying_material.as_mut())
-        .map_err(|_| HandshakeError::HkdfExpand)?;
-    Ok(RootKey::from_bytes(*output_keying_material))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,7 +414,7 @@ mod tests {
         DiscoveryKey, generate_discovery_key, generate_signed_prekey_for_discovery_key,
     };
     use crate::keys::{
-        KeyPair, PublicIdentityKey, SigningKeyPair, generate_key_pair, generate_signing_key_pair,
+        PublicIdentityKey, SigningKeyPair, generate_key_pair, generate_signing_key_pair,
         sign_identity_key_binding,
     };
     use crate::one_time_prekey::{OneTimePreKey, generate_one_time_prekey};
@@ -1081,8 +423,10 @@ mod tests {
     use roost_protocol::SignatureError;
 
     const FIXED_TS: u64 = 1_700_000_000;
+    const ASSOCIATED_DATA: &[u8] = b"associated data";
 
-    struct FullX3dhSetup {
+    struct Setup {
+        alice_identity_key_pair: KeyPair,
         alice_identity_key: PublicIdentityKey,
         alice_discovery_key: DiscoveryKey,
         bob_identity_key: PublicIdentityKey,
@@ -1091,14 +435,17 @@ mod tests {
         bob_one_time_prekey: OneTimePreKey,
     }
 
-    fn full_x3dh_setup() -> (FullX3dhSetup, ChaCha20Rng) {
+    fn setup() -> (Setup, ChaCha20Rng) {
         let mut rng = ChaCha20Rng::from_seed([0x42u8; 32]);
         let alice_identity = generate_signing_key_pair(&mut rng);
-        let alice_identity_key = generated_public_identity_key(&mut rng, &alice_identity);
+        let alice_identity_key_pair = generate_key_pair(&mut rng);
+        let alice_identity_key =
+            public_identity_key(&alice_identity, alice_identity_key_pair.public);
         let alice_discovery_key =
             generate_discovery_key(&mut rng, &alice_identity, 2, FIXED_TS).unwrap();
         let bob_identity = generate_signing_key_pair(&mut rng);
-        let bob_identity_key = generated_public_identity_key(&mut rng, &bob_identity);
+        let bob_identity_key =
+            public_identity_key(&bob_identity, generate_key_pair(&mut rng).public);
         let bob_discovery_key =
             generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_TS).unwrap();
         let bob_signed_prekey =
@@ -1106,7 +453,8 @@ mod tests {
                 .unwrap();
         let bob_one_time_prekey =
             generate_one_time_prekey(&mut rng, 9, bob_discovery_key.epoch(), FIXED_TS);
-        let setup = FullX3dhSetup {
+        let setup = Setup {
+            alice_identity_key_pair,
             alice_identity_key,
             alice_discovery_key,
             bob_identity_key,
@@ -1117,7 +465,7 @@ mod tests {
         (setup, rng)
     }
 
-    fn full_prekey_bundle(setup: &FullX3dhSetup, include_one_time: bool) -> PreKeyBundle {
+    fn bundle(setup: &Setup, include_one_time: bool) -> PreKeyBundle {
         PreKeyBundle {
             version: PREKEY_BUNDLE_VERSION,
             discovery_key: setup.bob_discovery_key.public(),
@@ -1126,29 +474,16 @@ mod tests {
         }
     }
 
-    fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
-        InitialPlaintext {
-            sender_certificate: b"sender certificate",
-            sender_signature: b"sender signature",
-            plaintext,
-        }
+    fn copy_one_time_prekey(prekey: &OneTimePreKey) -> OneTimePreKey {
+        OneTimePreKey::from_secret_bytes(
+            prekey.id(),
+            *prekey.to_secret_bytes(),
+            prekey.epoch(),
+            prekey.created_at_secs(),
+        )
     }
 
-    fn generated_public_identity_key(
-        rng: &mut ChaCha20Rng,
-        signing_key: &SigningKeyPair,
-    ) -> PublicIdentityKey {
-        let agreement_key = generate_key_pair(rng);
-        public_identity_key_from_parts(signing_key, agreement_key.public)
-    }
-
-    fn public_identity_key(rng: &mut ChaCha20Rng, x25519_secret: u8) -> PublicIdentityKey {
-        let signing_key = generate_signing_key_pair(rng);
-        let agreement_key = KeyPair::from_secret_bytes([x25519_secret; 32]);
-        public_identity_key_from_parts(&signing_key, agreement_key.public)
-    }
-
-    fn public_identity_key_from_parts(
+    fn public_identity_key(
         signing_key: &SigningKeyPair,
         public_key: PublicKey,
     ) -> PublicIdentityKey {
@@ -1160,316 +495,119 @@ mod tests {
         }
     }
 
-    fn envelope_reference(envelope: &HandshakeEnvelope) -> SealedFramePreKeyReference {
-        envelope.prekey_reference.unwrap()
-    }
-
-    fn test_prekey_reference(
-        setup: &FullX3dhSetup,
-        signed_prekey_public_key: &PublicKey,
-        one_time_prekey: Option<&OneTimePreKey>,
-    ) -> SealedFramePreKeyReference {
-        SealedFramePreKeyReference {
-            discovery_epoch: setup.bob_discovery_key.epoch(),
-            signed_prekey_public_key: *signed_prekey_public_key.as_bytes(),
-            one_time_prekey_id: one_time_prekey.map(OneTimePreKey::id),
-            one_time_prekey_public_key: one_time_prekey
-                .map(|prekey| *prekey.public_key().as_bytes()),
+    fn proof_transcript<'a>(
+        setup: &'a Setup,
+        handshake: &'a Handshake,
+        sender_discovery_key: &'a PublicDiscoveryKey,
+    ) -> SenderProofTranscript<'a> {
+        SenderProofTranscript {
+            handshake,
+            sender_identity_key: &setup.alice_identity_key,
+            sender_discovery_key,
+            sender_certificate: b"sender certificate",
+            sender_certificate_signature: b"sender certificate signature",
         }
     }
 
-    fn test_handshake_envelope(
-        setup: &FullX3dhSetup,
-        initiator_ephemeral_key: &KeyPair,
-        responder_signed_prekey_public_key: &PublicKey,
-        one_time_prekey: Option<&OneTimePreKey>,
-        header: &Header,
-        ciphertext: &[u8],
-    ) -> HandshakeEnvelope {
-        let frame_plaintext =
-            encode_handshake_frame_plaintext(header, ciphertext, &setup.alice_identity_key)
+    #[test]
+    fn peers_derive_the_same_session_id_and_ratchet_keys() {
+        for include_one_time in [true, false] {
+            let (setup, mut rng) = setup();
+            let (mut alice_state, alice_session_id, handshake) = initiate_handshake(
+                &mut rng,
+                &setup.bob_identity_key,
+                &bundle(&setup, include_one_time),
+            )
+            .unwrap();
+            let (mut bob_state, bob_session_id) = accept_handshake(
+                &handshake,
+                &setup.bob_discovery_key,
+                &setup.bob_signed_prekey,
+                include_one_time.then(|| copy_one_time_prekey(&setup.bob_one_time_prekey)),
+            )
+            .unwrap();
+
+            assert_eq!(bob_session_id, alice_session_id);
+            let (header, ciphertext) = alice_state
+                .ratchet_encrypt(b"hello bob", ASSOCIATED_DATA)
                 .unwrap();
-        let frame = seal_frame_with_ephemeral_key(
-            initiator_ephemeral_key,
-            setup.bob_discovery_key.public_key(),
-            Some(test_prekey_reference(
-                setup,
-                responder_signed_prekey_public_key,
-                one_time_prekey,
-            )),
-            &frame_plaintext,
-        )
-        .unwrap();
-        HandshakeEnvelope::from_frame(frame)
-    }
-
-    #[test]
-    fn full_x3dh_associated_data_binds_responder_discovery_key_and_epoch() {
-        let (setup, _) = full_x3dh_setup();
-        let associated_data = initial_associated_data(
-            setup.bob_discovery_key.public_key(),
-            setup.bob_discovery_key.epoch(),
-        );
-        assert_eq!(
-            &associated_data[..32],
-            setup.bob_discovery_key.public_key().as_bytes()
-        );
-        assert_eq!(
-            &associated_data[32..],
-            &setup.bob_discovery_key.epoch().to_be_bytes()
-        );
-    }
-
-    #[test]
-    fn initiate_accept_round_trip_with_one_time_prekey() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let plaintext = b"hello full x3dh";
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(plaintext),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(
-            envelope_reference(&envelope).one_time_prekey_id,
-            Some(setup.bob_one_time_prekey.id())
-        );
-        let (_, decrypted) = accept_with_associated_data(
-            &mut rng,
-            &envelope,
-            Some(&setup.alice_identity_key),
-            &setup.bob_identity_key,
-            &setup.bob_discovery_key,
-            &setup.bob_signed_prekey,
-            Some(setup.bob_one_time_prekey),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(decrypted.plaintext.as_slice(), plaintext);
-    }
-
-    #[test]
-    fn handshake_envelope_does_not_expose_initiator_discovery_key() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"hello sealed x3dh"),
-            &[],
-        )
-        .unwrap();
-
-        let bytes = envelope.to_bytes().unwrap();
-
-        assert!(
-            !bytes
-                .windows(setup.alice_discovery_key.public_key().as_bytes().len())
-                .any(|window| window == setup.alice_discovery_key.public_key().as_bytes())
-        );
-    }
-
-    #[test]
-    fn accept_exposes_sender_identity_after_decrypt() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let plaintext = b"hello sealed identity";
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"hello sealed identity"),
-            &[],
-        )
-        .unwrap();
-        let (_, decrypted) = accept_with_associated_data(
-            &mut rng,
-            &envelope,
-            Some(&setup.alice_identity_key),
-            &setup.bob_identity_key,
-            &setup.bob_discovery_key,
-            &setup.bob_signed_prekey,
-            Some(setup.bob_one_time_prekey),
-            &[],
-        )
-        .unwrap();
-
-        assert_eq!(decrypted.plaintext.as_slice(), plaintext);
-        assert_eq!(
-            decrypted.sender_identity.identity_key,
-            *setup.alice_identity_key.public_key.as_bytes()
-        );
-        assert_eq!(
-            decrypted.sender_identity.identity_verifying_key,
-            setup.alice_identity_key.verifying_key.to_bytes()
-        );
-    }
-
-    /// The hint is readable *before* accepting, and that ordering is what makes
-    /// it usable at all.
-    ///
-    /// A caller addresses session state by a key derived from both identities,
-    /// so it has to know who sent a message before it can accept one — and
-    /// `accept_with_associated_data` consumes the referenced one-time prekey, so
-    /// it cannot be called speculatively to find out. Reading the hint costs
-    /// nothing and consumes nothing: it opens only the layer sealed to the
-    /// responder's own Discovery Key.
-    #[test]
-    fn the_initiator_identity_is_readable_before_accepting() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"hello stranger"),
-            &[],
-        )
-        .unwrap();
-
-        let hint =
-            initiator_identity_hint_with_associated_data(&envelope, &setup.bob_discovery_key, &[])
+            let plaintext = bob_state
+                .ratchet_decrypt(&mut rng, &ciphertext, &header, ASSOCIATED_DATA)
                 .unwrap();
-
-        assert_eq!(
-            hint.public_key.as_bytes(),
-            setup.alice_identity_key.public_key.as_bytes()
-        );
-        assert_eq!(
-            hint.verifying_key.to_bytes(),
-            setup.alice_identity_key.verifying_key.to_bytes()
-        );
-
-        // Nothing was consumed: the accept that follows still finds its
-        // one-time prekey, which is the whole point of peeking separately.
-        let (_, decrypted) = accept_with_associated_data(
-            &mut rng,
-            &envelope,
-            None,
-            &setup.bob_identity_key,
-            &setup.bob_discovery_key,
-            &setup.bob_signed_prekey,
-            Some(setup.bob_one_time_prekey),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(decrypted.plaintext.as_slice(), b"hello stranger");
+            assert_eq!(plaintext.as_slice(), b"hello bob");
+        }
     }
 
-    /// A message request. The responder has never seen this initiator and holds
-    /// nothing to guess with, so it supplies no expected identity and reads the
-    /// sender from the frame instead.
-    ///
-    /// Sealed sender puts the sender inside the layer that needs the sender to
-    /// open — `derive_root_key_responder` wants the initiator's X25519 half
-    /// before any ciphertext can be touched. So without a hint in the layer the
-    /// recipient can already open with its own Discovery Key, a first message
-    /// from a stranger is unopenable, and every X3DH initial stays queued.
     #[test]
-    fn accept_opens_a_first_message_from_an_unknown_initiator() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let plaintext = b"hello stranger";
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(plaintext),
-            &[],
-        )
-        .unwrap();
+    fn handshakes_with_one_bundle_get_distinct_session_ids() {
+        let (setup, mut rng) = setup();
+        let bundle = bundle(&setup, false);
 
-        let (_, decrypted) = accept_with_associated_data(
-            &mut rng,
-            &envelope,
-            None,
-            &setup.bob_identity_key,
-            &setup.bob_discovery_key,
-            &setup.bob_signed_prekey,
-            Some(setup.bob_one_time_prekey),
-            &[],
-        )
-        .unwrap();
+        let (_, first, _) = initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle).unwrap();
+        let (_, second, _) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle).unwrap();
 
-        assert_eq!(decrypted.plaintext.as_slice(), plaintext);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn handshake_names_the_bundle_prekeys() {
+        let (setup, mut rng) = setup();
+
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
+
         assert_eq!(
-            decrypted.sender_identity.identity_key,
-            *setup.alice_identity_key.public_key.as_bytes()
+            handshake.responder_discovery_key,
+            *setup.bob_discovery_key.public_key()
         );
         assert_eq!(
-            decrypted.sender_identity.identity_verifying_key,
-            setup.alice_identity_key.verifying_key.to_bytes()
+            handshake.prekey_reference,
+            SealedFramePreKeyReference {
+                discovery_epoch: setup.bob_discovery_key.epoch(),
+                signed_prekey_public_key: *setup.bob_signed_prekey.public_key().as_bytes(),
+                one_time_prekey_id: Some(setup.bob_one_time_prekey.id()),
+                one_time_prekey_public_key: Some(
+                    *setup.bob_one_time_prekey.public_key().as_bytes()
+                ),
+            }
         );
     }
 
     #[test]
-    fn initiate_accept_round_trip_without_one_time_prekey() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let plaintext = b"hello signed prekey only";
-        let bundle = full_prekey_bundle(&setup, false);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(plaintext),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(envelope_reference(&envelope).one_time_prekey_id, None);
-        let (_, decrypted) = accept_with_associated_data(
-            &mut rng,
-            &envelope,
-            Some(&setup.alice_identity_key),
-            &setup.bob_identity_key,
-            &setup.bob_discovery_key,
-            &setup.bob_signed_prekey,
-            None,
-            &[],
-        )
-        .unwrap();
-        assert_eq!(decrypted.plaintext.as_slice(), plaintext);
+    fn root_key_and_session_id_change_with_each_key_agreement_input() {
+        let secret = |seed: u8| {
+            let mut rng = ChaCha20Rng::from_seed([seed; 32]);
+            generate_key_pair(&mut rng).diffie_hellman(&generate_key_pair(&mut rng).public)
+        };
+        let (discovery, signed, one_time, other) = (secret(1), secret(2), secret(3), secret(4));
+        let (root_key, session_id) =
+            derive_root_key_and_session_id(&discovery, &signed, Some(&one_time)).unwrap();
+
+        for (other_root_key, other_session_id) in [
+            derive_root_key_and_session_id(&other, &signed, Some(&one_time)).unwrap(),
+            derive_root_key_and_session_id(&discovery, &other, Some(&one_time)).unwrap(),
+            derive_root_key_and_session_id(&discovery, &signed, Some(&other)).unwrap(),
+            derive_root_key_and_session_id(&discovery, &signed, None).unwrap(),
+        ] {
+            assert_ne!(other_root_key.as_bytes(), root_key.as_bytes());
+            assert_ne!(other_session_id, session_id);
+        }
+        assert_ne!(&root_key.as_bytes()[..16], session_id.as_bytes());
     }
 
     #[test]
     fn accept_rejects_missing_one_time_prekey() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"payload"),
-            &[],
-        )
-        .unwrap();
+        let (setup, mut rng) = setup();
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
+
         assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&setup.alice_identity_key),
-                &setup.bob_identity_key,
+            accept_handshake(
+                &handshake,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
-                None,
-                &[],
+                None
             ),
             Err(HandshakeError::MissingOneTimePreKey)
         ));
@@ -1477,292 +615,122 @@ mod tests {
 
     #[test]
     fn accept_rejects_mismatched_one_time_prekey() {
-        let (setup, mut rng) = full_x3dh_setup();
+        let (setup, mut rng) = setup();
         let wrong_one_time_prekey =
             generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch(), FIXED_TS);
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"payload"),
-            &[],
-        )
-        .unwrap();
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
+
         assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&setup.alice_identity_key),
-                &setup.bob_identity_key,
+            accept_handshake(
+                &handshake,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
                 Some(wrong_one_time_prekey),
-                &[],
             ),
             Err(HandshakeError::OneTimePreKeyMismatch)
         ));
     }
 
     #[test]
-    fn initiate_rejects_stale_one_time_prekey_epoch() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let stale_one_time_prekey =
-            generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch() + 1, FIXED_TS);
-        let bundle = PreKeyBundle {
-            version: PREKEY_BUNDLE_VERSION,
-            discovery_key: setup.bob_discovery_key.public(),
-            signed_prekey: setup.bob_signed_prekey.public(),
-            one_time_prekey: Some(stale_one_time_prekey.public()),
-        };
-        assert!(matches!(
-            initiate_with_associated_data(
-                &mut rng,
-                &setup.alice_discovery_key,
-                &setup.alice_identity_key,
-                &setup.bob_identity_key,
-                &bundle,
-                initial_plaintext(b"payload"),
-                &[],
-            ),
-            Err(HandshakeError::StalePreKey)
-        ));
-    }
-
-    #[test]
-    fn initiate_rejects_unsupported_prekey_bundle_version() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = PreKeyBundle {
-            version: PREKEY_BUNDLE_VERSION + 1,
-            discovery_key: setup.bob_discovery_key.public(),
-            signed_prekey: setup.bob_signed_prekey.public(),
-            one_time_prekey: Some(setup.bob_one_time_prekey.public()),
-        };
-
-        assert!(matches!(
-            initiate_with_associated_data(
-                &mut rng,
-                &setup.alice_discovery_key,
-                &setup.alice_identity_key,
-                &setup.bob_identity_key,
-                &bundle,
-                initial_plaintext(b"payload"),
-                &[],
-            ),
-            Err(HandshakeError::UnsupportedPreKeyBundleVersion(version))
-                if version == PREKEY_BUNDLE_VERSION + 1
-        ));
-    }
-
-    #[test]
-    fn initiate_rejects_oversized_sealed_first_message() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-        let oversized_plaintext = vec![0u8; MAX_HANDSHAKE_SEALED_SENDER_CONTENT_LEN + 1];
-
-        let result = initiate_with_associated_data(
+    fn accept_rejects_mismatched_signed_prekey() {
+        let (setup, mut rng) = setup();
+        let other_signed_prekey = generate_signed_prekey_for_discovery_key(
             &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(&oversized_plaintext),
-            &[],
-        );
-
-        assert!(matches!(result, Err(HandshakeError::EnvelopeEncode)));
-    }
-
-    #[test]
-    fn initiator_and_responder_derive_identical_root_key() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let alice_identity_key = public_identity_key(&mut rng, 0x91);
-        let bob_identity_key = public_identity_key(&mut rng, 0x92);
-        let alice_ephemeral_key = generate_key_pair(&mut rng);
-        let initiator_root_key = derive_root_key_initiator(
-            &alice_ephemeral_key,
-            &alice_identity_key,
-            &bob_identity_key,
-            setup.bob_discovery_key.public_key(),
-            setup.bob_signed_prekey.public_key(),
-            Some(setup.bob_one_time_prekey.public_key()),
-        )
-        .unwrap();
-        let responder_root_key = derive_root_key_responder(
-            &alice_ephemeral_key.public,
-            &alice_identity_key,
-            &bob_identity_key,
             &setup.bob_discovery_key,
-            &setup.bob_signed_prekey,
-            Some(&setup.bob_one_time_prekey),
+            1,
+            FIXED_TS,
         )
         .unwrap();
-        assert_eq!(initiator_root_key.as_bytes(), responder_root_key.as_bytes());
-    }
-
-    #[test]
-    fn x3dh_root_changes_when_identity_binding_changes() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let alice_identity_key = public_identity_key(&mut rng, 0x93);
-        let bob_identity_key = public_identity_key(&mut rng, 0x94);
-        let other_bob_identity_key = public_identity_key(&mut rng, 0x95);
-        let alice_ephemeral_key = generate_key_pair(&mut rng);
-
-        let root_key = derive_root_key_initiator(
-            &alice_ephemeral_key,
-            &alice_identity_key,
-            &bob_identity_key,
-            setup.bob_discovery_key.public_key(),
-            setup.bob_signed_prekey.public_key(),
-            Some(setup.bob_one_time_prekey.public_key()),
-        )
-        .unwrap();
-        let rebound_root_key = derive_root_key_initiator(
-            &alice_ephemeral_key,
-            &alice_identity_key,
-            &other_bob_identity_key,
-            setup.bob_discovery_key.public_key(),
-            setup.bob_signed_prekey.public_key(),
-            Some(setup.bob_one_time_prekey.public_key()),
-        )
-        .unwrap();
-
-        assert_ne!(root_key.as_bytes(), rebound_root_key.as_bytes());
-    }
-
-    #[test]
-    fn x3dh_root_changes_with_each_key_agreement_input() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let ephemeral_key = generate_key_pair(&mut rng);
-        let other_ephemeral_key = generate_key_pair(&mut rng);
-        let other_public_key = generate_key_pair(&mut rng).public;
-        let other_alice_x25519 = PublicIdentityKey {
-            public_key: other_public_key,
-            ..setup.alice_identity_key.clone()
-        };
-        let other_alice_ed25519 = PublicIdentityKey {
-            verifying_key: generate_signing_key_pair(&mut rng).verifying,
-            ..setup.alice_identity_key.clone()
-        };
-        let discovery_key = setup.bob_discovery_key.public_key();
-        let signed_prekey = setup.bob_signed_prekey.public_key();
-        let one_time_prekey = setup.bob_one_time_prekey.public_key();
-        let root_key = |ephemeral_key: &KeyPair,
-                        alice_identity_key: &PublicIdentityKey,
-                        discovery_key: &PublicKey,
-                        signed_prekey: &PublicKey,
-                        one_time_prekey: Option<&PublicKey>| {
-            derive_root_key_initiator(
-                ephemeral_key,
-                alice_identity_key,
-                &setup.bob_identity_key,
-                discovery_key,
-                signed_prekey,
-                one_time_prekey,
-            )
-            .unwrap()
-        };
-        let alice_identity_key = &setup.alice_identity_key;
-        let baseline = root_key(
-            &ephemeral_key,
-            alice_identity_key,
-            discovery_key,
-            signed_prekey,
-            Some(one_time_prekey),
-        );
-
-        for changed in [
-            root_key(
-                &other_ephemeral_key,
-                alice_identity_key,
-                discovery_key,
-                signed_prekey,
-                Some(one_time_prekey),
-            ),
-            root_key(
-                &ephemeral_key,
-                &other_alice_x25519,
-                discovery_key,
-                signed_prekey,
-                Some(one_time_prekey),
-            ),
-            root_key(
-                &ephemeral_key,
-                &other_alice_ed25519,
-                discovery_key,
-                signed_prekey,
-                Some(one_time_prekey),
-            ),
-            root_key(
-                &ephemeral_key,
-                alice_identity_key,
-                &other_public_key,
-                signed_prekey,
-                Some(one_time_prekey),
-            ),
-            root_key(
-                &ephemeral_key,
-                alice_identity_key,
-                discovery_key,
-                &other_public_key,
-                Some(one_time_prekey),
-            ),
-            root_key(
-                &ephemeral_key,
-                alice_identity_key,
-                discovery_key,
-                signed_prekey,
-                Some(&other_public_key),
-            ),
-            root_key(
-                &ephemeral_key,
-                alice_identity_key,
-                discovery_key,
-                signed_prekey,
-                None,
-            ),
-        ] {
-            assert_ne!(changed.as_bytes(), baseline.as_bytes());
-        }
-    }
-
-    #[test]
-    fn root_derivation_rejects_non_contributory_peer_key() {
-        let (setup, _) = full_x3dh_setup();
-        let low_order_public_key = PublicKey::from([0u8; 32]);
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, false)).unwrap();
 
         assert!(matches!(
-            derive_root_key_responder(
-                &low_order_public_key,
-                &setup.alice_identity_key,
-                &setup.bob_identity_key,
+            accept_handshake(
+                &handshake,
+                &setup.bob_discovery_key,
+                &other_signed_prekey,
+                None
+            ),
+            Err(HandshakeError::SignedPreKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn accept_rejects_another_discovery_key() {
+        let (setup, mut rng) = setup();
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, false)).unwrap();
+
+        assert!(matches!(
+            accept_handshake(
+                &handshake,
+                &setup.alice_discovery_key,
+                &setup.bob_signed_prekey,
+                None
+            ),
+            Err(HandshakeError::DiscoveryKeyMismatch)
+        ));
+    }
+
+    #[test]
+    fn accept_rejects_a_non_contributory_base_key() {
+        let (setup, mut rng) = setup();
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, false)).unwrap();
+        let low_order = Handshake {
+            base_key: PublicKey::from([0u8; 32]),
+            ..handshake
+        };
+
+        assert!(matches!(
+            accept_handshake(
+                &low_order,
                 &setup.bob_discovery_key,
                 &setup.bob_signed_prekey,
-                Some(&setup.bob_one_time_prekey),
+                None
             ),
             Err(HandshakeError::NonContributorySharedSecret)
         ));
     }
 
     #[test]
-    fn initiate_rejects_bundle_under_wrong_verifying_key() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let wrong_signing_key = generate_signing_key_pair(&mut rng);
-        let wrong_identity_key = generated_public_identity_key(&mut rng, &wrong_signing_key);
-        let bundle = full_prekey_bundle(&setup, true);
-        let result = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &wrong_identity_key,
-            &bundle,
-            initial_plaintext(b"payload"),
-            &[],
-        );
+    fn initiate_rejects_stale_one_time_prekey_epoch() {
+        let (setup, mut rng) = setup();
+        let stale_one_time_prekey =
+            generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch() + 1, FIXED_TS);
+        let bundle = PreKeyBundle {
+            one_time_prekey: Some(stale_one_time_prekey.public()),
+            ..bundle(&setup, false)
+        };
+
         assert!(matches!(
-            result,
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle),
+            Err(HandshakeError::StalePreKey)
+        ));
+    }
+
+    #[test]
+    fn initiate_rejects_unsupported_prekey_bundle_version() {
+        let (setup, mut rng) = setup();
+        let bundle = PreKeyBundle {
+            version: PREKEY_BUNDLE_VERSION + 1,
+            ..bundle(&setup, true)
+        };
+
+        assert!(matches!(
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle),
+            Err(HandshakeError::UnsupportedPreKeyBundleVersion(version))
+                if version == PREKEY_BUNDLE_VERSION + 1
+        ));
+    }
+
+    #[test]
+    fn initiate_rejects_bundle_signed_by_another_identity() {
+        let (setup, mut rng) = setup();
+
+        assert!(matches!(
+            initiate_handshake(&mut rng, &setup.alice_identity_key, &bundle(&setup, true)),
             Err(HandshakeError::PublicKey(PublicKeyError::Signature(
                 SignatureError::SignatureInvalid
             )))
@@ -1770,621 +738,132 @@ mod tests {
     }
 
     #[test]
-    fn accept_rejects_mismatched_signed_prekey_public_key() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, false);
-        let (_, mut envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"payload"),
-            &[],
-        )
-        .unwrap();
-        envelope
-            .prekey_reference
-            .as_mut()
-            .unwrap()
-            .signed_prekey_public_key[0] ^= 0x01;
-        assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&setup.alice_identity_key),
-                &setup.bob_identity_key,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None,
-                &[],
-            ),
-            Err(HandshakeError::SignedPreKeyMismatch)
-        ));
+    fn sender_proof_verifies_with_the_signed_prekey() {
+        let (setup, mut rng) = setup();
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
+        let sender_discovery_key = setup.alice_discovery_key.public();
+        let transcript = proof_transcript(&setup, &handshake, &sender_discovery_key);
+
+        let proof = prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap();
+
+        verify_sender_proof(&setup.bob_signed_prekey, &transcript, &proof).unwrap();
     }
 
     #[test]
-    fn accept_rejects_tampered_ciphertext() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, false);
-        let (_, mut envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"tamper me"),
-            &[],
-        )
-        .unwrap();
-        envelope.ciphertext[0] ^= 0xFF;
-        assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&setup.alice_identity_key),
-                &setup.bob_identity_key,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None,
-                &[],
-            ),
-            Err(HandshakeError::SealedFrame(SealedFrameError::Aead))
-        ));
-    }
-
-    #[test]
-    fn accept_rejects_malformed_sealed_sender_envelope() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
-        let root_key = derive_root_key_initiator(
-            &initiator_ephemeral_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            setup.bob_discovery_key.public_key(),
-            responder_signed_prekey_public_key,
-            None,
-        )
-        .unwrap();
-        let mut state =
-            RatchetState::init_initiator(&mut rng, root_key, responder_signed_prekey_public_key)
-                .unwrap();
-        let associated_data = initial_associated_data(
-            setup.bob_discovery_key.public_key(),
-            setup.bob_discovery_key.epoch(),
-        );
-        let (header, ciphertext) = state
-            .ratchet_encrypt(b"not a sealed-sender envelope", &associated_data)
-            .unwrap();
-        let envelope = test_handshake_envelope(
-            &setup,
-            &initiator_ephemeral_key,
-            responder_signed_prekey_public_key,
-            None,
-            &header,
-            &ciphertext,
-        );
-
-        assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&setup.alice_identity_key),
-                &setup.bob_identity_key,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None,
-                &[],
-            ),
-            Err(HandshakeError::EnvelopeDecode)
-        ));
-    }
-
-    #[test]
-    fn accept_rejects_sender_identity_without_matching_proof() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
-        let root_key = derive_root_key_initiator(
-            &initiator_ephemeral_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            setup.bob_discovery_key.public_key(),
-            responder_signed_prekey_public_key,
-            None,
-        )
-        .unwrap();
-        let mut state =
-            RatchetState::init_initiator(&mut rng, root_key, responder_signed_prekey_public_key)
-                .unwrap();
-        let associated_data = initial_associated_data(
-            setup.bob_discovery_key.public_key(),
-            setup.bob_discovery_key.epoch(),
-        );
-        let bogus_sender_proof = [0u8; 32];
-        let sealed = postcard::to_stdvec(&SealedSenderEnvelopeWire {
-            version: SEALED_SENDER_ENVELOPE_VERSION,
-            sender_identity_key: *setup.alice_identity_key.public_key.as_bytes(),
-            sender_identity_verifying_key: setup.alice_identity_key.verifying_key.to_bytes(),
-            sender_identity_binding_signature: &setup
-                .alice_identity_key
-                .binding_signature
-                .to_bytes(),
-            sender_discovery_key: *setup.alice_discovery_key.public_key().as_bytes(),
-            sender_certificate: b"sender certificate",
-            sender_signature: b"sender signature",
-            sender_proof: &bogus_sender_proof,
-            plaintext: b"payload",
-        })
-        .unwrap();
-        let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data).unwrap();
-        let envelope = test_handshake_envelope(
-            &setup,
-            &initiator_ephemeral_key,
-            responder_signed_prekey_public_key,
-            None,
-            &header,
-            &ciphertext,
-        );
-
-        assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&setup.alice_identity_key),
-                &setup.bob_identity_key,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None,
-                &[],
-            ),
-            Err(HandshakeError::SenderProofInvalid)
-        ));
-    }
-
-    #[test]
-    fn accept_rejects_non_contributory_sender_identity_key() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
-        let root_key = derive_root_key_initiator(
-            &initiator_ephemeral_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            setup.bob_discovery_key.public_key(),
-            responder_signed_prekey_public_key,
-            None,
-        )
-        .unwrap();
-        let mut state =
-            RatchetState::init_initiator(&mut rng, root_key, responder_signed_prekey_public_key)
-                .unwrap();
-        let associated_data = initial_associated_data(
-            setup.bob_discovery_key.public_key(),
-            setup.bob_discovery_key.epoch(),
-        );
-        let bogus_sender_proof = [0u8; 32];
-        let sealed = postcard::to_stdvec(&SealedSenderEnvelopeWire {
-            version: SEALED_SENDER_ENVELOPE_VERSION,
-            sender_identity_key: [0u8; 32],
-            sender_identity_verifying_key: setup.alice_identity_key.verifying_key.to_bytes(),
-            sender_identity_binding_signature: &setup
-                .alice_identity_key
-                .binding_signature
-                .to_bytes(),
-            sender_discovery_key: *setup.alice_discovery_key.public_key().as_bytes(),
-            sender_certificate: b"sender certificate",
-            sender_signature: b"sender signature",
-            sender_proof: &bogus_sender_proof,
-            plaintext: b"payload",
-        })
-        .unwrap();
-        let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data).unwrap();
-        let envelope = test_handshake_envelope(
-            &setup,
-            &initiator_ephemeral_key,
-            responder_signed_prekey_public_key,
-            None,
-            &header,
-            &ciphertext,
-        );
-
-        assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&setup.alice_identity_key),
-                &setup.bob_identity_key,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None,
-                &[],
-            ),
-            Err(HandshakeError::EnvelopeDecode)
-        ));
-    }
-
-    #[test]
-    fn sender_proof_transcript_commits_to_identity_verifying_key() {
-        let (setup, _) = full_x3dh_setup();
-        let ephemeral = KeyPair::from_secret_bytes([0x77u8; 32]);
-        let sender_identity_key = [0x21u8; 32];
-        let sender_discovery_key = [0x22u8; 32];
-        let verifying_key_a = [0x31u8; 32];
-        let verifying_key_b = [0x32u8; 32];
-
-        let transcript_a = sender_proof_transcript(SenderProofTranscriptInput {
-            sender_identity_key: &sender_identity_key,
-            sender_identity_verifying_key: &verifying_key_a,
-            sender_discovery_key: &sender_discovery_key,
-            sender_certificate: b"cert",
-            sender_signature: b"sig",
-            initiator_ephemeral_public_key: &ephemeral.public,
-            responder_discovery_public_key: setup.bob_discovery_key.public_key(),
-            responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: setup.bob_signed_prekey.public_key(),
-            responder_one_time_prekey: None,
-        });
-        let transcript_b = sender_proof_transcript(SenderProofTranscriptInput {
-            sender_identity_key: &sender_identity_key,
-            sender_identity_verifying_key: &verifying_key_b,
-            sender_discovery_key: &sender_discovery_key,
-            sender_certificate: b"cert",
-            sender_signature: b"sig",
-            initiator_ephemeral_public_key: &ephemeral.public,
-            responder_discovery_public_key: setup.bob_discovery_key.public_key(),
-            responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key: setup.bob_signed_prekey.public_key(),
-            responder_one_time_prekey: None,
-        });
-
-        assert_ne!(transcript_a.as_slice(), transcript_b.as_slice());
-    }
-
-    #[test]
-    fn sender_proof_changes_with_each_transcript_field_and_the_secret() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let ephemeral_key = generate_key_pair(&mut rng).public;
+    fn sender_proof_changes_with_each_transcript_field_and_the_identity_key() {
+        let (setup, mut rng) = setup();
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
+        let sender_discovery_key = setup.alice_discovery_key.public();
+        let transcript = proof_transcript(&setup, &handshake, &sender_discovery_key);
+        let proof = prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap();
         let other_key = generate_key_pair(&mut rng).public;
-        let epoch = setup.bob_discovery_key.epoch();
-        let one_time_prekey = setup.bob_one_time_prekey.public();
-        let other_one_time_prekey_id = PublicOneTimePreKey {
-            id: one_time_prekey.id + 1,
-            ..one_time_prekey.clone()
-        };
-        let other_one_time_prekey_key = PublicOneTimePreKey {
+        let other_signing_key = generate_signing_key_pair(&mut rng);
+        let mut other_one_time_prekey = handshake;
+        other_one_time_prekey.prekey_reference.one_time_prekey_id = Some(10);
+        let mut without_one_time_prekey = handshake;
+        without_one_time_prekey.prekey_reference.one_time_prekey_id = None;
+        without_one_time_prekey
+            .prekey_reference
+            .one_time_prekey_public_key = None;
+        let mut other_one_time_prekey_key = handshake;
+        other_one_time_prekey_key
+            .prekey_reference
+            .one_time_prekey_public_key = Some(*other_key.as_bytes());
+        let mut other_signed_prekey = handshake;
+        other_signed_prekey
+            .prekey_reference
+            .signed_prekey_public_key = *other_key.as_bytes();
+        let mut other_epoch = handshake;
+        other_epoch.prekey_reference.discovery_epoch += 1;
+        let changed_handshakes = [
+            Handshake {
+                base_key: other_key,
+                ..handshake
+            },
+            Handshake {
+                responder_discovery_key: other_key,
+                ..handshake
+            },
+            other_epoch,
+            other_signed_prekey,
+            other_one_time_prekey,
+            other_one_time_prekey_key,
+            without_one_time_prekey,
+        ];
+        let other_identity_x25519 = PublicIdentityKey {
             public_key: other_key,
-            ..one_time_prekey.clone()
+            ..setup.alice_identity_key.clone()
         };
-        let secret = generate_key_pair(&mut rng).diffie_hellman(&other_key);
-        let other_secret = generate_key_pair(&mut rng).diffie_hellman(&other_key);
-        let baseline = || SenderProofTranscriptInput {
-            sender_identity_key: &[0x21; 32],
-            sender_identity_verifying_key: &[0x31; 32],
-            sender_discovery_key: &[0x22; 32],
-            sender_certificate: b"cert",
-            sender_signature: b"sig",
-            initiator_ephemeral_public_key: &ephemeral_key,
-            responder_discovery_public_key: setup.bob_discovery_key.public_key(),
-            responder_discovery_epoch: epoch,
-            responder_signed_prekey_public_key: setup.bob_signed_prekey.public_key(),
-            responder_one_time_prekey: Some(&one_time_prekey),
+        let other_identity_ed25519 = PublicIdentityKey {
+            verifying_key: other_signing_key.verifying,
+            ..setup.alice_identity_key.clone()
         };
-        let proof = |secret: &SharedSecret, input: SenderProofTranscriptInput<'_>| {
-            *derive_sender_proof(secret, &sender_proof_transcript(input)).unwrap()
+        let other_discovery_key = PublicDiscoveryKey {
+            public_key: other_key,
+            ..sender_discovery_key.clone()
         };
-        let expected = proof(&secret, baseline());
+        let other_discovery_ed25519 = PublicDiscoveryKey {
+            verifying_key: other_signing_key.verifying,
+            ..sender_discovery_key.clone()
+        };
 
-        assert_ne!(proof(&other_secret, baseline()), expected);
-        for changed in [
-            SenderProofTranscriptInput {
-                sender_identity_key: &[0x23; 32],
-                ..baseline()
+        let mut changed = changed_handshakes
+            .iter()
+            .map(|handshake| SenderProofTranscript {
+                handshake,
+                ..proof_transcript(&setup, handshake, &sender_discovery_key)
+            })
+            .map(|transcript| *prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap())
+            .collect::<Vec<_>>();
+        for transcript in [
+            SenderProofTranscript {
+                sender_identity_key: &other_identity_x25519,
+                ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
-            SenderProofTranscriptInput {
-                sender_discovery_key: &[0x24; 32],
-                ..baseline()
+            SenderProofTranscript {
+                sender_identity_key: &other_identity_ed25519,
+                ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
-            SenderProofTranscriptInput {
-                sender_certificate: b"other cert",
-                ..baseline()
+            SenderProofTranscript {
+                sender_discovery_key: &other_discovery_key,
+                ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
-            SenderProofTranscriptInput {
-                sender_signature: b"other sig",
-                ..baseline()
+            SenderProofTranscript {
+                sender_discovery_key: &other_discovery_ed25519,
+                ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
-            SenderProofTranscriptInput {
-                initiator_ephemeral_public_key: &other_key,
-                ..baseline()
+            SenderProofTranscript {
+                sender_certificate: b"other certificate",
+                ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
-            SenderProofTranscriptInput {
-                responder_discovery_public_key: &other_key,
-                ..baseline()
-            },
-            SenderProofTranscriptInput {
-                responder_discovery_epoch: epoch + 1,
-                ..baseline()
-            },
-            SenderProofTranscriptInput {
-                responder_signed_prekey_public_key: &other_key,
-                ..baseline()
-            },
-            SenderProofTranscriptInput {
-                responder_one_time_prekey: Some(&other_one_time_prekey_id),
-                ..baseline()
-            },
-            SenderProofTranscriptInput {
-                responder_one_time_prekey: Some(&other_one_time_prekey_key),
-                ..baseline()
-            },
-            SenderProofTranscriptInput {
-                responder_one_time_prekey: None,
-                ..baseline()
+            SenderProofTranscript {
+                sender_certificate_signature: b"other signature",
+                ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
         ] {
-            assert_ne!(proof(&secret, changed), expected);
+            changed.push(*prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap());
+        }
+        changed.push(*prove_sender(&generate_key_pair(&mut rng), &transcript).unwrap());
+
+        for other in changed {
+            assert_ne!(other, *proof);
         }
     }
 
     #[test]
-    fn accept_rejects_sealed_identity_not_bound_to_root() {
-        let (setup, mut rng) = full_x3dh_setup();
-        // The identity folded into the X3DH root, which the responder verifies as the peer.
-        let root_bound_identity_key = setup.alice_identity_key.clone();
-        // A self-consistent identity the malicious initiator seals in place of the root-bound one.
-        let impersonated_identity_key = public_identity_key(&mut rng, 0xA7);
-        let attacker_signing = generate_signing_key_pair(&mut rng);
-        let attacker_discovery_key =
-            generate_discovery_key(&mut rng, &attacker_signing, 5, FIXED_TS).unwrap();
-
-        let initiator_ephemeral_key = generate_key_pair(&mut rng);
-        let responder_signed_prekey_public_key = setup.bob_signed_prekey.public_key();
-        let root_key = derive_root_key_initiator(
-            &initiator_ephemeral_key,
-            &root_bound_identity_key,
-            &setup.bob_identity_key,
-            setup.bob_discovery_key.public_key(),
-            responder_signed_prekey_public_key,
-            None,
-        )
-        .unwrap();
-        let mut state =
-            RatchetState::init_initiator(&mut rng, root_key, responder_signed_prekey_public_key)
-                .unwrap();
-        let associated_data = initial_associated_data(
-            setup.bob_discovery_key.public_key(),
-            setup.bob_discovery_key.epoch(),
-        );
-
-        // Seal the impersonated identity behind a valid key-possession proof for the attacker's
-        // own discovery key, so decode and sender-proof verification both succeed.
-        let sender_identity_key = *impersonated_identity_key.public_key.as_bytes();
-        let sender_discovery_key = *attacker_discovery_key.public_key().as_bytes();
-        let sender_proof_secret = checked_shared_secret(
-            attacker_discovery_key.diffie_hellman(responder_signed_prekey_public_key),
-        )
-        .unwrap();
-        let transcript = sender_proof_transcript(SenderProofTranscriptInput {
-            sender_identity_key: &sender_identity_key,
-            sender_identity_verifying_key: impersonated_identity_key.verifying_key.as_bytes(),
-            sender_discovery_key: &sender_discovery_key,
-            sender_certificate: b"sender certificate",
-            sender_signature: b"sender signature",
-            initiator_ephemeral_public_key: &initiator_ephemeral_key.public,
-            responder_discovery_public_key: setup.bob_discovery_key.public_key(),
-            responder_discovery_epoch: setup.bob_discovery_key.epoch(),
-            responder_signed_prekey_public_key,
-            responder_one_time_prekey: None,
-        });
-        let sender_proof = derive_sender_proof(&sender_proof_secret, &transcript).unwrap();
-        let sealed = encode_sealed_sender_envelope(SealedSenderEnvelopeInput {
-            sender_identity_key,
-            sender_identity_verifying_key: *impersonated_identity_key.verifying_key.as_bytes(),
-            sender_identity_binding_signature: impersonated_identity_key
-                .binding_signature
-                .to_bytes(),
-            sender_discovery_key,
-            sender_certificate: b"sender certificate",
-            sender_signature: b"sender signature",
-            sender_proof: sender_proof.as_ref(),
-            plaintext: b"impersonation attempt",
-        })
-        .unwrap();
-        let (header, ciphertext) = state.ratchet_encrypt(&sealed, &associated_data).unwrap();
-        let envelope = test_handshake_envelope(
-            &setup,
-            &initiator_ephemeral_key,
-            responder_signed_prekey_public_key,
-            None,
-            &header,
-            &ciphertext,
-        );
+    fn sender_proof_rejects_a_claimed_identity_without_its_key() {
+        let (setup, mut rng) = setup();
+        let (_, _, handshake) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
+        let sender_discovery_key = setup.alice_discovery_key.public();
+        let transcript = proof_transcript(&setup, &handshake, &sender_discovery_key);
+        let forged = prove_sender(&generate_key_pair(&mut rng), &transcript).unwrap();
 
         assert!(matches!(
-            accept_with_associated_data(
-                &mut rng,
-                &envelope,
-                Some(&root_bound_identity_key),
-                &setup.bob_identity_key,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None,
-                &[],
-            ),
-            Err(HandshakeError::SenderIdentityMismatch)
-        ));
-    }
-
-    #[test]
-    fn envelope_survives_wire_round_trip() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let plaintext = b"serialize me";
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(plaintext),
-            &[],
-        )
-        .unwrap();
-        let bytes = envelope.to_bytes().unwrap();
-
-        let decoded_envelope = HandshakeEnvelope::from_bytes(&bytes).unwrap();
-        let (_, decrypted) = accept_with_associated_data(
-            &mut rng,
-            &decoded_envelope,
-            Some(&setup.alice_identity_key),
-            &setup.bob_identity_key,
-            &setup.bob_discovery_key,
-            &setup.bob_signed_prekey,
-            Some(setup.bob_one_time_prekey),
-            &[],
-        )
-        .unwrap();
-        assert_eq!(decrypted.plaintext.as_slice(), plaintext);
-    }
-
-    #[test]
-    fn envelope_from_bytes_rejects_trailing_bytes() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"payload"),
-            &[],
-        )
-        .unwrap();
-        let mut bytes = envelope.to_bytes().unwrap();
-        bytes.push(0xFF);
-
-        assert!(matches!(
-            HandshakeEnvelope::from_bytes(&bytes),
-            Err(HandshakeError::EnvelopeDecode)
-        ));
-    }
-
-    #[test]
-    fn envelope_from_bytes_rejects_malformed_blob() {
-        assert!(matches!(
-            HandshakeEnvelope::from_bytes(b"not a postcard envelope"),
-            Err(HandshakeError::EnvelopeDecode)
-        ));
-    }
-
-    #[test]
-    fn envelope_from_bytes_rejects_unsupported_version() {
-        let bytes = vec![2];
-
-        assert!(matches!(
-            HandshakeEnvelope::from_bytes(&bytes),
-            Err(HandshakeError::EnvelopeDecode)
-        ));
-    }
-
-    #[test]
-    fn envelope_to_bytes_rejects_missing_prekey_reference() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, mut envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"payload"),
-            &[],
-        )
-        .unwrap();
-        envelope.prekey_reference = None;
-
-        assert!(matches!(
-            envelope.to_bytes(),
-            Err(HandshakeError::EnvelopeEncode)
-        ));
-    }
-
-    #[test]
-    fn envelope_from_bytes_rejects_old_sender_visible_layout() {
-        #[derive(Serialize)]
-        struct SenderVisibleHandshakeEnvelopeWire {
-            initiator_discovery_public_key: [u8; 32],
-            initiator_ephemeral_public_key: [u8; 32],
-            responder_discovery_epoch: u32,
-            responder_signed_prekey_public_key: [u8; 32],
-            one_time_prekey_id: Option<u64>,
-            one_time_prekey_public_key: Option<[u8; 32]>,
-            ratchet_public_key: [u8; 32],
-            previous_chain_length: u32,
-            message_number: u32,
-            ciphertext: Vec<u8>,
-        }
-
-        let mut initiator_discovery_public_key = [0x42; 32];
-        initiator_discovery_public_key[0] = HANDSHAKE_ENVELOPE_VERSION;
-        let bytes = postcard::to_stdvec(&SenderVisibleHandshakeEnvelopeWire {
-            initiator_discovery_public_key,
-            initiator_ephemeral_public_key: [0x11; 32],
-            responder_discovery_epoch: 1,
-            responder_signed_prekey_public_key: [0x22; 32],
-            one_time_prekey_id: None,
-            one_time_prekey_public_key: None,
-            ratchet_public_key: [0x33; 32],
-            previous_chain_length: 0,
-            message_number: 0,
-            ciphertext: vec![0x44; 16],
-        })
-        .unwrap();
-
-        assert!(matches!(
-            HandshakeEnvelope::from_bytes(&bytes),
-            Err(HandshakeError::EnvelopeDecode)
-        ));
-    }
-
-    #[test]
-    fn envelope_from_bytes_rejects_oversized_blob() {
-        let bytes = vec![0u8; MAX_HANDSHAKE_ENVELOPE_LEN + 1];
-
-        assert!(matches!(
-            HandshakeEnvelope::from_bytes(&bytes),
-            Err(HandshakeError::EnvelopeDecode)
-        ));
-    }
-
-    #[test]
-    fn envelope_wire_api_rejects_oversized_ciphertext() {
-        let (setup, mut rng) = full_x3dh_setup();
-        let bundle = full_prekey_bundle(&setup, true);
-        let (_, mut envelope) = initiate_with_associated_data(
-            &mut rng,
-            &setup.alice_discovery_key,
-            &setup.alice_identity_key,
-            &setup.bob_identity_key,
-            &bundle,
-            initial_plaintext(b"payload"),
-            &[],
-        )
-        .unwrap();
-        envelope.ciphertext = vec![0u8; MAX_HANDSHAKE_CIPHERTEXT_LEN + 1];
-
-        assert!(matches!(
-            envelope.to_bytes(),
-            Err(HandshakeError::EnvelopeEncode)
-        ));
-
-        let bytes = envelope.to_frame().to_bytes().unwrap();
-        assert!(bytes.len() <= MAX_HANDSHAKE_ENVELOPE_LEN);
-        assert!(matches!(
-            HandshakeEnvelope::from_bytes(&bytes),
-            Err(HandshakeError::EnvelopeDecode)
+            verify_sender_proof(&setup.bob_signed_prekey, &transcript, &forged),
+            Err(HandshakeError::SenderProofInvalid)
         ));
     }
 }

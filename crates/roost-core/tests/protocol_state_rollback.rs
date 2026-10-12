@@ -3,7 +3,7 @@
 mod support;
 
 use roost_core::{InboundMessageOutcome, ProtocolStateEngine};
-use support::{ProtocolFixture, accepted, deduplication_address, ratchet_address};
+use support::{ProtocolFixture, accepted, deduplication_address, session_address};
 
 #[test]
 fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
@@ -13,7 +13,7 @@ fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
     fixture.decrypt_for_bob(&engine, &first, 0x52);
     let second = fixture.encrypt_from_alice(&engine, 2, b"interrupted");
     let addresses = [
-        ratchet_address(fixture.session_key.clone()),
+        session_address(fixture.session_id),
         deduplication_address(fixture.deduplication_key.clone()),
     ];
     let before = addresses

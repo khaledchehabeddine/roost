@@ -10,10 +10,7 @@ pub use operation::{
     KeyStoreOperationStatus, PreparedKeyStoreOperation, SecureStorageExpectedValue,
     SecureStoragePrecondition, UnfinishedKeyStoreOperation,
 };
-pub use session::{
-    SessionAcceptance, SessionAcceptanceResult, SessionEstablishmentError, SessionInitiation,
-    SessionInitiationResult,
-};
+pub use session::{SessionAcceptance, SessionEstablishmentError, SessionInitiation};
 
 use crate::contact::{ContactIdentityKey, ContactStateChange};
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager, DiscoveryKeyStatus};

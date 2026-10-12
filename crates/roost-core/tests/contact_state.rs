@@ -2,24 +2,25 @@
 
 mod support;
 
+use roost_core::MessageOperationError;
+use support::device::{Device, Relay};
+use support::{ProtocolFixture, accepted_contact_identity};
+
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey, ContactTrustState,
-    IdentityKey, OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    SenderIdentityMaterial, derive_safety_number,
+    IdentityKey, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKind, ProtocolStateSnapshot, derive_safety_number,
 };
 use roost_crypto::{
-    KeyPair, RecipientDeliveryCapability, SigningKeyPair, generate_discovery_key,
-    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
+    RecipientDeliveryCapability, generate_discovery_key, generate_key_pair,
+    generate_signing_key_pair,
 };
-use roost_protocol::MessageId;
 
 const CREATED_AT_SECS: u64 = 1_700_000_000;
 
 struct Setup {
-    sender_signing_key: SigningKeyPair,
     alice_identity: IdentityKey,
     bob_identity: ContactIdentityKey,
     bob_discovery: ContactDiscoveryKey,
@@ -41,7 +42,6 @@ fn setup() -> Setup {
     let alice_identity_key_pair = generate_key_pair(&mut rng);
 
     Setup {
-        sender_signing_key: sender_identity_signing_key(),
         alice_identity: IdentityKey {
             x25519_public_key: *alice_identity_key_pair.public.as_bytes(),
             ed25519_verifying_key: alice_identity.verifying.to_bytes(),
@@ -56,77 +56,10 @@ fn setup() -> Setup {
     }
 }
 
-fn session_key() -> ProtocolStateKey {
-    ProtocolStateKey::from_bytes(vec![9u8; 16]).unwrap()
-}
-
-fn sender_identity() -> SenderIdentityMaterial {
-    let signing_key = sender_identity_signing_key();
-    let identity_key_pair = KeyPair::from_secret_bytes([0x34; 32]);
-    let binding_signature =
-        sign_identity_key_binding(&signing_key, &identity_key_pair.public).unwrap();
-    SenderIdentityMaterial {
-        identity_key: *identity_key_pair.public.as_bytes(),
-        identity_verifying_key: signing_key.verifying.to_bytes(),
-        identity_binding_signature: binding_signature.to_bytes().to_vec(),
-        certificate: vec![2, 3, 4],
-        signature: vec![5; 64],
-    }
-}
-
-fn sender_identity_signing_key() -> SigningKeyPair {
-    SigningKeyPair::from_signing_bytes([1; 32])
-}
-
 fn contact_identity(setup: &Setup) -> ContactIdentity {
     ContactIdentity {
         identity_key: setup.bob_identity,
         discovery_key: setup.bob_discovery,
-    }
-}
-
-fn alternate_contact_identity() -> ContactIdentity {
-    let mut rng = ChaCha20Rng::from_seed([0x31; 32]);
-    let identity = generate_signing_key_pair(&mut rng);
-    let identity_key_pair = generate_key_pair(&mut rng);
-    let discovery_key = generate_discovery_key(&mut rng, &identity, 0, CREATED_AT_SECS).unwrap();
-    ContactIdentity {
-        identity_key: ContactIdentityKey {
-            x25519_public_key: *identity_key_pair.public.as_bytes(),
-            ed25519_verifying_key: identity.verifying.to_bytes(),
-        },
-        discovery_key: ContactDiscoveryKey::from(&discovery_key.public()),
-    }
-}
-
-fn snapshot_with_session(engine: &ProtocolStateEngine) -> ProtocolStateSnapshot {
-    let key = session_key();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply(
-            engine
-                .set_session_state(key.clone(), &support::setup([7; 32]).alice_state)
-                .unwrap(),
-        )
-        .unwrap();
-    snapshot
-        .apply(engine.initialize_pending_acknowledgments(key).unwrap())
-        .unwrap();
-    snapshot
-}
-
-fn outbound<'a>(
-    setup: &'a Setup,
-    sender_identity: &'a SenderIdentityMaterial,
-) -> OutboundPlaintext<'a> {
-    OutboundPlaintext {
-        id: MessageId::from_bytes([1u8; 16]),
-        sender_identity,
-        sender_identity_signing_key: &setup.sender_signing_key,
-        contact_identity_key: setup.bob_identity,
-        recipient_public_key: setup.bob_discovery.prekey_bundle_lookup_key(),
-        sent_at_millis: 1_700_000_000_123,
-        plaintext: b"hello contact",
     }
 }
 
@@ -162,40 +95,45 @@ fn new_contact_starts_pending_and_is_exposed_in_current_state() {
 
 #[test]
 fn pending_contact_refuses_outgoing_user_message_until_accepted() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine);
-    let change = engine
-        .record_contact(&snapshot, contact_identity(&setup))
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let bob = Device::new(&relay, 0xb0);
+    alice.initiate(&bob.bundle(), b"hello bob");
+    let engine = *alice.store.protocol_engine();
+    let recorded = engine
+        .record_contact(&alice.host.snapshot(), bob.contact_identity())
         .unwrap();
-    snapshot.apply_all(change.state_updates).unwrap();
+    alice.host.commit(recorded.state_updates).unwrap();
 
     assert!(matches!(
-        engine.encrypt_message_with_transport_binding(
-            &snapshot,
-            session_key(),
-            outbound(&setup, &sender),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        ),
-        Err(ProtocolStateError::ContactNotAccepted)
+        alice.encrypt(&bob, b"too early"),
+        Err(MessageOperationError::ProtocolState(
+            ProtocolStateError::ContactNotAccepted
+        ))
     ));
 
     let accepted = engine
-        .accept_contact(&snapshot, setup.bob_identity)
+        .accept_contact(&alice.host.snapshot(), bob.identity_key())
         .unwrap();
-    snapshot.apply_all(accepted.state_updates).unwrap();
+    alice.host.commit(accepted.state_updates).unwrap();
+    alice.send(&bob, b"accepted");
+}
 
-    assert!(
-        engine
-            .encrypt_message_with_transport_binding(
-                &snapshot,
-                session_key(),
-                outbound(&setup, &sender),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-            )
-            .is_ok()
-    );
+#[test]
+fn accepted_contact_without_a_session_needs_a_handshake() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let bob = Device::new(&relay, 0xb0);
+    alice.accept_contact(&bob);
+    let before = alice.host.clone();
+
+    assert!(matches!(
+        alice.encrypt(&bob, b"no session"),
+        Err(MessageOperationError::ProtocolState(
+            ProtocolStateError::NoSession
+        ))
+    ));
+    assert_eq!(alice.host.snapshot_bytes(), before.snapshot_bytes());
 }
 
 #[test]
@@ -328,162 +266,31 @@ fn contact_can_be_blocked_and_unblocked_without_changing_verified_trust() {
 
 #[test]
 fn blocked_accepted_contact_refuses_outgoing_user_message() {
-    let setup = setup();
     let engine = ProtocolStateEngine::new();
-    let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine);
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
+    let mut fixture = ProtocolFixture::new([0x71; 32]);
+    let bob = accepted_contact_identity().identity_key;
+    let blocked = engine
+        .block_contact(&fixture.alice_store.snapshot(), bob)
         .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .block_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
+    fixture.alice_store.commit(blocked.state_updates).unwrap();
 
     assert!(matches!(
         engine.encrypt_message_with_transport_binding(
-            &snapshot,
-            session_key(),
-            outbound(&setup, &sender),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
+            &mut ChaCha20Rng::from_seed([0x72; 32]),
+            &fixture.alice_store.snapshot(),
+            fixture.outbound(1, b"blocked"),
+            &fixture.binding,
         ),
         Err(ProtocolStateError::BlockedContact)
     ));
 
-    snapshot
-        .apply_all(
-            engine
-                .unblock_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
+    let unblocked = engine
+        .unblock_contact(&fixture.alice_store.snapshot(), bob)
         .unwrap();
-    assert!(
-        engine
-            .encrypt_message_with_transport_binding(
-                &snapshot,
-                session_key(),
-                outbound(&setup, &sender),
-                &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-            )
-            .is_ok()
-    );
-}
-
-#[test]
-fn accepted_contact_refuses_outgoing_message_for_stale_recipient_key() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine);
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let mut plaintext = outbound(&setup, &sender);
-    plaintext.recipient_public_key = setup.bob_rotated_discovery.prekey_bundle_lookup_key();
-
-    assert!(matches!(
-        engine.encrypt_message_with_transport_binding(
-            &snapshot,
-            session_key(),
-            plaintext,
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        ),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
-    ));
-}
-
-#[test]
-fn outbound_message_binds_session_to_one_contact_identity() {
-    let setup = setup();
-    let other_contact = alternate_contact_identity();
-    let engine = ProtocolStateEngine::new();
-    let sender = sender_identity();
-    let mut snapshot = snapshot_with_session(&engine);
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let first_send = engine
-        .encrypt_message_with_transport_binding(
-            &snapshot,
-            session_key(),
-            outbound(&setup, &sender),
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        )
-        .unwrap();
-    snapshot.apply_all(first_send.state_updates).unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, other_contact)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, other_contact.identity_key)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let mut plaintext = outbound(&setup, &sender);
-    plaintext.contact_identity_key = other_contact.identity_key;
-    plaintext.recipient_public_key = other_contact.discovery_key.prekey_bundle_lookup_key();
-
-    assert!(matches!(
-        engine.encrypt_message_with_transport_binding(
-            &snapshot,
-            session_key(),
-            plaintext,
-            &roost_core::TransportBinding::new(b"test-route".to_vec()).unwrap(),
-        ),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
-    ));
+    fixture.alice_store.commit(unblocked.state_updates).unwrap();
+    let sent = fixture.encrypt_from_alice(&engine, 2, b"unblocked");
+    let received = fixture.decrypt_for_bob(&engine, &sent, 0x73);
+    assert_eq!(received.plaintext.as_slice(), b"unblocked");
 }
 
 #[test]

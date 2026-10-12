@@ -5,12 +5,14 @@ use crate::error::RoostError;
 use crate::protocol::IdentityKey;
 use crate::records::fixed_32;
 use crate::time::{millis_from_secs, time_from_millis};
+use roost_core::InboundSenderCertificateValidation;
 use roost_protocol::{
     DomainSigningKey as ProtocolDomainSigningKey,
     DomainSigningKeyStatus as ProtocolDomainSigningKeyStatus,
     RevocationState as ProtocolRevocationState, SenderCertificateIdentityKey,
     SenderCertificateValidationInput,
 };
+use std::time::SystemTime;
 
 /// Trust status for a domain-signing key.
 #[derive(Clone, Copy, uniffi::Enum)]
@@ -135,6 +137,40 @@ impl DomainSigningKeyStatus {
         match self {
             Self::Trusted => ProtocolDomainSigningKeyStatus::Trusted,
             Self::Untrusted => ProtocolDomainSigningKeyStatus::Untrusted,
+        }
+    }
+}
+
+/// A host's certificate validation inputs, converted once so an operation can borrow them.
+pub(crate) struct CoreCertificateValidation<'a> {
+    source: &'a SenderCertificateValidation,
+    domain_signing_keys: Vec<ProtocolDomainSigningKey<'a>>,
+    revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
+    reference_time: SystemTime,
+}
+
+impl<'a> CoreCertificateValidation<'a> {
+    pub(crate) fn new(source: &'a SenderCertificateValidation) -> Result<Self, RoostError> {
+        Ok(Self {
+            source,
+            domain_signing_keys: domain_signing_keys_to_protocol(&source.domain_signing_keys)?,
+            revoked_identity_keys: revoked_identity_keys_to_protocol(&source.revocation_state)?,
+            reference_time: time_from_millis(
+                source.reference_time_millis,
+                "reference_time_millis",
+            )?,
+        })
+    }
+
+    pub(crate) fn to_core(&self) -> InboundSenderCertificateValidation<'_> {
+        InboundSenderCertificateValidation {
+            domain_signing_keys: &self.domain_signing_keys,
+            expected_relay_domain: &self.source.expected_relay_domain,
+            revocation_state: revocation_state_to_protocol(
+                &self.source.revocation_state,
+                &self.revoked_identity_keys,
+            ),
+            reference_time: self.reference_time,
         }
     }
 }

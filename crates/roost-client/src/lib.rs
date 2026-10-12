@@ -24,7 +24,7 @@ pub use certificate::{
 };
 pub use context::{
     ContactBlock, Contacts, ContextConfiguration, IdentityContext, Messaging,
-    SessionAcceptanceResult, SessionInitiationResult,
+    SessionAcceptanceOutcome, SessionAcceptanceResult, SessionInitiationResult,
 };
 pub use error::RoostError;
 pub use message::{
@@ -49,7 +49,7 @@ pub use protocol::{
 };
 pub use records::{
     Identity, InboxRotation, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
-    PublicationBundle,
+    PublicationBundle, SessionId,
 };
 pub use storage::SecureStorage;
 pub use transport_binding::{PreKeySelection, TransportBinding};

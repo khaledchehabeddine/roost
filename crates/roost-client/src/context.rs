@@ -1,10 +1,7 @@
 //! The identity context and the messaging and contacts groups that share it.
 
 use crate::SecureStorage;
-use crate::certificate::{
-    SenderCertificateValidation, domain_signing_keys_to_protocol, revocation_state_to_protocol,
-    revoked_identity_keys_to_protocol,
-};
+use crate::certificate::{CoreCertificateValidation, SenderCertificateValidation};
 use crate::error::RoostError;
 use crate::message::{Message, SenderIdentityMaterial};
 use crate::operation::{
@@ -13,23 +10,20 @@ use crate::operation::{
     UnfinishedOperation,
 };
 use crate::protocol::{
-    AcknowledgmentOutcome, ContactStateChange, IdentityKey, InboundMessageOutcome,
+    AcknowledgmentOutcome, ContactIdentity, ContactStateChange, IdentityKey, InboundMessageOutcome,
     OutboundMessageResult, ProtocolStateEntry, ProtocolStateUpdate, protocol_key,
     snapshot_input_from_entries, updates_from_core,
 };
 use crate::records::{
-    Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle, fixed_16,
-    fixed_32,
+    Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle, SessionId,
+    fixed_16, fixed_32,
 };
 use crate::storage::SecureStorageAdapter;
-use crate::time::time_from_millis;
 use crate::transport_binding::{PreKeySelection, TransportBinding};
 use roost_core::{
-    AcknowledgmentProcessing, InboundSenderCertificateValidation, KeyStore as CoreKeyStore,
-    MessageDecryption, MessageEncryption,
+    AcknowledgmentProcessing, KeyStore as CoreKeyStore, MessageDecryption, MessageEncryption,
     PreparedKeyStoreOperation as CorePreparedKeyStoreOperation,
-    ProtocolStateEngine as CoreProtocolStateEngine, ProtocolStateKey, SessionAcceptance,
-    SessionInitiation,
+    ProtocolStateEngine as CoreProtocolStateEngine, SessionAcceptance, SessionInitiation,
 };
 use roost_protocol::MessageId;
 use std::sync::Arc;
@@ -148,7 +142,13 @@ pub struct IdentityContext {
 /// Session, Message, acknowledgment, and retry operations for one [`IdentityContext`].
 ///
 /// The host supplies snapshots and exact Transport Binding bytes, then commits returned updates
-/// together with their associated application effects.
+/// together with their associated application effects. Roost picks the Session for each Message
+/// and finds it again from the SessionID each Message carries, so the host never chooses one.
+///
+/// The SessionID is sealed to the recipient's Discovery Key, so anyone who gets that Discovery Key
+/// can read it from recorded Messages and tell which of them belong to the same Session. Until the
+/// recipient replies, every Message on a new Session also shows the transport which of the
+/// recipient's prekeys started it, so the transport can tell those Messages belong together.
 #[derive(uniffi::Object)]
 pub struct Messaging {
     pub(crate) inner: Arc<CoreKeyStore>,
@@ -189,6 +189,8 @@ pub struct ContextConfiguration {
 /// Result of starting a Session through X3DH.
 #[derive(uniffi::Record)]
 pub struct SessionInitiationResult {
+    /// The Session both peers derive from the handshake.
+    pub session_id: SessionId,
     /// X3DH first Message to send after host commit.
     pub message: Message,
     /// Opaque protocol-state updates to commit.
@@ -208,9 +210,35 @@ pub struct ContactBlock {
     pub rotation: Option<InboxRotation>,
 }
 
-/// Result of accepting a Session through X3DH.
+/// The result of receiving a first Message that names a Session this identity doesn't have.
+#[derive(uniffi::Enum)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "UniFFI enum payloads are generated records, which can't be boxed"
+)]
+pub enum SessionAcceptanceOutcome {
+    /// The sender proved its identity and the Session was created.
+    Accepted {
+        /// Payload for this outcome.
+        result: SessionAcceptanceResult,
+    },
+    /// An already accepted encrypted Message. No effects are produced.
+    Duplicate,
+    /// The Message names a Session this identity deleted, so nothing was created.
+    DeletedSession,
+}
+
+/// A Session accepted from an authenticated first Message.
 #[derive(uniffi::Record)]
 pub struct SessionAcceptanceResult {
+    /// The Session both peers derive from the handshake.
+    pub session_id: SessionId,
+    /// The sender's Identity Key and the Discovery Key it shared for replies.
+    pub contact: ContactIdentity,
+    /// Authenticated Message identifier. Always 16 bytes.
+    pub message_id: Vec<u8>,
+    /// Authenticated sender timestamp in milliseconds.
+    pub sent_at_millis: u64,
     /// Decrypted first-message plaintext.
     pub plaintext: Vec<u8>,
     /// Sender identity material decoded after authentication.
@@ -660,21 +688,24 @@ impl IdentityContext {
 
 #[uniffi::export]
 impl Messaging {
-    /// Starts a new Session while authenticating a caller-owned Transport Binding.
+    /// Starts a Session with a contact while authenticating a caller-owned Transport Binding.
     ///
-    /// Commit the returned state updates atomically with the returned Message and retain the exact
-    /// binding for transport retry. Roost does not interpret, transmit, or store the binding.
+    /// Pass every protocol-state entry the host holds for this identity. Commit the returned state
+    /// updates atomically with the returned Message and retain the exact binding for transport
+    /// retry. Until the contact replies, every Message on the new Session carries the handshake,
+    /// so any of them can start the Session if an earlier one is lost. Roost does not interpret,
+    /// transmit, or store the binding.
     ///
     /// # Errors
-    /// - [`RoostError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
-    ///   fails.
+    /// - [`RoostError::AuthenticationFailed`] if the publication's signatures don't bind its
+    ///   Discovery Key and the responder's identity in both directions.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
     /// - [`RoostError::InvalidData`] if key, Message, certificate, prekey, or Transport Binding
     ///   inputs are malformed.
     /// - [`RoostError::NotFound`] if local Identity or Discovery Key material is missing.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::ProtocolStateFault`] if install state cannot be encoded.
+    /// - [`RoostError::ProtocolStateFault`] if stored Session state is malformed.
     /// - [`RoostError::Storage`] on platform storage failure.
     /// - [`RoostError::UnsupportedVersion`] if a prekey bundle, Message, or stored key version is
     ///   unsupported.
@@ -684,10 +715,12 @@ impl Messaging {
     )]
     pub fn initiate_session(
         &self,
-        session_key: Vec<u8>,
+        snapshot: Vec<ProtocolStateEntry>,
         responder_identity: Identity,
         responder_publication: PublicationBundle,
         responder_one_time_prekey: Option<PublicOneTimePreKey>,
+        message_id: Vec<u8>,
+        sent_at_millis: u64,
         sender_certificate: Vec<u8>,
         sender_signature: Vec<u8>,
         plaintext: Vec<u8>,
@@ -696,15 +729,18 @@ impl Messaging {
         let sender_certificate = Zeroizing::new(sender_certificate);
         let sender_signature = Zeroizing::new(sender_signature);
         let plaintext = Zeroizing::new(plaintext);
+        let snapshot = snapshot_input_from_entries(snapshot)?;
         let transport_binding = transport_binding.into_core()?;
         let result = self.inner.initiate_session_with_transport_binding(
             SessionInitiation {
-                session_key: ProtocolStateKey::from_bytes(session_key)?,
+                snapshot: &snapshot,
                 responder_identity_key: responder_identity.to_core()?,
                 responder_discovery_to_identity: responder_publication
                     .discovery_to_identity_signature()?,
                 responder_prekey_bundle: responder_publication
                     .to_prekey_bundle(responder_one_time_prekey)?,
+                message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
+                sent_at_millis,
                 sender_certificate: &sender_certificate,
                 sender_signature: &sender_signature,
                 plaintext: &plaintext,
@@ -712,112 +748,81 @@ impl Messaging {
             &transport_binding,
         )?;
         Ok(SessionInitiationResult {
+            session_id: SessionId::from_core(result.session_id),
             message: Message::from_core(result.message),
             state_updates: updates_from_core(result.state_updates),
         })
     }
 
-    /// Reads who sent an X3DH first Message while authenticating its Transport Binding.
+    /// Prepares acceptance of the Session a first Message starts, while authenticating its
+    /// Transport Binding.
     ///
-    /// This operation consumes no one-time prekey. Pass the same binding and prekey selection to
-    /// [`Self::prepare_accept_session`] after deriving the host Session key.
-    ///
-    /// # Errors
-    /// - [`RoostError::AuthenticationFailed`] if the frame is not sealed to this Discovery Key
-    ///   and Transport Binding, the selected one-time-prekey identifier does not match the
-    ///   Message, or the named identity's binding signature does not verify.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
-    /// - [`RoostError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`RoostError::InternalError`] on storage lock poisoning.
-    /// - [`RoostError::InvalidData`] if the Message or Transport Binding is malformed.
-    /// - [`RoostError::NotFound`] if local Discovery Key or referenced signed-prekey material is
-    ///   missing.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::Storage`] on platform storage failure.
-    /// - [`RoostError::UnsupportedVersion`] if the Message or stored prekey version is unsupported.
-    pub fn initiator_identity_hint(
-        &self,
-        message: Message,
-        transport_binding: TransportBinding,
-        prekey_selection: PreKeySelection,
-    ) -> Result<Identity, RoostError> {
-        let core_message = message.to_core()?;
-        let transport_binding = transport_binding.into_core()?;
-        let bundle = self.inner.initiator_identity_hint_with_transport_binding(
-            &core_message,
-            &transport_binding,
-            prekey_selection.to_core(),
-        )?;
-        Ok(Identity::from_public(bundle))
-    }
-
-    /// Prepares responder-side Session acceptance while authenticating a Transport Binding.
-    ///
+    /// Call this only after [`Self::decrypt_message`] reported an unknown Session for a Message
+    /// whose `prekey_reference` is set, and pass every protocol-state entry the host holds for
+    /// this identity. The sender must prove its identity, and its certificate must validate.
     /// For a retained superseded signed prekey, the host must first validate that its transport
-    /// accepted the item before supersession. Reserve the operation, atomically persist the returned
-    /// state updates and operation identifier, then finalize SecureStorage.
+    /// accepted the item before supersession. Reserve the operation, atomically persist any
+    /// returned state updates and the operation identifier, then finalize SecureStorage.
     ///
     /// # Errors
-    /// - [`RoostError::AuthenticationFailed`] if X3DH, sealed-frame, sender-proof, or AEAD work
-    ///   fails.
+    /// - [`RoostError::AuthenticationFailed`] if the handshake, sender proof, or decryption fails.
+    /// - [`RoostError::CertificateRejected`] if sender-certificate validation rejects the sender.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InboxRotationRequired`] after backup restore and before inbox rotation.
     /// - [`RoostError::InternalError`] on storage lock poisoning or operation identifier
     ///   generation failure.
     /// - [`RoostError::InvalidData`] if the Message, key, prekey, or Transport Binding inputs are
-    ///   malformed.
+    ///   malformed, or the Message names a Session this identity already has.
     /// - [`RoostError::NotFound`] if required local Identity, Discovery Key, signed-prekey, or
     ///   one-time-prekey material is missing.
     /// - [`RoostError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::ProtocolStateFault`] if install state cannot be encoded.
+    /// - [`RoostError::ProtocolStateFault`] if stored protocol state is missing or malformed.
     /// - [`RoostError::Storage`] on platform storage failure.
     /// - [`RoostError::UnsupportedVersion`] if the Message, stored prekey, or protocol-state
     ///   version is unsupported.
     pub fn prepare_accept_session(
         &self,
-        session_key: Vec<u8>,
-        initiator_identity: Option<Identity>,
+        snapshot: Vec<ProtocolStateEntry>,
+        deduplication_key: Vec<u8>,
         message: Message,
+        sender_certificate_validation: SenderCertificateValidation,
         transport_binding: TransportBinding,
         prekey_selection: PreKeySelection,
     ) -> Result<PreparedSessionAcceptance, RoostError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
         let core_message = message.to_core()?;
-        let initiator_identity_key = initiator_identity
-            .map(|identity| identity.to_core())
-            .transpose()?;
+        let validation = CoreCertificateValidation::new(&sender_certificate_validation)?;
         let transport_binding = transport_binding.into_core()?;
         let prepared = self.inner.prepare_accept_session_with_transport_binding(
             SessionAcceptance {
-                session_key: ProtocolStateKey::from_bytes(session_key)?,
-                initiator_identity_key,
+                snapshot: &snapshot,
+                deduplication_key: protocol_key(deduplication_key)?,
                 message: &core_message,
+                sender_certificate_validation: validation.to_core(),
             },
             &transport_binding,
             prekey_selection.to_core(),
         )?;
-        let (operation_id, acceptance) = convert_prepared(&self.inner, prepared, |result| {
-            let state_updates = updates_from_core(result.state_updates);
-            Ok(SessionAcceptanceResult {
-                plaintext: result.plaintext.to_vec(),
-                sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                state_updates,
-            })
-        })?;
+        let (operation_id, acceptance) =
+            convert_prepared(&self.inner, prepared, SessionAcceptanceOutcome::from_core)?;
         Ok(PreparedSessionAcceptance {
             operation_id,
             acceptance,
         })
     }
 
-    /// Encrypts an established-session Message while authenticating a Transport Binding.
+    /// Encrypts a Message to a contact while authenticating a Transport Binding.
     ///
-    /// Commit the returned state updates atomically with the returned Message and retain the exact
-    /// binding for retransmission.
+    /// Pass every protocol-state entry the host holds for this identity. Roost sends on the
+    /// Session that most recently delivered a Message from the contact, to the contact's current
+    /// Discovery Key. Commit the returned state updates atomically with the returned Message and
+    /// retain the exact binding for retransmission.
     ///
     /// # Errors
     /// - [`RoostError::ContactNotAccepted`] if the peer contact is still pending.
-    /// - [`RoostError::TerminalSessionRecovery`] if the Session requires replacement.
+    /// - [`RoostError::TerminalSessionRecovery`] if no live Session exists with the contact, so a
+    ///   fresh handshake must start one.
     /// - [`RoostError::BlockedContact`] if the contact is locally blocked.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
     /// - [`RoostError::InvalidData`] if Message identifiers, keys, Message fields, the Transport
@@ -834,10 +839,8 @@ impl Messaging {
     pub fn encrypt_message(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
-        session_key: Vec<u8>,
         message_id: Vec<u8>,
         contact_identity_key: IdentityKey,
-        recipient_public_key: Vec<u8>,
         sent_at_millis: u64,
         sender_certificate: Vec<u8>,
         sender_signature: Vec<u8>,
@@ -853,10 +856,8 @@ impl Messaging {
             self.inner.encrypt_message_with_transport_binding(
                 MessageEncryption {
                     snapshot: &snapshot,
-                    session_key: protocol_key(session_key)?,
                     message_id: MessageId::from_bytes(fixed_16(&message_id, "message id")?),
                     contact_identity_key: contact_identity_key.to_core()?,
-                    recipient_public_key: fixed_32(&recipient_public_key, "recipient public key")?,
                     sent_at_millis,
                     sender_certificate: &sender_certificate,
                     sender_signature: &sender_signature,
@@ -867,16 +868,20 @@ impl Messaging {
         ))
     }
 
-    /// Decrypts an established-session Message while authenticating its Transport Binding and the
-    /// binding used for the returned acknowledgment.
+    /// Decrypts a Message on the Session it names, while authenticating its Transport Binding
+    /// and the binding used for the returned acknowledgment.
     ///
-    /// Unique Messages require `sender_certificate_validation`; duplicates can return before
-    /// validation because they surface no plaintext. Retain `acknowledgment_transport_binding`
-    /// with any returned acknowledgment Message.
+    /// Pass every protocol-state entry the host holds for this identity. A Message naming a
+    /// Session this identity doesn't have returns
+    /// [`InboundMessageOutcome::UnknownSession`](crate::InboundMessageOutcome::UnknownSession)
+    /// and changes nothing; if its `prekey_reference` is set, pass it to
+    /// [`Self::prepare_accept_session`]. Unique Messages require `sender_certificate_validation`;
+    /// duplicates can return before validation because they surface no plaintext. Retain
+    /// `acknowledgment_transport_binding` with any returned acknowledgment Message.
     ///
     /// # Errors
-    /// - [`RoostError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
-    ///   authentication fails.
+    /// - [`RoostError::AuthenticationFailed`] if the Message fails to decrypt or its sender fails to
+    ///   authenticate.
     /// - [`RoostError::CertificateRejected`] if sender-certificate validation rejects the sender.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
@@ -895,7 +900,6 @@ impl Messaging {
     pub fn decrypt_message(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
-        session_key: Vec<u8>,
         deduplication_key: Vec<u8>,
         message: Message,
         acknowledgment_id: Vec<u8>,
@@ -913,38 +917,15 @@ impl Messaging {
         let message = message.to_core()?;
         let message_transport_binding = message_transport_binding.into_core()?;
         let acknowledgment_transport_binding = acknowledgment_transport_binding.into_core()?;
-
-        let validation_storage = if let Some(validation) = &sender_certificate_validation {
-            Some((
-                domain_signing_keys_to_protocol(&validation.domain_signing_keys)?,
-                revoked_identity_keys_to_protocol(&validation.revocation_state)?,
-                time_from_millis(validation.reference_time_millis, "reference_time_millis")?,
-            ))
-        } else {
-            None
-        };
-        let core_validation = sender_certificate_validation
+        let validation = sender_certificate_validation
             .as_ref()
-            .zip(validation_storage.as_ref())
-            .map(
-                |(validation, (domain_signing_keys, revoked_identity_keys, reference_time))| {
-                    InboundSenderCertificateValidation {
-                        domain_signing_keys,
-                        expected_relay_domain: &validation.expected_relay_domain,
-                        revocation_state: revocation_state_to_protocol(
-                            &validation.revocation_state,
-                            revoked_identity_keys,
-                        ),
-                        reference_time: *reference_time,
-                    }
-                },
-            );
+            .map(CoreCertificateValidation::new)
+            .transpose()?;
 
         Ok(InboundMessageOutcome::from_core(
             self.inner.decrypt_message_with_transport_bindings(
                 MessageDecryption {
                     snapshot: &snapshot,
-                    session_key: protocol_key(session_key)?,
                     deduplication_key: protocol_key(deduplication_key)?,
                     message: &message,
                     acknowledgment_id: MessageId::from_bytes(fixed_16(
@@ -958,7 +939,9 @@ impl Messaging {
                     acknowledgment_sent_at_millis,
                     acknowledgment_sender_certificate: &acknowledgment_sender_certificate,
                     acknowledgment_sender_signature: &acknowledgment_sender_signature,
-                    sender_certificate_validation: core_validation,
+                    sender_certificate_validation: validation
+                        .as_ref()
+                        .map(CoreCertificateValidation::to_core),
                 },
                 &message_transport_binding,
                 &acknowledgment_transport_binding,
@@ -966,13 +949,15 @@ impl Messaging {
         ))
     }
 
-    /// Processes an encrypted acknowledgment while authenticating its Transport Binding.
+    /// Processes an encrypted acknowledgment on the Session it names, while authenticating its
+    /// Transport Binding.
     ///
-    /// Commit returned updates before clearing local transport retry state.
+    /// Pass every protocol-state entry the host holds for this identity. Commit returned updates
+    /// before clearing local transport retry state.
     ///
     /// # Errors
-    /// - [`RoostError::AuthenticationFailed`] if sealed-sender, ratchet, transcript, or AEAD
-    ///   authentication fails.
+    /// - [`RoostError::AuthenticationFailed`] if the acknowledgment fails to decrypt or its sender
+    ///   fails to authenticate.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::InternalError`] on storage lock poisoning.
     /// - [`RoostError::InvalidData`] if Message fields or the Transport Binding are malformed.
@@ -985,7 +970,6 @@ impl Messaging {
     pub fn process_acknowledgment(
         &self,
         snapshot: Vec<ProtocolStateEntry>,
-        session_key: Vec<u8>,
         message: Message,
         transport_binding: TransportBinding,
     ) -> Result<AcknowledgmentOutcome, RoostError> {
@@ -996,7 +980,6 @@ impl Messaging {
             self.inner.process_acknowledgment_with_transport_binding(
                 AcknowledgmentProcessing {
                     snapshot: &snapshot,
-                    session_key: protocol_key(session_key)?,
                     message: &message,
                 },
                 &transport_binding,
@@ -1050,6 +1033,26 @@ impl Contacts {
         Ok(PreparedContactBlock {
             operation_id,
             block,
+        })
+    }
+}
+
+impl SessionAcceptanceOutcome {
+    fn from_core(value: roost_core::SessionAcceptanceOutcome) -> Result<Self, RoostError> {
+        Ok(match value {
+            roost_core::SessionAcceptanceOutcome::Accepted(result) => Self::Accepted {
+                result: SessionAcceptanceResult {
+                    session_id: SessionId::from_core(result.session_id),
+                    contact: ContactIdentity::from_core(result.contact)?,
+                    message_id: result.message_id.as_bytes().to_vec(),
+                    sent_at_millis: result.sent_at_millis,
+                    plaintext: result.plaintext.to_vec(),
+                    sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
+                    state_updates: updates_from_core(result.state_updates),
+                },
+            },
+            roost_core::SessionAcceptanceOutcome::Duplicate => Self::Duplicate,
+            roost_core::SessionAcceptanceOutcome::DeletedSession => Self::DeletedSession,
         })
     }
 }
@@ -1173,31 +1176,6 @@ impl IdentityContext {
         })?;
         self.complete_prepared(prepared.operation_id, signed_prekey)
     }
-
-    pub(crate) fn accept_session(
-        &self,
-        session_key: Vec<u8>,
-        initiator_identity: Option<Identity>,
-        message: Message,
-    ) -> Result<SessionAcceptanceResult, RoostError> {
-        let selection = crate::PreKeySelection {
-            signed_prekey_id: self.current_publication()?.signed_prekey.id,
-            one_time_prekey_id: message
-                .prekey_reference
-                .as_ref()
-                .and_then(|p| p.one_time_prekey_id),
-        };
-        let prepared = self.messaging().prepare_accept_session(
-            session_key,
-            initiator_identity,
-            message,
-            crate::TransportBinding {
-                bytes: b"test-route".to_vec(),
-            },
-            selection,
-        )?;
-        self.complete_prepared(prepared.operation_id, prepared.acceptance)
-    }
 }
 
 #[cfg(test)]
@@ -1206,10 +1184,7 @@ mod tests {
     use crate::storage::MemoryStorage;
     use crate::{
         RoostError, SecureStorage,
-        protocol::{
-            ContactDiscoveryKey, ContactIdentity, IdentityKey, ProtocolStateEntry,
-            ProtocolStateKind, ProtocolStateUpdate,
-        },
+        protocol::ProtocolStateKind,
         records::{
             Identity as FfiIdentity, PublicDiscoveryKey as FfiPublicDiscoveryKey,
             PublicOneTimePreKey as FfiPublicOneTimePreKey,
@@ -1522,29 +1497,9 @@ mod tests {
         assert_eq!(bundle.epoch, epoch);
     }
 
-    fn identity_key(identity: &FfiIdentity) -> IdentityKey {
-        identity.key.clone()
-    }
-
     fn current_discovery_key(store: &IdentityContext) -> FfiPublicDiscoveryKey {
         FfiPublicDiscoveryKey::from_core(store.inner.current_public_discovery_key().unwrap())
             .unwrap()
-    }
-
-    fn contact_identity(
-        identity: &FfiIdentity,
-        publication: &FfiPublicationBundle,
-    ) -> ContactIdentity {
-        ContactIdentity {
-            identity_key: identity_key(identity),
-            discovery_key: ContactDiscoveryKey {
-                x25519_public_key: publication.discovery_key.public_key.clone(),
-                ed25519_verifying_key: publication.discovery_key.verifying_key.clone(),
-                epoch: publication.discovery_key.epoch,
-                created_at_millis: publication.discovery_key.created_at_millis,
-                identity_signature: publication.discovery_key.signature.clone(),
-            },
-        }
     }
 
     fn same_protocol_state_kind(left: ProtocolStateKind, right: ProtocolStateKind) -> bool {
@@ -1568,6 +1523,9 @@ mod tests {
             ) | (
                 ProtocolStateKind::LocalInboxAuthorization,
                 ProtocolStateKind::LocalInboxAuthorization
+            ) | (
+                ProtocolStateKind::PeerSessions,
+                ProtocolStateKind::PeerSessions
             )
         )
     }
@@ -1576,28 +1534,13 @@ mod tests {
         assert!(same_protocol_state_kind(actual, expected));
     }
 
-    fn apply_updates(entries: &mut Vec<ProtocolStateEntry>, updates: Vec<ProtocolStateUpdate>) {
-        for update in updates {
-            entries.retain(|entry| {
-                !same_protocol_state_kind(entry.kind, update.kind) || entry.key != update.key
-            });
-            if let Some(blob) = update.blob {
-                entries.push(ProtocolStateEntry {
-                    kind: update.kind,
-                    key: update.key,
-                    blob,
-                });
-            }
-        }
-    }
-
     #[test]
     fn wipe_returns_only_active_protocol_state_kinds() {
         let engine = IdentityContext::new(Arc::new(MemoryStorage::default())).messaging();
 
         let updates = engine.wipe(Vec::new(), vec![0x44; 16]).unwrap();
 
-        assert_eq!(updates.len(), 6);
+        assert_eq!(updates.len(), 7);
         assert_protocol_state_kind(updates[0].kind, ProtocolStateKind::RatchetSession);
         assert_protocol_state_kind(updates[1].kind, ProtocolStateKind::DeduplicationSet);
         assert_protocol_state_kind(updates[2].kind, ProtocolStateKind::PendingAcknowledgments);
@@ -1606,18 +1549,8 @@ mod tests {
         // stale bearer secret behind with nothing left that uses it.
         assert_protocol_state_kind(updates[4].kind, ProtocolStateKind::PeerInboxAuthorization);
         assert_protocol_state_kind(updates[5].kind, ProtocolStateKind::LocalInboxAuthorization);
+        assert_protocol_state_kind(updates[6].kind, ProtocolStateKind::PeerSessions);
         assert!(updates.iter().all(|update| update.blob.is_none()));
-    }
-
-    fn copy_snapshot(entries: &[ProtocolStateEntry]) -> Vec<ProtocolStateEntry> {
-        entries
-            .iter()
-            .map(|entry| ProtocolStateEntry {
-                kind: entry.kind,
-                key: entry.key.clone(),
-                blob: entry.blob.clone(),
-            })
-            .collect()
     }
 
     #[test]
@@ -1701,231 +1634,5 @@ mod tests {
             assert_one_time_prekey_record(bundle, discovery.epoch);
         }
         assert!(store.replenish_one_time_prekeys().unwrap().is_empty());
-    }
-
-    #[test]
-    fn session_establishment_round_trips_first_message_through_ffi_records() {
-        let alice = key_store();
-        let bob = key_store();
-        let alice_identity = alice.generate_identity().unwrap();
-        let bob_identity = bob.generate_identity().unwrap();
-        bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.current_publication().unwrap();
-        let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
-
-        let session_key = vec![0x44; 16];
-        let initiation = alice
-            .messaging()
-            .initiate_session(
-                session_key.clone(),
-                bob_identity,
-                bob_publication,
-                Some(bob_one_time_prekey),
-                b"alice certificate".to_vec(),
-                b"alice signature".to_vec(),
-                b"hello bob".to_vec(),
-                crate::TransportBinding {
-                    bytes: b"test-route".to_vec(),
-                },
-            )
-            .unwrap();
-
-        assert!(initiation.message.prekey_reference.is_some());
-        assert_eq!(initiation.state_updates.len(), 2);
-
-        let acceptance = bob
-            .accept_session(session_key, Some(alice_identity), initiation.message)
-            .unwrap();
-
-        assert_eq!(acceptance.plaintext, b"hello bob".to_vec());
-        assert_eq!(
-            acceptance.sender_identity.certificate,
-            b"alice certificate".to_vec()
-        );
-        assert_eq!(acceptance.state_updates.len(), 2);
-    }
-
-    #[test]
-    fn encrypt_message_returns_message_and_pending_state_update() {
-        let alice = key_store();
-        let bob = key_store();
-        let alice_identity = alice.generate_identity().unwrap();
-        let bob_identity = bob.generate_identity().unwrap();
-        bob.rotate_signed_prekey_now().unwrap();
-        let bob_publication = bob.current_publication().unwrap();
-        let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
-        let session_key = vec![0x55; 16];
-        let initiation = alice
-            .messaging()
-            .initiate_session(
-                session_key.clone(),
-                bob_identity.clone(),
-                bob_publication.clone(),
-                Some(bob_one_time_prekey),
-                b"alice certificate".to_vec(),
-                b"alice signature".to_vec(),
-                b"hello bob".to_vec(),
-                crate::TransportBinding {
-                    bytes: b"test-route".to_vec(),
-                },
-            )
-            .unwrap();
-        let acceptance = bob
-            .accept_session(
-                session_key.clone(),
-                Some(alice_identity),
-                initiation.message.clone(),
-            )
-            .unwrap();
-
-        let engine = IdentityContext::new(Arc::new(MemoryStorage::default())).messaging();
-        let mut alice_snapshot = Vec::new();
-        apply_updates(&mut alice_snapshot, initiation.state_updates);
-        let change = alice
-            .contacts()
-            .record_contact(
-                Vec::new(),
-                contact_identity(&bob_identity, &bob_publication),
-            )
-            .unwrap();
-        apply_updates(&mut alice_snapshot, change.state_updates);
-        let accepted = alice
-            .contacts()
-            .accept_contact(copy_snapshot(&alice_snapshot), identity_key(&bob_identity))
-            .unwrap();
-        apply_updates(&mut alice_snapshot, accepted.state_updates);
-
-        let outbound = alice
-            .messaging()
-            .encrypt_message(
-                copy_snapshot(&alice_snapshot),
-                session_key.clone(),
-                vec![0x77; 16],
-                identity_key(&bob_identity),
-                bob_publication.discovery_key.public_key,
-                42,
-                b"alice certificate".to_vec(),
-                b"alice signature".to_vec(),
-                b"follow-up".to_vec(),
-                crate::TransportBinding {
-                    bytes: b"test-route".to_vec(),
-                },
-            )
-            .unwrap();
-
-        assert_eq!(outbound.message_id, vec![0x77; 16]);
-        assert_eq!(outbound.state_updates.len(), 2);
-        apply_updates(&mut alice_snapshot, outbound.state_updates);
-        let pending = engine
-            .pending_acknowledgments(alice_snapshot, session_key)
-            .unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(acceptance.plaintext, b"hello bob".to_vec());
-    }
-
-    #[test]
-    fn decrypt_message_requires_certificate_validation_for_unique_message() {
-        let alice = key_store();
-        let bob = key_store();
-        let alice_identity = alice.generate_identity().unwrap();
-        let bob_identity = bob.generate_identity().unwrap();
-        alice.rotate_signed_prekey_now().unwrap();
-        bob.rotate_signed_prekey_now().unwrap();
-        let alice_publication = alice.current_publication().unwrap();
-        let bob_publication = bob.current_publication().unwrap();
-        let bob_one_time_prekey = bob.generate_one_time_prekeys(1).unwrap().remove(0);
-        let session_key = vec![0x66; 16];
-        let initiation = alice
-            .messaging()
-            .initiate_session(
-                session_key.clone(),
-                bob_identity.clone(),
-                bob_publication.clone(),
-                Some(bob_one_time_prekey),
-                b"alice certificate".to_vec(),
-                b"alice signature".to_vec(),
-                b"hello bob".to_vec(),
-                crate::TransportBinding {
-                    bytes: b"test-route".to_vec(),
-                },
-            )
-            .unwrap();
-        let acceptance = bob
-            .accept_session(
-                session_key.clone(),
-                Some(alice_identity.clone()),
-                initiation.message,
-            )
-            .unwrap();
-
-        let engine = IdentityContext::new(Arc::new(MemoryStorage::default())).messaging();
-        let mut alice_snapshot = Vec::new();
-        apply_updates(&mut alice_snapshot, initiation.state_updates);
-        let change = alice
-            .contacts()
-            .record_contact(
-                Vec::new(),
-                contact_identity(&bob_identity, &bob_publication),
-            )
-            .unwrap();
-        apply_updates(&mut alice_snapshot, change.state_updates);
-        let accepted = alice
-            .contacts()
-            .accept_contact(copy_snapshot(&alice_snapshot), identity_key(&bob_identity))
-            .unwrap();
-        apply_updates(&mut alice_snapshot, accepted.state_updates);
-        let outbound = alice
-            .messaging()
-            .encrypt_message(
-                alice_snapshot,
-                session_key.clone(),
-                vec![0x88; 16],
-                identity_key(&bob_identity),
-                bob_publication.discovery_key.public_key,
-                43,
-                b"alice certificate".to_vec(),
-                b"alice signature".to_vec(),
-                b"follow-up".to_vec(),
-                crate::TransportBinding {
-                    bytes: b"test-route".to_vec(),
-                },
-            )
-            .unwrap();
-
-        let mut bob_snapshot = Vec::new();
-        apply_updates(&mut bob_snapshot, acceptance.state_updates);
-        let deduplication_key = b"bob-dedup".to_vec();
-        apply_updates(
-            &mut bob_snapshot,
-            vec![
-                engine
-                    .initialize_deduplication_set(deduplication_key.clone())
-                    .unwrap(),
-            ],
-        );
-        let result = bob.messaging().decrypt_message(
-            bob_snapshot,
-            session_key,
-            deduplication_key,
-            outbound.message,
-            vec![0x99; 16],
-            alice_publication.discovery_key.public_key,
-            44,
-            b"bob certificate".to_vec(),
-            b"bob signature".to_vec(),
-            None,
-            crate::TransportBinding {
-                bytes: b"test-route".to_vec(),
-            },
-            crate::TransportBinding {
-                bytes: b"test-route".to_vec(),
-            },
-        );
-
-        match result {
-            Err(RoostError::InvalidData { .. }) => {}
-            Err(error) => panic!("expected InvalidData, got {error}"),
-            Ok(_) => panic!("expected InvalidData"),
-        }
     }
 }

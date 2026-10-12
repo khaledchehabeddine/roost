@@ -16,7 +16,6 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 const MAX_SKIP: u32 = 100;
 // Caps all cached skipped-message keys, so repeated DH steps cannot exhaust memory.
 const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
-const RATCHET_STATE_VERSION: u8 = 1;
 
 /// A Double Ratchet session state between two peers.
 ///
@@ -54,7 +53,6 @@ pub struct RatchetState {
 // Serde-friendly wire form for `to_bytes` / `from_bytes`.
 #[derive(Deserialize, Serialize)]
 struct RatchetStateWire {
-    version: u8,
     sending_ratchet_secret_key: [u8; 32],
     receiving_ratchet_public_key: Option<[u8; 32]>,
     root_key: [u8; 32],
@@ -229,7 +227,6 @@ impl RatchetState {
     /// it. Forward secrecy depends on stale states being destroyed after every state change.
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, RatchetStateError> {
         let wire = RatchetStateWire {
-            version: RATCHET_STATE_VERSION,
             sending_ratchet_secret_key: *self.sending_ratchet_key_pair.to_secret_bytes(),
             receiving_ratchet_public_key: self
                 .receiving_ratchet_public_key
@@ -280,10 +277,6 @@ impl RatchetState {
     /// Persisted blobs are treated as external input, so tampered storage cannot bypass the
     /// skipped-key cache cap.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, RatchetStateError> {
-        let version = *bytes.first().ok_or(RatchetStateError::Decode)?;
-        if version != RATCHET_STATE_VERSION {
-            return Err(RatchetStateError::UnsupportedVersion(version));
-        }
         let (wire, rest): (RatchetStateWire, &[u8]) =
             postcard::take_from_bytes(bytes).map_err(|_| RatchetStateError::Decode)?;
         if !rest.is_empty() {
@@ -509,9 +502,6 @@ pub enum RatchetStateError {
         /// Number of bytes left over.
         len: usize,
     },
-    /// Persisted ratchet state uses a format version this build does not understand.
-    #[error("unsupported ratchet state format version: {0}")]
-    UnsupportedVersion(u8),
 }
 
 fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, RatchetError> {
@@ -1048,17 +1038,6 @@ mod tests {
     }
 
     #[test]
-    fn from_bytes_rejects_unsupported_version() {
-        let (initiator, _, _, _) = setup_pair();
-        let mut bytes = initiator.to_bytes().unwrap().to_vec();
-        bytes[0] = 0xFF;
-        assert!(matches!(
-            RatchetState::from_bytes(&bytes),
-            Err(RatchetStateError::UnsupportedVersion(0xFF))
-        ));
-    }
-
-    #[test]
     fn from_bytes_rejects_trailing_bytes() {
         let (initiator, _, _, _) = setup_pair();
         let mut bytes = initiator.to_bytes().unwrap().to_vec();
@@ -1083,7 +1062,6 @@ mod tests {
     #[test]
     fn from_bytes_rejects_oversized_skipped_key_cache() {
         let oversized = RatchetStateWire {
-            version: RATCHET_STATE_VERSION,
             sending_ratchet_secret_key: [0; 32],
             receiving_ratchet_public_key: None,
             root_key: [0; 32],

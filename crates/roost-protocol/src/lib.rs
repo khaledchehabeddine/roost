@@ -17,7 +17,7 @@ pub use key_encoding::{
 pub use message::{
     MESSAGE_TRANSCRIPT_CONTEXT, MessageEncodingError, MessageId, MessageTranscriptInput,
     PayloadKind, SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN, SealedPayloadError,
-    message_transcript, pad_sealed_payload, unpad_sealed_payload,
+    SessionId, message_transcript, pad_sealed_payload, unpad_sealed_payload,
 };
 pub use sender_certificate::{
     DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, RevocationState,

@@ -1,6 +1,6 @@
 # Sender-Proof Transcript
 
-The X3DH first message proves the sender holds their Identity Key with a Diffie-Hellman proof only the recipient can check, not a signature anyone could verify. The proof covers the handshake's public keys, the prekey choice, and the sender's Identity Key, Discovery Key, and certificate, so fields copied from one handshake can't be pasted into another. Forging a first message takes the sender's Identity Key, and the cost is that whoever holds a recipient's signed prekey can forge first messages to that recipient until the prekey rotates.
+Each Message that carries the X3DH handshake proves the sender holds their Identity Key with a Diffie-Hellman proof only the recipient can check, not a signature anyone could verify. The proof covers the handshake's public keys, the prekey choice, and the sender's Identity Key, Discovery Key, and certificate, so fields copied from one handshake can't be pasted into another. Forging a first message takes the sender's Identity Key, and the cost is that whoever holds a recipient's signed prekey can forge first messages to that recipient until the prekey rotates.
 
 ## Alternatives
 

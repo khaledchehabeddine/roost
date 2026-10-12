@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use roost_client::{RoostError, SecureStorage};
 use roost_core::SecureStorage as _;
 use std::sync::Mutex;

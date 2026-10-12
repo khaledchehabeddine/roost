@@ -139,6 +139,11 @@ impl Identity {
         // Signed-pre-key rotation needs direct signing-key access inside the crate.
         &self.signing_key_pair
     }
+
+    pub(crate) fn key_pair(&self) -> &KeyPair {
+        // First Messages prove the agreement half without exporting it.
+        &self.key_pair
+    }
 }
 
 pub(crate) struct IdentityManager {

@@ -5,20 +5,18 @@ use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRu
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    DiscoveryKey, HandshakeEnvelope, Header, InitialPlaintext, OneTimePreKey, PreKeyBundle,
-    PublicIdentityKey, RatchetError, RatchetState, SignedPreKey, SigningKeyPair,
-    accept_with_associated_data, generate_discovery_key, generate_key_pair,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initial_associated_data, initiate_with_associated_data, sign_identity_key_binding,
+    DiscoveryKey, Header, OneTimePreKey, PreKeyBundle, PublicIdentityKey, RatchetError,
+    RatchetState, SignedPreKey, SigningKeyPair, accept_handshake, generate_discovery_key,
+    generate_key_pair, generate_one_time_prekey, generate_signed_prekey_for_discovery_key,
+    generate_signing_key_pair, initiate_handshake, sign_identity_key_binding,
 };
 
 const CREATED_AT: u64 = 1_700_000_000;
+const ASSOCIATED_DATA: &[u8] = b"associated data";
 const MAX_SKIP: u32 = 100;
 const SKIPPED_KEY_CAP: usize = 500;
 
 struct Setup {
-    alice_identity_key: PublicIdentityKey,
-    alice_discovery_key: DiscoveryKey,
     bob_identity_key: PublicIdentityKey,
     bob_discovery_key: DiscoveryKey,
     bob_signed_prekey: SignedPreKey,
@@ -35,10 +33,6 @@ struct TraceBatch {
 
 fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed(seed);
-    let alice_identity = generate_signing_key_pair(&mut rng);
-    let alice_identity_key = public_identity_key(&mut rng, &alice_identity);
-    let alice_discovery_key =
-        generate_discovery_key(&mut rng, &alice_identity, 1, CREATED_AT).unwrap();
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
     let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT).unwrap();
@@ -49,8 +43,6 @@ fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
         generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT);
     (
         Setup {
-            alice_identity_key,
-            alice_discovery_key,
             bob_identity_key,
             bob_discovery_key,
             bob_signed_prekey,
@@ -65,7 +57,7 @@ fn bootstrap(
     rng: &mut ChaCha20Rng,
     include_one_time_prekey: bool,
     plaintext: &[u8],
-) -> (RatchetState, RatchetState, HandshakeEnvelope) {
+) -> (RatchetState, RatchetState) {
     let one_time_prekey_bundle =
         include_one_time_prekey.then(|| setup.bob_one_time_prekey.as_ref().unwrap().public());
     let prekey_bundle = PreKeyBundle {
@@ -74,46 +66,24 @@ fn bootstrap(
         signed_prekey: setup.bob_signed_prekey.public(),
         one_time_prekey: one_time_prekey_bundle,
     };
-    let (alice, envelope) = initiate_with_associated_data(
-        rng,
-        &setup.alice_discovery_key,
-        &setup.alice_identity_key,
-        &setup.bob_identity_key,
-        &prekey_bundle,
-        initial_plaintext(plaintext),
-        &[],
-    )
-    .unwrap();
+    let (mut alice, alice_session_id, handshake) =
+        initiate_handshake(rng, &setup.bob_identity_key, &prekey_bundle).unwrap();
     let bob_one_time_prekey =
         include_one_time_prekey.then(|| setup.bob_one_time_prekey.take().unwrap());
-    let (bob, decrypted) = accept_with_associated_data(
-        rng,
-        &envelope,
-        Some(&setup.alice_identity_key),
-        &setup.bob_identity_key,
+    let (mut bob, bob_session_id) = accept_handshake(
+        &handshake,
         &setup.bob_discovery_key,
         &setup.bob_signed_prekey,
         bob_one_time_prekey,
-        &[],
     )
     .unwrap();
-    assert_eq!(decrypted.plaintext.as_slice(), plaintext);
-    (alice, bob, envelope)
-}
-
-fn associated_data(setup: &Setup) -> [u8; 36] {
-    initial_associated_data(
-        setup.bob_discovery_key.public_key(),
-        setup.bob_discovery_key.epoch(),
-    )
-}
-
-fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
-    InitialPlaintext {
-        sender_certificate: b"sender certificate",
-        sender_signature: b"sender signature",
-        plaintext,
-    }
+    assert_eq!(bob_session_id, alice_session_id);
+    let (header, ciphertext) = alice.ratchet_encrypt(plaintext, ASSOCIATED_DATA).unwrap();
+    let decrypted = bob
+        .ratchet_decrypt(rng, &ciphertext, &header, ASSOCIATED_DATA)
+        .unwrap();
+    assert_eq!(decrypted.as_slice(), plaintext);
+    (alice, bob)
 }
 
 fn public_identity_key(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> PublicIdentityKey {
@@ -207,23 +177,23 @@ fn handshake_commutativity_property() {
     runner([0xA1u8; 32], 32)
         .run(&strategy, |(seed, include_one_time_prekey, plaintext)| {
             let (mut setup, mut rng) = setup(seed);
-            let associated_data = associated_data(&setup);
-            let (mut alice, mut bob, _) =
+            let associated_data = ASSOCIATED_DATA;
+            let (mut alice, mut bob) =
                 bootstrap(&mut setup, &mut rng, include_one_time_prekey, &plaintext);
 
             let (bob_header, bob_ciphertext) = bob
-                .ratchet_encrypt(b"bob proves root", &associated_data)
+                .ratchet_encrypt(b"bob proves root", associated_data)
                 .unwrap();
             let alice_plaintext = alice
-                .ratchet_decrypt(&mut rng, &bob_ciphertext, &bob_header, &associated_data)
+                .ratchet_decrypt(&mut rng, &bob_ciphertext, &bob_header, associated_data)
                 .unwrap();
             prop_assert_eq!(alice_plaintext.as_slice(), b"bob proves root");
 
             let (alice_header, alice_ciphertext) = alice
-                .ratchet_encrypt(b"alice proves root", &associated_data)
+                .ratchet_encrypt(b"alice proves root", associated_data)
                 .unwrap();
             let bob_plaintext = bob
-                .ratchet_decrypt(&mut rng, &alice_ciphertext, &alice_header, &associated_data)
+                .ratchet_decrypt(&mut rng, &alice_ciphertext, &alice_header, associated_data)
                 .unwrap();
             prop_assert_eq!(bob_plaintext.as_slice(), b"alice proves root");
             Ok(())
@@ -240,14 +210,14 @@ fn generated_bidirectional_traces_decrypt_once_and_remain_live_property() {
     runner([0xA4u8; 32], 24)
         .run(&strategy, |(seed, batches)| {
             let (mut setup, mut rng) = setup(seed);
-            let associated_data = associated_data(&setup);
-            let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, true, b"start");
+            let associated_data = ASSOCIATED_DATA;
+            let (mut alice, mut bob) = bootstrap(&mut setup, &mut rng, true, b"start");
 
             for (batch_index, batch) in batches.iter().enumerate() {
                 if batch.from_alice {
                     let messages = encrypted_batch(
                         &mut alice,
-                        &associated_data,
+                        associated_data,
                         batch_index,
                         true,
                         batch.message_count,
@@ -257,12 +227,12 @@ fn generated_bidirectional_traces_decrypt_once_and_remain_live_property() {
                         &mut rng,
                         &messages,
                         delivery_order(batch.message_count, batch.offset, batch.reverse),
-                        &associated_data,
+                        associated_data,
                     )?;
                 } else {
                     let messages = encrypted_batch(
                         &mut bob,
-                        &associated_data,
+                        associated_data,
                         batch_index,
                         false,
                         batch.message_count,
@@ -272,23 +242,23 @@ fn generated_bidirectional_traces_decrypt_once_and_remain_live_property() {
                         &mut rng,
                         &messages,
                         delivery_order(batch.message_count, batch.offset, batch.reverse),
-                        &associated_data,
+                        associated_data,
                     )?;
                 }
             }
 
             let (alice_header, alice_ciphertext) = alice
-                .ratchet_encrypt(b"final alice", &associated_data)
+                .ratchet_encrypt(b"final alice", associated_data)
                 .unwrap();
             let bob_plaintext = bob
-                .ratchet_decrypt(&mut rng, &alice_ciphertext, &alice_header, &associated_data)
+                .ratchet_decrypt(&mut rng, &alice_ciphertext, &alice_header, associated_data)
                 .unwrap();
             prop_assert_eq!(bob_plaintext.as_slice(), b"final alice");
 
             let (bob_header, bob_ciphertext) =
-                bob.ratchet_encrypt(b"final bob", &associated_data).unwrap();
+                bob.ratchet_encrypt(b"final bob", associated_data).unwrap();
             let alice_plaintext = alice
-                .ratchet_decrypt(&mut rng, &bob_ciphertext, &bob_header, &associated_data)
+                .ratchet_decrypt(&mut rng, &bob_ciphertext, &bob_header, associated_data)
                 .unwrap();
             prop_assert_eq!(alice_plaintext.as_slice(), b"final bob");
             Ok(())
@@ -299,12 +269,12 @@ fn generated_bidirectional_traces_decrypt_once_and_remain_live_property() {
 #[test]
 fn per_chain_skip_overflow_rejects_without_advancing_state() {
     let (mut setup, mut rng) = setup([0xA5u8; 32]);
-    let associated_data = associated_data(&setup);
-    let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, true, b"start");
+    let associated_data = ASSOCIATED_DATA;
+    let (mut alice, mut bob) = bootstrap(&mut setup, &mut rng, true, b"start");
     let messages: Vec<_> = (0..=MAX_SKIP + 1)
         .map(|message| {
             alice
-                .ratchet_encrypt(format!("gap msg {message}").as_bytes(), &associated_data)
+                .ratchet_encrypt(format!("gap msg {message}").as_bytes(), associated_data)
                 .unwrap()
         })
         .collect();
@@ -314,14 +284,14 @@ fn per_chain_skip_overflow_rejects_without_advancing_state() {
         &mut rng,
         overflow_ciphertext,
         overflow_header,
-        &associated_data,
+        associated_data,
     );
 
     assert!(matches!(overflow, Err(RatchetError::MaxSkipExceeded)));
     assert_eq!(bob.skipped_key_count(), 0);
     let (first_header, first_ciphertext) = &messages[0];
     let first = bob
-        .ratchet_decrypt(&mut rng, first_ciphertext, first_header, &associated_data)
+        .ratchet_decrypt(&mut rng, first_ciphertext, first_header, associated_data)
         .unwrap();
     assert_eq!(first.as_slice(), b"gap msg 0");
 }
@@ -332,8 +302,8 @@ fn skipped_key_bound_enforcement_property() {
     runner([0xA3u8; 32], 16)
         .run(&strategy, |(seed, batches, gap)| {
             let (mut setup, mut rng) = setup(seed);
-            let associated_data = associated_data(&setup);
-            let (mut alice, mut bob, _) = bootstrap(&mut setup, &mut rng, true, b"start");
+            let associated_data = ASSOCIATED_DATA;
+            let (mut alice, mut bob) = bootstrap(&mut setup, &mut rng, true, b"start");
             let mut rejected = false;
             let mut retained = None;
 
@@ -342,7 +312,7 @@ fn skipped_key_bound_enforcement_property() {
                     .map(|message| {
                         let plaintext = format!("batch {batch} msg {message}");
                         alice
-                            .ratchet_encrypt(plaintext.as_bytes(), &associated_data)
+                            .ratchet_encrypt(plaintext.as_bytes(), associated_data)
                             .map(|(header, ciphertext)| (plaintext, header, ciphertext))
                             .unwrap()
                     })
@@ -352,13 +322,13 @@ fn skipped_key_bound_enforcement_property() {
                 }
                 let (_, header, ciphertext) = messages.last().unwrap();
                 let before = bob.skipped_key_count();
-                let result = bob.ratchet_decrypt(&mut rng, ciphertext, header, &associated_data);
+                let result = bob.ratchet_decrypt(&mut rng, ciphertext, header, associated_data);
                 if before + gap > SKIPPED_KEY_CAP {
                     prop_assert!(matches!(result, Err(RatchetError::MaxSkippedKeysExceeded)));
                     prop_assert_eq!(bob.skipped_key_count(), before);
                     let (plaintext, header, ciphertext) = retained.take().unwrap();
                     let decrypted = bob
-                        .ratchet_decrypt(&mut rng, &ciphertext, &header, &associated_data)
+                        .ratchet_decrypt(&mut rng, &ciphertext, &header, associated_data)
                         .unwrap();
                     prop_assert_eq!(decrypted.as_slice(), plaintext.as_bytes());
                     rejected = true;

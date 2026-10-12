@@ -37,7 +37,7 @@
   - Avoid: payload, packet
 - **MessageID**: The identifier of one Message within a Session.
   - Avoid: uuid, packet id
-- **Message Transcript**: The bytes a sender signs for each Message, binding it to its recipient, Session, and sender certificate.
+- **Message Transcript**: The bytes a sender signs for each Message after the handshake, binding it to its recipient, Session, and sender certificate.
   - Avoid: associated data
 - **Pending Acknowledgment**: The stored record of a sent Message still waiting for its Acknowledgment Artifact.
   - Avoid: outbox, retry cache
@@ -80,5 +80,5 @@
   - Avoid: transport envelope, route record, delivery capability
 - **Trust State**: The trust level the app records for a peer: pending, accepted but unverified, or verified by Safety Number.
   - Avoid: certificate validity, blocking
-- **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys, whose first message proves the sender holds its Identity Key.
+- **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys, whose Messages prove the sender holds its Identity Key until the peer replies.
   - Avoid: login, certificate validation

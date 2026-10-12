@@ -249,6 +249,64 @@ impl PublicationBundle {
     }
 }
 
+/// The identifier both peers derive for a Session, which addresses its state.
+///
+/// The value is 32 lowercase hexadecimal digits, so it compares and hashes as a plain string.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
+pub struct SessionId {
+    /// The identifier's canonical text.
+    pub value: String,
+}
+
+impl SessionId {
+    pub(crate) fn from_core(id: roost_core::SessionId) -> Self {
+        Self {
+            value: hex_text(id.as_bytes()),
+        }
+    }
+
+    pub(crate) fn to_core(&self) -> Result<roost_core::SessionId, RoostError> {
+        Ok(roost_core::SessionId::from_bytes(hex_identifier(
+            &self.value,
+            "session id",
+        )?))
+    }
+}
+
+/// Returns `bytes` as lowercase hexadecimal digits.
+pub(crate) fn hex_text(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Parses an identifier written as exactly `2 * N` lowercase hexadecimal digits.
+pub(crate) fn hex_identifier<const N: usize>(
+    value: &str,
+    label: &str,
+) -> Result<[u8; N], RoostError> {
+    let invalid = || RoostError::InvalidData {
+        reason: format!("{label} must be {} lowercase hex digits", N * 2),
+    };
+    let digits = value.as_bytes();
+    if digits.len() != N * 2 {
+        return Err(invalid());
+    }
+    let mut bytes = [0u8; N];
+    for (byte, &[high, low]) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
+        let high = hex_digit(high).ok_or_else(invalid)?;
+        let low = hex_digit(low).ok_or_else(invalid)?;
+        *byte = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+fn hex_digit(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _ => None,
+    }
+}
+
 pub(crate) fn fixed_32(bytes: &[u8], label: &str) -> Result<[u8; 32], RoostError> {
     bytes.try_into().map_err(|_| RoostError::InvalidData {
         reason: format!("{label} must be 32 bytes"),
