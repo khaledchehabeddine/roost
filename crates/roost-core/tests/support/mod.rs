@@ -1,5 +1,6 @@
 #![allow(dead_code, unreachable_pub)]
 
+pub mod device;
 pub mod host_identity;
 
 use roost_protocol::from_unix_secs;
@@ -8,17 +9,18 @@ use std::collections::BTreeMap;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InboundEncryptedMessage,
-    InboundMessageOutcome, InboundSenderCertificateValidation, Message, OutboundAcknowledgment,
-    OutboundPlaintext, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InboundAcknowledgmentMessage,
+    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation,
+    InboundSessionStart, LocalSender, Message, OutboundAcknowledgment, OutboundPlaintext,
+    OutboundSessionStart, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
     ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    ProtocolStateUpdate, SenderIdentityMaterial, SessionUnrecoverableResult, TransportBinding,
+    ProtocolStateUpdate, PublicDiscoveryKey, SenderIdentityMaterial, SessionAcceptanceOutcome,
+    SessionId, SessionUnrecoverableResult, Signature, TransportBinding,
 };
 use roost_crypto::{
-    DiscoveryKey, InitialPlaintext, KeyPair, PreKeyBundle, PublicIdentityKey, RatchetState,
-    SigningKeyPair, accept_with_associated_data, generate_discovery_key, generate_key_pair,
-    generate_one_time_prekey, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
-    initiate_with_associated_data, sign_identity_key_binding,
+    DiscoveryKey, KeyPair, PreKeyBundle, PublicIdentityKey, SignedPreKey, SigningKeyPair,
+    generate_discovery_key, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
+    sign_identity_key_binding,
 };
 use roost_protocol::{
     DomainSigningKey, DomainSigningKeyStatus, MessageId, RevocationState,
@@ -32,15 +34,16 @@ const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
 const CERTIFICATE_VERSION: u8 = 2;
 
 pub struct ProtocolFixture {
-    pub session_key: ProtocolStateKey,
+    pub session_id: SessionId,
     pub deduplication_key: ProtocolStateKey,
     pub alice_store: HostStore,
     pub bob_store: HostStore,
     pub alice_sender: ValidatedSender,
     pub bob_sender: SenderIdentityMaterial,
     pub binding: TransportBinding,
-    bob_signing_key: SigningKeyPair,
-    bob_discovery_key: DiscoveryKey,
+    pub alice: TestIdentity,
+    pub bob: TestIdentity,
+    pub bob_signed_prekey: SignedPreKey,
 }
 
 #[derive(Clone, Default)]
@@ -88,6 +91,14 @@ impl HostStore {
 
     pub fn set_raw(&mut self, address: ProtocolStateAddress, blob: Vec<u8>) {
         self.blobs.insert(address, Zeroizing::new(blob));
+    }
+
+    /// Returns every stored blob, to compare whole stores before and after an operation.
+    pub fn snapshot_bytes(&self) -> BTreeMap<ProtocolStateAddress, Vec<u8>> {
+        self.blobs
+            .iter()
+            .map(|(address, blob)| (address.clone(), blob.to_vec()))
+            .collect()
     }
 
     pub fn blob_bytes(&self, address: &ProtocolStateAddress) -> Option<Vec<u8>> {
@@ -152,7 +163,6 @@ pub struct StoredMessage {
 
 pub struct ValidatedSender {
     pub sender_identity: SenderIdentityMaterial,
-    signing_key: SigningKeyPair,
     domain_id: Vec<u8>,
     domain_verifying_key: Vec<u8>,
 }
@@ -167,84 +177,277 @@ impl ValidatedSender {
     }
 }
 
-pub struct Setup {
-    pub alice_state: RatchetState,
-    pub bob_state: RatchetState,
+/// One identity's secrets and certified public material, held in memory for engine-level tests.
+pub struct TestIdentity {
+    pub sender_identity: SenderIdentityMaterial,
+    pub signing_key: SigningKeyPair,
+    pub agreement_key: KeyPair,
+    pub discovery_key: DiscoveryKey,
+    discovery_public: PublicDiscoveryKey,
+    discovery_to_identity: Signature,
+}
+
+impl TestIdentity {
+    /// Creates an identity whose certificate the test domain signed.
+    pub fn new(tag: u8, discovery_seed: u8) -> Self {
+        let signing_key = SigningKeyPair::from_signing_bytes([tag; 32]);
+        let agreement_key = KeyPair::from_secret_bytes([tag.wrapping_add(0x33); 32]);
+        let discovery_key = discovery_key(&signing_key, discovery_seed);
+        let public_identity_key = PublicIdentityKey {
+            public_key: agreement_key.public,
+            verifying_key: signing_key.verifying,
+            binding_signature: sign_identity_key_binding(&signing_key, &agreement_key.public)
+                .unwrap(),
+        };
+        let identity_key = ContactIdentityKey {
+            x25519_public_key: *agreement_key.public.as_bytes(),
+            ed25519_verifying_key: signing_key.verifying.to_bytes(),
+        };
+        let certificate =
+            sender_certificate_bytes(TEST_DOMAIN_ID, identity_key, CREATED_AT_SECS + 100_000);
+        let certificate_signature = test_domain_key().sign(&certificate).to_bytes().to_vec();
+        Self {
+            sender_identity: SenderIdentityMaterial {
+                identity_key: identity_key.x25519_public_key,
+                identity_verifying_key: identity_key.ed25519_verifying_key,
+                identity_binding_signature: public_identity_key
+                    .binding_signature
+                    .to_bytes()
+                    .to_vec(),
+                certificate,
+                signature: certificate_signature,
+            },
+            discovery_public: discovery_key.public(),
+            discovery_to_identity: discovery_key
+                .sign_identity_binding(&public_identity_key)
+                .unwrap(),
+            signing_key,
+            agreement_key,
+            discovery_key,
+        }
+    }
+
+    pub fn identity_key(&self) -> ContactIdentityKey {
+        ContactIdentityKey {
+            x25519_public_key: self.sender_identity.identity_key,
+            ed25519_verifying_key: self.sender_identity.identity_verifying_key,
+        }
+    }
+
+    pub fn public_identity_key(&self) -> PublicIdentityKey {
+        PublicIdentityKey::from_bytes(
+            &self.sender_identity.identity_key,
+            &self.sender_identity.identity_verifying_key,
+            &self.sender_identity.identity_binding_signature,
+        )
+        .unwrap()
+    }
+
+    pub fn contact_identity(&self) -> ContactIdentity {
+        ContactIdentity {
+            identity_key: self.identity_key(),
+            discovery_key: ContactDiscoveryKey::from(&self.discovery_public),
+        }
+    }
+
+    pub fn local_sender(&self) -> LocalSender<'_> {
+        LocalSender {
+            identity: &self.sender_identity,
+            signing_key: &self.signing_key,
+            agreement_key: &self.agreement_key,
+            discovery_key: &self.discovery_public,
+            discovery_to_identity: &self.discovery_to_identity,
+        }
+    }
+
+    pub fn discovery_to_identity(&self) -> &Signature {
+        &self.discovery_to_identity
+    }
+
+    /// Returns this identity's keys sealing `identity` in place of its own certified material.
+    pub fn local_sender_with<'a>(
+        &'a self,
+        identity: &'a SenderIdentityMaterial,
+    ) -> LocalSender<'a> {
+        LocalSender {
+            identity,
+            ..self.local_sender()
+        }
+    }
+
+    /// Returns this identity's material with a certificate that expires at `expires_at_secs`.
+    pub fn certified_until(&self, expires_at_secs: u64) -> SenderIdentityMaterial {
+        let certificate =
+            sender_certificate_bytes(TEST_DOMAIN_ID, self.identity_key(), expires_at_secs);
+        let mut identity = self.sender_identity.clone();
+        identity.signature = test_domain_key().sign(&certificate).to_bytes().to_vec();
+        identity.certificate = certificate;
+        identity
+    }
+}
+
+const TEST_DOMAIN_ID: &[u8] = b"test-domain";
+
+fn test_domain_key() -> SigningKeyPair {
+    generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x90; 32]))
+}
+
+pub fn validated_sender() -> ValidatedSender {
+    ValidatedSender {
+        sender_identity: TestIdentity::new(0xa2, 0xc2).sender_identity,
+        domain_id: TEST_DOMAIN_ID.to_vec(),
+        domain_verifying_key: test_domain_key().verifying.to_bytes().to_vec(),
+    }
+}
+
+/// Every identity's certificate validation inputs at the fixed test time.
+pub fn validation<'a>(
+    domain_signing_keys: &'a [DomainSigningKey<'a>],
+    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
+) -> InboundSenderCertificateValidation<'a> {
+    InboundSenderCertificateValidation {
+        domain_signing_keys,
+        expected_relay_domain: TEST_RELAY_DOMAIN,
+        revocation_state: RevocationState::Available(revoked_identity_keys),
+        reference_time: from_unix_secs(CREATED_AT_SECS).unwrap(),
+    }
 }
 
 impl ProtocolFixture {
+    /// Starts a Session from Alice to Bob through the engine's handshake, then has Bob reply once
+    /// so Alice's Messages no longer carry the handshake.
     pub fn new(seed: [u8; 32]) -> Self {
         let engine = ProtocolStateEngine::new();
-        let states = setup(seed);
-        let alice_sender = validated_sender();
-        let bob_signing_key = SigningKeyPair::from_signing_bytes([0xa1; 32]);
-        let bob_discovery_key = discovery_key(&bob_signing_key, 0x71);
-        let bob_sender = sender_identity(
-            0xa1,
-            &bob_signing_key,
-            vec![0xb2, 0xb3, 0xb4],
-            vec![0xb5; 64],
-        );
-        let mut fixture = Self {
-            session_key: ProtocolStateKey::from_bytes(vec![9; 16]).unwrap(),
-            deduplication_key: ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap(),
-            alice_store: HostStore::default(),
-            bob_store: HostStore::default(),
-            alice_sender,
-            bob_sender,
-            binding: TransportBinding::new(b"test-route".to_vec()).unwrap(),
-            bob_signing_key,
-            bob_discovery_key,
-        };
-        for (store, state, peer) in [
-            (
-                &mut fixture.alice_store,
-                &states.alice_state,
-                &fixture.bob_sender,
-            ),
-            (
-                &mut fixture.bob_store,
-                &states.bob_state,
-                &fixture.alice_sender.sender_identity,
-            ),
-        ] {
-            store.apply_all([
-                engine
-                    .set_session_state_with_peer_identity(fixture.session_key.clone(), state, peer)
-                    .unwrap(),
-                engine
-                    .initialize_pending_acknowledgments(fixture.session_key.clone())
-                    .unwrap(),
-            ]);
-            let contact = accepted_contact_identity();
-            let recorded = engine.record_contact(&store.snapshot(), contact).unwrap();
+        let mut rng = ChaCha20Rng::from_seed(seed);
+        let alice = TestIdentity::new(0xa2, 0xc2);
+        let bob = TestIdentity::new(0xa1, 0x71);
+        let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
+            &mut rng,
+            &bob.discovery_key,
+            0,
+            CREATED_AT_SECS,
+        )
+        .unwrap();
+        let binding = TransportBinding::new(b"test-route".to_vec()).unwrap();
+        let deduplication_key = ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap();
+        let mut alice_store = HostStore::default();
+        let mut bob_store = HostStore::default();
+        for (store, peer) in [(&mut alice_store, &bob), (&mut bob_store, &alice)] {
+            let recorded = engine
+                .record_contact(&store.snapshot(), peer.contact_identity())
+                .unwrap();
             store.apply_all(recorded.state_updates);
             let accepted = engine
-                .accept_contact(&store.snapshot(), contact.identity_key)
+                .accept_contact(&store.snapshot(), peer.identity_key())
                 .unwrap();
             store.apply_all(accepted.state_updates);
+            store.apply_all([engine
+                .initialize_deduplication_set(&mut rng, deduplication_key.clone())
+                .unwrap()]);
         }
-        fixture.bob_store.apply_all([engine
-            .initialize_deduplication_set(
-                &mut ChaCha20Rng::from_seed([0x44; 32]),
-                fixture.deduplication_key.clone(),
-            )
-            .unwrap()]);
+        let mut fixture = Self {
+            session_id: SessionId::from_bytes([0; 16]),
+            deduplication_key,
+            alice_store,
+            bob_store,
+            alice_sender: validated_sender(),
+            bob_sender: bob.sender_identity.clone(),
+            binding,
+            alice,
+            bob,
+            bob_signed_prekey,
+        };
+        fixture.start_session(&engine, &mut rng);
         fixture
     }
 
+    /// Runs a fresh handshake from Alice to Bob and has Bob reply once, so the new Session is the
+    /// one both send on and Alice's Messages no longer carry the handshake.
+    pub fn start_session(&mut self, engine: &ProtocolStateEngine, rng: &mut ChaCha20Rng) {
+        let initiation = engine
+            .initiate_session(
+                rng,
+                &self.alice_store.snapshot(),
+                OutboundSessionStart {
+                    responder_identity_key: &self.bob.public_identity_key(),
+                    responder_discovery_to_identity: self.bob.discovery_to_identity(),
+                    responder_prekey_bundle: &PreKeyBundle {
+                        version: roost_crypto::PREKEY_BUNDLE_VERSION,
+                        discovery_key: self.bob.discovery_key.public(),
+                        signed_prekey: self.bob_signed_prekey.public(),
+                        one_time_prekey: None,
+                    },
+                    sender: self.alice.local_sender(),
+                    id: MessageId::from_bytes([0x01; 16]),
+                    sent_at_millis: CREATED_AT_SECS * 1000,
+                    plaintext: b"initial",
+                },
+                &self.binding,
+            )
+            .unwrap();
+        self.alice_store.commit(initiation.state_updates).unwrap();
+        let domain = validated_sender();
+        let domain_keys = [domain.domain_signing_key()];
+        let SessionAcceptanceOutcome::Accepted(accepted) = engine
+            .accept_session(
+                rng,
+                &self.bob_store.snapshot(),
+                InboundSessionStart {
+                    deduplication_key: self.deduplication_key.clone(),
+                    message: &initiation.message,
+                    recipient_discovery_key: &self.bob.discovery_key,
+                    signed_prekey: &self.bob_signed_prekey,
+                    one_time_prekey: None,
+                    held_signed_prekeys: &[self.bob_signed_prekey.public()],
+                    sender_certificate_validation: validation(&domain_keys, &[]),
+                },
+                &self.binding,
+            )
+            .unwrap()
+        else {
+            panic!("fixture handshake was not accepted")
+        };
+        self.bob_store.commit(accepted.state_updates).unwrap();
+        self.bob_replies(engine, 0x45);
+        self.session_id = initiation.session_id;
+    }
+
+    /// Has Bob send to Alice on the Session Roost selects, and Alice receive it.
+    pub fn bob_replies(&mut self, engine: &ProtocolStateEngine, seed: u8) {
+        let mut id = [0xb0; 16];
+        id[1] = seed;
+        let reply = engine
+            .encrypt_message_with_transport_binding(
+                &mut ChaCha20Rng::from_seed([seed; 32]),
+                &self.bob_store.snapshot(),
+                OutboundPlaintext {
+                    id: MessageId::from_bytes(id),
+                    sender: self.bob.local_sender(),
+                    contact_identity_key: self.alice.identity_key(),
+                    sent_at_millis: CREATED_AT_SECS * 1000,
+                    plaintext: b"reply",
+                },
+                &self.binding,
+            )
+            .unwrap();
+        self.bob_store.commit(reply.state_updates).unwrap();
+        let InboundMessageOutcome::Accepted(received) =
+            self.receive_as_alice(engine, &reply.message, seed)
+        else {
+            panic!("Bob's reply was not accepted")
+        };
+        self.alice_store.commit(received.state_updates).unwrap();
+    }
+
     pub fn outbound<'a>(&'a self, sequence: u16, plaintext: &'a [u8]) -> OutboundPlaintext<'a> {
-        let contact = accepted_contact_identity();
         let mut id = [0; 16];
         id[..2].copy_from_slice(&sequence.to_be_bytes());
         id[6] = 0x40;
         id[8] = 0x80;
         OutboundPlaintext {
             id: MessageId::from_bytes(id),
-            sender_identity: &self.alice_sender.sender_identity,
-            sender_identity_signing_key: &self.alice_sender.signing_key,
-            contact_identity_key: contact.identity_key,
-            recipient_public_key: contact.discovery_key.prekey_bundle_lookup_key(),
+            sender: self.alice.local_sender(),
+            contact_identity_key: self.bob.identity_key(),
             sent_at_millis: 1_700_000_300_000 + u64::from(sequence),
             plaintext,
         }
@@ -256,27 +459,43 @@ impl ProtocolFixture {
         domain_signing_keys: &'a [DomainSigningKey<'a>],
         revoked_identity_keys: &'a [SenderCertificateIdentityKey],
     ) -> InboundEncryptedMessage<'a> {
+        self.inbound_with_validation(
+            message,
+            Some(validation(domain_signing_keys, revoked_identity_keys)),
+        )
+    }
+
+    /// Returns Bob's receive input for `message` with any certificate validation inputs.
+    pub fn inbound_with_validation<'a>(
+        &'a self,
+        message: &'a Message,
+        sender_certificate_validation: Option<InboundSenderCertificateValidation<'a>>,
+    ) -> InboundEncryptedMessage<'a> {
         InboundEncryptedMessage {
-            session_key: self.session_key.clone(),
             deduplication_key: self.deduplication_key.clone(),
             message,
-            recipient_discovery_key: &self.bob_discovery_key,
+            recipient_discovery_key: &self.bob.discovery_key,
             recipient_identity_verifying_key: self.bob_sender.identity_verifying_key,
             acknowledgment: OutboundAcknowledgment {
                 id: MessageId::from_bytes([0xee; 16]),
                 sender_identity: &self.bob_sender,
-                sender_identity_signing_key: &self.bob_signing_key,
-                recipient_public_key: *acknowledgment_recipient_discovery_key()
-                    .public_key()
-                    .as_bytes(),
+                sender_identity_signing_key: &self.bob.signing_key,
+                recipient_public_key: *self.alice.discovery_key.public_key().as_bytes(),
                 sent_at_millis: 1_700_000_100_000 + 0xee,
             },
-            sender_certificate_validation: Some(InboundSenderCertificateValidation {
-                domain_signing_keys,
-                expected_relay_domain: TEST_RELAY_DOMAIN,
-                revocation_state: RevocationState::Available(revoked_identity_keys),
-                reference_time: from_unix_secs(CREATED_AT_SECS).unwrap(),
-            }),
+            sender_certificate_validation,
+        }
+    }
+
+    /// Returns Alice's input for processing an acknowledgment Bob produced.
+    pub fn alice_acknowledgment<'a>(
+        &'a self,
+        message: &'a Message,
+    ) -> InboundAcknowledgmentMessage<'a> {
+        InboundAcknowledgmentMessage {
+            message,
+            recipient_discovery_key: &self.alice.discovery_key,
+            recipient_identity_verifying_key: self.alice.sender_identity.identity_verifying_key,
         }
     }
 
@@ -297,6 +516,40 @@ impl ProtocolFixture {
         )
     }
 
+    fn receive_as_alice(
+        &self,
+        engine: &ProtocolStateEngine,
+        message: &Message,
+        rng_seed: u8,
+    ) -> InboundMessageOutcome {
+        let domain_keys = [self.alice_sender.domain_signing_key()];
+        engine
+            .decrypt_message_with_transport_bindings(
+                &mut ChaCha20Rng::from_seed([rng_seed; 32]),
+                &self.alice_store.snapshot(),
+                InboundEncryptedMessage {
+                    deduplication_key: self.deduplication_key.clone(),
+                    message,
+                    recipient_discovery_key: &self.alice.discovery_key,
+                    recipient_identity_verifying_key: self
+                        .alice
+                        .sender_identity
+                        .identity_verifying_key,
+                    acknowledgment: OutboundAcknowledgment {
+                        id: MessageId::from_bytes([0xef; 16]),
+                        sender_identity: &self.alice.sender_identity,
+                        sender_identity_signing_key: &self.alice.signing_key,
+                        recipient_public_key: *self.bob.discovery_key.public_key().as_bytes(),
+                        sent_at_millis: 1_700_000_100_000 + 0xef,
+                    },
+                    sender_certificate_validation: Some(validation(&domain_keys, &[])),
+                },
+                &self.binding,
+                &self.binding,
+            )
+            .unwrap()
+    }
+
     pub fn encrypt_from_alice(
         &mut self,
         engine: &ProtocolStateEngine,
@@ -305,8 +558,8 @@ impl ProtocolFixture {
     ) -> StoredMessage {
         let encrypted = engine
             .encrypt_message_with_transport_binding(
+                &mut ChaCha20Rng::from_seed([sequence as u8; 32]),
                 &self.alice_store.snapshot(),
-                self.session_key.clone(),
                 self.outbound(sequence, plaintext),
                 &self.binding,
             )
@@ -347,8 +600,11 @@ impl ProtocolFixture {
     }
 }
 
-pub fn ratchet_address(key: ProtocolStateKey) -> ProtocolStateAddress {
-    ProtocolStateAddress::new(ProtocolStateKind::RatchetSession, key)
+pub fn session_address(session_id: SessionId) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(
+        ProtocolStateKind::RatchetSession,
+        ProtocolStateKey::from_bytes(session_id.as_bytes().to_vec()).unwrap(),
+    )
 }
 
 pub fn deduplication_address(key: ProtocolStateKey) -> ProtocolStateAddress {
@@ -371,80 +627,22 @@ pub fn session_unrecoverable(outcome: InboundMessageOutcome) -> SessionUnrecover
 
 pub fn dead_session_blob(
     event_emitted: bool,
-    peer_sender_identity_key: [u8; 32],
+    peer_identity_key: ContactIdentityKey,
 ) -> ProtocolStateBlob {
-    // Envelope 1.0, session body 4, Unrecoverable variant 2, reason 0,
-    // recovery flag, absent contact binding, present peer identity.
-    let mut bytes = vec![1, 0, 4, 2, 0, u8::from(event_emitted), 0, 1];
-    bytes.extend_from_slice(&peer_sender_identity_key);
+    // Blob version 1, the peer's two key halves, Unrecoverable variant 1, reason 0, event flag.
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(&peer_identity_key.x25519_public_key);
+    bytes.extend_from_slice(&peer_identity_key.ed25519_verifying_key);
+    bytes.extend_from_slice(&[1, 0, u8::from(event_emitted)]);
     ProtocolStateBlob::from_bytes(bytes)
 }
 
-pub fn setup(seed: [u8; 32]) -> Setup {
-    let mut rng = ChaCha20Rng::from_seed(seed);
-    let alice_identity = generate_signing_key_pair(&mut rng);
-    let bob_identity = generate_signing_key_pair(&mut rng);
-    let alice_identity_key = public_identity_key(&mut rng, &alice_identity);
-    let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
-    let alice_discovery =
-        generate_discovery_key(&mut rng, &alice_identity, 0, CREATED_AT_SECS).unwrap();
-    let bob_discovery =
-        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS).unwrap();
-    let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery, 0, CREATED_AT_SECS)
-            .unwrap();
-    let bob_one_time_prekey =
-        generate_one_time_prekey(&mut rng, 9, bob_discovery.epoch(), CREATED_AT_SECS);
-    let prekey_bundle = PreKeyBundle {
-        version: roost_crypto::PREKEY_BUNDLE_VERSION,
-        discovery_key: bob_discovery.public(),
-        signed_prekey: bob_signed_prekey.public(),
-        one_time_prekey: Some(bob_one_time_prekey.public()),
-    };
-    let (alice_state, envelope) = initiate_with_associated_data(
-        &mut rng,
-        &alice_discovery,
-        &alice_identity_key,
-        &bob_identity_key,
-        &prekey_bundle,
-        initial_plaintext(b"initial"),
-        &[],
-    )
-    .unwrap();
-    let (bob_state, plaintext) = accept_with_associated_data(
-        &mut rng,
-        &envelope,
-        Some(&alice_identity_key),
-        &bob_identity_key,
-        &bob_discovery,
-        &bob_signed_prekey,
-        Some(bob_one_time_prekey),
-        &[],
-    )
-    .unwrap();
-    assert_eq!(plaintext.plaintext.as_slice(), b"initial");
-    Setup {
-        alice_state,
-        bob_state,
-    }
+pub fn accepted_contact_identity() -> ContactIdentity {
+    TestIdentity::new(0xa1, 0x71).contact_identity()
 }
 
-fn initial_plaintext(plaintext: &[u8]) -> InitialPlaintext<'_> {
-    InitialPlaintext {
-        sender_certificate: b"sender certificate",
-        sender_signature: b"sender signature",
-        plaintext,
-    }
-}
-
-fn public_identity_key(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> PublicIdentityKey {
-    let agreement_key = generate_key_pair(rng);
-    let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
-    PublicIdentityKey {
-        public_key: agreement_key.public,
-        verifying_key: signing_key.verifying,
-        binding_signature,
-    }
+pub fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
+    TestIdentity::new(0xa2, 0xc2).discovery_key
 }
 
 fn discovery_key(signing_key: &SigningKeyPair, seed: u8) -> DiscoveryKey {
@@ -457,68 +655,9 @@ fn discovery_key(signing_key: &SigningKeyPair, seed: u8) -> DiscoveryKey {
     .unwrap()
 }
 
-fn contact_identity(tag: u8, signing_key: &SigningKeyPair, discovery_seed: u8) -> ContactIdentity {
-    ContactIdentity {
-        identity_key: ContactIdentityKey {
-            x25519_public_key: *KeyPair::from_secret_bytes([tag.wrapping_add(0x33); 32])
-                .public
-                .as_bytes(),
-            ed25519_verifying_key: signing_key.verifying.to_bytes(),
-        },
-        discovery_key: ContactDiscoveryKey::from(
-            &discovery_key(signing_key, discovery_seed).public(),
-        ),
-    }
-}
-
-pub fn accepted_contact_identity() -> ContactIdentity {
-    contact_identity(0xa1, &SigningKeyPair::from_signing_bytes([0xa1; 32]), 0x71)
-}
-
-pub fn acknowledgment_recipient_discovery_key() -> DiscoveryKey {
-    discovery_key(&SigningKeyPair::from_signing_bytes([0xa2; 32]), 0xc2)
-}
-
-fn sender_identity(
-    tag: u8,
-    signing_key: &SigningKeyPair,
-    certificate: Vec<u8>,
-    signature: Vec<u8>,
-) -> SenderIdentityMaterial {
-    let pair = KeyPair::from_secret_bytes([tag.wrapping_add(0x33); 32]);
-    SenderIdentityMaterial {
-        identity_key: *pair.public.as_bytes(),
-        identity_verifying_key: signing_key.verifying.to_bytes(),
-        identity_binding_signature: sign_identity_key_binding(signing_key, &pair.public)
-            .unwrap()
-            .to_bytes()
-            .to_vec(),
-        certificate,
-        signature,
-    }
-}
-
-fn validated_sender() -> ValidatedSender {
-    let signing_key = SigningKeyPair::from_signing_bytes([0xa2; 32]);
-    let domain_signing_key = generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x90; 32]));
-    let domain_id = b"test-domain".to_vec();
-    let certificate = sender_certificate_bytes(
-        &domain_id,
-        contact_identity(0xa2, &signing_key, 0x72),
-        1_700_100_000,
-    );
-    let signature = domain_signing_key.sign(&certificate).to_bytes().to_vec();
-    ValidatedSender {
-        sender_identity: sender_identity(0xa2, &signing_key, certificate, signature),
-        signing_key,
-        domain_id,
-        domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
-    }
-}
-
-fn sender_certificate_bytes(
+pub fn sender_certificate_bytes(
     signing_key_id: &[u8],
-    contact: ContactIdentity,
+    identity_key: ContactIdentityKey,
     expires_at_secs: u64,
 ) -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -528,8 +667,8 @@ fn sender_certificate_bytes(
     bytes.extend_from_slice(signing_key_id);
     bytes.push(TEST_RELAY_DOMAIN.len() as u8);
     bytes.extend_from_slice(TEST_RELAY_DOMAIN);
-    bytes.extend_from_slice(&contact.identity_key.x25519_public_key);
-    bytes.extend_from_slice(&contact.identity_key.ed25519_verifying_key);
+    bytes.extend_from_slice(&identity_key.x25519_public_key);
+    bytes.extend_from_slice(&identity_key.ed25519_verifying_key);
     bytes.extend_from_slice(&expires_at_secs.to_be_bytes());
     bytes
 }

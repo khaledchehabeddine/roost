@@ -5,10 +5,11 @@
 //! replay tracking, and transport framing.
 //!
 //! The identity key signs the public discovery key. The discovery key signs the public signed
-//! pre-key. Initiators verify both responder signatures, use [`initiate_with_associated_data`] and
-//! [`accept_with_associated_data`] to create the first [`RatchetState`], then use the ratchet to
-//! encrypt messages. X3DH includes a one-time pre-key when one is available. Sender identity
-//! material is revealed only after the sealed first message decrypts successfully.
+//! pre-key. Initiators verify both responder signatures, use [`initiate_handshake`] to create the
+//! first [`RatchetState`] and the [`SessionId`](roost_protocol::SessionId) both peers derive, then
+//! use the ratchet to encrypt messages. Responders run [`accept_handshake`] and check the
+//! initiator's [`prove_sender`] proof with [`verify_sender_proof`]. X3DH includes a one-time
+//! pre-key when one is available.
 //!
 //! # Secret handling
 //!
@@ -42,22 +43,12 @@
 //! assert_clone::<RatchetState>();
 //! ```
 //!
-//! Decrypted initial-message results do not implement caller-visible `Clone`.
-//!
-//! ```compile_fail
-//! use roost_crypto::AcceptedInitialMessage;
-//!
-//! fn assert_clone<T: Clone>() {}
-//!
-//! assert_clone::<AcceptedInitialMessage>();
-//! ```
-//!
 //! # Limitations
 //!
-//! - Handshake envelopes carry no replay marker. Replay detection belongs above this crate.
+//! - Handshakes carry no replay marker. Replay detection belongs above this crate.
 //! - Re-handshake policy belongs above this crate. A new handshake starts a new session.
-//! - This crate has no signed-pre-key storage. Delayed handshake envelopes require the caller to
-//!   retain and pass the matching key to [`accept_with_associated_data`].
+//! - This crate has no signed-pre-key storage. Delayed handshakes require the caller to retain and
+//!   pass the matching key to [`accept_handshake`].
 
 mod delivery_capability;
 mod discovery_key;
@@ -79,10 +70,8 @@ pub use discovery_key::{
 };
 pub use double_ratchet::{Header, RatchetError, RatchetState, RatchetStateError};
 pub use handshake::{
-    AcceptedInitialMessage, HandshakeEnvelope, HandshakeError, InitialPlaintext,
-    PREKEY_BUNDLE_VERSION, PreKeyBundle, SenderIdentityMaterial, accept_with_associated_data,
-    initial_associated_data, initiate_with_associated_data,
-    initiator_identity_hint_with_associated_data,
+    Handshake, HandshakeError, PREKEY_BUNDLE_VERSION, PreKeyBundle, SENDER_PROOF_LEN,
+    SenderProofTranscript, accept_handshake, initiate_handshake, prove_sender, verify_sender_proof,
 };
 pub use keys::{
     KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, Signature, SigningKeyPair,

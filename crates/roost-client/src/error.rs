@@ -108,7 +108,7 @@ pub enum RoostError {
         /// Stable SecureStorage entry name that changed.
         key: String,
     },
-    /// A Session is terminal and must be replaced through a fresh handshake.
+    /// No live Session exists with the contact, so a fresh handshake must start one.
     #[error("terminal session recovery required: {reason}")]
     TerminalSessionRecovery {
         /// Diagnostic context for logging only.
@@ -327,20 +327,17 @@ impl From<HandshakeError> for RoostError {
         match e {
             HandshakeError::PublicKey(e) => RoostError::from(e).with_reason(reason),
             HandshakeError::Ratchet(e) => RoostError::from(e).with_reason(reason),
-            HandshakeError::SealedFrame(e) => RoostError::from(e).with_reason(reason),
             HandshakeError::NonContributorySharedSecret
             | HandshakeError::OneTimePreKeyMismatch
-            | HandshakeError::SenderIdentityMismatch
             | HandshakeError::SenderProofInvalid
             | HandshakeError::SignedPreKeyMismatch => RoostError::AuthenticationFailed { reason },
             HandshakeError::UnsupportedPreKeyBundleVersion(_) => {
                 RoostError::UnsupportedVersion { reason }
             }
-            HandshakeError::EnvelopeEncode | HandshakeError::HkdfExpand => {
-                RoostError::InternalError { reason }
-            }
-            HandshakeError::EnvelopeDecode
+            HandshakeError::HkdfExpand => RoostError::InternalError { reason },
+            HandshakeError::DiscoveryKeyMismatch
             | HandshakeError::MissingOneTimePreKey
+            | HandshakeError::SenderProofFieldTooLong { .. }
             | HandshakeError::StalePreKey => RoostError::InvalidData { reason },
         }
     }
@@ -377,7 +374,6 @@ impl From<RatchetStateError> for RoostError {
     fn from(e: RatchetStateError) -> Self {
         let reason = reason_from_chain(&e);
         match e {
-            RatchetStateError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
             RatchetStateError::Encode => RoostError::InternalError { reason },
             RatchetStateError::Decode
             | RatchetStateError::MaxSkippedKeysExceeded
@@ -446,9 +442,10 @@ impl From<ProtocolStateError> for RoostError {
             | ProtocolStateError::SnapshotCapacityExceeded => RoostError::InvalidData { reason },
             ProtocolStateError::BlockedContact => RoostError::BlockedContact { reason },
             ProtocolStateError::ContactNotAccepted => RoostError::ContactNotAccepted,
-            ProtocolStateError::SessionUnrecoverable => {
+            ProtocolStateError::NoSession | ProtocolStateError::SessionUnrecoverable => {
                 RoostError::TerminalSessionRecovery { reason }
             }
+            ProtocolStateError::Handshake(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::BlobEncode { .. } => RoostError::InternalError { reason },
             ProtocolStateError::MessageEncode(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::Ratchet(e) => RoostError::from(e).with_reason(reason),
@@ -502,8 +499,6 @@ impl From<SessionEstablishmentError> for RoostError {
             SessionEstablishmentError::Discovery(e) => e.into(),
             SessionEstablishmentError::Handshake(e) => e.into(),
             SessionEstablishmentError::Identity(e) => e.into(),
-            SessionEstablishmentError::PublicKey(e) => e.into(),
-            SessionEstablishmentError::Message(e) => e.into(),
             SessionEstablishmentError::OneTimePreKey(e) => e.into(),
             SessionEstablishmentError::Operation(e) => e.into(),
             SessionEstablishmentError::ProtocolState(e) => e.into(),

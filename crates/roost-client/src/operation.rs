@@ -1,15 +1,15 @@
 //! Prepared SecureStorage operations and the records that carry their provisional output.
 
-use crate::context::{ContactBlock, SessionAcceptanceResult};
+use crate::context::{ContactBlock, SessionAcceptanceOutcome};
 use crate::error::RoostError;
-use crate::records::{Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey};
+use crate::records::{
+    Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey, hex_identifier, hex_text,
+};
 use roost_core::{
     KeyStoreOperationId as CoreKeyStoreOperationId,
     KeyStoreOperationStatus as CoreKeyStoreOperationStatus,
     UnfinishedKeyStoreOperation as CoreUnfinishedKeyStoreOperation,
 };
-
-const OPERATION_ID_DIGITS: usize = 32;
 
 /// Identifier of one prepared operation, which the host saves in the transaction it commits.
 ///
@@ -23,37 +23,15 @@ pub struct OperationId {
 impl OperationId {
     pub(crate) fn from_core(id: CoreKeyStoreOperationId) -> Self {
         Self {
-            value: id
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            value: hex_text(id.as_bytes()),
         }
     }
 
     pub(crate) fn to_core(&self) -> Result<CoreKeyStoreOperationId, RoostError> {
-        let invalid = || RoostError::InvalidData {
-            reason: format!("operation id must be {OPERATION_ID_DIGITS} lowercase hex digits"),
-        };
-        let digits = self.value.as_bytes();
-        if digits.len() != OPERATION_ID_DIGITS {
-            return Err(invalid());
-        }
-        let mut bytes = [0u8; OPERATION_ID_DIGITS / 2];
-        for (byte, &[high, low]) in bytes.iter_mut().zip(digits.as_chunks::<2>().0) {
-            let high = hex_digit(high).ok_or_else(invalid)?;
-            let low = hex_digit(low).ok_or_else(invalid)?;
-            *byte = (high << 4) | low;
-        }
-        Ok(CoreKeyStoreOperationId::from_bytes(bytes))
-    }
-}
-
-fn hex_digit(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        _ => None,
+        Ok(CoreKeyStoreOperationId::from_bytes(hex_identifier(
+            &self.value,
+            "operation id",
+        )?))
     }
 }
 
@@ -158,8 +136,9 @@ pub struct PreparedContactBlock {
 /// An accepted Session, provisional until its operation consumes the one-time prekey.
 #[derive(uniffi::Record)]
 pub struct PreparedSessionAcceptance {
-    /// The operation that consumes the one-time prekey.
+    /// The operation to reserve and finalize around the host commit, whatever the outcome. It
+    /// consumes the one-time prekey only if the Session was accepted.
     pub operation_id: OperationId,
-    /// The decrypted first Message and the Session's state updates.
-    pub acceptance: SessionAcceptanceResult,
+    /// The accepted Session, or why the first Message created nothing.
+    pub acceptance: SessionAcceptanceOutcome,
 }

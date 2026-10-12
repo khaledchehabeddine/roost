@@ -109,23 +109,7 @@ pub fn seal_frame_with_associated_data<R: RngCore + CryptoRng>(
     )
 }
 
-#[cfg(test)]
-pub(crate) fn seal_frame_with_ephemeral_key(
-    ephemeral_key: &KeyPair,
-    recipient_public_key: &PublicKey,
-    prekey_reference: Option<SealedFramePreKeyReference>,
-    plaintext: &[u8],
-) -> Result<SealedFrame, SealedFrameError> {
-    seal_frame_with_ephemeral_key_and_associated_data(
-        ephemeral_key,
-        recipient_public_key,
-        prekey_reference,
-        plaintext,
-        &[],
-    )
-}
-
-pub(crate) fn seal_frame_with_ephemeral_key_and_associated_data(
+fn seal_frame_with_ephemeral_key_and_associated_data(
     ephemeral_key: &KeyPair,
     recipient_public_key: &PublicKey,
     prekey_reference: Option<SealedFramePreKeyReference>,

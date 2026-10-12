@@ -37,7 +37,7 @@
   - Avoid: payload, packet
 - **MessageID**: The identifier of one Message within a Session.
   - Avoid: uuid, packet id
-- **Message Transcript**: The bytes a sender signs for each Message, binding it to its recipient, Session, and sender certificate.
+- **Message Transcript**: The bytes a sender signs for each Message after the handshake, binding it to its recipient, Session, and sender certificate.
   - Avoid: associated data
 - **Pending Acknowledgment**: The stored record of a sent Message still waiting for its Acknowledgment Artifact.
   - Avoid: outbox, retry cache
@@ -72,11 +72,13 @@
   - Avoid: sender IK, sender metadata
 - **Session**: An encrypted channel between two Identities, advanced by the Double Ratchet.
   - Avoid: connection, conversation, chat, login
+- **SessionID**: The identifier both peers derive from a Session's X3DH handshake, which each Message carries sealed to the recipient's Discovery Key so the recipient can find the Session.
+  - Avoid: session key, selector, lookup key, conversation ID
 - **Session-Unrecoverable Event**: The one-time signal that a Session has become a Dead Session.
   - Avoid: decrypt error, warning
 - **Transport Binding**: Public bytes the app attaches to a Message, which Roost authenticates but never reads or stores.
   - Avoid: transport envelope, route record, delivery capability
 - **Trust State**: The trust level the app records for a peer: pending, accepted but unverified, or verified by Safety Number.
   - Avoid: certificate validity, blocking
-- **X3DH**: The handshake that starts a Session, which binds both Identity Keys into the shared secret.
+- **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys, whose Messages prove the sender holds its Identity Key until the peer replies.
   - Avoid: login, certificate validation

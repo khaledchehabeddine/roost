@@ -3,7 +3,7 @@
 mod support;
 
 use roost_core::{ProtocolStateEngine, ProtocolStateError};
-use support::{ProtocolFixture, deduplication_address, ratchet_address};
+use support::{ProtocolFixture, deduplication_address, session_address};
 
 #[test]
 fn corrupt_committed_blobs_surface_faults_without_reinitialization() {
@@ -11,7 +11,7 @@ fn corrupt_committed_blobs_surface_faults_without_reinitialization() {
     let mut fixture = ProtocolFixture::new([0x56; 32]);
     let message = fixture.encrypt_from_alice(&engine, 1, b"corruption probe");
     for address in [
-        ratchet_address(fixture.session_key.clone()),
+        session_address(fixture.session_id),
         deduplication_address(fixture.deduplication_key.clone()),
     ] {
         let mut store = fixture.bob_store.clone();

@@ -3,6 +3,7 @@
 use zeroize::Zeroizing;
 
 const PUBLIC_KEY_LEN: usize = 32;
+const SESSION_ID_LEN: usize = 16;
 /// Domain separator for established Message signatures.
 pub const MESSAGE_TRANSCRIPT_CONTEXT: &[u8] = b"AetherMessageTranscript-v1:";
 /// Length of the original-plaintext size prefix.
@@ -11,12 +12,30 @@ pub const SEALED_PAYLOAD_LEN_PREFIX_LEN: usize = 4;
 pub const SEALED_PAYLOAD_BUCKETS: [usize; 12] = [
     32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16_384, 32_768, 65_536,
 ];
-// Longest session key a Message transcript accepts.
-const MAX_TRANSCRIPT_SESSION_KEY_LEN: usize = 96;
 // The transcript authenticates the padded payload, so its limit is the largest bucket.
 const MAX_TRANSCRIPT_PAYLOAD_LEN: usize = SEALED_PAYLOAD_BUCKETS[SEALED_PAYLOAD_BUCKETS.len() - 1];
 // Longest sender certificate a Message transcript accepts.
 const MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
+
+/// The identifier both peers derive from a Session's handshake.
+///
+/// It addresses the Session's state and travels sealed in every Message on the Session.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SessionId([u8; SESSION_ID_LEN]);
+
+impl SessionId {
+    /// Creates a Session identifier from its bytes.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; SESSION_ID_LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the identifier's bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; SESSION_ID_LEN] {
+        &self.0
+    }
+}
 
 /// The UUID-shaped identifier for a Message.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -74,8 +93,8 @@ impl PayloadKind {
 
 /// Fields authenticated by an established Message signature.
 pub struct MessageTranscriptInput<'a> {
-    /// Session identifier bytes, at most 96 bytes.
-    pub session_key: &'a [u8],
+    /// Session the Message belongs to.
+    pub session_id: SessionId,
     /// Canonical recipient Ed25519 Identity Key.
     pub recipient_identity_verifying_key: &'a [u8; PUBLIC_KEY_LEN],
     /// Sender-selected Message ID.
@@ -96,28 +115,22 @@ pub struct MessageTranscriptInput<'a> {
 pub fn message_transcript(
     input: MessageTranscriptInput<'_>,
 ) -> Result<Zeroizing<Vec<u8>>, MessageEncodingError> {
-    if input.session_key.len() > MAX_TRANSCRIPT_SESSION_KEY_LEN
-        || input.payload.len() > MAX_TRANSCRIPT_PAYLOAD_LEN
+    if input.payload.len() > MAX_TRANSCRIPT_PAYLOAD_LEN
         || input.sender_certificate.len() > MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN
     {
         return Err(MessageEncodingError::PayloadTooLarge);
     }
-    let session_key_len = u32::try_from(input.session_key.len())
-        .map_err(|_| MessageEncodingError::PayloadTooLarge)?;
     let payload_len =
         u32::try_from(input.payload.len()).map_err(|_| MessageEncodingError::PayloadTooLarge)?;
     let sender_certificate_len = u32::try_from(input.sender_certificate.len())
         .map_err(|_| MessageEncodingError::PayloadTooLarge)?;
-    let capacity = 4usize
-        .checked_add(input.session_key.len())
-        .and_then(|len| len.checked_add(PUBLIC_KEY_LEN + 16 + 8 + 1 + 4))
-        .and_then(|len| len.checked_add(input.payload.len()))
+    let capacity = (SESSION_ID_LEN + PUBLIC_KEY_LEN + 16 + 8 + 1 + 4)
+        .checked_add(input.payload.len())
         .and_then(|len| len.checked_add(4))
         .and_then(|len| len.checked_add(input.sender_certificate.len()))
         .ok_or(MessageEncodingError::PayloadTooLarge)?;
     let mut transcript = Zeroizing::new(Vec::with_capacity(capacity));
-    transcript.extend_from_slice(&session_key_len.to_be_bytes());
-    transcript.extend_from_slice(input.session_key);
+    transcript.extend_from_slice(input.session_id.as_bytes());
     transcript.extend_from_slice(input.recipient_identity_verifying_key);
     transcript.extend_from_slice(input.id.as_bytes());
     transcript.extend_from_slice(&input.sent_at_millis.to_be_bytes());

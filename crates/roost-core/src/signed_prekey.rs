@@ -166,6 +166,18 @@ impl SignedPreKeyManager {
         Ok(self.current(now)?.public())
     }
 
+    // Returns every signed prekey still held: the current one and each retained one.
+    pub(crate) fn held_public(
+        &self,
+        now: SystemTime,
+    ) -> Result<Vec<PublicSignedPreKey>, SignedPreKeyError> {
+        let store = self.load_store(now)?;
+        Ok(std::iter::once(&store.current)
+            .chain(store.retained.iter().map(|retained| &retained.prekey))
+            .map(SignedPreKey::public)
+            .collect())
+    }
+
     pub(crate) fn prekey_for_reference(
         &self,
         epoch: u32,

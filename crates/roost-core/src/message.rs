@@ -9,7 +9,7 @@ pub struct Message {
     pub version: u8,
     /// Recipient Discovery Key X25519 public key bytes. Always 32 bytes.
     pub recipient_public_key: [u8; PUBLIC_KEY_LEN],
-    /// Optional X3DH prekey reference for initial messages.
+    /// X3DH prekey reference, present while a new Session's Messages carry the handshake.
     pub prekey_reference: Option<SealedFramePreKeyReference>,
     /// Per-frame ephemeral X25519 public key bytes. Always 32 bytes.
     pub ephemeral_public_key: [u8; PUBLIC_KEY_LEN],

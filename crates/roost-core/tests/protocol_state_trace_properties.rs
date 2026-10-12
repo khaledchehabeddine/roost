@@ -7,7 +7,7 @@ use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{InboundMessageOutcome, ProtocolStateEngine};
-use support::{ProtocolFixture, StoredMessage, ratchet_address};
+use support::{ProtocolFixture, StoredMessage, session_address};
 
 #[derive(Clone, Debug)]
 struct TraceBatch {
@@ -74,10 +74,7 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                     prop_assert_eq!(decrypted.plaintext.as_slice(), message.plaintext.as_slice());
 
                     let mut corrupt_store = fixture.bob_store.clone();
-                    corrupt_store.set_raw(
-                        ratchet_address(fixture.session_key.clone()),
-                        vec![1, 0, 0xaa],
-                    );
+                    corrupt_store.set_raw(session_address(fixture.session_id), vec![1, 0, 0xaa]);
                     let duplicate = engine
                         .decrypt_message_with_transport_bindings(
                             &mut ChaCha20Rng::from_seed([0x90; 32]),

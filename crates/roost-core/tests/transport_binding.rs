@@ -51,8 +51,8 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
     let read = fixture.alice_store.snapshot();
     let outbound = engine
         .encrypt_message_with_transport_binding(
+            &mut ChaCha20Rng::from_seed([0x42; 32]),
             &read,
-            fixture.session_key.clone(),
             fixture.outbound(1, b"transport bound"),
             &message_binding,
         )
@@ -92,7 +92,6 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
             &mut ChaCha20Rng::from_seed([0x44; 32]),
             &read,
             InboundAcknowledgmentMessage {
-                session_key: fixture.session_key.clone(),
                 message: &received.acknowledgment,
                 recipient_discovery_key: &recipient,
                 recipient_identity_verifying_key: fixture

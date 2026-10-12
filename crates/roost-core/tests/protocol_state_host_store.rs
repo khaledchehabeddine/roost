@@ -2,17 +2,20 @@
 
 mod support;
 
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use roost_core::{ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateKey};
 use support::{HostCommitError, HostStore, ProtocolFixture};
 
 #[test]
 fn core_conditions_reject_stale_absence_and_digest_before_host_effects() {
     let engine = ProtocolStateEngine::new();
-    let key = ProtocolStateKey::from_bytes(b"new-session".to_vec()).unwrap();
+    let key = ProtocolStateKey::from_bytes(b"new-identity".to_vec()).unwrap();
+    let mut rng = ChaCha20Rng::from_seed([0x40; 32]);
     let first = engine
-        .initialize_pending_acknowledgments(key.clone())
+        .initialize_deduplication_set(&mut rng, key.clone())
         .unwrap();
-    let stale = engine.initialize_pending_acknowledgments(key).unwrap();
+    let stale = engine.initialize_deduplication_set(&mut rng, key).unwrap();
     assert!(matches!(
         first.commit_condition(),
         ProtocolStateCommitCondition::Absent
@@ -30,8 +33,8 @@ fn core_conditions_reject_stale_absence_and_digest_before_host_effects() {
     let mut fixture = ProtocolFixture::new([0x41; 32]);
     let mut stale = engine
         .encrypt_message_with_transport_binding(
+            &mut rng,
             &fixture.alice_store.snapshot(),
-            fixture.session_key.clone(),
             fixture.outbound(2, b"stale"),
             &fixture.binding,
         )
@@ -53,7 +56,8 @@ fn core_conditions_reject_stale_absence_and_digest_before_host_effects() {
         .collect();
     // A valid first update must not apply if a later condition fails.
     let fresh = engine
-        .initialize_pending_acknowledgments(
+        .initialize_deduplication_set(
+            &mut rng,
             ProtocolStateKey::from_bytes(b"fresh".to_vec()).unwrap(),
         )
         .unwrap();

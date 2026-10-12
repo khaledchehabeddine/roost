@@ -73,8 +73,7 @@ pub use key_store::{
     KeyStoreError, KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId,
     KeyStoreOperationStatus, MessageDecryption, MessageEncryption, MessageOperationError,
     PreparedKeyStoreOperation, PublicationBundle, SecureStorageExpectedValue,
-    SecureStoragePrecondition, SessionAcceptance, SessionAcceptanceResult,
-    SessionEstablishmentError, SessionInitiation, SessionInitiationResult,
+    SecureStoragePrecondition, SessionAcceptance, SessionEstablishmentError, SessionInitiation,
     UnfinishedKeyStoreOperation,
 };
 pub use message::{Message, MessageError};
@@ -83,20 +82,21 @@ pub use protocol_state::{
     AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
     ClearedAcknowledgment, InboundAcknowledgmentMessage, InboundEncryptedMessage,
     InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
-    MAX_PROTOCOL_STATE_ENTRIES, OutboundAcknowledgment, OutboundMessageResult, OutboundPlaintext,
-    PendingAcknowledgment, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition,
-    ProtocolStateEngine, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
-    ProtocolStateSnapshot, ProtocolStateUpdate, RetryInstruction, RetryInstructionResult,
-    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult,
-    protocol_state_blob_digest,
+    InboundSessionStart, LocalSender, MAX_PROTOCOL_STATE_ENTRIES, OutboundAcknowledgment,
+    OutboundMessageResult, OutboundPlaintext, OutboundSessionStart, PendingAcknowledgment,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine,
+    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
+    ProtocolStateUpdate, RetryInstruction, RetryInstructionResult, SenderIdentityMaterial,
+    SessionAcceptanceOutcome, SessionAcceptanceResult, SessionEvent, SessionInitiationResult,
+    SessionUnrecoverableReason, SessionUnrecoverableResult, protocol_state_blob_digest,
 };
 pub use roost_crypto::{
     HandshakeError, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey, PublicKey, PublicKeyError,
     PublicOneTimePreKey, PublicSignedPreKey, RatchetError, RatchetStateError,
-    RecipientDeliveryCapability, SealedFrameError, SealedFramePreKeyReference,
-    SenderIdentityMaterial, Signature, verify_discovery_to_identity_binding,
-    verify_public_identity_key,
+    RecipientDeliveryCapability, SealedFrameError, SealedFramePreKeyReference, Signature,
+    verify_discovery_to_identity_binding, verify_public_identity_key,
 };
+pub use roost_protocol::SessionId;
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
