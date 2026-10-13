@@ -1,6 +1,6 @@
 # Epoch and Delivery Capability
 
-The Discovery Key's Epoch also numbers the inbox, and the delivery capability, the token contacts need to deliver to the inbox, is saved with the Discovery Key, so one write updates both. Two separate counters could disagree, and since blocking works by rotating the inbox, a blocked contact could keep delivering. Roost creates the capability and its verifier but never registers, checks, or sends them.
+The Discovery Key's Epoch also numbers the inbox, and the Delivery Capability is saved with the Discovery Key, so one write updates both. Two separate counters could disagree, and since blocking works by rotating the inbox, a blocked contact could keep delivering. Roost creates the capability and its verifier and sends the capability only inside Inbox Grants, but never registers or checks either.
 
 ## Alternatives
 
