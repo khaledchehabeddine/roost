@@ -73,10 +73,7 @@ fn prepared_inbox_rotation_does_not_advance_authoritative_epoch_before_finalize(
         store.current_public_discovery_key().unwrap().epoch,
         before.epoch
     );
-    assert_eq!(
-        prepared.output.publication.discovery_key.epoch,
-        before.epoch + 1
-    );
+    assert_eq!(prepared.output.discovery_key.epoch, before.epoch + 1);
 
     store.reserve_operation(prepared.operation.id).unwrap();
     store.finalize_operation(prepared.operation.id).unwrap();

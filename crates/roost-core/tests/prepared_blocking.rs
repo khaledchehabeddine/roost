@@ -3,175 +3,114 @@
 //! The scenario commits the contact update and inbox rotation through their separate host-owned
 //! stores while one stable prepared-operation identifier coordinates recovery.
 
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-use roost_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InMemorySecureStorage, KeyStore,
-    KeyStoreOperationStatus, ProtocolStateEngine, ProtocolStateSnapshot, SecureStorage,
-    StorageError,
-};
-use roost_crypto::{
-    generate_discovery_key, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
-};
-use std::sync::{Arc, Mutex};
+mod support;
+
+use roost_core::{ContactIdentityKey, KeyStoreOperationStatus, ProtocolStateBlob};
+use support::device::{Device, Relay, contact_address};
 use zeroize::Zeroizing;
 
-const CREATED_AT_SECS: u64 = 1_700_000_000;
-
-#[derive(Clone)]
-struct SharedSecureStorage(Arc<Mutex<InMemorySecureStorage>>);
-
-impl SharedSecureStorage {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new(InMemorySecureStorage::new())))
-    }
-
-    fn key_store(&self) -> KeyStore {
-        KeyStore::new(Box::new(self.clone()))
-    }
-}
-
-impl SecureStorage for SharedSecureStorage {
-    fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
-        self.0.lock().unwrap().store(key, value)
-    }
-
-    fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
-        self.0.lock().unwrap().load(key)
-    }
-
-    fn delete(&mut self, key: &str) -> Result<(), StorageError> {
-        self.0.lock().unwrap().delete(key)
-    }
-}
-
-fn peer_contact() -> ContactIdentity {
-    let mut rng = ChaCha20Rng::from_seed([21u8; 32]);
-    let signing = generate_signing_key_pair(&mut rng);
-    let agreement = generate_key_pair(&mut rng);
-    let _binding = sign_identity_key_binding(&signing, &agreement.public).unwrap();
-    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS).unwrap();
-    ContactIdentity {
-        identity_key: ContactIdentityKey {
-            x25519_public_key: *agreement.public.as_bytes(),
-            ed25519_verifying_key: signing.verifying.to_bytes(),
-        },
-        discovery_key: ContactDiscoveryKey::from(&discovery.public()),
-    }
-}
-
-fn setup() -> (
-    SharedSecureStorage,
-    KeyStore,
-    ProtocolStateEngine,
-    ProtocolStateSnapshot,
-    ContactIdentityKey,
-) {
-    let storage = SharedSecureStorage::new();
-    let store = storage.key_store();
-    let identity = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(identity.operation.id).unwrap();
-    store.finalize_operation(identity.operation.id).unwrap();
-    let engine = ProtocolStateEngine::new();
-    let contact = peer_contact();
-    let identity_key = contact.identity_key;
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact)
-                .unwrap()
-                .state_updates,
-        )
+// Bob holds Alice's Contact Request, and returns her Identity Key and her record's bytes.
+fn setup() -> (Device, ContactIdentityKey, ProtocolStateBlob) {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let mut bob = Device::new(&relay, 0xb0);
+    let request = alice.request(&bob, b"hi bob");
+    bob.receive(&request.message);
+    let record = bob
+        .host
+        .blob_bytes(&contact_address(alice.identity_key()))
         .unwrap();
-    (storage, store, engine, snapshot, identity_key)
+    (
+        bob,
+        alice.identity_key(),
+        ProtocolStateBlob::from_bytes(record),
+    )
+}
+
+fn epoch(device: &Device) -> u32 {
+    device.store.current_public_discovery_key().unwrap().epoch
+}
+
+fn blocked(device: &Device, address: &roost_core::ProtocolStateAddress, blob: &[u8]) -> bool {
+    device
+        .store
+        .protocol_engine()
+        .decode_contact(address, &ProtocolStateBlob::from_bytes(blob.to_vec()))
+        .unwrap()
+        .blocked
 }
 
 #[test]
 fn prepared_block_commits_contact_and_rotation_without_a_cross_store_partial_state() {
-    let (_storage, store, engine, mut snapshot, identity_key) = setup();
-    let before = store.current_public_discovery_key().unwrap().epoch;
+    let (mut bob, alice, record) = setup();
+    let before = epoch(&bob);
 
-    let prepared = store
-        .prepare_block_contact(&snapshot, identity_key)
+    let block = bob
+        .store
+        .prepare_block_contact(alice, Some(&record))
         .unwrap();
 
-    assert!(prepared.output.contact.contact.blocked);
-    assert_eq!(
-        prepared
-            .output
-            .rotation
-            .as_ref()
-            .unwrap()
-            .publication
-            .discovery_key
-            .epoch,
-        before + 1
-    );
-    assert_eq!(store.current_public_discovery_key().unwrap().epoch, before);
+    assert_eq!(block.publication.unwrap().discovery_key.epoch, before + 1);
+    assert_eq!(epoch(&bob), before);
+    let operation = block.changes.operation().unwrap();
+    bob.store.reserve_operation(operation).unwrap();
+    bob.host.commit_changes(block.changes).unwrap();
+    bob.store.finalize_operation(operation).unwrap();
 
-    store.reserve_operation(prepared.operation.id).unwrap();
-    snapshot
-        .apply_all(prepared.output.contact.state_updates)
-        .unwrap();
-    store.finalize_operation(prepared.operation.id).unwrap();
-
-    assert_eq!(
-        store.current_public_discovery_key().unwrap().epoch,
-        before + 1
-    );
-    assert!(
-        engine
-            .contact_state(&snapshot, identity_key)
-            .unwrap()
-            .unwrap()
-            .blocked
-    );
+    assert_eq!(epoch(&bob), before + 1);
+    let address = contact_address(alice);
+    assert!(blocked(
+        &bob,
+        &address,
+        &bob.host.blob_bytes(&address).unwrap()
+    ));
 }
 
 #[test]
 fn failed_host_block_commit_aborts_without_rotating_the_inbox() {
-    let (_storage, store, _engine, snapshot, identity_key) = setup();
-    let before = store.current_public_discovery_key().unwrap().epoch;
-    let prepared = store
-        .prepare_block_contact(&snapshot, identity_key)
+    let (bob, alice, record) = setup();
+    let before = epoch(&bob);
+    let block = bob
+        .store
+        .prepare_block_contact(alice, Some(&record))
         .unwrap();
+    let operation = block.changes.operation().unwrap();
 
-    store.reserve_operation(prepared.operation.id).unwrap();
-    store.abort_operation(prepared.operation.id).unwrap();
+    bob.store.reserve_operation(operation).unwrap();
+    bob.store.abort_operation(operation).unwrap();
 
-    assert_eq!(store.current_public_discovery_key().unwrap().epoch, before);
+    assert_eq!(epoch(&bob), before);
 }
 
 #[test]
 fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_record() {
     for applied_before_response_loss in [false, true] {
-        let (storage, store, engine, mut snapshot, identity_key) = setup();
-        let before = store.current_public_discovery_key().unwrap().epoch;
-        let prepared = store
-            .prepare_block_contact(&snapshot, identity_key)
+        let (bob, alice, record) = setup();
+        let before = epoch(&bob);
+        let block = bob
+            .store
+            .prepare_block_contact(alice, Some(&record))
             .unwrap();
-        let id = prepared.operation.id;
-        let updates = prepared.output.contact.state_updates;
+        let id = block.changes.operation().unwrap();
+        let updates = block.changes.into_updates();
         assert_eq!(updates.len(), 1);
         let address = updates[0].address().clone();
+        let mut snapshot = bob.host.snapshot();
         let directory =
             std::env::temp_dir().join(format!("roost-host-commit-{}", hex::encode(id.as_bytes()),));
         std::fs::create_dir(&directory).unwrap();
         let committed_path = directory.join("committed");
         let staged_path = directory.join("staged");
         // This one host record holds both the opaque contact blob and the commit decision.
-        let initial = Zeroizing::new(
-            postcard::to_allocvec(&(None::<[u8; 16]>, snapshot.get(&address).unwrap().as_bytes()))
-                .unwrap(),
-        );
+        let initial =
+            Zeroizing::new(postcard::to_allocvec(&(None::<[u8; 16]>, record.as_bytes())).unwrap());
         std::fs::write(&committed_path, &initial).unwrap();
         std::fs::File::open(&committed_path)
             .unwrap()
             .sync_all()
             .unwrap();
 
-        store.reserve_operation(id).unwrap();
+        bob.store.reserve_operation(id).unwrap();
         assert!(updates.iter().all(|update| {
             update
                 .commit_condition()
@@ -196,16 +135,15 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
         std::fs::File::open(&directory).unwrap().sync_all().unwrap();
         // No transaction response reaches the caller. Do not finalize or abort from that absence.
         assert!(
-            store
+            bob.store
                 .unfinished_operations()
                 .unwrap()
                 .iter()
                 .any(|operation| operation.status == KeyStoreOperationStatus::Reserved)
         );
         drop(snapshot);
-        drop(store);
 
-        let recovered = storage.key_store();
+        let recovered = bob.second_instance();
         let unfinished = recovered.unfinished_operations().unwrap();
         assert_eq!(unfinished.len(), 1);
         let operation = &unfinished[0];
@@ -231,21 +169,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
             recovered.operation_status(operation.operation.id).unwrap(),
             expected_status
         );
-        let mut snapshot = ProtocolStateSnapshot::new();
-        snapshot
-            .set(
-                address,
-                roost_core::ProtocolStateBlob::from_bytes(blob.to_vec()),
-            )
-            .unwrap();
-        assert_eq!(
-            engine
-                .contact_state(&snapshot, identity_key)
-                .unwrap()
-                .unwrap()
-                .blocked,
-            applied_before_response_loss
-        );
+        assert_eq!(blocked(&bob, &address, blob), applied_before_response_loss);
         assert_eq!(
             recovered.current_public_discovery_key().unwrap().epoch,
             before + u32::from(applied_before_response_loss)

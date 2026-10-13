@@ -1,9 +1,8 @@
 //! Prepared SecureStorage operations and the records that carry their provisional output.
 
-use crate::context::{ContactBlock, SessionAcceptanceOutcome};
 use crate::error::RoostError;
 use crate::records::{
-    Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey, hex_identifier, hex_text,
+    Identity, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle, hex_identifier, hex_text,
 };
 use roost_core::{
     KeyStoreOperationId as CoreKeyStoreOperationId,
@@ -111,8 +110,8 @@ pub struct PreparedOneTimePreKeys {
 pub struct PreparedInboxRotation {
     /// The operation that makes the new Discovery Key current.
     pub operation_id: OperationId,
-    /// The new inbox's publication and delivery capability.
-    pub rotation: InboxRotation,
+    /// The new inbox's publication, to publish and register after finalization.
+    pub publication: PublicationBundle,
 }
 
 /// A new signed prekey, provisional until its operation is finalized.
@@ -122,23 +121,4 @@ pub struct PreparedSignedPreKeyRotation {
     pub operation_id: OperationId,
     /// The new public signed prekey, absent when the current one wasn't stale.
     pub signed_prekey: Option<PublicSignedPreKey>,
-}
-
-/// A contact block and its inbox rotation, provisional until their operation is finalized.
-#[derive(uniffi::Record)]
-pub struct PreparedContactBlock {
-    /// The operation that makes the inbox rotation current.
-    pub operation_id: OperationId,
-    /// The contact change and the inbox rotation it caused.
-    pub block: ContactBlock,
-}
-
-/// An accepted Session, provisional until its operation consumes the one-time prekey.
-#[derive(uniffi::Record)]
-pub struct PreparedSessionAcceptance {
-    /// The operation to reserve and finalize around the host commit, whatever the outcome. It
-    /// consumes the one-time prekey only if the Session was accepted.
-    pub operation_id: OperationId,
-    /// The accepted Session, or why the first Message created nothing.
-    pub acceptance: SessionAcceptanceOutcome,
 }

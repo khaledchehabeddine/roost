@@ -1,7 +1,8 @@
 //! Contact identity and trust-state records.
 
+use crate::protocol_state::StateChanges;
 use crate::safety_number::IdentityKey;
-use roost_crypto::{PublicDiscoveryKey, RecipientDeliveryCapability};
+use roost_crypto::PublicDiscoveryKey;
 use roost_protocol::PUBLIC_KEY_LEN;
 use serde::{Deserialize, Serialize};
 
@@ -25,14 +26,6 @@ pub struct ContactDiscoveryKey {
     pub identity_signature: [u8; SIGNATURE_LEN],
 }
 
-impl ContactDiscoveryKey {
-    /// Returns the Discovery Key lookup key used by consumers to fetch the contact prekey bundle.
-    #[must_use]
-    pub fn prekey_bundle_lookup_key(&self) -> [u8; PUBLIC_KEY_LEN] {
-        self.x25519_public_key
-    }
-}
-
 impl From<&PublicDiscoveryKey> for ContactDiscoveryKey {
     fn from(value: &PublicDiscoveryKey) -> Self {
         Self {
@@ -45,77 +38,37 @@ impl From<&PublicDiscoveryKey> for ContactDiscoveryKey {
     }
 }
 
-/// A known peer contact identity: permanent Identity Key plus current Discovery Key.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ContactIdentity {
-    /// Permanent Identity Key that owns trust and blocking decisions.
-    pub identity_key: ContactIdentityKey,
-    /// Current Discovery Key used for prekey-bundle lookup.
-    pub discovery_key: ContactDiscoveryKey,
-}
-
-/// Consumer-recorded local trust verdict for one contact Identity Key.
+/// The trust level the app records for one contact Identity Key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ContactTrustState {
-    /// The contact exists but has not been accepted by the consumer.
+    /// A Contact Request is open in either direction.
     Pending,
-    /// The contact was accepted but its Safety Number has not been confirmed out of band.
+    /// Both sides consented, but the Safety Number has not been confirmed out of band.
     Unverified,
     /// The accepted contact's Safety Number was confirmed out of band.
     Verified,
 }
 
-/// Public contact state stored by Core and mirrored through events/current-state snapshots.
+/// A contact as the app shows it, decoded from its record after the app commits.
+///
+/// The peer's Delivery Capability is not part of it: that leaves Roost only in the destination of
+/// an established Message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContactState {
-    /// Contact identity material.
-    pub identity: ContactIdentity,
+    /// Permanent Identity Key that owns trust and blocking decisions.
+    pub identity_key: ContactIdentityKey,
+    /// Current Discovery Key, absent for a stranger blocked before they sent anything.
+    pub discovery_key: Option<ContactDiscoveryKey>,
     /// Identity-key-bound trust state.
     pub trust_state: ContactTrustState,
     /// Local-only block flag for this Contact Identity Key.
     pub blocked: bool,
 }
 
-/// Contact state-change event emitted after the consumer durably commits returned updates.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ContactEvent {
-    /// A contact was created, accepted, verified, blocked, unblocked, or had its Discovery Key updated.
-    Changed {
-        /// Complete public snapshot of the changed contact.
-        contact: ContactState,
-    },
-}
-
-/// State updates and public event data produced by one contact-state operation.
-pub struct ContactStateChange {
-    /// Complete public snapshot after the operation.
-    pub contact: ContactState,
-    /// Protocol-state updates to commit durably before emitting `event`.
-    pub state_updates: Vec<crate::protocol_state::ProtocolStateUpdate>,
-    /// Event to emit after durable commit, if this operation changed state.
-    pub event: Option<ContactEvent>,
-}
-
 /// Result of out-of-band Safety Number confirmation.
 pub enum ContactSafetyNumberConfirmation {
-    /// The presented Safety Number matched.
-    Matched(ContactStateChange),
-    /// The presented Safety Number did not match and no state update or event was produced.
-    Mismatched(ContactStateChange),
-}
-
-/// A peer's current inbox authorization: what a caller needs to submit an established Message.
-///
-/// Held per contact and supplied by that contact inside an encrypted Message. The
-/// capability is the peer's bearer secret, so this deliberately does not live in [`ContactState`],
-/// which is available through public contact queries.
-///
-/// `epoch` is the peer's Discovery Key epoch the capability belongs to. It exists so a replayed
-/// older authorization can be recognized and refused rather than silently rolling a contact back to
-/// a capability they have already rotated away from.
-pub struct PeerInboxAuthorization {
-    /// The peer's Discovery Key epoch this authorization belongs to.
-    pub epoch: u32,
-    /// The peer's recipient delivery capability for that epoch.
-    pub capability: RecipientDeliveryCapability,
+    /// The presented Safety Number matched, and the changes verify the contact.
+    Matched(StateChanges),
+    /// The presented Safety Number did not match, and nothing changed.
+    Mismatched,
 }

@@ -7,28 +7,22 @@ use rand_chacha::ChaCha20Rng;
 use roost_core::{
     BlockedContactAcknowledgmentPolicy, DEFAULT_DEDUPLICATION_CAPACITY, InboundMessageOutcome,
     MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, MessageDecryption,
-    MessageDecryptionStep, MessageDestination, MessageEncryption, MessageEncryptionStep,
-    MessageOperationError, OutboundMessageResult, OutgoingMessage, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ReceiveSettings, SignedSenderCertificate, StateEntryError,
+    MessageDecryptionStep, MessageEncryption, MessageEncryptionStep, MessageOperationError,
+    OutboundMessageResult, OutgoingMessage, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateCommitCondition, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
+    ReceiveSettings, SignedSenderCertificate, StateEntryError,
 };
 use roost_protocol::{MAX_CERTIFICATE_GRACE_WINDOW, SenderCertificateValidationError};
 use std::time::Duration;
-use support::device::{Device, Relay, binding};
+use support::device::{Device, Relay, Route, binding};
 
-fn befriend(first: &mut Device<'_>, second: &mut Device<'_>) {
-    first.accept_contact(second);
-    second.accept_contact(first);
-}
-
-// Starts a Session from `initiator`, has `responder` accept it and reply.
-fn establish(initiator: &mut Device<'_>, responder: &mut Device<'_>) -> roost_core::SessionId {
-    let bundle = responder.bundle();
-    let initiation = initiator.initiate(&bundle, b"hello");
-    responder.accept(&initiation.message, bundle.selection);
-    let reply = responder.send(initiator, b"reply");
-    initiator.receive(&reply.message);
-    initiation.session_id
+// Has `initiator` ask `responder`, `responder` accept, and `initiator` receive the acceptance.
+fn establish(initiator: &mut Device, responder: &mut Device) -> roost_core::SessionId {
+    let request = initiator.request(responder, b"hello");
+    responder.receive(&request.message);
+    let acceptance = responder.accept_request(initiator, b"reply");
+    initiator.receive(&acceptance.message);
+    request.session_id
 }
 
 fn address(kind: ProtocolStateKind, key: &[u8]) -> ProtocolStateAddress {
@@ -44,7 +38,6 @@ fn encryption_reads_the_contact_then_its_session_then_asks_for_a_transport() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     let session_id = establish(&mut alice, &mut bob);
     let bob_key = bob.identity_key().canonical_encoding();
     let outgoing = alice.outgoing(&bob, b"hello again");
@@ -85,13 +78,7 @@ fn encryption_reads_the_contact_then_its_session_then_asks_for_a_transport() {
     else {
         panic!("expected a transport request")
     };
-    assert_eq!(
-        destination,
-        MessageDestination {
-            identity_key: bob.identity_key(),
-            discovery_key: bob.contact_identity().discovery_key.x25519_public_key,
-        }
-    );
+    assert_eq!(Route::of(&destination), bob.established_route());
     encryption.supply_transport_binding(binding()).unwrap();
     let MessageEncryptionStep::Ready(sent) = encryption.step(&mut rng()).unwrap() else {
         panic!("expected the sealed Message")
@@ -111,7 +98,6 @@ fn decryption_checks_duplicates_first_and_asks_where_to_acknowledge_only_after_a
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     let session_id = establish(&mut alice, &mut bob);
     let sent = alice.send(&bob, b"ping");
     let alice_key = alice.identity_key().canonical_encoding();
@@ -162,13 +148,7 @@ fn decryption_checks_duplicates_first_and_asks_where_to_acknowledge_only_after_a
     else {
         panic!("expected a transport request for the acknowledgment")
     };
-    assert_eq!(
-        destination,
-        MessageDestination {
-            identity_key: alice.identity_key(),
-            discovery_key: alice.contact_identity().discovery_key.x25519_public_key,
-        }
-    );
+    assert_eq!(Route::of(&destination), alice.established_route());
     decryption
         .supply_acknowledgment_transport_binding(binding())
         .unwrap();
@@ -186,7 +166,6 @@ fn a_tampered_message_fails_before_roost_asks_where_to_acknowledge() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let mut tampered = alice.send(&bob, b"ping").message;
     let last = tampered.ciphertext.len() - 1;
@@ -198,9 +177,10 @@ fn a_tampered_message_fails_before_roost_asks_where_to_acknowledge() {
             Ok(MessageDecryptionStep::NeedsState(addresses)) => {
                 decryption.supply_state(bob.host.read(&addresses)).unwrap();
             }
-            Ok(MessageDecryptionStep::NeedsAcknowledgmentTransport(_)) => {
-                panic!("a tampered Message must not reach the acknowledgment")
-            }
+            Ok(
+                MessageDecryptionStep::NeedsAcknowledgmentTransport(_)
+                | MessageDecryptionStep::NeedsAdmission(_),
+            ) => panic!("a tampered Message must not reach the acknowledgment"),
             Ok(MessageDecryptionStep::Ready(_)) => panic!("a tampered Message must not decrypt"),
             Err(error) => break error,
         }
@@ -237,7 +217,7 @@ fn seal(
                 (
                     MessageEncryptionStep::NeedsTransport(first),
                     MessageEncryptionStep::NeedsTransport(second),
-                ) => assert_eq!(first, second),
+                ) => assert_eq!(Route::of(first), Route::of(second)),
                 _ => panic!("asking again changed the request"),
             }
         }
@@ -248,6 +228,7 @@ fn seal(
             MessageEncryptionStep::NeedsTransport(_) => {
                 encryption.supply_transport_binding(binding()).unwrap();
             }
+            MessageEncryptionStep::NeedsPreKeyBundle(_) => panic!("expected an existing Session"),
             MessageEncryptionStep::Ready(sent) => return *sent,
         }
     }
@@ -258,7 +239,6 @@ fn asking_a_waiting_operation_again_returns_the_same_request_without_repeating_w
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let outgoing = alice.outgoing(&bob, b"once");
     let replay = redraft(&outgoing);
@@ -294,7 +274,6 @@ fn entries_that_do_not_match_the_pending_read_end_the_operation() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
 
     for bad in [
@@ -351,7 +330,6 @@ fn entries_in_any_order_satisfy_the_pending_read() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let outgoing = alice.outgoing(&bob, b"reordered");
     let mut encryption = alice.store.start_encryption(outgoing).unwrap();
@@ -374,7 +352,6 @@ fn a_supply_call_out_of_turn_ends_the_operation() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
 
     let outgoing = alice.outgoing(&bob, b"early");
@@ -405,7 +382,6 @@ fn an_operation_refuses_every_call_after_returning_its_result() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let outgoing = alice.outgoing(&bob, b"done");
     let mut encryption = alice.store.start_encryption(outgoing).unwrap();
@@ -419,6 +395,7 @@ fn an_operation_refuses_every_call_after_returning_its_result() {
             MessageEncryptionStep::NeedsTransport(_) => {
                 encryption.supply_transport_binding(binding()).unwrap();
             }
+            MessageEncryptionStep::NeedsPreKeyBundle(_) => panic!("expected an existing Session"),
             MessageEncryptionStep::Ready(_) => break,
         }
     }
@@ -442,9 +419,8 @@ fn a_send_cannot_commit_after_another_operation_blocks_its_contact() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
-    let sent = alice.encrypt(&bob, b"before the block").unwrap();
+    let sent = alice.encrypt_to(&bob, b"before the block").unwrap();
     let contact = address(
         ProtocolStateKind::ContactState,
         &bob.identity_key().canonical_encoding(),
@@ -457,20 +433,16 @@ fn a_send_cannot_commit_after_another_operation_blocks_its_contact() {
             .all(|update| update.address() != &contact)
     );
 
-    let blocked = alice
-        .store
-        .protocol_engine()
-        .block_contact(&alice.host.snapshot(), bob.identity_key())
-        .unwrap();
-    alice.host.commit(blocked.state_updates).unwrap();
+    alice.block(bob.identity_key());
     let before = alice.host.snapshot_bytes();
+    let queued = alice.host.outbox().len();
 
     assert_eq!(
         alice.host.commit_sent(sent),
         Err(support::HostCommitError::StaleCondition)
     );
     assert_eq!(alice.host.snapshot_bytes(), before);
-    assert!(alice.host.outbox().is_empty());
+    assert_eq!(alice.host.outbox().len(), queued);
 }
 
 #[test]
@@ -478,9 +450,8 @@ fn matching_checks_each_condition_and_rejects_malformed_records() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
-    let sent = alice.encrypt(&bob, b"conditional").unwrap();
+    let sent = alice.encrypt_to(&bob, b"conditional").unwrap();
     let addresses: Vec<_> = sent
         .changes
         .conditions()
@@ -522,7 +493,6 @@ fn the_first_receive_creates_the_deduplication_set_and_a_redelivery_stops_before
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     bob.forget_received_digests();
     let deduplication_set = address(ProtocolStateKind::DeduplicationSet, &[0]);
@@ -554,7 +524,6 @@ fn shrinking_the_deduplication_set_evicts_its_oldest_digests() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let settings = |capacity| {
         ReceiveSettings::new(
@@ -637,6 +606,10 @@ fn decrypt_recording(
                 requests.push(format!("{} records", addresses.len()));
                 decryption.supply_state(host.read(&addresses)).unwrap();
             }
+            MessageDecryptionStep::NeedsAdmission(_) => {
+                requests.push("admission".into());
+                decryption.confirm_admission().unwrap();
+            }
             MessageDecryptionStep::NeedsAcknowledgmentTransport(_) => {
                 requests.push("acknowledgment transport".into());
                 decryption
@@ -653,7 +626,6 @@ fn an_acknowledgment_decrypts_like_any_message_and_never_asks_for_a_reply_transp
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     let session_id = establish(&mut alice, &mut bob);
     let sent = alice.send(&bob, b"please acknowledge");
     let InboundMessageOutcome::Accepted(received) = bob.receive(&sent.message) else {
@@ -668,7 +640,7 @@ fn an_acknowledgment_decrypts_like_any_message_and_never_asks_for_a_reply_transp
 
     let decryption = alice
         .store
-        .start_decryption(alice.incoming(&received.acknowledgment))
+        .start_decryption(alice.incoming(received.acknowledgment.as_ref().unwrap()))
         .unwrap();
     let (requests, outcome) = decrypt_recording(decryption, &alice.host);
 
@@ -685,7 +657,9 @@ fn an_acknowledgment_decrypts_like_any_message_and_never_asks_for_a_reply_transp
             .is_empty()
     );
     assert!(matches!(
-        alice.decrypt(&received.acknowledgment).unwrap(),
+        alice
+            .decrypt(received.acknowledgment.as_ref().unwrap())
+            .unwrap(),
         InboundMessageOutcome::Duplicate
     ));
 }
@@ -695,9 +669,8 @@ fn an_unmatched_acknowledgment_still_commits_its_advanced_state() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
-    let sent = alice.encrypt(&bob, b"forgotten").unwrap();
+    let sent = alice.encrypt_to(&bob, b"forgotten").unwrap();
     let message = support::copy(&sent.message);
     // The host keeps the ratchet's advance but loses the Pending Acknowledgment.
     let session_only = sent
@@ -712,14 +685,16 @@ fn an_unmatched_acknowledgment_still_commits_its_advanced_state() {
     };
 
     let InboundMessageOutcome::AcknowledgmentUnmatched(unmatched) =
-        alice.receive(&received.acknowledgment)
+        alice.receive(received.acknowledgment.as_ref().unwrap())
     else {
         panic!("expected an unmatched acknowledgment")
     };
 
     assert_eq!(unmatched.acknowledged_message_id, sent.message_id);
     assert!(matches!(
-        alice.decrypt(&received.acknowledgment).unwrap(),
+        alice
+            .decrypt(received.acknowledgment.as_ref().unwrap())
+            .unwrap(),
         InboundMessageOutcome::Duplicate
     ));
 }
@@ -729,13 +704,12 @@ fn an_acknowledgment_needs_a_valid_sender_certificate() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let sent = alice.send(&bob, b"acknowledge me");
     let InboundMessageOutcome::Accepted(received) = bob.receive(&sent.message) else {
         panic!("expected Bob to accept the Message")
     };
-    let mut incoming = alice.incoming(&received.acknowledgment);
+    let mut incoming = alice.incoming(received.acknowledgment.as_ref().unwrap());
     // Bob's certificate expired long before this reference time.
     incoming.sender_certificate_validation.reference_time += Duration::from_secs(1_000_000);
     let before = alice.host.snapshot_bytes();
@@ -763,15 +737,13 @@ fn a_blocked_sender_gets_an_acknowledgment_only_under_the_silent_receipt_choice(
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
-    let blocked = bob
-        .store
-        .protocol_engine()
-        .block_contact(&bob.host.snapshot(), alice.identity_key())
-        .unwrap();
-    bob.host.commit(blocked.state_updates).unwrap();
-    let sent = alice.send(&bob, b"from a blocked contact");
+    bob.block(alice.identity_key());
+    // The block rotated Bob's inbox, so only a request on his new prekeys still reaches him.
+    alice
+        .host
+        .remove(&support::device::peer_sessions_address(bob.identity_key()));
+    let sent = alice.request(&bob, b"from a blocked contact");
 
     let unreachable = bob
         .store
@@ -825,6 +797,7 @@ fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
             signature: draft.sender_certificate.signature.clone(),
         },
         plaintext: draft.plaintext.clone(),
+        prekey_bundle: None,
     }
 }
 
@@ -833,7 +806,6 @@ fn a_second_instance_that_loses_the_commit_retries_from_fresh_reads() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let extension = alice.second_instance();
     let app_draft = alice.outgoing(&bob, b"from the app");
@@ -881,7 +853,6 @@ fn dropping_an_unfinished_operation_changes_nothing_and_a_restart_sends_the_draf
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let draft = alice.outgoing(&bob, b"survives a crash");
     let before = alice.host.snapshot_bytes();
@@ -894,7 +865,9 @@ fn dropping_an_unfinished_operation_changes_nothing_and_a_restart_sends_the_draf
                     .unwrap();
             }
             MessageEncryptionStep::NeedsTransport(_) => break,
-            MessageEncryptionStep::Ready(_) => panic!("expected the crash before sealing"),
+            MessageEncryptionStep::NeedsPreKeyBundle(_) | MessageEncryptionStep::Ready(_) => {
+                panic!("expected the crash before sealing")
+            }
         }
     }
     drop(interrupted);
@@ -922,7 +895,6 @@ fn a_receive_that_found_no_deduplication_set_cannot_commit_after_another_creates
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     bob.forget_received_digests();
     let first = alice.send(&bob, b"first");
@@ -976,7 +948,7 @@ fn open_and_acknowledge(
                 (
                     MessageDecryptionStep::NeedsAcknowledgmentTransport(first),
                     MessageDecryptionStep::NeedsAcknowledgmentTransport(second),
-                ) => assert_eq!(first, second),
+                ) => assert_eq!(Route::of(first), Route::of(second)),
                 _ => panic!("asking again changed the request"),
             }
         }
@@ -984,6 +956,7 @@ fn open_and_acknowledge(
             MessageDecryptionStep::NeedsState(addresses) => {
                 decryption.supply_state(host.read(&addresses)).unwrap();
             }
+            MessageDecryptionStep::NeedsAdmission(_) => decryption.confirm_admission().unwrap(),
             MessageDecryptionStep::NeedsAcknowledgmentTransport(_) => {
                 decryption
                     .supply_acknowledgment_transport_binding(binding())
@@ -999,7 +972,6 @@ fn asking_a_waiting_decryption_again_repeats_no_work() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    befriend(&mut alice, &mut bob);
     establish(&mut alice, &mut bob);
     let sent = alice.send(&bob, b"once");
 
@@ -1013,7 +985,7 @@ fn asking_a_waiting_decryption_again_repeats_no_work() {
         else {
             panic!("expected Bob to accept the Message")
         };
-        received.acknowledgment.to_bytes().unwrap()
+        received.acknowledgment.unwrap().to_bytes().unwrap()
     });
 
     // Opening and sealing draw randomness, so repeated work would change the acknowledgment.

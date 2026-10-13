@@ -77,9 +77,15 @@ pub enum OneTimePreKeyError {
     /// The internal storage lock was poisoned by a panicked thread.
     #[error("internal lock poisoned")]
     LockPoisoned,
-    /// The requested one-time pre-key is absent or already consumed.
+    /// The requested one-time pre-key was never created.
     #[error("one-time pre-key not found")]
     NotFound,
+    /// A Session already used the requested one-time pre-key.
+    #[error("one-time pre-key {id} was already used")]
+    Used {
+        /// The used one-time pre-key's identifier.
+        id: u64,
+    },
     /// The requested one-time pre-key belongs to another discovery-key epoch.
     #[error("one-time pre-key belongs to a superseded discovery-key epoch")]
     StaleEpoch,
@@ -210,11 +216,15 @@ impl OneTimePreKeyManager {
         if pool.epoch != epoch {
             return Err(OneTimePreKeyError::StaleEpoch);
         }
-        let entry = pool
-            .entries
-            .iter()
-            .find(|entry| entry.id == id)
-            .ok_or(OneTimePreKeyError::NotFound)?;
+        let entry =
+            pool.entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .ok_or(if id < pool.next_id {
+                    OneTimePreKeyError::Used { id }
+                } else {
+                    OneTimePreKeyError::NotFound
+                })?;
         let prekey = OneTimePreKey::from_secret_bytes(
             entry.id,
             entry.secret,

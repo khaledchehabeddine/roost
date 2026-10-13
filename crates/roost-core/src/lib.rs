@@ -60,9 +60,8 @@ mod transport_binding;
 use roost_protocol::{MessageId, PayloadKind};
 
 pub use contact::{
-    ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey,
-    ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
-    PeerInboxAuthorization,
+    ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
+    ContactTrustState,
 };
 pub use discovery_key::DiscoveryKeyError;
 pub use hardening::{
@@ -71,27 +70,25 @@ pub use hardening::{
 };
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
-    ContactBlock, InboxRotation, JournalCorruption, KeyStore, KeyStoreError, KeyStoreOperation,
+    ContactBlock, JournalCorruption, KeyStore, KeyStoreError, KeyStoreOperation,
     KeyStoreOperationError, KeyStoreOperationId, KeyStoreOperationStatus, MessageStartError,
     PreparedKeyStoreOperation, PublicationBundle, SecureStorageExpectedValue,
-    SecureStoragePrecondition, SessionAcceptance, SessionEstablishmentError, SessionInitiation,
-    UnfinishedKeyStoreOperation,
+    SecureStoragePrecondition, UnfinishedKeyStoreOperation,
 };
 pub use message::{Message, MessageError};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
-    AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
-    InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
-    InboundSessionStart, IncomingMessage, KnownDomainSigningKey, LocalIdentityKeys, LocalSender,
+    AcknowledgmentResult, AdmissionRequest, BlockedContactAcknowledgmentPolicy,
+    BlockedInboundMessageResult, InboundMessageOutcome, InboundMessageResult,
+    InboundSenderCertificateValidation, IncomingMessage, KnownDomainSigningKey,
     MAX_PROTOCOL_STATE_ENTRIES, MessageDecryption, MessageDecryptionStep, MessageDestination,
     MessageEncryption, MessageEncryptionStep, MessageOperationError, OutboundMessageResult,
-    OutboundSessionStart, OutgoingMessage, PendingAcknowledgment, ProtocolStateAddress,
+    OutgoingMessage, PeerPreKeyBundle, PendingAcknowledgment, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
     ReceiveSettings, RetryInstruction, RetryInstructionResult, SenderIdentityMaterial,
-    SessionAcceptanceOutcome, SessionAcceptanceResult, SessionEvent, SessionInitiationResult,
-    SessionUnrecoverableReason, SessionUnrecoverableResult, SignedSenderCertificate, StateChanges,
-    StateEntryError, commit_conditions_match,
+    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, SignedSenderCertificate,
+    StateChanges, StateEntryError, WithheldInboundMessageResult, commit_conditions_match,
 };
 pub use roost_crypto::{
     HandshakeError, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey, PublicKey, PublicKeyError,
@@ -103,4 +100,4 @@ pub use roost_protocol::SessionId;
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
-pub use transport_binding::{PreKeySelection, TransportBinding, TransportBindingError};
+pub use transport_binding::{TransportBinding, TransportBindingError};

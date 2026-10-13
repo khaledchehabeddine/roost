@@ -28,7 +28,7 @@ fn prekey_ids_are_stable_and_restart_with_each_discovery_key_epoch() {
     finalize(&store, &one_time);
 
     let rotated_inbox = store.prepare_inbox_rotation().unwrap();
-    assert_eq!(rotated_inbox.output.publication.signed_prekey.id, 0);
+    assert_eq!(rotated_inbox.output.signed_prekey.id, 0);
     finalize(&store, &rotated_inbox);
     let next_epoch_one_time = store.prepare_one_time_prekeys(1).unwrap();
     assert_eq!(next_epoch_one_time.output[0].id, 0);

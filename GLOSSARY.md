@@ -57,8 +57,6 @@
   - Avoid: outbox, retry cache
 - **PreKey ID**: The number that identifies a prekey within one Epoch, counted separately for signed and one-time prekeys.
   - Avoid: key fingerprint, database row ID
-- **PreKey Selection**: The signed and one-time prekey IDs the app picks for an incoming X3DH Message.
-  - Avoid: prekey reference
 - **PreKey State**: The stored secrets for an Identity's current Discovery Key and its prekeys.
   - Avoid: protocol state blob, prekey cache
 - **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app reserves before committing its own state, then finalizes or aborts.

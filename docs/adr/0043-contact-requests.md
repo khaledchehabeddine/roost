@@ -1,6 +1,6 @@
 # Contact Requests
 
-Roost creates a contact record only when someone sends a Contact Request, and a contact becomes accepted only with both consents, the app's own request or acceptance and the peer's authenticated Message, where two requests that cross count as both. Who asked comes from who started the Session a Message arrives on, and only a Contact Acceptance on the requester's Session accepts, because people may exchange a few Messages first, and the asked side shares its Inbox Grant only when it accepts, so a requester it turns down never holds its Delivery Capability. Blocking still rotates the inbox even for a stranger, because only a new address stops a blocked person from returning with a new identity, while deleting a request just hides it.
+Roost creates a contact record only when someone sends a Contact Request or the app blocks a stranger, and a contact becomes accepted only with both consents, the app's own request or acceptance and the peer's authenticated Message, where two requests that cross count as both. Who asked comes from who started the Session a Message arrives on, and only a Contact Acceptance on the requester's Session accepts, because people may exchange a few Messages first, and the asked side shares its Inbox Grant only when it accepts, so a requester it turns down never holds its Delivery Capability. Blocking still rotates the inbox even for a stranger, because only a new address stops a blocked person from returning with a new identity, while deleting a request just hides it.
 
 ## Alternatives
 

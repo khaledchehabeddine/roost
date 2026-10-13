@@ -23,37 +23,33 @@ pub use certificate::{
     DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
     ValidatedSenderCertificate,
 };
-pub use context::{
-    ContactBlock, Contacts, IdentityContext, Messaging, SessionAcceptanceOutcome,
-    SessionAcceptanceResult, SessionInitiationResult,
-};
+pub use context::{ContactBlock, Contacts, IdentityContext, Messaging};
 pub use error::RoostError;
 pub use message::{
     FramePreKeyReference, Message, MessageId, PayloadKind, SenderIdentityMaterial, decode_message,
     encode_message,
 };
 pub use message_operation::{
-    IncomingMessage, MessageDecryption, MessageDecryptionStep, MessageDestination,
-    MessageEncryption, MessageEncryptionStep, OutgoingMessage, SignedSenderCertificate,
+    AdmissionRequest, IncomingMessage, MessageDecryption, MessageDecryptionStep,
+    MessageDestination, MessageEncryption, MessageEncryptionStep, OutgoingMessage,
+    SignedSenderCertificate,
 };
 pub use operation::{
-    OperationId, OperationStatus, PreparedContactBlock, PreparedIdentity, PreparedInboxRotation,
-    PreparedOneTimePreKeys, PreparedSessionAcceptance, PreparedSignedPreKeyRotation,
-    UnfinishedOperation,
+    OperationId, OperationStatus, PreparedIdentity, PreparedInboxRotation, PreparedOneTimePreKeys,
+    PreparedSignedPreKeyRotation, UnfinishedOperation,
 };
 pub use protocol::{
     AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
-    CommitCondition, ContactDiscoveryKey, ContactEvent, ContactEventKind, ContactIdentity,
-    ContactSafetyNumberConfirmation, ContactSafetyNumberConfirmationKind, ContactState,
-    ContactStateChange, ContactTrustState, IdentityKey, InboundMessageOutcome,
-    InboundMessageResult, OutboundMessageResult, PendingAcknowledgment, ProtocolHardeningLimits,
-    ProtocolStateKind, ReceiveSettings, RetryInstruction, RetryInstructionResult, SafetyNumber,
-    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, StateChanges, StateEntry,
-    StateKey, StateUpdate, derive_safety_number, protocol_hardening_limits,
+    CommitCondition, ContactDiscoveryKey, ContactSafetyNumberConfirmation, ContactState,
+    ContactTrustState, IdentityKey, InboundMessageOutcome, InboundMessageResult,
+    OutboundMessageResult, PendingAcknowledgment, ProtocolHardeningLimits, ProtocolStateKind,
+    ReceiveSettings, RetryInstruction, RetryInstructionResult, SafetyNumber, SessionEvent,
+    SessionUnrecoverableReason, SessionUnrecoverableResult, StateChanges, StateEntry, StateKey,
+    StateUpdate, WithheldInboundMessageResult, derive_safety_number, protocol_hardening_limits,
 };
 pub use records::{
-    Identity, InboxRotation, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
+    Identity, PreKeyBundle, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
     PublicationBundle, SessionId,
 };
 pub use storage::SecureStorage;
-pub use transport_binding::{PreKeySelection, TransportBinding};
+pub use transport_binding::TransportBinding;

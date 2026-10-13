@@ -1,6 +1,5 @@
 mod messaging;
 mod operation;
-mod session;
 
 pub use messaging::MessageStartError;
 pub use operation::{
@@ -8,13 +7,12 @@ pub use operation::{
     KeyStoreOperationStatus, PreparedKeyStoreOperation, SecureStorageExpectedValue,
     SecureStoragePrecondition, UnfinishedKeyStoreOperation,
 };
-pub use session::{SessionAcceptance, SessionEstablishmentError, SessionInitiation};
 
-use crate::contact::{ContactIdentityKey, ContactStateChange};
+use crate::contact::ContactIdentityKey;
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager, DiscoveryKeyStatus};
 use crate::identity::{Identity, IdentityError, IdentityManager};
 use crate::one_time_prekey::{OneTimePreKeyError, OneTimePreKeyManager};
-use crate::protocol_state::{ProtocolStateEngine, ProtocolStateSnapshot};
+use crate::protocol_state::{ProtocolStateBlob, ProtocolStateEngine, StateChanges};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
 use rand::rngs::OsRng;
@@ -22,7 +20,7 @@ use rand::rngs::OsRng;
 use roost_crypto::OneTimePreKey;
 use roost_crypto::{
     PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
-    RecipientDeliveryCapability, RecipientDeliveryVerifier, Signature, verify_public_signed_prekey,
+    RecipientDeliveryVerifier, Signature, verify_public_signed_prekey,
 };
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
@@ -69,43 +67,26 @@ pub struct PublicationBundle {
     /// peer that starts from a discovery key verifies it to learn the identity really was
     /// authorized by that discovery key.
     pub discovery_to_identity: Signature,
-    /// Public commitment to the recipient delivery capability of this inbox.
+    /// Public commitment to the Delivery Capability of this inbox.
     ///
-    /// Register this with the relay. The capability it commits to is a bearer secret and is
-    /// reached only through [`KeyStore::current_delivery_capability`].
+    /// Register this with the relay. The capability it commits to is a secret that Roost shares
+    /// with contacts only inside Inbox Grants.
     pub recipient_delivery_verifier: RecipientDeliveryVerifier,
     /// The signed pre-key for this publication.
     pub signed_prekey: PublicSignedPreKey,
 }
 
-/// Everything one inbox rotation produces.
-///
-/// A rotation advances the epoch and replaces the discovery key, its mutual binding
-/// signatures, the prekey bundle, and the recipient delivery capability together. Both halves are
-/// returned from the one call so a caller cannot publish the new inbox while still
-/// distributing the previous inbox's capability.
-pub struct InboxRotation {
-    /// Material to publish and register, including the new Discovery Key and verifier.
-    pub publication: PublicationBundle,
-    /// The new inbox's bearer secret, to persist and share with authorized contacts.
-    ///
-    /// Deliberately kept out of [`PublicationBundle`]: everything in that struct is meant to be
-    /// published, and a secret sitting inside it is one careless `publish(bundle)` away from
-    /// reaching the relay.
-    pub capability: RecipientDeliveryCapability,
-}
-
 /// Result of blocking a contact.
 pub struct ContactBlock {
-    /// Contact state change to commit durably, then emit.
-    pub contact: ContactStateChange,
-    /// The inbox rotation the block performed, or `None` when the contact was already blocked.
+    /// The contact change to commit, carrying the inbox rotation's Prepared KeyStore Operation
+    /// when the block rotated the inbox.
+    pub changes: StateChanges,
+    /// The rotated inbox's publication, or `None` when the contact was already blocked.
     ///
-    /// Present means every remaining contact now holds a stale delivery capability and must be
-    /// given [`InboxRotation::capability`] before they can reach this inbox again. The blocked
-    /// contact is deliberately not among them — that is what makes the block bite at the relay
-    /// rather than only locally.
-    pub rotation: Option<InboxRotation>,
+    /// Present means every remaining contact holds a stale Delivery Capability until a Message
+    /// carries them the new Inbox Grant. The blocked contact never gets one, which is what makes
+    /// the block bite at the relay rather than only locally.
+    pub publication: Option<PublicationBundle>,
 }
 
 struct KeyStoreInner {
@@ -256,49 +237,38 @@ impl KeyStore {
         })
     }
 
-    /// Blocks a contact and rotates the inbox so the block takes effect at the relay.
+    /// Blocks a contact, given its record or the record's absence, and rotates the inbox so the
+    /// block takes effect at the relay.
     ///
-    /// Blocking alone only stops messages being surfaced locally; the relay would still accept and
-    /// queue them, because the blocked contact still holds a working delivery capability. Rotating
-    /// the inbox invalidates that capability. The cost is that every *other* contact's copy is
-    /// invalidated too and must be re-supplied — see [`ContactBlock::rotation`].
+    /// Blocking alone only stops Messages being surfaced locally; the relay would still accept and
+    /// queue them, because the blocked contact still holds a working Delivery Capability or knows
+    /// the inbox's prekeys. Rotating the inbox replaces both, even for a stranger who never got a
+    /// grant, so a blocked person can't come back with a new identity at the same address. A
+    /// stranger with no record gets one that holds only the block.
     ///
-    /// A contact that is already blocked produces no state change and no rotation, so repeating the
-    /// call does not churn every contact's capability. Its no-op operation must still be finalized
-    /// or aborted.
+    /// A contact that is already blocked produces no change and no rotation, so repeating the call
+    /// does not churn every contact's capability.
     ///
-    /// Neither change is authoritative when this returns. Reserve the operation, atomically apply
-    /// [`ContactBlock::contact`] in the host transaction, then finalize the staged inbox rotation.
-    /// Abort only after proving the host transaction did not commit.
+    /// Neither change is authoritative when this returns. Reserve the operation in
+    /// [`ContactBlock::changes`], commit the changes with its ID, then finalize it. Abort only after
+    /// proving the host transaction did not commit.
     pub fn prepare_block_contact(
         &self,
-        snapshot: &ProtocolStateSnapshot,
         identity_key: ContactIdentityKey,
-    ) -> Result<PreparedKeyStoreOperation<ContactBlock>, KeyStoreError> {
-        let contact = self.0.engine.block_contact(snapshot, identity_key)?;
-        self.prepare_operation(move |staged| {
-            // Repeated blocking still owns an operation, but must not rotate other contacts'
-            // capabilities.
-            let rotation = if contact.state_updates.is_empty() {
-                None
-            } else {
-                Some(staged.rotate_inbox_now_eager()?)
-            };
-            Ok(ContactBlock { contact, rotation })
+        record: Option<&ProtocolStateBlob>,
+    ) -> Result<ContactBlock, KeyStoreError> {
+        let (changes, blocks) = self.0.engine.block_contact(identity_key, record)?;
+        if !blocks {
+            return Ok(ContactBlock {
+                changes,
+                publication: None,
+            });
+        }
+        let prepared = self.prepare_operation(|staged| staged.rotate_inbox_now_eager())?;
+        Ok(ContactBlock {
+            changes: changes.with_operation(prepared.operation.id),
+            publication: Some(prepared.output),
         })
-    }
-
-    /// Returns the recipient delivery capability for the current inbox.
-    ///
-    /// Secret-bearing. Give it only to authorized contacts through an encrypted channel, and
-    /// register [`PublicationBundle::recipient_delivery_verifier`] instead — Roost never
-    /// registers, validates, or transmits a capability.
-    pub fn current_delivery_capability(
-        &self,
-    ) -> Result<RecipientDeliveryCapability, KeyStoreError> {
-        let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required()?;
-        Ok(self.0.discovery.current_capability()?)
     }
 
     /// Prepares exactly `batch_size` one-time prekeys for the current discovery-key epoch.
@@ -356,39 +326,34 @@ impl KeyStore {
 
     /// Prepares rotation of the whole inbox.
     ///
-    /// Advances the epoch, replaces the discovery key and the recipient delivery
-    /// capability together, clears epoch-bound one-time pre-keys, and returns both the
-    /// publishable material and the new capability. A preparation failure discards the staged
-    /// changes, leaving the previous authoritative inbox intact.
+    /// Advances the epoch, replaces the discovery key and the Delivery Capability together, clears
+    /// epoch-bound one-time pre-keys, and returns the publishable material. A preparation failure
+    /// discards the staged changes, leaving the previous authoritative inbox intact.
     ///
-    /// This invalidates every contact's delivery authorization — that is what makes it the
-    /// mechanism behind blocking, and why it is not merely a discovery-key rotation.
+    /// This invalidates every contact's Delivery Capability until a Message carries them the new
+    /// Inbox Grant — that is what makes it the mechanism behind blocking, and why it is not merely
+    /// a discovery-key rotation.
     pub fn prepare_inbox_rotation(
         &self,
-    ) -> Result<PreparedKeyStoreOperation<InboxRotation>, KeyStoreError> {
+    ) -> Result<PreparedKeyStoreOperation<PublicationBundle>, KeyStoreError> {
         self.prepare_operation(|staged| staged.rotate_inbox_now_eager())
     }
 
-    fn rotate_inbox_now_eager(&self) -> Result<InboxRotation, KeyStoreError> {
+    fn rotate_inbox_now_eager(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let now = SystemTime::now();
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
         let discovery_key = self.0.discovery.rotate_now(&mut OsRng, now)?;
         let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
-        let capability = self.0.discovery.current_capability()?;
-        let recipient_delivery_verifier = capability.verifier();
+        let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
         let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng, now)?;
-        let publication = PublicationBundle {
+        Ok(PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
             discovery_key: discovery_key.public(),
             discovery_to_identity,
             recipient_delivery_verifier,
             signed_prekey: signed_prekey.public(),
-        };
-        Ok(InboxRotation {
-            publication,
-            capability,
         })
     }
 
@@ -540,7 +505,7 @@ impl KeyStore {
         self.replenish_one_time_prekeys_eager()
     }
 
-    fn rotate_inbox_now(&self) -> Result<InboxRotation, KeyStoreError> {
+    fn rotate_inbox_now(&self) -> Result<PublicationBundle, KeyStoreError> {
         self.rotate_inbox_now_eager()
     }
 
@@ -602,42 +567,25 @@ mod tests {
         assert!(cloned_store.load_identity().is_ok());
     }
 
-    /// One operation must return everything a rotation produces. Returning the
-    /// publishable material without the capability invites a caller to publish a new inbox
-    /// while still handing contacts the previous inbox's secret.
+    /// The host registers the verifier and never the capability, so a rotation's publication must
+    /// carry a verifier that commits to the capability now in storage.
     #[test]
-    fn inbox_rotation_returns_publication_and_capability_together() {
+    fn inbox_rotation_publishes_the_verifier_for_the_new_capability() {
         let key_store = store();
         key_store.generate_identity().unwrap();
 
-        let rotation = key_store.rotate_inbox_now().unwrap();
-
-        assert_eq!(
-            rotation.publication.recipient_delivery_verifier,
-            rotation.capability.verifier()
-        );
-        assert_eq!(
-            *rotation.capability.to_bytes(),
-            *key_store.current_delivery_capability().unwrap().to_bytes()
-        );
-        assert_eq!(rotation.publication.discovery_key.epoch, 2);
-    }
-
-    /// The host registers the verifier and never the capability, so the published
-    /// bundle must carry a verifier that actually commits to the capability currently in storage.
-    #[test]
-    fn publication_bundle_carries_the_verifier_for_the_current_capability() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_now().unwrap();
-
-        let publication = key_store.current_publication().unwrap();
-        let capability = key_store.current_delivery_capability().unwrap();
+        let publication = key_store.rotate_inbox_now().unwrap();
 
         assert_eq!(
             publication.recipient_delivery_verifier,
-            capability.verifier()
+            key_store
+                .0
+                .discovery
+                .current_capability()
+                .unwrap()
+                .verifier()
         );
+        assert_eq!(publication.discovery_key.epoch, 2);
     }
 
     #[test]
@@ -647,7 +595,7 @@ mod tests {
         key_store.rotate_signed_prekey_now().unwrap();
         let before = key_store.current_publication().unwrap();
 
-        let after = key_store.rotate_inbox_now().unwrap().publication;
+        let after = key_store.rotate_inbox_now().unwrap();
 
         assert_ne!(
             before.recipient_delivery_verifier,
@@ -724,7 +672,7 @@ mod tests {
         let key_store = store();
         let identity = key_store.generate_identity().unwrap();
 
-        let publication = key_store.rotate_inbox_now().unwrap().publication;
+        let publication = key_store.rotate_inbox_now().unwrap();
 
         assert!(
             verify_public_discovery_key(&publication.discovery_key, identity.verifying_key())
@@ -765,7 +713,7 @@ mod tests {
         key_store.rotate_signed_prekey_now().unwrap();
         let before = key_store.current_publication().unwrap();
 
-        let after = key_store.rotate_inbox_now().unwrap().publication;
+        let after = key_store.rotate_inbox_now().unwrap();
 
         assert_ne!(
             before.discovery_to_identity.to_bytes(),
@@ -982,7 +930,7 @@ mod tests {
         let key_store = store();
         key_store.generate_identity().unwrap();
         key_store.replenish_one_time_prekeys().unwrap();
-        let rotation = key_store.rotate_inbox_now().unwrap().publication;
+        let rotation = key_store.rotate_inbox_now().unwrap();
         let bundles = key_store.replenish_one_time_prekeys().unwrap();
         assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
         assert!(
@@ -1018,7 +966,7 @@ mod tests {
             ))
         ));
 
-        let rotation = destination_store.rotate_inbox_now().unwrap().publication;
+        let rotation = destination_store.rotate_inbox_now().unwrap();
         let one_time_prekeys = destination_store.replenish_one_time_prekeys().unwrap();
         assert_eq!(one_time_prekeys[0].epoch, rotation.discovery_key.epoch);
         assert_eq!(one_time_prekeys[0].id, 0);
@@ -1056,7 +1004,7 @@ mod tests {
         let first_dk = key_store.current_public_discovery_key().unwrap();
         assert_eq!(first_dk.epoch, 1);
 
-        let rotation = key_store.rotate_inbox_now().unwrap().publication;
+        let rotation = key_store.rotate_inbox_now().unwrap();
         assert_eq!(rotation.version, roost_crypto::PREKEY_BUNDLE_VERSION);
         assert_eq!(rotation.discovery_key.epoch, 2);
         assert_ne!(
@@ -1082,9 +1030,8 @@ mod tests {
         key_store.rotate_inbox_now().unwrap();
 
         assert!(matches!(
-            key_store.0.signed_prekey.prekey_for_reference(
+            key_store.0.signed_prekey.prekey_for_first_message(
                 first_epoch,
-                first_prekey.id,
                 first_prekey.public_key.as_bytes(),
                 SystemTime::now(),
             ),
@@ -1435,7 +1382,7 @@ mod tests {
         destination_store
             .import_encrypted_backup(&backup, "pass")
             .unwrap();
-        let rotation = destination_store.rotate_inbox_now().unwrap().publication;
+        let rotation = destination_store.rotate_inbox_now().unwrap();
 
         let rotated_bundle = destination_store.current_public_signed_prekey().unwrap();
         let imported_identity = destination_store.load_identity().unwrap();

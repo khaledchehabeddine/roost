@@ -1,16 +1,17 @@
-//! Two hosts establish a Session and exchange Messages through the exported Message Operations.
+//! Two hosts become contacts and exchange Messages through the exported Message Operations.
 
 mod support;
 
 use roost_client::{
-    BlockedContactAcknowledgmentPolicy, ContactIdentity, DomainSigningKey, DomainSigningKeyStatus,
-    IdentityContext, IdentityKey, InboundMessageOutcome, IncomingMessage, Message,
-    MessageDecryptionStep, MessageEncryption, MessageEncryptionStep, MessageId, OperationId,
-    OutboundMessageResult, OutgoingMessage, PreKeySelection, ReceiveSettings, RevocationState,
-    RoostError, SenderCertificateValidation, SessionAcceptanceOutcome, SessionId,
-    SignedSenderCertificate, StateChanges, StateEntry, StateKey, TransportBinding,
+    BlockedContactAcknowledgmentPolicy, ContactSafetyNumberConfirmation, ContactTrustState,
+    DomainSigningKey, DomainSigningKeyStatus, IdentityContext, IdentityKey, InboundMessageOutcome,
+    IncomingMessage, Message, MessageDecryptionStep, MessageDestination, MessageEncryption,
+    MessageEncryptionStep, MessageId, OperationId, OutboundMessageResult, OutgoingMessage,
+    PreKeyBundle, ProtocolStateKind, ReceiveSettings, RevocationState, RoostError,
+    SenderCertificateValidation, SessionId, SignedSenderCertificate, StateChanges, StateEntry,
+    StateKey, TransportBinding, derive_safety_number,
 };
-use roost_crypto::SigningKeyPair;
+use roost_crypto::{RecipientDeliveryCapability, SigningKeyPair};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use support::MemoryStorage;
@@ -53,6 +54,12 @@ fn validation() -> SenderCertificateValidation {
         },
         reference_time_millis: NOW_MILLIS,
     }
+}
+
+/// A sealed Message, the destination Roost named for it, and the changes to commit with it.
+struct Sealed {
+    result: OutboundMessageResult,
+    destination: MessageDestination,
 }
 
 /// One app's IdentityContext, its host store, and the certificate its relay issued.
@@ -102,30 +109,15 @@ impl Host {
         }
     }
 
-    fn contact(&self) -> ContactIdentity {
-        let publication = self.context.current_publication().unwrap();
-        ContactIdentity {
-            identity_key: self.identity_key(),
-            discovery_key: roost_client::ContactDiscoveryKey {
-                x25519_public_key: publication.discovery_key.public_key,
-                ed25519_verifying_key: publication.discovery_key.verifying_key,
-                epoch: publication.discovery_key.epoch,
-                created_at_millis: publication.discovery_key.created_at_millis,
-                identity_signature: publication.discovery_key.signature,
-            },
+    // Publishes a bundle with a fresh one-time prekey, as the relay would serve it.
+    fn bundle(&self) -> PreKeyBundle {
+        let one_time_prekeys = self.context.prepare_one_time_prekeys(1).unwrap();
+        complete(&self.context, one_time_prekeys.operation_id);
+        PreKeyBundle {
+            identity: self.context.identity().unwrap().unwrap(),
+            publication: self.context.current_publication().unwrap(),
+            one_time_prekey: Some(one_time_prekeys.one_time_prekeys[0].clone()),
         }
-    }
-
-    fn accept_contact(&mut self, peer: &Host) {
-        let contacts = self.context.contacts();
-        let recorded = contacts
-            .record_contact(self.snapshot(), peer.contact())
-            .unwrap();
-        assert!(self.commit(recorded.changes));
-        let accepted = contacts
-            .accept_contact(self.snapshot(), peer.identity_key())
-            .unwrap();
-        assert!(self.commit(accepted.changes));
     }
 
     fn snapshot(&self) -> Vec<StateEntry> {
@@ -147,14 +139,39 @@ impl Host {
             .collect()
     }
 
-    // Writes `changes` only when every condition holds, as one host transaction does.
+    // Returns the record the host holds for `peer`'s contact, by decoding each contact record.
+    fn contact_record(&self, peer: &Host) -> Option<Vec<u8>> {
+        let contacts = self.context.contacts();
+        self.records
+            .iter()
+            .filter(|(key, _)| matches!(key.kind, ProtocolStateKind::ContactState))
+            .find(|(key, blob)| {
+                contacts
+                    .contact_state(StateEntry {
+                        key: (*key).clone(),
+                        blob: Some((*blob).clone()),
+                    })
+                    .unwrap()
+                    .is_some_and(|contact| contact.identity_key == peer.identity_key())
+            })
+            .map(|(_, blob)| blob.clone())
+    }
+
+    // Writes `changes` only when every condition holds, as one host transaction does, around the
+    // operation the changes carry.
     fn commit(&mut self, changes: StateChanges) -> bool {
+        if let Some(operation) = &changes.operation_id {
+            self.context.reserve_operation(operation.clone()).unwrap();
+        }
         let keys: Vec<_> = changes
             .conditions
             .iter()
             .map(|condition| condition.key.clone())
             .collect();
         if !changes.matches(self.read(&keys)).unwrap() {
+            if let Some(operation) = changes.operation_id {
+                self.context.abort_operation(operation).unwrap();
+            }
             return false;
         }
         for update in changes.updates {
@@ -162,6 +179,9 @@ impl Host {
                 Some(blob) => self.records.insert(update.key, blob),
                 None => self.records.remove(&update.key),
             };
+        }
+        if let Some(operation) = changes.operation_id {
+            self.context.finalize_operation(operation).unwrap();
         }
         true
     }
@@ -173,28 +193,67 @@ impl Host {
             sent_at_millis: NOW_MILLIS,
             sender_certificate: self.signed_certificate(),
             plaintext: plaintext.to_vec(),
+            prekey_bundle: None,
+        }
+    }
+
+    // Runs `encryption`, and returns the contact whose bundle it needs when it asks for one.
+    fn seal(&self, encryption: Arc<MessageEncryption>) -> Result<Sealed, IdentityKey> {
+        let mut destination = None;
+        loop {
+            match encryption.step().unwrap() {
+                MessageEncryptionStep::NeedsState { keys } => {
+                    encryption.supply_state(self.read(&keys)).unwrap();
+                }
+                MessageEncryptionStep::NeedsTransport { destination: asked } => {
+                    destination = Some(asked);
+                    encryption.supply_transport_binding(binding()).unwrap();
+                }
+                MessageEncryptionStep::NeedsPreKeyBundle { identity_key } => {
+                    return Err(identity_key);
+                }
+                MessageEncryptionStep::Ready { result } => {
+                    return Ok(Sealed {
+                        result,
+                        destination: destination.unwrap(),
+                    });
+                }
+            }
         }
     }
 
     fn encrypt(&self, outgoing: OutgoingMessage) -> Result<OutboundMessageResult, RoostError> {
         let encryption = self.context.messaging().start_encryption(outgoing)?;
-        loop {
-            match encryption.step()? {
-                MessageEncryptionStep::NeedsState { keys } => {
-                    encryption.supply_state(self.read(&keys))?;
-                }
-                MessageEncryptionStep::NeedsTransport { .. } => {
-                    encryption.supply_transport_binding(binding())?;
-                }
-                MessageEncryptionStep::Ready { result } => return Ok(result),
-            }
-        }
+        Ok(self.seal(encryption).unwrap().result)
     }
 
     fn send(&mut self, recipient: &Host, plaintext: &[u8]) -> (SessionId, MessageId, Message) {
         let sent = self.encrypt(self.outgoing(recipient, plaintext)).unwrap();
         assert!(self.commit(sent.changes));
         (sent.session_id, sent.message_id, sent.message)
+    }
+
+    // Asks `recipient` to become a contact, fetching their bundle when Roost asks for it.
+    fn request(&mut self, recipient: &Host, plaintext: &[u8]) -> Sealed {
+        let contacts = self.context.contacts();
+        let mut draft = self.outgoing(recipient, plaintext);
+        let first = self.seal(contacts.request_contact(redraft(&draft)).unwrap());
+        assert_eq!(first.err(), Some(recipient.identity_key()));
+        draft.prekey_bundle = Some(recipient.bundle());
+        let mut sealed = self.seal(contacts.request_contact(draft).unwrap()).unwrap();
+        assert!(self.commit(take_changes(&mut sealed.result)));
+        sealed
+    }
+
+    fn accept(&mut self, requester: &Host, plaintext: &[u8]) -> Sealed {
+        let encryption = self
+            .context
+            .contacts()
+            .accept_contact(self.outgoing(requester, plaintext))
+            .unwrap();
+        let mut sealed = self.seal(encryption).unwrap();
+        assert!(self.commit(take_changes(&mut sealed.result)));
+        sealed
     }
 
     fn decrypt(&self, message: Message) -> Result<InboundMessageOutcome, RoostError> {
@@ -211,6 +270,7 @@ impl Host {
                 MessageDecryptionStep::NeedsState { keys } => {
                     decryption.supply_state(self.read(&keys))?;
                 }
+                MessageDecryptionStep::NeedsAdmission { .. } => decryption.confirm_admission()?,
                 MessageDecryptionStep::NeedsAcknowledgmentTransport { .. } => {
                     decryption.supply_acknowledgment_transport_binding(binding())?;
                 }
@@ -220,79 +280,163 @@ impl Host {
     }
 }
 
+// Copies a draft, as an app restarts it under the same MessageID.
+fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
+    OutgoingMessage {
+        recipient: draft.recipient.clone(),
+        message_id: draft.message_id.clone(),
+        sent_at_millis: draft.sent_at_millis,
+        sender_certificate: SignedSenderCertificate {
+            certificate: draft.sender_certificate.certificate.clone(),
+            signature: draft.sender_certificate.signature.clone(),
+        },
+        plaintext: draft.plaintext.clone(),
+        prekey_bundle: draft.prekey_bundle.clone(),
+    }
+}
+
+// Takes the changes a sealed Message commits with, leaving none behind.
+fn take_changes(result: &mut OutboundMessageResult) -> StateChanges {
+    std::mem::replace(
+        &mut result.changes,
+        StateChanges {
+            conditions: Vec::new(),
+            updates: Vec::new(),
+            operation_id: None,
+        },
+    )
+}
+
 fn complete(context: &IdentityContext, id: OperationId) {
     context.reserve_operation(id.clone()).unwrap();
     context.finalize_operation(id).unwrap();
 }
 
-// Starts a Session from `alice` to `bob`, has Bob accept it, and returns its SessionIDs as each
-// host saw them.
-fn establish(alice: &mut Host, bob: &mut Host) -> (SessionId, SessionId) {
-    let one_time_prekeys = bob.context.prepare_one_time_prekeys(1).unwrap();
-    complete(&bob.context, one_time_prekeys.operation_id);
-    let one_time_prekey = one_time_prekeys.one_time_prekeys[0].clone();
-    let publication = bob.context.current_publication().unwrap();
-    let selection = PreKeySelection {
-        signed_prekey_id: publication.signed_prekey.id,
-        one_time_prekey_id: Some(one_time_prekey.id),
+fn received(outcome: InboundMessageOutcome) -> roost_client::InboundMessageResult {
+    let (InboundMessageOutcome::Accepted { result }
+    | InboundMessageOutcome::ContactRequest { result }) = outcome
+    else {
+        panic!("expected a delivered Message")
     };
-    let initiation = alice
-        .context
-        .messaging()
-        .initiate_session(
-            alice.snapshot(),
-            bob.context.identity().unwrap().unwrap(),
-            publication,
-            Some(one_time_prekey),
-            alice.context.messaging().create_message().unwrap(),
-            NOW_MILLIS,
-            alice.signed_certificate(),
-            b"hello bob".to_vec(),
-            binding(),
-        )
-        .unwrap();
-    assert!(alice.commit(initiation.changes));
-    assert!(matches!(
-        bob.decrypt(initiation.message.clone()),
-        Ok(InboundMessageOutcome::UnknownSession)
-    ));
-    let prepared = bob
-        .context
-        .messaging()
-        .prepare_accept_session(
-            bob.snapshot(),
-            initiation.message,
-            settings(),
-            validation(),
-            binding(),
-            selection,
-        )
-        .unwrap();
-    bob.context
-        .reserve_operation(prepared.operation_id.clone())
-        .unwrap();
-    let SessionAcceptanceOutcome::Accepted { result } = prepared.acceptance else {
-        panic!("expected an accepted Session");
+    result
+}
+
+fn verifier(destination: &MessageDestination) -> Vec<u8> {
+    let MessageDestination::Established {
+        delivery_capability,
+        ..
+    } = destination
+    else {
+        panic!("expected an established Message");
+    };
+    RecipientDeliveryCapability::from_bytes(delivery_capability.as_slice().try_into().unwrap())
+        .verifier()
+        .as_bytes()
+        .to_vec()
+}
+
+// Alice asks Bob, Bob accepts, and Alice receives the acceptance. Returns the SessionID as each
+// host saw it.
+fn establish(alice: &mut Host, bob: &mut Host) -> (SessionId, SessionId) {
+    let request = alice.request(bob, b"hello bob");
+    let InboundMessageOutcome::ContactRequest { result } =
+        bob.decrypt(request.result.message.clone()).unwrap()
+    else {
+        panic!("expected a contact request");
     };
     assert_eq!(result.plaintext, b"hello bob");
     assert!(bob.commit(result.changes));
-    bob.context
-        .finalize_operation(prepared.operation_id)
-        .unwrap();
-    (initiation.session_id, result.session_id)
+    let acceptance = bob.accept(alice, b"hello alice");
+    let accepted = received(alice.decrypt(acceptance.result.message).unwrap());
+    assert!(alice.commit(accepted.changes));
+    (request.result.session_id, result.session_id)
 }
 
-fn befriended() -> (Host, Host) {
+#[test]
+fn a_request_routes_to_the_bundle_and_commits_its_one_time_prekey_with_the_contact() {
     let mut alice = Host::new();
     let mut bob = Host::new();
-    alice.accept_contact(&bob);
-    bob.accept_contact(&alice);
-    (alice, bob)
+
+    let request = alice.request(&bob, b"hello bob");
+
+    let MessageDestination::FirstMessage {
+        identity_key,
+        signed_prekey_id,
+        one_time_prekey_id,
+        ..
+    } = &request.destination
+    else {
+        panic!("expected a first Message");
+    };
+    assert_eq!(*identity_key, bob.identity_key());
+    let publication = bob.context.current_publication().unwrap();
+    assert_eq!(*signed_prekey_id, publication.signed_prekey.id);
+    assert!(one_time_prekey_id.is_some());
+    let InboundMessageOutcome::ContactRequest { result } =
+        bob.decrypt(request.result.message).unwrap()
+    else {
+        panic!("expected a contact request");
+    };
+    assert!(result.acknowledgment.is_none());
+    assert!(result.changes.operation_id.is_some());
+    assert!(bob.commit(result.changes));
+    let contact = bob
+        .context
+        .contacts()
+        .contact_states(
+            bob.snapshot()
+                .into_iter()
+                .filter(|entry| matches!(entry.key.kind, ProtocolStateKind::ContactState))
+                .collect(),
+        )
+        .unwrap()
+        .remove(0);
+    assert_eq!(contact.identity_key, alice.identity_key());
+    assert!(matches!(contact.trust_state, ContactTrustState::Pending));
+}
+
+#[test]
+fn an_acceptance_opens_established_routes_to_both_inboxes() {
+    let mut alice = Host::new();
+    let mut bob = Host::new();
+    let request = alice.request(&bob, b"hello bob");
+    assert!(bob.commit(received(bob.decrypt(request.result.message).unwrap()).changes));
+
+    let acceptance = bob.accept(&alice, b"welcome");
+
+    assert_eq!(
+        verifier(&acceptance.destination),
+        alice
+            .context
+            .current_publication()
+            .unwrap()
+            .recipient_delivery_verifier
+    );
+    assert!(alice.commit(received(alice.decrypt(acceptance.result.message).unwrap()).changes));
+    let message = alice.encrypt(alice.outgoing(&bob, b"thanks")).unwrap();
+    assert!(message.message.prekey_reference.is_none());
+    let sealed = alice
+        .seal(
+            alice
+                .context
+                .messaging()
+                .start_encryption(alice.outgoing(&bob, b"again"))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        verifier(&sealed.destination),
+        bob.context
+            .current_publication()
+            .unwrap()
+            .recipient_delivery_verifier
+    );
 }
 
 #[test]
 fn a_reply_and_its_acknowledgment_round_trip_on_one_canonical_session_id() {
-    let (mut alice, mut bob) = befriended();
+    let mut alice = Host::new();
+    let mut bob = Host::new();
 
     let (alice_view, bob_view) = establish(&mut alice, &mut bob);
 
@@ -308,18 +452,16 @@ fn a_reply_and_its_acknowledgment_round_trip_on_one_canonical_session_id() {
             .bytes()
             .all(|digit| matches!(digit, b'0'..=b'9' | b'a'..=b'f'))
     );
-    let (session_id, message_id, reply) = bob.send(&alice, b"hello alice");
+    let (session_id, message_id, reply) = bob.send(&alice, b"hello again");
     assert_eq!(session_id, bob_view);
-    let Ok(InboundMessageOutcome::Accepted { result }) = alice.decrypt(reply) else {
-        panic!("expected an accepted reply");
-    };
+    let result = received(alice.decrypt(reply).unwrap());
     assert_eq!(result.session_id, alice_view);
     assert_eq!(result.message_id, message_id);
-    assert_eq!(result.plaintext, b"hello alice");
+    assert_eq!(result.plaintext, b"hello again");
     assert!(alice.commit(result.changes));
 
     let Ok(InboundMessageOutcome::AcknowledgmentMatched { result: matched }) =
-        bob.decrypt(result.acknowledgment)
+        bob.decrypt(result.acknowledgment.unwrap())
     else {
         panic!("expected the reply's acknowledgment");
     };
@@ -330,8 +472,91 @@ fn a_reply_and_its_acknowledgment_round_trip_on_one_canonical_session_id() {
             .messaging()
             .pending_acknowledgments(bob.snapshot(), bob_view)
             .unwrap()
-            .is_empty()
+            .iter()
+            .all(|pending| pending.message_id != message_id)
     );
+}
+
+#[test]
+fn safety_number_confirmation_uses_the_contexts_local_identity() {
+    let mut alice = Host::new();
+    let mut bob = Host::new();
+    let charlie = Host::new();
+    establish(&mut alice, &mut bob);
+    let contacts = alice.context.contacts();
+    let foreign = derive_safety_number(charlie.identity_key(), bob.identity_key()).unwrap();
+
+    let rejected = contacts
+        .confirm_contact_safety_number(
+            bob.identity_key(),
+            alice.contact_record(&bob),
+            foreign.grouped_decimal,
+        )
+        .unwrap();
+    assert!(matches!(
+        rejected,
+        ContactSafetyNumberConfirmation::Mismatched
+    ));
+    let correct = derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap();
+    let ContactSafetyNumberConfirmation::Matched { changes } = contacts
+        .confirm_contact_safety_number(
+            bob.identity_key(),
+            alice.contact_record(&bob),
+            correct.grouped_decimal,
+        )
+        .unwrap()
+    else {
+        panic!("expected the Safety Number to match");
+    };
+    assert!(alice.commit(changes));
+
+    let record = alice.contact_record(&bob);
+    let contact = alice
+        .context
+        .contacts()
+        .contact_state(StateEntry {
+            key: alice
+                .records
+                .iter()
+                .find(|(_, blob)| Some(*blob) == record.as_ref())
+                .unwrap()
+                .0
+                .clone(),
+            blob: record,
+        })
+        .unwrap()
+        .unwrap();
+    assert!(matches!(contact.trust_state, ContactTrustState::Verified));
+}
+
+#[test]
+fn blocking_rotates_the_inbox_through_the_operation_its_changes_carry() {
+    let mut alice = Host::new();
+    let mut bob = Host::new();
+    establish(&mut alice, &mut bob);
+    let before = alice.context.current_publication().unwrap();
+
+    let block = alice
+        .context
+        .contacts()
+        .prepare_block_contact(bob.identity_key(), alice.contact_record(&bob))
+        .unwrap();
+
+    assert!(block.changes.operation_id.is_some());
+    let publication = block.publication.unwrap();
+    assert!(alice.commit(block.changes));
+    assert_eq!(
+        alice.context.current_publication().unwrap().discovery_key,
+        publication.discovery_key
+    );
+    assert_ne!(publication.discovery_key, before.discovery_key);
+    let unblock = alice
+        .context
+        .contacts()
+        .unblock_contact(bob.identity_key(), alice.contact_record(&bob))
+        .unwrap();
+    assert!(unblock.operation_id.is_none());
+    assert!(alice.commit(unblock));
 }
 
 #[test]
@@ -357,7 +582,8 @@ fn session_ids_must_be_canonical() {
 
 #[test]
 fn each_draft_gets_its_own_canonical_message_id() {
-    let (alice, bob) = befriended();
+    let alice = Host::new();
+    let bob = Host::new();
     let messaging = alice.context.messaging();
     let ids: HashSet<_> = (0..16)
         .map(|_| messaging.create_message().unwrap())
@@ -382,7 +608,8 @@ fn each_draft_gets_its_own_canonical_message_id() {
 
 #[test]
 fn a_malformed_entry_ends_the_operation() {
-    let (mut alice, mut bob) = befriended();
+    let mut alice = Host::new();
+    let mut bob = Host::new();
     establish(&mut alice, &mut bob);
     let encryption = alice
         .context
@@ -411,7 +638,8 @@ fn a_malformed_entry_ends_the_operation() {
 
 #[test]
 fn calls_from_two_threads_take_turns() {
-    let (mut alice, mut bob) = befriended();
+    let mut alice = Host::new();
+    let mut bob = Host::new();
     establish(&mut alice, &mut bob);
     let encryption: Arc<MessageEncryption> = alice
         .context
@@ -425,6 +653,7 @@ fn calls_from_two_threads_take_turns() {
             std::thread::spawn(move || match encryption.step().unwrap() {
                 MessageEncryptionStep::NeedsState { keys } => keys,
                 MessageEncryptionStep::NeedsTransport { .. }
+                | MessageEncryptionStep::NeedsPreKeyBundle { .. }
                 | MessageEncryptionStep::Ready { .. } => panic!("expected a read"),
             })
         })
@@ -438,7 +667,8 @@ fn calls_from_two_threads_take_turns() {
 
 #[test]
 fn matches_refuses_stale_and_malformed_records() {
-    let (mut alice, mut bob) = befriended();
+    let mut alice = Host::new();
+    let mut bob = Host::new();
     establish(&mut alice, &mut bob);
     let sent = alice.encrypt(alice.outgoing(&bob, b"conditional")).unwrap();
     let keys: Vec<_> = sent

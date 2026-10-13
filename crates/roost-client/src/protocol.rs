@@ -3,18 +3,18 @@
 use crate::context::{Contacts, Messaging};
 use crate::error::RoostError;
 use crate::message::{Message, MessageId, PayloadKind, SenderIdentityMaterial};
-use crate::records::{SessionId, fixed_32, fixed_64, hex_bytes, hex_text};
-use crate::time::{millis_from_secs, time_from_millis, whole_secs_from_millis};
-use roost_core::RecipientDeliveryCapability as CoreRecipientDeliveryCapability;
+use crate::operation::OperationId;
+use crate::records::{SessionId, fixed_32, hex_bytes, hex_text};
+use crate::time::{millis_from_secs, time_from_millis};
 use roost_core::{
     ContactSafetyNumberConfirmation as CoreSafetyNumberConfirmation,
-    ContactStateChange as CoreContactStateChange, ProtocolStateAddress as CoreProtocolStateAddress,
-    ProtocolStateBlob as CoreProtocolStateBlob, ProtocolStateCommitCondition,
-    ProtocolStateKey as CoreProtocolStateKey, ProtocolStateSnapshot as CoreProtocolStateSnapshot,
+    ProtocolStateAddress as CoreProtocolStateAddress, ProtocolStateBlob as CoreProtocolStateBlob,
+    ProtocolStateCommitCondition, ProtocolStateKey as CoreProtocolStateKey,
+    ProtocolStateSnapshot as CoreProtocolStateSnapshot,
     ProtocolStateUpdate as CoreProtocolStateUpdate, StateChanges as CoreStateChanges,
 };
 use std::time::Duration;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 /// Stable category for an opaque protocol-state blob.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, uniffi::Enum)]
@@ -25,15 +25,9 @@ pub enum ProtocolStateKind {
     DeduplicationSet,
     /// SessionID-addressed pending-acknowledgment state.
     PendingAcknowledgments,
-    /// Identity-key-addressed contact state.
+    /// A contact's record, stored under its Identity Key, which holds the peer's Delivery
+    /// Capability. Read it through [`Contacts::contact_state`].
     ContactState,
-    /// Identity-key-addressed peer inbox-authorization state.
-    ///
-    /// Separate from [`Self::ContactState`] because it holds the peer's delivery capability, a
-    /// bearer secret that must not ride along with the public contact snapshot.
-    PeerInboxAuthorization,
-    /// Identity-key-addressed record of the latest local epoch whose capability a contact holds.
-    LocalInboxAuthorization,
     /// Identity-key-addressed record of the Sessions kept with one peer and the one Roost sends
     /// on.
     PeerSessions,
@@ -82,18 +76,33 @@ pub struct CommitCondition {
     pub digest: Option<Vec<u8>>,
 }
 
-/// The records an operation's result relies on, and the records it writes.
+/// The records an operation's result relies on, the records it writes, and the operation that
+/// commits with them, if any.
 ///
 /// Inside one transaction, read the record under each condition's key, call [`Self::matches`],
 /// and only when it returns `true` write every update together with the result's effects, such as
 /// a Message to send. When it returns `false`, another operation changed a record first: roll
 /// back, then start the operation again from fresh reads.
+///
+/// When [`Self::operation_id`] is present, the changes also change SecureStorage, such as using a
+/// one-time prekey or rotating the inbox:
+///
+/// 1. Call [`IdentityContext::reserve_operation`](crate::IdentityContext::reserve_operation). If
+///    it fails because SecureStorage changed, abort the operation and start again from fresh reads.
+/// 2. Commit the updates and the operation ID in the one transaction. If a condition fails, abort
+///    the operation and start again.
+/// 3. Call [`IdentityContext::finalize_operation`](crate::IdentityContext::finalize_operation),
+///    and only then show plaintext or send anything the result holds.
+///
+/// When the commit's outcome is unknown, neither finalize nor abort: resolve it at startup.
 #[derive(uniffi::Record)]
 pub struct StateChanges {
     /// Every record the result relies on, including ones it read but doesn't write.
     pub conditions: Vec<CommitCondition>,
     /// The records to write.
     pub updates: Vec<StateUpdate>,
+    /// The operation to reserve before the commit and finalize after it, if any.
+    pub operation_id: Option<OperationId>,
 }
 
 /// Roost's fixed limits on what one Message or record may cost, and the Deduplication Set's range.
@@ -119,6 +128,8 @@ pub struct ProtocolHardeningLimits {
     pub default_deduplication_capacity: u32,
     /// Largest Deduplication Set size a receive may pass.
     pub max_deduplication_capacity: u32,
+    /// Distinct Messages each side may send a contact before the contact accepts.
+    pub max_messages_before_acceptance: u32,
 }
 
 /// The settings the app passes with each receive.
@@ -150,7 +161,7 @@ pub struct IdentityKey {
     pub signing_key: Vec<u8>,
 }
 
-/// Current Discovery Key material for a Contact Identity.
+/// A contact's current Discovery Key.
 #[derive(Clone, uniffi::Record)]
 pub struct ContactDiscoveryKey {
     /// X25519 public key used to fetch the contact prekey bundle.
@@ -165,92 +176,44 @@ pub struct ContactDiscoveryKey {
     pub identity_signature: Vec<u8>,
 }
 
-/// Known peer identity and current Discovery Key.
-#[derive(Clone, uniffi::Record)]
-pub struct ContactIdentity {
-    /// Permanent peer Identity Key.
-    pub identity_key: IdentityKey,
-    /// Current peer Discovery Key.
-    pub discovery_key: ContactDiscoveryKey,
-}
-
-/// Consumer-recorded trust state for a contact.
+/// The trust level the app records for a contact.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum ContactTrustState {
-    /// Contact exists but has not been accepted.
+    /// A Contact Request is open in either direction.
     Pending,
-    /// Contact was accepted but not verified out of band.
+    /// Both sides consented, but the Safety Number wasn't verified out of band.
     Unverified,
-    /// Contact Safety Number was verified out of band.
+    /// The contact's Safety Number was verified out of band.
     Verified,
 }
 
-/// Public contact state snapshot.
+/// A contact as its record holds it, decoded after the host commits.
+///
+/// The peer's Delivery Capability is not part of it: Roost hands it out only in an established
+/// Message's destination.
 #[derive(Clone, uniffi::Record)]
 pub struct ContactState {
-    /// Contact identity material.
-    pub identity: ContactIdentity,
+    /// The contact's permanent Identity Key.
+    pub identity_key: IdentityKey,
+    /// The contact's current Discovery Key, absent for a stranger blocked before they sent
+    /// anything.
+    pub discovery_key: Option<ContactDiscoveryKey>,
     /// Trust state.
     pub trust_state: ContactTrustState,
     /// Local block flag.
     pub blocked: bool,
 }
 
-/// Contact event kind.
-#[derive(Clone, Copy, uniffi::Enum)]
-pub enum ContactEventKind {
-    /// Contact state changed.
-    Changed,
-}
-
-/// Immutable contact event snapshot.
-#[derive(Clone, uniffi::Record)]
-pub struct ContactEvent {
-    /// Event kind.
-    pub kind: ContactEventKind,
-    /// Complete changed contact snapshot.
-    pub contact: ContactState,
-}
-
-/// A peer's recipient delivery capability for one of its Discovery Key epochs.
-///
-/// Deliberately not [`Clone`]: [`Self::capability`] is a bearer secret, and every clone is another
-/// heap copy nothing scrubs. Hand it straight to the relay submission that needs it.
-#[derive(uniffi::Record)]
-pub struct PeerInboxAuthorization {
-    /// The peer's Discovery Key epoch this authorization belongs to.
-    pub epoch: u32,
-    /// The peer's recipient delivery capability for that epoch. Always 32 bytes, and secret.
-    pub capability: Vec<u8>,
-}
-
-/// Contact mutation result.
-#[derive(uniffi::Record)]
-pub struct ContactStateChange {
-    /// Complete contact snapshot after the operation.
-    pub contact: ContactState,
-    /// State changes to commit.
-    pub changes: StateChanges,
-    /// Event to emit after durable commit, when state changed.
-    pub event: Option<ContactEvent>,
-}
-
-/// Safety-number confirmation outcome kind.
+/// The result of confirming a contact's Safety Number.
 #[derive(uniffi::Enum)]
-pub enum ContactSafetyNumberConfirmationKind {
-    /// Presented Safety Number matched.
-    Matched,
-    /// Presented Safety Number did not match.
+pub enum ContactSafetyNumberConfirmation {
+    /// The Safety Number matched. Commit the changes before showing the contact as verified.
+    Matched {
+        /// The changes that verify the contact.
+        changes: StateChanges,
+    },
+    /// The Safety Number didn't match, and nothing changed.
     Mismatched,
-}
-
-/// Safety-number confirmation outcome.
-#[derive(uniffi::Record)]
-pub struct ContactSafetyNumberConfirmation {
-    /// Match result.
-    pub kind: ContactSafetyNumberConfirmationKind,
-    /// Contact state change.
-    pub change: ContactStateChange,
 }
 
 /// Derived Safety Number.
@@ -337,8 +300,15 @@ pub struct SessionEvent {
 /// displayed, an acknowledgment is sent, or recovery is scheduled.
 #[derive(uniffi::Enum)]
 pub enum InboundMessageOutcome {
-    /// Authenticated plaintext and acknowledgment for a unique Message.
+    /// Authenticated plaintext, and an acknowledgment when this side acknowledges, for a unique
+    /// Message.
     Accepted {
+        /// Payload for this outcome.
+        result: InboundMessageResult,
+    },
+    /// A Contact Request: the first Message from an identity with no contact record, which the
+    /// changes record as a Pending contact. Nothing is acknowledged until this side replies.
+    ContactRequest {
         /// Payload for this outcome.
         result: InboundMessageResult,
     },
@@ -347,6 +317,11 @@ pub enum InboundMessageOutcome {
         /// Payload for this outcome.
         result: BlockedInboundMessageResult,
     },
+    /// A Message past the limit before acceptance, whose plaintext Roost withholds.
+    Withheld {
+        /// Payload for this outcome.
+        result: WithheldInboundMessageResult,
+    },
     /// An already accepted encrypted Message. No effects are produced.
     Duplicate,
     /// A dead Session and its once-only durable recovery signal.
@@ -354,11 +329,12 @@ pub enum InboundMessageOutcome {
         /// Payload for this outcome.
         result: SessionUnrecoverableResult,
     },
-    /// The Message names a Session this identity doesn't have. No effects are produced.
-    ///
-    /// A Message whose `prekey_reference` is set may still start that Session through
-    /// [`Messaging::prepare_accept_session`].
+    /// The Message names a Session this identity doesn't have and carries no handshake. No
+    /// effects are produced.
     UnknownSession,
+    /// The first Message names a Session this identity deleted, so nothing was created. No
+    /// effects are produced.
+    DeletedSession,
     /// An acknowledgment cleared one of this identity's Pending Acknowledgments. Commit it before
     /// treating the acknowledged Message as delivered. Roost sends no reply to an acknowledgment.
     AcknowledgmentMatched {
@@ -375,8 +351,9 @@ pub enum InboundMessageOutcome {
 
 /// Authenticated Message data that remains provisional until the host transaction commits.
 ///
-/// The host commits the Message, acknowledgment, and state changes in one transaction.
-/// Plaintext is host-owned secret bytes; clear discarded copies promptly.
+/// The host commits the Message, acknowledgment, and state changes in one transaction. When the
+/// changes carry an operation, the host finalizes it before showing the plaintext. Plaintext is
+/// host-owned secret bytes; clear discarded copies promptly.
 #[derive(uniffi::Record)]
 pub struct InboundMessageResult {
     /// The Session the Message arrived on.
@@ -391,9 +368,24 @@ pub struct InboundMessageResult {
     pub plaintext: Vec<u8>,
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
-    /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it.
-    pub acknowledgment: Message,
+    /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it,
+    /// absent while the contact isn't accepted and this side doesn't acknowledge yet.
+    pub acknowledgment: Option<Message>,
     /// State changes to commit with the accepted Message and acknowledgment.
+    pub changes: StateChanges,
+}
+
+/// A Message from a contact who hasn't accepted, past the limit on Messages before acceptance.
+///
+/// Roost withholds its plaintext and sends no acknowledgment. Commit the changes so the Session
+/// keeps up.
+#[derive(uniffi::Record)]
+pub struct WithheldInboundMessageResult {
+    /// The Session the Message arrived on.
+    pub session_id: SessionId,
+    /// Authenticated MessageID.
+    pub message_id: MessageId,
+    /// State changes to commit before treating the Message as processed.
     pub changes: StateChanges,
 }
 
@@ -448,7 +440,7 @@ pub struct AcknowledgmentResult {
 pub enum BlockedContactAcknowledgmentPolicy {
     /// Suppress acknowledgments so blocks look like unreachable recipients.
     Unreachable,
-    /// Return normal acknowledgments while hiding plaintext.
+    /// Return the acknowledgments an unblocked sender would get, while hiding plaintext.
     SilentReceipt,
 }
 
@@ -531,263 +523,115 @@ impl Messaging {
 
 #[uniffi::export]
 impl Contacts {
-    /// Creates or updates a Contact State blob.
-    ///
-    /// Roost verifies the Contact Identity and Discovery Key binding. Commit the returned changes with the host contact record; an unchanged contact may produce no updates.
+    /// Returns the contact a Contact State record holds, or no contact when the entry has no bytes.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
-    /// - [`RoostError::InternalError`] if the updated contact cannot be encoded.
-    /// - [`RoostError::ProtocolStateFault`] if peer keys or their binding fail validation, or stored state is malformed.
-    /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
-    pub fn record_contact(
-        &self,
-        snapshot: Vec<StateEntry>,
-        contact_identity: ContactIdentity,
-    ) -> Result<ContactStateChange, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        ContactStateChange::from_core(
-            self.inner
-                .protocol_engine()
-                .record_contact(&snapshot, contact_identity.to_core()?)?,
-        )
-    }
-
-    /// Returns one Contact State, if present.
-    ///
-    /// An absent contact returns `None`. Corrupt stored state is an error and must not be treated as absence.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
-    /// - [`RoostError::ProtocolStateFault`] if peer keys are not canonical or stored contact state is malformed.
-    /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
-    pub fn contact_state(
-        &self,
-        snapshot: Vec<StateEntry>,
-        identity_key: IdentityKey,
-    ) -> Result<Option<ContactState>, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        self.inner
-            .protocol_engine()
-            .contact_state(&snapshot, identity_key.to_core()?)?
-            .map(ContactState::from_core)
+    /// - [`RoostError::InvalidData`] if the key is malformed.
+    /// - [`RoostError::ProtocolStateFault`] if the entry isn't a contact record, or the record is
+    ///   malformed or stored under another identity's key.
+    /// - [`RoostError::UnsupportedVersion`] if the record has an unsupported version.
+    pub fn contact_state(&self, record: StateEntry) -> Result<Option<ContactState>, RoostError> {
+        let address = record.key.to_core()?;
+        record
+            .blob
+            .map(|blob| {
+                ContactState::from_core(
+                    self.inner
+                        .protocol_engine()
+                        .decode_contact(&address, &CoreProtocolStateBlob::from_bytes(blob))?,
+                )
+            })
             .transpose()
     }
 
-    /// Returns all Contact State snapshots.
+    /// Returns the contact each Contact State record holds, in the order given.
     ///
-    /// Project contacts from a snapshot freshly loaded from the committed host store. Platform observation can coalesce refreshes without retaining Rust subscriptions or cursors.
+    /// Pass the host's committed records of kind [`ProtocolStateKind::ContactState`], so views can
+    /// refresh after each commit without Roost keeping subscriptions or cursors.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if the snapshot exceeds its bounds or repeats an address.
-    /// - [`RoostError::ProtocolStateFault`] if stored contact state is malformed.
-    /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
+    /// - [`RoostError::InvalidData`] if a key is malformed, an entry has no bytes, or there are
+    ///   more entries than Roost's limit.
+    /// - [`RoostError::ProtocolStateFault`] if an entry isn't a contact record, or a record is
+    ///   malformed or stored under another identity's key.
+    /// - [`RoostError::UnsupportedVersion`] if a record has an unsupported version.
     pub fn contact_states(
         &self,
-        snapshot: Vec<StateEntry>,
+        records: Vec<StateEntry>,
     ) -> Result<Vec<ContactState>, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        self.inner
-            .protocol_engine()
-            .contact_states(&snapshot)?
+        entries_to_core(records)?
             .into_iter()
-            .map(ContactState::from_core)
+            .map(|(address, blob)| {
+                let blob = blob.ok_or_else(|| RoostError::InvalidData {
+                    reason: "contact entry has no record".into(),
+                })?;
+                ContactState::from_core(
+                    self.inner
+                        .protocol_engine()
+                        .decode_contact(&address, &blob)?,
+                )
+            })
             .collect()
     }
 
-    /// Accepts a pending contact.
+    /// Confirms a contact's Safety Number using this context's local Identity, given the record
+    /// the host holds for the contact.
     ///
-    /// Accepting a pending peer changes its trust to unverified. Commit the returned contact changes before sending application messages to that peer.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
-    /// - [`RoostError::InternalError`] if the updated contact cannot be encoded.
-    /// - [`RoostError::ProtocolStateFault`] if peer keys are not canonical, or the contact is missing or malformed.
-    /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
-    pub fn accept_contact(
-        &self,
-        snapshot: Vec<StateEntry>,
-        identity_key: IdentityKey,
-    ) -> Result<ContactStateChange, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        ContactStateChange::from_core(
-            self.inner
-                .protocol_engine()
-                .accept_contact(&snapshot, identity_key.to_core()?)?,
-        )
-    }
-
-    /// Records a peer's inbox authorization for an epoch.
-    ///
-    /// Returns no updates when `epoch` is not newer than what is stored. That refusal is
-    /// load-bearing: an old authorization replayed at a contact would restore a capability the
-    /// peer has already rotated away from, which is exactly the state a blocked sender wants to
-    /// reach.
-    ///
-    /// # Errors
-    /// - [`RoostError::InternalError`] if the new authorization cannot be encoded.
-    /// - [`RoostError::InvalidData`] if keys, capability length, or snapshot bounds are invalid.
-    /// - [`RoostError::ProtocolStateFault`] if the peer key is not canonical or stored authorization is malformed.
-    /// - [`RoostError::UnsupportedVersion`] if stored authorization has an unsupported version.
-    pub fn record_peer_inbox_authorization(
-        &self,
-        snapshot: Vec<StateEntry>,
-        identity_key: IdentityKey,
-        epoch: u32,
-        capability: Vec<u8>,
-    ) -> Result<StateChanges, RoostError> {
-        let capability = Zeroizing::new(capability);
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let capability = CoreRecipientDeliveryCapability::from_bytes(fixed_32(
-            &capability,
-            "recipient delivery capability",
-        )?);
-        Ok(StateChanges::from_updates(
-            self.inner
-                .protocol_engine()
-                .record_peer_inbox_authorization(
-                    &snapshot,
-                    identity_key.to_core()?,
-                    epoch,
-                    &capability,
-                )?,
-        ))
-    }
-
-    /// Returns the stored inbox authorization for a peer, if one has been recorded.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if key lengths or snapshot bounds are invalid.
-    /// - [`RoostError::ProtocolStateFault`] if the peer key is not canonical or stored authorization is malformed.
-    /// - [`RoostError::UnsupportedVersion`] if stored authorization has an unsupported version.
-    pub fn peer_inbox_authorization(
-        &self,
-        snapshot: Vec<StateEntry>,
-        identity_key: IdentityKey,
-    ) -> Result<Option<PeerInboxAuthorization>, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        Ok(self
-            .inner
-            .protocol_engine()
-            .peer_inbox_authorization(&snapshot, identity_key.to_core()?)?
-            .map(|stored| PeerInboxAuthorization {
-                epoch: stored.epoch,
-                capability: stored.capability.to_bytes().to_vec(),
-            }))
-    }
-
-    /// Records that a contact has been given the delivery capability for local epoch `epoch`.
-    ///
-    /// Call this only once the authorization update has actually reached transport. Recording it
-    /// earlier would let an app killed mid-re-key resume past a contact that never received
-    /// anything, leaving that contact unable to deliver until the next rotation.
-    ///
-    /// # Errors
-    /// - [`RoostError::InternalError`] if the new record cannot be encoded.
-    /// - [`RoostError::InvalidData`] if key lengths or snapshot bounds are invalid.
-    /// - [`RoostError::ProtocolStateFault`] if the peer key is not canonical or the stored record is malformed.
-    /// - [`RoostError::UnsupportedVersion`] if the stored record has an unsupported version.
-    pub fn record_inbox_authorization_delivered(
-        &self,
-        snapshot: Vec<StateEntry>,
-        identity_key: IdentityKey,
-        epoch: u32,
-    ) -> Result<StateChanges, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        Ok(StateChanges::from_updates(
-            self.inner
-                .protocol_engine()
-                .record_inbox_authorization_delivered(&snapshot, identity_key.to_core()?, epoch)?,
-        ))
-    }
-
-    /// Returns which of `candidates` still need the current epoch's delivery capability.
-    ///
-    /// A contact qualifies when it has never been given an authorization or was last given an
-    /// older one. Blocked contacts are always excluded — re-supplying one would hand back the very
-    /// capability the rotation revoked and silently undo the block. Contacts with no
-    /// stored contact record are skipped.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if candidate key lengths or snapshot bounds are invalid.
-    /// - [`RoostError::ProtocolStateFault`] if a candidate key is not canonical or a stored record is malformed.
-    /// - [`RoostError::UnsupportedVersion`] if a stored record has an unsupported version.
-    pub fn contacts_needing_inbox_authorization(
-        &self,
-        snapshot: Vec<StateEntry>,
-        current_epoch: u32,
-        candidates: Vec<IdentityKey>,
-    ) -> Result<Vec<IdentityKey>, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let candidates = candidates
-            .iter()
-            .map(IdentityKey::to_core)
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(self
-            .inner
-            .protocol_engine()
-            .contacts_needing_inbox_authorization(&snapshot, current_epoch, &candidates)?
-            .into_iter()
-            .map(IdentityKey::from_core)
-            .collect())
-    }
-
-    /// Confirms a Safety Number using this context's local Identity.
-    ///
-    /// The peer must already be accepted. A mismatch, including malformed presented text, returns
-    /// no updates. The local Identity comes from this context's storage and cannot be supplied by
-    /// the caller. Commit a matching confirmation's updates before showing the peer as verified.
+    /// The contact must already be accepted. A mismatch, including malformed presented text,
+    /// changes nothing. The local Identity comes from this context's storage and cannot be supplied
+    /// by the caller.
     ///
     /// # Errors
     /// - [`RoostError::InternalError`] if a storage lock is poisoned or a state update cannot encode.
-    /// - [`RoostError::InvalidData`] if the stored local Identity is malformed, or peer key lengths
-    ///   or snapshot bounds are invalid.
+    /// - [`RoostError::InvalidData`] if the stored local Identity or a key is malformed.
     /// - [`RoostError::NotFound`] if the context has no local Identity.
     /// - [`RoostError::OperationRecoveryRequired`] if a committed secure operation needs recovery.
-    /// - [`RoostError::ProtocolStateFault`] if peer keys are not canonical, or the contact is missing, unaccepted, or corrupt.
+    /// - [`RoostError::ProtocolStateFault`] if the record is absent, pending, or malformed.
     /// - [`RoostError::Storage`] if platform storage fails.
     /// - [`RoostError::UnsupportedVersion`] if stored Identity or contact state has an unsupported version.
     pub fn confirm_contact_safety_number(
         &self,
-        snapshot: Vec<StateEntry>,
         contact_identity_key: IdentityKey,
+        record: Option<Vec<u8>>,
         presented_grouped_decimal: String,
     ) -> Result<ContactSafetyNumberConfirmation, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
+        let record = record.map(CoreProtocolStateBlob::from_bytes);
         let local = self.inner.load_identity()?;
         ContactSafetyNumberConfirmation::from_core(
             self.inner.protocol_engine().confirm_contact_safety_number(
-                &snapshot,
                 roost_core::ContactIdentityKey {
                     x25519_public_key: *local.public_key().as_bytes(),
                     ed25519_verifying_key: *local.verifying_key().as_bytes(),
                 },
                 contact_identity_key.to_core()?,
+                record.as_ref(),
                 &presented_grouped_decimal,
             )?,
         )
     }
 
-    /// Unblocks a contact locally.
+    /// Unblocks a contact locally, given the record the host holds for them or none.
     ///
-    /// Commit the returned state change before resuming local delivery. Unblocking does not restore a delivery capability invalidated by a prior inbox rotation.
+    /// Commit the changes before resuming local delivery. Existing Sessions keep working, but
+    /// unblocking doesn't restore a Delivery Capability an inbox rotation replaced. Unblocking a
+    /// stranger blocked before they sent anything deletes their record, since nobody asked.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
+    /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
     /// - [`RoostError::InternalError`] if the updated contact cannot be encoded.
-    /// - [`RoostError::ProtocolStateFault`] if peer keys are not canonical, or the contact is missing or malformed.
-    /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
+    /// - [`RoostError::ProtocolStateFault`] if the key is not canonical or the record is malformed.
+    /// - [`RoostError::UnsupportedVersion`] if the record has an unsupported version.
     pub fn unblock_contact(
         &self,
-        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
-    ) -> Result<ContactStateChange, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        ContactStateChange::from_core(
+        record: Option<Vec<u8>>,
+    ) -> Result<StateChanges, RoostError> {
+        let record = record.map(CoreProtocolStateBlob::from_bytes);
+        Ok(StateChanges::from_core(
             self.inner
                 .protocol_engine()
-                .unblock_contact(&snapshot, identity_key.to_core()?)?,
-        )
+                .unblock_contact(identity_key.to_core()?, record.as_ref())?,
+        ))
     }
 }
 
@@ -832,6 +676,7 @@ impl StateChanges {
             .collect();
         Self {
             conditions,
+            operation_id: changes.operation().map(OperationId::from_core),
             updates: changes
                 .into_updates()
                 .into_iter()
@@ -958,6 +803,7 @@ impl ProtocolHardeningLimits {
             min_deduplication_capacity: value.min_deduplication_capacity as u32,
             default_deduplication_capacity: value.default_deduplication_capacity as u32,
             max_deduplication_capacity: value.max_deduplication_capacity as u32,
+            max_messages_before_acceptance: value.max_messages_before_acceptance as u32,
         }
     }
 }
@@ -1014,44 +860,6 @@ impl ContactDiscoveryKey {
             identity_signature: value.identity_signature.to_vec(),
         })
     }
-
-    fn to_core(&self) -> Result<roost_core::ContactDiscoveryKey, RoostError> {
-        Ok(roost_core::ContactDiscoveryKey {
-            x25519_public_key: fixed_32(
-                &self.x25519_public_key,
-                "contact discovery x25519 public key",
-            )?,
-            ed25519_verifying_key: fixed_32(
-                &self.ed25519_verifying_key,
-                "contact discovery ed25519 verifying key",
-            )?,
-            epoch: self.epoch,
-            created_at_secs: whole_secs_from_millis(
-                self.created_at_millis,
-                "contact discovery-key created_at_millis",
-            )?,
-            identity_signature: fixed_64(
-                &self.identity_signature,
-                "contact discovery identity signature",
-            )?,
-        })
-    }
-}
-
-impl ContactIdentity {
-    pub(crate) fn from_core(value: roost_core::ContactIdentity) -> Result<Self, RoostError> {
-        Ok(Self {
-            identity_key: IdentityKey::from_core(value.identity_key),
-            discovery_key: ContactDiscoveryKey::from_core(value.discovery_key)?,
-        })
-    }
-
-    fn to_core(&self) -> Result<roost_core::ContactIdentity, RoostError> {
-        Ok(roost_core::ContactIdentity {
-            identity_key: self.identity_key.to_core()?,
-            discovery_key: self.discovery_key.to_core()?,
-        })
-    }
 }
 
 impl ContactTrustState {
@@ -1067,46 +875,25 @@ impl ContactTrustState {
 impl ContactState {
     pub(crate) fn from_core(value: roost_core::ContactState) -> Result<Self, RoostError> {
         Ok(Self {
-            identity: ContactIdentity::from_core(value.identity)?,
+            identity_key: IdentityKey::from_core(value.identity_key),
+            discovery_key: value
+                .discovery_key
+                .map(ContactDiscoveryKey::from_core)
+                .transpose()?,
             trust_state: ContactTrustState::from_core(value.trust_state),
             blocked: value.blocked,
         })
     }
 }
 
-impl ContactEvent {
-    pub(crate) fn from_core(value: roost_core::ContactEvent) -> Result<Self, RoostError> {
-        match value {
-            roost_core::ContactEvent::Changed { contact } => Ok(Self {
-                kind: ContactEventKind::Changed,
-                contact: ContactState::from_core(contact)?,
-            }),
-        }
-    }
-}
-
-impl ContactStateChange {
-    pub(crate) fn from_core(value: CoreContactStateChange) -> Result<Self, RoostError> {
-        Ok(Self {
-            contact: ContactState::from_core(value.contact)?,
-            changes: StateChanges::from_updates(value.state_updates),
-            event: value.event.map(ContactEvent::from_core).transpose()?,
-        })
-    }
-}
-
 impl ContactSafetyNumberConfirmation {
     fn from_core(value: CoreSafetyNumberConfirmation) -> Result<Self, RoostError> {
-        match value {
-            CoreSafetyNumberConfirmation::Matched(change) => Ok(Self {
-                kind: ContactSafetyNumberConfirmationKind::Matched,
-                change: ContactStateChange::from_core(change)?,
-            }),
-            CoreSafetyNumberConfirmation::Mismatched(change) => Ok(Self {
-                kind: ContactSafetyNumberConfirmationKind::Mismatched,
-                change: ContactStateChange::from_core(change)?,
-            }),
-        }
+        Ok(match value {
+            CoreSafetyNumberConfirmation::Matched(changes) => Self::Matched {
+                changes: StateChanges::from_core(changes),
+            },
+            CoreSafetyNumberConfirmation::Mismatched => Self::Mismatched,
+        })
     }
 }
 
@@ -1158,18 +945,34 @@ impl OutboundMessageResult {
     }
 }
 
+impl InboundMessageResult {
+    fn from_core(value: roost_core::InboundMessageResult) -> Self {
+        Self {
+            session_id: SessionId::from_core(value.session_id),
+            message_id: MessageId::from_core(value.message_id),
+            sent_at_millis: value.sent_at_millis,
+            payload_kind: PayloadKind::from_protocol(value.payload_kind),
+            plaintext: value.plaintext.to_vec(),
+            sender_identity: SenderIdentityMaterial::from_core(value.sender_identity),
+            acknowledgment: value.acknowledgment.map(Message::from_core),
+            changes: StateChanges::from_core(value.changes),
+        }
+    }
+}
+
 impl InboundMessageOutcome {
     pub(crate) fn from_core(value: roost_core::InboundMessageOutcome) -> Self {
         match value {
             roost_core::InboundMessageOutcome::Accepted(result) => Self::Accepted {
-                result: InboundMessageResult {
+                result: InboundMessageResult::from_core(*result),
+            },
+            roost_core::InboundMessageOutcome::ContactRequest(result) => Self::ContactRequest {
+                result: InboundMessageResult::from_core(*result),
+            },
+            roost_core::InboundMessageOutcome::Withheld(result) => Self::Withheld {
+                result: WithheldInboundMessageResult {
                     session_id: SessionId::from_core(result.session_id),
                     message_id: MessageId::from_core(result.message_id),
-                    sent_at_millis: result.sent_at_millis,
-                    payload_kind: PayloadKind::from_protocol(result.payload_kind),
-                    plaintext: result.plaintext.to_vec(),
-                    sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                    acknowledgment: Message::from_core(result.acknowledgment),
                     changes: StateChanges::from_core(result.changes),
                 },
             },
@@ -1186,6 +989,7 @@ impl InboundMessageOutcome {
                 }
             }
             roost_core::InboundMessageOutcome::UnknownSession => Self::UnknownSession,
+            roost_core::InboundMessageOutcome::DeletedSession => Self::DeletedSession,
             roost_core::InboundMessageOutcome::AcknowledgmentMatched(result) => {
                 Self::AcknowledgmentMatched {
                     result: AcknowledgmentResult::from_core(*result),
@@ -1252,8 +1056,6 @@ impl ProtocolStateKind {
             roost_core::ProtocolStateKind::DeduplicationSet => Self::DeduplicationSet,
             roost_core::ProtocolStateKind::PendingAcknowledgments => Self::PendingAcknowledgments,
             roost_core::ProtocolStateKind::ContactState => Self::ContactState,
-            roost_core::ProtocolStateKind::PeerInboxAuthorization => Self::PeerInboxAuthorization,
-            roost_core::ProtocolStateKind::LocalInboxAuthorization => Self::LocalInboxAuthorization,
             roost_core::ProtocolStateKind::PeerSessions => Self::PeerSessions,
         }
     }
@@ -1264,8 +1066,6 @@ impl ProtocolStateKind {
             Self::DeduplicationSet => roost_core::ProtocolStateKind::DeduplicationSet,
             Self::PendingAcknowledgments => roost_core::ProtocolStateKind::PendingAcknowledgments,
             Self::ContactState => roost_core::ProtocolStateKind::ContactState,
-            Self::PeerInboxAuthorization => roost_core::ProtocolStateKind::PeerInboxAuthorization,
-            Self::LocalInboxAuthorization => roost_core::ProtocolStateKind::LocalInboxAuthorization,
             Self::PeerSessions => roost_core::ProtocolStateKind::PeerSessions,
         }
     }

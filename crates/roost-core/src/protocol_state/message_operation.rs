@@ -1,7 +1,12 @@
+use super::contact_record::{ContactRecord, ReceivedCount, contact_address, load_contact};
+use super::grant::{
+    DiscoveryKeyStamp, InboxGrant, LocalGrant, encode_granted_payload, open_granted_payload,
+};
 use super::session::{
-    LoadedSession, SessionStatus, encode_active_session, encode_unrecoverable_session,
-    load_peer_sessions, load_session, peer_sessions_address, pending_acknowledgment_address,
-    session_address,
+    LoadedSession, PeerSessions, PendingHandshake, SessionStatus, SignedPreKeyUse, Starter,
+    encode_active_session, encode_peer_sessions, encode_unrecoverable_session, load_peer_sessions,
+    load_session, peer_sessions_address, pending_acknowledgment_address, session_address,
+    session_record_addresses,
 };
 use super::{
     AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
@@ -11,35 +16,52 @@ use super::{
     ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
     ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings, SenderIdentityMaterial,
     SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, SignedRecipient,
-    StateChanges, acknowledgment_digest, authenticate_session_message, contact_address,
-    contact_identity_keys_match, contains_digest, decode_acknowledgment_plaintext,
-    deduplication_address, deduplication_digest, encode_acknowledgment_plaintext,
-    encode_deduplication_set, encode_pending_acknowledgments, ensure_payload_kind,
-    inbound_contact_identity_key, load_contact_state, load_pending_acknowledgments,
-    load_required_session, match_state_entries, open_message, outbound_contact,
-    pending_acknowledgment_digest_seen, receiving_deduplication_set, record_acknowledgment_digest,
-    record_deduplication_digest, record_pending_acknowledgment, seal_proved, seal_signed,
+    StateChanges, WithheldInboundMessageResult, acknowledgment_digest, authenticate_first_message,
+    authenticate_session_message, contact_identity_keys_match, contains_digest,
+    decode_acknowledgment_plaintext, deduplication_address, deduplication_digest,
+    encode_acknowledgment_plaintext, encode_deduplication_set, encode_pending_acknowledgments,
+    ensure_supported_payload_kind, inbound_contact_identity_key, load_pending_acknowledgments,
+    load_required_session, match_state_entries, open_message, pending_acknowledgment_digest_seen,
+    receiving_deduplication_set, record_acknowledgment_digest, record_deduplication_digest,
+    record_pending_acknowledgment, seal_proved, seal_signed, session_deletions,
     validate_contact_identity_key, validate_sender_identity, verify_recipient_keys,
 };
-use crate::contact::ContactIdentityKey;
+use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
+use crate::key_store::{KeyStore, KeyStoreError};
 use crate::{Message, MessageId, PayloadKind, TransportBinding};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    DiscoveryKey, Handshake, KeyPair, PublicDiscoveryKey, PublicIdentityKey, RatchetState,
-    Signature, SigningKeyPair, sign_identity_key_binding,
+    DiscoveryKey, Handshake, KeyPair, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,
+    PublicKey, PublicSignedPreKey, RatchetState, RecipientDeliveryCapability,
+    SealedFramePreKeyReference, Signature, SigningKeyPair, accept_handshake, initiate_handshake,
+    sign_identity_key_binding, verify_discovery_to_identity_binding,
 };
 use roost_protocol::{PUBLIC_KEY_LEN, SessionId};
 use std::collections::BTreeMap;
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 /// The local Identity's secret keys a Message Operation uses.
-pub struct LocalIdentityKeys {
+pub(crate) struct LocalIdentityKeys {
     /// Identity Key agreement half, which proves Messages that carry a handshake.
-    pub agreement_key: KeyPair,
+    pub(crate) agreement_key: KeyPair,
     /// Identity Key signing half, which signs Messages sent after the peer replies.
-    pub signing_key: SigningKeyPair,
+    pub(crate) signing_key: SigningKeyPair,
     /// Current Discovery Key, which opens received Messages.
-    pub discovery_key: DiscoveryKey,
+    pub(crate) discovery_key: DiscoveryKey,
+    /// The current inbox's Delivery Capability, which Roost shares only inside Inbox Grants.
+    pub(crate) delivery_capability: RecipientDeliveryCapability,
+}
+
+/// What the app asked an encryption to do, which the contact's current state may change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SendIntent {
+    /// An ordinary Message to a contact.
+    Message,
+    /// A Contact Request, which becomes an acceptance when the peer already asked.
+    Request,
+    /// A Contact Acceptance, which becomes an ordinary Message once the contact is accepted.
+    Acceptance,
 }
 
 /// A domain-signed sender certificate and the domain's signature over it.
@@ -48,6 +70,16 @@ pub struct SignedSenderCertificate {
     pub certificate: Vec<u8>,
     /// Domain signature over the certificate.
     pub signature: Vec<u8>,
+}
+
+/// A contact's published keys as the app fetched them from the Relay.
+pub struct PeerPreKeyBundle {
+    /// The contact's Identity Key.
+    pub identity_key: PublicIdentityKey,
+    /// The contact Discovery Key's signature over the Identity Key.
+    pub discovery_to_identity: Signature,
+    /// The contact's Discovery Key, signed prekey, and one-time prekey when one was left.
+    pub bundle: PreKeyBundle,
 }
 
 /// What the app sends: a recipient, a stable draft MessageID, and the plaintext.
@@ -62,6 +94,9 @@ pub struct OutgoingMessage {
     pub sender_certificate: SignedSenderCertificate,
     /// Plaintext bytes to encrypt.
     pub plaintext: Zeroizing<Vec<u8>>,
+    /// The bundle the app fetched after [`MessageEncryptionStep::NeedsPreKeyBundle`], kept with
+    /// the draft until a Session uses it.
+    pub prekey_bundle: Option<PeerPreKeyBundle>,
 }
 
 /// What the app received, with the inputs Roost needs to check and acknowledge it.
@@ -81,12 +116,37 @@ pub struct IncomingMessage {
 }
 
 /// Where Roost sends a Message, so the app can supply a Transport Binding that reaches it.
+pub enum MessageDestination {
+    /// A first Message, which the Relay admits against the recipient's current prekeys.
+    FirstMessage {
+        /// The recipient's Identity Key.
+        identity_key: ContactIdentityKey,
+        /// The recipient Discovery Key's X25519 public key the Message is sealed to.
+        discovery_key: [u8; PUBLIC_KEY_LEN],
+        /// The recipient signed prekey the handshake used.
+        signed_prekey_id: u64,
+        /// The recipient one-time prekey the handshake used, if one was left.
+        one_time_prekey_id: Option<u64>,
+    },
+    /// An established Message, which the Relay admits with the recipient's Delivery Capability.
+    Established {
+        /// The recipient's Identity Key.
+        identity_key: ContactIdentityKey,
+        /// The recipient Discovery Key's X25519 public key the Message is sealed to.
+        discovery_key: [u8; PUBLIC_KEY_LEN],
+        /// The recipient's Delivery Capability, a secret the app passes only to the Relay.
+        delivery_capability: RecipientDeliveryCapability,
+    },
+}
+
+/// The signed prekey a first Message names, which the app must prove the Relay admitted it
+/// against before Roost uses it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MessageDestination {
-    /// The recipient's Identity Key.
-    pub identity_key: ContactIdentityKey,
-    /// The recipient Discovery Key's X25519 public key the Message is sealed to.
-    pub discovery_key: [u8; PUBLIC_KEY_LEN],
+pub struct AdmissionRequest {
+    /// The local Discovery Key epoch the signed prekey belongs to.
+    pub discovery_epoch: u32,
+    /// The signed prekey's ID, which the Relay's admission proof must name.
+    pub signed_prekey_id: u64,
 }
 
 /// What a [`MessageEncryption`] needs next, or its result.
@@ -96,6 +156,10 @@ pub enum MessageEncryptionStep {
     /// The destination whose Transport Binding to supply through
     /// [`MessageEncryption::supply_transport_binding`].
     NeedsTransport(MessageDestination),
+    /// A new Session needs this contact's prekey bundle, and the given one is missing or older
+    /// than the contact's Discovery Key. The operation has ended: fetch the bundle and start again
+    /// with the same draft.
+    NeedsPreKeyBundle(ContactIdentityKey),
     /// The sealed Message and its state changes. The operation has ended.
     Ready(Box<OutboundMessageResult>),
 }
@@ -104,6 +168,10 @@ pub enum MessageEncryptionStep {
 pub enum MessageDecryptionStep {
     /// The records to supply through [`MessageDecryption::supply_state`].
     NeedsState(Vec<ProtocolStateAddress>),
+    /// A first Message names a signed prekey kept after a rotation. Confirm through
+    /// [`MessageDecryption::confirm_admission`] once the Relay's proof shows it admitted this
+    /// Message against that prekey, or drop the operation.
+    NeedsAdmission(AdmissionRequest),
     /// The destination whose Transport Binding the acknowledgment needs, to supply through
     /// [`MessageDecryption::supply_acknowledgment_transport_binding`].
     NeedsAcknowledgmentTransport(MessageDestination),
@@ -119,12 +187,19 @@ pub enum MessageOperationError {
     /// The operation returned its result or failed, and accepts no more calls.
     #[error("message operation has finished")]
     Finished,
+    /// Admission was confirmed while the operation wasn't waiting for it.
+    #[error("message operation isn't waiting for admission")]
+    NotAwaitingAdmission,
     /// State was supplied while the operation wasn't waiting for any.
     #[error("message operation isn't waiting for state")]
     NotAwaitingState,
     /// A Transport Binding was supplied while the operation wasn't waiting for one.
     #[error("message operation isn't waiting for a transport binding")]
     NotAwaitingTransportBinding,
+    /// Reading the prekeys a first Message names, or staging the use of a one-time prekey,
+    /// failed.
+    #[error(transparent)]
+    KeyStore(#[from] KeyStoreError),
     /// Checking or processing the Message failed.
     #[error(transparent)]
     ProtocolState(#[from] ProtocolStateError),
@@ -133,18 +208,21 @@ pub enum MessageOperationError {
 /// One attempt to encrypt a Message to a contact, which asks for the records it needs and returns
 /// its result once.
 ///
-/// Call [`Self::step`] until it returns [`MessageEncryptionStep::Ready`], supplying what each
-/// other step asks for. Calling [`Self::step`] again before supplying it returns the same request
-/// without repeating work. Dropping the operation commits nothing.
+/// Call [`Self::step`] until it returns [`MessageEncryptionStep::Ready`] or
+/// [`MessageEncryptionStep::NeedsPreKeyBundle`], supplying what each other step asks for. Calling
+/// [`Self::step`] again before supplying it returns the same request without repeating work.
+/// Dropping the operation commits nothing.
 pub struct MessageEncryption(Option<Box<Encrypting>>);
 
 struct Encrypting {
     engine: ProtocolStateEngine,
     sender: LocalSenderKeys,
+    intent: SendIntent,
     recipient: ContactIdentityKey,
     message_id: MessageId,
     sent_at_millis: u64,
     plaintext: Zeroizing<Vec<u8>>,
+    prekey_bundle: Option<PeerPreKeyBundle>,
     reads: StateReads,
     phase: EncryptionPhase,
 }
@@ -152,30 +230,115 @@ struct Encrypting {
 enum EncryptionPhase {
     Started,
     ContactRequested,
-    SessionRequested {
-        discovery_key: [u8; PUBLIC_KEY_LEN],
-        session_id: SessionId,
-    },
+    SessionRequested(Box<Planned>),
+    NewSessionRequested(Box<NewSession>),
     TransportRequested(Box<PreparedSeal>),
     Taken,
 }
 
+// What a send turned out to be, and the contact record after it.
+struct Planned {
+    contact: ContactRecord,
+    payload_kind: PayloadKind,
+    session_id: SessionId,
+}
+
+// A Session this send starts, waiting to confirm its records don't exist yet.
+struct NewSession {
+    planned: Planned,
+    state: Box<RatchetState>,
+    pending_handshake: PendingHandshake,
+    peer_sessions: PeerSessions,
+    evicted: Vec<SessionId>,
+}
+
+// How the Relay admits a Message, kept so Roost can describe the destination again.
+enum Route {
+    FirstMessage {
+        discovery_key: [u8; PUBLIC_KEY_LEN],
+        signed_prekey_id: u64,
+        one_time_prekey_id: Option<u64>,
+    },
+    Established {
+        discovery_key: [u8; PUBLIC_KEY_LEN],
+        delivery_capability: Zeroizing<[u8; 32]>,
+    },
+}
+
+impl Route {
+    fn first_message(pending_handshake: &PendingHandshake) -> Self {
+        Self::FirstMessage {
+            discovery_key: *pending_handshake
+                .handshake
+                .responder_discovery_key
+                .as_bytes(),
+            signed_prekey_id: pending_handshake.signed_prekey_id,
+            one_time_prekey_id: pending_handshake
+                .handshake
+                .prekey_reference
+                .one_time_prekey_id,
+        }
+    }
+
+    fn established(contact: &ContactRecord) -> Result<Self, ProtocolStateError> {
+        let (discovery_key, capability) = contact.established_route()?;
+        Ok(Self::Established {
+            discovery_key,
+            delivery_capability: capability.to_bytes(),
+        })
+    }
+
+    fn discovery_key(&self) -> [u8; PUBLIC_KEY_LEN] {
+        match self {
+            Self::FirstMessage { discovery_key, .. } | Self::Established { discovery_key, .. } => {
+                *discovery_key
+            }
+        }
+    }
+
+    fn destination(&self, identity_key: ContactIdentityKey) -> MessageDestination {
+        match self {
+            Self::FirstMessage {
+                discovery_key,
+                signed_prekey_id,
+                one_time_prekey_id,
+            } => MessageDestination::FirstMessage {
+                identity_key,
+                discovery_key: *discovery_key,
+                signed_prekey_id: *signed_prekey_id,
+                one_time_prekey_id: *one_time_prekey_id,
+            },
+            Self::Established {
+                discovery_key,
+                delivery_capability,
+            } => MessageDestination::Established {
+                identity_key,
+                discovery_key: *discovery_key,
+                delivery_capability: RecipientDeliveryCapability::from_bytes(**delivery_capability),
+            },
+        }
+    }
+}
+
 // Everything sealing needs once Roost knows the Session and the destination.
 struct PreparedSeal {
-    session_id: SessionId,
+    planned: Planned,
     state: Box<RatchetState>,
-    pending_handshake: Option<Handshake>,
+    pending_handshake: Option<PendingHandshake>,
     pending: LoadedPendingAcknowledgments,
-    destination: MessageDestination,
+    // The peer's Session list when this send starts a Session, and the Sessions that evicts.
+    started: Option<(PeerSessions, Vec<SessionId>)>,
+    route: Route,
     transport_binding: Option<TransportBinding>,
 }
 
 impl ProtocolStateEngine {
-    /// Starts encrypting `message` with the local Identity's `keys`.
-    pub fn start_encryption(
+    // Starts encrypting `message` with the local Identity's `keys`.
+    pub(crate) fn start_encryption(
         &self,
         keys: LocalIdentityKeys,
         message: OutgoingMessage,
+        intent: SendIntent,
     ) -> Result<MessageEncryption, ProtocolStateError> {
         validate_contact_identity_key(&contact_address(message.recipient), &message.recipient)?;
         let sender = LocalSenderKeys::new(keys, message.sender_certificate)?;
@@ -183,18 +346,21 @@ impl ProtocolStateEngine {
         Ok(MessageEncryption(Some(Box::new(Encrypting {
             engine: *self,
             sender,
+            intent,
             recipient: message.recipient,
             message_id: message.message_id,
             sent_at_millis: message.sent_at_millis,
             plaintext: message.plaintext,
+            prekey_bundle: message.prekey_bundle,
             reads: StateReads::default(),
             phase: EncryptionPhase::Started,
         }))))
     }
 
-    /// Starts decrypting `message` with the local Identity's `keys`.
-    pub fn start_decryption(
+    // Starts decrypting `message` with the local Identity's `keys`, reading prekeys from `store`.
+    pub(crate) fn start_decryption(
         &self,
+        store: KeyStore,
         keys: LocalIdentityKeys,
         message: IncomingMessage,
     ) -> Result<MessageDecryption, ProtocolStateError> {
@@ -206,6 +372,7 @@ impl ProtocolStateEngine {
         validate_sender_identity(&local.identity, self.limits)?;
         Ok(MessageDecryption(Some(Box::new(Decrypting {
             engine: *self,
+            store,
             local,
             message: message.message,
             encoded,
@@ -223,7 +390,8 @@ impl MessageEncryption {
     /// Advances the operation and returns what it needs next, or its result.
     ///
     /// Sealing happens here, never in the supply calls. Returning
-    /// [`MessageEncryptionStep::Ready`] or an error ends the operation.
+    /// [`MessageEncryptionStep::Ready`], [`MessageEncryptionStep::NeedsPreKeyBundle`], or an error
+    /// ends the operation.
     pub fn step<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -278,7 +446,6 @@ impl Encrypting {
         if let Some(pending) = self.reads.pending() {
             return Ok(MessageEncryptionStep::NeedsState(pending.to_vec()));
         }
-        let limits = self.engine.limits;
         match std::mem::replace(&mut self.phase, EncryptionPhase::Taken) {
             EncryptionPhase::Started => {
                 self.phase = EncryptionPhase::ContactRequested;
@@ -287,56 +454,213 @@ impl Encrypting {
                     peer_sessions_address(self.recipient),
                 ])))
             }
-            EncryptionPhase::ContactRequested => {
-                let snapshot = self.reads.snapshot();
-                let contact = outbound_contact(snapshot, self.recipient, limits)?;
-                let session_id =
-                    load_peer_sessions(snapshot, &peer_sessions_address(self.recipient), limits)?
-                        .ok_or(ProtocolStateError::NoSession)?
-                        .current();
-                self.phase = EncryptionPhase::SessionRequested {
-                    discovery_key: contact.identity.discovery_key.x25519_public_key,
-                    session_id,
-                };
-                Ok(MessageEncryptionStep::NeedsState(self.reads.request(vec![
-                    session_address(session_id),
-                    pending_acknowledgment_address(session_id),
-                ])))
+            EncryptionPhase::ContactRequested => self.plan(rng),
+            EncryptionPhase::SessionRequested(planned) => {
+                let prepared = self.prepare_seal(*planned)?;
+                Ok(self.request_transport(prepared))
             }
-            EncryptionPhase::SessionRequested {
-                discovery_key,
-                session_id,
-            } => {
-                let prepared = self.prepare_seal(discovery_key, session_id)?;
-                let destination = prepared.destination;
-                self.phase = EncryptionPhase::TransportRequested(Box::new(prepared));
-                Ok(MessageEncryptionStep::NeedsTransport(destination))
+            EncryptionPhase::NewSessionRequested(new_session) => {
+                let prepared = self.prepare_new_session(*new_session)?;
+                Ok(self.request_transport(prepared))
             }
             EncryptionPhase::TransportRequested(mut prepared) => {
                 match prepared.transport_binding.take() {
                     Some(transport_binding) => Ok(MessageEncryptionStep::Ready(Box::new(
                         self.seal(rng, *prepared, &transport_binding)?,
                     ))),
-                    None => {
-                        let destination = prepared.destination;
-                        self.phase = EncryptionPhase::TransportRequested(prepared);
-                        Ok(MessageEncryptionStep::NeedsTransport(destination))
-                    }
+                    None => Ok(self.request_transport(*prepared)),
                 }
             }
             EncryptionPhase::Taken => Err(MessageOperationError::Finished),
         }
     }
 
-    // Checks the Session Roost selected and finds where the Message goes.
-    fn prepare_seal(
-        &self,
-        contact_discovery_key: [u8; PUBLIC_KEY_LEN],
-        session_id: SessionId,
-    ) -> Result<PreparedSeal, ProtocolStateError> {
+    fn request_transport(&mut self, prepared: PreparedSeal) -> MessageEncryptionStep {
+        let destination = prepared.route.destination(self.recipient);
+        self.phase = EncryptionPhase::TransportRequested(Box::new(prepared));
+        MessageEncryptionStep::NeedsTransport(destination)
+    }
+
+    // Decides what this send is from the contact's record and Sessions, and asks for what it
+    // needs next.
+    fn plan<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<MessageEncryptionStep, MessageOperationError> {
         let limits = self.engine.limits;
         let snapshot = self.reads.snapshot();
-        let address = session_address(session_id);
+        let address = contact_address(self.recipient);
+        let contact = load_contact(snapshot, &address, limits)?;
+        let sessions =
+            load_peer_sessions(snapshot, &peer_sessions_address(self.recipient), limits)?;
+        if contact.as_ref().is_some_and(|contact| contact.blocked) {
+            return Err(ProtocolStateError::BlockedContact.into());
+        }
+        let local_grant = self.sender.grant().stamp();
+        let (mut contact, sessions) = match (contact, sessions) {
+            (contact, None) | (contact @ None, Some(_)) if self.intent == SendIntent::Request => {
+                return self.start_session(rng, contact);
+            }
+            (Some(contact), sessions) if contact.is_accepted() => {
+                let session_id = sessions.ok_or(ProtocolStateError::NoSession)?.current();
+                return Ok(self.request_session(Planned {
+                    payload_kind: text_kind(contact.needs_grant(local_grant)),
+                    contact,
+                    session_id,
+                }));
+            }
+            (Some(contact), Some(sessions)) => (contact, sessions),
+            (None, _) if self.intent != SendIntent::Acceptance => {
+                return Err(ProtocolStateError::MissingRequiredState { address }.into());
+            }
+            (Some(_), None) if self.intent == SendIntent::Message => {
+                return Err(ProtocolStateError::NoSession.into());
+            }
+            (None | Some(_), _) => return Err(ProtocolStateError::NoContactRequest.into()),
+        };
+        let peer_asked = sessions.current_starter() == Starter::Peer;
+        let payload_kind = match (self.intent, peer_asked) {
+            (SendIntent::Request | SendIntent::Acceptance, true) => {
+                contact.accept();
+                PayloadKind::ContactAcceptance
+            }
+            (SendIntent::Acceptance, false) => {
+                return Err(ProtocolStateError::NoContactRequest.into());
+            }
+            // The asked side keeps its grant private until it accepts.
+            (SendIntent::Message | SendIntent::Request, _) => {
+                let carries_grant = !peer_asked && contact.needs_grant(local_grant);
+                contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
+                text_kind(carries_grant)
+            }
+        };
+        Ok(self.request_session(Planned {
+            contact,
+            payload_kind,
+            session_id: sessions.current(),
+        }))
+    }
+
+    fn request_session(&mut self, planned: Planned) -> MessageEncryptionStep {
+        let session_id = planned.session_id;
+        self.phase = EncryptionPhase::SessionRequested(Box::new(planned));
+        MessageEncryptionStep::NeedsState(self.reads.request(vec![
+            session_address(session_id),
+            pending_acknowledgment_address(session_id),
+        ]))
+    }
+
+    // Starts a Session from the bundle the app fetched, after checking it against the contact.
+    fn start_session<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        contact: Option<ContactRecord>,
+    ) -> Result<MessageEncryptionStep, MessageOperationError> {
+        let limits = self.engine.limits;
+        let Some(bundle) = self.prekey_bundle.take() else {
+            return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
+        };
+        let bundle_identity_key = ContactIdentityKey {
+            x25519_public_key: *bundle.identity_key.public_key.as_bytes(),
+            ed25519_verifying_key: bundle.identity_key.verifying_key.to_bytes(),
+        };
+        if !contact_identity_keys_match(&bundle_identity_key, &self.recipient) {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: "prekey bundle belongs to another identity".into(),
+            }
+            .into());
+        }
+        verify_discovery_to_identity_binding(
+            &bundle.identity_key,
+            &bundle.bundle.discovery_key.verifying_key,
+            &bundle.discovery_to_identity,
+        )
+        .map_err(roost_crypto::HandshakeError::from)
+        .map_err(ProtocolStateError::from)?;
+        let bundle_discovery_key = ContactDiscoveryKey::from(&bundle.bundle.discovery_key);
+        if contact
+            .as_ref()
+            .and_then(|contact| contact.discovery_key)
+            .is_some_and(|current| {
+                DiscoveryKeyStamp::of(&bundle_discovery_key) < DiscoveryKeyStamp::of(&current)
+            })
+        {
+            return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
+        }
+        let (state, session_id, handshake) =
+            initiate_handshake(rng, &bundle.identity_key, &bundle.bundle)
+                .map_err(ProtocolStateError::from)?;
+        let mut contact = contact.unwrap_or_else(|| ContactRecord::pending(self.recipient, None));
+        contact.record_discovery_key(bundle_discovery_key);
+        let local_grant = self.sender.grant().stamp();
+        let carries_grant = contact.needs_grant(local_grant);
+        if !contact.is_accepted() {
+            contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
+        }
+        let (peer_sessions, evicted) = match load_peer_sessions(
+            self.reads.snapshot(),
+            &peer_sessions_address(self.recipient),
+            limits,
+        )? {
+            Some(mut sessions) => {
+                let evicted = sessions.start(session_id, None);
+                (sessions, evicted)
+            }
+            None => (PeerSessions::new(session_id, None), Vec::new()),
+        };
+        let mut addresses = session_record_addresses(session_id).to_vec();
+        for evicted in &evicted {
+            addresses.extend(session_record_addresses(*evicted));
+        }
+        self.phase = EncryptionPhase::NewSessionRequested(Box::new(NewSession {
+            planned: Planned {
+                payload_kind: text_kind(carries_grant),
+                contact,
+                session_id,
+            },
+            state: Box::new(state),
+            pending_handshake: PendingHandshake {
+                handshake,
+                signed_prekey_id: bundle.bundle.signed_prekey.id,
+            },
+            peer_sessions,
+            evicted,
+        }));
+        Ok(MessageEncryptionStep::NeedsState(
+            self.reads.request(addresses),
+        ))
+    }
+
+    // Checks that the new Session's records don't exist yet.
+    fn prepare_new_session(
+        &self,
+        new_session: NewSession,
+    ) -> Result<PreparedSeal, ProtocolStateError> {
+        let session_id = new_session.planned.session_id;
+        for address in session_record_addresses(session_id) {
+            if self.reads.snapshot().get(&address).is_some() {
+                return Err(ProtocolStateError::InvalidStateBinding {
+                    address,
+                    reason: "session already exists".into(),
+                });
+            }
+        }
+        Ok(PreparedSeal {
+            route: Route::first_message(&new_session.pending_handshake),
+            planned: new_session.planned,
+            state: new_session.state,
+            pending_handshake: Some(new_session.pending_handshake),
+            pending: LoadedPendingAcknowledgments::empty(),
+            started: Some((new_session.peer_sessions, new_session.evicted)),
+            transport_binding: None,
+        })
+    }
+
+    // Checks the Session Roost selected and finds where the Message goes.
+    fn prepare_seal(&self, planned: Planned) -> Result<PreparedSeal, ProtocolStateError> {
+        let limits = self.engine.limits;
+        let snapshot = self.reads.snapshot();
+        let address = session_address(planned.session_id);
         let LoadedSession {
             peer_identity_key,
             status,
@@ -356,22 +680,20 @@ impl Encrypting {
         };
         let pending = load_pending_acknowledgments(
             snapshot,
-            &pending_acknowledgment_address(session_id),
+            &pending_acknowledgment_address(planned.session_id),
             limits,
         )?;
-        let discovery_key = match &pending_handshake {
-            Some(handshake) => *handshake.responder_discovery_key.as_bytes(),
-            None => contact_discovery_key,
+        let route = match &pending_handshake {
+            Some(pending_handshake) => Route::first_message(pending_handshake),
+            None => Route::established(&planned.contact)?,
         };
         Ok(PreparedSeal {
-            session_id,
+            planned,
             state,
             pending_handshake,
             pending,
-            destination: MessageDestination {
-                identity_key: self.recipient,
-                discovery_key,
-            },
+            started: None,
+            route,
             transport_binding: None,
         })
     }
@@ -384,26 +706,41 @@ impl Encrypting {
     ) -> Result<OutboundMessageResult, ProtocolStateError> {
         let limits = self.engine.limits;
         let PreparedSeal {
-            session_id,
+            planned,
             mut state,
             pending_handshake,
             mut pending,
-            destination,
+            started,
+            route,
             ..
         } = prepared;
+        let Planned {
+            contact,
+            payload_kind,
+            session_id,
+        } = planned;
+        let grant = self.sender.grant();
+        let granted;
+        let payload: &[u8] = if payload_kind.carries_grant() {
+            granted = encode_granted_payload(&grant, &self.plaintext)?;
+            &granted
+        } else {
+            &self.plaintext
+        };
         let content = OutboundContent {
             session_id,
             id: self.message_id,
             sent_at_millis: self.sent_at_millis,
-            plaintext: &self.plaintext,
+            payload_kind,
+            payload,
         };
         let sender = self.sender.local_sender();
         let message = match &pending_handshake {
-            Some(handshake) => seal_proved(
+            Some(pending_handshake) => seal_proved(
                 rng,
                 &mut state,
                 content,
-                handshake,
+                &pending_handshake.handshake,
                 &sender,
                 transport_binding,
                 limits,
@@ -412,9 +749,8 @@ impl Encrypting {
                 rng,
                 &mut state,
                 content,
-                PayloadKind::EncryptedText,
                 SignedRecipient {
-                    discovery_key: destination.discovery_key,
+                    discovery_key: route.discovery_key(),
                     identity_verifying_key: &self.recipient.ed25519_verifying_key,
                 },
                 sender.identity,
@@ -424,42 +760,62 @@ impl Encrypting {
             )?,
         };
         let pending_address = pending_acknowledgment_address(session_id);
-        record_pending_acknowledgment(
-            &pending_address,
-            &mut pending,
-            self.message_id,
-            self.sent_at_millis,
-            &message,
-            limits,
-        )?;
-        let address = session_address(session_id);
+        // A contact that hasn't accepted acknowledges nothing yet, so nothing waits for it.
+        if contact.is_accepted() {
+            record_pending_acknowledgment(
+                &pending_address,
+                &mut pending,
+                self.message_id,
+                self.sent_at_millis,
+                &message,
+                payload_kind.carries_grant().then(|| grant.stamp()),
+                limits,
+            )?;
+        }
         let snapshot = self.reads.snapshot();
-        let updates = vec![
-            ProtocolStateUpdate::set(
-                address.clone(),
-                encode_active_session(
-                    &address,
-                    self.recipient,
-                    &state,
-                    pending_handshake.as_ref(),
-                    limits,
-                )?,
-            )
-            .with_snapshot(snapshot),
+        let mut updates = vec![
+            session_update(
+                snapshot,
+                session_id,
+                self.recipient,
+                &state,
+                pending_handshake.as_ref(),
+                limits,
+            )?,
             ProtocolStateUpdate::set(
                 pending_address.clone(),
                 encode_pending_acknowledgments(&pending_address, &pending, limits)?,
             )
             .with_snapshot(snapshot),
         ];
+        updates.extend(contact_update(snapshot, &contact, limits)?);
+        if let Some((peer_sessions, evicted)) = started {
+            let peer_address = peer_sessions_address(self.recipient);
+            updates.push(
+                ProtocolStateUpdate::set(
+                    peer_address.clone(),
+                    encode_peer_sessions(&peer_address, &peer_sessions, limits)?,
+                )
+                .with_snapshot(snapshot),
+            );
+            updates.extend(session_deletions(snapshot, &evicted));
+        }
         Ok(OutboundMessageResult {
             session_id,
             message_id: self.message_id,
             sent_at_millis: self.sent_at_millis,
-            payload_kind: PayloadKind::EncryptedText,
+            payload_kind,
             message,
             changes: changes(&self.reads, updates),
         })
+    }
+}
+
+fn text_kind(carries_grant: bool) -> PayloadKind {
+    if carries_grant {
+        PayloadKind::EncryptedTextWithGrant
+    } else {
+        PayloadKind::EncryptedText
     }
 }
 
@@ -467,14 +823,16 @@ impl Encrypting {
 /// its result once.
 ///
 /// Call [`Self::step`] until it returns [`MessageDecryptionStep::Ready`], supplying what each
-/// other step asks for. A Message that needs an acknowledgment asks for that acknowledgment's
-/// Transport Binding only after its sender authenticates and block policy allows a reply. Calling
-/// [`Self::step`] again before supplying input returns the same request without repeating work.
-/// Dropping the operation commits nothing.
+/// other step asks for. A first Message on a signed prekey kept after a rotation asks for proof of
+/// admission before Roost uses that prekey. A Message that needs an acknowledgment asks for that
+/// acknowledgment's Transport Binding only after its sender authenticates and Roost decides to
+/// reply. Calling [`Self::step`] again before supplying input returns the same request without
+/// repeating work. Dropping the operation commits nothing.
 pub struct MessageDecryption(Option<Box<Decrypting>>);
 
 struct Decrypting {
     engine: ProtocolStateEngine,
+    store: KeyStore,
     local: LocalSenderKeys,
     message: Message,
     encoded: Vec<u8>,
@@ -490,12 +848,10 @@ enum DecryptionPhase {
     Started,
     DeduplicationRequested,
     SessionRequested(Box<Opened>),
-    PeerRequested(
-        Box<Opened>,
-        SessionId,
-        ContactIdentityKey,
-        Box<RatchetState>,
-    ),
+    PeerRequested(Box<KnownSession>),
+    AdmissionRequested(Box<FirstMessage>),
+    FirstMessagePeerRequested(Box<AcceptedFirstMessage>),
+    FirstMessageCurrentRequested(Box<AcceptedFirstMessage>, PeerSessions),
     AcknowledgmentTransportRequested(Box<Acknowledging>),
     Taken,
 }
@@ -507,19 +863,78 @@ struct Opened {
     message: OpenedMessage,
 }
 
-// An authenticated Message waiting only for its acknowledgment's Transport Binding.
-struct Acknowledging {
+// A Message on a Session this identity has, waiting for its peer's records.
+struct KnownSession {
+    opened: Opened,
     session_id: SessionId,
     peer_identity_key: ContactIdentityKey,
     state: Box<RatchetState>,
+    pending_handshake: Option<PendingHandshake>,
+}
+
+// A first Message whose signed prekey needs proof of admission.
+struct FirstMessage {
+    opened: Opened,
+    reference: SealedFramePreKeyReference,
+    admission: AdmissionRequest,
+    admitted: bool,
+}
+
+// A first Message that authenticated and created a Session, waiting for its sender's records.
+struct AcceptedFirstMessage {
+    deduplication: LoadedDeduplicationSet,
+    digest: [u8; super::DEDUPLICATION_DIGEST_LEN],
+    session_id: SessionId,
+    state: Box<RatchetState>,
+    sender_identity_key: ContactIdentityKey,
+    sender_discovery_key: ContactDiscoveryKey,
+    grant: Option<InboxGrant>,
     message_id: MessageId,
     sent_at_millis: u64,
     payload_kind: PayloadKind,
     plaintext: Zeroizing<Vec<u8>>,
     sender_identity: SenderIdentityMaterial,
-    blocked: bool,
+    accepted_with: SignedPreKeyUse,
+    held_signed_prekeys: Vec<PublicSignedPreKey>,
+    one_time_prekey: Option<OneTimePreKeyUse>,
+}
+
+// The one-time prekey a new Session used, by its Epoch and ID.
+#[derive(Clone, Copy)]
+struct OneTimePreKeyUse {
+    epoch: u32,
+    id: u64,
+}
+
+// What an authenticated Message turned out to be.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Delivered {
+    Accepted,
+    ContactRequest,
+    Blocked,
+}
+
+// An authenticated Message and the state changes it makes, before any acknowledgment.
+struct Delivery {
+    session_id: SessionId,
+    peer_identity_key: ContactIdentityKey,
+    state: Box<RatchetState>,
+    pending_handshake: Option<PendingHandshake>,
+    message_id: MessageId,
+    sent_at_millis: u64,
+    payload_kind: PayloadKind,
+    plaintext: Zeroizing<Vec<u8>>,
+    sender_identity: SenderIdentityMaterial,
+    delivered: Delivered,
+    // Every update except the Session's, which sealing an acknowledgment advances.
     updates: Vec<ProtocolStateUpdate>,
-    destination: MessageDestination,
+    one_time_prekey: Option<OneTimePreKeyUse>,
+}
+
+// A delivered Message waiting only for its acknowledgment's Transport Binding.
+struct Acknowledging {
+    delivery: Delivery,
+    route: Route,
     transport_binding: Option<TransportBinding>,
 }
 
@@ -537,6 +952,7 @@ impl MessageDecryption {
         if !matches!(
             step,
             Ok(MessageDecryptionStep::NeedsState(_)
+                | MessageDecryptionStep::NeedsAdmission(_)
                 | MessageDecryptionStep::NeedsAcknowledgmentTransport(_))
         ) {
             self.0 = None;
@@ -556,6 +972,20 @@ impl MessageDecryption {
             self.0 = None;
         }
         supplied
+    }
+
+    /// Confirms the pending [`MessageDecryptionStep::NeedsAdmission`]: the Relay's proof shows it
+    /// admitted this exact Message as a first Message against the named signed prekey.
+    pub fn confirm_admission(&mut self) -> Result<(), MessageOperationError> {
+        let decrypting = self.0.as_mut().ok_or(MessageOperationError::Finished)?;
+        if let DecryptionPhase::AdmissionRequested(first) = &mut decrypting.phase
+            && !first.admitted
+        {
+            first.admitted = true;
+            return Ok(());
+        }
+        self.0 = None;
+        Err(MessageOperationError::NotAwaitingAdmission)
     }
 
     /// Supplies the Transport Binding for the pending
@@ -593,9 +1023,23 @@ impl Decrypting {
                 ))
             }
             DecryptionPhase::DeduplicationRequested => self.open(rng),
-            DecryptionPhase::SessionRequested(opened) => self.load_session(*opened),
-            DecryptionPhase::PeerRequested(opened, session_id, peer_identity_key, state) => {
-                self.authenticate(rng, *opened, session_id, peer_identity_key, *state)
+            DecryptionPhase::SessionRequested(opened) => self.load_session(rng, *opened),
+            DecryptionPhase::PeerRequested(known) => self.authenticate(rng, *known),
+            DecryptionPhase::AdmissionRequested(first) => {
+                if first.admitted {
+                    let FirstMessage {
+                        opened, reference, ..
+                    } = *first;
+                    self.accept_first_message(rng, opened, reference)
+                } else {
+                    let admission = first.admission;
+                    self.phase = DecryptionPhase::AdmissionRequested(first);
+                    Ok(MessageDecryptionStep::NeedsAdmission(admission))
+                }
+            }
+            DecryptionPhase::FirstMessagePeerRequested(first) => self.read_current_session(*first),
+            DecryptionPhase::FirstMessageCurrentRequested(first, sessions) => {
+                self.record_first_message(*first, Some(sessions))
             }
             DecryptionPhase::AcknowledgmentTransportRequested(mut acknowledging) => {
                 match acknowledging.transport_binding.take() {
@@ -603,7 +1047,9 @@ impl Decrypting {
                         self.acknowledge(rng, *acknowledging, &transport_binding)?,
                     ))),
                     None => {
-                        let destination = acknowledging.destination;
+                        let destination = acknowledging
+                            .route
+                            .destination(acknowledging.delivery.peer_identity_key);
                         self.phase =
                             DecryptionPhase::AcknowledgmentTransportRequested(acknowledging);
                         Ok(MessageDecryptionStep::NeedsAcknowledgmentTransport(
@@ -643,6 +1089,7 @@ impl Decrypting {
             &self.local.keys.discovery_key,
             &self.transport_binding,
         )?;
+        ensure_supported_payload_kind(&message)?;
         let session_id = message.metadata.session_id;
         let mut addresses = vec![session_address(session_id)];
         if message.metadata.payload_kind == PayloadKind::Acknowledgment {
@@ -658,18 +1105,23 @@ impl Decrypting {
         ))
     }
 
-    // Finds the Session the Message names, then asks for its peer's records.
-    fn load_session(
+    // Finds the Session the Message names, then asks for its peer's records. A Message that names
+    // no Session this identity has may start one when it carries a handshake.
+    fn load_session<R: RngCore + CryptoRng>(
         &mut self,
+        rng: &mut R,
         opened: Opened,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
         let limits = self.engine.limits;
         let session_id = opened.message.metadata.session_id;
         let snapshot = self.reads.snapshot();
         let Some(session) = load_session(snapshot, &session_address(session_id), limits)? else {
-            return Ok(MessageDecryptionStep::Ready(Box::new(
-                InboundMessageOutcome::UnknownSession,
-            )));
+            return match self.message.prekey_reference {
+                Some(reference) => self.check_admission(rng, opened, reference),
+                None => Ok(MessageDecryptionStep::Ready(Box::new(
+                    InboundMessageOutcome::UnknownSession,
+                ))),
+            };
         };
         let is_acknowledgment = opened.message.metadata.payload_kind == PayloadKind::Acknowledgment;
         if is_acknowledgment
@@ -685,8 +1137,11 @@ impl Decrypting {
             )));
         }
         let peer_identity_key = session.peer_identity_key;
-        let state = match session.status {
-            SessionStatus::Active { state, .. } => state,
+        let (state, pending_handshake) = match session.status {
+            SessionStatus::Active {
+                state,
+                pending_handshake,
+            } => (state, pending_handshake),
             SessionStatus::Unrecoverable {
                 reason,
                 event_emitted,
@@ -709,32 +1164,349 @@ impl Decrypting {
             contact_address(peer_identity_key),
             peer_sessions_address(peer_identity_key),
         ];
-        self.phase =
-            DecryptionPhase::PeerRequested(Box::new(opened), session_id, peer_identity_key, state);
+        self.phase = DecryptionPhase::PeerRequested(Box::new(KnownSession {
+            opened,
+            session_id,
+            peer_identity_key,
+            state,
+            pending_handshake,
+        }));
         Ok(MessageDecryptionStep::NeedsState(
             self.reads.request(addresses),
         ))
     }
 
-    // Decrypts the Message and authenticates its sender and certificate before any result.
-    fn authenticate<R: RngCore + CryptoRng>(
+    // Asks for proof of admission when the first Message names a signed prekey kept after a
+    // rotation, since the Relay admits first Messages only against the current one.
+    fn check_admission<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
         opened: Opened,
-        session_id: SessionId,
-        peer_identity_key: ContactIdentityKey,
-        mut state: RatchetState,
+        reference: SealedFramePreKeyReference,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let Some(signed_prekey_id) = self.store.signed_prekey_needing_admission(
+            reference.discovery_epoch,
+            &reference.signed_prekey_public_key,
+        )?
+        else {
+            return self.accept_first_message(rng, opened, reference);
+        };
+        let admission = AdmissionRequest {
+            discovery_epoch: reference.discovery_epoch,
+            signed_prekey_id,
+        };
+        self.phase = DecryptionPhase::AdmissionRequested(Box::new(FirstMessage {
+            opened,
+            reference,
+            admission,
+            admitted: false,
+        }));
+        Ok(MessageDecryptionStep::NeedsAdmission(admission))
+    }
+
+    // Runs the handshake a first Message carries, decrypts it, and authenticates its sender, then
+    // asks for the sender's records.
+    fn accept_first_message<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        opened: Opened,
+        reference: SealedFramePreKeyReference,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
         let limits = self.engine.limits;
         let Opened {
-            mut deduplication,
+            deduplication,
             digest,
             message,
         } = opened;
-        let payload_kind = message.metadata.payload_kind;
-        if payload_kind != PayloadKind::Acknowledgment {
-            ensure_payload_kind(&message, PayloadKind::EncryptedText)?;
+        let prekeys = self.store.first_message_prekeys(&reference)?;
+        let session_id = message.metadata.session_id;
+        let base_key =
+            message
+                .metadata
+                .base_key
+                .ok_or_else(|| ProtocolStateError::InvalidMessage {
+                    reason: "message carries no handshake".into(),
+                })?;
+        let handshake = Handshake {
+            base_key: PublicKey::from(base_key),
+            responder_discovery_key: PublicKey::from(self.message.recipient_public_key),
+            prekey_reference: reference,
+        };
+        let (mut state, derived_session_id) = accept_handshake(
+            &handshake,
+            &self.local.keys.discovery_key,
+            &prekeys.signed_prekey,
+            prekeys.one_time_prekey,
+        )
+        .map_err(ProtocolStateError::from)?;
+        if !bool::from(derived_session_id.as_bytes().ct_eq(session_id.as_bytes())) {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: "session id does not match its handshake".into(),
+            }
+            .into());
         }
+        let payload_kind = message.metadata.payload_kind;
+        if payload_kind == PayloadKind::Acknowledgment {
+            return Err(ProtocolStateError::InvalidMessage {
+                reason: "an acknowledgment cannot start a session".into(),
+            }
+            .into());
+        }
+        let decoded = message.decrypt(rng, &mut state, limits)?;
+        let (sender, sender_discovery_key) =
+            authenticate_first_message(&decoded, &handshake, &prekeys.signed_prekey)?;
+        let sender_identity_key = inbound_contact_identity_key(
+            &self.validation,
+            self.settings.certificate_grace(),
+            &decoded.sender_identity,
+            Some(decoded.sender_identity.contact_identity_key()),
+            limits,
+        )?;
+        // The sender started this Session, so it can't be accepting a request this side made.
+        if payload_kind == PayloadKind::ContactAcceptance {
+            return Err(ProtocolStateError::UnsolicitedAcceptance.into());
+        }
+        let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
+        let accepted = AcceptedFirstMessage {
+            deduplication,
+            digest,
+            session_id,
+            state: Box::new(state),
+            sender_identity_key,
+            sender_discovery_key,
+            grant,
+            message_id: message.metadata.id,
+            sent_at_millis: message.metadata.sent_at_millis,
+            payload_kind,
+            plaintext,
+            sender_identity: decoded.sender_identity,
+            accepted_with: SignedPreKeyUse {
+                epoch: reference.discovery_epoch,
+                public_key: reference.signed_prekey_public_key,
+            },
+            held_signed_prekeys: prekeys.held_signed_prekeys,
+            one_time_prekey: reference.one_time_prekey_id.map(|id| OneTimePreKeyUse {
+                epoch: reference.discovery_epoch,
+                id,
+            }),
+        };
+        let addresses = vec![
+            contact_address(sender_identity_key),
+            peer_sessions_address(sender_identity_key),
+        ];
+        self.phase = DecryptionPhase::FirstMessagePeerRequested(Box::new(accepted));
+        Ok(MessageDecryptionStep::NeedsState(
+            self.reads.request(addresses),
+        ))
+    }
+
+    // Asks for the records the new Session's start touches: the Session this side sends on when
+    // this side started it, since the new one replaces it only once it no longer awaits a reply,
+    // and the records of the Sessions it evicts.
+    fn read_current_session(
+        &mut self,
+        first: AcceptedFirstMessage,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let sessions = load_peer_sessions(
+            self.reads.snapshot(),
+            &peer_sessions_address(first.sender_identity_key),
+            self.engine.limits,
+        )?;
+        let sessions = match sessions {
+            Some(sessions)
+                if !sessions.was_deleted(first.session_id)
+                    && !sessions.contains(first.session_id) =>
+            {
+                sessions
+            }
+            sessions => return self.record_first_message(first, sessions),
+        };
+        let mut addresses: Vec<ProtocolStateAddress> = sessions
+            .evicted_by_next_start()
+            .iter()
+            .flat_map(|entry| session_record_addresses(entry.session_id))
+            .collect();
+        if sessions.current_starter() == Starter::Local {
+            addresses.push(session_address(sessions.current()));
+        }
+        if addresses.is_empty() {
+            return self.record_first_message(first, Some(sessions));
+        }
+        self.phase = DecryptionPhase::FirstMessageCurrentRequested(Box::new(first), sessions);
+        Ok(MessageDecryptionStep::NeedsState(
+            self.reads.request(addresses),
+        ))
+    }
+
+    // Records the new Session and what the first Message means for the sender's contact record.
+    fn record_first_message(
+        &mut self,
+        first: AcceptedFirstMessage,
+        sessions: Option<PeerSessions>,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let limits = self.engine.limits;
+        let AcceptedFirstMessage {
+            mut deduplication,
+            digest,
+            session_id,
+            state,
+            sender_identity_key,
+            sender_discovery_key,
+            grant,
+            message_id,
+            sent_at_millis,
+            payload_kind,
+            plaintext,
+            sender_identity,
+            accepted_with,
+            held_signed_prekeys,
+            one_time_prekey,
+        } = first;
+        let snapshot = self.reads.snapshot();
+        let previous = load_contact(snapshot, &contact_address(sender_identity_key), limits)?;
+        let local_asked = sessions
+            .as_ref()
+            .is_some_and(|sessions| sessions.current_starter() == Starter::Local);
+        let (peer_sessions, evicted) = match sessions {
+            // The Session's blob is gone by now, so one the list still names was wiped by the
+            // host.
+            Some(sessions) if sessions.was_deleted(session_id) || sessions.contains(session_id) => {
+                return Ok(MessageDecryptionStep::Ready(Box::new(
+                    InboundMessageOutcome::DeletedSession,
+                )));
+            }
+            Some(mut sessions) => {
+                sessions.forget_deletions_unless(|signed_prekey| {
+                    held_signed_prekeys.iter().any(|held| {
+                        held.epoch == signed_prekey.epoch
+                            && held.public_key.as_bytes() == &signed_prekey.public_key
+                    })
+                });
+                let evicted = if self.engine.awaits_reply(snapshot, sessions.current())? {
+                    sessions.start_alongside(session_id, Some(accepted_with))
+                } else {
+                    sessions.start(session_id, Some(accepted_with))
+                };
+                (sessions, evicted)
+            }
+            None => (
+                PeerSessions::new(session_id, Some(accepted_with)),
+                Vec::new(),
+            ),
+        };
+        let created = previous.is_none();
+        let mut contact = match previous {
+            Some(contact) => contact,
+            // A Contact Request carries the requester's grant, which the asked side's replies use.
+            None if grant.is_some() => ContactRecord::pending(sender_identity_key, None),
+            None => {
+                return Err(ProtocolStateError::InvalidMessage {
+                    reason: "contact request carries no inbox grant".into(),
+                }
+                .into());
+            }
+        };
+        contact.record_discovery_key(sender_discovery_key);
+        if let Some(grant) = grant {
+            contact.record_grant(grant);
+        }
+        let delivered = if contact.blocked {
+            Some(Delivered::Blocked)
+        } else if created {
+            contact.count_received(message_id);
+            Some(Delivered::ContactRequest)
+        } else if contact.is_accepted() {
+            Some(Delivered::Accepted)
+        } else if local_asked {
+            // Requests that cross count as both consents.
+            contact.accept();
+            Some(Delivered::Accepted)
+        } else if contact.count_received(message_id) == ReceivedCount::WithinLimit {
+            Some(Delivered::Accepted)
+        } else {
+            None
+        };
+        // The sender started the new Session.
+        let acknowledges = self.should_acknowledge(&contact, Starter::Peer);
+        record_deduplication_digest(&mut deduplication, digest);
+        let peer_address = peer_sessions_address(sender_identity_key);
+        let pending_address = pending_acknowledgment_address(session_id);
+        let mut updates = vec![
+            ProtocolStateUpdate::set(
+                pending_address.clone(),
+                encode_pending_acknowledgments(
+                    &pending_address,
+                    &LoadedPendingAcknowledgments::empty(),
+                    limits,
+                )?,
+            )
+            .with_snapshot(snapshot),
+            ProtocolStateUpdate::set(
+                peer_address.clone(),
+                encode_peer_sessions(&peer_address, &peer_sessions, limits)?,
+            )
+            .with_snapshot(snapshot),
+            deduplication_update(snapshot, &deduplication, limits)?,
+        ];
+        updates.extend(contact_update(snapshot, &contact, limits)?);
+        updates.extend(session_deletions(snapshot, &evicted));
+        let Some(delivered) = delivered else {
+            updates.insert(
+                0,
+                session_update(
+                    snapshot,
+                    session_id,
+                    sender_identity_key,
+                    &state,
+                    None,
+                    limits,
+                )?,
+            );
+            return self.withhold(session_id, message_id, updates, one_time_prekey);
+        };
+        let route = acknowledges
+            .then(|| Route::established(&contact))
+            .transpose()?;
+        self.deliver(
+            Delivery {
+                session_id,
+                peer_identity_key: sender_identity_key,
+                state,
+                pending_handshake: None,
+                message_id,
+                sent_at_millis,
+                payload_kind,
+                plaintext,
+                sender_identity,
+                delivered,
+                updates,
+                one_time_prekey,
+            },
+            route,
+        )
+    }
+
+    // Decrypts a Message on a known Session and authenticates its sender and certificate before
+    // any result.
+    fn authenticate<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        known: KnownSession,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let limits = self.engine.limits;
+        let KnownSession {
+            opened:
+                Opened {
+                    mut deduplication,
+                    digest,
+                    message,
+                },
+            session_id,
+            peer_identity_key,
+            mut state,
+            pending_handshake,
+        } = known;
+        let payload_kind = message.metadata.payload_kind;
         let decoded = message.decrypt(rng, &mut state, limits)?;
         authenticate_session_message(
             &decoded,
@@ -750,19 +1522,17 @@ impl Decrypting {
             limits,
         )?;
         let snapshot = self.reads.snapshot();
-        let session_update =
-            |state: &RatchetState| -> Result<ProtocolStateUpdate, ProtocolStateError> {
-                let address = session_address(session_id);
-                Ok(ProtocolStateUpdate::set(
-                    address.clone(),
-                    encode_active_session(&address, peer_identity_key, state, None, limits)?,
-                )
-                .with_snapshot(snapshot))
-            };
-        let delivery_update =
-            self.engine
-                .delivery_update(snapshot, session_id, peer_identity_key)?;
-        let contact = load_contact_state(snapshot, &contact_address(peer_identity_key), limits)?;
+        let contact_address = contact_address(peer_identity_key);
+        let mut contact = load_contact(snapshot, &contact_address, limits)?.ok_or_else(|| {
+            ProtocolStateError::MissingRequiredState {
+                address: contact_address.clone(),
+            }
+        })?;
+        let mut updates: Vec<ProtocolStateUpdate> = self
+            .engine
+            .delivery_update(snapshot, session_id, peer_identity_key)?
+            .into_iter()
+            .collect();
         if payload_kind == PayloadKind::Acknowledgment {
             let acknowledged_message_id = decode_acknowledgment_plaintext(&decoded.plaintext)?;
             let pending_address = pending_acknowledgment_address(session_id);
@@ -772,19 +1542,33 @@ impl Decrypting {
                 acknowledgment_digest(self.transport_binding.as_bytes(), &self.encoded),
                 limits,
             );
-            let matched = pending
-                .pending
-                .remove(acknowledged_message_id.as_bytes())
-                .is_some();
-            let mut updates = vec![
-                session_update(&state)?,
+            let matched = pending.pending.remove(acknowledged_message_id.as_bytes());
+            if let Some(stamp) = matched.as_ref().and_then(|entry| entry.grant) {
+                contact.acknowledge_grant(stamp);
+            }
+            // Messages sent before acceptance wait in the contact record instead.
+            contact.acknowledge_sent_before_acceptance(acknowledged_message_id);
+            updates.extend(contact_update(snapshot, &contact, limits)?);
+            let pending_handshake = pending_handshake.filter(|_| !contact.is_accepted());
+            updates.insert(
+                0,
+                session_update(
+                    snapshot,
+                    session_id,
+                    peer_identity_key,
+                    &state,
+                    pending_handshake.as_ref(),
+                    limits,
+                )?,
+            );
+            updates.insert(
+                1,
                 ProtocolStateUpdate::set(
                     pending_address.clone(),
                     encode_pending_acknowledgments(&pending_address, &pending, limits)?,
                 )
                 .with_snapshot(snapshot),
-            ];
-            updates.extend(delivery_update);
+            );
             let result = Box::new(AcknowledgmentResult {
                 session_id,
                 message_id: message.metadata.id,
@@ -793,52 +1577,134 @@ impl Decrypting {
                 sender_identity: decoded.sender_identity,
                 changes: changes(&self.reads, updates),
             });
-            return Ok(MessageDecryptionStep::Ready(Box::new(if matched {
-                InboundMessageOutcome::AcknowledgmentMatched(result)
-            } else {
-                InboundMessageOutcome::AcknowledgmentUnmatched(result)
-            })));
-        }
-        record_deduplication_digest(&mut deduplication, digest);
-        let deduplication_address = deduplication_address();
-        let mut updates = vec![
-            ProtocolStateUpdate::set(
-                deduplication_address.clone(),
-                encode_deduplication_set(&deduplication_address, &deduplication, limits)?,
-            )
-            .with_snapshot(snapshot),
-        ];
-        updates.extend(delivery_update);
-        if contact.blocked
-            && self.settings.blocked_contact_acknowledgment_policy()
-                == BlockedContactAcknowledgmentPolicy::Unreachable
-        {
-            // No acknowledgment, so the sending chain stays where it was while the receiving
-            // chain's advance and the recorded digest still commit.
-            updates.insert(0, session_update(&state)?);
             return Ok(MessageDecryptionStep::Ready(Box::new(
-                InboundMessageOutcome::Blocked(Box::new(BlockedInboundMessageResult {
-                    acknowledgment: None,
-                    changes: changes(&self.reads, updates),
-                })),
+                if matched.is_some() {
+                    InboundMessageOutcome::AcknowledgmentMatched(result)
+                } else {
+                    InboundMessageOutcome::AcknowledgmentUnmatched(result)
+                },
             )));
         }
-        let destination = MessageDestination {
-            identity_key: peer_identity_key,
-            discovery_key: contact.identity.discovery_key.x25519_public_key,
+        let sender = decoded.sender_identity.public_identity_key()?;
+        let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
+        if let Some(grant) = grant {
+            contact.record_grant(grant);
+        }
+        let peer_address = peer_sessions_address(peer_identity_key);
+        // The delivery update already refused a Session the peer's list doesn't keep.
+        let starter = load_peer_sessions(snapshot, &peer_address, limits)?
+            .and_then(|sessions| sessions.starter(session_id))
+            .ok_or_else(|| ProtocolStateError::MissingRequiredState {
+                address: peer_address,
+            })?;
+        if payload_kind == PayloadKind::ContactAcceptance && !contact.is_accepted() {
+            // Only the asked side accepts, on the Session the requester started.
+            if starter != Starter::Local {
+                return Err(ProtocolStateError::UnsolicitedAcceptance.into());
+            }
+            contact.accept();
+        }
+        let within_limit = contact.is_accepted()
+            || contact.blocked
+            || contact.count_received(message.metadata.id) == ReceivedCount::WithinLimit;
+        // The requester's Messages keep carrying the handshake until the peer accepts.
+        let pending_handshake = pending_handshake.filter(|_| !contact.is_accepted());
+        record_deduplication_digest(&mut deduplication, digest);
+        updates.insert(0, deduplication_update(snapshot, &deduplication, limits)?);
+        updates.extend(contact_update(snapshot, &contact, limits)?);
+        if !within_limit {
+            updates.insert(
+                0,
+                session_update(
+                    snapshot,
+                    session_id,
+                    peer_identity_key,
+                    &state,
+                    pending_handshake.as_ref(),
+                    limits,
+                )?,
+            );
+            return self.withhold(session_id, message.metadata.id, updates, None);
+        }
+        let delivered = if contact.blocked {
+            Delivered::Blocked
+        } else {
+            Delivered::Accepted
         };
+        let acknowledges = self.should_acknowledge(&contact, starter);
+        let route = acknowledges
+            .then(|| Route::established(&contact))
+            .transpose()?;
+        self.deliver(
+            Delivery {
+                session_id,
+                peer_identity_key,
+                state,
+                pending_handshake,
+                message_id: message.metadata.id,
+                sent_at_millis: message.metadata.sent_at_millis,
+                payload_kind,
+                plaintext,
+                sender_identity: decoded.sender_identity,
+                delivered,
+                updates,
+                one_time_prekey: None,
+            },
+            route,
+        )
+    }
+
+    // Returns whether a Message from `contact` on a Session `starter` started gets an
+    // acknowledgment. A blocked contact gets one only under the silent-receipt choice, and even
+    // then a stranger whose request is open doesn't learn it arrived.
+    fn should_acknowledge(&self, contact: &ContactRecord, starter: Starter) -> bool {
+        contact.should_acknowledge(starter)
+            && (!contact.blocked
+                || self.settings.blocked_contact_acknowledgment_policy()
+                    == BlockedContactAcknowledgmentPolicy::SilentReceipt)
+    }
+
+    // Returns a Message past the limit before acceptance without its plaintext.
+    fn withhold(
+        &self,
+        session_id: SessionId,
+        message_id: MessageId,
+        updates: Vec<ProtocolStateUpdate>,
+        one_time_prekey: Option<OneTimePreKeyUse>,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let changes = self.with_one_time_prekey(changes(&self.reads, updates), one_time_prekey)?;
+        Ok(MessageDecryptionStep::Ready(Box::new(
+            InboundMessageOutcome::Withheld(Box::new(WithheldInboundMessageResult {
+                session_id,
+                message_id,
+                changes,
+            })),
+        )))
+    }
+
+    // Returns the delivered Message, or first asks where its acknowledgment goes.
+    fn deliver(
+        &mut self,
+        delivery: Delivery,
+        acknowledgment_route: Option<Route>,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let Some(route) = acknowledgment_route else {
+            let session = session_update(
+                self.reads.snapshot(),
+                delivery.session_id,
+                delivery.peer_identity_key,
+                &delivery.state,
+                delivery.pending_handshake.as_ref(),
+                self.engine.limits,
+            )?;
+            return Ok(MessageDecryptionStep::Ready(Box::new(
+                self.outcome(delivery, session, None)?,
+            )));
+        };
+        let destination = route.destination(delivery.peer_identity_key);
         self.phase = DecryptionPhase::AcknowledgmentTransportRequested(Box::new(Acknowledging {
-            session_id,
-            peer_identity_key,
-            state: Box::new(state),
-            message_id: message.metadata.id,
-            sent_at_millis: message.metadata.sent_at_millis,
-            payload_kind,
-            plaintext: decoded.plaintext,
-            sender_identity: decoded.sender_identity,
-            blocked: contact.blocked,
-            updates,
-            destination,
+            delivery,
+            route,
             transport_binding: None,
         }));
         Ok(MessageDecryptionStep::NeedsAcknowledgmentTransport(
@@ -852,20 +1718,11 @@ impl Decrypting {
         rng: &mut R,
         acknowledging: Acknowledging,
         transport_binding: &TransportBinding,
-    ) -> Result<InboundMessageOutcome, ProtocolStateError> {
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
         let limits = self.engine.limits;
         let Acknowledging {
-            session_id,
-            peer_identity_key,
-            mut state,
-            message_id,
-            sent_at_millis,
-            payload_kind,
-            plaintext,
-            sender_identity,
-            blocked,
-            mut updates,
-            destination,
+            mut delivery,
+            route,
             ..
         } = acknowledging;
         let mut acknowledgment_id = [0u8; 16];
@@ -873,51 +1730,162 @@ impl Decrypting {
             .map_err(ProtocolStateError::Randomness)?;
         let acknowledgment = seal_signed(
             rng,
-            &mut state,
+            &mut delivery.state,
             OutboundContent {
-                session_id,
+                session_id: delivery.session_id,
                 id: MessageId::from_bytes(acknowledgment_id),
                 sent_at_millis: self.acknowledgment_sent_at_millis,
-                plaintext: &encode_acknowledgment_plaintext(message_id)?,
+                payload_kind: PayloadKind::Acknowledgment,
+                payload: &encode_acknowledgment_plaintext(delivery.message_id)?,
             },
-            PayloadKind::Acknowledgment,
             SignedRecipient {
-                discovery_key: destination.discovery_key,
-                identity_verifying_key: &sender_identity.identity_verifying_key,
+                discovery_key: route.discovery_key(),
+                identity_verifying_key: &delivery.sender_identity.identity_verifying_key,
             },
             &self.local.identity,
             &self.local.keys.signing_key,
             transport_binding,
             limits,
         )?;
-        let address = session_address(session_id);
-        updates.insert(
-            0,
-            ProtocolStateUpdate::set(
-                address.clone(),
-                encode_active_session(&address, peer_identity_key, &state, None, limits)?,
-            )
-            .with_snapshot(self.reads.snapshot()),
-        );
-        let changes = changes(&self.reads, updates);
-        Ok(if blocked {
-            InboundMessageOutcome::Blocked(Box::new(BlockedInboundMessageResult {
-                acknowledgment: Some(acknowledgment),
-                changes,
-            }))
-        } else {
-            InboundMessageOutcome::Accepted(Box::new(InboundMessageResult {
-                session_id,
-                message_id,
-                sent_at_millis,
-                payload_kind,
-                plaintext,
-                sender_identity,
-                acknowledgment,
-                changes,
-            }))
+        let session = session_update(
+            self.reads.snapshot(),
+            delivery.session_id,
+            delivery.peer_identity_key,
+            &delivery.state,
+            delivery.pending_handshake.as_ref(),
+            limits,
+        )?;
+        self.outcome(delivery, session, Some(acknowledgment))
+    }
+
+    fn outcome(
+        &self,
+        delivery: Delivery,
+        session: ProtocolStateUpdate,
+        acknowledgment: Option<Message>,
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+        let Delivery {
+            session_id,
+            message_id,
+            sent_at_millis,
+            payload_kind,
+            plaintext,
+            sender_identity,
+            delivered,
+            mut updates,
+            one_time_prekey,
+            ..
+        } = delivery;
+        updates.insert(0, session);
+        let changes = self.with_one_time_prekey(changes(&self.reads, updates), one_time_prekey)?;
+        Ok(match delivered {
+            Delivered::Blocked => {
+                InboundMessageOutcome::Blocked(Box::new(BlockedInboundMessageResult {
+                    acknowledgment,
+                    changes,
+                }))
+            }
+            Delivered::Accepted | Delivered::ContactRequest => {
+                let result = Box::new(InboundMessageResult {
+                    session_id,
+                    message_id,
+                    sent_at_millis,
+                    payload_kind,
+                    plaintext,
+                    sender_identity,
+                    acknowledgment,
+                    changes,
+                });
+                if delivered == Delivered::ContactRequest {
+                    InboundMessageOutcome::ContactRequest(result)
+                } else {
+                    InboundMessageOutcome::Accepted(result)
+                }
+            }
         })
     }
+
+    // Stages the use of the one-time prekey a new Session consumed, so it commits with `changes`.
+    fn with_one_time_prekey(
+        &self,
+        changes: StateChanges,
+        one_time_prekey: Option<OneTimePreKeyUse>,
+    ) -> Result<StateChanges, MessageOperationError> {
+        Ok(match one_time_prekey {
+            Some(OneTimePreKeyUse { epoch, id }) => {
+                changes.with_operation(self.store.prepare_one_time_prekey_use(epoch, id)?)
+            }
+            None => changes,
+        })
+    }
+}
+
+// Splits a payload into the Inbox Grant its kind carries, verified against `sender`, and the
+// plaintext.
+fn open_payload(
+    payload_kind: PayloadKind,
+    payload: Zeroizing<Vec<u8>>,
+    sender: &PublicIdentityKey,
+) -> Result<(Option<InboxGrant>, Zeroizing<Vec<u8>>), ProtocolStateError> {
+    if !payload_kind.carries_grant() {
+        return Ok((None, payload));
+    }
+    let (grant, plaintext) = open_granted_payload(&payload, sender)?;
+    Ok((Some(grant), plaintext))
+}
+
+fn session_update(
+    snapshot: &ProtocolStateSnapshot,
+    session_id: SessionId,
+    peer_identity_key: ContactIdentityKey,
+    state: &RatchetState,
+    pending_handshake: Option<&PendingHandshake>,
+    limits: ProtocolHardeningLimits,
+) -> Result<ProtocolStateUpdate, ProtocolStateError> {
+    let address = session_address(session_id);
+    Ok(ProtocolStateUpdate::set(
+        address.clone(),
+        encode_active_session(
+            &address,
+            peer_identity_key,
+            state,
+            pending_handshake,
+            limits,
+        )?,
+    )
+    .with_snapshot(snapshot))
+}
+
+// Returns the update that stores `contact`, or `None` when the record read holds it already.
+fn contact_update(
+    snapshot: &ProtocolStateSnapshot,
+    contact: &ContactRecord,
+    limits: ProtocolHardeningLimits,
+) -> Result<Option<ProtocolStateUpdate>, ProtocolStateError> {
+    let address = contact_address(contact.identity_key);
+    let blob = contact.encode(&address, limits)?;
+    if snapshot
+        .get(&address)
+        .is_some_and(|current| current.as_bytes() == blob.as_bytes())
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        ProtocolStateUpdate::set(address, blob).with_snapshot(snapshot),
+    ))
+}
+
+fn deduplication_update(
+    snapshot: &ProtocolStateSnapshot,
+    deduplication: &LoadedDeduplicationSet,
+    limits: ProtocolHardeningLimits,
+) -> Result<ProtocolStateUpdate, ProtocolStateError> {
+    let address = deduplication_address();
+    Ok(ProtocolStateUpdate::set(
+        address.clone(),
+        encode_deduplication_set(&address, deduplication, limits)?,
+    )
+    .with_snapshot(snapshot))
 }
 
 fn supply_state(
@@ -930,8 +1898,8 @@ fn supply_state(
     Ok(reads.supply(entries)?)
 }
 
-/// The local keys and credentials that authenticate what one operation seals.
-pub(crate) struct LocalSenderKeys {
+// The local keys and credentials that authenticate what one operation seals.
+struct LocalSenderKeys {
     keys: LocalIdentityKeys,
     identity: SenderIdentityMaterial,
     discovery_key: PublicDiscoveryKey,
@@ -939,7 +1907,7 @@ pub(crate) struct LocalSenderKeys {
 }
 
 impl LocalSenderKeys {
-    pub(crate) fn new(
+    fn new(
         keys: LocalIdentityKeys,
         certificate: SignedSenderCertificate,
     ) -> Result<Self, ProtocolStateError> {
@@ -968,13 +1936,21 @@ impl LocalSenderKeys {
         })
     }
 
-    pub(crate) fn local_sender(&self) -> LocalSender<'_> {
+    fn local_sender(&self) -> LocalSender<'_> {
         LocalSender {
             identity: &self.identity,
             signing_key: &self.keys.signing_key,
             agreement_key: &self.keys.agreement_key,
             discovery_key: &self.discovery_key,
             discovery_to_identity: &self.discovery_to_identity,
+        }
+    }
+
+    fn grant(&self) -> LocalGrant<'_> {
+        LocalGrant {
+            discovery_key: &self.discovery_key,
+            discovery_to_identity: &self.discovery_to_identity,
+            delivery_capability: &self.keys.delivery_capability,
         }
     }
 }
@@ -990,6 +1966,7 @@ fn changes(reads: &StateReads, updates: Vec<ProtocolStateUpdate>) -> StateChange
     StateChanges {
         conditions: conditions.into_iter().collect(),
         updates,
+        operation: None,
     }
 }
 
@@ -1077,4 +2054,41 @@ fn session_unrecoverable_result(
         event,
         changes: changes(reads, state_updates),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    use roost_crypto::generate_discovery_key;
+
+    #[test]
+    fn local_keys_whose_discovery_key_another_identity_signed_are_refused() {
+        let other = SigningKeyPair::from_signing_bytes([2; 32]);
+        let keys = LocalIdentityKeys {
+            agreement_key: KeyPair::from_secret_bytes([1; 32]),
+            signing_key: SigningKeyPair::from_signing_bytes([1; 32]),
+            discovery_key: generate_discovery_key(
+                &mut ChaCha20Rng::from_seed([3; 32]),
+                &other,
+                1,
+                1_700_000_000,
+            )
+            .unwrap(),
+            delivery_capability: RecipientDeliveryCapability::from_bytes([4; 32]),
+        };
+
+        assert!(matches!(
+            LocalSenderKeys::new(
+                keys,
+                SignedSenderCertificate {
+                    certificate: Vec::new(),
+                    signature: Vec::new(),
+                },
+            ),
+            Err(ProtocolStateError::InvalidMessage { reason })
+                if reason == "recipient discovery key does not match recipient identity key"
+        ));
+    }
 }

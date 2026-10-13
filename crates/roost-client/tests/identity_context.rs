@@ -3,11 +3,9 @@
 mod support;
 
 use roost_client::{
-    ContactDiscoveryKey, ContactIdentity, ContactSafetyNumberConfirmationKind, ContactTrustState,
     DomainSigningKey, DomainSigningKeyStatus, IdentityContext, IdentityKey, OperationId,
     OperationStatus, RevocationState, RoostError, SenderCertificateValidation,
-    SignedSenderCertificate, StateChanges, StateEntry, ValidatedSenderCertificate,
-    derive_safety_number,
+    SignedSenderCertificate, ValidatedSenderCertificate,
 };
 use roost_crypto::{KeyPair, SigningKeyPair};
 use roost_protocol::SenderCertificateValidationError;
@@ -94,11 +92,7 @@ fn restored_backup_publishes_only_after_inbox_rotation() {
     complete(&restored, rotation.operation_id);
     let publication = restored.current_publication().unwrap();
     assert_eq!(publication.discovery_key.epoch, source_epoch + 1);
-    assert_eq!(publication, rotation.rotation.publication);
-    assert_eq!(
-        restored.current_delivery_capability().unwrap(),
-        rotation.rotation.capability
-    );
+    assert_eq!(publication, rotation.publication);
     let one_time_prekeys = restored.prepare_one_time_prekeys(4).unwrap();
     assert_eq!(one_time_prekeys.one_time_prekeys.len(), 4);
     complete(&restored, one_time_prekeys.operation_id);
@@ -313,83 +307,4 @@ fn sender_certificate_is_rejected_when_revocation_is_unavailable() {
         context.validate_sender_certificate(signed.signed(), validation, 0),
         SenderCertificateValidationError::RevocationStateUnavailable,
     );
-}
-
-#[test]
-fn safety_number_confirmation_uses_the_contexts_local_identity() {
-    let alice = IdentityContext::new(Arc::new(MemoryStorage::default()));
-    let bob = IdentityContext::new(Arc::new(MemoryStorage::default()));
-    let charlie = IdentityContext::new(Arc::new(MemoryStorage::default()));
-    for context in [&alice, &bob, &charlie] {
-        let created = context.prepare_identity_creation().unwrap();
-        complete(context, created.operation_id);
-        let signed_prekey = context.prepare_signed_prekey_rotation().unwrap();
-        complete(context, signed_prekey.operation_id);
-    }
-    let identity_key = |context: &IdentityContext| context.identity().unwrap().unwrap().key;
-    let key = bob.current_publication().unwrap().discovery_key;
-    let change = alice
-        .contacts()
-        .record_contact(
-            Vec::new(),
-            ContactIdentity {
-                identity_key: identity_key(&bob),
-                discovery_key: ContactDiscoveryKey {
-                    x25519_public_key: key.public_key,
-                    ed25519_verifying_key: key.verifying_key,
-                    epoch: key.epoch,
-                    created_at_millis: key.created_at_millis,
-                    identity_signature: key.signature,
-                },
-            },
-        )
-        .unwrap();
-    let entries = |changes: &StateChanges| {
-        changes
-            .updates
-            .iter()
-            .map(|update| StateEntry {
-                key: update.key.clone(),
-                blob: Some(update.blob.clone().expect("contact changes write a blob")),
-            })
-            .collect::<Vec<_>>()
-    };
-    let accepted = alice
-        .contacts()
-        .accept_contact(entries(&change.changes), identity_key(&bob))
-        .unwrap();
-    let foreign = derive_safety_number(identity_key(&charlie), identity_key(&bob)).unwrap();
-    let rejected = alice
-        .contacts()
-        .confirm_contact_safety_number(
-            entries(&accepted.changes),
-            identity_key(&bob),
-            foreign.grouped_decimal,
-        )
-        .unwrap();
-    assert!(matches!(
-        rejected.kind,
-        ContactSafetyNumberConfirmationKind::Mismatched
-    ));
-    assert!(!matches!(
-        rejected.change.contact.trust_state,
-        ContactTrustState::Verified
-    ));
-    let correct = derive_safety_number(identity_key(&alice), identity_key(&bob)).unwrap();
-    let confirmed = alice
-        .contacts()
-        .confirm_contact_safety_number(
-            entries(&accepted.changes),
-            identity_key(&bob),
-            correct.grouped_decimal,
-        )
-        .unwrap();
-    assert!(matches!(
-        confirmed.kind,
-        ContactSafetyNumberConfirmationKind::Matched
-    ));
-    assert!(matches!(
-        confirmed.change.contact.trust_state,
-        ContactTrustState::Verified
-    ));
 }

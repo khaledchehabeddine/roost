@@ -1,27 +1,17 @@
 //! The identity context and the messaging and contacts groups that share it.
 
 use crate::SecureStorage;
-use crate::certificate::SenderCertificateValidation;
 use crate::error::RoostError;
-use crate::message::{Message, MessageId, SenderIdentityMaterial};
-use crate::message_operation::SignedSenderCertificate;
 use crate::operation::{
-    OperationId, OperationStatus, PreparedContactBlock, PreparedIdentity, PreparedInboxRotation,
-    PreparedOneTimePreKeys, PreparedSessionAcceptance, PreparedSignedPreKeyRotation,
-    UnfinishedOperation,
+    OperationId, OperationStatus, PreparedIdentity, PreparedInboxRotation, PreparedOneTimePreKeys,
+    PreparedSignedPreKeyRotation, UnfinishedOperation,
 };
-use crate::protocol::{
-    ContactIdentity, ContactStateChange, IdentityKey, ReceiveSettings, StateChanges, StateEntry,
-    snapshot_input_from_entries,
-};
-use crate::records::{
-    Identity, InboxRotation, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle, SessionId,
-};
+use crate::protocol::{IdentityKey, StateChanges};
+use crate::records::{Identity, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle};
 use crate::storage::SecureStorageAdapter;
-use crate::transport_binding::{PreKeySelection, TransportBinding};
 use roost_core::{
     KeyStore as CoreKeyStore, PreparedKeyStoreOperation as CorePreparedKeyStoreOperation,
-    SessionAcceptance, SessionInitiation,
+    ProtocolStateBlob as CoreProtocolStateBlob,
 };
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -45,10 +35,12 @@ const RESERVED_DOMAIN_PREFIXES: [&str; 2] = ["Aether", "Roost"];
 /// Create one context for each namespace, before or after the identity exists. Its
 /// [`Self::messaging`] and [`Self::contacts`] groups share its storage. The context caches no
 /// protocol state and holds no settings, so several contexts, including ones in an app extension,
-/// can serve the same identity, and the app passes [`ReceiveSettings`] with each receive.
+/// can serve the same identity, and the app passes [`ReceiveSettings`](crate::ReceiveSettings) with
+/// each receive.
 ///
-/// Roost owns the identity's keys, backups, prekeys, and inbox rotations, the contents of
-/// Protocol State Blobs, and the journal that makes key changes recoverable. It reads no clock
+/// Roost owns the identity's keys, backups, prekeys, inbox rotations, and the Inbox Grants that
+/// share its inbox with contacts, the contents of Protocol State Blobs, and the journal that makes
+/// key changes recoverable. It reads no clock
 /// for certificate checks, does no networking, and keeps no copy of protocol state between calls.
 ///
 /// The host owns the [`SecureStorage`] adapter, the database that stores Protocol State Blobs and
@@ -134,13 +126,14 @@ pub struct IdentityContext {
     pub(crate) inner: Arc<CoreKeyStore>,
 }
 
-/// Session, Message, acknowledgment, and retry operations for one [`IdentityContext`].
+/// Message, acknowledgment, and retry operations for one [`IdentityContext`].
 ///
 /// Each send and receive is a [`MessageEncryption`](crate::MessageEncryption) or
 /// [`MessageDecryption`](crate::MessageDecryption) that asks the host for exact records and
 /// Transport Bindings. The host commits each result's [`StateChanges`] together with its
-/// application effects. Roost picks the Session for each Message and finds it again from the
-/// SessionID each Message carries, so the host never chooses one.
+/// application effects. Roost starts Sessions with [`Contacts::request_contact`], picks the
+/// Session for each Message, and finds it again from the SessionID each Message carries, so the
+/// host never chooses one.
 ///
 /// The SessionID is sealed to the recipient's Discovery Key, so anyone who gets that Discovery Key
 /// can read it from recorded Messages and tell which of them belong to the same Session. Until the
@@ -151,74 +144,31 @@ pub struct Messaging {
     pub(crate) inner: Arc<CoreKeyStore>,
 }
 
-/// Contact identity, trust, blocking, and inbox authorization for one [`IdentityContext`].
+/// Contact Requests and acceptance, trust, blocking, and the decoders for contact records, for one
+/// [`IdentityContext`].
 ///
-/// Queries read host-owned snapshots; state changes become visible when the host commits and
-/// refreshes its store.
+/// A contact record exists only once someone asks: the host's own
+/// [`Self::request_contact`] creates one when it commits, and so does a received Contact Request.
+/// Roost shares this identity's Inbox Grant with contacts inside Messages, so the host never
+/// handles a Delivery Capability except in an established Message's destination. Changes become
+/// visible when the host commits them; read contacts through [`Self::contact_states`] after that.
 #[derive(uniffi::Object)]
 pub struct Contacts {
     pub(crate) inner: Arc<CoreKeyStore>,
 }
 
-/// Result of starting a Session through X3DH.
-#[derive(uniffi::Record)]
-pub struct SessionInitiationResult {
-    /// The Session both peers derive from the handshake.
-    pub session_id: SessionId,
-    /// X3DH first Message to send after host commit.
-    pub message: Message,
-    /// State changes to commit atomically with the Message.
-    pub changes: StateChanges,
-}
-
 /// Result of blocking a contact.
 #[derive(uniffi::Record)]
 pub struct ContactBlock {
-    /// Contact state change to commit durably, then emit.
-    pub contact: ContactStateChange,
-    /// The inbox rotation the block performed, absent when the contact was already blocked.
-    ///
-    /// Present means every remaining contact now holds a stale delivery capability and must be
-    /// given the new one before it can reach this inbox again. The blocked contact is deliberately
-    /// not among them — that is what makes the block bite at the relay rather than only locally.
-    pub rotation: Option<InboxRotation>,
-}
-
-/// The result of receiving a first Message that names a Session this identity doesn't have.
-#[derive(uniffi::Enum)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "UniFFI enum payloads are generated records, which can't be boxed"
-)]
-pub enum SessionAcceptanceOutcome {
-    /// The sender proved its identity and the Session was created.
-    Accepted {
-        /// Payload for this outcome.
-        result: SessionAcceptanceResult,
-    },
-    /// An already accepted encrypted Message. No effects are produced.
-    Duplicate,
-    /// The Message names a Session this identity deleted, so nothing was created.
-    DeletedSession,
-}
-
-/// A Session accepted from an authenticated first Message.
-#[derive(uniffi::Record)]
-pub struct SessionAcceptanceResult {
-    /// The Session both peers derive from the handshake.
-    pub session_id: SessionId,
-    /// The sender's Identity Key and the Discovery Key it shared for replies.
-    pub contact: ContactIdentity,
-    /// Authenticated MessageID.
-    pub message_id: MessageId,
-    /// Authenticated sender timestamp in milliseconds.
-    pub sent_at_millis: u64,
-    /// Decrypted first-message plaintext.
-    pub plaintext: Vec<u8>,
-    /// Sender identity material decoded after authentication.
-    pub sender_identity: SenderIdentityMaterial,
-    /// State changes to commit.
+    /// The contact change to commit, carrying the inbox rotation's operation when the block
+    /// rotated the inbox.
     pub changes: StateChanges,
+    /// The rotated inbox's publication, absent when the contact was already blocked.
+    ///
+    /// Publish and register it after finalizing. Every remaining contact then holds a stale
+    /// Delivery Capability until a Message carries them the new Inbox Grant, which Roost attaches
+    /// by itself. The blocked contact never gets one, so the block takes effect at the relay.
+    pub publication: Option<PublicationBundle>,
 }
 
 #[uniffi::export]
@@ -392,30 +342,12 @@ impl IdentityContext {
         PublicationBundle::from_core(self.inner.current_publication()?)
     }
 
-    /// Returns the current inbox's 32-byte delivery capability.
-    ///
-    /// The capability is a secret that lets a contact deliver to this inbox. Share it only with
-    /// authorized contacts over an encrypted channel, keep it in secure storage, and register the
-    /// publication's verifier with the relay instead.
-    ///
-    /// # Errors
-    /// - [`RoostError::NotFound`] if no Discovery Key is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::Storage`] if SecureStorage fails.
-    pub fn current_delivery_capability(&self) -> Result<Vec<u8>, RoostError> {
-        Ok(self
-            .inner
-            .current_delivery_capability()?
-            .to_bytes()
-            .to_vec())
-    }
-
     /// Prepares an inbox rotation: a Discovery Key at the next epoch, a signed prekey, and a
-    /// delivery capability.
+    /// Delivery Capability.
     ///
     /// Rotation clears the previous inbox's one-time prekeys and invalidates every contact's
-    /// delivery capability, so the host shares the new capability with each contact that should
-    /// keep delivering.
+    /// Delivery Capability. Roost attaches the new Inbox Grant to each contact's Messages until
+    /// that contact acknowledges one.
     ///
     /// # Errors
     /// - [`RoostError::NotFound`] if no identity is stored.
@@ -423,14 +355,14 @@ impl IdentityContext {
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_inbox_rotation(&self) -> Result<PreparedInboxRotation, RoostError> {
-        let (operation_id, rotation) = convert_prepared(
+        let (operation_id, publication) = convert_prepared(
             &self.inner,
             self.inner.prepare_inbox_rotation()?,
-            inbox_rotation_from_core,
+            PublicationBundle::from_core,
         )?;
         Ok(PreparedInboxRotation {
             operation_id,
-            rotation,
+            publication,
         })
     }
 
@@ -610,197 +542,49 @@ impl IdentityContext {
 }
 
 #[uniffi::export]
-impl Messaging {
-    /// Starts a Session with a contact while authenticating a caller-owned Transport Binding.
-    ///
-    /// Pass every protocol-state entry the host holds for this identity. Commit the returned
-    /// changes atomically with the returned Message and retain the exact binding for transport
-    /// retry. Until the contact replies, every Message on the new Session carries the handshake,
-    /// so any of them can start the Session if an earlier one is lost. Roost does not interpret,
-    /// transmit, or store the binding.
-    ///
-    /// # Errors
-    /// - [`RoostError::AuthenticationFailed`] if the publication's signatures don't bind its
-    ///   Discovery Key and the responder's identity in both directions.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
-    /// - [`RoostError::InternalError`] on storage lock poisoning.
-    /// - [`RoostError::InvalidData`] if key, Message, certificate, prekey, or Transport Binding
-    ///   inputs are malformed.
-    /// - [`RoostError::NotFound`] if local Identity or Discovery Key material is missing.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::ProtocolStateFault`] if stored Session state is malformed.
-    /// - [`RoostError::Storage`] on platform storage failure.
-    /// - [`RoostError::UnsupportedVersion`] if a prekey bundle, Message, or stored key version is
-    ///   unsupported.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "flat UniFFI export preserves generated binding shape"
-    )]
-    pub fn initiate_session(
-        &self,
-        snapshot: Vec<StateEntry>,
-        responder_identity: Identity,
-        responder_publication: PublicationBundle,
-        responder_one_time_prekey: Option<PublicOneTimePreKey>,
-        message_id: MessageId,
-        sent_at_millis: u64,
-        sender_certificate: SignedSenderCertificate,
-        plaintext: Vec<u8>,
-        transport_binding: TransportBinding,
-    ) -> Result<SessionInitiationResult, RoostError> {
-        let certificate = Zeroizing::new(sender_certificate.certificate);
-        let signature = Zeroizing::new(sender_certificate.signature);
-        let plaintext = Zeroizing::new(plaintext);
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let transport_binding = transport_binding.into_core()?;
-        let result = self.inner.initiate_session_with_transport_binding(
-            SessionInitiation {
-                snapshot: &snapshot,
-                responder_identity_key: responder_identity.to_core()?,
-                responder_discovery_to_identity: responder_publication
-                    .discovery_to_identity_signature()?,
-                responder_prekey_bundle: responder_publication
-                    .to_prekey_bundle(responder_one_time_prekey)?,
-                message_id: message_id.to_core()?,
-                sent_at_millis,
-                sender_certificate: &certificate,
-                sender_signature: &signature,
-                plaintext: &plaintext,
-            },
-            &transport_binding,
-        )?;
-        Ok(SessionInitiationResult {
-            session_id: SessionId::from_core(result.session_id),
-            message: Message::from_core(result.message),
-            changes: StateChanges::from_updates(result.state_updates),
-        })
-    }
-
-    /// Prepares acceptance of the Session a first Message starts, while authenticating its
-    /// Transport Binding.
-    ///
-    /// Call this only after a [`MessageDecryption`](crate::MessageDecryption) returned
-    /// [`InboundMessageOutcome::UnknownSession`](crate::InboundMessageOutcome::UnknownSession) for
-    /// a Message whose `prekey_reference` is set, and pass every protocol-state entry the host
-    /// holds for this identity. The sender must prove its identity, and its certificate must
-    /// validate. For a retained superseded signed prekey, the host must first validate that its
-    /// transport accepted the item before supersession. Reserve the operation, atomically persist
-    /// any returned changes and the operation identifier, then finalize SecureStorage.
-    ///
-    /// # Errors
-    /// - [`RoostError::AuthenticationFailed`] if the handshake, sender proof, or decryption fails.
-    /// - [`RoostError::CertificateRejected`] if sender-certificate validation rejects the sender.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
-    /// - [`RoostError::InboxRotationRequired`] after backup restore and before inbox rotation.
-    /// - [`RoostError::InternalError`] on storage lock poisoning or operation identifier
-    ///   generation failure.
-    /// - [`RoostError::InvalidData`] if the Message, key, prekey, settings, or Transport Binding
-    ///   inputs are malformed, or the Message names a Session this identity already has.
-    /// - [`RoostError::NotFound`] if required local Identity, Discovery Key, signed-prekey, or
-    ///   one-time-prekey material is missing.
-    /// - [`RoostError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::ProtocolStateFault`] if stored protocol state is missing or malformed.
-    /// - [`RoostError::Storage`] on platform storage failure.
-    /// - [`RoostError::UnsupportedVersion`] if the Message, stored prekey, or protocol-state
-    ///   version is unsupported.
-    pub fn prepare_accept_session(
-        &self,
-        snapshot: Vec<StateEntry>,
-        message: Message,
-        settings: ReceiveSettings,
-        sender_certificate_validation: SenderCertificateValidation,
-        transport_binding: TransportBinding,
-        prekey_selection: PreKeySelection,
-    ) -> Result<PreparedSessionAcceptance, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let core_message = message.to_core()?;
-        let validation = sender_certificate_validation.to_core()?;
-        let transport_binding = transport_binding.into_core()?;
-        let prepared = self.inner.prepare_accept_session_with_transport_binding(
-            SessionAcceptance {
-                snapshot: &snapshot,
-                message: &core_message,
-                settings: settings.to_core()?,
-                sender_certificate_validation: &validation,
-            },
-            &transport_binding,
-            prekey_selection.to_core(),
-        )?;
-        let (operation_id, acceptance) =
-            convert_prepared(&self.inner, prepared, SessionAcceptanceOutcome::from_core)?;
-        Ok(PreparedSessionAcceptance {
-            operation_id,
-            acceptance,
-        })
-    }
-}
-
-#[uniffi::export]
 impl Contacts {
-    /// Prepares a contact block and inbox rotation so both cross one host commit boundary.
+    /// Prepares blocking a contact, given the record the host holds for them or none, and rotates
+    /// the inbox so the block takes effect at the relay.
     ///
-    /// Blocking stops this device sending and surfacing the contact's messages and rotates the
-    /// local inbox to invalidate the contact's delivery capability. Rotation also invalidates
-    /// every other contact's copy:
-    /// when `PreparedContactBlock.block.rotation` is present, each remaining contact must receive
-    /// the new capability before it can deliver again.
-    /// [`Self::contacts_needing_inbox_authorization`] returns that list and excludes the blocked
-    /// contact.
+    /// Blocking stops this device sending to the contact and surfacing their Messages, even a
+    /// stranger's: one with no record gets a record that holds only the block. Rotation replaces
+    /// the inbox's prekeys and Delivery Capability, so a blocked person can't come back with a new
+    /// identity at the same address. Blocking an already-blocked contact rotates nothing and
+    /// carries no operation.
     ///
-    /// Blocking an already-blocked contact performs no rotation, so repeating the call does not
-    /// churn every contact's capability. Its no-op operation must still be finalized or aborted.
-    ///
-    /// Reserve the operation, atomically persist `PreparedContactBlock.block.contact` and any
-    /// host-owned publication work, then finalize the staged SecureStorage rotation. Abort only
-    /// after proving the host transaction did not commit.
+    /// When [`ContactBlock::changes`] carries an operation, reserve it, commit the changes with
+    /// its ID, then finalize it before publishing [`ContactBlock::publication`]. Abort only after
+    /// proving the host transaction did not commit.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
     /// - [`RoostError::InternalError`] on storage lock poisoning or system clock anomaly.
     /// - [`RoostError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::ProtocolStateFault`] if no contact is stored for `identity_key`, or its
-    ///   blob is malformed.
+    /// - [`RoostError::ProtocolStateFault`] if the record is malformed or belongs to someone
+    ///   else.
     /// - [`RoostError::Storage`] on platform storage failure.
     pub fn prepare_block_contact(
         &self,
-        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
-    ) -> Result<PreparedContactBlock, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        let prepared = self
+        record: Option<Vec<u8>>,
+    ) -> Result<ContactBlock, RoostError> {
+        let record = record.map(CoreProtocolStateBlob::from_bytes);
+        let block = self
             .inner
-            .prepare_block_contact(&snapshot, identity_key.to_core()?)?;
-        let (operation_id, block) = convert_prepared(&self.inner, prepared, |blocked| {
-            Ok(ContactBlock {
-                contact: ContactStateChange::from_core(blocked.contact)?,
-                rotation: blocked.rotation.map(inbox_rotation_from_core).transpose()?,
-            })
-        })?;
-        Ok(PreparedContactBlock {
-            operation_id,
-            block,
-        })
-    }
-}
-
-impl SessionAcceptanceOutcome {
-    fn from_core(value: roost_core::SessionAcceptanceOutcome) -> Result<Self, RoostError> {
-        Ok(match value {
-            roost_core::SessionAcceptanceOutcome::Accepted(result) => Self::Accepted {
-                result: SessionAcceptanceResult {
-                    session_id: SessionId::from_core(result.session_id),
-                    contact: ContactIdentity::from_core(result.contact)?,
-                    message_id: MessageId::from_core(result.message_id),
-                    sent_at_millis: result.sent_at_millis,
-                    plaintext: result.plaintext.to_vec(),
-                    sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                    changes: StateChanges::from_updates(result.state_updates),
-                },
-            },
-            roost_core::SessionAcceptanceOutcome::Duplicate => Self::Duplicate,
-            roost_core::SessionAcceptanceOutcome::DeletedSession => Self::DeletedSession,
+            .prepare_block_contact(identity_key.to_core()?, record.as_ref())?;
+        let operation = block.changes.operation();
+        let publication = match block
+            .publication
+            .map(PublicationBundle::from_core)
+            .transpose()
+        {
+            Ok(publication) => publication,
+            Err(error) => return Err(abort_unconverted(&self.inner, operation, error)),
+        };
+        Ok(ContactBlock {
+            changes: StateChanges::from_core(block.changes),
+            publication,
         })
     }
 }
@@ -813,28 +597,30 @@ fn convert_prepared<T, U>(
     let id = prepared.operation.id;
     match convert(prepared.output) {
         Ok(output) => Ok((OperationId::from_core(id), output)),
-        // A conversion failure hides the prepared output from the host. Abort its journal record,
-        // or return the identifier so the host can reconcile an uncertain cleanup after restart.
-        Err(error) => match store.abort_operation(id) {
-            Ok(_) => Err(error),
-            Err(abort_error) => Err(RoostError::OperationRecoveryRequired {
-                operation_id: OperationId::from_core(id),
-                reason: format!(
-                    "prepared output conversion failed and cleanup also failed: {}",
-                    crate::error::reason_from_chain(&abort_error)
-                ),
-            }),
-        },
+        Err(error) => Err(abort_unconverted(store, Some(id), error)),
     }
 }
 
-fn inbox_rotation_from_core(
-    rotation: roost_core::InboxRotation,
-) -> Result<InboxRotation, RoostError> {
-    Ok(InboxRotation {
-        publication: PublicationBundle::from_core(rotation.publication)?,
-        capability: rotation.capability.to_bytes().to_vec(),
-    })
+// Aborts the operation whose prepared output failed to convert, since the host never sees it, or
+// returns its identifier so the host can reconcile an uncertain cleanup after restart.
+fn abort_unconverted(
+    store: &CoreKeyStore,
+    operation: Option<roost_core::KeyStoreOperationId>,
+    error: RoostError,
+) -> RoostError {
+    let Some(id) = operation else {
+        return error;
+    };
+    match store.abort_operation(id) {
+        Ok(_) => error,
+        Err(abort_error) => RoostError::OperationRecoveryRequired {
+            operation_id: OperationId::from_core(id),
+            reason: format!(
+                "prepared output conversion failed and cleanup also failed: {}",
+                crate::error::reason_from_chain(&abort_error)
+            ),
+        },
+    }
 }
 
 fn public_one_time_prekeys_from_core(
@@ -905,9 +691,9 @@ impl IdentityContext {
         self.complete_prepared(prepared.operation_id, prepared.one_time_prekeys)
     }
 
-    pub(crate) fn rotate_inbox_now(&self) -> Result<InboxRotation, RoostError> {
+    pub(crate) fn rotate_inbox_now(&self) -> Result<PublicationBundle, RoostError> {
         let prepared = self.prepare_inbox_rotation()?;
-        self.complete_prepared(prepared.operation_id, prepared.rotation)
+        self.complete_prepared(prepared.operation_id, prepared.publication)
     }
 
     pub(crate) fn rotate_signed_prekey_if_stale(
@@ -942,8 +728,7 @@ mod tests {
     use roost_crypto::{
         PublicDiscoveryKey as CryptoPublicDiscoveryKey,
         PublicIdentityKey as CryptoPublicIdentityKey, PublicKey,
-        PublicSignedPreKey as CryptoPublicSignedPreKey,
-        RecipientDeliveryCapability as CryptoCapability, Signature, VerifyingKey,
+        PublicSignedPreKey as CryptoPublicSignedPreKey, Signature, VerifyingKey,
         verify_discovery_to_identity_binding, verify_public_discovery_key,
         verify_public_identity_key, verify_public_signed_prekey,
     };
@@ -1198,29 +983,20 @@ mod tests {
         assert_discovery_to_identity_verifies(identity, publication, &discovery);
     }
 
-    /// The host registers the verifier and shares the capability only with authorized contacts, so
-    /// both must cross the FFI boundary and the verifier must commit to the capability actually in
-    /// storage.
+    /// The host registers the verifier, so it must cross the FFI boundary unchanged, and the
+    /// capability it commits to never does.
     #[test]
-    fn publication_verifier_commits_to_the_capability_across_ffi() {
+    fn publication_carries_the_delivery_verifier_across_ffi() {
         let key_store = key_store();
         key_store.generate_identity().unwrap();
         key_store.rotate_signed_prekey_now().unwrap();
 
         let publication = key_store.current_publication().unwrap();
-        let capability = key_store.current_delivery_capability().unwrap();
 
-        assert_eq!(publication.recipient_delivery_verifier.len(), 32);
-        assert_eq!(capability.len(), 32);
-        // The capability is the secret; publishing it instead of the verifier would be the whole
-        // bug this separation exists to prevent.
-        assert_ne!(publication.recipient_delivery_verifier, capability);
-
-        let expected =
-            CryptoCapability::from_bytes(<[u8; 32]>::try_from(capability.as_slice()).unwrap());
+        let core = key_store.inner.current_publication().unwrap();
         assert_eq!(
             publication.recipient_delivery_verifier,
-            expected.verifier().as_bytes().to_vec()
+            core.recipient_delivery_verifier.as_bytes()
         );
     }
 
@@ -1266,12 +1042,6 @@ mod tests {
                 ProtocolStateKind::ContactState,
                 ProtocolStateKind::ContactState
             ) | (
-                ProtocolStateKind::PeerInboxAuthorization,
-                ProtocolStateKind::PeerInboxAuthorization
-            ) | (
-                ProtocolStateKind::LocalInboxAuthorization,
-                ProtocolStateKind::LocalInboxAuthorization
-            ) | (
                 ProtocolStateKind::PeerSessions,
                 ProtocolStateKind::PeerSessions
             )
@@ -1288,25 +1058,16 @@ mod tests {
 
         let updates = engine.wipe(Vec::new(), "44".repeat(16)).unwrap().updates;
 
-        assert_eq!(updates.len(), 7);
+        assert_eq!(updates.len(), 5);
         assert_protocol_state_kind(updates[0].key.kind, ProtocolStateKind::RatchetSession);
         assert_protocol_state_kind(updates[1].key.kind, ProtocolStateKind::DeduplicationSet);
         assert_protocol_state_kind(
             updates[2].key.kind,
             ProtocolStateKind::PendingAcknowledgments,
         );
+        // The contact record holds the peer's Delivery Capability, so a wipe reaches it too.
         assert_protocol_state_kind(updates[3].key.kind, ProtocolStateKind::ContactState);
-        // A wipe must reach the peer's delivery capability too, or session replacement leaves a
-        // stale bearer secret behind with nothing left that uses it.
-        assert_protocol_state_kind(
-            updates[4].key.kind,
-            ProtocolStateKind::PeerInboxAuthorization,
-        );
-        assert_protocol_state_kind(
-            updates[5].key.kind,
-            ProtocolStateKind::LocalInboxAuthorization,
-        );
-        assert_protocol_state_kind(updates[6].key.kind, ProtocolStateKind::PeerSessions);
+        assert_protocol_state_kind(updates[4].key.kind, ProtocolStateKind::PeerSessions);
         assert!(updates.iter().all(|update| update.blob.is_none()));
     }
 
@@ -1365,18 +1126,9 @@ mod tests {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
         let initial_discovery = current_discovery_key(&store);
-        let rotation = store.rotate_inbox_now().unwrap();
-        assert_eq!(
-            rotation.publication.discovery_key.epoch,
-            initial_discovery.epoch + 1
-        );
-        assert_publication_verifies(&identity, &rotation.publication);
-        // The capability returned by the rotation is the one the new verifier commits to.
-        assert_eq!(rotation.capability.len(), 32);
-        assert_eq!(
-            rotation.capability,
-            store.current_delivery_capability().unwrap()
-        );
+        let publication = store.rotate_inbox_now().unwrap();
+        assert_eq!(publication.discovery_key.epoch, initial_discovery.epoch + 1);
+        assert_publication_verifies(&identity, &publication);
     }
 
     #[test]

@@ -1,350 +1,144 @@
-//! Exercises IK-keyed Contact State protocol blobs and trust transitions.
+//! Contact calls that take a contact's one record, and the decoders apps read contacts through.
 
 mod support;
 
-use roost_core::MessageOperationError;
-use support::device::{Device, DeviceError, Relay};
-use support::{ProtocolFixture, accepted_contact_identity};
-
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey, ContactTrustState,
-    IdentityKey, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKind, ProtocolStateSnapshot, derive_safety_number,
+    ContactIdentityKey, ContactSafetyNumberConfirmation, ContactTrustState, InboundMessageOutcome,
+    MessageOperationError, ProtocolStateBlob, ProtocolStateError, ProtocolStateKind,
+    derive_safety_number,
 };
-use roost_crypto::{
-    RecipientDeliveryCapability, generate_discovery_key, generate_key_pair,
-    generate_signing_key_pair,
-};
+use support::device::{Device, DeviceError, Intent, Relay, contact_address, peer_sessions_address};
+use support::{HostCommitError, session_address};
 
-const CREATED_AT_SECS: u64 = 1_700_000_000;
-
-struct Setup {
-    alice_identity: IdentityKey,
-    bob_identity: ContactIdentityKey,
-    bob_discovery: ContactDiscoveryKey,
-    bob_rotated_discovery: ContactDiscoveryKey,
-    bob_restored_discovery: ContactDiscoveryKey,
+// Alice asks Bob, Bob accepts, and Alice receives the acceptance.
+fn befriended(relay: &Relay) -> (Device, Device) {
+    let mut alice = Device::new(relay, 0xa1);
+    let mut bob = Device::new(relay, 0xb0);
+    let request = alice.request(&bob, b"hi bob");
+    bob.receive(&request.message);
+    let acceptance = bob.accept_request(&alice, b"welcome");
+    alice.receive(&acceptance.message);
+    (alice, bob)
 }
 
-fn setup() -> Setup {
-    let mut rng = ChaCha20Rng::from_seed([7u8; 32]);
-    let alice_identity = generate_signing_key_pair(&mut rng);
-    let bob_identity = generate_signing_key_pair(&mut rng);
-    let bob_identity_key_pair = generate_key_pair(&mut rng);
-    let bob_discovery =
-        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS).unwrap();
-    let bob_rotated_discovery =
-        generate_discovery_key(&mut rng, &bob_identity, 1, CREATED_AT_SECS + 60).unwrap();
-    let bob_restored_discovery =
-        generate_discovery_key(&mut rng, &bob_identity, 0, CREATED_AT_SECS + 120).unwrap();
-    let alice_identity_key_pair = generate_key_pair(&mut rng);
-
-    Setup {
-        alice_identity: IdentityKey {
-            x25519_public_key: *alice_identity_key_pair.public.as_bytes(),
-            ed25519_verifying_key: alice_identity.verifying.to_bytes(),
-        },
-        bob_identity: ContactIdentityKey {
-            x25519_public_key: *bob_identity_key_pair.public.as_bytes(),
-            ed25519_verifying_key: bob_identity.verifying.to_bytes(),
-        },
-        bob_discovery: ContactDiscoveryKey::from(&bob_discovery.public()),
-        bob_rotated_discovery: ContactDiscoveryKey::from(&bob_rotated_discovery.public()),
-        bob_restored_discovery: ContactDiscoveryKey::from(&bob_restored_discovery.public()),
-    }
+fn record(device: &Device, peer: ContactIdentityKey) -> Option<ProtocolStateBlob> {
+    device
+        .host
+        .blob_bytes(&contact_address(peer))
+        .map(ProtocolStateBlob::from_bytes)
 }
 
-fn contact_identity(setup: &Setup) -> ContactIdentity {
-    ContactIdentity {
-        identity_key: setup.bob_identity,
-        discovery_key: setup.bob_discovery,
-    }
+fn local_identity_key(device: &Device) -> ContactIdentityKey {
+    device.identity_key()
+}
+
+// Confirms `peer`'s Safety Number on `device` and commits the result.
+fn verify(device: &mut Device, peer: &Device) {
+    let safety_number = derive_safety_number(device.identity_key(), peer.identity_key()).unwrap();
+    let confirmation = device
+        .store
+        .protocol_engine()
+        .confirm_contact_safety_number(
+            local_identity_key(device),
+            peer.identity_key(),
+            record(device, peer.identity_key()).as_ref(),
+            &safety_number.grouped_decimal,
+        )
+        .unwrap();
+    let ContactSafetyNumberConfirmation::Matched(changes) = confirmation else {
+        panic!("safety number did not match");
+    };
+    device.commit_changes(changes).unwrap();
+}
+
+fn unblock(device: &mut Device, peer: ContactIdentityKey) {
+    let changes = device
+        .store
+        .protocol_engine()
+        .unblock_contact(peer, record(device, peer).as_ref())
+        .unwrap();
+    device.commit_changes(changes).unwrap();
 }
 
 #[test]
-fn new_contact_starts_pending_and_is_exposed_in_current_state() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-
-    let change = engine
-        .record_contact(&snapshot, contact_identity(&setup))
-        .unwrap();
-    snapshot.apply_all(change.state_updates).unwrap();
-
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Pending);
-    assert_eq!(contact.identity.identity_key, setup.bob_identity);
-    assert_eq!(contact.identity.discovery_key, setup.bob_discovery);
-    assert_eq!(
-        engine.contact_states(&snapshot).unwrap(),
-        vec![contact.clone()]
-    );
-    assert_eq!(
-        change.event,
-        Some(ContactEvent::Changed {
-            contact: change.contact
-        })
-    );
-}
-
-#[test]
-fn pending_contact_refuses_outgoing_user_message_until_accepted() {
+fn decoders_read_every_contact_record_and_refuse_other_kinds() {
     let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let bob = Device::new(&relay, 0xb0);
-    alice.initiate(&bob.bundle(), b"hello bob");
+    let (alice, bob) = befriended(&relay);
     let engine = *alice.store.protocol_engine();
-    let recorded = engine
-        .record_contact(&alice.host.snapshot(), bob.contact_identity())
-        .unwrap();
-    alice.host.commit(recorded.state_updates).unwrap();
+    let contacts: Vec<_> = alice
+        .host
+        .snapshot_bytes()
+        .into_iter()
+        .filter(|(address, _)| address.kind() == ProtocolStateKind::ContactState)
+        .map(|(address, blob)| {
+            engine
+                .decode_contact(&address, &ProtocolStateBlob::from_bytes(blob))
+                .unwrap()
+        })
+        .collect();
 
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].identity_key, bob.identity_key());
+    assert_eq!(contacts[0].trust_state, ContactTrustState::Unverified);
+    let sessions = peer_sessions_address(bob.identity_key());
     assert!(matches!(
-        alice.encrypt(&bob, b"too early"),
-        Err(DeviceError::Operation(
-            MessageOperationError::ProtocolState(ProtocolStateError::ContactNotAccepted)
-        ))
-    ));
-
-    let accepted = engine
-        .accept_contact(&alice.host.snapshot(), bob.identity_key())
-        .unwrap();
-    alice.host.commit(accepted.state_updates).unwrap();
-    alice.send(&bob, b"accepted");
-}
-
-#[test]
-fn accepted_contact_without_a_session_needs_a_handshake() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let bob = Device::new(&relay, 0xb0);
-    alice.accept_contact(&bob);
-    let before = alice.host.clone();
-
-    assert!(matches!(
-        alice.encrypt(&bob, b"no session"),
-        Err(DeviceError::Operation(
-            MessageOperationError::ProtocolState(ProtocolStateError::NoSession)
-        ))
-    ));
-    assert_eq!(alice.host.snapshot_bytes(), before.snapshot_bytes());
-}
-
-#[test]
-fn contact_can_be_blocked_and_unblocked_without_changing_pending_trust() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let blocked = engine.block_contact(&snapshot, setup.bob_identity).unwrap();
-    snapshot.apply_all(blocked.state_updates).unwrap();
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Pending);
-    assert!(contact.blocked);
-
-    let unblocked = engine
-        .unblock_contact(&snapshot, setup.bob_identity)
-        .unwrap();
-    snapshot.apply_all(unblocked.state_updates).unwrap();
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Pending);
-    assert!(!contact.blocked);
-}
-
-#[test]
-fn contact_can_be_blocked_and_unblocked_without_changing_unverified_trust() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let blocked = engine.block_contact(&snapshot, setup.bob_identity).unwrap();
-    snapshot.apply_all(blocked.state_updates).unwrap();
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
-    assert!(contact.blocked);
-
-    let unblocked = engine
-        .unblock_contact(&snapshot, setup.bob_identity)
-        .unwrap();
-    snapshot.apply_all(unblocked.state_updates).unwrap();
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
-    assert!(!contact.blocked);
-}
-
-#[test]
-fn contact_can_be_blocked_and_unblocked_without_changing_verified_trust() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            confirm_safety_number(&engine, &snapshot, &setup)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let blocked = engine.block_contact(&snapshot, setup.bob_identity).unwrap();
-    snapshot.apply_all(blocked.state_updates).unwrap();
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Verified);
-    assert!(contact.blocked);
-
-    let unblocked = engine
-        .unblock_contact(&snapshot, setup.bob_identity)
-        .unwrap();
-    snapshot.apply_all(unblocked.state_updates).unwrap();
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Verified);
-    assert!(!contact.blocked);
-}
-
-#[test]
-fn blocked_accepted_contact_refuses_outgoing_user_message() {
-    let engine = ProtocolStateEngine::new();
-    let mut fixture = ProtocolFixture::new([0x71; 32]);
-    let bob = accepted_contact_identity().identity_key;
-    let blocked = engine
-        .block_contact(&fixture.alice_store.snapshot(), bob)
-        .unwrap();
-    fixture.alice_store.commit(blocked.state_updates).unwrap();
-
-    assert!(matches!(
-        fixture.encrypt(
-            &engine,
-            &fixture.alice_store,
-            fixture.outgoing(1, b"blocked"),
-            0x72
+        engine.decode_contact(
+            &sessions,
+            &ProtocolStateBlob::from_bytes(alice.host.blob_bytes(&sessions).unwrap())
         ),
-        Err(MessageOperationError::ProtocolState(
-            ProtocolStateError::BlockedContact
-        ))
+        Err(ProtocolStateError::InvalidStateBinding { .. })
     ));
-
-    let unblocked = engine
-        .unblock_contact(&fixture.alice_store.snapshot(), bob)
-        .unwrap();
-    fixture.alice_store.commit(unblocked.state_updates).unwrap();
-    let sent = fixture.encrypt_from_alice(&engine, 2, b"unblocked");
-    let received = fixture.decrypt_for_bob(&engine, &sent, 0x73);
-    assert_eq!(received.plaintext.as_slice(), b"unblocked");
 }
 
 #[test]
-fn acceptance_transitions_pending_to_unverified() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
+fn a_contact_record_under_another_identitys_address_is_a_fault() {
+    let relay = Relay::new();
+    let (alice, bob) = befriended(&relay);
+    let stranger = Device::new(&relay, 0xc0);
+    let blob = record(&alice, bob.identity_key()).unwrap();
 
-    let change = engine
-        .accept_contact(&snapshot, setup.bob_identity)
-        .unwrap();
-    snapshot.apply_all(change.state_updates).unwrap();
+    assert!(matches!(
+        alice
+            .store
+            .protocol_engine()
+            .decode_contact(&contact_address(stranger.identity_key()), &blob),
+        Err(ProtocolStateError::BlobDecode { .. })
+    ));
+    assert!(matches!(
+        alice.store.protocol_engine().decode_contact(
+            &contact_address(bob.identity_key()),
+            &ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa])
+        ),
+        Err(ProtocolStateError::BlobDecode { .. })
+    ));
+}
 
-    assert_eq!(change.contact.trust_state, ContactTrustState::Unverified);
+#[test]
+fn confirming_the_safety_number_verifies_an_accepted_contact() {
+    let relay = Relay::new();
+    let (mut alice, bob) = befriended(&relay);
+
+    verify(&mut alice, &bob);
+
     assert_eq!(
-        engine
-            .contact_state(&snapshot, setup.bob_identity)
-            .unwrap()
-            .unwrap()
-            .trust_state,
-        ContactTrustState::Unverified
+        alice.contact(&bob).unwrap().trust_state,
+        ContactTrustState::Verified
     );
 }
 
 #[test]
-fn pending_contact_cannot_be_verified_by_safety_number() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let safety_number = derive_safety_number(setup.alice_identity, setup.bob_identity).unwrap();
+fn a_pending_contact_cannot_be_verified() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let bob = Device::new(&relay, 0xb0);
+    alice.request(&bob, b"hi bob");
+    let safety_number = derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap();
 
     assert!(matches!(
-        engine.confirm_contact_safety_number(
-            &snapshot,
-            setup.alice_identity,
-            setup.bob_identity,
+        alice.store.protocol_engine().confirm_contact_safety_number(
+            alice.identity_key(),
+            bob.identity_key(),
+            record(&alice, bob.identity_key()).as_ref(),
             &safety_number.grouped_decimal,
         ),
         Err(ProtocolStateError::InvalidStateBinding { .. })
@@ -352,510 +146,211 @@ fn pending_contact_cannot_be_verified_by_safety_number() {
 }
 
 #[test]
-fn discovery_key_update_preserves_unverified_state() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let change = engine
-        .record_contact(
-            &snapshot,
-            ContactIdentity {
-                identity_key: setup.bob_identity,
-                discovery_key: setup.bob_rotated_discovery,
-            },
-        )
-        .unwrap();
-    snapshot.apply_all(change.state_updates).unwrap();
-
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
-    assert_eq!(contact.identity.discovery_key, setup.bob_rotated_discovery);
-}
-
-#[test]
-fn discovery_key_update_preserves_blocking_state() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .block_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let change = engine
-        .record_contact(
-            &snapshot,
-            ContactIdentity {
-                identity_key: setup.bob_identity,
-                discovery_key: setup.bob_rotated_discovery,
-            },
-        )
-        .unwrap();
-    snapshot.apply_all(change.state_updates).unwrap();
-
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
-    assert_eq!(contact.identity.discovery_key, setup.bob_rotated_discovery);
-    assert!(contact.blocked);
-}
-
-#[test]
-fn discovery_key_update_preserves_verified_state() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            confirm_safety_number(&engine, &snapshot, &setup)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let change = engine
-        .record_contact(
-            &snapshot,
-            ContactIdentity {
-                identity_key: setup.bob_identity,
-                discovery_key: setup.bob_rotated_discovery,
-            },
-        )
-        .unwrap();
-    snapshot.apply_all(change.state_updates).unwrap();
-
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Verified);
-    assert_eq!(contact.identity.discovery_key, setup.bob_rotated_discovery);
-}
-
-fn confirm_safety_number(
-    engine: &ProtocolStateEngine,
-    snapshot: &ProtocolStateSnapshot,
-    setup: &Setup,
-) -> Result<roost_core::ContactStateChange, ProtocolStateError> {
-    let safety_number = derive_safety_number(setup.alice_identity, setup.bob_identity).unwrap();
-    let confirmation = engine.confirm_contact_safety_number(
-        snapshot,
-        setup.alice_identity,
-        setup.bob_identity,
-        &safety_number.grouped_decimal,
-    )?;
-    match confirmation {
-        roost_core::ContactSafetyNumberConfirmation::Matched(change) => Ok(change),
-        roost_core::ContactSafetyNumberConfirmation::Mismatched(_) => {
-            panic!("safety number did not match")
+fn a_mismatched_safety_number_changes_nothing() {
+    let relay = Relay::new();
+    let (mut alice, bob) = befriended(&relay);
+    for verified in [false, true] {
+        if verified {
+            verify(&mut alice, &bob);
         }
-    }
-}
+        let before = alice.contact(&bob).unwrap().trust_state;
 
-#[test]
-fn later_discovery_key_creation_time_updates_even_with_lower_epoch() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(
-                    &snapshot,
-                    ContactIdentity {
-                        identity_key: setup.bob_identity,
-                        discovery_key: setup.bob_rotated_discovery,
-                    },
-                )
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let change = engine
-        .record_contact(
-            &snapshot,
-            ContactIdentity {
-                identity_key: setup.bob_identity,
-                discovery_key: setup.bob_restored_discovery,
-            },
-        )
-        .unwrap();
-    assert_eq!(change.state_updates.len(), 1);
-    snapshot.apply_all(change.state_updates).unwrap();
-
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
-    assert_eq!(contact.identity.discovery_key, setup.bob_restored_discovery);
-}
-
-#[test]
-fn older_discovery_key_is_not_restored_by_higher_epoch_replay() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.bob_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(
-                    &snapshot,
-                    ContactIdentity {
-                        identity_key: setup.bob_identity,
-                        discovery_key: setup.bob_rotated_discovery,
-                    },
-                )
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(
-                    &snapshot,
-                    ContactIdentity {
-                        identity_key: setup.bob_identity,
-                        discovery_key: setup.bob_restored_discovery,
-                    },
-                )
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let replay = engine
-        .record_contact(
-            &snapshot,
-            ContactIdentity {
-                identity_key: setup.bob_identity,
-                discovery_key: setup.bob_rotated_discovery,
-            },
-        )
-        .unwrap();
-    assert!(replay.state_updates.is_empty());
-
-    let contact = engine
-        .contact_state(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(contact.identity.discovery_key, setup.bob_restored_discovery);
-}
-
-#[test]
-fn contact_lookup_rejects_blob_whose_identity_key_mismatches_address() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    let change = engine
-        .record_contact(&snapshot, contact_identity(&setup))
-        .unwrap();
-    let blob = change.state_updates.into_iter().next().unwrap();
-    let mut wrong_identity = setup.bob_identity;
-    wrong_identity.x25519_public_key[0] ^= 0x01;
-    snapshot
-        .set(
-            ProtocolStateAddress::new(ProtocolStateKind::ContactState, wrong_identity.into()),
-            ProtocolStateBlob::from_bytes(blob.blob().unwrap().as_bytes().to_vec()),
-        )
-        .unwrap();
-
-    assert!(matches!(
-        engine.contact_state(&snapshot, wrong_identity),
-        Err(ProtocolStateError::BlobDecode { .. })
-    ));
-}
-
-#[test]
-fn contact_lookup_rejects_corrupt_blobs_without_replacing_stored_state() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    let change = engine
-        .record_contact(&snapshot, contact_identity(&setup))
-        .unwrap();
-    snapshot.apply_all(change.state_updates).unwrap();
-    assert!(
-        engine
-            .contact_state(&snapshot, setup.bob_identity)
-            .unwrap()
-            .is_some()
-    );
-
-    let address =
-        ProtocolStateAddress::new(ProtocolStateKind::ContactState, setup.bob_identity.into());
-    let valid = snapshot.get(&address).unwrap().as_bytes().to_vec();
-    let mut trailing = valid.clone();
-    trailing.push(0xaa);
-    let truncated = valid[..valid.len() / 2].to_vec();
-    for corrupt in [trailing, truncated] {
-        snapshot
-            .set(
-                address.clone(),
-                ProtocolStateBlob::from_bytes(corrupt.clone()),
+        let confirmation = alice
+            .store
+            .protocol_engine()
+            .confirm_contact_safety_number(
+                alice.identity_key(),
+                bob.identity_key(),
+                record(&alice, bob.identity_key()).as_ref(),
+                "00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000",
             )
             .unwrap();
+
         assert!(matches!(
-            engine.contact_state(&snapshot, setup.bob_identity),
-            Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+            confirmation,
+            ContactSafetyNumberConfirmation::Mismatched
         ));
-        assert_eq!(snapshot.get(&address).unwrap().as_bytes(), corrupt);
+        assert_eq!(alice.contact(&bob).unwrap().trust_state, before);
     }
 }
 
 #[test]
-fn contact_inputs_reject_non_canonical_identity_and_discovery_keys() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut bad_identity = contact_identity(&setup);
-    bad_identity.identity_key.x25519_public_key = [0xff; 32];
-    assert!(matches!(
-        engine.record_contact(&ProtocolStateSnapshot::new(), bad_identity),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
-    ));
+fn confirming_without_a_record_is_a_fault() {
+    let relay = Relay::new();
+    let alice = Device::new(&relay, 0xa1);
+    let bob = Device::new(&relay, 0xb0);
+    let safety_number = derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap();
 
-    let mut bad_discovery = contact_identity(&setup);
-    bad_discovery.discovery_key.x25519_public_key = [0xff; 32];
     assert!(matches!(
-        engine.record_contact(&ProtocolStateSnapshot::new(), bad_discovery),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
+        alice.store.protocol_engine().confirm_contact_safety_number(
+            alice.identity_key(),
+            bob.identity_key(),
+            None,
+            &safety_number.grouped_decimal,
+        ),
+        Err(ProtocolStateError::MissingRequiredState { .. })
     ));
 }
 
 #[test]
-fn contact_input_rejects_invalid_discovery_key_signature() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut identity = contact_identity(&setup);
-    identity.discovery_key.identity_signature[0] ^= 0x01;
-
-    assert!(matches!(
-        engine.record_contact(&ProtocolStateSnapshot::new(), identity),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
-    ));
-}
-
-/// A peer's delivery capability is a bearer secret they handed us for submission.
-/// It must survive a commit and read back exactly, since a wrong byte means the relay rejects
-/// every submission to that contact.
-#[test]
-fn peer_inbox_authorization_round_trips_through_protocol_state() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
+fn a_confirmation_cannot_commit_after_the_record_changed() {
+    let relay = Relay::new();
+    let (mut alice, bob) = befriended(&relay);
+    let safety_number = derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap();
+    let ContactSafetyNumberConfirmation::Matched(stale) = alice
+        .store
+        .protocol_engine()
+        .confirm_contact_safety_number(
+            alice.identity_key(),
+            bob.identity_key(),
+            record(&alice, bob.identity_key()).as_ref(),
+            &safety_number.grouped_decimal,
         )
-        .unwrap();
-    let capability = RecipientDeliveryCapability::from_bytes([0x5Au8; 32]);
-
-    snapshot
-        .apply_all(
-            engine
-                .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 4, &capability)
-                .unwrap(),
-        )
-        .unwrap();
-
-    let stored = engine
-        .peer_inbox_authorization(&snapshot, setup.bob_identity)
         .unwrap()
-        .unwrap();
-    assert_eq!(stored.epoch, 4);
-    assert_eq!(*stored.capability.to_bytes(), *capability.to_bytes());
+    else {
+        panic!("safety number did not match");
+    };
+    alice.block(bob.identity_key());
+
+    assert_eq!(
+        alice.commit_changes(stale),
+        Err(HostCommitError::StaleCondition)
+    );
+    let contact = alice.contact(&bob).unwrap();
+    assert!(contact.blocked);
+    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
 }
 
 #[test]
-fn peer_inbox_authorization_is_absent_until_recorded() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
+fn blocking_and_unblocking_keep_every_trust_state() {
+    for trust_state in [
+        ContactTrustState::Pending,
+        ContactTrustState::Unverified,
+        ContactTrustState::Verified,
+    ] {
+        let relay = Relay::new();
+        let (mut alice, bob) = match trust_state {
+            ContactTrustState::Pending => {
+                let mut alice = Device::new(&relay, 0xa1);
+                let bob = Device::new(&relay, 0xb0);
+                alice.request(&bob, b"hi bob");
+                (alice, bob)
+            }
+            ContactTrustState::Unverified | ContactTrustState::Verified => befriended(&relay),
+        };
+        if trust_state == ContactTrustState::Verified {
+            verify(&mut alice, &bob);
+        }
 
+        alice.block(bob.identity_key());
+        let blocked = alice.contact(&bob).unwrap();
+        unblock(&mut alice, bob.identity_key());
+        let unblocked = alice.contact(&bob).unwrap();
+
+        assert!(blocked.blocked);
+        assert!(!unblocked.blocked);
+        assert_eq!(blocked.trust_state, trust_state);
+        assert_eq!(unblocked.trust_state, trust_state);
+    }
+}
+
+#[test]
+fn unblocking_a_stranger_blocked_before_they_sent_anything_forgets_them() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let stranger = Device::new(&relay, 0xc0);
+    alice.block(stranger.identity_key());
+    assert!(alice.contact(&stranger).unwrap().blocked);
+
+    unblock(&mut alice, stranger.identity_key());
+
+    assert!(alice.contact(&stranger).is_none());
+    let changes = alice
+        .store
+        .protocol_engine()
+        .unblock_contact(stranger.identity_key(), None)
+        .unwrap();
+    assert!(changes.updates().is_empty());
+}
+
+#[test]
+fn a_blocked_contact_refuses_outgoing_messages() {
+    let relay = Relay::new();
+    let (mut alice, bob) = befriended(&relay);
+    alice.block(bob.identity_key());
+    let outgoing = alice.outgoing(&bob, b"never sent");
+
+    assert!(matches!(
+        alice.encrypt(outgoing, Intent::Message),
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::BlockedContact)
+        ))
+    ));
+}
+
+#[test]
+fn an_accepted_contact_without_a_session_needs_a_handshake() {
+    let relay = Relay::new();
+    let (mut alice, bob) = befriended(&relay);
+    alice
+        .host
+        .remove(&peer_sessions_address(bob.identity_key()));
+    let outgoing = alice.outgoing(&bob, b"never sent");
+
+    assert!(matches!(
+        alice.encrypt(outgoing, Intent::Message),
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::NoSession)
+        ))
+    ));
+}
+
+#[test]
+fn a_new_discovery_key_keeps_trust_blocking_and_the_safety_number() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    verify(&mut alice, &bob);
+    let safety_number = derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap();
+    let rotation = bob.store.prepare_inbox_rotation().unwrap();
+    bob.store.reserve_operation(rotation.operation.id).unwrap();
+    bob.store.finalize_operation(rotation.operation.id).unwrap();
+    let message = bob.send(&alice, b"new inbox");
+
+    assert!(matches!(
+        alice.receive(&message.message),
+        InboundMessageOutcome::Accepted(_)
+    ));
+
+    let contact = alice.contact(&bob).unwrap();
+    assert_eq!(
+        contact.discovery_key.unwrap().x25519_public_key,
+        *rotation.output.discovery_key.public_key.as_bytes()
+    );
+    assert_eq!(contact.trust_state, ContactTrustState::Verified);
+    assert!(!contact.blocked);
+    assert_eq!(
+        derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap(),
+        safety_number
+    );
     assert!(
-        engine
-            .peer_inbox_authorization(&snapshot, setup.bob_identity)
-            .unwrap()
-            .is_none()
+        alice
+            .host
+            .blob_bytes(&session_address(message.session_id))
+            .is_some()
     );
 }
 
-/// Replaying an older inbox-authorization update must not roll a contact back to a capability
-/// they have already rotated away from — which is exactly what a blocked sender would want.
 #[test]
-fn peer_inbox_authorization_refuses_to_go_backwards() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let current = RecipientDeliveryCapability::from_bytes([0x11u8; 32]);
-    let superseded = RecipientDeliveryCapability::from_bytes([0x22u8; 32]);
-    snapshot
-        .apply_all(
-            engine
-                .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 7, &current)
-                .unwrap(),
-        )
-        .unwrap();
+fn contact_calls_refuse_a_non_canonical_identity_key() {
+    let relay = Relay::new();
+    let alice = Device::new(&relay, 0xa1);
+    let invalid = ContactIdentityKey {
+        x25519_public_key: [0; 32],
+        ed25519_verifying_key: alice.identity_key().ed25519_verifying_key,
+    };
 
-    let updates = engine
-        .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 6, &superseded)
-        .unwrap();
-
-    assert!(updates.is_empty(), "a lower epoch must produce no update");
-    let stored = engine
-        .peer_inbox_authorization(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.epoch, 7);
-    assert_eq!(*stored.capability.to_bytes(), *current.to_bytes());
-}
-
-#[test]
-fn peer_inbox_authorization_advances_on_a_higher_epoch() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let first = RecipientDeliveryCapability::from_bytes([0x11u8; 32]);
-    let rotated = RecipientDeliveryCapability::from_bytes([0x22u8; 32]);
-    snapshot
-        .apply_all(
-            engine
-                .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 1, &first)
-                .unwrap(),
-        )
-        .unwrap();
-
-    snapshot
-        .apply_all(
-            engine
-                .record_peer_inbox_authorization(&snapshot, setup.bob_identity, 2, &rotated)
-                .unwrap(),
-        )
-        .unwrap();
-
-    let stored = engine
-        .peer_inbox_authorization(&snapshot, setup.bob_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(stored.epoch, 2);
-    assert_eq!(*stored.capability.to_bytes(), *rotated.to_bytes());
+    assert!(matches!(
+        alice.store.protocol_engine().unblock_contact(invalid, None),
+        Err(ProtocolStateError::InvalidStateBinding { .. })
+    ));
 }
