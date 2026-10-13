@@ -139,11 +139,6 @@ impl Identity {
         // Signed-pre-key rotation needs direct signing-key access inside the crate.
         &self.signing_key_pair
     }
-
-    pub(crate) fn key_pair(&self) -> &KeyPair {
-        // First Messages prove the agreement half without exporting it.
-        &self.key_pair
-    }
 }
 
 pub(crate) struct IdentityManager {
@@ -182,11 +177,20 @@ impl IdentityManager {
     }
 
     pub(crate) fn load_identity(&self) -> Result<Identity, IdentityError> {
-        let (x25519, ed25519) = self.load_identity_key_bytes()?;
+        let (key_pair, signing_key_pair) = self.load_key_pairs()?;
         Ok(Identity {
-            key_pair: KeyPair::from_secret_bytes(*x25519),
-            signing_key_pair: SigningKeyPair::from_signing_bytes(*ed25519),
+            key_pair,
+            signing_key_pair,
         })
+    }
+
+    // Returns the stored agreement and signing key pairs, for an operation that owns them.
+    pub(crate) fn load_key_pairs(&self) -> Result<(KeyPair, SigningKeyPair), IdentityError> {
+        let (x25519, ed25519) = self.load_identity_key_bytes()?;
+        Ok((
+            KeyPair::from_secret_bytes(*x25519),
+            SigningKeyPair::from_signing_bytes(*ed25519),
+        ))
     }
 
     // Use `KeyStore::prepare_identity_deletion` to clear dependent key material before identity.

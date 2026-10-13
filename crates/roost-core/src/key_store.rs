@@ -2,9 +2,7 @@ mod messaging;
 mod operation;
 mod session;
 
-pub use messaging::{
-    AcknowledgmentProcessing, MessageDecryption, MessageEncryption, MessageOperationError,
-};
+pub use messaging::MessageStartError;
 pub use operation::{
     JournalCorruption, KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId,
     KeyStoreOperationStatus, PreparedKeyStoreOperation, SecureStorageExpectedValue,
@@ -147,17 +145,7 @@ pub struct KeyStore(Arc<KeyStoreInner>);
 impl KeyStore {
     /// Creates a keystore backed by `storage`, reading time from the system clock.
     pub fn new(storage: Box<dyn SecureStorage>) -> Self {
-        Self::with_protocol_engine(storage, ProtocolStateEngine::new())
-    }
-
-    /// Creates a keystore whose operations share the supplied protocol configuration.
-    ///
-    /// The engine is immutable for this identity context, including prepared operations.
-    pub fn with_protocol_engine(
-        storage: Box<dyn SecureStorage>,
-        engine: ProtocolStateEngine,
-    ) -> Self {
-        Self::from_shared_storage(Arc::new(Mutex::new(storage)), engine)
+        Self::from_shared_storage(Arc::new(Mutex::new(storage)), ProtocolStateEngine::new())
     }
 
     /// Returns the engine shared by identity, messaging, and contact operations.

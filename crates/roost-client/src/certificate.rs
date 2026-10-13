@@ -2,17 +2,15 @@
 
 use crate::IdentityContext;
 use crate::error::RoostError;
+use crate::message_operation::SignedSenderCertificate;
 use crate::protocol::IdentityKey;
 use crate::records::fixed_32;
 use crate::time::{millis_from_secs, time_from_millis};
-use roost_core::InboundSenderCertificateValidation;
+use roost_core::{InboundSenderCertificateValidation, KnownDomainSigningKey};
 use roost_protocol::{
-    DomainSigningKey as ProtocolDomainSigningKey,
-    DomainSigningKeyStatus as ProtocolDomainSigningKeyStatus,
-    RevocationState as ProtocolRevocationState, SenderCertificateIdentityKey,
-    SenderCertificateValidationInput,
+    DomainSigningKeyStatus as ProtocolDomainSigningKeyStatus, SenderCertificateIdentityKey,
 };
-use std::time::SystemTime;
+use std::time::Duration;
 
 /// Trust status for a domain-signing key.
 #[derive(Clone, Copy, uniffi::Enum)]
@@ -45,7 +43,7 @@ pub struct RevocationState {
 
 /// The trust, revocation, and time inputs for validating a sender certificate.
 ///
-/// The grace for expired certificates comes from the context's configuration.
+/// The grace for expired certificates comes with each receive, in [`ReceiveSettings`](crate::ReceiveSettings).
 #[derive(uniffi::Record)]
 pub struct SenderCertificateValidation {
     /// Known domain-signing keys.
@@ -78,37 +76,25 @@ pub struct ValidatedSenderCertificate {
 impl IdentityContext {
     /// Validates a sender certificate against the host's trust, revocation, and time inputs.
     ///
-    /// An expired certificate still validates within the configured certificate grace.
+    /// An expired certificate still validates for `certificate_grace_millis` after it expires, at
+    /// most 300,000.
     ///
     /// # Errors
     /// - [`RoostError::CertificateRejected`] if the certificate is expired, revoked, untrusted, or
     ///   signed for another relay domain.
-    /// - [`RoostError::InvalidData`] if a key or the reference time is malformed.
+    /// - [`RoostError::InvalidData`] if a key, the reference time, or the grace is malformed or
+    ///   too large.
     pub fn validate_sender_certificate(
         &self,
-        certificate: Vec<u8>,
-        signature: Vec<u8>,
+        certificate: SignedSenderCertificate,
         validation: SenderCertificateValidation,
+        certificate_grace_millis: u64,
     ) -> Result<ValidatedSenderCertificate, RoostError> {
-        let domain_signing_keys = domain_signing_keys_to_protocol(&validation.domain_signing_keys)?;
-        let revoked_identity_keys =
-            revoked_identity_keys_to_protocol(&validation.revocation_state)?;
-        let validated =
-            roost_protocol::validate_sender_certificate(SenderCertificateValidationInput {
-                certificate: &certificate,
-                signature: &signature,
-                domain_signing_keys: &domain_signing_keys,
-                expected_relay_domain: &validation.expected_relay_domain,
-                revocation_state: revocation_state_to_protocol(
-                    &validation.revocation_state,
-                    &revoked_identity_keys,
-                ),
-                reference_time: time_from_millis(
-                    validation.reference_time_millis,
-                    "reference_time_millis",
-                )?,
-                grace_window: self.inner.protocol_engine().certificate_grace(),
-            })?;
+        let validated = validation.to_core()?.validate(
+            &certificate.certificate,
+            &certificate.signature,
+            Duration::from_millis(certificate_grace_millis),
+        )?;
         Ok(ValidatedSenderCertificate {
             signing_key_id: validated.signing_key_id,
             identity_key: IdentityKey {
@@ -121,14 +107,48 @@ impl IdentityContext {
     }
 }
 
+impl SenderCertificateValidation {
+    pub(crate) fn to_core(&self) -> Result<InboundSenderCertificateValidation, RoostError> {
+        Ok(InboundSenderCertificateValidation {
+            domain_signing_keys: self
+                .domain_signing_keys
+                .iter()
+                .map(DomainSigningKey::to_core)
+                .collect::<Result<_, _>>()?,
+            expected_relay_domain: self.expected_relay_domain.clone(),
+            revoked_identity_keys: self.revocation_state.to_core()?,
+            reference_time: time_from_millis(self.reference_time_millis, "reference_time_millis")?,
+        })
+    }
+}
+
 impl DomainSigningKey {
-    pub(crate) fn to_protocol(&self) -> Result<ProtocolDomainSigningKey<'_>, RoostError> {
-        fixed_32(&self.verifying_key, "domain signing verifying key")?;
-        Ok(ProtocolDomainSigningKey {
-            id: &self.id,
-            verifying_key: &self.verifying_key,
+    fn to_core(&self) -> Result<KnownDomainSigningKey, RoostError> {
+        Ok(KnownDomainSigningKey {
+            id: self.id.clone(),
+            verifying_key: fixed_32(&self.verifying_key, "domain signing verifying key")?,
             status: self.status.to_protocol(),
         })
+    }
+}
+
+impl RevocationState {
+    // Returns `None` when the revocation source failed to load, which fails validation closed.
+    fn to_core(&self) -> Result<Option<Vec<SenderCertificateIdentityKey>>, RoostError> {
+        if !self.available {
+            return Ok(None);
+        }
+        self.revoked_identity_keys
+            .iter()
+            .map(|identity_key| {
+                let key = identity_key.to_core()?;
+                Ok(SenderCertificateIdentityKey {
+                    x25519_public_key: key.x25519_public_key,
+                    ed25519_verifying_key: key.ed25519_verifying_key,
+                })
+            })
+            .collect::<Result<_, _>>()
+            .map(Some)
     }
 }
 
@@ -138,72 +158,5 @@ impl DomainSigningKeyStatus {
             Self::Trusted => ProtocolDomainSigningKeyStatus::Trusted,
             Self::Untrusted => ProtocolDomainSigningKeyStatus::Untrusted,
         }
-    }
-}
-
-/// A host's certificate validation inputs, converted once so an operation can borrow them.
-pub(crate) struct CoreCertificateValidation<'a> {
-    source: &'a SenderCertificateValidation,
-    domain_signing_keys: Vec<ProtocolDomainSigningKey<'a>>,
-    revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
-    reference_time: SystemTime,
-}
-
-impl<'a> CoreCertificateValidation<'a> {
-    pub(crate) fn new(source: &'a SenderCertificateValidation) -> Result<Self, RoostError> {
-        Ok(Self {
-            source,
-            domain_signing_keys: domain_signing_keys_to_protocol(&source.domain_signing_keys)?,
-            revoked_identity_keys: revoked_identity_keys_to_protocol(&source.revocation_state)?,
-            reference_time: time_from_millis(
-                source.reference_time_millis,
-                "reference_time_millis",
-            )?,
-        })
-    }
-
-    pub(crate) fn to_core(&self) -> InboundSenderCertificateValidation<'_> {
-        InboundSenderCertificateValidation {
-            domain_signing_keys: &self.domain_signing_keys,
-            expected_relay_domain: &self.source.expected_relay_domain,
-            revocation_state: revocation_state_to_protocol(
-                &self.source.revocation_state,
-                &self.revoked_identity_keys,
-            ),
-            reference_time: self.reference_time,
-        }
-    }
-}
-
-pub(crate) fn domain_signing_keys_to_protocol(
-    values: &[DomainSigningKey],
-) -> Result<Vec<ProtocolDomainSigningKey<'_>>, RoostError> {
-    values.iter().map(DomainSigningKey::to_protocol).collect()
-}
-
-pub(crate) fn revoked_identity_keys_to_protocol(
-    state: &RevocationState,
-) -> Result<Vec<SenderCertificateIdentityKey>, RoostError> {
-    state
-        .revoked_identity_keys
-        .iter()
-        .map(|identity_key| {
-            let key = identity_key.to_core()?;
-            Ok(SenderCertificateIdentityKey {
-                x25519_public_key: key.x25519_public_key,
-                ed25519_verifying_key: key.ed25519_verifying_key,
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn revocation_state_to_protocol<'a>(
-    state: &RevocationState,
-    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
-) -> ProtocolRevocationState<'a> {
-    if state.available {
-        ProtocolRevocationState::Available(revoked_identity_keys)
-    } else {
-        ProtocolRevocationState::Unavailable
     }
 }

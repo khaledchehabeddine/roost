@@ -9,23 +9,22 @@ use std::collections::BTreeMap;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InboundAcknowledgmentMessage,
-    InboundEncryptedMessage, InboundMessageOutcome, InboundSenderCertificateValidation,
-    InboundSessionStart, LocalSender, Message, OutboundAcknowledgment, OutboundPlaintext,
-    OutboundSessionStart, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    ProtocolStateUpdate, PublicDiscoveryKey, SenderIdentityMaterial, SessionAcceptanceOutcome,
-    SessionId, SessionUnrecoverableResult, Signature, TransportBinding,
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InboundMessageOutcome,
+    InboundSenderCertificateValidation, InboundSessionStart, IncomingMessage,
+    KnownDomainSigningKey, LocalIdentityKeys, LocalSender, Message, MessageDecryption,
+    MessageDecryptionStep, MessageEncryption, MessageEncryptionStep, MessageOperationError,
+    OutboundMessageResult, OutboundSessionStart, OutgoingMessage, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateEngine, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateSnapshot, ProtocolStateUpdate, PublicDiscoveryKey, ReceiveSettings,
+    SenderIdentityMaterial, SessionAcceptanceOutcome, SessionId, SessionUnrecoverableResult,
+    Signature, SignedSenderCertificate, StateChanges, TransportBinding,
 };
 use roost_crypto::{
     DiscoveryKey, KeyPair, PreKeyBundle, PublicIdentityKey, SignedPreKey, SigningKeyPair,
     generate_discovery_key, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
     sign_identity_key_binding,
 };
-use roost_protocol::{
-    DomainSigningKey, DomainSigningKeyStatus, MessageId, RevocationState,
-    SenderCertificateIdentityKey,
-};
+use roost_protocol::{DomainSigningKeyStatus, MessageId, SenderCertificateIdentityKey};
 use zeroize::Zeroizing;
 
 pub const CREATED_AT_SECS: u64 = 1_700_000_000;
@@ -35,7 +34,6 @@ const CERTIFICATE_VERSION: u8 = 2;
 
 pub struct ProtocolFixture {
     pub session_id: SessionId,
-    pub deduplication_key: ProtocolStateKey,
     pub alice_store: HostStore,
     pub bob_store: HostStore,
     pub alice_sender: ValidatedSender,
@@ -85,8 +83,62 @@ impl HostStore {
         )
     }
 
+    /// Commits `changes` in one transaction when every Commit Condition still holds.
+    pub fn commit_changes(&mut self, changes: StateChanges) -> Result<(), HostCommitError> {
+        self.commit_changes_with(changes, None)
+    }
+
+    /// Commits a sent Message's changes and queues the Message in the same transaction.
+    pub fn commit_sent(&mut self, sent: OutboundMessageResult) -> Result<(), HostCommitError> {
+        let outbox = OutboxRecord {
+            message_id: sent.message_id,
+            message: sent.message.to_bytes().unwrap(),
+        };
+        self.commit_changes_with(sent.changes, Some(outbox))
+    }
+
+    /// Returns the host's entry for each requested record, with `None` where it holds none.
+    pub fn read(
+        &self,
+        addresses: &[ProtocolStateAddress],
+    ) -> Vec<(ProtocolStateAddress, Option<ProtocolStateBlob>)> {
+        addresses
+            .iter()
+            .map(|address| {
+                (
+                    address.clone(),
+                    self.blobs
+                        .get(address)
+                        .map(|blob| ProtocolStateBlob::from_bytes(blob.to_vec())),
+                )
+            })
+            .collect()
+    }
+
+    fn commit_changes_with(
+        &mut self,
+        changes: StateChanges,
+        outbox: Option<OutboxRecord>,
+    ) -> Result<(), HostCommitError> {
+        let addresses: Vec<_> = changes
+            .conditions()
+            .iter()
+            .map(|(address, _)| address.clone())
+            .collect();
+        if !changes.matches(&self.read(&addresses)).unwrap() {
+            return Err(HostCommitError::StaleCondition);
+        }
+        self.apply_all(changes.into_updates());
+        self.outbox.extend(outbox);
+        Ok(())
+    }
+
     pub fn outbox(&self) -> &[OutboxRecord] {
         &self.outbox
+    }
+
+    pub fn remove(&mut self, address: &ProtocolStateAddress) {
+        self.blobs.remove(address);
     }
 
     pub fn set_raw(&mut self, address: ProtocolStateAddress, blob: Vec<u8>) {
@@ -124,7 +176,7 @@ impl HostStore {
         Ok(())
     }
 
-    fn apply_all(&mut self, updates: impl IntoIterator<Item = ProtocolStateUpdate>) {
+    pub fn apply_all(&mut self, updates: impl IntoIterator<Item = ProtocolStateUpdate>) {
         for update in updates {
             match update.blob() {
                 Some(blob) => {
@@ -164,21 +216,80 @@ pub struct StoredMessage {
 pub struct ValidatedSender {
     pub sender_identity: SenderIdentityMaterial,
     domain_id: Vec<u8>,
-    domain_verifying_key: Vec<u8>,
+    domain_verifying_key: [u8; 32],
 }
 
 impl ValidatedSender {
-    pub fn domain_signing_key(&self) -> DomainSigningKey<'_> {
-        DomainSigningKey {
-            id: &self.domain_id,
-            verifying_key: &self.domain_verifying_key,
+    pub fn domain_signing_key(&self) -> KnownDomainSigningKey {
+        KnownDomainSigningKey {
+            id: self.domain_id.clone(),
+            verifying_key: self.domain_verifying_key,
             status: DomainSigningKeyStatus::Trusted,
         }
     }
 }
 
+/// Runs `encryption` over `host`'s records, supplying `binding` when it asks for a transport.
+pub fn run_encryption(
+    mut encryption: MessageEncryption,
+    host: &HostStore,
+    rng: &mut ChaCha20Rng,
+    binding: &TransportBinding,
+) -> Result<OutboundMessageResult, MessageOperationError> {
+    loop {
+        match encryption.step(rng)? {
+            MessageEncryptionStep::NeedsState(addresses) => {
+                encryption.supply_state(host.read(&addresses))?;
+            }
+            MessageEncryptionStep::NeedsTransport(_) => {
+                encryption.supply_transport_binding(binding.clone())?;
+            }
+            MessageEncryptionStep::Ready(result) => return Ok(*result),
+        }
+    }
+}
+
+/// Runs `decryption` over `host`'s records, supplying `binding` when its acknowledgment asks for
+/// a transport.
+pub fn run_decryption(
+    mut decryption: MessageDecryption,
+    host: &HostStore,
+    rng: &mut ChaCha20Rng,
+    binding: &TransportBinding,
+) -> Result<InboundMessageOutcome, MessageOperationError> {
+    loop {
+        match decryption.step(rng)? {
+            MessageDecryptionStep::NeedsState(addresses) => {
+                decryption.supply_state(host.read(&addresses))?;
+            }
+            MessageDecryptionStep::NeedsAcknowledgmentTransport(_) => {
+                decryption.supply_acknowledgment_transport_binding(binding.clone())?;
+            }
+            MessageDecryptionStep::Ready(outcome) => return Ok(*outcome),
+        }
+    }
+}
+
+/// Takes the changes an outcome asks the host to commit, if any, leaving empty changes behind.
+pub fn split_changes(
+    mut outcome: InboundMessageOutcome,
+) -> (InboundMessageOutcome, Option<StateChanges>) {
+    let changes = match &mut outcome {
+        InboundMessageOutcome::Accepted(result) => Some(&mut result.changes),
+        InboundMessageOutcome::Blocked(result) => Some(&mut result.changes),
+        InboundMessageOutcome::SessionUnrecoverable(result) => Some(&mut result.changes),
+        InboundMessageOutcome::AcknowledgmentMatched(result)
+        | InboundMessageOutcome::AcknowledgmentUnmatched(result) => Some(&mut result.changes),
+        InboundMessageOutcome::Duplicate | InboundMessageOutcome::UnknownSession => None,
+    }
+    .map(|changes| std::mem::replace(changes, StateChanges::from(Vec::new())));
+    (outcome, changes)
+}
+
 /// One identity's secrets and certified public material, held in memory for engine-level tests.
 pub struct TestIdentity {
+    tag: u8,
+    discovery_seed: u8,
     pub sender_identity: SenderIdentityMaterial,
     pub signing_key: SigningKeyPair,
     pub agreement_key: KeyPair,
@@ -207,6 +318,8 @@ impl TestIdentity {
             sender_certificate_bytes(TEST_DOMAIN_ID, identity_key, CREATED_AT_SECS + 100_000);
         let certificate_signature = test_domain_key().sign(&certificate).to_bytes().to_vec();
         Self {
+            tag,
+            discovery_seed,
             sender_identity: SenderIdentityMaterial {
                 identity_key: identity_key.x25519_public_key,
                 identity_verifying_key: identity_key.ed25519_verifying_key,
@@ -232,6 +345,20 @@ impl TestIdentity {
             x25519_public_key: self.sender_identity.identity_key,
             ed25519_verifying_key: self.sender_identity.identity_verifying_key,
         }
+    }
+
+    /// Returns a copy of this identity's secret keys for one Message Operation.
+    pub fn local_keys(&self) -> LocalIdentityKeys {
+        LocalIdentityKeys {
+            agreement_key: KeyPair::from_secret_bytes([self.tag.wrapping_add(0x33); 32]),
+            signing_key: SigningKeyPair::from_signing_bytes([self.tag; 32]),
+            discovery_key: discovery_key(&self.signing_key, self.discovery_seed),
+        }
+    }
+
+    /// Returns this identity's sender certificate and the domain's signature.
+    pub fn certificate(&self) -> SignedSenderCertificate {
+        signed(&self.sender_identity)
     }
 
     pub fn public_identity_key(&self) -> PublicIdentityKey {
@@ -296,21 +423,34 @@ pub fn validated_sender() -> ValidatedSender {
     ValidatedSender {
         sender_identity: TestIdentity::new(0xa2, 0xc2).sender_identity,
         domain_id: TEST_DOMAIN_ID.to_vec(),
-        domain_verifying_key: test_domain_key().verifying.to_bytes().to_vec(),
+        domain_verifying_key: test_domain_key().verifying.to_bytes(),
+    }
+}
+
+/// Returns `identity`'s certificate and signature as a sender passes them.
+pub fn signed(identity: &SenderIdentityMaterial) -> SignedSenderCertificate {
+    SignedSenderCertificate {
+        certificate: identity.certificate.clone(),
+        signature: identity.signature.clone(),
     }
 }
 
 /// Every identity's certificate validation inputs at the fixed test time.
-pub fn validation<'a>(
-    domain_signing_keys: &'a [DomainSigningKey<'a>],
-    revoked_identity_keys: &'a [SenderCertificateIdentityKey],
-) -> InboundSenderCertificateValidation<'a> {
+pub fn validation(
+    domain_signing_keys: Vec<KnownDomainSigningKey>,
+    revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
+) -> InboundSenderCertificateValidation {
     InboundSenderCertificateValidation {
         domain_signing_keys,
-        expected_relay_domain: TEST_RELAY_DOMAIN,
-        revocation_state: RevocationState::Available(revoked_identity_keys),
+        expected_relay_domain: TEST_RELAY_DOMAIN.to_vec(),
+        revoked_identity_keys: Some(revoked_identity_keys),
         reference_time: from_unix_secs(CREATED_AT_SECS).unwrap(),
     }
+}
+
+/// The test domain's validation inputs with nothing revoked.
+pub fn trusted_validation() -> InboundSenderCertificateValidation {
+    validation(vec![validated_sender().domain_signing_key()], Vec::new())
 }
 
 impl ProtocolFixture {
@@ -329,7 +469,6 @@ impl ProtocolFixture {
         )
         .unwrap();
         let binding = TransportBinding::new(b"test-route".to_vec()).unwrap();
-        let deduplication_key = ProtocolStateKey::from_bytes(vec![0xdd; 16]).unwrap();
         let mut alice_store = HostStore::default();
         let mut bob_store = HostStore::default();
         for (store, peer) in [(&mut alice_store, &bob), (&mut bob_store, &alice)] {
@@ -341,13 +480,9 @@ impl ProtocolFixture {
                 .accept_contact(&store.snapshot(), peer.identity_key())
                 .unwrap();
             store.apply_all(accepted.state_updates);
-            store.apply_all([engine
-                .initialize_deduplication_set(&mut rng, deduplication_key.clone())
-                .unwrap()]);
         }
         let mut fixture = Self {
             session_id: SessionId::from_bytes([0; 16]),
-            deduplication_key,
             alice_store,
             bob_store,
             alice_sender: validated_sender(),
@@ -386,20 +521,18 @@ impl ProtocolFixture {
             )
             .unwrap();
         self.alice_store.commit(initiation.state_updates).unwrap();
-        let domain = validated_sender();
-        let domain_keys = [domain.domain_signing_key()];
         let SessionAcceptanceOutcome::Accepted(accepted) = engine
             .accept_session(
                 rng,
                 &self.bob_store.snapshot(),
                 InboundSessionStart {
-                    deduplication_key: self.deduplication_key.clone(),
                     message: &initiation.message,
                     recipient_discovery_key: &self.bob.discovery_key,
                     signed_prekey: &self.bob_signed_prekey,
                     one_time_prekey: None,
                     held_signed_prekeys: &[self.bob_signed_prekey.public()],
-                    sender_certificate_validation: validation(&domain_keys, &[]),
+                    settings: ReceiveSettings::default(),
+                    sender_certificate_validation: &trusted_validation(),
                 },
                 &self.binding,
             )
@@ -416,187 +549,206 @@ impl ProtocolFixture {
     pub fn bob_replies(&mut self, engine: &ProtocolStateEngine, seed: u8) {
         let mut id = [0xb0; 16];
         id[1] = seed;
-        let reply = engine
-            .encrypt_message_with_transport_binding(
-                &mut ChaCha20Rng::from_seed([seed; 32]),
-                &self.bob_store.snapshot(),
-                OutboundPlaintext {
-                    id: MessageId::from_bytes(id),
-                    sender: self.bob.local_sender(),
-                    contact_identity_key: self.alice.identity_key(),
-                    sent_at_millis: CREATED_AT_SECS * 1000,
-                    plaintext: b"reply",
-                },
-                &self.binding,
-            )
-            .unwrap();
-        self.bob_store.commit(reply.state_updates).unwrap();
-        let InboundMessageOutcome::Accepted(received) =
-            self.receive_as_alice(engine, &reply.message, seed)
-        else {
-            panic!("Bob's reply was not accepted")
-        };
-        self.alice_store.commit(received.state_updates).unwrap();
+        let reply = run_encryption(
+            engine
+                .start_encryption(
+                    self.bob.local_keys(),
+                    OutgoingMessage {
+                        recipient: self.alice.identity_key(),
+                        message_id: MessageId::from_bytes(id),
+                        sent_at_millis: CREATED_AT_SECS * 1000,
+                        sender_certificate: self.bob.certificate(),
+                        plaintext: Zeroizing::new(b"reply".to_vec()),
+                    },
+                )
+                .unwrap(),
+            &self.bob_store,
+            &mut ChaCha20Rng::from_seed([seed; 32]),
+            &self.binding,
+        )
+        .unwrap();
+        let message = Message::from_bytes(&reply.message.to_bytes().unwrap()).unwrap();
+        self.bob_store.commit_changes(reply.changes).unwrap();
+        let received = accepted(self.alice_receives(engine, &message, seed).unwrap());
+        self.alice_store.commit_changes(received.changes).unwrap();
     }
 
-    pub fn outbound<'a>(&'a self, sequence: u16, plaintext: &'a [u8]) -> OutboundPlaintext<'a> {
+    /// Returns Alice's input for sending `plaintext` to Bob as Message number `sequence`.
+    pub fn outgoing(&self, sequence: u16, plaintext: &[u8]) -> OutgoingMessage {
         let mut id = [0; 16];
         id[..2].copy_from_slice(&sequence.to_be_bytes());
         id[6] = 0x40;
         id[8] = 0x80;
-        OutboundPlaintext {
-            id: MessageId::from_bytes(id),
-            sender: self.alice.local_sender(),
-            contact_identity_key: self.bob.identity_key(),
+        OutgoingMessage {
+            recipient: self.bob.identity_key(),
+            message_id: MessageId::from_bytes(id),
             sent_at_millis: 1_700_000_300_000 + u64::from(sequence),
-            plaintext,
+            sender_certificate: self.alice.certificate(),
+            plaintext: Zeroizing::new(plaintext.to_vec()),
         }
     }
 
-    pub fn inbound<'a>(
-        &'a self,
-        message: &'a Message,
-        domain_signing_keys: &'a [DomainSigningKey<'a>],
-        revoked_identity_keys: &'a [SenderCertificateIdentityKey],
-    ) -> InboundEncryptedMessage<'a> {
-        self.inbound_with_validation(
-            message,
-            Some(validation(domain_signing_keys, revoked_identity_keys)),
+    /// Returns Bob's input for receiving `message` with `settings` and certificate `validation`.
+    pub fn incoming(
+        &self,
+        message: &Message,
+        settings: ReceiveSettings,
+        validation: InboundSenderCertificateValidation,
+    ) -> IncomingMessage {
+        IncomingMessage {
+            message: copy(message),
+            transport_binding: self.binding.clone(),
+            settings,
+            sender_certificate_validation: validation,
+            acknowledgment_sent_at_millis: 1_700_000_100_000 + 0xee,
+            acknowledgment_sender_certificate: signed(&self.bob_sender),
+        }
+    }
+
+    /// Has Alice encrypt `outgoing` over `store` without committing.
+    pub fn encrypt(
+        &self,
+        engine: &ProtocolStateEngine,
+        store: &HostStore,
+        outgoing: OutgoingMessage,
+        rng_seed: u8,
+    ) -> Result<OutboundMessageResult, MessageOperationError> {
+        run_encryption(
+            engine.start_encryption(self.alice.local_keys(), outgoing)?,
+            store,
+            &mut ChaCha20Rng::from_seed([rng_seed; 32]),
+            &self.binding,
         )
     }
 
-    /// Returns Bob's receive input for `message` with any certificate validation inputs.
-    pub fn inbound_with_validation<'a>(
-        &'a self,
-        message: &'a Message,
-        sender_certificate_validation: Option<InboundSenderCertificateValidation<'a>>,
-    ) -> InboundEncryptedMessage<'a> {
-        InboundEncryptedMessage {
-            deduplication_key: self.deduplication_key.clone(),
-            message,
-            recipient_discovery_key: &self.bob.discovery_key,
-            recipient_identity_verifying_key: self.bob_sender.identity_verifying_key,
-            acknowledgment: OutboundAcknowledgment {
-                id: MessageId::from_bytes([0xee; 16]),
-                sender_identity: &self.bob_sender,
-                sender_identity_signing_key: &self.bob.signing_key,
-                recipient_public_key: *self.alice.discovery_key.public_key().as_bytes(),
-                sent_at_millis: 1_700_000_100_000 + 0xee,
-            },
-            sender_certificate_validation,
-        }
+    /// Has Bob decrypt `incoming` over `store` without committing.
+    pub fn decrypt(
+        &self,
+        engine: &ProtocolStateEngine,
+        store: &HostStore,
+        incoming: IncomingMessage,
+        rng_seed: u8,
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+        run_decryption(
+            engine.start_decryption(self.bob.local_keys(), incoming)?,
+            store,
+            &mut ChaCha20Rng::from_seed([rng_seed; 32]),
+            &self.binding,
+        )
     }
 
-    /// Returns Alice's input for processing an acknowledgment Bob produced.
-    pub fn alice_acknowledgment<'a>(
-        &'a self,
-        message: &'a Message,
-    ) -> InboundAcknowledgmentMessage<'a> {
-        InboundAcknowledgmentMessage {
-            message,
-            recipient_discovery_key: &self.alice.discovery_key,
-            recipient_identity_verifying_key: self.alice.sender_identity.identity_verifying_key,
-        }
-    }
-
+    /// Has Bob receive `message` over `store` with default settings and the trusted domain.
     pub fn receive(
         &self,
         engine: &ProtocolStateEngine,
-        snapshot: &ProtocolStateSnapshot,
+        store: &HostStore,
         message: &Message,
         rng_seed: u8,
-    ) -> Result<InboundMessageOutcome, ProtocolStateError> {
-        let domain_keys = [self.alice_sender.domain_signing_key()];
-        engine.decrypt_message_with_transport_bindings(
-            &mut ChaCha20Rng::from_seed([rng_seed; 32]),
-            snapshot,
-            self.inbound(message, &domain_keys, &[]),
-            &self.binding,
-            &self.binding,
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+        self.decrypt(
+            engine,
+            store,
+            self.incoming(message, ReceiveSettings::default(), trusted_validation()),
+            rng_seed,
         )
     }
 
-    fn receive_as_alice(
+    /// Has Alice receive `message` over her store, such as Bob's reply, without committing.
+    pub fn alice_receives(
         &self,
         engine: &ProtocolStateEngine,
         message: &Message,
         rng_seed: u8,
-    ) -> InboundMessageOutcome {
-        let domain_keys = [self.alice_sender.domain_signing_key()];
-        engine
-            .decrypt_message_with_transport_bindings(
-                &mut ChaCha20Rng::from_seed([rng_seed; 32]),
-                &self.alice_store.snapshot(),
-                InboundEncryptedMessage {
-                    deduplication_key: self.deduplication_key.clone(),
-                    message,
-                    recipient_discovery_key: &self.alice.discovery_key,
-                    recipient_identity_verifying_key: self
-                        .alice
-                        .sender_identity
-                        .identity_verifying_key,
-                    acknowledgment: OutboundAcknowledgment {
-                        id: MessageId::from_bytes([0xef; 16]),
-                        sender_identity: &self.alice.sender_identity,
-                        sender_identity_signing_key: &self.alice.signing_key,
-                        recipient_public_key: *self.bob.discovery_key.public_key().as_bytes(),
-                        sent_at_millis: 1_700_000_100_000 + 0xef,
-                    },
-                    sender_certificate_validation: Some(validation(&domain_keys, &[])),
-                },
-                &self.binding,
-                &self.binding,
-            )
-            .unwrap()
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+        self.alice_receives_over(engine, &self.alice_store, message, rng_seed)
     }
 
+    /// Has Alice receive `message` over `store` without committing.
+    pub fn alice_receives_over(
+        &self,
+        engine: &ProtocolStateEngine,
+        store: &HostStore,
+        message: &Message,
+        rng_seed: u8,
+    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+        run_decryption(
+            engine.start_decryption(
+                self.alice.local_keys(),
+                IncomingMessage {
+                    message: copy(message),
+                    transport_binding: self.binding.clone(),
+                    settings: ReceiveSettings::default(),
+                    sender_certificate_validation: trusted_validation(),
+                    acknowledgment_sent_at_millis: 1_700_000_100_000 + 0xef,
+                    acknowledgment_sender_certificate: self.alice.certificate(),
+                },
+            )?,
+            store,
+            &mut ChaCha20Rng::from_seed([rng_seed; 32]),
+            &self.binding,
+        )
+    }
+
+    /// Has Alice encrypt to Bob and commits the Message with its changes.
     pub fn encrypt_from_alice(
         &mut self,
         engine: &ProtocolStateEngine,
         sequence: u16,
         plaintext: &[u8],
     ) -> StoredMessage {
-        let encrypted = engine
-            .encrypt_message_with_transport_binding(
-                &mut ChaCha20Rng::from_seed([sequence as u8; 32]),
-                &self.alice_store.snapshot(),
-                self.outbound(sequence, plaintext),
-                &self.binding,
+        let encrypted = self
+            .encrypt(
+                engine,
+                &self.alice_store,
+                self.outgoing(sequence, plaintext),
+                sequence as u8,
             )
             .unwrap();
-        self.alice_store
-            .commit_outbound(
-                encrypted.state_updates,
-                encrypted.message_id,
-                &encrypted.message,
-            )
-            .unwrap();
+        let message_id = encrypted.message_id;
+        let message = copy(&encrypted.message);
+        self.alice_store.commit_sent(encrypted).unwrap();
         StoredMessage {
-            message_id: encrypted.message_id,
+            message_id,
             plaintext: plaintext.to_vec(),
-            message: encrypted.message,
+            message,
         }
     }
 
+    /// Has Bob receive `message` and commits what it changed.
     pub fn decrypt_for_bob(
         &mut self,
         engine: &ProtocolStateEngine,
         message: &StoredMessage,
         rng_seed: u8,
-    ) -> roost_core::InboundMessageResult {
-        let mut decrypted = accepted(
-            self.receive(
-                engine,
-                &self.bob_store.snapshot(),
-                &message.message,
-                rng_seed,
-            )
-            .unwrap(),
+    ) -> ReceivedMessage {
+        let decrypted = accepted(
+            self.receive(engine, &self.bob_store, &message.message, rng_seed)
+                .unwrap(),
         );
-        self.bob_store
-            .commit(std::mem::take(&mut decrypted.state_updates))
-            .unwrap();
-        decrypted
+        self.bob_store.commit_changes(decrypted.changes).unwrap();
+        ReceivedMessage {
+            message_id: decrypted.message_id,
+            plaintext: decrypted.plaintext,
+            acknowledgment: decrypted.acknowledgment,
+        }
+    }
+}
+
+/// A received Message after the host committed it.
+pub struct ReceivedMessage {
+    pub message_id: MessageId,
+    pub plaintext: Zeroizing<Vec<u8>>,
+    pub acknowledgment: Message,
+}
+
+/// Returns a copy of `message`, even one too large to encode.
+pub fn copy(message: &Message) -> Message {
+    Message {
+        version: message.version,
+        recipient_public_key: message.recipient_public_key,
+        prekey_reference: message.prekey_reference,
+        ephemeral_public_key: message.ephemeral_public_key,
+        ciphertext: message.ciphertext.clone(),
     }
 }
 
@@ -607,8 +759,12 @@ pub fn session_address(session_id: SessionId) -> ProtocolStateAddress {
     )
 }
 
-pub fn deduplication_address(key: ProtocolStateKey) -> ProtocolStateAddress {
-    ProtocolStateAddress::new(ProtocolStateKind::DeduplicationSet, key)
+/// The Deduplication Set's address, which Roost fixes.
+pub fn deduplication_address() -> ProtocolStateAddress {
+    ProtocolStateAddress::new(
+        ProtocolStateKind::DeduplicationSet,
+        ProtocolStateKey::from_bytes(vec![0]).unwrap(),
+    )
 }
 
 pub fn accepted(outcome: InboundMessageOutcome) -> roost_core::InboundMessageResult {

@@ -4,10 +4,12 @@
 //! Mobile consumers use `roost-client`. Platform adapters provide [`SecureStorage`] for keys and
 //! the host owns durable Protocol State Blob transactions.
 //!
-//! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys and one configured
-//! [`ProtocolStateEngine`]. The host serializes each identity's complete operation and commit,
-//! including prepared-operation recovery across instances and processes. See [`KeyStore`] and
-//! [`ProtocolStateSnapshot`] for the storage and commit contracts.
+//! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys and the
+//! [`ProtocolStateEngine`], and starts each [`MessageEncryption`] and [`MessageDecryption`]. A
+//! Message Operation asks the host for exact records and returns [`StateChanges`] the host commits
+//! only while every Commit Condition holds. The host serializes each identity's complete operation
+//! and commit, including prepared-operation recovery across instances and processes. See
+//! [`KeyStore`] and [`StateChanges`] for the storage and commit contracts.
 //!
 //! # Secret handling
 //!
@@ -69,9 +71,8 @@ pub use hardening::{
 };
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
-    AcknowledgmentProcessing, ContactBlock, InboxRotation, JournalCorruption, KeyStore,
-    KeyStoreError, KeyStoreOperation, KeyStoreOperationError, KeyStoreOperationId,
-    KeyStoreOperationStatus, MessageDecryption, MessageEncryption, MessageOperationError,
+    ContactBlock, InboxRotation, JournalCorruption, KeyStore, KeyStoreError, KeyStoreOperation,
+    KeyStoreOperationError, KeyStoreOperationId, KeyStoreOperationStatus, MessageStartError,
     PreparedKeyStoreOperation, PublicationBundle, SecureStorageExpectedValue,
     SecureStoragePrecondition, SessionAcceptance, SessionEstablishmentError, SessionInitiation,
     UnfinishedKeyStoreOperation,
@@ -79,16 +80,18 @@ pub use key_store::{
 pub use message::{Message, MessageError};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
-    AcknowledgmentOutcome, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
-    ClearedAcknowledgment, InboundAcknowledgmentMessage, InboundEncryptedMessage,
+    AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
     InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
-    InboundSessionStart, LocalSender, MAX_PROTOCOL_STATE_ENTRIES, OutboundAcknowledgment,
-    OutboundMessageResult, OutboundPlaintext, OutboundSessionStart, PendingAcknowledgment,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    ProtocolStateUpdate, RetryInstruction, RetryInstructionResult, SenderIdentityMaterial,
+    InboundSessionStart, IncomingMessage, KnownDomainSigningKey, LocalIdentityKeys, LocalSender,
+    MAX_PROTOCOL_STATE_ENTRIES, MessageDecryption, MessageDecryptionStep, MessageDestination,
+    MessageEncryption, MessageEncryptionStep, MessageOperationError, OutboundMessageResult,
+    OutboundSessionStart, OutgoingMessage, PendingAcknowledgment, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
+    ReceiveSettings, RetryInstruction, RetryInstructionResult, SenderIdentityMaterial,
     SessionAcceptanceOutcome, SessionAcceptanceResult, SessionEvent, SessionInitiationResult,
-    SessionUnrecoverableReason, SessionUnrecoverableResult, protocol_state_blob_digest,
+    SessionUnrecoverableReason, SessionUnrecoverableResult, SignedSenderCertificate, StateChanges,
+    StateEntryError, commit_conditions_match,
 };
 pub use roost_crypto::{
     HandshakeError, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey, PublicKey, PublicKeyError,

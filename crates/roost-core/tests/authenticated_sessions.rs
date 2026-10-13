@@ -5,20 +5,20 @@ mod support;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    AcknowledgmentOutcome, HandshakeError, InboundMessageOutcome, InboundSessionStart, LocalSender,
-    Message, MessageOperationError, OutboundSessionStart, PreKeyBundle, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, PublicKeyError, SessionAcceptanceOutcome,
-    SessionEstablishmentError, SessionId,
+    HandshakeError, InboundMessageOutcome, InboundSessionStart, LocalSender, Message,
+    MessageOperationError, OutboundSessionStart, PreKeyBundle, ProtocolStateEngine,
+    ProtocolStateError, ProtocolStateKey, PublicKeyError, ReceiveSettings,
+    SessionAcceptanceOutcome, SessionEstablishmentError, SessionId,
 };
 use roost_crypto::{
     RatchetError, SealedFrameError, open_frame_for_discovery_key_with_associated_data,
     seal_frame_with_associated_data,
 };
 use roost_protocol::{MessageId, SenderCertificateValidationError, SignatureError};
-use support::device::{Device, Relay};
+use support::device::{Device, DeviceError, Relay};
 use support::{
     CREATED_AT_SECS, ProtocolFixture, TestIdentity, dead_session_blob, session_address,
-    validated_sender, validation,
+    trusted_validation,
 };
 
 fn accepted_session(outcome: SessionAcceptanceOutcome) -> roost_core::SessionAcceptanceResult {
@@ -71,11 +71,11 @@ fn peers_derive_one_session_id_and_exchange_messages_both_ways() {
     bob.accept_contact(&alice);
     let reply = bob.send(&alice, b"hello alice");
     assert_eq!(reply.session_id, initiation.session_id);
+    alice.accept_contact(&bob);
     let received = accepted_message(alice.receive(&reply.message));
     assert_eq!(received.session_id, initiation.session_id);
     assert_eq!(&*received.plaintext, b"hello alice");
 
-    alice.accept_contact(&bob);
     let follow_up = alice.send(&bob, b"how are you");
     assert_eq!(follow_up.session_id, initiation.session_id);
     let received = accepted_message(bob.receive(&follow_up.message));
@@ -142,8 +142,8 @@ fn a_message_naming_an_unknown_session_changes_nothing() {
         InboundMessageOutcome::UnknownSession
     ));
     assert!(matches!(
-        bob.process_acknowledgment(&acknowledgment),
-        AcknowledgmentOutcome::UnknownSession
+        bob.receive(&acknowledgment),
+        InboundMessageOutcome::UnknownSession
     ));
     assert_eq!(bob.host.snapshot_bytes(), before);
 }
@@ -365,8 +365,8 @@ fn a_dead_session_is_never_sent_on_until_a_new_handshake() {
 
     assert!(matches!(
         alice.encrypt(&bob, b"on a dead session"),
-        Err(MessageOperationError::ProtocolState(
-            ProtocolStateError::SessionUnrecoverable
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::SessionUnrecoverable)
         ))
     ));
 
@@ -418,8 +418,10 @@ fn a_tampered_or_misdelivered_first_message_changes_nothing() {
     ));
     assert!(matches!(
         carol.decrypt(&initiation.message),
-        Err(MessageOperationError::ProtocolState(
-            ProtocolStateError::SealedFrame(SealedFrameError::Decode)
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::SealedFrame(
+                SealedFrameError::Decode
+            ))
         ))
     ));
     assert_eq!(bob.host.snapshot_bytes(), bob_before);
@@ -494,8 +496,10 @@ fn a_session_id_substituted_under_the_discovery_key_is_rejected() {
     let before = fixture.bob_store.snapshot_bytes();
 
     assert!(matches!(
-        fixture.receive(&engine, &fixture.bob_store.snapshot(), &substituted, 0x63),
-        Err(ProtocolStateError::Ratchet(RatchetError::Aead))
+        fixture.receive(&engine, &fixture.bob_store, &substituted, 0x63),
+        Err(MessageOperationError::ProtocolState(
+            ProtocolStateError::Ratchet(RatchetError::Aead)
+        ))
     ));
     assert_eq!(fixture.bob_store.snapshot_bytes(), before);
     let received = fixture.decrypt_for_bob(&engine, &message, 0x64);
@@ -537,19 +541,17 @@ fn bob_accepts(
     fixture: &ProtocolFixture,
     message: &Message,
 ) -> Result<SessionAcceptanceOutcome, ProtocolStateError> {
-    let domain = validated_sender();
-    let domain_keys = [domain.domain_signing_key()];
     engine.accept_session(
         &mut ChaCha20Rng::from_seed([0x73; 32]),
         &fixture.bob_store.snapshot(),
         InboundSessionStart {
-            deduplication_key: fixture.deduplication_key.clone(),
             message,
             recipient_discovery_key: &fixture.bob.discovery_key,
             signed_prekey: &fixture.bob_signed_prekey,
             one_time_prekey: None,
             held_signed_prekeys: &[fixture.bob_signed_prekey.public()],
-            sender_certificate_validation: validation(&domain_keys, &[]),
+            settings: ReceiveSettings::default(),
+            sender_certificate_validation: &trusted_validation(),
         },
         &fixture.binding,
     )
