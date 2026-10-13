@@ -2,8 +2,8 @@ use super::KeyStore;
 use crate::{
     DiscoveryKeyError, IdentityError, InboundSenderCertificateValidation, InboundSessionStart,
     KeyStoreOperationError, Message, MessageId, OneTimePreKeyError, OutboundSessionStart,
-    PreKeySelection, PreparedKeyStoreOperation, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateSnapshot, SessionAcceptanceOutcome, SessionInitiationResult, SignedPreKeyError,
+    PreKeySelection, PreparedKeyStoreOperation, ProtocolStateError, ProtocolStateSnapshot,
+    ReceiveSettings, SessionAcceptanceOutcome, SessionInitiationResult, SignedPreKeyError,
     TransportBinding,
 };
 use rand::rngs::OsRng;
@@ -42,15 +42,15 @@ pub struct SessionInitiation<'a> {
 
 /// Inputs for accepting a new Session as the X3DH responder.
 pub struct SessionAcceptance<'a> {
-    /// Consumer-held protocol-state snapshot, including the deduplication set and the Sessions
+    /// Consumer-held protocol-state snapshot, including the Deduplication Set and the Sessions
     /// kept with the sender.
     pub snapshot: &'a ProtocolStateSnapshot,
-    /// Identity-scoped deduplication-set key.
-    pub deduplication_key: ProtocolStateKey,
     /// X3DH first message received from the initiator.
     pub message: &'a Message,
+    /// The app's settings for this receive.
+    pub settings: ReceiveSettings,
     /// Sender-certificate validation inputs for the first Message.
-    pub sender_certificate_validation: InboundSenderCertificateValidation<'a>,
+    pub sender_certificate_validation: &'a InboundSenderCertificateValidation,
 }
 
 /// Errors returned by Session establishment helpers.
@@ -194,12 +194,12 @@ impl KeyStore {
             &mut OsRng,
             input.snapshot,
             InboundSessionStart {
-                deduplication_key: input.deduplication_key,
                 message: input.message,
                 recipient_discovery_key: &discovery_key,
                 signed_prekey: &signed_prekey,
                 one_time_prekey,
                 held_signed_prekeys: &held_signed_prekeys,
+                settings: input.settings,
                 sender_certificate_validation: input.sender_certificate_validation,
             },
             transport_binding,

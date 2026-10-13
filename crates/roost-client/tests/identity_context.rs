@@ -3,11 +3,11 @@
 mod support;
 
 use roost_client::{
-    BlockedContactAcknowledgmentPolicy, ContactDiscoveryKey, ContactIdentity,
-    ContactSafetyNumberConfirmationKind, ContactTrustState, ContextConfiguration, DomainSigningKey,
-    DomainSigningKeyStatus, IdentityContext, IdentityKey, OperationId, OperationStatus,
-    ProtocolStateEntry, ProtocolStateUpdate, RevocationState, RoostError,
-    SenderCertificateValidation, ValidatedSenderCertificate, derive_safety_number,
+    ContactDiscoveryKey, ContactIdentity, ContactSafetyNumberConfirmationKind, ContactTrustState,
+    DomainSigningKey, DomainSigningKeyStatus, IdentityContext, IdentityKey, OperationId,
+    OperationStatus, RevocationState, RoostError, SenderCertificateValidation,
+    SignedSenderCertificate, StateChanges, StateEntry, ValidatedSenderCertificate,
+    derive_safety_number,
 };
 use roost_crypto::{KeyPair, SigningKeyPair};
 use roost_protocol::SenderCertificateValidationError;
@@ -161,57 +161,15 @@ fn operation_ids_must_be_canonical() {
     ));
 }
 
-/// A configuration a host might choose: smaller deduplication, receipts for blocked senders,
-/// the largest certificate grace, and its own revision number.
-fn configuration() -> ContextConfiguration {
-    ContextConfiguration {
-        deduplication_capacity: 64,
-        blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy::SilentReceipt,
-        certificate_grace_millis: 300_000,
-        revision: 7,
-    }
-}
-
-#[test]
-fn context_reports_the_configuration_it_was_created_with() {
-    let default = IdentityContext::new(Arc::new(MemoryStorage::default())).configuration();
-    assert_eq!(default.certificate_grace_millis, 0);
-    assert_eq!(default.revision, 0);
-
-    let context =
-        IdentityContext::with_configuration(Arc::new(MemoryStorage::default()), configuration())
-            .unwrap();
-    assert_eq!(context.configuration(), configuration());
-    assert_eq!(
-        context
-            .messaging()
-            .hardening_limits()
-            .deduplication_capacity,
-        64
-    );
-}
-
-#[test]
-fn configuration_rejects_certificate_grace_above_five_minutes() {
-    let result = IdentityContext::with_configuration(
-        Arc::new(MemoryStorage::default()),
-        ContextConfiguration {
-            certificate_grace_millis: 300_001,
-            ..configuration()
-        },
-    );
-    assert!(matches!(result, Err(RoostError::InvalidData { .. })));
-}
-
 /// A Sender Certificate signed by a relay's domain key, with the keys a host checks it against.
-struct SignedSenderCertificate {
+struct IssuedCertificate {
     identity_key: IdentityKey,
     certificate: Vec<u8>,
     signature: Vec<u8>,
     domain_verifying_key: Vec<u8>,
 }
 
-impl SignedSenderCertificate {
+impl IssuedCertificate {
     fn new() -> Self {
         let identity_key = IdentityKey {
             agreement_key: KeyPair::from_secret_bytes([0x31; 32])
@@ -262,15 +220,23 @@ impl SignedSenderCertificate {
         }
     }
 
+    fn signed(&self) -> SignedSenderCertificate {
+        SignedSenderCertificate {
+            certificate: self.certificate.clone(),
+            signature: self.signature.clone(),
+        }
+    }
+
     fn validate_at(
         &self,
         context: &IdentityContext,
         reference_time_millis: u64,
+        certificate_grace_millis: u64,
     ) -> Result<ValidatedSenderCertificate, RoostError> {
         context.validate_sender_certificate(
-            self.certificate.clone(),
-            self.signature.clone(),
+            self.signed(),
             self.validation(reference_time_millis),
+            certificate_grace_millis,
         )
     }
 }
@@ -288,39 +254,52 @@ fn assert_rejected_for(
 }
 
 #[test]
-fn expired_sender_certificate_validates_only_within_the_configured_grace() {
-    let signed = SignedSenderCertificate::new();
-    let default = IdentityContext::new(Arc::new(MemoryStorage::default()));
-    let graced_configuration = configuration();
-    let grace_millis = graced_configuration.certificate_grace_millis;
-    let graced = IdentityContext::with_configuration(
-        Arc::new(MemoryStorage::default()),
-        graced_configuration,
-    )
-    .unwrap();
+fn expired_sender_certificate_validates_only_within_the_passed_grace() {
+    let signed = IssuedCertificate::new();
+    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let grace_millis = 300_000;
 
     let validated = signed
-        .validate_at(&default, CERTIFICATE_EXPIRES_AT_MILLIS)
+        .validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS, 0)
         .unwrap();
     assert_eq!(validated.identity_key, signed.identity_key);
     assert_eq!(validated.relay_domain, CERTIFICATE_RELAY_DOMAIN);
     assert_eq!(validated.expires_at_millis, CERTIFICATE_EXPIRES_AT_MILLIS);
     assert_rejected_for(
-        signed.validate_at(&default, CERTIFICATE_EXPIRES_AT_MILLIS + 1),
+        signed.validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS + 1, 0),
         SenderCertificateValidationError::ExpiredCertificate,
     );
     signed
-        .validate_at(&graced, CERTIFICATE_EXPIRES_AT_MILLIS + grace_millis)
+        .validate_at(
+            &context,
+            CERTIFICATE_EXPIRES_AT_MILLIS + grace_millis,
+            grace_millis,
+        )
         .unwrap();
     assert_rejected_for(
-        signed.validate_at(&graced, CERTIFICATE_EXPIRES_AT_MILLIS + grace_millis + 1),
+        signed.validate_at(
+            &context,
+            CERTIFICATE_EXPIRES_AT_MILLIS + grace_millis + 1,
+            grace_millis,
+        ),
         SenderCertificateValidationError::ExpiredCertificate,
     );
 }
 
 #[test]
+fn certificate_grace_above_five_minutes_is_refused() {
+    let signed = IssuedCertificate::new();
+    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
+
+    assert!(matches!(
+        signed.validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS, 300_001),
+        Err(RoostError::InvalidData { .. })
+    ));
+}
+
+#[test]
 fn sender_certificate_is_rejected_when_revocation_is_unavailable() {
-    let signed = SignedSenderCertificate::new();
+    let signed = IssuedCertificate::new();
     let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
     let validation = SenderCertificateValidation {
         revocation_state: RevocationState {
@@ -331,7 +310,7 @@ fn sender_certificate_is_rejected_when_revocation_is_unavailable() {
     };
 
     assert_rejected_for(
-        context.validate_sender_certificate(signed.certificate, signed.signature, validation),
+        context.validate_sender_certificate(signed.signed(), validation, 0),
         SenderCertificateValidationError::RevocationStateUnavailable,
     );
 }
@@ -365,25 +344,25 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
             },
         )
         .unwrap();
-    let entries = |updates: &[ProtocolStateUpdate]| {
-        updates
+    let entries = |changes: &StateChanges| {
+        changes
+            .updates
             .iter()
-            .map(|update| ProtocolStateEntry {
-                kind: update.kind,
+            .map(|update| StateEntry {
                 key: update.key.clone(),
-                blob: update.blob.clone().expect("contact changes write a blob"),
+                blob: Some(update.blob.clone().expect("contact changes write a blob")),
             })
             .collect::<Vec<_>>()
     };
     let accepted = alice
         .contacts()
-        .accept_contact(entries(&change.state_updates), identity_key(&bob))
+        .accept_contact(entries(&change.changes), identity_key(&bob))
         .unwrap();
     let foreign = derive_safety_number(identity_key(&charlie), identity_key(&bob)).unwrap();
     let rejected = alice
         .contacts()
         .confirm_contact_safety_number(
-            entries(&accepted.state_updates),
+            entries(&accepted.changes),
             identity_key(&bob),
             foreign.grouped_decimal,
         )
@@ -400,7 +379,7 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
     let confirmed = alice
         .contacts()
         .confirm_contact_safety_number(
-            entries(&accepted.state_updates),
+            entries(&accepted.changes),
             identity_key(&bob),
             correct.grouped_decimal,
         )

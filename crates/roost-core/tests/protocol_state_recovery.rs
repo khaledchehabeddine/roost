@@ -19,18 +19,8 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
             .as_bytes()
             .to_vec(),
     );
-    let domain_keys = [fixture.alice_sender.domain_signing_key()];
-    let revoked = [];
-
-    let first_read = fixture.bob_store.snapshot();
-    let first = engine
-        .decrypt_message_with_transport_bindings(
-            &mut ChaCha20Rng::from_seed([0x5a; 32]),
-            &first_read,
-            fixture.inbound(&message.message, &domain_keys, &revoked),
-            &fixture.binding,
-            &fixture.binding,
-        )
+    let first = fixture
+        .receive(&engine, &fixture.bob_store, &message.message, 0x5a)
         .map(session_unrecoverable)
         .unwrap();
     assert_eq!(
@@ -44,20 +34,14 @@ fn dead_session_marker_is_durable_until_caller_replaces_session() {
             ..
         })
     ));
-    fixture.bob_store.commit(first.state_updates).unwrap();
+    fixture.bob_store.commit_changes(first.changes).unwrap();
 
-    let repeated = engine
-        .decrypt_message_with_transport_bindings(
-            &mut ChaCha20Rng::from_seed([0x5b; 32]),
-            &fixture.bob_store.snapshot(),
-            fixture.inbound(&message.message, &domain_keys, &revoked),
-            &fixture.binding,
-            &fixture.binding,
-        )
+    let repeated = fixture
+        .receive(&engine, &fixture.bob_store, &message.message, 0x5b)
         .map(session_unrecoverable)
         .unwrap();
     assert!(repeated.event.is_none());
-    assert!(repeated.state_updates.is_empty());
+    assert!(repeated.changes.updates().is_empty());
 
     let dead_session = fixture.session_id;
     // Only a new handshake replaces a Dead Session, and it gets its own SessionID.

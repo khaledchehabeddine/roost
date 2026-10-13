@@ -1,9 +1,33 @@
 //! FFI-safe sealed-sender Message records and encode/decode helpers.
 
 use crate::error::RoostError;
-use crate::records::fixed_32;
+use crate::records::{fixed_32, hex_identifier, hex_text};
 use roost_core::Message as CoreMessage;
 use roost_core::SealedFramePreKeyReference as CorePreKeyReference;
+
+/// The identifier of one Message within a Session.
+///
+/// The value is 32 lowercase hexadecimal digits, so it compares and hashes as a plain string.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
+pub struct MessageId {
+    /// The identifier's canonical text.
+    pub value: String,
+}
+
+impl MessageId {
+    pub(crate) fn from_core(id: roost_protocol::MessageId) -> Self {
+        Self {
+            value: hex_text(id.as_bytes()),
+        }
+    }
+
+    pub(crate) fn to_core(&self) -> Result<roost_protocol::MessageId, RoostError> {
+        Ok(roost_protocol::MessageId::from_bytes(hex_identifier(
+            &self.value,
+            "message id",
+        )?))
+    }
+}
 
 /// Transport-visible X3DH prekey reference in a sealed-sender frame.
 #[derive(Clone, uniffi::Record)]

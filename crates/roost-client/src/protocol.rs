@@ -2,23 +2,22 @@
 
 use crate::context::{Contacts, Messaging};
 use crate::error::RoostError;
-use crate::message::{Message, PayloadKind, SenderIdentityMaterial};
-use crate::records::{SessionId, fixed_32, fixed_64};
+use crate::message::{Message, MessageId, PayloadKind, SenderIdentityMaterial};
+use crate::records::{SessionId, fixed_32, fixed_64, hex_bytes, hex_text};
 use crate::time::{millis_from_secs, time_from_millis, whole_secs_from_millis};
-use rand::rngs::OsRng;
 use roost_core::RecipientDeliveryCapability as CoreRecipientDeliveryCapability;
 use roost_core::{
     ContactSafetyNumberConfirmation as CoreSafetyNumberConfirmation,
     ContactStateChange as CoreContactStateChange, ProtocolStateAddress as CoreProtocolStateAddress,
-    ProtocolStateBlob as CoreProtocolStateBlob, ProtocolStateKey as CoreProtocolStateKey,
-    ProtocolStateSnapshot as CoreProtocolStateSnapshot,
-    ProtocolStateUpdate as CoreProtocolStateUpdate,
+    ProtocolStateBlob as CoreProtocolStateBlob, ProtocolStateCommitCondition,
+    ProtocolStateKey as CoreProtocolStateKey, ProtocolStateSnapshot as CoreProtocolStateSnapshot,
+    ProtocolStateUpdate as CoreProtocolStateUpdate, StateChanges as CoreStateChanges,
 };
 use std::time::Duration;
 use zeroize::{Zeroize, Zeroizing};
 
 /// Stable category for an opaque protocol-state blob.
-#[derive(Clone, Copy, Eq, PartialEq, uniffi::Enum)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, uniffi::Enum)]
 pub enum ProtocolStateKind {
     /// A Session's encryption state, stored under its SessionID.
     RatchetSession,
@@ -40,51 +39,64 @@ pub enum ProtocolStateKind {
     PeerSessions,
 }
 
-/// Host-side compare-and-set precondition for one protocol-state update.
+/// The name of one record the host stores: its kind and its ID.
 ///
-/// Core derives this value from the input snapshot. Check it against current durable storage inside
-/// the same per-identity transaction that writes all returned updates and effects. Compare digests
-/// in constant time; on failure reload and process again.
-#[derive(Clone, Eq, PartialEq, uniffi::Enum)]
-pub enum ProtocolStateCommitCheck {
-    /// The host must apply the update only when no blob exists at the address.
-    Absent,
-    /// The host must apply the update only when the current blob digest matches.
-    Digest {
-        /// Expected digest of the current opaque blob. Always 32 bytes.
-        expected_blob_digest: Vec<u8>,
-    },
+/// The ID is lowercase hexadecimal. For a contact's records it encodes the contact's Identity
+/// Key, so the host can find every record of one contact without decoding a blob.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
+pub struct StateKey {
+    /// The record's kind.
+    pub kind: ProtocolStateKind,
+    /// The record's ID within its kind, in lowercase hexadecimal.
+    pub id: String,
 }
 
-/// Opaque protocol-state address and blob loaded by a host.
+/// One record as the host holds it, or its absence.
 ///
-/// Loaded blob bytes are wrapped and zeroized when converted into a Rust snapshot.
+/// Roost wraps the bytes and erases its copy once it's done with them.
 #[derive(uniffi::Record)]
-pub struct ProtocolStateEntry {
-    /// State kind.
-    pub kind: ProtocolStateKind,
-    /// State key bytes.
-    pub key: Vec<u8>,
-    /// Opaque blob bytes.
-    pub blob: Vec<u8>,
-}
-
-/// Opaque protocol-state update returned by Rust for host commit.
-///
-/// Returned blob bytes are host-owned FFI values; hosts must commit or discard them promptly.
-#[derive(uniffi::Record)]
-pub struct ProtocolStateUpdate {
-    /// State kind.
-    pub kind: ProtocolStateKind,
-    /// State key bytes.
-    pub key: Vec<u8>,
-    /// Previous-blob check the host must enforce before applying this update.
-    pub commit_check: ProtocolStateCommitCheck,
-    /// Replacement blob, or `None` to delete the address.
+pub struct StateEntry {
+    /// The record's name.
+    pub key: StateKey,
+    /// The record's bytes, or `None` when the host holds no record under this key.
     pub blob: Option<Vec<u8>>,
 }
 
-/// Protocol hardening limits exposed to bindings.
+/// One record to write when the host commits.
+#[derive(uniffi::Record)]
+pub struct StateUpdate {
+    /// The record's name.
+    pub key: StateKey,
+    /// The record's new bytes, or `None` to delete it.
+    pub blob: Option<Vec<u8>>,
+}
+
+/// What one record must still be when the host commits: unchanged since Roost read it, or still
+/// absent.
+#[derive(Clone, uniffi::Record)]
+pub struct CommitCondition {
+    /// The record's name.
+    pub key: StateKey,
+    /// Roost's fingerprint of the record it read, or `None` when the record must still be absent.
+    /// Pass it back unchanged.
+    pub digest: Option<Vec<u8>>,
+}
+
+/// The records an operation's result relies on, and the records it writes.
+///
+/// Inside one transaction, read the record under each condition's key, call [`Self::matches`],
+/// and only when it returns `true` write every update together with the result's effects, such as
+/// a Message to send. When it returns `false`, another operation changed a record first: roll
+/// back, then start the operation again from fresh reads.
+#[derive(uniffi::Record)]
+pub struct StateChanges {
+    /// Every record the result relies on, including ones it read but doesn't write.
+    pub conditions: Vec<CommitCondition>,
+    /// The records to write.
+    pub updates: Vec<StateUpdate>,
+}
+
+/// Roost's fixed limits on what one Message or record may cost, and the Deduplication Set's range.
 #[derive(uniffi::Record)]
 pub struct ProtocolHardeningLimits {
     /// Maximum encoded Message bytes accepted before parsing.
@@ -97,12 +109,36 @@ pub struct ProtocolHardeningLimits {
     pub max_sender_certificate_len: u64,
     /// Maximum sender signature bytes accepted after sealed-sender decrypt.
     pub max_sender_signature_len: u64,
-    /// Received-message digest window capacity.
-    pub deduplication_capacity: u64,
     /// Maximum pending outbound Messages retained for acknowledgment processing.
     pub max_pending_acknowledgments: u64,
     /// Maximum processed acknowledgment digests retained for duplicate detection.
     pub max_acknowledgment_digests: u64,
+    /// Smallest Deduplication Set size a receive may pass.
+    pub min_deduplication_capacity: u32,
+    /// Deduplication Set size for apps without a reason to choose another.
+    pub default_deduplication_capacity: u32,
+    /// Largest Deduplication Set size a receive may pass.
+    pub max_deduplication_capacity: u32,
+}
+
+/// The settings the app passes with each receive.
+///
+/// Roost holds no settings, so the app and its extensions apply whatever each receive passes.
+/// Read the value the app should use from one place, such as its own settings or its Relay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct ReceiveSettings {
+    /// How many received-Message digests the Deduplication Set keeps, within
+    /// [`ProtocolHardeningLimits`]'s range. Roost resizes the set when this changes, dropping the
+    /// oldest digests first.
+    pub deduplication_capacity: u32,
+    /// Whether a blocked contact's Messages get an acknowledgment.
+    pub blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy,
+    /// How long after expiry a sender certificate still validates, in milliseconds, at most
+    /// 300,000.
+    ///
+    /// A grace covers clock differences between devices, at the cost of accepting a certificate
+    /// the relay has stopped vouching for.
+    pub certificate_grace_millis: u64,
 }
 
 /// An identity's permanent public key, used for trust, certificates, and contacts.
@@ -193,8 +229,8 @@ pub struct PeerInboxAuthorization {
 pub struct ContactStateChange {
     /// Complete contact snapshot after the operation.
     pub contact: ContactState,
-    /// Opaque state updates to commit.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+    /// State changes to commit.
+    pub changes: StateChanges,
     /// Event to emit after durable commit, when state changed.
     pub event: Option<ContactEvent>,
 }
@@ -229,8 +265,8 @@ pub struct SafetyNumber {
 /// Pending acknowledgment visible to hosts without plaintext.
 #[derive(uniffi::Record)]
 pub struct PendingAcknowledgment {
-    /// Original outbound Message ID. Always 16 bytes.
-    pub message_id: Vec<u8>,
+    /// Original outbound Message ID.
+    pub message_id: MessageId,
     /// Original outbound Message waiting for acknowledgment.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
@@ -242,8 +278,8 @@ pub struct PendingAcknowledgment {
 /// Retry instruction for an unacknowledged Message.
 #[derive(uniffi::Record)]
 pub struct RetryInstruction {
-    /// Original outbound Message ID. Always 16 bytes.
-    pub message_id: Vec<u8>,
+    /// Original outbound Message ID.
+    pub message_id: MessageId,
     /// Message the host may retransmit.
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
@@ -257,25 +293,25 @@ pub struct RetryInstruction {
 pub struct RetryInstructionResult {
     /// Messages whose retry window elapsed.
     pub instructions: Vec<RetryInstruction>,
-    /// Opaque state updates to commit.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+    /// State changes to commit.
+    pub changes: StateChanges,
 }
 
-/// Outbound Message plus state updates from one encrypt operation.
+/// An outbound Message and the state changes from one Message Operation.
 #[derive(uniffi::Record)]
 pub struct OutboundMessageResult {
     /// The Session Roost selected for the Message.
     pub session_id: SessionId,
-    /// Stable outbound Message ID. Always 16 bytes.
-    pub message_id: Vec<u8>,
+    /// The draft's MessageID, sealed inside the Message.
+    pub message_id: MessageId,
     /// Sender-observed Unix timestamp in milliseconds.
     pub sent_at_millis: u64,
     /// Payload kind sealed in the Message.
     pub payload_kind: PayloadKind,
     /// Message to send after durable commit.
     pub message: Message,
-    /// Opaque state updates to commit atomically with the Message.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+    /// State changes to commit atomically with the Message.
+    pub changes: StateChanges,
 }
 
 /// Terminal Session reason.
@@ -285,7 +321,7 @@ pub enum SessionUnrecoverableReason {
     SkippedKeyLimitExceeded,
 }
 
-/// Session event emitted after committing returned updates.
+/// Session event emitted after committing the returned changes.
 #[derive(uniffi::Record)]
 pub struct SessionEvent {
     /// The Dead Session.
@@ -294,23 +330,19 @@ pub struct SessionEvent {
     pub reason: SessionUnrecoverableReason,
 }
 
-/// A provisional receive result. Commit its updates and effects atomically before use.
+/// A provisional receive result. Commit its changes and effects atomically before use.
 ///
 /// Switch on the outcome to obtain only the fields that case permits. The host transaction must
-/// enforce every returned condition and persist effects before plaintext is displayed, an
-/// acknowledgment is sent, or recovery is scheduled.
+/// check the changes with [`StateChanges::matches`] and persist effects before plaintext is
+/// displayed, an acknowledgment is sent, or recovery is scheduled.
 #[derive(uniffi::Enum)]
-#[expect(
-    clippy::large_enum_variant,
-    reason = "UniFFI enum payloads are generated records, which can't be boxed"
-)]
 pub enum InboundMessageOutcome {
     /// Authenticated plaintext and acknowledgment for a unique Message.
     Accepted {
         /// Payload for this outcome.
         result: InboundMessageResult,
     },
-    /// A blocked Message with state changes and the configured acknowledgment policy.
+    /// A blocked Message with state changes and the acknowledgment its receive allows.
     Blocked {
         /// Payload for this outcome.
         result: BlockedInboundMessageResult,
@@ -327,18 +359,30 @@ pub enum InboundMessageOutcome {
     /// A Message whose `prekey_reference` is set may still start that Session through
     /// [`Messaging::prepare_accept_session`].
     UnknownSession,
+    /// An acknowledgment cleared one of this identity's Pending Acknowledgments. Commit it before
+    /// treating the acknowledged Message as delivered. Roost sends no reply to an acknowledgment.
+    AcknowledgmentMatched {
+        /// Payload for this outcome.
+        result: AcknowledgmentResult,
+    },
+    /// An authenticated acknowledgment named no Pending Acknowledgment, such as one already
+    /// cleared. Commit it anyway, so the advanced state recognizes a retry as a duplicate.
+    AcknowledgmentUnmatched {
+        /// Payload for this outcome.
+        result: AcknowledgmentResult,
+    },
 }
 
 /// Authenticated Message data that remains provisional until the host transaction commits.
 ///
-/// The host commits the Message, acknowledgment, and conditional updates in one transaction.
+/// The host commits the Message, acknowledgment, and state changes in one transaction.
 /// Plaintext is host-owned secret bytes; clear discarded copies promptly.
 #[derive(uniffi::Record)]
 pub struct InboundMessageResult {
     /// The Session the Message arrived on.
     pub session_id: SessionId,
-    /// Authenticated Message identifier. Always 16 bytes.
-    pub message_id: Vec<u8>,
+    /// Authenticated MessageID.
+    pub message_id: MessageId,
     /// Authenticated sender timestamp in milliseconds.
     pub sent_at_millis: u64,
     /// Authenticated payload kind.
@@ -347,27 +391,27 @@ pub struct InboundMessageResult {
     pub plaintext: Vec<u8>,
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
-    /// Encrypted acknowledgment to commit with its exact caller-supplied Transport Binding.
+    /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it.
     pub acknowledgment: Message,
-    /// Conditional opaque updates to commit with the accepted Message and acknowledgment.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+    /// State changes to commit with the accepted Message and acknowledgment.
+    pub changes: StateChanges,
 }
 
 /// A blocked receive with no plaintext available to the caller.
 ///
-/// The acknowledgment is present only under the silent-receipt policy. Commit it with the updates
+/// The acknowledgment is present only under the silent-receipt policy. Commit it with the changes
 /// before sending; under the default policy the host persists only the processed state.
 #[derive(uniffi::Record)]
 pub struct BlockedInboundMessageResult {
-    /// Acknowledgment when the configured policy permits one.
+    /// Acknowledgment when the receive's policy permits one.
     pub acknowledgment: Option<Message>,
-    /// Conditional updates to commit before treating the Message as processed.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+    /// State changes to commit before treating the Message as processed.
+    pub changes: StateChanges,
 }
 
 /// A terminal Session and the recovery work required after durable commit.
 ///
-/// An event accompanies the first durable observation. Persist it with the conditional updates so
+/// An event accompanies the first durable observation. Persist it with the state changes so
 /// restarts can resume recovery without reporting it twice. Only a fresh handshake, which gets its
 /// own SessionID, replaces the Session; this result never resets it.
 #[derive(uniffi::Record)]
@@ -376,58 +420,27 @@ pub struct SessionUnrecoverableResult {
     pub session_id: SessionId,
     /// Typed terminal reason.
     pub reason: SessionUnrecoverableReason,
-    /// Once-only recovery signal to persist atomically with the returned updates.
+    /// Once-only recovery signal to persist atomically with the state changes.
     pub event: Option<SessionEvent>,
-    /// Conditional updates that record delivery of the recovery signal.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+    /// State changes that record delivery of the recovery signal.
+    pub changes: StateChanges,
 }
 
-/// A provisional result of processing an encrypted acknowledgment.
-///
-/// Cleared and missed acknowledgments both advance authenticated protocol state. Commit that state
-/// and the matching host delivery decision together. Duplicates have no effects; terminal Sessions
-/// carry the same durable recovery contract as Message receives.
-#[derive(uniffi::Enum)]
-pub enum AcknowledgmentOutcome {
-    /// A pending outbound Message was cleared.
-    Cleared {
-        /// Payload for this outcome.
-        result: AcknowledgmentResult,
-    },
-    /// An authenticated acknowledgment did not match a pending Message.
-    Missed {
-        /// Payload for this outcome.
-        result: AcknowledgmentResult,
-    },
-    /// An already processed acknowledgment. No effects are produced.
-    Duplicate,
-    /// A terminal Session with durable recovery work.
-    SessionUnrecoverable {
-        /// Payload for this outcome.
-        result: SessionUnrecoverableResult,
-    },
-    /// The acknowledgment names a Session this identity doesn't have. No effects are produced.
-    UnknownSession,
-}
-
-/// Authenticated acknowledgment data and its conditional state updates.
-///
-/// The named outbound Message may have already left host pending state. A missed acknowledgment
-/// still needs its protocol updates committed so retries are recognized as duplicates.
+/// An authenticated acknowledgment and the state it advanced.
 #[derive(uniffi::Record)]
 pub struct AcknowledgmentResult {
     /// The Session the acknowledgment arrived on.
     pub session_id: SessionId,
-    /// Acknowledgment Message identifier. Always 16 bytes.
-    pub message_id: Vec<u8>,
+    /// The acknowledgment's own MessageID.
+    pub message_id: MessageId,
     /// Authenticated sender timestamp in milliseconds.
     pub sent_at_millis: u64,
-    /// Outbound Message identifier named by the acknowledgment. Always 16 bytes.
-    pub acknowledged_message_id: Vec<u8>,
+    /// The outbound MessageID the acknowledgment names.
+    pub acknowledged_message_id: MessageId,
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
-    /// Conditional updates to commit before clearing host pending state.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+    /// State changes to commit before clearing the host's own delivery state.
+    pub changes: StateChanges,
 }
 
 /// Blocked-contact acknowledgment policy.
@@ -439,51 +452,28 @@ pub enum BlockedContactAcknowledgmentPolicy {
     SilentReceipt,
 }
 
+/// Returns Roost's fixed limits and the Deduplication Set's range.
+#[uniffi::export]
+pub fn protocol_hardening_limits() -> ProtocolHardeningLimits {
+    ProtocolHardeningLimits::from_core(roost_core::ProtocolHardeningLimits::default())
+}
+
 #[uniffi::export]
 impl Messaging {
-    /// Returns the engine hardening limits.
+    /// Returns changes that delete every kind of record stored under `id`, such as a SessionID.
     ///
-    /// The values come from this context's immutable configuration and describe the limits applied to its operations.
-    pub fn hardening_limits(&self) -> ProtocolHardeningLimits {
-        ProtocolHardeningLimits::from_core(self.inner.protocol_engine().hardening_limits())
-    }
-
-    /// Returns an update that initializes a deduplication set.
-    ///
-    /// Persist the update with the first application effects using this set. Its absent precondition refuses replacement of an existing set.
+    /// Commit the changes atomically with the host effects that require the wipe.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if the key exceeds the protocol address limit.
-    /// - [`RoostError::InternalError`] if the new state cannot be encoded.
-    pub fn initialize_deduplication_set(
-        &self,
-        key: Vec<u8>,
-    ) -> Result<ProtocolStateUpdate, RoostError> {
-        Ok(ProtocolStateUpdate::from_core(
+    /// - [`RoostError::InvalidData`] if `id` isn't lowercase hexadecimal of a valid length, or the
+    ///   snapshot exceeds its bounds or repeats a key.
+    pub fn wipe(&self, snapshot: Vec<StateEntry>, id: String) -> Result<StateChanges, RoostError> {
+        let snapshot = snapshot_input_from_entries(snapshot)?;
+        Ok(StateChanges::from_updates(
             self.inner
                 .protocol_engine()
-                .initialize_deduplication_set(&mut OsRng, protocol_key(key)?)?,
+                .wipe(&snapshot, protocol_key(&id)?),
         ))
-    }
-
-    /// Returns deletion updates for all protocol-state kinds at the key.
-    ///
-    /// Deletion remains conditional on the supplied snapshot. Commit the returned updates atomically with the host effects that require the wipe.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if a key or snapshot exceeds its bounds or repeats an address.
-    pub fn wipe(
-        &self,
-        snapshot: Vec<ProtocolStateEntry>,
-        key: Vec<u8>,
-    ) -> Result<Vec<ProtocolStateUpdate>, RoostError> {
-        Ok(self
-            .inner
-            .protocol_engine()
-            .wipe(&snapshot_input_from_entries(snapshot)?, protocol_key(key)?)
-            .into_iter()
-            .map(ProtocolStateUpdate::from_core)
-            .collect())
     }
 
     /// Returns all pending acknowledgments for a Session.
@@ -497,7 +487,7 @@ impl Messaging {
     /// - [`RoostError::UnsupportedVersion`] if the stored blob has an unsupported version.
     pub fn pending_acknowledgments(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         session_id: SessionId,
     ) -> Result<Vec<PendingAcknowledgment>, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -512,7 +502,7 @@ impl Messaging {
 
     /// Returns retry instructions whose retry window elapsed.
     ///
-    /// Commit the returned updates with the host retry work. Preserve each Message's originally supplied Transport Binding when submitting it again.
+    /// Commit the returned changes with the host retry work. Preserve each Message's originally supplied Transport Binding when submitting it again.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if the SessionID isn't canonical or the snapshot exceeds its
@@ -522,7 +512,7 @@ impl Messaging {
     /// - [`RoostError::UnsupportedVersion`] if a stored blob has an unsupported version.
     pub fn retry_instructions(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         session_id: SessionId,
         now_millis: u64,
         retry_window_millis: u64,
@@ -543,7 +533,7 @@ impl Messaging {
 impl Contacts {
     /// Creates or updates a Contact State blob.
     ///
-    /// Roost verifies the Contact Identity and Discovery Key binding. Commit the returned updates with the host contact record; an unchanged contact may produce no updates.
+    /// Roost verifies the Contact Identity and Discovery Key binding. Commit the returned changes with the host contact record; an unchanged contact may produce no updates.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if peer key lengths or snapshot bounds are invalid.
@@ -552,7 +542,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
     pub fn record_contact(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         contact_identity: ContactIdentity,
     ) -> Result<ContactStateChange, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -573,7 +563,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
     pub fn contact_state(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
     ) -> Result<Option<ContactState>, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -594,7 +584,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
     pub fn contact_states(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
     ) -> Result<Vec<ContactState>, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
         self.inner
@@ -616,7 +606,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
     pub fn accept_contact(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
     ) -> Result<ContactStateChange, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -641,18 +631,18 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored authorization has an unsupported version.
     pub fn record_peer_inbox_authorization(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
         epoch: u32,
         capability: Vec<u8>,
-    ) -> Result<Vec<ProtocolStateUpdate>, RoostError> {
+    ) -> Result<StateChanges, RoostError> {
         let capability = Zeroizing::new(capability);
         let snapshot = snapshot_input_from_entries(snapshot)?;
         let capability = CoreRecipientDeliveryCapability::from_bytes(fixed_32(
             &capability,
             "recipient delivery capability",
         )?);
-        Ok(updates_from_core(
+        Ok(StateChanges::from_updates(
             self.inner
                 .protocol_engine()
                 .record_peer_inbox_authorization(
@@ -672,7 +662,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored authorization has an unsupported version.
     pub fn peer_inbox_authorization(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
     ) -> Result<Option<PeerInboxAuthorization>, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -699,12 +689,12 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if the stored record has an unsupported version.
     pub fn record_inbox_authorization_delivered(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
         epoch: u32,
-    ) -> Result<Vec<ProtocolStateUpdate>, RoostError> {
+    ) -> Result<StateChanges, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
-        Ok(updates_from_core(
+        Ok(StateChanges::from_updates(
             self.inner
                 .protocol_engine()
                 .record_inbox_authorization_delivered(&snapshot, identity_key.to_core()?, epoch)?,
@@ -724,7 +714,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if a stored record has an unsupported version.
     pub fn contacts_needing_inbox_authorization(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         current_epoch: u32,
         candidates: Vec<IdentityKey>,
     ) -> Result<Vec<IdentityKey>, RoostError> {
@@ -759,7 +749,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored Identity or contact state has an unsupported version.
     pub fn confirm_contact_safety_number(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         contact_identity_key: IdentityKey,
         presented_grouped_decimal: String,
     ) -> Result<ContactSafetyNumberConfirmation, RoostError> {
@@ -789,7 +779,7 @@ impl Contacts {
     /// - [`RoostError::UnsupportedVersion`] if stored contact state has an unsupported version.
     pub fn unblock_contact(
         &self,
-        snapshot: Vec<ProtocolStateEntry>,
+        snapshot: Vec<StateEntry>,
         identity_key: IdentityKey,
     ) -> Result<ContactStateChange, RoostError> {
         let snapshot = snapshot_input_from_entries(snapshot)?;
@@ -799,15 +789,6 @@ impl Contacts {
                 .unblock_contact(&snapshot, identity_key.to_core()?)?,
         )
     }
-}
-
-/// Protocol-state address requested from a host store.
-#[derive(uniffi::Record)]
-pub struct ProtocolStateAddress {
-    /// State kind.
-    pub kind: ProtocolStateKind,
-    /// State key bytes.
-    pub key: Vec<u8>,
 }
 
 /// Derives a Safety Number for two permanent Identity Keys.
@@ -823,104 +804,180 @@ pub fn derive_safety_number(
     })
 }
 
-/// Computes the Core-owned digest used by `ProtocolStateUpdate` commit checks.
 #[uniffi::export]
-pub fn protocol_state_blob_digest(blob: Vec<u8>) -> Vec<u8> {
-    let blob = Zeroizing::new(blob);
-    roost_core::protocol_state_blob_digest(&blob).to_vec()
-}
-
-pub(crate) fn protocol_key(key: Vec<u8>) -> Result<CoreProtocolStateKey, RoostError> {
-    CoreProtocolStateKey::from_bytes(key).map_err(RoostError::from)
-}
-
-pub(crate) fn snapshot_input_from_entries(
-    mut entries: Vec<ProtocolStateEntry>,
-) -> Result<CoreProtocolStateSnapshot, RoostError> {
-    if entries.len() > roost_core::MAX_PROTOCOL_STATE_ENTRIES {
-        for entry in &mut entries {
-            entry.blob.zeroize();
-        }
-        return Err(RoostError::InvalidData {
-            reason: "too many protocol-state entries".into(),
-        });
+impl StateChanges {
+    /// Returns whether every condition still holds for `current`, the host's entry for each
+    /// condition's key, read inside the commit's transaction.
+    ///
+    /// # Errors
+    /// - [`RoostError::InvalidData`] if `current` misses a condition's key, repeats one, names one
+    ///   no condition has, or a key or digest is malformed.
+    pub fn matches(&self, current: Vec<StateEntry>) -> Result<bool, RoostError> {
+        let current = entries_to_core(current)?;
+        let conditions = self
+            .conditions
+            .iter()
+            .map(CommitCondition::to_core)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(roost_core::commit_conditions_match(&conditions, &current)?)
     }
-    // Wrap every entry before validation, including entries after a malformed one.
-    let entries: Vec<_> = entries
-        .into_iter()
-        .map(|entry| {
-            (
-                entry.kind,
-                entry.key,
-                CoreProtocolStateBlob::from_bytes(entry.blob),
-            )
-        })
-        .collect();
-
-    let mut snapshot = CoreProtocolStateSnapshot::new();
-    for (kind, key, blob) in entries {
-        let address = CoreProtocolStateAddress::new(kind.to_core(), protocol_key(key)?);
-        if snapshot.get(&address).is_some() {
-            return Err(RoostError::InvalidData {
-                reason: "duplicate protocol-state address".into(),
-            });
-        }
-        snapshot.set(address, blob)?;
-    }
-    Ok(snapshot)
 }
 
-impl ProtocolStateUpdate {
-    pub(crate) fn from_core(update: CoreProtocolStateUpdate) -> Self {
+impl StateChanges {
+    pub(crate) fn from_core(changes: CoreStateChanges) -> Self {
+        let conditions = changes
+            .conditions()
+            .iter()
+            .map(|(address, condition)| CommitCondition::from_core(address, *condition))
+            .collect();
         Self {
-            kind: ProtocolStateKind::from_core(update.address().kind()),
-            key: update.address().key().as_bytes().to_vec(),
-            commit_check: match update.commit_condition() {
-                roost_core::ProtocolStateCommitCondition::Absent => {
-                    ProtocolStateCommitCheck::Absent
-                }
-                roost_core::ProtocolStateCommitCondition::Digest(digest) => {
-                    ProtocolStateCommitCheck::Digest {
-                        expected_blob_digest: digest.to_vec(),
-                    }
-                }
+            conditions,
+            updates: changes
+                .into_updates()
+                .into_iter()
+                .map(StateUpdate::from_core)
+                .collect(),
+        }
+    }
+
+    // Conditions come from each update, for operations that read only what they write.
+    pub(crate) fn from_updates(updates: Vec<CoreProtocolStateUpdate>) -> Self {
+        Self::from_core(CoreStateChanges::from(updates))
+    }
+}
+
+impl CommitCondition {
+    fn from_core(
+        address: &CoreProtocolStateAddress,
+        condition: ProtocolStateCommitCondition,
+    ) -> Self {
+        Self {
+            key: StateKey::from_core(address),
+            digest: match condition {
+                ProtocolStateCommitCondition::Absent => None,
+                ProtocolStateCommitCondition::Digest(digest) => Some(digest.to_vec()),
             },
+        }
+    }
+
+    fn to_core(
+        &self,
+    ) -> Result<(CoreProtocolStateAddress, ProtocolStateCommitCondition), RoostError> {
+        let condition = match &self.digest {
+            None => ProtocolStateCommitCondition::Absent,
+            Some(digest) => {
+                ProtocolStateCommitCondition::Digest(fixed_32(digest, "commit condition digest")?)
+            }
+        };
+        Ok((self.key.to_core()?, condition))
+    }
+}
+
+impl StateUpdate {
+    fn from_core(update: CoreProtocolStateUpdate) -> Self {
+        Self {
+            key: StateKey::from_core(update.address()),
             blob: update.blob().map(|blob| blob.as_bytes().to_vec()),
         }
     }
 }
 
-pub(crate) fn updates_from_core(updates: Vec<CoreProtocolStateUpdate>) -> Vec<ProtocolStateUpdate> {
-    updates
+impl StateKey {
+    pub(crate) fn from_core(address: &CoreProtocolStateAddress) -> Self {
+        Self {
+            kind: ProtocolStateKind::from_core(address.kind()),
+            id: hex_text(address.key().as_bytes()),
+        }
+    }
+
+    pub(crate) fn to_core(&self) -> Result<CoreProtocolStateAddress, RoostError> {
+        Ok(CoreProtocolStateAddress::new(
+            self.kind.to_core(),
+            protocol_key(&self.id)?,
+        ))
+    }
+}
+
+fn protocol_key(id: &str) -> Result<CoreProtocolStateKey, RoostError> {
+    CoreProtocolStateKey::from_bytes(hex_bytes(id, "state id")?).map_err(RoostError::from)
+}
+
+// Wraps every entry's bytes before checking any key, so a malformed entry leaves no copy behind.
+pub(crate) fn entries_to_core(
+    mut entries: Vec<StateEntry>,
+) -> Result<Vec<(CoreProtocolStateAddress, Option<CoreProtocolStateBlob>)>, RoostError> {
+    if entries.len() > roost_core::MAX_PROTOCOL_STATE_ENTRIES {
+        for entry in &mut entries {
+            if let Some(blob) = &mut entry.blob {
+                blob.zeroize();
+            }
+        }
+        return Err(RoostError::InvalidData {
+            reason: "too many protocol-state entries".into(),
+        });
+    }
+    let wrapped: Vec<_> = entries
         .into_iter()
-        .map(ProtocolStateUpdate::from_core)
+        .map(|entry| (entry.key, entry.blob.map(CoreProtocolStateBlob::from_bytes)))
+        .collect();
+    wrapped
+        .into_iter()
+        .map(|(key, blob)| Ok((key.to_core()?, blob)))
         .collect()
+}
+
+// Builds a snapshot from the host's present records; an entry without bytes adds nothing.
+pub(crate) fn snapshot_input_from_entries(
+    entries: Vec<StateEntry>,
+) -> Result<CoreProtocolStateSnapshot, RoostError> {
+    let mut snapshot = CoreProtocolStateSnapshot::new();
+    for (address, blob) in entries_to_core(entries)? {
+        if snapshot.get(&address).is_some() {
+            return Err(RoostError::InvalidData {
+                reason: "duplicate protocol-state address".into(),
+            });
+        }
+        if let Some(blob) = blob {
+            snapshot.set(address, blob)?;
+        }
+    }
+    Ok(snapshot)
 }
 
 impl ProtocolHardeningLimits {
     fn from_core(value: roost_core::ProtocolHardeningLimits) -> Self {
+        // Every limit is a fixed constant well inside both target types.
         Self {
             max_encoded_message_len: value.max_encoded_message_len as u64,
             max_message_payload_len: value.max_message_payload_len as u64,
             max_protocol_state_blob_len: value.max_protocol_state_blob_len as u64,
             max_sender_certificate_len: value.max_sender_certificate_len as u64,
             max_sender_signature_len: value.max_sender_signature_len as u64,
-            deduplication_capacity: value.deduplication_capacity as u64,
             max_pending_acknowledgments: value.max_pending_acknowledgments as u64,
             max_acknowledgment_digests: value.max_acknowledgment_digests as u64,
+            min_deduplication_capacity: value.min_deduplication_capacity as u32,
+            default_deduplication_capacity: value.default_deduplication_capacity as u32,
+            max_deduplication_capacity: value.max_deduplication_capacity as u32,
         }
     }
 }
 
-impl BlockedContactAcknowledgmentPolicy {
-    pub(crate) fn from_core(policy: roost_core::BlockedContactAcknowledgmentPolicy) -> Self {
-        match policy {
-            roost_core::BlockedContactAcknowledgmentPolicy::Unreachable => Self::Unreachable,
-            roost_core::BlockedContactAcknowledgmentPolicy::SilentReceipt => Self::SilentReceipt,
-        }
+impl ReceiveSettings {
+    pub(crate) fn to_core(self) -> Result<roost_core::ReceiveSettings, RoostError> {
+        let deduplication_capacity =
+            usize::try_from(self.deduplication_capacity).map_err(|_| RoostError::InvalidData {
+                reason: "deduplication capacity exceeds platform range".into(),
+            })?;
+        Ok(roost_core::ReceiveSettings::new(
+            deduplication_capacity,
+            self.blocked_contact_acknowledgment_policy.to_core(),
+            Duration::from_millis(self.certificate_grace_millis),
+        )?)
     }
+}
 
-    pub(crate) fn to_core(self) -> roost_core::BlockedContactAcknowledgmentPolicy {
+impl BlockedContactAcknowledgmentPolicy {
+    fn to_core(self) -> roost_core::BlockedContactAcknowledgmentPolicy {
         match self {
             Self::Unreachable => roost_core::BlockedContactAcknowledgmentPolicy::Unreachable,
             Self::SilentReceipt => roost_core::BlockedContactAcknowledgmentPolicy::SilentReceipt,
@@ -1032,7 +1089,7 @@ impl ContactStateChange {
     pub(crate) fn from_core(value: CoreContactStateChange) -> Result<Self, RoostError> {
         Ok(Self {
             contact: ContactState::from_core(value.contact)?,
-            state_updates: updates_from_core(value.state_updates),
+            changes: StateChanges::from_updates(value.state_updates),
             event: value.event.map(ContactEvent::from_core).transpose()?,
         })
     }
@@ -1056,7 +1113,7 @@ impl ContactSafetyNumberConfirmation {
 impl PendingAcknowledgment {
     fn from_core(value: roost_core::PendingAcknowledgment) -> Self {
         Self {
-            message_id: value.message_id.as_bytes().to_vec(),
+            message_id: MessageId::from_core(value.message_id),
             message: Message::from_core(value.message),
             first_sent_at_millis: value.first_sent_at_millis,
             last_retried_at_millis: value.last_retried_at_millis,
@@ -1067,7 +1124,7 @@ impl PendingAcknowledgment {
 impl RetryInstruction {
     fn from_core(value: roost_core::RetryInstruction) -> Self {
         Self {
-            message_id: value.message_id.as_bytes().to_vec(),
+            message_id: MessageId::from_core(value.message_id),
             message: Message::from_core(value.message),
             first_sent_at_millis: value.first_sent_at_millis,
             last_retried_at_millis: value.last_retried_at_millis,
@@ -1083,7 +1140,7 @@ impl RetryInstructionResult {
                 .into_iter()
                 .map(RetryInstruction::from_core)
                 .collect(),
-            state_updates: updates_from_core(value.state_updates),
+            changes: StateChanges::from_updates(value.state_updates),
         }
     }
 }
@@ -1092,11 +1149,11 @@ impl OutboundMessageResult {
     pub(crate) fn from_core(value: roost_core::OutboundMessageResult) -> Self {
         Self {
             session_id: SessionId::from_core(value.session_id),
-            message_id: value.message_id.as_bytes().to_vec(),
+            message_id: MessageId::from_core(value.message_id),
             sent_at_millis: value.sent_at_millis,
             payload_kind: PayloadKind::from_protocol(value.payload_kind),
             message: Message::from_core(value.message),
-            state_updates: updates_from_core(value.state_updates),
+            changes: StateChanges::from_core(value.changes),
         }
     }
 }
@@ -1104,25 +1161,22 @@ impl OutboundMessageResult {
 impl InboundMessageOutcome {
     pub(crate) fn from_core(value: roost_core::InboundMessageOutcome) -> Self {
         match value {
-            roost_core::InboundMessageOutcome::Accepted(result) => {
-                let state_updates = updates_from_core(result.state_updates);
-                Self::Accepted {
-                    result: InboundMessageResult {
-                        session_id: SessionId::from_core(result.session_id),
-                        message_id: result.message_id.as_bytes().to_vec(),
-                        sent_at_millis: result.sent_at_millis,
-                        payload_kind: PayloadKind::from_protocol(result.payload_kind),
-                        plaintext: result.plaintext.to_vec(),
-                        sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                        acknowledgment: Message::from_core(result.acknowledgment),
-                        state_updates,
-                    },
-                }
-            }
+            roost_core::InboundMessageOutcome::Accepted(result) => Self::Accepted {
+                result: InboundMessageResult {
+                    session_id: SessionId::from_core(result.session_id),
+                    message_id: MessageId::from_core(result.message_id),
+                    sent_at_millis: result.sent_at_millis,
+                    payload_kind: PayloadKind::from_protocol(result.payload_kind),
+                    plaintext: result.plaintext.to_vec(),
+                    sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
+                    acknowledgment: Message::from_core(result.acknowledgment),
+                    changes: StateChanges::from_core(result.changes),
+                },
+            },
             roost_core::InboundMessageOutcome::Blocked(result) => Self::Blocked {
                 result: BlockedInboundMessageResult {
                     acknowledgment: result.acknowledgment.map(Message::from_core),
-                    state_updates: updates_from_core(result.state_updates),
+                    changes: StateChanges::from_core(result.changes),
                 },
             },
             roost_core::InboundMessageOutcome::Duplicate => Self::Duplicate,
@@ -1132,6 +1186,16 @@ impl InboundMessageOutcome {
                 }
             }
             roost_core::InboundMessageOutcome::UnknownSession => Self::UnknownSession,
+            roost_core::InboundMessageOutcome::AcknowledgmentMatched(result) => {
+                Self::AcknowledgmentMatched {
+                    result: AcknowledgmentResult::from_core(*result),
+                }
+            }
+            roost_core::InboundMessageOutcome::AcknowledgmentUnmatched(result) => {
+                Self::AcknowledgmentUnmatched {
+                    result: AcknowledgmentResult::from_core(*result),
+                }
+            }
         }
     }
 }
@@ -1142,48 +1206,20 @@ impl SessionUnrecoverableResult {
             session_id: SessionId::from_core(result.session_id),
             reason: SessionUnrecoverableReason::from_core(result.reason),
             event: result.event.map(SessionEvent::from_core),
-            state_updates: updates_from_core(result.state_updates),
+            changes: StateChanges::from_core(result.changes),
         }
     }
 }
 
-impl AcknowledgmentOutcome {
-    pub(crate) fn from_core(value: roost_core::AcknowledgmentOutcome) -> Self {
-        match value {
-            roost_core::AcknowledgmentOutcome::Cleared(result) => Self::Cleared {
-                result: AcknowledgmentResult {
-                    session_id: SessionId::from_core(result.session_id),
-                    message_id: result.message_id.as_bytes().to_vec(),
-                    sent_at_millis: result.sent_at_millis,
-                    acknowledged_message_id: result.acknowledged_message_id.as_bytes().to_vec(),
-                    sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-                    state_updates: updates_from_core(result.state_updates),
-                },
-            },
-            roost_core::AcknowledgmentOutcome::Missed {
-                session_id,
-                message_id,
-                sent_at_millis,
-                acknowledged_message_id,
-                sender_identity,
-                state_updates,
-            } => Self::Missed {
-                result: AcknowledgmentResult {
-                    session_id: SessionId::from_core(session_id),
-                    message_id: message_id.as_bytes().to_vec(),
-                    sent_at_millis,
-                    acknowledged_message_id: acknowledged_message_id.as_bytes().to_vec(),
-                    sender_identity: SenderIdentityMaterial::from_core(sender_identity),
-                    state_updates: updates_from_core(state_updates),
-                },
-            },
-            roost_core::AcknowledgmentOutcome::Duplicate => Self::Duplicate,
-            roost_core::AcknowledgmentOutcome::SessionUnrecoverable(result) => {
-                Self::SessionUnrecoverable {
-                    result: SessionUnrecoverableResult::from_core(*result),
-                }
-            }
-            roost_core::AcknowledgmentOutcome::UnknownSession => Self::UnknownSession,
+impl AcknowledgmentResult {
+    fn from_core(result: roost_core::AcknowledgmentResult) -> Self {
+        Self {
+            session_id: SessionId::from_core(result.session_id),
+            message_id: MessageId::from_core(result.message_id),
+            sent_at_millis: result.sent_at_millis,
+            acknowledged_message_id: MessageId::from_core(result.acknowledged_message_id),
+            sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
+            changes: StateChanges::from_core(result.changes),
         }
     }
 }

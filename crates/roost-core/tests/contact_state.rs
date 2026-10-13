@@ -3,7 +3,7 @@
 mod support;
 
 use roost_core::MessageOperationError;
-use support::device::{Device, Relay};
+use support::device::{Device, DeviceError, Relay};
 use support::{ProtocolFixture, accepted_contact_identity};
 
 use rand::SeedableRng;
@@ -107,8 +107,8 @@ fn pending_contact_refuses_outgoing_user_message_until_accepted() {
 
     assert!(matches!(
         alice.encrypt(&bob, b"too early"),
-        Err(MessageOperationError::ProtocolState(
-            ProtocolStateError::ContactNotAccepted
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::ContactNotAccepted)
         ))
     ));
 
@@ -129,8 +129,8 @@ fn accepted_contact_without_a_session_needs_a_handshake() {
 
     assert!(matches!(
         alice.encrypt(&bob, b"no session"),
-        Err(MessageOperationError::ProtocolState(
-            ProtocolStateError::NoSession
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::NoSession)
         ))
     ));
     assert_eq!(alice.host.snapshot_bytes(), before.snapshot_bytes());
@@ -275,13 +275,15 @@ fn blocked_accepted_contact_refuses_outgoing_user_message() {
     fixture.alice_store.commit(blocked.state_updates).unwrap();
 
     assert!(matches!(
-        engine.encrypt_message_with_transport_binding(
-            &mut ChaCha20Rng::from_seed([0x72; 32]),
-            &fixture.alice_store.snapshot(),
-            fixture.outbound(1, b"blocked"),
-            &fixture.binding,
+        fixture.encrypt(
+            &engine,
+            &fixture.alice_store,
+            fixture.outgoing(1, b"blocked"),
+            0x72
         ),
-        Err(ProtocolStateError::BlockedContact)
+        Err(MessageOperationError::ProtocolState(
+            ProtocolStateError::BlockedContact
+        ))
     ));
 
     let unblocked = engine

@@ -299,6 +299,23 @@ pub(crate) fn hex_identifier<const N: usize>(
     Ok(bytes)
 }
 
+/// Parses a non-empty identifier written as an even number of lowercase hexadecimal digits.
+pub(crate) fn hex_bytes(value: &str, label: &str) -> Result<Vec<u8>, RoostError> {
+    let invalid = || RoostError::InvalidData {
+        reason: format!("{label} must be an even number of lowercase hex digits"),
+    };
+    let (pairs, rest) = value.as_bytes().as_chunks::<2>();
+    if pairs.is_empty() || !rest.is_empty() {
+        return Err(invalid());
+    }
+    pairs
+        .iter()
+        .map(|&[high, low]| {
+            Ok((hex_digit(high).ok_or_else(invalid)? << 4) | hex_digit(low).ok_or_else(invalid)?)
+        })
+        .collect()
+}
+
 fn hex_digit(digit: u8) -> Option<u8> {
     match digit {
         b'0'..=b'9' => Some(digit - b'0'),
@@ -310,12 +327,6 @@ fn hex_digit(digit: u8) -> Option<u8> {
 pub(crate) fn fixed_32(bytes: &[u8], label: &str) -> Result<[u8; 32], RoostError> {
     bytes.try_into().map_err(|_| RoostError::InvalidData {
         reason: format!("{label} must be 32 bytes"),
-    })
-}
-
-pub(crate) fn fixed_16(bytes: &[u8], label: &str) -> Result<[u8; 16], RoostError> {
-    bytes.try_into().map_err(|_| RoostError::InvalidData {
-        reason: format!("{label} must be 16 bytes"),
     })
 }
 

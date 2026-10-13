@@ -10,6 +10,7 @@ mod certificate;
 mod context;
 mod error;
 mod message;
+mod message_operation;
 mod operation;
 mod protocol;
 mod records;
@@ -23,13 +24,17 @@ pub use certificate::{
     ValidatedSenderCertificate,
 };
 pub use context::{
-    ContactBlock, Contacts, ContextConfiguration, IdentityContext, Messaging,
-    SessionAcceptanceOutcome, SessionAcceptanceResult, SessionInitiationResult,
+    ContactBlock, Contacts, IdentityContext, Messaging, SessionAcceptanceOutcome,
+    SessionAcceptanceResult, SessionInitiationResult,
 };
 pub use error::RoostError;
 pub use message::{
-    FramePreKeyReference, Message, PayloadKind, SenderIdentityMaterial, decode_message,
+    FramePreKeyReference, Message, MessageId, PayloadKind, SenderIdentityMaterial, decode_message,
     encode_message,
+};
+pub use message_operation::{
+    IncomingMessage, MessageDecryption, MessageDecryptionStep, MessageDestination,
+    MessageEncryption, MessageEncryptionStep, OutgoingMessage, SignedSenderCertificate,
 };
 pub use operation::{
     OperationId, OperationStatus, PreparedContactBlock, PreparedIdentity, PreparedInboxRotation,
@@ -37,15 +42,14 @@ pub use operation::{
     UnfinishedOperation,
 };
 pub use protocol::{
-    AcknowledgmentOutcome, AcknowledgmentResult, BlockedContactAcknowledgmentPolicy,
-    BlockedInboundMessageResult, ContactDiscoveryKey, ContactEvent, ContactEventKind,
-    ContactIdentity, ContactSafetyNumberConfirmation, ContactSafetyNumberConfirmationKind,
-    ContactState, ContactStateChange, ContactTrustState, IdentityKey, InboundMessageOutcome,
+    AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
+    CommitCondition, ContactDiscoveryKey, ContactEvent, ContactEventKind, ContactIdentity,
+    ContactSafetyNumberConfirmation, ContactSafetyNumberConfirmationKind, ContactState,
+    ContactStateChange, ContactTrustState, IdentityKey, InboundMessageOutcome,
     InboundMessageResult, OutboundMessageResult, PendingAcknowledgment, ProtocolHardeningLimits,
-    ProtocolStateAddress, ProtocolStateCommitCheck, ProtocolStateEntry, ProtocolStateKind,
-    ProtocolStateUpdate, RetryInstruction, RetryInstructionResult, SafetyNumber, SessionEvent,
-    SessionUnrecoverableReason, SessionUnrecoverableResult, derive_safety_number,
-    protocol_state_blob_digest,
+    ProtocolStateKind, ReceiveSettings, RetryInstruction, RetryInstructionResult, SafetyNumber,
+    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, StateChanges, StateEntry,
+    StateKey, StateUpdate, derive_safety_number, protocol_hardening_limits,
 };
 pub use records::{
     Identity, InboxRotation, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,

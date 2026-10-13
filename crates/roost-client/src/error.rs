@@ -2,9 +2,10 @@
 
 use roost_core::{
     DiscoveryKeyError, HandshakeError, IdentityError, KeyStoreError, KeyStoreOperationError,
-    MessageError, MessageOperationError, OneTimePreKeyError, ProtocolStateError, PublicKeyError,
-    RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
-    SessionEstablishmentError, SignedPreKeyError, StorageError, TransportBindingError,
+    MessageError, MessageOperationError, MessageStartError, OneTimePreKeyError, ProtocolStateError,
+    PublicKeyError, RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
+    SessionEstablishmentError, SignedPreKeyError, StateEntryError, StorageError,
+    TransportBindingError,
 };
 use roost_protocol::{SenderCertificateValidationError, SignatureError};
 
@@ -75,6 +76,10 @@ pub enum RoostError {
     /// Requested identity, discovery-key, or signed-pre-key material is not stored.
     #[error("key material not found")]
     NotFound,
+    /// A Message Operation already returned its result or failed, so start a new one from fresh
+    /// reads.
+    #[error("message operation has finished")]
+    OperationFinished,
     /// The requested prepared-operation transition conflicts with its durable state.
     #[error("prepared-operation conflict: {reason}")]
     OperationConflict {
@@ -148,6 +153,7 @@ impl RoostError {
             | RoostError::DecryptionFailed
             | RoostError::InboxRotationRequired
             | RoostError::NotFound
+            | RoostError::OperationFinished
             | RoostError::SecureStoragePreconditionChanged { .. }
             | RoostError::TooManyUnfinishedOperations => {}
         }
@@ -434,19 +440,20 @@ impl From<ProtocolStateError> for RoostError {
             ProtocolStateError::UnsupportedBlobVersion { .. } => {
                 RoostError::UnsupportedVersion { reason }
             }
-            ProtocolStateError::MissingSenderCertificateValidation
-            | ProtocolStateError::InvalidDeduplicationCapacity { .. }
-            | ProtocolStateError::InvalidHardeningLimit { .. }
+            ProtocolStateError::InvalidDeduplicationCapacity { .. }
             | ProtocolStateError::InvalidMessage { .. }
             | ProtocolStateError::InvalidStateKey { .. }
-            | ProtocolStateError::SnapshotCapacityExceeded => RoostError::InvalidData { reason },
+            | ProtocolStateError::SnapshotCapacityExceeded
+            | ProtocolStateError::StateEntry(_) => RoostError::InvalidData { reason },
             ProtocolStateError::BlockedContact => RoostError::BlockedContact { reason },
             ProtocolStateError::ContactNotAccepted => RoostError::ContactNotAccepted,
             ProtocolStateError::NoSession | ProtocolStateError::SessionUnrecoverable => {
                 RoostError::TerminalSessionRecovery { reason }
             }
             ProtocolStateError::Handshake(e) => RoostError::from(e).with_reason(reason),
-            ProtocolStateError::BlobEncode { .. } => RoostError::InternalError { reason },
+            ProtocolStateError::BlobEncode { .. } | ProtocolStateError::Randomness(_) => {
+                RoostError::InternalError { reason }
+            }
             ProtocolStateError::MessageEncode(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::Ratchet(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::RatchetState(e) => RoostError::from(e).with_reason(reason),
@@ -507,13 +514,35 @@ impl From<SessionEstablishmentError> for RoostError {
     }
 }
 
+impl From<MessageStartError> for RoostError {
+    fn from(e: MessageStartError) -> Self {
+        match e {
+            MessageStartError::Discovery(e) => e.into(),
+            MessageStartError::Identity(e) => e.into(),
+            MessageStartError::Operation(e) => e.into(),
+            MessageStartError::ProtocolState(e) => e.into(),
+        }
+    }
+}
+
 impl From<MessageOperationError> for RoostError {
     fn from(e: MessageOperationError) -> Self {
+        let reason = reason_from_chain(&e);
         match e {
-            MessageOperationError::Discovery(e) => e.into(),
-            MessageOperationError::Identity(e) => e.into(),
-            MessageOperationError::Operation(e) => e.into(),
+            MessageOperationError::Finished => RoostError::OperationFinished,
+            MessageOperationError::NotAwaitingState
+            | MessageOperationError::NotAwaitingTransportBinding => {
+                RoostError::InvalidData { reason }
+            }
             MessageOperationError::ProtocolState(e) => e.into(),
+        }
+    }
+}
+
+impl From<StateEntryError> for RoostError {
+    fn from(e: StateEntryError) -> Self {
+        RoostError::InvalidData {
+            reason: reason_from_chain(&e),
         }
     }
 }

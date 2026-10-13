@@ -130,10 +130,6 @@ impl OpenedMessage {
 }
 
 /// Seals `envelope` under the ratchet and then to the recipient's Discovery Key.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "each argument is a separate layer input of one sealed Message"
-)]
 pub(super) fn seal_message<R: RngCore + CryptoRng>(
     rng: &mut R,
     state: &mut RatchetState,
@@ -142,7 +138,6 @@ pub(super) fn seal_message<R: RngCore + CryptoRng>(
     prekey_reference: Option<SealedFramePreKeyReference>,
     envelope: &[u8],
     transport_binding: &TransportBinding,
-    limits: ProtocolHardeningLimits,
 ) -> Result<Message, ProtocolStateError> {
     let associated_data = metadata.associated_data(&recipient_public_key);
     let (header, ciphertext) = state.ratchet_encrypt(envelope, &associated_data)?;
@@ -167,7 +162,7 @@ pub(super) fn seal_message<R: RngCore + CryptoRng>(
     )?;
     let message = Message::from_frame(frame);
     message
-        .to_bytes_with_hardening_limits(limits)
+        .to_bytes()
         .map_err(ProtocolStateError::MessageEncode)?;
     Ok(message)
 }
@@ -294,7 +289,7 @@ pub(super) fn encode_sealed_sender_envelope(
             }
         }
     };
-    // The sealed Message's encoded size is checked against the configured limits once it exists.
+    // The sealed Message's encoded size is checked against Roost's limits once it exists.
     encode_zeroizing(&SealedSenderEnvelopeWire {
         sender_identity_key: sender_identity.identity_key,
         sender_identity_verifying_key: sender_identity.identity_verifying_key,

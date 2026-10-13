@@ -1,19 +1,23 @@
 //! Devices that run real handshakes through KeyStore and commit through a host store.
 
 use super::host_identity::DeviceStorage;
-use super::{CREATED_AT_SECS, HostStore, sender_certificate_bytes, validation};
+use super::{
+    CREATED_AT_SECS, HostStore, deduplication_address, run_decryption, run_encryption,
+    sender_certificate_bytes, validation,
+};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    AcknowledgmentOutcome, AcknowledgmentProcessing, ContactDiscoveryKey, ContactIdentity,
-    ContactIdentityKey, InboundMessageOutcome, KeyStore, Message, MessageDecryption,
-    MessageEncryption, OutboundMessageResult, PreKeyBundle, PreKeySelection,
-    PreparedKeyStoreOperation, ProtocolStateKey, PublicIdentityKey, SessionAcceptance,
-    SessionAcceptanceOutcome, SessionEstablishmentError, SessionInitiation,
-    SessionInitiationResult, TransportBinding,
+    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InboundMessageOutcome,
+    InboundSenderCertificateValidation, IncomingMessage, KeyStore, KnownDomainSigningKey, Message,
+    MessageOperationError, MessageStartError, OutboundMessageResult, OutgoingMessage, PreKeyBundle,
+    PreKeySelection, PreparedKeyStoreOperation, PublicIdentityKey, ReceiveSettings,
+    SessionAcceptance, SessionAcceptanceOutcome, SessionEstablishmentError, SessionId,
+    SessionInitiation, SessionInitiationResult, SignedSenderCertificate, TransportBinding,
 };
 use roost_crypto::SigningKeyPair;
-use roost_protocol::{DomainSigningKey, DomainSigningKeyStatus, MessageId};
+use roost_protocol::{DomainSigningKeyStatus, MessageId};
+use zeroize::Zeroizing;
 
 /// The relay that certifies every test Device's Identity Key.
 pub struct Relay {
@@ -42,18 +46,32 @@ impl Relay {
         }
     }
 
-    fn domain_signing_key(&self) -> DomainSigningKey<'_> {
-        DomainSigningKey {
-            id: &self.domain_id,
-            verifying_key: self.signing_key.verifying.as_bytes(),
+    fn domain_signing_key(&self) -> KnownDomainSigningKey {
+        KnownDomainSigningKey {
+            id: self.domain_id.clone(),
+            verifying_key: self.signing_key.verifying.to_bytes(),
             status: DomainSigningKeyStatus::Trusted,
         }
+    }
+
+    /// Returns the validation inputs that trust this relay and revoke nothing.
+    pub fn validation(&self) -> InboundSenderCertificateValidation {
+        validation(vec![self.domain_signing_key()], Vec::new())
     }
 }
 
 struct Credential {
     certificate: Vec<u8>,
     signature: Vec<u8>,
+}
+
+impl Credential {
+    fn signed(&self) -> SignedSenderCertificate {
+        SignedSenderCertificate {
+            certificate: self.certificate.clone(),
+            signature: self.signature.clone(),
+        }
+    }
 }
 
 /// One app install: its KeyStore, its host database, and the Relay that certifies it.
@@ -64,9 +82,8 @@ pub struct Device<'relay> {
     pub identity: PublicIdentityKey,
     relay: &'relay Relay,
     credential: Credential,
-    deduplication_key: ProtocolStateKey,
-    /// Where acknowledgments go: the Discovery Key of the contact this Device last accepted.
-    acknowledgment_recipient: [u8; 32],
+    /// The settings the app passes with each receive.
+    pub settings: ReceiveSettings,
     next_message: u16,
     tag: u8,
 }
@@ -84,27 +101,14 @@ impl<'relay> Device<'relay> {
         let identity = created.output.public().unwrap();
         let rotated = store.prepare_signed_prekey_rotation().unwrap();
         finalize(&store, &rotated);
-        let deduplication_key = ProtocolStateKey::from_bytes(vec![tag; 16]).unwrap();
-        let mut host = HostStore::default();
-        host.commit(vec![
-            store
-                .protocol_engine()
-                .initialize_deduplication_set(
-                    &mut ChaCha20Rng::from_seed([tag; 32]),
-                    deduplication_key.clone(),
-                )
-                .unwrap(),
-        ])
-        .unwrap();
         Self {
             store,
-            host,
+            host: HostStore::default(),
             storage,
             credential: relay.certify(&identity),
             identity,
             relay,
-            deduplication_key,
-            acknowledgment_recipient: [0x09; 32],
+            settings: ReceiveSettings::default(),
             next_message: 0,
             tag,
         }
@@ -112,6 +116,11 @@ impl<'relay> Device<'relay> {
 
     pub fn identity_key(&self) -> ContactIdentityKey {
         identity_key(&self.identity)
+    }
+
+    /// Returns another KeyStore over the same SecureStorage, as an app extension runs.
+    pub fn second_instance(&self) -> KeyStore {
+        self.storage.open()
     }
 
     /// Replaces the KeyStore with a new one over the same SecureStorage, as an app restart does.
@@ -139,7 +148,6 @@ impl<'relay> Device<'relay> {
             .accept_contact(&self.host.snapshot(), peer.identity_key())
             .unwrap();
         self.host.commit(accepted.state_updates).unwrap();
-        self.acknowledgment_recipient = peer.contact_identity().discovery_key.x25519_public_key;
     }
 
     /// Publishes a bundle with a fresh one-time prekey, as the relay would serve it.
@@ -210,29 +218,33 @@ impl<'relay> Device<'relay> {
         )
     }
 
-    /// Replaces the Deduplication Set with an empty one, as if every recorded digest had aged out.
+    /// Deletes the Deduplication Set, as if every recorded digest had aged out.
     pub fn forget_received_digests(&mut self) {
-        let fresh = self
-            .store
-            .protocol_engine()
-            .initialize_deduplication_set(
-                &mut ChaCha20Rng::from_seed([self.tag ^ 0x5a; 32]),
-                self.deduplication_key.clone(),
-            )
-            .unwrap();
-        self.host.set_raw(
-            fresh.address().clone(),
-            fresh.blob().unwrap().as_bytes().to_vec(),
-        );
+        self.host.remove(&deduplication_address());
     }
 
-    /// Sends to `peer` on whichever Session Roost selects.
-    pub fn send(&mut self, peer: &Device<'_>, plaintext: &[u8]) -> OutboundMessageResult {
-        let mut sent = self.encrypt(peer, plaintext).unwrap();
-        self.host
-            .commit(std::mem::take(&mut sent.state_updates))
-            .unwrap();
-        sent
+    /// Sends to `peer` on whichever Session Roost selects, and commits it.
+    pub fn send(&mut self, peer: &Device<'_>, plaintext: &[u8]) -> SentMessage {
+        let sent = self.encrypt(peer, plaintext).unwrap();
+        let message = SentMessage {
+            session_id: sent.session_id,
+            message_id: sent.message_id,
+            message: super::copy(&sent.message),
+        };
+        self.host.commit_changes(sent.changes).unwrap();
+        message
+    }
+
+    /// Returns what the app passes to send `plaintext` to `peer` under a new draft MessageID.
+    pub fn outgoing(&mut self, peer: &Device<'_>, plaintext: &[u8]) -> OutgoingMessage {
+        let message_id = self.next_message_id();
+        OutgoingMessage {
+            recipient: peer.identity_key(),
+            message_id,
+            sent_at_millis: sent_at_millis(message_id),
+            sender_certificate: self.credential.signed(),
+            plaintext: Zeroizing::new(plaintext.to_vec()),
+        }
     }
 
     /// Encrypts for `peer` without committing the result.
@@ -240,58 +252,49 @@ impl<'relay> Device<'relay> {
         &mut self,
         peer: &Device<'_>,
         plaintext: &[u8],
-    ) -> Result<OutboundMessageResult, roost_core::MessageOperationError> {
-        let message_id = self.next_message_id();
-        self.store.encrypt_message_with_transport_binding(
-            MessageEncryption {
-                snapshot: &self.host.snapshot(),
-                message_id,
-                contact_identity_key: peer.identity_key(),
-                sent_at_millis: sent_at_millis(message_id),
-                sender_certificate: &self.credential.certificate,
-                sender_signature: &self.credential.signature,
-                plaintext,
-            },
+    ) -> Result<OutboundMessageResult, DeviceError> {
+        let outgoing = self.outgoing(peer, plaintext);
+        let seed = self.tag ^ outgoing.message_id.as_bytes()[1];
+        let encryption = self.store.start_encryption(outgoing)?;
+        Ok(run_encryption(
+            encryption,
+            &self.host,
+            &mut ChaCha20Rng::from_seed([seed; 32]),
             &binding(),
-        )
+        )?)
+    }
+
+    /// Returns what the app passes to receive `message` with this Device's settings.
+    pub fn incoming(&self, message: &Message) -> IncomingMessage {
+        IncomingMessage {
+            message: super::copy(message),
+            transport_binding: binding(),
+            settings: self.settings,
+            sender_certificate_validation: self.relay.validation(),
+            acknowledgment_sent_at_millis: CREATED_AT_SECS * 1000,
+            acknowledgment_sender_certificate: self.credential.signed(),
+        }
     }
 
     /// Receives `message` and commits whatever state it returns.
     pub fn receive(&mut self, message: &Message) -> InboundMessageOutcome {
-        let mut outcome = self.decrypt(message).unwrap();
-        let updates = match &mut outcome {
-            InboundMessageOutcome::Accepted(result) => std::mem::take(&mut result.state_updates),
-            InboundMessageOutcome::Blocked(result) => std::mem::take(&mut result.state_updates),
-            InboundMessageOutcome::SessionUnrecoverable(result) => {
-                std::mem::take(&mut result.state_updates)
-            }
-            InboundMessageOutcome::Duplicate | InboundMessageOutcome::UnknownSession => Vec::new(),
-        };
-        self.host.commit(updates).unwrap();
+        let outcome = self.decrypt(message).unwrap();
+        let (outcome, changes) = super::split_changes(outcome);
+        if let Some(changes) = changes {
+            self.host.commit_changes(changes).unwrap();
+        }
         outcome
     }
 
     /// Decrypts `message` without committing the result.
-    pub fn decrypt(
-        &self,
-        message: &Message,
-    ) -> Result<InboundMessageOutcome, roost_core::MessageOperationError> {
-        let domain_keys = [self.relay.domain_signing_key()];
-        self.store.decrypt_message_with_transport_bindings(
-            MessageDecryption {
-                snapshot: &self.host.snapshot(),
-                deduplication_key: self.deduplication_key.clone(),
-                message,
-                acknowledgment_id: MessageId::from_bytes([self.tag ^ 0xff; 16]),
-                acknowledgment_recipient_public_key: self.acknowledgment_recipient,
-                acknowledgment_sent_at_millis: CREATED_AT_SECS * 1000,
-                acknowledgment_sender_certificate: &self.credential.certificate,
-                acknowledgment_sender_signature: &self.credential.signature,
-                sender_certificate_validation: Some(validation(&domain_keys, &[])),
-            },
+    pub fn decrypt(&self, message: &Message) -> Result<InboundMessageOutcome, DeviceError> {
+        let decryption = self.store.start_decryption(self.incoming(message))?;
+        Ok(run_decryption(
+            decryption,
+            &self.host,
+            &mut ChaCha20Rng::from_seed([self.tag ^ 0xff; 32]),
             &binding(),
-            &binding(),
-        )
+        )?)
     }
 
     /// Accepts a Session from a first Message and commits it through the prepared operation.
@@ -330,41 +333,16 @@ impl<'relay> Device<'relay> {
         selection: PreKeySelection,
     ) -> Result<PreparedKeyStoreOperation<SessionAcceptanceOutcome>, SessionEstablishmentError>
     {
-        let domain_keys = [self.relay.domain_signing_key()];
         self.store.prepare_accept_session_with_transport_binding(
             SessionAcceptance {
                 snapshot: &self.host.snapshot(),
-                deduplication_key: self.deduplication_key.clone(),
                 message,
-                sender_certificate_validation: validation(&domain_keys, &[]),
+                settings: self.settings,
+                sender_certificate_validation: &self.relay.validation(),
             },
             transport_binding,
             selection,
         )
-    }
-
-    /// Processes an acknowledgment and commits whatever state it returns.
-    pub fn process_acknowledgment(&mut self, message: &Message) -> AcknowledgmentOutcome {
-        let mut outcome = self
-            .store
-            .process_acknowledgment_with_transport_binding(
-                AcknowledgmentProcessing {
-                    snapshot: &self.host.snapshot(),
-                    message,
-                },
-                &binding(),
-            )
-            .unwrap();
-        let updates = match &mut outcome {
-            AcknowledgmentOutcome::Cleared(result) => std::mem::take(&mut result.state_updates),
-            AcknowledgmentOutcome::Missed { state_updates, .. } => std::mem::take(state_updates),
-            AcknowledgmentOutcome::SessionUnrecoverable(result) => {
-                std::mem::take(&mut result.state_updates)
-            }
-            AcknowledgmentOutcome::Duplicate | AcknowledgmentOutcome::UnknownSession => Vec::new(),
-        };
-        self.host.commit(updates).unwrap();
-        outcome
     }
 
     fn next_message_id(&mut self) -> MessageId {
@@ -372,6 +350,32 @@ impl<'relay> Device<'relay> {
         let mut id = [self.tag; 16];
         id[..2].copy_from_slice(&self.next_message.to_be_bytes());
         MessageId::from_bytes(id)
+    }
+}
+
+/// A Message the host committed and queued for sending.
+pub struct SentMessage {
+    pub session_id: SessionId,
+    pub message_id: MessageId,
+    pub message: Message,
+}
+
+/// Why a Device's Message Operation failed.
+#[derive(Debug)]
+pub enum DeviceError {
+    Start(MessageStartError),
+    Operation(MessageOperationError),
+}
+
+impl From<MessageStartError> for DeviceError {
+    fn from(error: MessageStartError) -> Self {
+        Self::Start(error)
+    }
+}
+
+impl From<MessageOperationError> for DeviceError {
+    fn from(error: MessageOperationError) -> Self {
+        Self::Operation(error)
     }
 }
 

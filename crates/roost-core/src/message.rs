@@ -23,15 +23,7 @@ impl Message {
     /// The sealed-frame version is internal to the encoded message and independent of any
     /// transport envelope a consumer may add around the returned bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, MessageError> {
-        self.to_bytes_with_hardening_limits(ProtocolHardeningLimits::default())
-    }
-
-    /// Encodes this message with caller-selected hardening limits.
-    pub fn to_bytes_with_hardening_limits(
-        &self,
-        limits: ProtocolHardeningLimits,
-    ) -> Result<Vec<u8>, MessageError> {
-        let limits = limits.bounded();
+        let limits = ProtocolHardeningLimits::default();
         if self.ciphertext.len() > limits.max_message_payload_len {
             return Err(MessageError::PayloadTooLarge);
         }
@@ -49,17 +41,7 @@ impl Message {
     ///
     /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MessageError> {
-        Self::from_bytes_with_hardening_limits(bytes, ProtocolHardeningLimits::default())
-    }
-
-    /// Decodes a sealed-frame message with caller-selected hardening limits.
-    ///
-    /// Unsupported message versions are rejected before the remaining Postcard body is decoded.
-    pub fn from_bytes_with_hardening_limits(
-        bytes: &[u8],
-        limits: ProtocolHardeningLimits,
-    ) -> Result<Self, MessageError> {
-        let limits = limits.bounded();
+        let limits = ProtocolHardeningLimits::default();
         if bytes.len() > limits.max_encoded_message_len {
             return Err(MessageError::EncodedTooLarge);
         }
@@ -97,7 +79,7 @@ pub enum MessageError {
     /// Message bytes failed structural decoding.
     #[error("message bytes failed to decode")]
     Decode,
-    /// Encoded message bytes exceed the configured size cap.
+    /// Encoded message bytes exceed the size cap.
     #[error("message bytes exceed size limit")]
     EncodedTooLarge,
     /// Message bytes failed to encode.
@@ -197,9 +179,7 @@ mod tests {
 
     #[test]
     fn from_bytes_rejects_oversized_before_full_decode() {
-        let max_len = ProtocolHardeningLimits::default()
-            .bounded()
-            .max_encoded_message_len;
+        let max_len = ProtocolHardeningLimits::default().max_encoded_message_len;
         let bytes = vec![0; max_len + 1];
 
         assert_decode_error(&bytes, MessageError::EncodedTooLarge);
