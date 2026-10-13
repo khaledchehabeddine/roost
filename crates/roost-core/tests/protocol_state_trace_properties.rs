@@ -4,7 +4,7 @@ mod support;
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use roost_core::{InboundMessageOutcome, ProtocolStateEngine, ReceiveSettings};
+use roost_core::{InboundMessageOutcome, ReceiveSettings};
 use support::{ProtocolFixture, StoredMessage, session_address, validation};
 
 #[derive(Clone, Debug)]
@@ -42,14 +42,10 @@ fn delivery_order(count: usize, offset: usize, reverse: bool) -> Vec<usize> {
 
 #[test]
 fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property() {
-    let strategy = (
-        any::<[u8; 32]>(),
-        proptest::collection::vec(trace_batch_strategy(), 1..=8),
-    );
+    let strategy = proptest::collection::vec(trace_batch_strategy(), 1..=8);
     runner([0xB1; 32], 16)
-        .run(&strategy, |(seed, batches)| {
-            let engine = ProtocolStateEngine::new();
-            let mut fixture = ProtocolFixture::new(seed);
+        .run(&strategy, |batches| {
+            let mut fixture = ProtocolFixture::new();
             let mut sequence = 1u16;
 
             for (batch_index, batch) in batches.iter().enumerate() {
@@ -57,25 +53,21 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                 for message_index in 0..batch.message_count {
                     let plaintext =
                         format!("batch {batch_index} message {message_index}").into_bytes();
-                    messages.push(fixture.encrypt_from_alice(&engine, sequence, &plaintext));
+                    messages.push(fixture.encrypt_from_alice(sequence, &plaintext));
                     sequence = sequence.wrapping_add(1);
                 }
 
                 for index in delivery_order(batch.message_count, batch.offset, batch.reverse) {
                     let message: &StoredMessage = &messages[index];
-                    let decrypted = fixture.decrypt_for_bob(
-                        &engine,
-                        message,
-                        0x40u8.wrapping_add(sequence as u8),
-                    );
+                    let decrypted =
+                        fixture.decrypt_for_bob(message, 0x40u8.wrapping_add(sequence as u8));
                     prop_assert_eq!(decrypted.message_id, message.message_id);
                     prop_assert_eq!(decrypted.plaintext.as_slice(), message.plaintext.as_slice());
 
-                    let mut corrupt_store = fixture.bob_store.clone();
+                    let mut corrupt_store = fixture.bob.host.clone();
                     corrupt_store.set_raw(session_address(fixture.session_id), vec![1, 0, 0xaa]);
                     let duplicate = fixture
                         .decrypt(
-                            &engine,
                             &corrupt_store,
                             fixture.incoming(
                                 &message.message,
@@ -89,9 +81,8 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                 }
             }
 
-            let final_message =
-                fixture.encrypt_from_alice(&engine, sequence, b"final trace liveness");
-            let final_decrypted = fixture.decrypt_for_bob(&engine, &final_message, 0xf1);
+            let final_message = fixture.encrypt_from_alice(sequence, b"final trace liveness");
+            let final_decrypted = fixture.decrypt_for_bob(&final_message, 0xf1);
             prop_assert_eq!(
                 final_decrypted.plaintext.as_slice(),
                 b"final trace liveness"

@@ -4,8 +4,7 @@ use roost_core::{
     DiscoveryKeyError, HandshakeError, IdentityError, KeyStoreError, KeyStoreOperationError,
     MessageError, MessageOperationError, MessageStartError, OneTimePreKeyError, ProtocolStateError,
     PublicKeyError, RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
-    SessionEstablishmentError, SignedPreKeyError, StateEntryError, StorageError,
-    TransportBindingError,
+    SignedPreKeyError, StateEntryError, StorageError, TransportBindingError,
 };
 use roost_protocol::{SenderCertificateValidationError, SignatureError};
 
@@ -49,9 +48,13 @@ pub enum RoostError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// A contact must be accepted before sending.
-    #[error("contact is not accepted")]
-    ContactNotAccepted,
+    /// The contact hasn't accepted, and this side already sent the most Messages allowed before
+    /// acceptance.
+    #[error("contact is not accepted and the limit of {limit} messages is reached")]
+    ContactNotAccepted {
+        /// Distinct Messages each side may send before acceptance.
+        limit: u32,
+    },
     /// Stored discovery-key, signed-pre-key, or prepared-operation material is corrupt.
     #[error("stored key material is corrupt")]
     Corrupt,
@@ -73,9 +76,20 @@ pub enum RoostError {
     /// A restored identity must rotate its inbox before using prekeys.
     #[error("inbox rotation required after backup restore")]
     InboxRotationRequired,
+    /// An established Message needs the contact's Delivery Capability, and no Inbox Grant from
+    /// the contact has supplied one for its current Discovery Key.
+    #[error("no delivery capability for this contact")]
+    NoDeliveryCapability,
     /// Requested identity, discovery-key, or signed-pre-key material is not stored.
     #[error("key material not found")]
     NotFound,
+    /// A different first Message already used the one-time prekey this one names, so Roost refuses
+    /// it.
+    #[error("one-time prekey already used: {reason}")]
+    OneTimePreKeyUsed {
+        /// Diagnostic context for logging only.
+        reason: String,
+    },
     /// A Message Operation already returned its result or failed, so start a new one from fresh
     /// reads.
     #[error("message operation has finished")]
@@ -141,6 +155,7 @@ impl RoostError {
             | RoostError::CertificateRejected { reason }
             | RoostError::InternalError { reason }
             | RoostError::InvalidData { reason }
+            | RoostError::OneTimePreKeyUsed { reason }
             | RoostError::OperationConflict { reason }
             | RoostError::OperationRecoveryRequired { reason, .. }
             | RoostError::ProtocolStateFault { reason }
@@ -148,10 +163,11 @@ impl RoostError {
             | RoostError::TerminalSessionRecovery { reason }
             | RoostError::UnsupportedVersion { reason } => *reason = new_reason,
             RoostError::AlreadyExists
-            | RoostError::ContactNotAccepted
+            | RoostError::ContactNotAccepted { .. }
             | RoostError::Corrupt
             | RoostError::DecryptionFailed
             | RoostError::InboxRotationRequired
+            | RoostError::NoDeliveryCapability
             | RoostError::NotFound
             | RoostError::OperationFinished
             | RoostError::SecureStoragePreconditionChanged { .. }
@@ -251,6 +267,7 @@ impl From<OneTimePreKeyError> for RoostError {
             | OneTimePreKeyError::StaleEpoch
             | OneTimePreKeyError::TooManyPreKeys { .. } => RoostError::InvalidData { reason },
             OneTimePreKeyError::NotFound => RoostError::NotFound,
+            OneTimePreKeyError::Used { .. } => RoostError::OneTimePreKeyUsed { reason },
             OneTimePreKeyError::Storage(_) => RoostError::Storage { reason },
         }
     }
@@ -312,8 +329,8 @@ impl From<KeyStoreOperationError> for RoostError {
     }
 }
 
-// `KeyStoreError`, `SessionEstablishmentError`, and `MessageOperationError` are transparent, so the
-// inner error's chain is already the whole chain.
+// `KeyStoreError`, `MessageStartError`, and `MessageOperationError` are transparent, so the inner
+// error's chain is already the whole chain.
 impl From<KeyStoreError> for RoostError {
     fn from(e: KeyStoreError) -> Self {
         match e {
@@ -443,10 +460,16 @@ impl From<ProtocolStateError> for RoostError {
             ProtocolStateError::InvalidDeduplicationCapacity { .. }
             | ProtocolStateError::InvalidMessage { .. }
             | ProtocolStateError::InvalidStateKey { .. }
+            | ProtocolStateError::NoContactRequest
             | ProtocolStateError::SnapshotCapacityExceeded
-            | ProtocolStateError::StateEntry(_) => RoostError::InvalidData { reason },
+            | ProtocolStateError::StateEntry(_)
+            | ProtocolStateError::UnsolicitedAcceptance => RoostError::InvalidData { reason },
+            ProtocolStateError::InvalidInboxGrant => RoostError::AuthenticationFailed { reason },
             ProtocolStateError::BlockedContact => RoostError::BlockedContact { reason },
-            ProtocolStateError::ContactNotAccepted => RoostError::ContactNotAccepted,
+            ProtocolStateError::PendingLimitReached { limit } => RoostError::ContactNotAccepted {
+                limit: limit as u32,
+            },
+            ProtocolStateError::NoDeliveryCapability => RoostError::NoDeliveryCapability,
             ProtocolStateError::NoSession | ProtocolStateError::SessionUnrecoverable => {
                 RoostError::TerminalSessionRecovery { reason }
             }
@@ -500,20 +523,6 @@ impl From<SafetyNumberError> for RoostError {
     }
 }
 
-impl From<SessionEstablishmentError> for RoostError {
-    fn from(e: SessionEstablishmentError) -> Self {
-        match e {
-            SessionEstablishmentError::Discovery(e) => e.into(),
-            SessionEstablishmentError::Handshake(e) => e.into(),
-            SessionEstablishmentError::Identity(e) => e.into(),
-            SessionEstablishmentError::OneTimePreKey(e) => e.into(),
-            SessionEstablishmentError::Operation(e) => e.into(),
-            SessionEstablishmentError::ProtocolState(e) => e.into(),
-            SessionEstablishmentError::SignedPreKey(e) => e.into(),
-        }
-    }
-}
-
 impl From<MessageStartError> for RoostError {
     fn from(e: MessageStartError) -> Self {
         match e {
@@ -530,10 +539,12 @@ impl From<MessageOperationError> for RoostError {
         let reason = reason_from_chain(&e);
         match e {
             MessageOperationError::Finished => RoostError::OperationFinished,
-            MessageOperationError::NotAwaitingState
+            MessageOperationError::NotAwaitingAdmission
+            | MessageOperationError::NotAwaitingState
             | MessageOperationError::NotAwaitingTransportBinding => {
                 RoostError::InvalidData { reason }
             }
+            MessageOperationError::KeyStore(e) => e.into(),
             MessageOperationError::ProtocolState(e) => e.into(),
         }
     }

@@ -1,22 +1,24 @@
-//! Devices that run real handshakes through KeyStore and commit through a host store.
+//! Devices that send and receive through KeyStore and commit through a host store.
 
 use super::host_identity::DeviceStorage;
 use super::{
-    CREATED_AT_SECS, HostStore, deduplication_address, run_decryption, run_encryption,
-    sender_certificate_bytes, validation,
+    CREATED_AT_SECS, HostCommitError, HostStore, deduplication_address, sender_certificate_bytes,
+    validation,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InboundMessageOutcome,
-    InboundSenderCertificateValidation, IncomingMessage, KeyStore, KnownDomainSigningKey, Message,
-    MessageOperationError, MessageStartError, OutboundMessageResult, OutgoingMessage, PreKeyBundle,
-    PreKeySelection, PreparedKeyStoreOperation, PublicIdentityKey, ReceiveSettings,
-    SessionAcceptance, SessionAcceptanceOutcome, SessionEstablishmentError, SessionId,
-    SessionInitiation, SessionInitiationResult, SignedSenderCertificate, TransportBinding,
+    AdmissionRequest, ContactIdentityKey, ContactState, InboundMessageOutcome,
+    InboundSenderCertificateValidation, IncomingMessage, KeyStore, KeyStoreError,
+    KeyStoreOperationError, KnownDomainSigningKey, Message, MessageDecryptionStep,
+    MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
+    MessageStartError, OutboundMessageResult, OutgoingMessage, PeerPreKeyBundle, PreKeyBundle,
+    PreparedKeyStoreOperation, ProtocolStateAddress, ProtocolStateKey, ProtocolStateKind,
+    PublicIdentityKey, PublicationBundle, ReceiveSettings, SessionId, SignedSenderCertificate,
+    StateChanges, TransportBinding,
 };
 use roost_crypto::SigningKeyPair;
-use roost_protocol::{DomainSigningKeyStatus, MessageId};
+use roost_protocol::{DomainSigningKeyStatus, MessageId, PayloadKind};
 use zeroize::Zeroizing;
 
 /// The relay that certifies every test Device's Identity Key.
@@ -43,26 +45,18 @@ impl Relay {
         Credential {
             certificate,
             signature,
+            domain_id: self.domain_id.clone(),
+            domain_verifying_key: self.signing_key.verifying.to_bytes(),
         }
-    }
-
-    fn domain_signing_key(&self) -> KnownDomainSigningKey {
-        KnownDomainSigningKey {
-            id: self.domain_id.clone(),
-            verifying_key: self.signing_key.verifying.to_bytes(),
-            status: DomainSigningKeyStatus::Trusted,
-        }
-    }
-
-    /// Returns the validation inputs that trust this relay and revoke nothing.
-    pub fn validation(&self) -> InboundSenderCertificateValidation {
-        validation(vec![self.domain_signing_key()], Vec::new())
     }
 }
 
+// A Device's certificate and the relay key that vouches for every Device's certificate.
 struct Credential {
     certificate: Vec<u8>,
     signature: Vec<u8>,
+    domain_id: Vec<u8>,
+    domain_verifying_key: [u8; 32],
 }
 
 impl Credential {
@@ -72,18 +66,104 @@ impl Credential {
             signature: self.signature.clone(),
         }
     }
+
+    fn validation(&self) -> InboundSenderCertificateValidation {
+        validation(
+            vec![KnownDomainSigningKey {
+                id: self.domain_id.clone(),
+                verifying_key: self.domain_verifying_key,
+                status: DomainSigningKeyStatus::Trusted,
+            }],
+            Vec::new(),
+        )
+    }
 }
 
-/// One app install: its KeyStore, its host database, and the Relay that certifies it.
-pub struct Device<'relay> {
+/// What the app asks an encryption to do.
+#[derive(Clone, Copy, Debug)]
+pub enum Intent {
+    Message,
+    Request,
+    Acceptance,
+}
+
+/// How an encryption ended.
+pub enum Encrypted {
+    Ready(Box<(OutboundMessageResult, MessageDestination)>),
+    NeedsPreKeyBundle(ContactIdentityKey),
+}
+
+impl Encrypted {
+    pub fn ready(self) -> (OutboundMessageResult, MessageDestination) {
+        match self {
+            Self::Ready(sealed) => *sealed,
+            Self::NeedsPreKeyBundle(_) => panic!("expected a sealed Message"),
+        }
+    }
+}
+
+/// A destination's public parts, with the capability reduced to its verifier, so tests can compare
+/// destinations.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Route {
+    FirstMessage {
+        identity_key: ContactIdentityKey,
+        discovery_key: [u8; 32],
+        signed_prekey_id: u64,
+        one_time_prekey_id: Option<u64>,
+    },
+    Established {
+        identity_key: ContactIdentityKey,
+        discovery_key: [u8; 32],
+        verifier: [u8; 32],
+    },
+}
+
+impl Route {
+    pub fn of(destination: &MessageDestination) -> Self {
+        match destination {
+            MessageDestination::FirstMessage {
+                identity_key,
+                discovery_key,
+                signed_prekey_id,
+                one_time_prekey_id,
+            } => Self::FirstMessage {
+                identity_key: *identity_key,
+                discovery_key: *discovery_key,
+                signed_prekey_id: *signed_prekey_id,
+                one_time_prekey_id: *one_time_prekey_id,
+            },
+            MessageDestination::Established {
+                identity_key,
+                discovery_key,
+                delivery_capability,
+            } => Self::Established {
+                identity_key: *identity_key,
+                discovery_key: *discovery_key,
+                verifier: *delivery_capability.verifier().as_bytes(),
+            },
+        }
+    }
+}
+
+/// How a decryption ended, with what it asked for on the way.
+pub struct Decrypted {
+    pub outcome: InboundMessageOutcome,
+    pub admission: Option<AdmissionRequest>,
+    pub acknowledgment_destination: Option<MessageDestination>,
+}
+
+/// One app install: its KeyStore, its host database, and the certificate its relay issued.
+pub struct Device {
     pub store: KeyStore,
     pub host: HostStore,
     storage: DeviceStorage,
     pub identity: PublicIdentityKey,
-    relay: &'relay Relay,
     credential: Credential,
     /// The settings the app passes with each receive.
     pub settings: ReceiveSettings,
+    /// Whether the Relay's proofs show it admitted the first Messages this Device receives.
+    pub admits: bool,
     next_message: u16,
     tag: u8,
 }
@@ -92,8 +172,8 @@ pub fn binding() -> TransportBinding {
     TransportBinding::new(b"test-route".to_vec()).unwrap()
 }
 
-impl<'relay> Device<'relay> {
-    pub fn new(relay: &'relay Relay, tag: u8) -> Self {
+impl Device {
+    pub fn new(relay: &Relay, tag: u8) -> Self {
         let storage = DeviceStorage::default();
         let store = storage.open();
         let created = store.prepare_identity_creation().unwrap();
@@ -107,8 +187,8 @@ impl<'relay> Device<'relay> {
             storage,
             credential: relay.certify(&identity),
             identity,
-            relay,
             settings: ReceiveSettings::default(),
+            admits: true,
             next_message: 0,
             tag,
         }
@@ -128,51 +208,72 @@ impl<'relay> Device<'relay> {
         self.store = self.storage.open();
     }
 
-    pub fn contact_identity(&self) -> ContactIdentity {
-        ContactIdentity {
-            identity_key: self.identity_key(),
-            discovery_key: ContactDiscoveryKey::from(
-                &self.store.current_publication().unwrap().discovery_key,
-            ),
-        }
+    /// Returns this Device's current Discovery Key, read from its SecureStorage as an attacker who
+    /// stole it would hold it.
+    pub fn discovery_key(&self) -> roost_crypto::DiscoveryKey {
+        use roost_core::SecureStorage as _;
+        let blob = self.storage.load("discovery/current").unwrap().unwrap();
+        let field = |range: std::ops::Range<usize>| blob[range].to_vec();
+        roost_crypto::DiscoveryKey::from_secret_bytes(
+            field(5..37).try_into().unwrap(),
+            field(37..69).try_into().unwrap(),
+            u32::from_be_bytes(field(1..5).try_into().unwrap()),
+            u64::from_be_bytes(field(133..141).try_into().unwrap()),
+            field(69..133).try_into().unwrap(),
+        )
     }
 
-    /// Records `peer` as an accepted contact, as the app does after the user accepts them.
-    pub fn accept_contact(&mut self, peer: &Device<'_>) {
-        let engine = *self.store.protocol_engine();
-        let recorded = engine
-            .record_contact(&self.host.snapshot(), peer.contact_identity())
-            .unwrap();
-        self.host.commit(recorded.state_updates).unwrap();
-        let accepted = engine
-            .accept_contact(&self.host.snapshot(), peer.identity_key())
-            .unwrap();
-        self.host.commit(accepted.state_updates).unwrap();
+    /// Forgets the Sessions kept with `peer`, as a host that lost that record does, so the next
+    /// request starts a new Session.
+    pub fn forget_sessions_with(&mut self, peer: &Device) {
+        self.host
+            .remove(&peer_sessions_address(peer.identity_key()));
+    }
+
+    /// Returns this Device's certificate as its relay issued it.
+    pub fn certificate(&self) -> SignedSenderCertificate {
+        self.credential.signed()
+    }
+
+    /// Returns a certificate for this Device's Identity Key that expires at `expires_at_secs`.
+    pub fn certified_until(&self, expires_at_secs: u64) -> SignedSenderCertificate {
+        super::certificate_until(self.identity_key(), expires_at_secs)
+    }
+
+    pub fn publication(&self) -> PublicationBundle {
+        self.store.current_publication().unwrap()
+    }
+
+    /// Returns the contact this Device's host holds for `peer`, decoded after commit.
+    pub fn contact(&self, peer: &Device) -> Option<ContactState> {
+        let address = contact_address(peer.identity_key());
+        self.host.blob_bytes(&address).map(|bytes| {
+            self.store
+                .protocol_engine()
+                .decode_contact(&address, &roost_core::ProtocolStateBlob::from_bytes(bytes))
+                .unwrap()
+        })
     }
 
     /// Publishes a bundle with a fresh one-time prekey, as the relay would serve it.
-    pub fn bundle(&self) -> PublishedBundle {
+    pub fn bundle(&self) -> PeerPreKeyBundle {
         let one_time_prekeys = self.store.prepare_one_time_prekeys(1).unwrap();
         finalize(&self.store, &one_time_prekeys);
         self.published(Some(one_time_prekeys.output[0].clone()))
     }
 
     /// Publishes a bundle after one-time prekeys run out, so only the signed prekey is used.
-    pub fn bundle_without_one_time_prekey(&self) -> PublishedBundle {
+    pub fn bundle_without_one_time_prekey(&self) -> PeerPreKeyBundle {
         self.published(None)
     }
 
     fn published(
         &self,
         one_time_prekey: Option<roost_core::PublicOneTimePreKey>,
-    ) -> PublishedBundle {
-        let publication = self.store.current_publication().unwrap();
-        PublishedBundle {
-            identity: self.identity.clone(),
-            selection: PreKeySelection {
-                signed_prekey_id: publication.signed_prekey.id,
-                one_time_prekey_id: one_time_prekey.as_ref().map(|prekey| prekey.id),
-            },
+    ) -> PeerPreKeyBundle {
+        let publication = self.publication();
+        PeerPreKeyBundle {
+            identity_key: self.identity.clone(),
             discovery_to_identity: publication.discovery_to_identity,
             bundle: PreKeyBundle {
                 version: publication.version,
@@ -183,60 +284,28 @@ impl<'relay> Device<'relay> {
         }
     }
 
-    pub fn initiate(
+    /// Returns where `peer`'s established Messages go: its current Discovery Key and inbox.
+    pub fn established_route(&self) -> Route {
+        let publication = self.publication();
+        Route::Established {
+            identity_key: self.identity_key(),
+            discovery_key: *publication.discovery_key.public_key.as_bytes(),
+            verifier: *publication.recipient_delivery_verifier.as_bytes(),
+        }
+    }
+
+    /// Encrypts an ordinary Message for `peer` under a new draft MessageID without committing it.
+    pub fn encrypt_to(
         &mut self,
-        peer: &PublishedBundle,
+        peer: &Device,
         plaintext: &[u8],
-    ) -> SessionInitiationResult {
-        let mut initiation = self.initiate_session(peer, plaintext).unwrap();
-        self.host
-            .commit(std::mem::take(&mut initiation.state_updates))
-            .unwrap();
-        initiation
-    }
-
-    /// Starts a Session with `peer` without committing the result.
-    pub fn initiate_session(
-        &mut self,
-        peer: &PublishedBundle,
-        plaintext: &[u8],
-    ) -> Result<SessionInitiationResult, SessionEstablishmentError> {
-        let message_id = self.next_message_id();
-        self.store.initiate_session_with_transport_binding(
-            SessionInitiation {
-                snapshot: &self.host.snapshot(),
-                responder_identity_key: peer.identity.clone(),
-                responder_discovery_to_identity: peer.discovery_to_identity,
-                responder_prekey_bundle: peer.bundle.clone(),
-                message_id,
-                sent_at_millis: sent_at_millis(message_id),
-                sender_certificate: &self.credential.certificate,
-                sender_signature: &self.credential.signature,
-                plaintext,
-            },
-            &binding(),
-        )
-    }
-
-    /// Deletes the Deduplication Set, as if every recorded digest had aged out.
-    pub fn forget_received_digests(&mut self) {
-        self.host.remove(&deduplication_address());
-    }
-
-    /// Sends to `peer` on whichever Session Roost selects, and commits it.
-    pub fn send(&mut self, peer: &Device<'_>, plaintext: &[u8]) -> SentMessage {
-        let sent = self.encrypt(peer, plaintext).unwrap();
-        let message = SentMessage {
-            session_id: sent.session_id,
-            message_id: sent.message_id,
-            message: super::copy(&sent.message),
-        };
-        self.host.commit_changes(sent.changes).unwrap();
-        message
+    ) -> Result<OutboundMessageResult, DeviceError> {
+        let outgoing = self.outgoing(peer, plaintext);
+        Ok(self.encrypt(outgoing, Intent::Message)?.ready().0)
     }
 
     /// Returns what the app passes to send `plaintext` to `peer` under a new draft MessageID.
-    pub fn outgoing(&mut self, peer: &Device<'_>, plaintext: &[u8]) -> OutgoingMessage {
+    pub fn outgoing(&mut self, peer: &Device, plaintext: &[u8]) -> OutgoingMessage {
         let message_id = self.next_message_id();
         OutgoingMessage {
             recipient: peer.identity_key(),
@@ -244,23 +313,59 @@ impl<'relay> Device<'relay> {
             sent_at_millis: sent_at_millis(message_id),
             sender_certificate: self.credential.signed(),
             plaintext: Zeroizing::new(plaintext.to_vec()),
+            prekey_bundle: None,
         }
     }
 
-    /// Encrypts for `peer` without committing the result.
-    pub fn encrypt(
-        &mut self,
-        peer: &Device<'_>,
-        plaintext: &[u8],
-    ) -> Result<OutboundMessageResult, DeviceError> {
+    /// Asks `peer` to become a contact with a freshly fetched bundle, and commits the request.
+    pub fn request(&mut self, peer: &Device, plaintext: &[u8]) -> SentMessage {
+        let mut outgoing = self.outgoing(peer, plaintext);
+        outgoing.prekey_bundle = Some(peer.bundle());
+        self.send_with(outgoing, Intent::Request)
+    }
+
+    /// Accepts `peer`'s Contact Request and commits the acceptance.
+    pub fn accept_request(&mut self, peer: &Device, plaintext: &[u8]) -> SentMessage {
         let outgoing = self.outgoing(peer, plaintext);
+        self.send_with(outgoing, Intent::Acceptance)
+    }
+
+    /// Sends to `peer` on whichever Session Roost selects, and commits it.
+    pub fn send(&mut self, peer: &Device, plaintext: &[u8]) -> SentMessage {
+        let outgoing = self.outgoing(peer, plaintext);
+        self.send_with(outgoing, Intent::Message)
+    }
+
+    /// Encrypts `outgoing` as `intent` and commits the sealed Message.
+    pub fn send_with(&mut self, outgoing: OutgoingMessage, intent: Intent) -> SentMessage {
+        let (result, destination) = self.encrypt(outgoing, intent).unwrap().ready();
+        let sent = SentMessage {
+            session_id: result.session_id,
+            message_id: result.message_id,
+            payload_kind: result.payload_kind,
+            message: super::copy(&result.message),
+            destination,
+        };
+        self.host.commit_sent(result).unwrap();
+        sent
+    }
+
+    /// Encrypts `outgoing` as `intent` without committing the result.
+    pub fn encrypt(
+        &self,
+        outgoing: OutgoingMessage,
+        intent: Intent,
+    ) -> Result<Encrypted, DeviceError> {
         let seed = self.tag ^ outgoing.message_id.as_bytes()[1];
-        let encryption = self.store.start_encryption(outgoing)?;
+        let encryption = match intent {
+            Intent::Message => self.store.start_encryption(outgoing),
+            Intent::Request => self.store.request_contact(outgoing),
+            Intent::Acceptance => self.store.accept_contact(outgoing),
+        }?;
         Ok(run_encryption(
             encryption,
             &self.host,
             &mut ChaCha20Rng::from_seed([seed; 32]),
-            &binding(),
         )?)
     }
 
@@ -270,7 +375,7 @@ impl<'relay> Device<'relay> {
             message: super::copy(message),
             transport_binding: binding(),
             settings: self.settings,
-            sender_certificate_validation: self.relay.validation(),
+            sender_certificate_validation: self.credential.validation(),
             acknowledgment_sent_at_millis: CREATED_AT_SECS * 1000,
             acknowledgment_sender_certificate: self.credential.signed(),
         }
@@ -281,68 +386,96 @@ impl<'relay> Device<'relay> {
         let outcome = self.decrypt(message).unwrap();
         let (outcome, changes) = super::split_changes(outcome);
         if let Some(changes) = changes {
-            self.host.commit_changes(changes).unwrap();
+            self.commit_changes(changes).unwrap();
         }
         outcome
     }
 
     /// Decrypts `message` without committing the result.
     pub fn decrypt(&self, message: &Message) -> Result<InboundMessageOutcome, DeviceError> {
-        let decryption = self.store.start_decryption(self.incoming(message))?;
-        Ok(run_decryption(
-            decryption,
-            &self.host,
-            &mut ChaCha20Rng::from_seed([self.tag ^ 0xff; 32]),
-            &binding(),
-        )?)
+        Ok(self.observe(message)?.outcome)
     }
 
-    /// Accepts a Session from a first Message and commits it through the prepared operation.
-    pub fn accept(
-        &mut self,
-        message: &Message,
-        selection: PreKeySelection,
-    ) -> SessionAcceptanceOutcome {
-        let mut prepared = self.prepare_accept(message, selection).unwrap();
-        self.store.reserve_operation(prepared.operation.id).unwrap();
-        if let SessionAcceptanceOutcome::Accepted(result) = &mut prepared.output {
-            self.host
-                .commit(std::mem::take(&mut result.state_updates))
-                .unwrap();
+    /// Decrypts `message` without committing the result, and reports what the operation asked for.
+    pub fn observe(&self, message: &Message) -> Result<Decrypted, DeviceError> {
+        let mut decryption = self.store.start_decryption(self.incoming(message))?;
+        // Each Message's ephemeral key varies the seed, so each ratchet step draws new keys.
+        let mut seed = message.ephemeral_public_key;
+        seed[0] ^= self.tag;
+        let mut rng = ChaCha20Rng::from_seed(seed);
+        let mut admission = None;
+        let mut acknowledgment_destination = None;
+        loop {
+            match decryption.step(&mut rng)? {
+                MessageDecryptionStep::NeedsState(addresses) => {
+                    decryption.supply_state(self.host.read(&addresses))?;
+                }
+                MessageDecryptionStep::NeedsAdmission(request) => {
+                    admission = Some(request);
+                    if !self.admits {
+                        return Err(DeviceError::NotAdmitted(request));
+                    }
+                    decryption.confirm_admission()?;
+                }
+                MessageDecryptionStep::NeedsAcknowledgmentTransport(destination) => {
+                    acknowledgment_destination = Some(destination);
+                    decryption.supply_acknowledgment_transport_binding(binding())?;
+                }
+                MessageDecryptionStep::Ready(outcome) => {
+                    return Ok(Decrypted {
+                        outcome: *outcome,
+                        admission,
+                        acknowledgment_destination,
+                    });
+                }
+            }
         }
-        self.store
-            .finalize_operation(prepared.operation.id)
+    }
+
+    /// Commits `changes`, reserving and finalizing the operation they carry around the host
+    /// transaction, and aborting it when a condition fails.
+    pub fn commit_changes(&mut self, changes: StateChanges) -> Result<(), HostCommitError> {
+        let Some(operation) = changes.operation() else {
+            return self.host.commit_changes(changes);
+        };
+        // SecureStorage changed since preparation, so the result is stale like a failed condition.
+        if let Err(KeyStoreError::Operation(KeyStoreOperationError::PreconditionChanged {
+            ..
+        })) = self.store.reserve_operation(operation)
+        {
+            self.store.abort_operation(operation).unwrap();
+            return Err(HostCommitError::StaleCondition);
+        }
+        match self.host.commit_changes(changes) {
+            Ok(()) => {
+                self.store.finalize_operation(operation).unwrap();
+                Ok(())
+            }
+            Err(error) => {
+                self.store.abort_operation(operation).unwrap();
+                Err(error)
+            }
+        }
+    }
+
+    /// Blocks `peer`, given whatever record this Device holds for them, and commits the block.
+    pub fn block(&mut self, peer: ContactIdentityKey) -> Option<PublicationBundle> {
+        let address = contact_address(peer);
+        let record = self
+            .host
+            .blob_bytes(&address)
+            .map(roost_core::ProtocolStateBlob::from_bytes);
+        let block = self
+            .store
+            .prepare_block_contact(peer, record.as_ref())
             .unwrap();
-        prepared.output
+        self.commit_changes(block.changes).unwrap();
+        block.publication
     }
 
-    /// Prepares acceptance of the Session `message` starts, without reserving or committing it.
-    pub fn prepare_accept(
-        &self,
-        message: &Message,
-        selection: PreKeySelection,
-    ) -> Result<PreparedKeyStoreOperation<SessionAcceptanceOutcome>, SessionEstablishmentError>
-    {
-        self.prepare_accept_with_binding(message, &binding(), selection)
-    }
-
-    pub fn prepare_accept_with_binding(
-        &self,
-        message: &Message,
-        transport_binding: &TransportBinding,
-        selection: PreKeySelection,
-    ) -> Result<PreparedKeyStoreOperation<SessionAcceptanceOutcome>, SessionEstablishmentError>
-    {
-        self.store.prepare_accept_session_with_transport_binding(
-            SessionAcceptance {
-                snapshot: &self.host.snapshot(),
-                message,
-                settings: self.settings,
-                sender_certificate_validation: &self.relay.validation(),
-            },
-            transport_binding,
-            selection,
-        )
+    /// Deletes the Deduplication Set, as if every recorded digest had aged out.
+    pub fn forget_received_digests(&mut self) {
+        self.host.remove(&deduplication_address());
     }
 
     fn next_message_id(&mut self) -> MessageId {
@@ -353,11 +486,41 @@ impl<'relay> Device<'relay> {
     }
 }
 
+/// Runs `encryption` over `host`'s records, supplying the test binding when it asks for a
+/// transport, and returns the destination it named.
+pub fn run_encryption(
+    mut encryption: MessageEncryption,
+    host: &HostStore,
+    rng: &mut ChaCha20Rng,
+) -> Result<Encrypted, MessageOperationError> {
+    let mut destination = None;
+    loop {
+        match encryption.step(rng)? {
+            MessageEncryptionStep::NeedsState(addresses) => {
+                encryption.supply_state(host.read(&addresses))?;
+            }
+            MessageEncryptionStep::NeedsTransport(asked) => {
+                destination = Some(asked);
+                encryption.supply_transport_binding(binding())?;
+            }
+            MessageEncryptionStep::NeedsPreKeyBundle(identity_key) => {
+                return Ok(Encrypted::NeedsPreKeyBundle(identity_key));
+            }
+            MessageEncryptionStep::Ready(result) => {
+                let destination = destination.expect("a sealed Message names its destination");
+                return Ok(Encrypted::Ready(Box::new((*result, destination))));
+            }
+        }
+    }
+}
+
 /// A Message the host committed and queued for sending.
 pub struct SentMessage {
     pub session_id: SessionId,
     pub message_id: MessageId,
+    pub payload_kind: PayloadKind,
     pub message: Message,
+    pub destination: MessageDestination,
 }
 
 /// Why a Device's Message Operation failed.
@@ -365,6 +528,7 @@ pub struct SentMessage {
 pub enum DeviceError {
     Start(MessageStartError),
     Operation(MessageOperationError),
+    NotAdmitted(AdmissionRequest),
 }
 
 impl From<MessageStartError> for DeviceError {
@@ -379,12 +543,35 @@ impl From<MessageOperationError> for DeviceError {
     }
 }
 
-/// A peer's published keys as the relay serves them, with the prekey IDs a transport carries.
-pub struct PublishedBundle {
-    pub identity: PublicIdentityKey,
-    pub discovery_to_identity: roost_core::Signature,
-    pub bundle: PreKeyBundle,
-    pub selection: PreKeySelection,
+/// Returns the same draft again, as an app restarts an attempt, without a bundle.
+pub fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
+    OutgoingMessage {
+        recipient: draft.recipient,
+        message_id: draft.message_id,
+        sent_at_millis: draft.sent_at_millis,
+        sender_certificate: SignedSenderCertificate {
+            certificate: draft.sender_certificate.certificate.clone(),
+            signature: draft.sender_certificate.signature.clone(),
+        },
+        plaintext: draft.plaintext.clone(),
+        prekey_bundle: None,
+    }
+}
+
+/// The address of the record of the Sessions kept with `identity_key`.
+pub fn peer_sessions_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(
+        ProtocolStateKind::PeerSessions,
+        ProtocolStateKey::from(identity_key),
+    )
+}
+
+/// The address of the contact record for `identity_key`.
+pub fn contact_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
+    ProtocolStateAddress::new(
+        ProtocolStateKind::ContactState,
+        ProtocolStateKey::from(identity_key),
+    )
 }
 
 fn identity_key(identity: &PublicIdentityKey) -> ContactIdentityKey {

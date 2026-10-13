@@ -1,51 +1,32 @@
-//! Public contact queries reconstruct app state after another instance commits opaque host blobs.
+//! Public contact decoders reconstruct app state after another instance commits opaque host blobs.
 
 mod support;
 
-use roost_core::ProtocolStateEngine;
-use support::{HostStore, accepted_contact_identity};
+use support::device::{Device, Relay, contact_address};
 
 #[test]
 fn app_queries_observe_extension_changes_only_after_host_commit() {
-    let app = ProtocolStateEngine::new();
-    let extension = ProtocolStateEngine::new();
-    let mut host = HostStore::default();
-    let contact = accepted_contact_identity();
-    host.commit(
-        app.record_contact(&host.snapshot(), contact)
-            .unwrap()
-            .state_updates,
-    )
-    .unwrap();
-    host.commit(
-        app.accept_contact(&host.snapshot(), contact.identity_key)
-            .unwrap()
-            .state_updates,
-    )
-    .unwrap();
-    let read = host.snapshot();
-    let contact = app.contact_states(&read).unwrap().remove(0);
-    assert!(!contact.blocked);
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let mut bob = Device::new(&relay, 0xb0);
+    let request = alice.request(&bob, b"hi bob");
+    bob.receive(&request.message);
+    assert!(!bob.contact(&alice).unwrap().blocked);
 
-    let change = extension
-        .block_contact(&read, contact.identity.identity_key)
+    let extension = bob.second_instance();
+    let record = bob
+        .host
+        .blob_bytes(&contact_address(alice.identity_key()))
+        .map(roost_core::ProtocolStateBlob::from_bytes);
+    let block = extension
+        .prepare_block_contact(alice.identity_key(), record.as_ref())
         .unwrap();
-    assert!(change.contact.blocked);
-    assert!(change.event.is_some());
-    assert!(
-        !app.contact_state(&host.snapshot(), contact.identity.identity_key)
-            .unwrap()
-            .unwrap()
-            .blocked
-    );
+    assert!(!bob.contact(&alice).unwrap().blocked);
 
-    host.commit(change.state_updates).unwrap();
-    let restarted_app = ProtocolStateEngine::new();
-    assert!(
-        restarted_app
-            .contact_state(&host.snapshot(), contact.identity.identity_key)
-            .unwrap()
-            .unwrap()
-            .blocked
-    );
+    let operation = block.changes.operation().unwrap();
+    extension.reserve_operation(operation).unwrap();
+    bob.host.commit_changes(block.changes).unwrap();
+    extension.finalize_operation(operation).unwrap();
+    bob.restart();
+    assert!(bob.contact(&alice).unwrap().blocked);
 }

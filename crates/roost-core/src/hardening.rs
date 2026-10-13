@@ -14,6 +14,8 @@ const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
 pub(crate) const MAX_PENDING_ACKNOWLEDGMENTS: usize = 1024;
 pub(crate) const MAX_ACKNOWLEDGMENT_DIGESTS: usize = 1024;
+/// How many distinct Messages each side may send a contact before the contact is accepted.
+pub(crate) const MAX_MESSAGES_BEFORE_ACCEPTANCE: usize = 3;
 
 /// The fixed ceilings on externally influenced protocol work, and the Deduplication Set's range.
 ///
@@ -41,6 +43,8 @@ pub struct ProtocolHardeningLimits {
     pub default_deduplication_capacity: usize,
     /// Largest Deduplication Set an app may choose.
     pub max_deduplication_capacity: usize,
+    /// Distinct Messages each side may send a contact before the contact is accepted.
+    pub max_messages_before_acceptance: usize,
 }
 
 impl Default for ProtocolHardeningLimits {
@@ -56,6 +60,7 @@ impl Default for ProtocolHardeningLimits {
             min_deduplication_capacity: MIN_DEDUPLICATION_CAPACITY,
             default_deduplication_capacity: DEFAULT_DEDUPLICATION_CAPACITY,
             max_deduplication_capacity: MAX_DEDUPLICATION_CAPACITY,
+            max_messages_before_acceptance: MAX_MESSAGES_BEFORE_ACCEPTANCE,
         }
     }
 }

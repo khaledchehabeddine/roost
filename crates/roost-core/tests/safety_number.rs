@@ -1,21 +1,13 @@
-//! Exercises Safety Number derivation and out-of-band contact verification.
+//! Exercises Safety Number derivation.
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use roost_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactSafetyNumberConfirmation, ContactStateChange,
-    ContactTrustState, IdentityKey, ProtocolStateEngine, ProtocolStateError, ProtocolStateSnapshot,
-    SafetyNumberError, derive_safety_number,
-};
-use roost_crypto::{generate_discovery_key, generate_key_pair, generate_signing_key_pair};
-
-const CREATED_AT_SECS: u64 = 1_700_000_000;
+use roost_core::{IdentityKey, SafetyNumberError, derive_safety_number};
+use roost_crypto::{generate_key_pair, generate_signing_key_pair};
 
 struct Setup {
     local_identity: IdentityKey,
     contact_identity: IdentityKey,
-    contact_discovery: ContactDiscoveryKey,
-    contact_rotated_discovery: ContactDiscoveryKey,
 }
 
 fn setup() -> Setup {
@@ -24,10 +16,6 @@ fn setup() -> Setup {
     let local_key_pair = generate_key_pair(&mut rng);
     let contact_signing = generate_signing_key_pair(&mut rng);
     let contact_key_pair = generate_key_pair(&mut rng);
-    let contact_discovery =
-        generate_discovery_key(&mut rng, &contact_signing, 0, CREATED_AT_SECS).unwrap();
-    let contact_rotated_discovery =
-        generate_discovery_key(&mut rng, &contact_signing, 1, CREATED_AT_SECS + 60).unwrap();
 
     Setup {
         local_identity: IdentityKey {
@@ -38,27 +26,11 @@ fn setup() -> Setup {
             x25519_public_key: *contact_key_pair.public.as_bytes(),
             ed25519_verifying_key: contact_signing.verifying.to_bytes(),
         },
-        contact_discovery: ContactDiscoveryKey::from(&contact_discovery.public()),
-        contact_rotated_discovery: ContactDiscoveryKey::from(&contact_rotated_discovery.public()),
-    }
-}
-
-fn contact_identity(setup: &Setup) -> ContactIdentity {
-    ContactIdentity {
-        identity_key: setup.contact_identity,
-        discovery_key: setup.contact_discovery,
     }
 }
 
 fn display_groups(value: &str) -> Vec<&str> {
     value.split(' ').collect()
-}
-
-fn matched_confirmation(confirmation: ContactSafetyNumberConfirmation) -> ContactStateChange {
-    match confirmation {
-        ContactSafetyNumberConfirmation::Matched(change) => change,
-        ContactSafetyNumberConfirmation::Mismatched(_) => panic!("safety number did not match"),
-    }
 }
 
 #[test]
@@ -170,227 +142,4 @@ fn safety_number_derivation_rejects_non_canonical_identity_key() {
         derive_safety_number(setup.local_identity, invalid),
         Err(SafetyNumberError::InvalidIdentityKey)
     );
-}
-
-#[test]
-fn discovery_key_rotation_does_not_change_safety_number() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    let initial_number =
-        derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.contact_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(
-                    &snapshot,
-                    ContactIdentity {
-                        identity_key: setup.contact_identity,
-                        discovery_key: setup.contact_rotated_discovery,
-                    },
-                )
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let rotated_number =
-        derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-    let contact = engine
-        .contact_state(&snapshot, setup.contact_identity)
-        .unwrap()
-        .unwrap();
-    assert_eq!(rotated_number, initial_number);
-    assert_eq!(
-        contact.identity.discovery_key,
-        setup.contact_rotated_discovery
-    );
-    assert_eq!(contact.trust_state, ContactTrustState::Unverified);
-}
-
-#[test]
-fn out_of_band_confirmation_transitions_unverified_contact_to_verified() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.contact_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let safety_number = derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-
-    let change = matched_confirmation(
-        engine
-            .confirm_contact_safety_number(
-                &snapshot,
-                setup.local_identity,
-                setup.contact_identity,
-                &safety_number.grouped_decimal,
-            )
-            .unwrap(),
-    );
-    snapshot.apply_all(change.state_updates).unwrap();
-
-    assert_eq!(change.contact.trust_state, ContactTrustState::Verified);
-    assert_eq!(
-        engine
-            .contact_state(&snapshot, setup.contact_identity)
-            .unwrap()
-            .unwrap()
-            .trust_state,
-        ContactTrustState::Verified
-    );
-}
-
-#[test]
-fn pending_contact_cannot_be_raised_to_verified_by_safety_number() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let safety_number = derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-
-    assert!(matches!(
-        engine.confirm_contact_safety_number(
-            &snapshot,
-            setup.local_identity,
-            setup.contact_identity,
-            &safety_number.grouped_decimal,
-        ),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
-    ));
-}
-
-#[test]
-fn safety_number_mismatch_leaves_trust_state_unchanged() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.contact_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-
-    let confirmation = engine
-        .confirm_contact_safety_number(
-            &snapshot,
-            setup.local_identity,
-            setup.contact_identity,
-            "00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000",
-        )
-        .unwrap();
-    let ContactSafetyNumberConfirmation::Mismatched(change) = confirmation else {
-        panic!("safety number mismatch was not explicit");
-    };
-
-    assert_eq!(change.contact.trust_state, ContactTrustState::Unverified);
-    assert!(change.state_updates.is_empty());
-    assert!(change.event.is_none());
-    assert_eq!(
-        engine
-            .contact_state(&snapshot, setup.contact_identity)
-            .unwrap()
-            .unwrap()
-            .trust_state,
-        ContactTrustState::Unverified
-    );
-}
-
-#[test]
-fn safety_number_mismatch_on_verified_contact_is_explicit() {
-    let setup = setup();
-    let engine = ProtocolStateEngine::new();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact_identity(&setup))
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    snapshot
-        .apply_all(
-            engine
-                .accept_contact(&snapshot, setup.contact_identity)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    let safety_number = derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-    let matched = matched_confirmation(
-        engine
-            .confirm_contact_safety_number(
-                &snapshot,
-                setup.local_identity,
-                setup.contact_identity,
-                &safety_number.grouped_decimal,
-            )
-            .unwrap(),
-    );
-    snapshot.apply_all(matched.state_updates).unwrap();
-
-    let confirmation = engine
-        .confirm_contact_safety_number(
-            &snapshot,
-            setup.local_identity,
-            setup.contact_identity,
-            "00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000 00000",
-        )
-        .unwrap();
-    let ContactSafetyNumberConfirmation::Mismatched(change) = confirmation else {
-        panic!("verified contact mismatch was not explicit");
-    };
-
-    assert_eq!(change.contact.trust_state, ContactTrustState::Verified);
-    assert!(change.state_updates.is_empty());
-    assert!(change.event.is_none());
 }

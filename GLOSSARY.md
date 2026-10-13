@@ -2,19 +2,27 @@
 
 - **Acknowledgment Artifact**: An encrypted Message that proves the receiver accepted an earlier Message.
   - Avoid: receipt, network ack
+- **Admission**: The Relay's acceptance of a Message into an inbox, either by Delivery Capability or by the recipient's current prekeys.
+  - Avoid: delivery, queueing
 - **Blocking**: A local choice to hide a contact's Messages, separate from Trust State and certificate revocation.
   - Avoid: revocation, distrust, blocklist
 - **Caller-Owned Transport**: The app's own networking, authentication, and retries, which carry the Messages Roost produces.
 - **Commit Condition**: The state a record must still be in when the app commits an operation's result, either unchanged since Roost read it or still absent.
   - Avoid: precondition, version check, lock
+- **Contact Acceptance**: The Message that accepts a Contact Request and carries the accepter's Inbox Grant.
+  - Avoid: reply
 - **Contact Identity**: The Identity Key and current Discovery Key that identify a peer.
   - Avoid: account, profile
+- **Contact Request**: The first Message to a new contact, which carries the sender's Inbox Grant.
+  - Avoid: introduction, invite
 - **Dead Session**: A Session that an authenticated failure has made unrecoverable, so only a new X3DH exchange can replace it.
   - Avoid: reset session, closed conversation
 - **Deduplication Digest**: A keyed hash of a received frame and its Transport Binding that catches a repeated delivery before decryption.
   - Avoid: message hash, replay token
 - **Deduplication Set**: The limited set of recent Deduplication Digests kept for one Identity.
   - Avoid: cache
+- **Delivery Capability**: The secret, one per Epoch, that the Relay checks before it admits an established Message to an inbox.
+  - Avoid: inbox token
 - **Device**: The app install that holds one Identity's private keys.
   - Avoid: client, installation, instance
 - **Discovery Key (DK)**: A rotatable key pair, signed by the Identity Key, that peers use to start Sessions with an Identity.
@@ -33,6 +41,8 @@
   - Avoid: master key, root key
 - **Identity Secret Blob**: The SecureStorage entry that holds an Identity Key's secret halves.
   - Avoid: backup blob
+- **Inbox Grant**: The Discovery Key, its binding signatures, and the Delivery Capability that an Identity sends a contact so the contact can deliver to its inbox.
+  - Avoid: inbox authorization, introduction
 - **Library Instance**: One running copy of Roost in a process, which owns no durable state.
   - Avoid: Device, client
 - **Message**: One Sealed Sender Frame sent within a Session.
@@ -47,15 +57,13 @@
   - Avoid: outbox, retry cache
 - **PreKey ID**: The number that identifies a prekey within one Epoch, counted separately for signed and one-time prekeys.
   - Avoid: key fingerprint, database row ID
-- **PreKey Selection**: The signed and one-time prekey IDs the app picks for an incoming X3DH Message.
-  - Avoid: prekey reference
 - **PreKey State**: The stored secrets for an Identity's current Discovery Key and its prekeys.
   - Avoid: protocol state blob, prekey cache
 - **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app reserves before committing its own state, then finalizes or aborts.
   - Avoid: database transaction, deferred write
 - **Protocol State Blob**: Opaque state, including secrets, that Roost produces and the app stores between operations.
   - Avoid: cache
-- **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a peer's inbox authorization.
+- **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a contact.
   - Avoid: table, bucket, namespace
 - **Relay Domain**: The domain name of a Relay. A Sender Certificate names one, and a recipient refuses a certificate that names a different Relay than it expects.
 - **Retry Instruction**: A notice telling the app to resend a Message that is still unacknowledged.
@@ -82,7 +90,7 @@
   - Avoid: decrypt error, warning
 - **Transport Binding**: Public bytes the app attaches to a Message, which Roost authenticates but never reads or stores.
   - Avoid: transport envelope, route record, delivery capability
-- **Trust State**: The trust level the app records for a peer: pending, accepted but unverified, or verified by Safety Number.
+- **Trust State**: The trust level the app records for a peer: pending while a Contact Request is open in either direction, accepted but unverified, or verified by Safety Number.
   - Avoid: certificate validity, blocking
 - **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys, whose Messages prove the sender holds its Identity Key until the peer replies.
   - Avoid: login, certificate validation

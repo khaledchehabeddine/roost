@@ -2,23 +2,22 @@
 
 mod support;
 
-use roost_core::{InboundMessageOutcome, ProtocolStateEngine};
+use roost_core::InboundMessageOutcome;
 use support::{ProtocolFixture, accepted, deduplication_address, session_address};
 
 #[test]
 fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
-    let engine = ProtocolStateEngine::new();
-    let mut fixture = ProtocolFixture::new([0x51; 32]);
-    let first = fixture.encrypt_from_alice(&engine, 1, b"committed");
-    fixture.decrypt_for_bob(&engine, &first, 0x52);
-    let second = fixture.encrypt_from_alice(&engine, 2, b"interrupted");
+    let mut fixture = ProtocolFixture::new();
+    let first = fixture.encrypt_from_alice(1, b"committed");
+    fixture.decrypt_for_bob(&first, 0x52);
+    let second = fixture.encrypt_from_alice(2, b"interrupted");
     let addresses = [session_address(fixture.session_id), deduplication_address()];
     let before = addresses
         .each_ref()
-        .map(|address| fixture.bob_store.blob_bytes(address));
+        .map(|address| fixture.bob.host.blob_bytes(address));
     let interrupted = accepted(
         fixture
-            .receive(&engine, &fixture.bob_store, &second.message, 0x53)
+            .receive(&fixture.bob.host, &second.message, 0x53)
             .unwrap(),
     );
     assert_eq!(interrupted.plaintext.as_slice(), b"interrupted");
@@ -26,22 +25,16 @@ fn interrupted_receive_commit_leaves_only_last_committed_state_visible() {
     assert_eq!(
         addresses
             .each_ref()
-            .map(|address| fixture.bob_store.blob_bytes(address)),
+            .map(|address| fixture.bob.host.blob_bytes(address)),
         before
     );
 
-    let restarted = ProtocolStateEngine::new();
-    let store = fixture.bob_store.clone();
+    fixture.bob.restart();
+    let store = fixture.bob.host.clone();
     assert!(matches!(
-        fixture
-            .receive(&restarted, &store, &first.message, 0x54)
-            .unwrap(),
+        fixture.receive(&store, &first.message, 0x54).unwrap(),
         InboundMessageOutcome::Duplicate
     ));
-    let retried = accepted(
-        fixture
-            .receive(&restarted, &store, &second.message, 0x55)
-            .unwrap(),
-    );
+    let retried = accepted(fixture.receive(&store, &second.message, 0x55).unwrap());
     assert_eq!(retried.plaintext.as_slice(), b"interrupted");
 }

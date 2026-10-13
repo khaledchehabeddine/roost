@@ -1,10 +1,13 @@
-use super::KeyStore;
-use crate::protocol_state::LocalSenderKeys;
+use super::{KeyStore, KeyStoreError, KeyStoreOperationId};
+use crate::protocol_state::{LocalIdentityKeys, SendIntent};
 use crate::{
-    DiscoveryKeyError, IdentityError, IncomingMessage, KeyStoreOperationError, LocalIdentityKeys,
-    MessageDecryption, MessageEncryption, OutgoingMessage, ProtocolStateError,
-    SignedSenderCertificate,
+    DiscoveryKeyError, IdentityError, IncomingMessage, KeyStoreOperationError, MessageDecryption,
+    MessageEncryption, OutgoingMessage, ProtocolStateError,
 };
+use roost_crypto::{
+    HandshakeError, OneTimePreKey, PublicSignedPreKey, SealedFramePreKeyReference, SignedPreKey,
+};
+use std::time::SystemTime;
 
 /// Errors returned when a Message Operation can't start.
 #[derive(Debug, thiserror::Error)]
@@ -23,8 +26,17 @@ pub enum MessageStartError {
     ProtocolState(#[from] ProtocolStateError),
 }
 
+/// The local prekeys a first Message names.
+pub(crate) struct FirstMessagePreKeys {
+    pub(crate) signed_prekey: SignedPreKey,
+    pub(crate) one_time_prekey: Option<OneTimePreKey>,
+    /// Every signed prekey this identity still holds, so Roost can forget deleted SessionIDs that
+    /// no handshake can recreate.
+    pub(crate) held_signed_prekeys: Vec<PublicSignedPreKey>,
+}
+
 impl KeyStore {
-    /// Starts encrypting a Message to a contact.
+    /// Starts encrypting an ordinary Message to a contact.
     ///
     /// The operation loads the local Identity's keys now and touches SecureStorage no more.
     /// Roost selects the Session and the contact's Discovery Key as the operation reads them.
@@ -32,17 +44,48 @@ impl KeyStore {
         &self,
         message: OutgoingMessage,
     ) -> Result<MessageEncryption, MessageStartError> {
+        self.start_send(message, SendIntent::Message)
+    }
+
+    /// Starts encrypting a Contact Request, whose commit creates the contact's Pending record.
+    ///
+    /// A request to a contact who already asked sends a Contact Acceptance instead, and one to an
+    /// accepted contact sends an ordinary Message.
+    pub fn request_contact(
+        &self,
+        message: OutgoingMessage,
+    ) -> Result<MessageEncryption, MessageStartError> {
+        self.start_send(message, SendIntent::Request)
+    }
+
+    /// Starts encrypting a Contact Acceptance, whose commit accepts the contact.
+    ///
+    /// An acceptance to a contact already accepted sends an ordinary Message instead.
+    pub fn accept_contact(
+        &self,
+        message: OutgoingMessage,
+    ) -> Result<MessageEncryption, MessageStartError> {
+        self.start_send(message, SendIntent::Acceptance)
+    }
+
+    fn start_send(
+        &self,
+        message: OutgoingMessage,
+        intent: SendIntent,
+    ) -> Result<MessageEncryption, MessageStartError> {
         let keys = {
             let _lifecycle = self.lifecycle_guard();
             self.ensure_no_recovery_required()?;
-            self.load_local_identity_keys::<MessageStartError>()?
+            self.load_local_identity_keys()?
         };
-        Ok(self.0.engine.start_encryption(keys, message)?)
+        Ok(self.0.engine.start_encryption(keys, message, intent)?)
     }
 
     /// Starts decrypting a received Message.
     ///
-    /// The operation loads the local Identity's keys now and touches SecureStorage no more.
+    /// The operation loads the local Identity's keys now. It reads SecureStorage again only for
+    /// the prekeys a first Message names, and stages the use of a one-time prekey as a Prepared
+    /// KeyStore Operation that travels in the result's state changes.
     pub fn start_decryption(
         &self,
         message: IncomingMessage,
@@ -50,37 +93,88 @@ impl KeyStore {
         let keys = {
             let _lifecycle = self.lifecycle_guard();
             self.ensure_no_recovery_required()?;
-            self.load_local_identity_keys::<MessageStartError>()?
+            self.load_local_identity_keys()?
         };
-        Ok(self.0.engine.start_decryption(keys, message)?)
+        Ok(self
+            .0
+            .engine
+            .start_decryption(self.clone(), keys, message)?)
     }
 
-    // Loads the identity's key pairs and current Discovery Key, and both binding directions.
-    pub(super) fn load_sender<E>(
+    // Returns the ID of the signed prekey a first Message names when it is one kept after a
+    // rotation, which needs proof of admission, or `None` when it is the current one.
+    pub(crate) fn signed_prekey_needing_admission(
         &self,
-        certificate: &[u8],
-        signature: &[u8],
-    ) -> Result<LocalSenderKeys, E>
-    where
-        E: From<IdentityError> + From<DiscoveryKeyError> + From<ProtocolStateError>,
-    {
-        Ok(LocalSenderKeys::new(
-            self.load_local_identity_keys::<E>()?,
-            SignedSenderCertificate {
-                certificate: certificate.to_vec(),
-                signature: signature.to_vec(),
-            },
-        )?)
+        epoch: u32,
+        public_key: &[u8; 32],
+    ) -> Result<Option<u64>, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        let (signed_prekey, is_current) =
+            self.0
+                .signed_prekey
+                .prekey_for_first_message(epoch, public_key, SystemTime::now())?;
+        Ok((!is_current).then(|| signed_prekey.id()))
     }
 
-    fn load_local_identity_keys<E: From<IdentityError> + From<DiscoveryKeyError>>(
+    // Loads the signed and one-time prekeys a first Message names, without consuming either.
+    pub(crate) fn first_message_prekeys(
         &self,
-    ) -> Result<LocalIdentityKeys, E> {
+        reference: &SealedFramePreKeyReference,
+    ) -> Result<FirstMessagePreKeys, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        let now = SystemTime::now();
+        let (signed_prekey, _) = self.0.signed_prekey.prekey_for_first_message(
+            reference.discovery_epoch,
+            &reference.signed_prekey_public_key,
+            now,
+        )?;
+        let one_time_prekey = match (
+            reference.one_time_prekey_id,
+            reference.one_time_prekey_public_key,
+        ) {
+            (None, None) => None,
+            (Some(id), Some(public_key)) => {
+                Some(self.0.one_time_prekey.one_time_prekey_for_public_key(
+                    reference.discovery_epoch,
+                    id,
+                    &public_key,
+                )?)
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(ProtocolStateError::from(HandshakeError::OneTimePreKeyMismatch).into());
+            }
+        };
+        Ok(FirstMessagePreKeys {
+            signed_prekey,
+            one_time_prekey,
+            held_signed_prekeys: self.0.signed_prekey.held_public(now)?,
+        })
+    }
+
+    // Stages consuming the one-time prekey a new Session used, and returns the operation's ID.
+    pub(crate) fn prepare_one_time_prekey_use(
+        &self,
+        epoch: u32,
+        id: u64,
+    ) -> Result<KeyStoreOperationId, KeyStoreError> {
+        let prepared = self.prepare_operation(|staged| {
+            let _lifecycle = staged.lifecycle_guard();
+            staged
+                .0
+                .one_time_prekey
+                .consume_one_time_prekey(epoch, id)
+                .map_err(KeyStoreError::from)
+        })?;
+        Ok(prepared.operation.id)
+    }
+
+    fn load_local_identity_keys(&self) -> Result<LocalIdentityKeys, MessageStartError> {
         let (agreement_key, signing_key) = self.0.identity.load_key_pairs()?;
         Ok(LocalIdentityKeys {
             agreement_key,
             signing_key,
             discovery_key: self.0.discovery.current()?,
+            delivery_capability: self.0.discovery.current_capability()?,
         })
     }
 }

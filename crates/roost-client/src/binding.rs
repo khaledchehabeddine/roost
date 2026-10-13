@@ -1,11 +1,10 @@
 //! Standalone IK/DK binding verification exposed through UniFFI.
 //!
-//! Both directions of the mutual binding were already implemented in `roost-crypto`
-//! and already checked on every path that establishes a session or records a contact. Neither was
-//! reachable from a binding before this module: `initiate_session` needs a live publication bundle
-//! and a session, and `record_contact` covers only the IK→DK direction. A client adding a contact
-//! from a typed discovery key has neither, and it must decide whether the identity a relay answered
-//! with is the one that discovery key vouches for *before* it records anything.
+//! Both directions of the mutual binding are implemented in `roost-crypto` and checked on every
+//! path that starts a Session or takes an Inbox Grant. Neither is reachable from a binding without
+//! this module: a request checks them only once the app holds a whole prekey bundle. A client that
+//! looks someone up from a typed discovery key must decide whether the identity a relay answered
+//! with is the one that discovery key vouches for *before* it asks them.
 //!
 //! The functions here take public material only and return nothing but a verdict, so they are not
 //! a signing oracle. They are not a general Ed25519 verification oracle either: each one fixes its

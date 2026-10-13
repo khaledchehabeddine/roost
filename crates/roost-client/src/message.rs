@@ -83,6 +83,10 @@ pub enum PayloadKind {
     KeyExchange,
     /// Double Ratchet header bytes.
     RatchetHeader,
+    /// Encrypted application text that carried the sender's Inbox Grant, which Roost kept.
+    EncryptedTextWithGrant,
+    /// A Contact Acceptance and its encrypted application text.
+    ContactAcceptance,
 }
 
 impl SenderIdentityMaterial {
@@ -161,6 +165,8 @@ impl PayloadKind {
             roost_protocol::PayloadKind::Acknowledgment => Self::Acknowledgment,
             roost_protocol::PayloadKind::KeyExchange => Self::KeyExchange,
             roost_protocol::PayloadKind::RatchetHeader => Self::RatchetHeader,
+            roost_protocol::PayloadKind::EncryptedTextWithGrant => Self::EncryptedTextWithGrant,
+            roost_protocol::PayloadKind::ContactAcceptance => Self::ContactAcceptance,
         }
     }
 }

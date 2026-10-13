@@ -33,19 +33,6 @@ impl TransportBinding {
     }
 }
 
-/// Stable prekey identifiers selected for an X3DH initial Message.
-///
-/// The caller obtains these identifiers from the recipient publication and supplies them again
-/// when receiving a Transport-Bound initial Message. Core uses them only to select and validate
-/// Roost-owned prekey state; it does not infer any transport encoding from them.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PreKeySelection {
-    /// Identifier of the selected signed pre-key within one Discovery Key Epoch.
-    pub signed_prekey_id: u64,
-    /// Identifier of the selected one-time pre-key, when one was used.
-    pub one_time_prekey_id: Option<u64>,
-}
-
 /// Errors returned while constructing a [`TransportBinding`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TransportBindingError {

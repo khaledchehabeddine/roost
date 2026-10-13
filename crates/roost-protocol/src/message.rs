@@ -66,6 +66,10 @@ pub enum PayloadKind {
     KeyExchange,
     /// Double Ratchet header bytes.
     RatchetHeader,
+    /// Encrypted application text content that follows the sender's Inbox Grant.
+    EncryptedTextWithGrant,
+    /// A Contact Acceptance: the accepter's Inbox Grant, then encrypted application text content.
+    ContactAcceptance,
 }
 
 impl PayloadKind {
@@ -76,6 +80,8 @@ impl PayloadKind {
             PayloadKind::Acknowledgment => 1,
             PayloadKind::KeyExchange => 2,
             PayloadKind::RatchetHeader => 3,
+            PayloadKind::EncryptedTextWithGrant => 4,
+            PayloadKind::ContactAcceptance => 5,
         }
     }
 
@@ -86,8 +92,18 @@ impl PayloadKind {
             1 => Ok(PayloadKind::Acknowledgment),
             2 => Ok(PayloadKind::KeyExchange),
             3 => Ok(PayloadKind::RatchetHeader),
+            4 => Ok(PayloadKind::EncryptedTextWithGrant),
+            5 => Ok(PayloadKind::ContactAcceptance),
             _ => Err(MessageEncodingError::UnsupportedPayloadKind(tag)),
         }
+    }
+
+    /// Returns whether the payload starts with the sender's Inbox Grant.
+    pub fn carries_grant(self) -> bool {
+        matches!(
+            self,
+            PayloadKind::EncryptedTextWithGrant | PayloadKind::ContactAcceptance
+        )
     }
 }
 

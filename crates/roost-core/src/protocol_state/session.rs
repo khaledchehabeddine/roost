@@ -24,6 +24,14 @@ pub(super) fn pending_acknowledgment_address(session_id: SessionId) -> ProtocolS
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, session_id.into())
 }
 
+/// Returns the addresses of the records a Session keeps.
+pub(super) fn session_record_addresses(session_id: SessionId) -> [ProtocolStateAddress; 2] {
+    [
+        session_address(session_id),
+        pending_acknowledgment_address(session_id),
+    ]
+}
+
 pub(super) fn peer_sessions_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::PeerSessions, identity_key.into())
 }
@@ -44,13 +52,21 @@ pub(super) struct LoadedSession {
 pub(super) enum SessionStatus {
     Active {
         state: Box<RatchetState>,
-        /// The handshake this side started, which its Messages carry until the peer replies.
-        pending_handshake: Option<Handshake>,
+        /// The handshake this side started, which its Messages carry until the peer replies, or for
+        /// a Contact Request until the peer accepts.
+        pending_handshake: Option<PendingHandshake>,
     },
     Unrecoverable {
         reason: SessionUnrecoverableReason,
         event_emitted: bool,
     },
+}
+
+/// A handshake this side started, and the signed prekey ID its route names.
+#[derive(Clone, Copy)]
+pub(super) struct PendingHandshake {
+    pub(super) handshake: Handshake,
+    pub(super) signed_prekey_id: u64,
 }
 
 /// Returns the Session at `address`, or `None` when the snapshot has none.
@@ -69,7 +85,7 @@ pub(super) fn encode_active_session(
     address: &ProtocolStateAddress,
     peer_identity_key: ContactIdentityKey,
     state: &RatchetState,
-    pending_handshake: Option<&Handshake>,
+    pending_handshake: Option<&PendingHandshake>,
     limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
     let ratchet_state = state.to_bytes()?;
@@ -170,11 +186,27 @@ pub(super) struct SignedPreKeyUse {
     pub(super) public_key: [u8; PUBLIC_KEY_LEN],
 }
 
+/// Which side started a Session with its handshake.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SessionEntry {
-    session_id: SessionId,
+pub(super) enum Starter {
+    Local,
+    Peer,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SessionEntry {
+    pub(super) session_id: SessionId,
     /// The signed prekey this side accepted the Session with, or `None` if this side started it.
     accepted_with: Option<SignedPreKeyUse>,
+}
+
+impl SessionEntry {
+    fn starter(&self) -> Starter {
+        match self.accepted_with {
+            Some(_) => Starter::Peer,
+            None => Starter::Local,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -212,6 +244,20 @@ impl PeerSessions {
         self.current.session_id
     }
 
+    /// Returns which side started the Session Roost sends on.
+    pub(super) fn current_starter(&self) -> Starter {
+        self.current.starter()
+    }
+
+    /// Returns which side started `session_id`, or `None` when it isn't one of this peer's
+    /// Sessions.
+    pub(super) fn starter(&self, session_id: SessionId) -> Option<Starter> {
+        std::iter::once(&self.current)
+            .chain(&self.older)
+            .find(|entry| entry.session_id == session_id)
+            .map(SessionEntry::starter)
+    }
+
     /// Returns whether `session_id` is one of this peer's Sessions.
     pub(super) fn contains(&self, session_id: SessionId) -> bool {
         self.current.session_id == session_id
@@ -232,6 +278,12 @@ impl PeerSessions {
     pub(super) fn forget_deletions_unless(&mut self, is_held: impl Fn(&SignedPreKeyUse) -> bool) {
         self.deleted
             .retain(|deleted| is_held(&deleted.signed_prekey));
+    }
+
+    /// Returns the Sessions starting one more would evict, whichever Session it makes current.
+    pub(super) fn evicted_by_next_start(&self) -> &[SessionEntry] {
+        let excess = (self.older.len() + 1).saturating_sub(MAX_OLDER_SESSIONS);
+        &self.older[..excess]
     }
 
     /// Makes a new Session the one Roost sends on, and returns the Sessions this evicts.
@@ -395,17 +447,19 @@ struct HandshakeWire {
     base_key: [u8; PUBLIC_KEY_LEN],
     responder_discovery_key: [u8; PUBLIC_KEY_LEN],
     discovery_epoch: u32,
+    signed_prekey_id: u64,
     signed_prekey_public_key: [u8; PUBLIC_KEY_LEN],
     one_time_prekey: Option<(u64, [u8; PUBLIC_KEY_LEN])>,
 }
 
-impl From<&Handshake> for HandshakeWire {
-    fn from(value: &Handshake) -> Self {
-        let reference = value.prekey_reference;
+impl From<&PendingHandshake> for HandshakeWire {
+    fn from(value: &PendingHandshake) -> Self {
+        let reference = value.handshake.prekey_reference;
         Self {
-            base_key: *value.base_key.as_bytes(),
-            responder_discovery_key: *value.responder_discovery_key.as_bytes(),
+            base_key: *value.handshake.base_key.as_bytes(),
+            responder_discovery_key: *value.handshake.responder_discovery_key.as_bytes(),
             discovery_epoch: reference.discovery_epoch,
+            signed_prekey_id: value.signed_prekey_id,
             signed_prekey_public_key: reference.signed_prekey_public_key,
             one_time_prekey: reference
                 .one_time_prekey_id
@@ -418,7 +472,7 @@ impl HandshakeWire {
     fn to_handshake(
         &self,
         address: &ProtocolStateAddress,
-    ) -> Result<Handshake, ProtocolStateError> {
+    ) -> Result<PendingHandshake, ProtocolStateError> {
         let keys_valid = [
             &self.base_key,
             &self.responder_discovery_key,
@@ -430,15 +484,18 @@ impl HandshakeWire {
         if !keys_valid {
             return Err(decode_error(address, "session handshake key is invalid"));
         }
-        Ok(Handshake {
-            base_key: PublicKey::from(self.base_key),
-            responder_discovery_key: PublicKey::from(self.responder_discovery_key),
-            prekey_reference: SealedFramePreKeyReference {
-                discovery_epoch: self.discovery_epoch,
-                signed_prekey_public_key: self.signed_prekey_public_key,
-                one_time_prekey_id: self.one_time_prekey.map(|(id, _)| id),
-                one_time_prekey_public_key: self.one_time_prekey.map(|(_, key)| key),
+        Ok(PendingHandshake {
+            handshake: Handshake {
+                base_key: PublicKey::from(self.base_key),
+                responder_discovery_key: PublicKey::from(self.responder_discovery_key),
+                prekey_reference: SealedFramePreKeyReference {
+                    discovery_epoch: self.discovery_epoch,
+                    signed_prekey_public_key: self.signed_prekey_public_key,
+                    one_time_prekey_id: self.one_time_prekey.map(|(id, _)| id),
+                    one_time_prekey_public_key: self.one_time_prekey.map(|(_, key)| key),
+                },
             },
+            signed_prekey_id: self.signed_prekey_id,
         })
     }
 }

@@ -152,7 +152,7 @@ impl SignedPreKeyManager {
         SignedPreKeyManager { storage, discovery }
     }
 
-    // Loads the secret signed pre-key from storage, pruning retained keys expired at `now`.
+    // Loads the current secret signed pre-key from storage.
     pub(crate) fn current(&self, now: SystemTime) -> Result<SignedPreKey, SignedPreKeyError> {
         let store = self.load_store(now)?;
         Ok(store.current.clone_for_storage())
@@ -178,21 +178,23 @@ impl SignedPreKeyManager {
             .collect())
     }
 
-    pub(crate) fn prekey_for_reference(
+    // Returns the signed prekey a first Message names by its public key, and whether it is the
+    // current one rather than one kept after a rotation.
+    pub(crate) fn prekey_for_first_message(
         &self,
         epoch: u32,
-        id: u64,
         public_key: &[u8; 32],
         now: SystemTime,
-    ) -> Result<SignedPreKey, SignedPreKeyError> {
+    ) -> Result<(SignedPreKey, bool), SignedPreKeyError> {
         let store = self.load_store(now)?;
-        matching_prekey(&store.current, epoch, id, public_key)
-            .or_else(|| {
-                store
-                    .retained
-                    .iter()
-                    .find_map(|retained| matching_prekey(&retained.prekey, epoch, id, public_key))
-            })
+        if let Some(current) = matching_public_key(&store.current, epoch, public_key) {
+            return Ok((current, true));
+        }
+        store
+            .retained
+            .iter()
+            .find_map(|retained| matching_public_key(&retained.prekey, epoch, public_key))
+            .map(|retained| (retained, false))
             .ok_or(SignedPreKeyError::NotFound)
     }
 
@@ -278,16 +280,17 @@ impl SignedPreKeyManager {
             .ok_or(SignedPreKeyError::NotFound)
     }
 
+    // Leaves out retained keys expired at `now` without deleting them, so only a rotation, which
+    // runs inside a prepared operation, removes them from storage.
     fn load_store_optional(
         &self,
         now: SystemTime,
     ) -> Result<Option<StoredSignedPreKeys>, SignedPreKeyError> {
-        let mut storage = self.lock_storage()?;
+        let storage = self.lock_storage()?;
         let Some(raw) = storage.load(SIGNED_PREKEY_KEY)? else {
             return Ok(None);
         };
         let mut store = decode_signed_prekey_store(&raw)?;
-        let retained_count = store.retained.len();
         store.retained.retain(|retained| {
             !is_expired(
                 retained.superseded_at_secs,
@@ -295,10 +298,6 @@ impl SignedPreKeyManager {
                 SIGNED_PREKEY_RETENTION_WINDOW,
             )
         });
-        if retained_count != store.retained.len() {
-            let blob = encode_signed_prekey_store(&store);
-            storage.store(SIGNED_PREKEY_KEY, &blob)?;
-        }
         Ok(Some(store))
     }
 
@@ -325,16 +324,14 @@ impl CloneForSignedPreKeyStorage for SignedPreKey {
     }
 }
 
-fn matching_prekey(
+fn matching_public_key(
     prekey: &SignedPreKey,
     epoch: u32,
-    id: u64,
     public_key: &[u8; 32],
 ) -> Option<SignedPreKey> {
     let matches_epoch = prekey.epoch() == epoch;
-    let matches_id = prekey.id() == id;
     let matches_public_key: bool = prekey.public_key().as_bytes().ct_eq(public_key).into();
-    (matches_epoch && matches_id && matches_public_key).then(|| prekey.clone_for_storage())
+    (matches_epoch && matches_public_key).then(|| prekey.clone_for_storage())
 }
 
 // Returns whether a stored Unix-seconds timestamp is at least `window` old at `now`. Timestamps
@@ -731,22 +728,21 @@ mod tests {
 
         let retained = setup
             .manager
-            .prekey_for_reference(
+            .prekey_for_first_message(
                 stale_signed_prekey.epoch(),
-                stale_signed_prekey.id(),
                 stale_signed_prekey.public_key().as_bytes(),
                 at(FIXED_NOW + SECONDS_PER_DAY),
             )
             .unwrap();
+        assert!(!retained.1);
         assert_eq!(
-            retained.public_key().as_bytes(),
+            retained.0.public_key().as_bytes(),
             stale_signed_prekey.public_key().as_bytes()
         );
 
         assert!(matches!(
-            setup.manager.prekey_for_reference(
+            setup.manager.prekey_for_first_message(
                 stale_signed_prekey.epoch(),
-                stale_signed_prekey.id(),
                 stale_signed_prekey.public_key().as_bytes(),
                 at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS)
             ),
@@ -795,17 +791,13 @@ mod tests {
 
         let retained = setup
             .manager
-            .prekey_for_reference(
-                first.epoch(),
-                first.id(),
-                first.public_key().as_bytes(),
-                at(FIXED_NOW),
-            )
+            .prekey_for_first_message(first.epoch(), first.public_key().as_bytes(), at(FIXED_NOW))
             .unwrap();
         let current = setup.manager.current(at(FIXED_NOW)).unwrap();
 
+        assert!(!retained.1);
         assert_eq!(
-            retained.public_key().as_bytes(),
+            retained.0.public_key().as_bytes(),
             first.public_key().as_bytes()
         );
         assert_eq!(
@@ -825,9 +817,8 @@ mod tests {
         assert!(
             setup
                 .manager
-                .prekey_for_reference(
+                .prekey_for_first_message(
                     first.epoch(),
-                    first.id(),
                     first.public_key().as_bytes(),
                     at(FIXED_NOW)
                 )
@@ -836,9 +827,8 @@ mod tests {
         assert!(
             setup
                 .manager
-                .prekey_for_reference(
+                .prekey_for_first_message(
                     second.epoch(),
-                    second.id(),
                     second.public_key().as_bytes(),
                     at(FIXED_NOW)
                 )
@@ -864,9 +854,8 @@ mod tests {
         assert!(
             setup
                 .manager
-                .prekey_for_reference(
+                .prekey_for_first_message(
                     first.epoch(),
-                    first.id(),
                     first.public_key().as_bytes(),
                     at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS - 1)
                 )
@@ -874,38 +863,35 @@ mod tests {
         );
 
         assert!(matches!(
-            setup.manager.prekey_for_reference(
+            setup.manager.prekey_for_first_message(
                 first.epoch(),
-                first.id(),
                 first.public_key().as_bytes(),
                 at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS)
-            ),
-            Err(SignedPreKeyError::NotFound)
-        ));
-        assert!(matches!(
-            setup.manager.prekey_for_reference(
-                first.epoch(),
-                first.id(),
-                first.public_key().as_bytes(),
-                at(FIXED_NOW)
             ),
             Err(SignedPreKeyError::NotFound)
         ));
     }
 
     #[test]
-    fn prekey_lookup_rejects_wrong_id_for_matching_public_key() {
-        let mut rng = ChaCha20Rng::from_seed([0x9d; 32]);
+    fn reading_keeps_an_expired_prekey_until_a_rotation_deletes_it() {
+        let mut rng = ChaCha20Rng::from_seed([0x9c; 32]);
         let setup = setup_with_discovery_key();
-        let prekey = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
+        let first = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
+        setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
+        let expired = at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS);
+        let find = |now| {
+            setup.manager.prekey_for_first_message(
+                first.epoch(),
+                first.public_key().as_bytes(),
+                now,
+            )
+        };
+        assert!(matches!(find(expired), Err(SignedPreKeyError::NotFound)));
 
+        assert!(find(at(FIXED_NOW)).is_ok());
+        setup.manager.rotate_now(&mut rng, expired).unwrap();
         assert!(matches!(
-            setup.manager.prekey_for_reference(
-                prekey.epoch(),
-                prekey.id() + 1,
-                prekey.public_key().as_bytes(),
-                at(FIXED_NOW)
-            ),
+            find(at(FIXED_NOW)),
             Err(SignedPreKeyError::NotFound)
         ));
     }

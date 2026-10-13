@@ -3,111 +3,65 @@
 //! Crosses the keystore boundary into protocol state: the contact flag lives in protocol state
 //! while the inbox lives in secure storage, and blocking must move both.
 
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-use roost_core::{
-    ContactDiscoveryKey, ContactIdentity, ContactIdentityKey, InMemorySecureStorage, KeyStore,
-    KeyStoreOperationStatus, PreparedKeyStoreOperation, ProtocolStateEngine, ProtocolStateSnapshot,
-};
-use roost_crypto::{
-    generate_discovery_key, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
-};
+mod support;
 
-const CREATED_AT_SECS: u64 = 1_700_000_000;
+use support::device::{Device, Relay};
 
-fn complete<T>(key_store: &KeyStore, prepared: PreparedKeyStoreOperation<T>) -> T {
-    key_store.reserve_operation(prepared.operation.id).unwrap();
-    key_store.finalize_operation(prepared.operation.id).unwrap();
-    prepared.output
-}
-
-fn peer_contact() -> ContactIdentity {
-    let mut rng = ChaCha20Rng::from_seed([21u8; 32]);
-    let signing = generate_signing_key_pair(&mut rng);
-    let agreement = generate_key_pair(&mut rng);
-    let _binding = sign_identity_key_binding(&signing, &agreement.public).unwrap();
-    let discovery = generate_discovery_key(&mut rng, &signing, 1, CREATED_AT_SECS).unwrap();
-    ContactIdentity {
-        identity_key: ContactIdentityKey {
-            x25519_public_key: *agreement.public.as_bytes(),
-            ed25519_verifying_key: signing.verifying.to_bytes(),
-        },
-        discovery_key: ContactDiscoveryKey::from(&discovery.public()),
-    }
-}
-
-fn store_with_contact() -> (KeyStore, ProtocolStateSnapshot, ContactIdentityKey) {
-    let key_store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-    let identity = key_store.prepare_identity_creation().unwrap();
-    complete(&key_store, identity);
-    let engine = ProtocolStateEngine::new();
-    let contact = peer_contact();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    snapshot
-        .apply_all(
-            engine
-                .record_contact(&snapshot, contact)
-                .unwrap()
-                .state_updates,
-        )
-        .unwrap();
-    (key_store, snapshot, contact.identity_key)
+// Bob holds Alice's Contact Request.
+fn requested(relay: &Relay) -> (Device, Device) {
+    let mut alice = Device::new(relay, 0xa1);
+    let mut bob = Device::new(relay, 0xb0);
+    let request = alice.request(&bob, b"hi bob");
+    bob.receive(&request.message);
+    (alice, bob)
 }
 
 #[test]
 fn blocking_a_contact_rotates_the_inbox() {
-    let (key_store, snapshot, identity_key) = store_with_contact();
-    let before = key_store.current_public_discovery_key().unwrap().epoch;
-    let previous_capability = *key_store.current_delivery_capability().unwrap().to_bytes();
+    let relay = Relay::new();
+    let (alice, mut bob) = requested(&relay);
+    let before = bob.publication();
 
-    let block = complete(
-        &key_store,
-        key_store
-            .prepare_block_contact(&snapshot, identity_key)
-            .unwrap(),
-    );
-
-    assert!(block.contact.contact.blocked);
-    let rotation = block
-        .rotation
+    let publication = bob
+        .block(alice.identity_key())
         .expect("blocking must rotate the inbox so the blocked contact loses delivery");
-    assert_eq!(rotation.publication.discovery_key.epoch, before + 1);
-    // The blocked contact's copy of the capability is now worthless at the relay.
-    assert_ne!(*rotation.capability.to_bytes(), previous_capability);
+
+    assert!(bob.contact(&alice).unwrap().blocked);
+    assert_eq!(
+        publication.discovery_key.epoch,
+        before.discovery_key.epoch + 1
+    );
+    // The capability the blocked contact could have held no longer matches the registered verifier.
+    assert_ne!(
+        publication.recipient_delivery_verifier,
+        before.recipient_delivery_verifier
+    );
+    assert_eq!(
+        bob.publication().discovery_key.epoch,
+        publication.discovery_key.epoch
+    );
 }
 
 /// Blocking someone already blocked must not churn every other contact's delivery capability for
-/// no reason. Each rotation costs an encrypted re-key message to every remaining contact.
+/// no reason, since each rotation sends every remaining contact a new Inbox Grant.
 #[test]
 fn blocking_an_already_blocked_contact_does_not_rotate_again() {
-    let (key_store, mut snapshot, identity_key) = store_with_contact();
-    let first = complete(
-        &key_store,
-        key_store
-            .prepare_block_contact(&snapshot, identity_key)
-            .unwrap(),
-    );
-    snapshot.apply_all(first.contact.state_updates).unwrap();
-    let epoch_after_first = key_store.current_public_discovery_key().unwrap().epoch;
+    let relay = Relay::new();
+    let (alice, mut bob) = requested(&relay);
+    bob.block(alice.identity_key()).unwrap();
+    let epoch_after_first = bob.publication().discovery_key.epoch;
+    let record = bob
+        .host
+        .blob_bytes(&support::device::contact_address(alice.identity_key()))
+        .map(roost_core::ProtocolStateBlob::from_bytes);
 
-    let prepared = key_store
-        .prepare_block_contact(&snapshot, identity_key)
+    let second = bob
+        .store
+        .prepare_block_contact(alice.identity_key(), record.as_ref())
         .unwrap();
-    let id = prepared.operation.id;
-    assert!(matches!(
-        key_store.operation_status(id).unwrap(),
-        KeyStoreOperationStatus::Prepared
-    ));
-    assert!(prepared.output.contact.state_updates.is_empty());
-    let second = complete(&key_store, prepared);
 
-    assert!(second.rotation.is_none());
-    assert!(matches!(
-        key_store.operation_status(id).unwrap(),
-        KeyStoreOperationStatus::Finalized
-    ));
-    assert_eq!(
-        key_store.current_public_discovery_key().unwrap().epoch,
-        epoch_after_first
-    );
+    assert!(second.publication.is_none());
+    assert!(second.changes.operation().is_none());
+    assert!(second.changes.updates().is_empty());
+    assert_eq!(bob.publication().discovery_key.epoch, epoch_after_first);
 }

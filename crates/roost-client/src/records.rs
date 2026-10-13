@@ -185,11 +185,10 @@ pub struct PublicationBundle {
     /// Publish this alongside the discovery key. A relay verifies both directions before accepting
     /// a registration and rejects it when either fails.
     pub discovery_to_identity: Vec<u8>,
-    /// Public commitment to this inbox's recipient delivery capability. Always 32
-    /// bytes.
+    /// Public commitment to this inbox's Delivery Capability. Always 32 bytes.
     ///
-    /// Register this value. Never register the capability itself — that is a bearer secret, and
-    /// handing it to the relay would defeat the point of committing to it.
+    /// Register this value. The capability itself is a secret that Roost shares with contacts only
+    /// inside Inbox Grants.
     pub recipient_delivery_verifier: Vec<u8>,
     /// Public signed pre-key for this publication.
     pub signed_prekey: PublicSignedPreKey,
@@ -207,33 +206,43 @@ impl PublicationBundle {
     }
 }
 
-/// Everything one inbox rotation produces.
-///
-/// Publish and register [`Self::publication`]; persist [`Self::capability`] in secure storage and
-/// give it only to authorized contacts. The two are returned together so a new inbox cannot be
-/// published while contacts still hold the previous inbox's capability.
-#[derive(Clone, uniffi::Record)]
-pub struct InboxRotation {
-    /// Material to publish and register for the new inbox.
+/// A contact's published keys as the app fetched them from the Relay, to start a Session with.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct PreKeyBundle {
+    /// The contact's identity.
+    pub identity: Identity,
+    /// The contact's Discovery Key, both binding signatures, and signed prekey.
     pub publication: PublicationBundle,
-    /// The new inbox's recipient delivery capability. Always 32 bytes, and secret.
-    pub capability: Vec<u8>,
+    /// The one-time prekey the Relay handed out, absent once the contact's pool ran out.
+    pub one_time_prekey: Option<PublicOneTimePreKey>,
+}
+
+impl PreKeyBundle {
+    pub(crate) fn to_core(&self) -> Result<roost_core::PeerPreKeyBundle, RoostError> {
+        Ok(roost_core::PeerPreKeyBundle {
+            identity_key: self.identity.to_core()?,
+            discovery_to_identity: self.publication.discovery_to_identity_signature()?,
+            bundle: self
+                .publication
+                .to_prekey_bundle(self.one_time_prekey.clone())?,
+        })
+    }
 }
 
 impl PublicationBundle {
     /// The DK→IK half as a signature, rejecting anything that is not 64 bytes.
     ///
     /// Separate from [`Self::to_prekey_bundle`] because [`CorePreKeyBundle`] has no field for it:
-    /// the binding is verified against the responder identity, which a prekey bundle does not
-    /// carry. Session initiation checks it before any handshake work.
-    pub(crate) fn discovery_to_identity_signature(&self) -> Result<Signature, RoostError> {
+    /// the binding is verified against the contact's identity, which a prekey bundle does not
+    /// carry. Starting a Session checks it before any handshake work.
+    fn discovery_to_identity_signature(&self) -> Result<Signature, RoostError> {
         Ok(Signature::from_bytes(&fixed_64(
             &self.discovery_to_identity,
             "discovery_to_identity",
         )?))
     }
 
-    pub(crate) fn to_prekey_bundle(
+    fn to_prekey_bundle(
         &self,
         one_time_prekey: Option<PublicOneTimePreKey>,
     ) -> Result<CorePreKeyBundle, RoostError> {

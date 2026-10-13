@@ -1,21 +1,24 @@
 //! Public protocol-state blob addressing and stateless operation results.
 
+mod contact_record;
 mod envelope;
+mod grant;
 mod message_operation;
 mod session;
 
 use crate::contact::{
-    ContactDiscoveryKey, ContactEvent, ContactIdentity, ContactIdentityKey,
-    ContactSafetyNumberConfirmation, ContactState, ContactStateChange, ContactTrustState,
-    PeerInboxAuthorization,
+    ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
+    ContactTrustState,
 };
 use crate::hardening::{
     DEFAULT_DEDUPLICATION_CAPACITY, MAX_ACKNOWLEDGMENT_DIGESTS, MAX_DEDUPLICATION_CAPACITY,
     MAX_PENDING_ACKNOWLEDGMENTS, MIN_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits,
     validate_deduplication_capacity,
 };
+use crate::key_store::KeyStoreOperationId;
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
 use crate::{Message, MessageError, MessageId, PayloadKind, TransportBinding};
+use contact_record::{ContactRecord, contact_address};
 pub use envelope::SenderIdentityMaterial;
 use envelope::{
     DecodedSealedSenderEnvelope, MessageMetadata, OpenedMessage, OutboundAuthentication,
@@ -23,19 +26,18 @@ use envelope::{
     encode_sealed_sender_envelope, open_message, seal_message, sign_message_transcript,
     validate_sender_identity, verify_message_transcript,
 };
-pub(crate) use message_operation::LocalSenderKeys;
+use grant::DiscoveryKeyStamp;
 pub use message_operation::{
-    IncomingMessage, LocalIdentityKeys, MessageDecryption, MessageDecryptionStep,
+    AdmissionRequest, IncomingMessage, MessageDecryption, MessageDecryptionStep,
     MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    OutgoingMessage, SignedSenderCertificate,
+    OutgoingMessage, PeerPreKeyBundle, SignedSenderCertificate,
 };
+pub(crate) use message_operation::{LocalIdentityKeys, SendIntent};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    DiscoveryKey, Handshake, KeyPair, OneTimePreKey, PreKeyBundle, PublicDiscoveryKey,
-    PublicIdentityKey, PublicKey, PublicSignedPreKey, RatchetState, RecipientDeliveryCapability,
-    SenderProofTranscript, Signature, SignedPreKey, SigningKeyPair, accept_handshake,
-    initiate_handshake, prove_sender, verify_discovery_to_identity_binding,
-    verify_public_discovery_key, verify_sender_proof,
+    DiscoveryKey, Handshake, KeyPair, PublicDiscoveryKey, PublicIdentityKey, RatchetState,
+    SenderProofTranscript, Signature, SignedPreKey, SigningKeyPair, prove_sender,
+    verify_discovery_to_identity_binding, verify_public_discovery_key, verify_sender_proof,
 };
 use roost_protocol::SignatureError;
 use roost_protocol::{
@@ -48,18 +50,15 @@ use roost_protocol::{
     MessageTranscriptInput, pad_sealed_payload as pad_message_payload,
     unpad_sealed_payload as unpad_message_payload,
 };
-use roost_protocol::{
-    PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
-};
+use roost_protocol::{PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
 #[cfg(test)]
 use roost_protocol::{SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN};
 use roost_protocol::{from_unix_millis, to_unix_millis};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use session::{
-    LoadedSession, PeerSessions, SessionStatus, SignedPreKeyUse, encode_active_session,
-    encode_peer_sessions, load_peer_sessions, load_session, peer_sessions_address,
-    pending_acknowledgment_address, session_address,
+    LoadedSession, SessionStatus, encode_peer_sessions, load_peer_sessions, load_session,
+    peer_sessions_address, pending_acknowledgment_address, session_address,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -120,19 +119,8 @@ pub enum ProtocolStateKind {
     DeduplicationSet = 3,
     /// SessionID-addressed pending-acknowledgment state.
     PendingAcknowledgments = 4,
-    /// Identity-key-addressed contact state.
+    /// Identity-key-addressed contact state, including the peer's Delivery Capability.
     ContactState = 5,
-    /// Identity-key-addressed peer inbox authorization.
-    ///
-    /// Kept separate from [`Self::ContactState`] because a peer's delivery capability is a bearer
-    /// secret, while contact queries return public state for host-owned views and observation.
-    PeerInboxAuthorization = 6,
-    /// Identity-key-addressed record of the latest local epoch whose capability a contact holds.
-    ///
-    /// Distribution bookkeeping, not key material: the local capability itself lives in secure
-    /// storage. This answers "who still holds a superseded capability and must be re-supplied",
-    /// which is what makes a post-rotation re-key both complete and resumable.
-    LocalInboxAuthorization = 7,
     /// Identity-key-addressed record of the Sessions kept with one peer and the one Roost sends on.
     PeerSessions = 8,
 }
@@ -146,8 +134,6 @@ impl ProtocolStateKind {
             Self::DeduplicationSet,
             Self::PendingAcknowledgments,
             Self::ContactState,
-            Self::PeerInboxAuthorization,
-            Self::LocalInboxAuthorization,
             Self::PeerSessions,
         ]
     }
@@ -160,8 +146,6 @@ impl fmt::Display for ProtocolStateKind {
             Self::DeduplicationSet => write!(f, "deduplication-set state"),
             Self::PendingAcknowledgments => write!(f, "pending-acknowledgment state"),
             Self::ContactState => write!(f, "contact state"),
-            Self::PeerInboxAuthorization => write!(f, "peer inbox-authorization state"),
-            Self::LocalInboxAuthorization => write!(f, "local inbox-authorization state"),
             Self::PeerSessions => write!(f, "peer sessions"),
         }
     }
@@ -290,6 +274,19 @@ impl ProtocolStateUpdate {
         }
     }
 
+    // Creates an update that replaces `current`, the record the caller passed for `address`.
+    fn replacing(
+        address: ProtocolStateAddress,
+        blob: Option<ProtocolStateBlob>,
+        current: Option<&ProtocolStateBlob>,
+    ) -> Self {
+        Self {
+            address,
+            blob,
+            condition: ProtocolStateCommitCondition::from_blob(current),
+        }
+    }
+
     fn with_snapshot(mut self, snapshot: &ProtocolStateSnapshot) -> Self {
         self.condition = ProtocolStateCommitCondition::from_blob(snapshot.get(&self.address));
         self
@@ -314,16 +311,44 @@ impl ProtocolStateUpdate {
     }
 }
 
-/// The records an operation's result relies on, and the records it writes.
+/// The records an operation's result relies on, the records it writes, and the Prepared KeyStore
+/// Operation that commits with them, if any.
 ///
 /// The host reads the record at each Commit Condition's address inside its transaction, and
-/// commits the updates with the result's effects only when [`Self::matches`] holds for them.
+/// commits the updates with the result's effects only when [`Self::matches`] holds for them. When
+/// [`Self::operation`] is present, the host reserves it before the transaction, commits its ID
+/// with the updates, and finalizes it before using the result.
 pub struct StateChanges {
     conditions: Vec<(ProtocolStateAddress, ProtocolStateCommitCondition)>,
     updates: Vec<ProtocolStateUpdate>,
+    operation: Option<KeyStoreOperationId>,
 }
 
 impl StateChanges {
+    // Returns changes that rely on one record a call took directly and write at most that record.
+    fn for_record(
+        address: ProtocolStateAddress,
+        current: Option<&ProtocolStateBlob>,
+        update: Option<ProtocolStateUpdate>,
+    ) -> Self {
+        Self {
+            conditions: vec![(address, ProtocolStateCommitCondition::from_blob(current))],
+            updates: update.into_iter().collect(),
+            operation: None,
+        }
+    }
+
+    pub(crate) fn with_operation(mut self, operation: KeyStoreOperationId) -> Self {
+        self.operation = Some(operation);
+        self
+    }
+
+    /// Returns the Prepared KeyStore Operation that commits with these changes, if any.
+    #[must_use]
+    pub fn operation(&self) -> Option<KeyStoreOperationId> {
+        self.operation
+    }
+
     /// Returns each Commit Condition with the address it applies to, in address order.
     #[must_use]
     pub fn conditions(&self) -> &[(ProtocolStateAddress, ProtocolStateCommitCondition)] {
@@ -361,6 +386,7 @@ impl From<Vec<ProtocolStateUpdate>> for StateChanges {
                 .map(|update| (update.address.clone(), update.condition))
                 .collect(),
             updates,
+            operation: None,
         }
     }
 }
@@ -502,93 +528,18 @@ impl ProtocolStateSnapshot {
     }
 }
 
-/// The local Identity's keys and credentials, which authenticate the Messages it sends.
-pub struct LocalSender<'a> {
-    /// Public identity material and sender certificate sealed into each Message.
-    pub identity: &'a SenderIdentityMaterial,
-    /// Identity Key signing half, which signs Messages sent after the peer replies.
-    pub signing_key: &'a SigningKeyPair,
-    /// Identity Key agreement half, which proves Messages that carry a handshake.
-    pub agreement_key: &'a KeyPair,
-    /// Current Discovery Key, sealed into Messages that carry a handshake so the peer can reply.
-    pub discovery_key: &'a PublicDiscoveryKey,
-    /// The current Discovery Key's signature over the Identity Key.
-    pub discovery_to_identity: &'a Signature,
-}
-
-/// Inputs for starting a Session as the X3DH initiator with its first Message.
-pub struct OutboundSessionStart<'a> {
-    /// Responder permanent public Identity Key.
-    pub responder_identity_key: &'a PublicIdentityKey,
-    /// The responder Discovery Key's signature over the responder Identity Key.
-    pub responder_discovery_to_identity: &'a Signature,
-    /// Responder publication bundle containing its Discovery Key and prekeys.
-    pub responder_prekey_bundle: &'a PreKeyBundle,
-    /// Local keys and credentials that authenticate the first Message.
-    pub sender: LocalSender<'a>,
-    /// Stable identifier for the first Message.
-    pub id: MessageId,
-    /// Sender-observed Unix timestamp in milliseconds.
-    pub sent_at_millis: u64,
-    /// First plaintext bytes.
-    pub plaintext: &'a [u8],
-}
-
-/// A new Session and the first Message that starts it.
-pub struct SessionInitiationResult {
-    /// The Session both peers derive from the handshake.
-    pub session_id: SessionId,
-    /// X3DH first Message to send after committing `state_updates`.
-    pub message: Message,
-    /// Protocol-state updates for the new Session and the peer's Session list.
-    pub state_updates: Vec<ProtocolStateUpdate>,
-}
-
-/// A first Message plus the local keys needed to accept the Session it starts.
-pub struct InboundSessionStart<'a> {
-    /// First Message carrying the handshake.
-    pub message: &'a Message,
-    /// Local Discovery Key the handshake targets.
-    pub recipient_discovery_key: &'a DiscoveryKey,
-    /// Local signed prekey the handshake names.
-    pub signed_prekey: &'a SignedPreKey,
-    /// Local one-time prekey the handshake names, if any.
-    pub one_time_prekey: Option<OneTimePreKey>,
-    /// Every signed prekey this identity still holds, so Roost can forget deleted SessionIDs that
-    /// no handshake can recreate.
-    pub held_signed_prekeys: &'a [PublicSignedPreKey],
-    /// The app's settings for this receive.
-    pub settings: ReceiveSettings,
-    /// Sender-certificate validation inputs for the first Message.
-    pub sender_certificate_validation: &'a InboundSenderCertificateValidation,
-}
-
-/// The result of receiving a first Message that names a Session this identity doesn't have.
-pub enum SessionAcceptanceOutcome {
-    /// The handshake authenticated and created a Session.
-    Accepted(Box<SessionAcceptanceResult>),
-    /// The Message matched an already-accepted encrypted byte sequence.
-    Duplicate,
-    /// The Message names a Session this identity deleted, so nothing was created.
-    DeletedSession,
-}
-
-/// A Session accepted from an authenticated first Message.
-pub struct SessionAcceptanceResult {
-    /// The Session both peers derive from the handshake.
-    pub session_id: SessionId,
-    /// The sender's Identity Key and the Discovery Key it seals for replies.
-    pub contact: ContactIdentity,
-    /// Message ID recovered after decrypt.
-    pub message_id: MessageId,
-    /// Sender-observed Unix timestamp recovered after decrypt.
-    pub sent_at_millis: u64,
-    /// Decrypted first-message plaintext.
-    pub plaintext: Zeroizing<Vec<u8>>,
-    /// Sender identity material decoded after the first Message authenticated.
-    pub sender_identity: SenderIdentityMaterial,
-    /// Protocol-state updates to commit before treating the Session as accepted.
-    pub state_updates: Vec<ProtocolStateUpdate>,
+// The local Identity's keys and credentials, which authenticate the Messages it sends.
+struct LocalSender<'a> {
+    // Public identity material and sender certificate sealed into each Message.
+    identity: &'a SenderIdentityMaterial,
+    // Identity Key signing half, which signs Messages sent after the peer replies.
+    signing_key: &'a SigningKeyPair,
+    // Identity Key agreement half, which proves Messages that carry a handshake.
+    agreement_key: &'a KeyPair,
+    // Current Discovery Key, sealed into Messages that carry a handshake so the peer can reply.
+    discovery_key: &'a PublicDiscoveryKey,
+    // The current Discovery Key's signature over the Identity Key.
+    discovery_to_identity: &'a Signature,
 }
 
 /// An outbound Message and the state changes from one Message Operation.
@@ -680,9 +631,22 @@ pub struct InboundMessageResult {
     pub plaintext: Zeroizing<Vec<u8>>,
     /// Sender identity material decoded from the sealed-sender envelope.
     pub sender_identity: SenderIdentityMaterial,
-    /// Encrypted acknowledgment artifact to durably queue with the state changes.
-    pub acknowledgment: Message,
+    /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
+    /// the contact isn't accepted and this side doesn't acknowledge yet.
+    pub acknowledgment: Option<Message>,
     /// State changes to commit before treating the inbound Message as processed.
+    pub changes: StateChanges,
+}
+
+/// A Message from a contact who isn't accepted, past the limit on Messages before acceptance.
+///
+/// Roost withholds its plaintext and sends no acknowledgment.
+pub struct WithheldInboundMessageResult {
+    /// The Session the Message arrived on.
+    pub session_id: SessionId,
+    /// Message ID recovered after decrypt.
+    pub message_id: MessageId,
+    /// State changes to commit before treating the withheld Message as processed.
     pub changes: StateChanges,
 }
 
@@ -746,16 +710,21 @@ pub struct AcknowledgmentResult {
 pub enum InboundMessageOutcome {
     /// A unique Message decrypted and advanced protocol state.
     Accepted(Box<InboundMessageResult>),
+    /// A first Message from an Identity with no contact record, which creates a Pending one.
+    ContactRequest(Box<InboundMessageResult>),
     /// A unique blocked Message decrypted and advanced protocol state.
     Blocked(Box<BlockedInboundMessageResult>),
+    /// A Message past the limit before acceptance decrypted, and its plaintext is withheld.
+    Withheld(Box<WithheldInboundMessageResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
     Duplicate,
     /// The Session is permanently unrecoverable and no plaintext was produced.
     SessionUnrecoverable(Box<SessionUnrecoverableResult>),
-    /// The Message names a Session this identity doesn't have, and nothing changed.
-    ///
-    /// A Message that carries a handshake may still start that Session through acceptance.
+    /// The Message names a Session this identity doesn't have and carries no handshake, and
+    /// nothing changed.
     UnknownSession,
+    /// The first Message names a Session this identity deleted, so nothing was created.
+    DeletedSession,
     /// An acknowledgment cleared one of this identity's Pending Acknowledgments.
     AcknowledgmentMatched(Box<AcknowledgmentResult>),
     /// An authenticated acknowledgment named no Pending Acknowledgment, such as one already
@@ -805,7 +774,8 @@ pub enum BlockedContactAcknowledgmentPolicy {
     /// retrying as if the recipient were offline.
     #[default]
     Unreachable,
-    /// Return a normal acknowledgment, revealing delivery; local plaintext is still hidden.
+    /// Return the acknowledgment an unblocked sender would get, revealing delivery; local plaintext
+    /// is still hidden.
     SilentReceipt,
 }
 
@@ -903,137 +873,59 @@ impl ProtocolStateEngine {
     pub fn hardening_limits(&self) -> ProtocolHardeningLimits {
         self.limits
     }
-    /// Creates or updates an Identity-key-addressed Contact State blob.
-    ///
-    /// New contacts start [`ContactTrustState::Pending`]. Updating an existing contact may replace
-    /// the current Discovery Key, but never resets the Identity-key-bound trust state.
-    /// Consumers must build `contact_identity` from authenticated identity material; this method
-    /// validates canonical key encodings and the Discovery Key signature, but it cannot prove where
-    /// the Identity Key bytes came from.
-    pub fn record_contact(
+    /// Returns the contact a Contact State record holds.
+    pub fn decode_contact(
         &self,
-        snapshot: &ProtocolStateSnapshot,
-        contact_identity: ContactIdentity,
-    ) -> Result<ContactStateChange, ProtocolStateError> {
-        let address = contact_address(contact_identity.identity_key);
-        validate_contact_identity(&address, &contact_identity)?;
-        let contact = match snapshot.get(&address) {
-            Some(blob) => {
-                let current = decode_contact_state(&address, blob, self.limits)?;
-                if contact_discovery_key_is_newer(
-                    &current.identity.discovery_key,
-                    &contact_identity.discovery_key,
-                ) {
-                    ContactState {
-                        identity: contact_identity,
-                        trust_state: current.trust_state,
-                        blocked: current.blocked,
-                    }
-                } else {
-                    return Ok(ContactStateChange {
-                        contact: current,
-                        state_updates: Vec::new(),
-                        event: None,
-                    });
-                }
-            }
-            None => ContactState {
-                identity: contact_identity,
-                trust_state: ContactTrustState::Pending,
-                blocked: false,
-            },
-        };
-        changed_contact_state(snapshot, address, contact, self.limits)
-    }
-
-    /// Returns the Contact State for one peer Identity Key, if present.
-    pub fn contact_state(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-    ) -> Result<Option<ContactState>, ProtocolStateError> {
-        let address = contact_address(identity_key);
-        validate_contact_identity_key(&address, &identity_key)?;
-        snapshot
-            .get(&address)
-            .map(|blob| decode_contact_state(&address, blob, self.limits))
-            .transpose()
-    }
-
-    /// Returns all current Contact State snapshots in address order.
-    pub fn contact_states(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-    ) -> Result<Vec<ContactState>, ProtocolStateError> {
-        snapshot
-            .blobs
-            .iter()
-            .filter(|(address, _)| address.kind == ProtocolStateKind::ContactState)
-            .map(|(address, blob)| decode_contact_state(address, blob, self.limits))
-            .collect()
-    }
-
-    /// Records consumer acceptance for a Pending contact.
-    ///
-    /// Acceptance moves Pending to Unverified. Calling this for an already accepted contact is an
-    /// idempotent no-op.
-    pub fn accept_contact(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-    ) -> Result<ContactStateChange, ProtocolStateError> {
-        let address = contact_address(identity_key);
-        validate_contact_identity_key(&address, &identity_key)?;
-        let mut contact = load_contact_state(snapshot, &address, self.limits)?;
-        match contact.trust_state {
-            ContactTrustState::Pending => {
-                contact.trust_state = ContactTrustState::Unverified;
-                changed_contact_state(snapshot, address, contact, self.limits)
-            }
-            ContactTrustState::Unverified | ContactTrustState::Verified => Ok(ContactStateChange {
-                contact,
-                state_updates: Vec::new(),
-                event: None,
-            }),
+        address: &ProtocolStateAddress,
+        blob: &ProtocolStateBlob,
+    ) -> Result<ContactState, ProtocolStateError> {
+        if address.kind != ProtocolStateKind::ContactState {
+            return Err(ProtocolStateError::InvalidStateBinding {
+                address: address.clone(),
+                reason: "record is not a contact".into(),
+            });
         }
+        Ok(ContactRecord::decode(address, blob, self.limits)?.to_contact_state())
     }
 
-    /// Locally blocks a contact without changing its Trust State.
+    /// Unblocks a contact, given its record or the record's absence.
     ///
-    /// Blocking is keyed by the contact Identity Key. It refuses new outgoing user Messages and
-    /// suppresses consumer-visible inbound plaintext after mandatory sender-certificate validation,
-    /// while still accepting the protocol Message.
-    pub fn block_contact(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-    ) -> Result<ContactStateChange, ProtocolStateError> {
-        self.set_contact_blocked(snapshot, identity_key, true)
-    }
-
-    /// Locally unblocks a contact without changing its Trust State.
-    ///
-    /// Existing Sessions remain usable after unblock; no handshake is required solely because of
-    /// the block/unblock cycle.
+    /// Existing Sessions remain usable. Unblocking a stranger blocked before they sent anything
+    /// deletes their record, since nobody asked. Unblocking doesn't restore the capability an
+    /// inbox rotation took away.
     pub fn unblock_contact(
         &self,
-        snapshot: &ProtocolStateSnapshot,
         identity_key: ContactIdentityKey,
-    ) -> Result<ContactStateChange, ProtocolStateError> {
-        self.set_contact_blocked(snapshot, identity_key, false)
+        record: Option<&ProtocolStateBlob>,
+    ) -> Result<StateChanges, ProtocolStateError> {
+        let address = contact_address(identity_key);
+        validate_contact_identity_key(&address, &identity_key)?;
+        let Some(blob) = record else {
+            return Ok(StateChanges::for_record(address, None, None));
+        };
+        let mut contact = ContactRecord::decode(&address, blob, self.limits)?;
+        if !contact.blocked {
+            return Ok(StateChanges::for_record(address, record, None));
+        }
+        let blob = if contact.discovery_key.is_none() {
+            None
+        } else {
+            contact.blocked = false;
+            Some(contact.encode(&address, self.limits)?)
+        };
+        let update = ProtocolStateUpdate::replacing(address.clone(), blob, record);
+        Ok(StateChanges::for_record(address, record, Some(update)))
     }
 
-    /// Records out-of-band Safety Number confirmation for an accepted contact.
+    /// Records out-of-band Safety Number confirmation for an accepted contact, given its record.
     ///
     /// The presented value must match the Safety Number derived from `local_identity_key` and
-    /// `contact_identity_key`. A mismatch is reported explicitly, leaves the stored Trust State
-    /// unchanged, and returns no update or event. In-band Messages and acknowledgments never call
-    /// this transition.
+    /// `contact_identity_key`. In-band Messages and acknowledgments never call this transition.
     pub fn confirm_contact_safety_number(
         &self,
-        snapshot: &ProtocolStateSnapshot,
         local_identity_key: IdentityKey,
         contact_identity_key: ContactIdentityKey,
+        record: Option<&ProtocolStateBlob>,
         presented_grouped_decimal: &str,
     ) -> Result<ContactSafetyNumberConfirmation, ProtocolStateError> {
         let address = contact_address(contact_identity_key);
@@ -1043,181 +935,61 @@ impl ProtocolStateEngine {
                 address: address.clone(),
                 reason: "identity key is invalid".into(),
             })?;
-        let mut contact = load_contact_state(snapshot, &address, self.limits)?;
-        match contact.trust_state {
-            ContactTrustState::Pending => {
-                return Err(ProtocolStateError::InvalidStateBinding {
-                    address,
-                    reason: "pending contact cannot be verified".into(),
-                });
-            }
-            ContactTrustState::Verified => {}
-            ContactTrustState::Unverified => {}
+        let blob = record.ok_or_else(|| ProtocolStateError::MissingRequiredState {
+            address: address.clone(),
+        })?;
+        let mut contact = ContactRecord::decode(&address, blob, self.limits)?;
+        if contact.trust_state == ContactTrustState::Pending {
+            return Err(ProtocolStateError::InvalidStateBinding {
+                address,
+                reason: "pending contact cannot be verified".into(),
+            });
         }
         if safety_number.grouped_decimal != presented_grouped_decimal {
-            return Ok(ContactSafetyNumberConfirmation::Mismatched(
-                ContactStateChange {
-                    contact,
-                    state_updates: Vec::new(),
-                    event: None,
-                },
-            ));
+            return Ok(ContactSafetyNumberConfirmation::Mismatched);
         }
         if contact.trust_state == ContactTrustState::Verified {
             return Ok(ContactSafetyNumberConfirmation::Matched(
-                ContactStateChange {
-                    contact,
-                    state_updates: Vec::new(),
-                    event: None,
-                },
+                StateChanges::for_record(address, record, None),
             ));
         }
         contact.trust_state = ContactTrustState::Verified;
-        changed_contact_state(snapshot, address, contact, self.limits)
-            .map(ContactSafetyNumberConfirmation::Matched)
+        let update = ProtocolStateUpdate::replacing(
+            address.clone(),
+            Some(contact.encode(&address, self.limits)?),
+            record,
+        );
+        Ok(ContactSafetyNumberConfirmation::Matched(
+            StateChanges::for_record(address, record, Some(update)),
+        ))
     }
 
-    /// Records a peer's inbox authorization, refusing to move backwards.
-    ///
-    /// Returns updates to commit, or an empty vector when `epoch` is not newer than what is
-    /// already stored. Refusing a lower epoch matters because an old authorization replayed at
-    /// a contact would restore a capability the peer has already rotated away from — the exact
-    /// state a blocked sender would want to reach.
-    ///
-    /// The capability never enters [`ContactState`], so it is not mirrored to event observers.
-    pub fn record_peer_inbox_authorization(
+    // Returns the changes that block a contact, given its record or its absence, and whether they
+    // block anyone new. A stranger with no record gets one that holds only the block.
+    pub(crate) fn block_contact(
         &self,
-        snapshot: &ProtocolStateSnapshot,
         identity_key: ContactIdentityKey,
-        epoch: u32,
-        capability: &RecipientDeliveryCapability,
-    ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
-        let address = peer_inbox_authorization_address(identity_key);
-        validate_contact_identity_key(&address, &identity_key)?;
-        if let Some(stored) = load_peer_inbox_authorization(snapshot, &address, self.limits)?
-            && epoch <= stored.epoch
-        {
-            return Ok(Vec::new());
-        }
-        let wire = PeerInboxAuthorizationWire {
-            epoch,
-            capability: *capability.to_bytes(),
-        };
-        let body = encode_zeroizing(&wire).map_err(|e| ProtocolStateError::BlobEncode {
-            address: address.clone(),
-            reason: e.to_string(),
-        })?;
-        let blob = encode_blob(&address, &body, self.limits.max_protocol_state_blob_len)?;
-        Ok(vec![
-            ProtocolStateUpdate::set(address, blob).with_snapshot(snapshot),
-        ])
-    }
-
-    /// Records that `identity_key` has been given the delivery capability for local epoch `epoch`.
-    ///
-    /// Call this only after the in-band authorization update has actually been handed to the
-    /// transport, so an app killed mid-re-key resumes rather than skipping contacts. Returns no
-    /// updates when the contact already holds this epoch's capability or a newer one.
-    pub fn record_inbox_authorization_delivered(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-        epoch: u32,
-    ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
-        let address = local_inbox_authorization_address(identity_key);
-        validate_contact_identity_key(&address, &identity_key)?;
-        if let Some(delivered) =
-            load_delivered_inbox_authorization(snapshot, &address, self.limits)?
-            && epoch <= delivered
-        {
-            return Ok(Vec::new());
-        }
-        let body = postcard::to_stdvec(&LocalInboxAuthorizationWire { epoch }).map_err(|e| {
-            ProtocolStateError::BlobEncode {
-                address: address.clone(),
-                reason: e.to_string(),
-            }
-        })?;
-        let blob = encode_blob(&address, &body, self.limits.max_protocol_state_blob_len)?;
-        Ok(vec![
-            ProtocolStateUpdate::set(address, blob).with_snapshot(snapshot),
-        ])
-    }
-
-    /// Returns the latest local epoch whose capability `identity_key` was given, if any.
-    pub fn delivered_inbox_authorization(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-    ) -> Result<Option<u32>, ProtocolStateError> {
-        let address = local_inbox_authorization_address(identity_key);
-        validate_contact_identity_key(&address, &identity_key)?;
-        load_delivered_inbox_authorization(snapshot, &address, self.limits)
-    }
-
-    /// Returns which of `candidates` still need the current epoch's delivery capability.
-    ///
-    /// A contact qualifies when it has never been given an authorization, or was last given one
-    /// older than `current_epoch`. **Blocked contacts are always excluded**: re-supplying a
-    /// blocked contact would hand back the very capability the rotation revoked and silently undo
-    /// the block. Contacts with no stored contact record are skipped.
-    pub fn contacts_needing_inbox_authorization(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        current_epoch: u32,
-        candidates: &[ContactIdentityKey],
-    ) -> Result<Vec<ContactIdentityKey>, ProtocolStateError> {
-        let mut stale = Vec::new();
-        for identity_key in candidates {
-            let contact_address = contact_address(*identity_key);
-            validate_contact_identity_key(&contact_address, identity_key)?;
-            let Some(blob) = snapshot.get(&contact_address) else {
-                continue;
-            };
-            if decode_contact_state(&contact_address, blob, self.limits)?.blocked {
-                continue;
-            }
-            let delivered = load_delivered_inbox_authorization(
-                snapshot,
-                &local_inbox_authorization_address(*identity_key),
-                self.limits,
-            )?;
-            if delivered.is_none_or(|delivered| delivered < current_epoch) {
-                stale.push(*identity_key);
-            }
-        }
-        Ok(stale)
-    }
-
-    /// Returns the stored inbox authorization for a peer, if one has been recorded.
-    pub fn peer_inbox_authorization(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-    ) -> Result<Option<PeerInboxAuthorization>, ProtocolStateError> {
-        let address = peer_inbox_authorization_address(identity_key);
-        validate_contact_identity_key(&address, &identity_key)?;
-        load_peer_inbox_authorization(snapshot, &address, self.limits)
-    }
-
-    fn set_contact_blocked(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        identity_key: ContactIdentityKey,
-        blocked: bool,
-    ) -> Result<ContactStateChange, ProtocolStateError> {
+        record: Option<&ProtocolStateBlob>,
+    ) -> Result<(StateChanges, bool), ProtocolStateError> {
         let address = contact_address(identity_key);
         validate_contact_identity_key(&address, &identity_key)?;
-        let mut contact = load_contact_state(snapshot, &address, self.limits)?;
-        if contact.blocked == blocked {
-            return Ok(ContactStateChange {
-                contact,
-                state_updates: Vec::new(),
-                event: None,
-            });
+        let mut contact = match record {
+            Some(blob) => ContactRecord::decode(&address, blob, self.limits)?,
+            None => ContactRecord::pending(identity_key, None),
+        };
+        if contact.blocked {
+            return Ok((StateChanges::for_record(address, record, None), false));
         }
-        contact.blocked = blocked;
-        changed_contact_state(snapshot, address, contact, self.limits)
+        contact.blocked = true;
+        let update = ProtocolStateUpdate::replacing(
+            address.clone(),
+            Some(contact.encode(&address, self.limits)?),
+            record,
+        );
+        Ok((
+            StateChanges::for_record(address, record, Some(update)),
+            true,
+        ))
     }
 
     /// Returns deletion updates for all protocol-state kinds at `key`.
@@ -1234,230 +1006,6 @@ impl ProtocolStateEngine {
                     .with_snapshot(snapshot)
             })
             .collect()
-    }
-
-    /// Starts a Session with the responder whose bundle the caller fetched, and seals its first
-    /// Message.
-    ///
-    /// The responder's Discovery Key must vouch for its Identity Key, as well as the reverse. Until
-    /// the responder replies, every Message on the new Session carries the handshake. The caller
-    /// must retain the exact binding with the returned Message for retransmission.
-    pub fn initiate_session<R: RngCore + CryptoRng>(
-        &self,
-        rng: &mut R,
-        snapshot: &ProtocolStateSnapshot,
-        start: OutboundSessionStart<'_>,
-        transport_binding: &TransportBinding,
-    ) -> Result<SessionInitiationResult, ProtocolStateError> {
-        verify_discovery_to_identity_binding(
-            start.responder_identity_key,
-            &start.responder_prekey_bundle.discovery_key.verifying_key,
-            start.responder_discovery_to_identity,
-        )
-        .map_err(roost_crypto::HandshakeError::from)?;
-        validate_sender_identity(start.sender.identity, self.limits)?;
-        let peer_identity_key = ContactIdentityKey {
-            x25519_public_key: *start.responder_identity_key.public_key.as_bytes(),
-            ed25519_verifying_key: start.responder_identity_key.verifying_key.to_bytes(),
-        };
-        let (mut state, session_id, handshake) = initiate_handshake(
-            rng,
-            start.responder_identity_key,
-            start.responder_prekey_bundle,
-        )?;
-        let address = session_address(session_id);
-        if snapshot.get(&address).is_some() {
-            return Err(ProtocolStateError::InvalidStateBinding {
-                address,
-                reason: "session already exists".into(),
-            });
-        }
-        let message = seal_proved(
-            rng,
-            &mut state,
-            OutboundContent {
-                session_id,
-                id: start.id,
-                sent_at_millis: start.sent_at_millis,
-                plaintext: start.plaintext,
-            },
-            &handshake,
-            &start.sender,
-            transport_binding,
-            self.limits,
-        )?;
-        let peer_address = peer_sessions_address(peer_identity_key);
-        let (peer_sessions, evicted) =
-            match load_peer_sessions(snapshot, &peer_address, self.limits)? {
-                Some(mut sessions) => {
-                    let evicted = sessions.start(session_id, None);
-                    (sessions, evicted)
-                }
-                None => (PeerSessions::new(session_id, None), Vec::new()),
-            };
-        let mut state_updates = self.new_session_updates(
-            snapshot,
-            session_id,
-            peer_identity_key,
-            &state,
-            Some(&handshake),
-        )?;
-        state_updates.push(
-            ProtocolStateUpdate::set(
-                peer_address.clone(),
-                encode_peer_sessions(&peer_address, &peer_sessions, self.limits)?,
-            )
-            .with_snapshot(snapshot),
-        );
-        state_updates.extend(session_deletions(snapshot, &evicted));
-        Ok(SessionInitiationResult {
-            session_id,
-            message,
-            state_updates,
-        })
-    }
-
-    /// Accepts the Session a first Message starts, after authenticating its sender.
-    ///
-    /// Call this only after a [`MessageDecryption`] returned
-    /// [`InboundMessageOutcome::UnknownSession`] for a Message that carries a handshake. The sender
-    /// must prove its Identity Key, seal a Discovery Key both bound to it, and present a valid
-    /// certificate for it. The new Session becomes the one Roost sends on, except that when this
-    /// side's own new Session with the peer still awaits a reply, the lower SessionID wins.
-    pub fn accept_session<R: RngCore + CryptoRng>(
-        &self,
-        rng: &mut R,
-        snapshot: &ProtocolStateSnapshot,
-        inbound: InboundSessionStart<'_>,
-        transport_binding: &TransportBinding,
-    ) -> Result<SessionAcceptanceOutcome, ProtocolStateError> {
-        let encoded = inbound
-            .message
-            .to_bytes()
-            .map_err(ProtocolStateError::MessageEncode)?;
-        let deduplication_address = deduplication_address();
-        let mut deduplication =
-            receiving_deduplication_set(rng, snapshot, inbound.settings, self.limits)?;
-        let digest = deduplication_digest(
-            &deduplication.digest_key,
-            transport_binding.as_bytes(),
-            &encoded,
-        );
-        if contains_digest(&deduplication.digests, &digest) {
-            return Ok(SessionAcceptanceOutcome::Duplicate);
-        }
-        let prekey_reference =
-            inbound
-                .message
-                .prekey_reference
-                .ok_or_else(|| ProtocolStateError::InvalidMessage {
-                    reason: "message carries no handshake".into(),
-                })?;
-        let opened = open_message(
-            inbound.message,
-            inbound.recipient_discovery_key,
-            transport_binding,
-        )?;
-        let session_id = opened.metadata.session_id;
-        let address = session_address(session_id);
-        // The host passes a Message here only after decrypting it found no Session.
-        if snapshot.get(&address).is_some() {
-            return Err(ProtocolStateError::InvalidMessage {
-                reason: "message names a session this identity already has".into(),
-            });
-        }
-        ensure_payload_kind(&opened, PayloadKind::EncryptedText)?;
-        let base_key =
-            opened
-                .metadata
-                .base_key
-                .ok_or_else(|| ProtocolStateError::InvalidMessage {
-                    reason: "message carries no handshake".into(),
-                })?;
-        let handshake = Handshake {
-            base_key: PublicKey::from(base_key),
-            responder_discovery_key: PublicKey::from(inbound.message.recipient_public_key),
-            prekey_reference,
-        };
-        let (mut state, derived_session_id) = accept_handshake(
-            &handshake,
-            inbound.recipient_discovery_key,
-            inbound.signed_prekey,
-            inbound.one_time_prekey,
-        )?;
-        if !bool::from(derived_session_id.as_bytes().ct_eq(session_id.as_bytes())) {
-            return Err(ProtocolStateError::InvalidMessage {
-                reason: "session id does not match its handshake".into(),
-            });
-        }
-        let decoded = opened.decrypt(rng, &mut state, self.limits)?;
-        let contact = authenticate_first_message(&decoded, &handshake, inbound.signed_prekey)?;
-        let peer_identity_key = inbound_contact_identity_key(
-            inbound.sender_certificate_validation,
-            inbound.settings.certificate_grace(),
-            &decoded.sender_identity,
-            Some(contact.identity_key),
-            self.limits,
-        )?;
-        let peer_address = peer_sessions_address(peer_identity_key);
-        let accepted_with = Some(SignedPreKeyUse {
-            epoch: prekey_reference.discovery_epoch,
-            public_key: prekey_reference.signed_prekey_public_key,
-        });
-        let (peer_sessions, evicted) =
-            match load_peer_sessions(snapshot, &peer_address, self.limits)? {
-                // The Session's blob is gone by now, so one the list still names was wiped by the
-                // host.
-                Some(sessions)
-                    if sessions.was_deleted(session_id) || sessions.contains(session_id) =>
-                {
-                    return Ok(SessionAcceptanceOutcome::DeletedSession);
-                }
-                Some(mut sessions) => {
-                    sessions.forget_deletions_unless(|signed_prekey| {
-                        inbound.held_signed_prekeys.iter().any(|held| {
-                            held.epoch == signed_prekey.epoch
-                                && held.public_key.as_bytes() == &signed_prekey.public_key
-                        })
-                    });
-                    let evicted = if self.awaits_reply(snapshot, sessions.current())? {
-                        sessions.start_alongside(session_id, accepted_with)
-                    } else {
-                        sessions.start(session_id, accepted_with)
-                    };
-                    (sessions, evicted)
-                }
-                None => (PeerSessions::new(session_id, accepted_with), Vec::new()),
-            };
-        record_deduplication_digest(&mut deduplication, digest);
-        let mut state_updates =
-            self.new_session_updates(snapshot, session_id, peer_identity_key, &state, None)?;
-        state_updates.push(
-            ProtocolStateUpdate::set(
-                peer_address.clone(),
-                encode_peer_sessions(&peer_address, &peer_sessions, self.limits)?,
-            )
-            .with_snapshot(snapshot),
-        );
-        state_updates.push(
-            ProtocolStateUpdate::set(
-                deduplication_address.clone(),
-                encode_deduplication_set(&deduplication_address, &deduplication, self.limits)?,
-            )
-            .with_snapshot(snapshot),
-        );
-        state_updates.extend(session_deletions(snapshot, &evicted));
-        Ok(SessionAcceptanceOutcome::Accepted(Box::new(
-            SessionAcceptanceResult {
-                session_id,
-                contact,
-                message_id: opened.metadata.id,
-                sent_at_millis: opened.metadata.sent_at_millis,
-                plaintext: decoded.plaintext,
-                sender_identity: decoded.sender_identity,
-                state_updates,
-            },
-        )))
     }
 
     /// Returns all pending acknowledgments stored for a Session.
@@ -1533,41 +1081,6 @@ impl ProtocolStateEngine {
         })
     }
 
-    // Returns the blobs a new Session starts with: its ratchet state and an empty pending list.
-    fn new_session_updates(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        session_id: SessionId,
-        peer_identity_key: ContactIdentityKey,
-        state: &RatchetState,
-        pending_handshake: Option<&Handshake>,
-    ) -> Result<Vec<ProtocolStateUpdate>, ProtocolStateError> {
-        let address = session_address(session_id);
-        let pending_address = pending_acknowledgment_address(session_id);
-        let pending = LoadedPendingAcknowledgments {
-            pending: BTreeMap::new(),
-            acknowledgment_digests: Vec::new(),
-        };
-        Ok(vec![
-            ProtocolStateUpdate::set(
-                address.clone(),
-                encode_active_session(
-                    &address,
-                    peer_identity_key,
-                    state,
-                    pending_handshake,
-                    self.limits,
-                )?,
-            )
-            .with_snapshot(snapshot),
-            ProtocolStateUpdate::set(
-                pending_address.clone(),
-                encode_pending_acknowledgments(&pending_address, &pending, self.limits)?,
-            )
-            .with_snapshot(snapshot),
-        ])
-    }
-
     // Returns the update that makes `session_id` the Session Roost sends on, if it isn't already.
     fn delivery_update(
         &self,
@@ -1625,12 +1138,29 @@ pub enum ProtocolStateError {
     /// The contact is locally blocked.
     #[error("contact is blocked")]
     BlockedContact,
-    /// The contact must be accepted before sending.
-    #[error("contact is not accepted")]
-    ContactNotAccepted,
+    /// A received Contact Inbox Grant's signatures don't verify against its sender's Identity
+    /// Key, so the whole Message is rejected.
+    #[error("inbox grant does not verify")]
+    InvalidInboxGrant,
+    /// The contact has no open Contact Request for this side to accept.
+    #[error("no contact request to accept")]
+    NoContactRequest,
+    /// An established Message needs the peer's Delivery Capability, and no grant has supplied one
+    /// for its current Discovery Key.
+    #[error("no delivery capability for this contact")]
+    NoDeliveryCapability,
     /// No Session exists with the contact, so a fresh handshake must start one.
     #[error("no session with this contact")]
     NoSession,
+    /// This side already sent the most Messages allowed before the contact accepts.
+    #[error("contact is not accepted and the limit of {limit} messages is reached")]
+    PendingLimitReached {
+        /// Distinct Messages each side may send before acceptance.
+        limit: usize,
+    },
+    /// A Contact Acceptance arrived on a Session this side didn't start with a Contact Request.
+    #[error("contact acceptance answers no request")]
+    UnsolicitedAcceptance,
     /// A terminal Session must be replaced by a fresh handshake.
     #[error("session is unrecoverable")]
     SessionUnrecoverable,
@@ -1740,71 +1270,6 @@ fn deduplication_address() -> ProtocolStateAddress {
         ProtocolStateKind::DeduplicationSet,
         ProtocolStateKey(DEDUPLICATION_SET_KEY.to_vec()),
     )
-}
-
-fn contact_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
-    ProtocolStateAddress::new(ProtocolStateKind::ContactState, identity_key.into())
-}
-
-fn peer_inbox_authorization_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
-    ProtocolStateAddress::new(
-        ProtocolStateKind::PeerInboxAuthorization,
-        identity_key.into(),
-    )
-}
-
-fn local_inbox_authorization_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
-    ProtocolStateAddress::new(
-        ProtocolStateKind::LocalInboxAuthorization,
-        identity_key.into(),
-    )
-}
-
-fn load_delivered_inbox_authorization(
-    snapshot: &ProtocolStateSnapshot,
-    address: &ProtocolStateAddress,
-    limits: ProtocolHardeningLimits,
-) -> Result<Option<u32>, ProtocolStateError> {
-    let Some(blob) = snapshot.get(address) else {
-        return Ok(None);
-    };
-    let wire: LocalInboxAuthorizationWire = decode_inbox_authorization(address, blob, limits)?;
-    Ok(Some(wire.epoch))
-}
-
-fn load_peer_inbox_authorization(
-    snapshot: &ProtocolStateSnapshot,
-    address: &ProtocolStateAddress,
-    limits: ProtocolHardeningLimits,
-) -> Result<Option<PeerInboxAuthorization>, ProtocolStateError> {
-    let Some(blob) = snapshot.get(address) else {
-        return Ok(None);
-    };
-    let wire: PeerInboxAuthorizationWire = decode_inbox_authorization(address, blob, limits)?;
-    Ok(Some(PeerInboxAuthorization {
-        epoch: wire.epoch,
-        capability: RecipientDeliveryCapability::from_bytes(wire.capability),
-    }))
-}
-
-fn decode_inbox_authorization<T: serde::de::DeserializeOwned>(
-    address: &ProtocolStateAddress,
-    blob: &ProtocolStateBlob,
-    limits: ProtocolHardeningLimits,
-) -> Result<T, ProtocolStateError> {
-    let body = blob_body(address, blob, limits.max_protocol_state_blob_len)?;
-    let (wire, trailing) =
-        postcard::take_from_bytes(body).map_err(|e| ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: e.to_string(),
-        })?;
-    if !trailing.is_empty() {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!("inbox authorization has {} trailing bytes", trailing.len()),
-        });
-    }
-    Ok(wire)
 }
 
 // Prefixes `body` with the version that covers the whole blob.
@@ -1922,11 +1387,23 @@ struct LoadedPendingAcknowledgments {
     acknowledgment_digests: Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>,
 }
 
+impl LoadedPendingAcknowledgments {
+    // A new Session's list, with nothing waiting and no acknowledgment seen.
+    fn empty() -> Self {
+        Self {
+            pending: BTreeMap::new(),
+            acknowledgment_digests: Vec::new(),
+        }
+    }
+}
+
 struct LoadedPendingAcknowledgment {
     message: Message,
     encoded_message: Vec<u8>,
     first_sent_at_millis: u64,
     last_retried_at_millis: Option<u64>,
+    /// The local grant the Message carried, which its acknowledgment confirms the peer holds.
+    grant: Option<DiscoveryKeyStamp>,
 }
 
 #[derive(Serialize)]
@@ -1955,6 +1432,7 @@ struct PendingAcknowledgmentWire<'a> {
     encoded_message: &'a [u8],
     first_sent_at_millis: u64,
     last_retried_at_millis: Option<u64>,
+    grant: Option<(u64, u32)>,
 }
 
 #[derive(Deserialize)]
@@ -1971,6 +1449,7 @@ struct DecodedPendingAcknowledgmentWire {
     encoded_message: Vec<u8>,
     first_sent_at_millis: u64,
     last_retried_at_millis: Option<u64>,
+    grant: Option<(u64, u32)>,
 }
 
 fn deserialize_pending_acknowledgment_list<'de, D>(
@@ -2062,44 +1541,6 @@ where
     }
 
     deserializer.deserialize_seq(AcknowledgmentDigestListVisitor)
-}
-
-#[derive(Deserialize, Serialize)]
-struct LocalInboxAuthorizationWire {
-    epoch: u32,
-}
-
-// Persistence requires serialization; `ZeroizeOnDrop` scrubs the temporary bearer-secret copy.
-#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
-struct PeerInboxAuthorizationWire {
-    epoch: u32,
-    capability: [u8; 32],
-}
-
-#[derive(Serialize)]
-struct ContactStateWire<'a> {
-    identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    discovery_epoch: u32,
-    discovery_created_at_secs: u64,
-    discovery_identity_signature: &'a [u8],
-    trust_state: ContactTrustState,
-    blocked: bool,
-}
-
-#[derive(Deserialize)]
-struct DecodedContactStateWire {
-    identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    discovery_x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    discovery_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    discovery_epoch: u32,
-    discovery_created_at_secs: u64,
-    discovery_identity_signature: Vec<u8>,
-    trust_state: ContactTrustState,
-    blocked: bool,
 }
 
 fn encode_deduplication_set(
@@ -2226,6 +1667,7 @@ fn encode_pending_acknowledgments(
             encoded_message: &entry.encoded_message,
             first_sent_at_millis: entry.first_sent_at_millis,
             last_retried_at_millis: entry.last_retried_at_millis,
+            grant: entry.grant.map(DiscoveryKeyStamp::to_wire),
         })
         .collect();
     let body = Zeroizing::new(
@@ -2337,6 +1779,12 @@ fn decode_pending_acknowledgments_payload(
                 encoded_message: entry.encoded_message,
                 first_sent_at_millis: entry.first_sent_at_millis,
                 last_retried_at_millis: entry.last_retried_at_millis,
+                grant: entry
+                    .grant
+                    .map(|(created_at_secs, epoch)| DiscoveryKeyStamp {
+                        created_at_secs,
+                        epoch,
+                    }),
             },
         );
         if replaced.is_some() {
@@ -2394,6 +1842,24 @@ fn decode_pending_acknowledgment_digests_payload(
                 return Err(pending_acknowledgment_decode_error(
                     address,
                     "pending retry time option is invalid",
+                ));
+            }
+        }
+        match read_postcard_u8(payload, &mut offset).ok_or_else(|| {
+            pending_acknowledgment_decode_error(address, "pending grant option is malformed")
+        })? {
+            0 => {}
+            1 => {
+                skip_postcard_varint_u64(payload, &mut offset)
+                    .and_then(|()| skip_postcard_varint_u64(payload, &mut offset))
+                    .ok_or_else(|| {
+                        pending_acknowledgment_decode_error(address, "pending grant is malformed")
+                    })?;
+            }
+            _ => {
+                return Err(pending_acknowledgment_decode_error(
+                    address,
+                    "pending grant option is invalid",
                 ));
             }
         }
@@ -2483,156 +1949,6 @@ fn max_pending_acknowledgments_blob_len(limits: ProtocolHardeningLimits) -> usiz
         + limits.max_acknowledgment_digests * ACKNOWLEDGMENT_DIGEST_LEN
 }
 
-fn changed_contact_state(
-    snapshot: &ProtocolStateSnapshot,
-
-    address: ProtocolStateAddress,
-    contact: ContactState,
-    limits: ProtocolHardeningLimits,
-) -> Result<ContactStateChange, ProtocolStateError> {
-    Ok(ContactStateChange {
-        contact: contact.clone(),
-        state_updates: vec![
-            ProtocolStateUpdate::set(
-                address.clone(),
-                encode_contact_state(&address, &contact, limits)?,
-            )
-            .with_snapshot(snapshot),
-        ],
-        event: Some(ContactEvent::Changed { contact }),
-    })
-}
-
-fn load_contact_state(
-    snapshot: &ProtocolStateSnapshot,
-    address: &ProtocolStateAddress,
-    limits: ProtocolHardeningLimits,
-) -> Result<ContactState, ProtocolStateError> {
-    let blob = snapshot
-        .get(address)
-        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-            address: address.clone(),
-        })?;
-    decode_contact_state(address, blob, limits)
-}
-
-fn encode_contact_state(
-    address: &ProtocolStateAddress,
-    contact: &ContactState,
-    limits: ProtocolHardeningLimits,
-) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    let wire = ContactStateWire {
-        identity_x25519_public_key: contact.identity.identity_key.x25519_public_key,
-        identity_ed25519_verifying_key: contact.identity.identity_key.ed25519_verifying_key,
-        discovery_x25519_public_key: contact.identity.discovery_key.x25519_public_key,
-        discovery_ed25519_verifying_key: contact.identity.discovery_key.ed25519_verifying_key,
-        discovery_epoch: contact.identity.discovery_key.epoch,
-        discovery_created_at_secs: contact.identity.discovery_key.created_at_secs,
-        discovery_identity_signature: &contact.identity.discovery_key.identity_signature,
-        trust_state: contact.trust_state,
-        blocked: contact.blocked,
-    };
-    let body = postcard::to_stdvec(&wire).map_err(|_| ProtocolStateError::BlobEncode {
-        address: address.clone(),
-        reason: "contact state failed to encode".into(),
-    })?;
-    encode_blob(address, &body, limits.max_protocol_state_blob_len)
-}
-
-fn decode_contact_state(
-    address: &ProtocolStateAddress,
-    blob: &ProtocolStateBlob,
-    limits: ProtocolHardeningLimits,
-) -> Result<ContactState, ProtocolStateError> {
-    let body = blob_body(address, blob, limits.max_protocol_state_blob_len)?;
-    let (wire, trailing): (DecodedContactStateWire, &[u8]) = postcard::take_from_bytes(body)
-        .map_err(|_| ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "contact-state payload failed to decode".into(),
-        })?;
-    if !trailing.is_empty() {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "contact state has trailing bytes".into(),
-        });
-    }
-    decoded_contact_state(address, wire)
-}
-
-fn decoded_contact_state(
-    address: &ProtocolStateAddress,
-    wire: DecodedContactStateWire,
-) -> Result<ContactState, ProtocolStateError> {
-    let contact = ContactState {
-        identity: ContactIdentity {
-            identity_key: ContactIdentityKey {
-                x25519_public_key: wire.identity_x25519_public_key,
-                ed25519_verifying_key: wire.identity_ed25519_verifying_key,
-            },
-            discovery_key: ContactDiscoveryKey {
-                x25519_public_key: wire.discovery_x25519_public_key,
-                ed25519_verifying_key: wire.discovery_ed25519_verifying_key,
-                epoch: wire.discovery_epoch,
-                created_at_secs: wire.discovery_created_at_secs,
-                identity_signature: wire.discovery_identity_signature.try_into().map_err(|_| {
-                    ProtocolStateError::BlobDecode {
-                        address: address.clone(),
-                        reason: "contact discovery key signature length is invalid".into(),
-                    }
-                })?,
-            },
-        },
-        trust_state: wire.trust_state,
-        blocked: wire.blocked,
-    };
-    validate_decoded_contact_state(address, &contact)?;
-    Ok(contact)
-}
-
-fn validate_decoded_contact_state(
-    address: &ProtocolStateAddress,
-    contact: &ContactState,
-) -> Result<(), ProtocolStateError> {
-    let expected_key = contact.identity.identity_key.canonical_encoding();
-    if address.key().as_bytes().ct_eq(&expected_key).unwrap_u8() != 1 {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "contact identity key does not match address".into(),
-        });
-    }
-    validate_contact_identity_for_decode(address, &contact.identity)
-}
-
-fn validate_contact_identity_for_decode(
-    address: &ProtocolStateAddress,
-    contact_identity: &ContactIdentity,
-) -> Result<(), ProtocolStateError> {
-    if !contact_identity_key_is_valid(&contact_identity.identity_key) {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "contact identity key is invalid".into(),
-        });
-    }
-    let Some(bundle) = contact_public_discovery_key(&contact_identity.discovery_key) else {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "contact discovery key is invalid".into(),
-        });
-    };
-    let identity_verifying_key =
-        parse_ed25519_verifying_key_bytes(&contact_identity.identity_key.ed25519_verifying_key)
-            .ok_or_else(|| ProtocolStateError::BlobDecode {
-                address: address.clone(),
-                reason: "contact identity key is invalid".into(),
-            })?;
-    verify_public_discovery_key(&bundle, &identity_verifying_key).map_err(|_| {
-        ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "contact discovery key signature failed".into(),
-        }
-    })
-}
-
 fn validate_contact_identity_key(
     address: &ProtocolStateAddress,
     identity_key: &ContactIdentityKey,
@@ -2661,53 +1977,8 @@ fn validate_session_contact_identity_key(
     }
 }
 
-fn validate_contact_identity(
-    address: &ProtocolStateAddress,
-    contact_identity: &ContactIdentity,
-) -> Result<(), ProtocolStateError> {
-    validate_contact_identity_key(address, &contact_identity.identity_key)?;
-    let Some(bundle) = contact_public_discovery_key(&contact_identity.discovery_key) else {
-        return Err(ProtocolStateError::InvalidStateBinding {
-            address: address.clone(),
-            reason: "contact discovery key is invalid".into(),
-        });
-    };
-    let identity_verifying_key =
-        parse_ed25519_verifying_key_bytes(&contact_identity.identity_key.ed25519_verifying_key)
-            .ok_or_else(|| ProtocolStateError::InvalidStateBinding {
-                address: address.clone(),
-                reason: "contact identity key is invalid".into(),
-            })?;
-    verify_public_discovery_key(&bundle, &identity_verifying_key).map_err(|_| {
-        ProtocolStateError::InvalidStateBinding {
-            address: address.clone(),
-            reason: "contact discovery key signature failed".into(),
-        }
-    })
-}
-
 fn contact_identity_key_is_valid(identity_key: &ContactIdentityKey) -> bool {
     identity_key_is_valid(identity_key)
-}
-
-fn contact_public_discovery_key(discovery_key: &ContactDiscoveryKey) -> Option<PublicDiscoveryKey> {
-    if !is_valid_x25519_public_key(&discovery_key.x25519_public_key) {
-        return None;
-    }
-    Some(PublicDiscoveryKey {
-        public_key: PublicKey::from(discovery_key.x25519_public_key),
-        verifying_key: parse_ed25519_verifying_key_bytes(&discovery_key.ed25519_verifying_key)?,
-        epoch: discovery_key.epoch,
-        created_at_secs: discovery_key.created_at_secs,
-        signature: Signature::from_bytes(&discovery_key.identity_signature),
-    })
-}
-
-fn contact_discovery_key_is_newer(
-    current: &ContactDiscoveryKey,
-    candidate: &ContactDiscoveryKey,
-) -> bool {
-    (candidate.created_at_secs, candidate.epoch) > (current.created_at_secs, current.epoch)
 }
 
 fn inbound_contact_identity_key(
@@ -2788,7 +2059,9 @@ struct OutboundContent<'a> {
     session_id: SessionId,
     id: MessageId,
     sent_at_millis: u64,
-    plaintext: &'a [u8],
+    payload_kind: PayloadKind,
+    // The plaintext, after the Inbox Grant when the payload kind carries one.
+    payload: &'a [u8],
 }
 
 // Where a signed Message goes and whose Identity Key its transcript names.
@@ -2806,14 +2079,14 @@ fn seal_signed<R: RngCore + CryptoRng>(
     rng: &mut R,
     state: &mut RatchetState,
     content: OutboundContent<'_>,
-    payload_kind: PayloadKind,
     recipient: SignedRecipient<'_>,
     sender_identity: &SenderIdentityMaterial,
     signing_key: &SigningKeyPair,
     transport_binding: &TransportBinding,
     limits: ProtocolHardeningLimits,
 ) -> Result<Message, ProtocolStateError> {
-    let padded_plaintext = pad_sealed_payload(content.plaintext)?;
+    let payload_kind = content.payload_kind;
+    let padded_plaintext = pad_sealed_payload(content.payload)?;
     let signature = sign_message_transcript(
         signing_key,
         MessageTranscriptInput {
@@ -2859,7 +2132,7 @@ fn seal_proved<R: RngCore + CryptoRng>(
     transport_binding: &TransportBinding,
     limits: ProtocolHardeningLimits,
 ) -> Result<Message, ProtocolStateError> {
-    let padded_plaintext = pad_sealed_payload(content.plaintext)?;
+    let padded_plaintext = pad_sealed_payload(content.payload)?;
     let proof = prove_sender(
         sender.agreement_key,
         &SenderProofTranscript {
@@ -2888,7 +2161,7 @@ fn seal_proved<R: RngCore + CryptoRng>(
             base_key: Some(*handshake.base_key.as_bytes()),
             id: content.id,
             sent_at_millis: content.sent_at_millis,
-            payload_kind: PayloadKind::EncryptedText,
+            payload_kind: content.payload_kind,
         },
         *handshake.responder_discovery_key.as_bytes(),
         Some(handshake.prekey_reference),
@@ -2897,13 +2170,13 @@ fn seal_proved<R: RngCore + CryptoRng>(
     )
 }
 
-// Checks a first Message's proof and the Discovery Key it seals, and returns the sender they
-// authenticate.
+// Checks a first Message's proof and the Discovery Key it seals, and returns the sender's
+// Identity Key and that Discovery Key.
 fn authenticate_first_message(
     decoded: &DecodedSealedSenderEnvelope,
     handshake: &Handshake,
     signed_prekey: &SignedPreKey,
-) -> Result<ContactIdentity, ProtocolStateError> {
+) -> Result<(PublicIdentityKey, ContactDiscoveryKey), ProtocolStateError> {
     let SenderAuthentication::Proof {
         discovery_key,
         discovery_to_identity,
@@ -2939,10 +2212,10 @@ fn authenticate_first_message(
         },
         proof,
     )?;
-    Ok(ContactIdentity {
-        identity_key: decoded.sender_identity.contact_identity_key(),
-        discovery_key: ContactDiscoveryKey::from(&**discovery_key),
-    })
+    Ok((
+        sender_identity_key,
+        ContactDiscoveryKey::from(&**discovery_key),
+    ))
 }
 
 // Checks that a Message on a known Session comes from the Session's peer and, after the handshake,
@@ -2982,16 +2255,19 @@ fn authenticate_session_message(
     }
 }
 
-fn ensure_payload_kind(
-    opened: &OpenedMessage,
-    expected: PayloadKind,
-) -> Result<(), ProtocolStateError> {
-    if opened.metadata.payload_kind != expected {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: format!("message payload is not {expected:?}"),
-        });
+// Refuses payload kinds a Message Operation never seals.
+fn ensure_supported_payload_kind(opened: &OpenedMessage) -> Result<(), ProtocolStateError> {
+    match opened.metadata.payload_kind {
+        PayloadKind::EncryptedText
+        | PayloadKind::EncryptedTextWithGrant
+        | PayloadKind::ContactAcceptance
+        | PayloadKind::Acknowledgment => Ok(()),
+        kind @ (PayloadKind::KeyExchange | PayloadKind::RatchetHeader) => {
+            Err(ProtocolStateError::InvalidMessage {
+                reason: format!("message payload kind {kind:?} is unsupported"),
+            })
+        }
     }
-    Ok(())
 }
 
 // Checks that the local Discovery Key belongs to the local Identity Key a transcript names.
@@ -3026,39 +2302,16 @@ fn load_required_session(
     })
 }
 
-// Returns the deletions for each evicted Session's blobs.
+// Returns the deletions for each evicted Session's blobs, which the operation must have read.
 fn session_deletions(
     snapshot: &ProtocolStateSnapshot,
     evicted: &[SessionId],
 ) -> Vec<ProtocolStateUpdate> {
     evicted
         .iter()
-        .flat_map(|session_id| {
-            [
-                session_address(*session_id),
-                pending_acknowledgment_address(*session_id),
-            ]
-        })
+        .flat_map(|session_id| session::session_record_addresses(*session_id))
         .map(|address| ProtocolStateUpdate::delete(address).with_snapshot(snapshot))
         .collect()
-}
-
-// Returns an accepted, unblocked contact that new Messages may go to.
-fn outbound_contact(
-    snapshot: &ProtocolStateSnapshot,
-    identity_key: ContactIdentityKey,
-    limits: ProtocolHardeningLimits,
-) -> Result<ContactState, ProtocolStateError> {
-    let address = contact_address(identity_key);
-    validate_contact_identity_key(&address, &identity_key)?;
-    let contact = load_contact_state(snapshot, &address, limits)?;
-    if contact.blocked {
-        return Err(ProtocolStateError::BlockedContact);
-    }
-    if contact.trust_state == ContactTrustState::Pending {
-        return Err(ProtocolStateError::ContactNotAccepted);
-    }
-    Ok(contact)
 }
 
 fn deduplication_digest(
@@ -3103,6 +2356,7 @@ fn record_pending_acknowledgment(
     message_id: MessageId,
     first_sent_at_millis: u64,
     message: &Message,
+    grant: Option<DiscoveryKeyStamp>,
     limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
     let message_id_bytes = *message_id.as_bytes();
@@ -3124,6 +2378,7 @@ fn record_pending_acknowledgment(
             encoded_message,
             first_sent_at_millis,
             last_retried_at_millis: None,
+            grant,
         },
     );
     Ok(())
@@ -3198,6 +2453,7 @@ fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
 
 #[cfg(test)]
 mod tests {
+    use super::envelope::{DecodedSealedSenderEnvelope, SenderAuthentication};
     use super::{
         DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
         MIN_DEDUPLICATION_CAPACITY, PROTOCOL_STATE_BLOB_VERSION, ProtocolStateError,
@@ -3205,8 +2461,119 @@ mod tests {
         contains_digest, deduplication_digest, pad_sealed_payload, protocol_state_blob_digest,
         record_deduplication_digest, unpad_sealed_payload,
     };
+    use super::{SenderIdentityMaterial, authenticate_first_message};
     use crate::{ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    use roost_crypto::{
+        DiscoveryKey, Handshake, KeyPair, PublicIdentityKey, SealedFramePreKeyReference,
+        SignedPreKey, SigningKeyPair, generate_discovery_key,
+        generate_signed_prekey_for_discovery_key, sign_identity_key_binding,
+    };
     use zeroize::Zeroizing;
+
+    struct Sender {
+        identity: PublicIdentityKey,
+        signing_key: SigningKeyPair,
+        material: SenderIdentityMaterial,
+    }
+
+    fn sender(seed: u8) -> Sender {
+        let signing_key = SigningKeyPair::from_signing_bytes([seed; 32]);
+        let agreement_key = KeyPair::from_secret_bytes([seed.wrapping_add(1); 32]);
+        let identity = PublicIdentityKey {
+            public_key: agreement_key.public,
+            verifying_key: signing_key.verifying,
+            binding_signature: sign_identity_key_binding(&signing_key, &agreement_key.public)
+                .unwrap(),
+        };
+        Sender {
+            material: SenderIdentityMaterial {
+                identity_key: *identity.public_key.as_bytes(),
+                identity_verifying_key: identity.verifying_key.to_bytes(),
+                identity_binding_signature: identity.binding_signature.to_bytes().to_vec(),
+                certificate: Vec::new(),
+                signature: Vec::new(),
+            },
+            identity,
+            signing_key,
+        }
+    }
+
+    fn discovery_key(owner: &Sender, seed: u8) -> DiscoveryKey {
+        generate_discovery_key(
+            &mut ChaCha20Rng::from_seed([seed; 32]),
+            &owner.signing_key,
+            1,
+            1_700_000_000,
+        )
+        .unwrap()
+    }
+
+    // Authenticates a first Message from `claimed` that seals `sealed` and its binding over
+    // `bound`, with a proof the Discovery Key checks reject before anyone verifies it.
+    fn authenticate(
+        claimed: &Sender,
+        sealed: &DiscoveryKey,
+        bound: &PublicIdentityKey,
+    ) -> Result<(), ProtocolStateError> {
+        let responder = sender(0x50);
+        let responder_discovery_key = discovery_key(&responder, 0x51);
+        let signed_prekey: SignedPreKey = generate_signed_prekey_for_discovery_key(
+            &mut ChaCha20Rng::from_seed([0x52; 32]),
+            &responder_discovery_key,
+            0,
+            1_700_000_000,
+        )
+        .unwrap();
+        let decoded = DecodedSealedSenderEnvelope {
+            sender_identity: claimed.material.clone(),
+            authentication: SenderAuthentication::Proof {
+                discovery_key: Box::new(sealed.public()),
+                discovery_to_identity: sealed.sign_identity_binding(bound).unwrap(),
+                proof: [0; roost_crypto::SENDER_PROOF_LEN],
+            },
+            padded_plaintext: Zeroizing::new(Vec::new()),
+            plaintext: Zeroizing::new(Vec::new()),
+        };
+        let handshake = Handshake {
+            base_key: KeyPair::from_secret_bytes([0x53; 32]).public,
+            responder_discovery_key: *responder_discovery_key.public_key(),
+            prekey_reference: SealedFramePreKeyReference {
+                discovery_epoch: 1,
+                signed_prekey_public_key: *signed_prekey.public_key().as_bytes(),
+                one_time_prekey_id: None,
+                one_time_prekey_public_key: None,
+            },
+        };
+        authenticate_first_message(&decoded, &handshake, &signed_prekey).map(|_| ())
+    }
+
+    #[test]
+    fn a_first_message_sealing_another_identitys_discovery_key_is_rejected() {
+        let alice = sender(0x10);
+        let mallory = sender(0x20);
+        let mallorys_discovery_key = discovery_key(&mallory, 0x21);
+
+        assert!(matches!(
+            authenticate(&alice, &mallorys_discovery_key, &alice.identity),
+            Err(ProtocolStateError::InvalidMessage { reason })
+                if reason == "sender discovery key is not signed by its identity key"
+        ));
+    }
+
+    #[test]
+    fn a_first_message_whose_discovery_key_vouches_for_another_identity_is_rejected() {
+        let alice = sender(0x10);
+        let mallory = sender(0x20);
+        let alices_discovery_key = discovery_key(&alice, 0x11);
+
+        assert!(matches!(
+            authenticate(&alice, &alices_discovery_key, &mallory.identity),
+            Err(ProtocolStateError::InvalidMessage { reason })
+                if reason == "sender discovery key does not sign its identity key"
+        ));
+    }
 
     #[test]
     fn blob_versions_other_than_the_current_one_are_faults() {
