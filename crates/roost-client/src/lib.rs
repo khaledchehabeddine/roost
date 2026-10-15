@@ -31,8 +31,8 @@ pub use message::{
 };
 pub use message_operation::{
     AdmissionRequest, IncomingMessage, MessageDecryption, MessageDecryptionStep,
-    MessageDestination, MessageEncryption, MessageEncryptionStep, OutgoingMessage,
-    SignedSenderCertificate,
+    MessageDestination, MessageEncryption, MessageEncryptionStep, OutgoingGrantUpdate,
+    OutgoingMessage, SignedSenderCertificate,
 };
 pub use operation::{
     OperationId, OperationStatus, PreparedIdentity, PreparedInboxRotation, PreparedOneTimePreKeys,
@@ -41,7 +41,7 @@ pub use operation::{
 pub use protocol::{
     AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
     CommitCondition, ContactDiscoveryKey, ContactSafetyNumberConfirmation, ContactState,
-    ContactTrustState, IdentityKey, InboundMessageOutcome, InboundMessageResult,
+    ContactTrustState, GrantUpdateResult, IdentityKey, InboundMessageOutcome, InboundMessageResult,
     OutboundMessageResult, PendingAcknowledgment, ProtocolHardeningLimits, ProtocolStateKind,
     ReceiveSettings, RetryInstruction, RetryInstructionResult, SafetyNumber, SessionEvent,
     SessionUnrecoverableReason, SessionUnrecoverableResult, StateChanges, StateEntry, StateKey,

@@ -83,9 +83,9 @@ pub struct ContactBlock {
     pub changes: StateChanges,
     /// The rotated inbox's publication, or `None` when the contact was already blocked.
     ///
-    /// Present means every remaining contact holds a stale Delivery Capability until a Message
-    /// carries them the new Inbox Grant. The blocked contact never gets one, which is what makes
-    /// the block bite at the relay rather than only locally.
+    /// Present means every remaining contact holds a stale Delivery Capability until a Message,
+    /// acknowledgment, or Grant Update carries them the new Inbox Grant. The blocked contact never
+    /// gets one, which is what makes the block bite at the relay rather than only locally.
     pub publication: Option<PublicationBundle>,
 }
 
@@ -330,9 +330,10 @@ impl KeyStore {
     /// epoch-bound one-time pre-keys, and returns the publishable material. A preparation failure
     /// discards the staged changes, leaving the previous authoritative inbox intact.
     ///
-    /// This invalidates every contact's Delivery Capability until a Message carries them the new
-    /// Inbox Grant — that is what makes it the mechanism behind blocking, and why it is not merely
-    /// a discovery-key rotation.
+    /// This invalidates every contact's Delivery Capability until a Message, acknowledgment, or
+    /// Grant Update carries them the new Inbox Grant — that is what makes it the mechanism behind
+    /// blocking, and why it is not merely a discovery-key rotation. The replaced Discovery Key
+    /// still opens Messages the Relay queued for it, for as long as the Relay may hold them.
     pub fn prepare_inbox_rotation(
         &self,
     ) -> Result<PreparedKeyStoreOperation<PublicationBundle>, KeyStoreError> {

@@ -52,6 +52,9 @@ pub(super) struct ContactRecord {
     pub(super) blocked: bool,
     sent_before_acceptance: Vec<SentBeforeAcceptance>,
     received_before_acceptance: Vec<MessageId>,
+    /// Whether the next send first checks the contact's current prekey bundle, since the contact
+    /// may have rotated its inbox while blocked.
+    pub(super) needs_discovery_key_check: bool,
 }
 
 impl ContactRecord {
@@ -69,6 +72,7 @@ impl ContactRecord {
             blocked: false,
             sent_before_acceptance: Vec::new(),
             received_before_acceptance: Vec::new(),
+            needs_discovery_key_check: false,
         }
     }
 
@@ -142,6 +146,19 @@ impl ContactRecord {
         ReceivedCount::WithinLimit
     }
 
+    /// Lifts the block, and makes the next send check whether the contact rotated meanwhile.
+    pub(super) fn unblock(&mut self) {
+        self.blocked = false;
+        self.needs_discovery_key_check = true;
+    }
+
+    /// Returns whether the stored Discovery Key is newer than `discovery_key`, such as one from a
+    /// stale prekey bundle.
+    pub(super) fn has_newer_discovery_key_than(&self, discovery_key: &ContactDiscoveryKey) -> bool {
+        self.discovery_key
+            .is_some_and(|current| is_newer_discovery_key(&current, discovery_key))
+    }
+
     /// Replaces the Discovery Key with `discovery_key` when it is newer, dropping the capability,
     /// which belongs to the older one.
     pub(super) fn record_discovery_key(&mut self, discovery_key: ContactDiscoveryKey) {
@@ -184,10 +201,22 @@ impl ContactRecord {
         }
     }
 
-    /// Returns whether a Message to this contact should carry the local grant stamped `current`.
+    /// Returns whether the contact hasn't yet acknowledged a Message carrying the local grant
+    /// stamped `current`.
     pub(super) fn needs_grant(&self, current: DiscoveryKeyStamp) -> bool {
         self.acknowledged_grant
             .is_none_or(|acknowledged| acknowledged < current)
+    }
+
+    /// Returns whether the contact gets the local grant stamped `current` on a Message or
+    /// acknowledgment on a Session `starter` started.
+    ///
+    /// The asked side keeps its grant private until it accepts, so a requester it turns down never
+    /// holds the capability, and a blocked contact never gets one.
+    pub(super) fn receives_grant(&self, starter: Starter, current: DiscoveryKeyStamp) -> bool {
+        !self.blocked
+            && (self.is_accepted() || starter == Starter::Local)
+            && self.needs_grant(current)
     }
 
     /// Records that the contact acknowledged a Message carrying the grant stamped `stamp`.
@@ -252,6 +281,7 @@ impl ContactRecord {
             blocked: self.blocked,
             sent_before_acceptance: &sent,
             received_before_acceptance: &received,
+            needs_discovery_key_check: self.needs_discovery_key_check,
         })
         .map_err(|_| ProtocolStateError::BlobEncode {
             address: address.clone(),
@@ -309,6 +339,7 @@ impl ContactRecord {
             acknowledged_grant: wire.acknowledged_grant.map(DiscoveryKeyStamp::from_wire),
             trust_state: wire.trust_state,
             blocked: wire.blocked,
+            needs_discovery_key_check: wire.needs_discovery_key_check,
             sent_before_acceptance: wire
                 .sent_before_acceptance
                 .iter()
@@ -382,6 +413,7 @@ struct ContactRecordWire<'a> {
     blocked: bool,
     sent_before_acceptance: &'a [SentBeforeAcceptanceWire],
     received_before_acceptance: &'a [[u8; MESSAGE_ID_LEN]],
+    needs_discovery_key_check: bool,
 }
 
 #[derive(Serialize)]
@@ -414,6 +446,8 @@ struct DecodedContactRecordWire {
     #[zeroize(skip)]
     #[serde(deserialize_with = "deserialize_counted")]
     received_before_acceptance: Vec<[u8; MESSAGE_ID_LEN]>,
+    #[zeroize(skip)]
+    needs_discovery_key_check: bool,
 }
 
 #[derive(Deserialize)]

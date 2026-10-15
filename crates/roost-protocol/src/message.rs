@@ -70,6 +70,10 @@ pub enum PayloadKind {
     EncryptedTextWithGrant,
     /// A Contact Acceptance: the accepter's Inbox Grant, then encrypted application text content.
     ContactAcceptance,
+    /// An acknowledgment that follows the sender's Inbox Grant.
+    AcknowledgmentWithGrant,
+    /// A Grant Update: the sender's Inbox Grant and no content.
+    GrantUpdate,
 }
 
 impl PayloadKind {
@@ -82,6 +86,8 @@ impl PayloadKind {
             PayloadKind::RatchetHeader => 3,
             PayloadKind::EncryptedTextWithGrant => 4,
             PayloadKind::ContactAcceptance => 5,
+            PayloadKind::AcknowledgmentWithGrant => 6,
+            PayloadKind::GrantUpdate => 7,
         }
     }
 
@@ -94,6 +100,8 @@ impl PayloadKind {
             3 => Ok(PayloadKind::RatchetHeader),
             4 => Ok(PayloadKind::EncryptedTextWithGrant),
             5 => Ok(PayloadKind::ContactAcceptance),
+            6 => Ok(PayloadKind::AcknowledgmentWithGrant),
+            7 => Ok(PayloadKind::GrantUpdate),
             _ => Err(MessageEncodingError::UnsupportedPayloadKind(tag)),
         }
     }
@@ -102,7 +110,18 @@ impl PayloadKind {
     pub fn carries_grant(self) -> bool {
         matches!(
             self,
-            PayloadKind::EncryptedTextWithGrant | PayloadKind::ContactAcceptance
+            PayloadKind::EncryptedTextWithGrant
+                | PayloadKind::ContactAcceptance
+                | PayloadKind::AcknowledgmentWithGrant
+                | PayloadKind::GrantUpdate
+        )
+    }
+
+    /// Returns whether the payload acknowledges an earlier Message.
+    pub fn is_acknowledgment(self) -> bool {
+        matches!(
+            self,
+            PayloadKind::Acknowledgment | PayloadKind::AcknowledgmentWithGrant
         )
     }
 }

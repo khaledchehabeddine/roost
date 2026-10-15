@@ -2,10 +2,11 @@ use super::{KeyStore, KeyStoreError, KeyStoreOperationId};
 use crate::protocol_state::{LocalIdentityKeys, SendIntent};
 use crate::{
     DiscoveryKeyError, IdentityError, IncomingMessage, KeyStoreOperationError, MessageDecryption,
-    MessageEncryption, OutgoingMessage, ProtocolStateError,
+    MessageEncryption, OutgoingGrantUpdate, OutgoingMessage, ProtocolStateError,
 };
 use roost_crypto::{
-    HandshakeError, OneTimePreKey, PublicSignedPreKey, SealedFramePreKeyReference, SignedPreKey,
+    DiscoveryKey, HandshakeError, OneTimePreKey, PublicSignedPreKey, SealedFramePreKeyReference,
+    SignedPreKey,
 };
 use std::time::SystemTime;
 
@@ -68,6 +69,20 @@ impl KeyStore {
         self.start_send(message, SendIntent::Acceptance)
     }
 
+    /// Starts encrypting a Grant Update, which carries only the current Inbox Grant.
+    ///
+    /// The app picks who gets one and when, such as every contact after an inbox rotation, and
+    /// Roost decides who may hold the grant. A blocked contact or a requester this side hasn't
+    /// accepted is refused, and a contact that already acknowledged the current grant gets
+    /// nothing. A requester's Grant Updates don't count toward the limit on Messages before
+    /// acceptance.
+    pub fn start_grant_update(
+        &self,
+        update: OutgoingGrantUpdate,
+    ) -> Result<MessageEncryption, MessageStartError> {
+        self.start_send(update.into_message(), SendIntent::GrantUpdate)
+    }
+
     fn start_send(
         &self,
         message: OutgoingMessage,
@@ -84,8 +99,9 @@ impl KeyStore {
     /// Starts decrypting a received Message.
     ///
     /// The operation loads the local Identity's keys now. It reads SecureStorage again only for
-    /// the prekeys a first Message names, and stages the use of a one-time prekey as a Prepared
-    /// KeyStore Operation that travels in the result's state changes.
+    /// the prekeys a first Message names, or the previous Discovery Key an established Message was
+    /// sealed to before a rotation, and stages the use of a one-time prekey as a Prepared KeyStore
+    /// Operation that travels in the result's state changes.
     pub fn start_decryption(
         &self,
         message: IncomingMessage,
@@ -99,6 +115,19 @@ impl KeyStore {
             .0
             .engine
             .start_decryption(self.clone(), keys, message)?)
+    }
+
+    // Returns the Discovery Key a rotation replaced whose X25519 public key is `public_key`, while
+    // the Relay may still hold Messages sealed to it.
+    pub(crate) fn previous_discovery_key(
+        &self,
+        public_key: &[u8; 32],
+    ) -> Result<Option<DiscoveryKey>, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        Ok(self
+            .0
+            .discovery
+            .previous_key(public_key, SystemTime::now())?)
     }
 
     // Returns the ID of the signed prekey a first Message names when it is one kept after a

@@ -30,7 +30,7 @@ use grant::DiscoveryKeyStamp;
 pub use message_operation::{
     AdmissionRequest, IncomingMessage, MessageDecryption, MessageDecryptionStep,
     MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    OutgoingMessage, PeerPreKeyBundle, SignedSenderCertificate,
+    OutgoingGrantUpdate, OutgoingMessage, PeerPreKeyBundle, SignedSenderCertificate,
 };
 pub(crate) use message_operation::{LocalIdentityKeys, SendIntent};
 use rand::{CryptoRng, RngCore};
@@ -123,20 +123,6 @@ pub enum ProtocolStateKind {
     ContactState = 5,
     /// Identity-key-addressed record of the Sessions kept with one peer and the one Roost sends on.
     PeerSessions = 8,
-}
-
-impl ProtocolStateKind {
-    /// Returns every protocol-state kind known to this build.
-    #[must_use]
-    pub fn all() -> &'static [Self] {
-        &[
-            Self::RatchetSession,
-            Self::DeduplicationSet,
-            Self::PendingAcknowledgments,
-            Self::ContactState,
-            Self::PeerSessions,
-        ]
-    }
 }
 
 impl fmt::Display for ProtocolStateKind {
@@ -650,6 +636,19 @@ pub struct WithheldInboundMessageResult {
     pub changes: StateChanges,
 }
 
+/// A Grant Update whose Inbox Grant Roost kept, which has nothing to show.
+pub struct GrantUpdateResult {
+    /// The Session the Grant Update arrived on.
+    pub session_id: SessionId,
+    /// Message ID recovered after decrypt.
+    pub message_id: MessageId,
+    /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
+    /// this side doesn't acknowledge the contact yet.
+    pub acknowledgment: Option<Message>,
+    /// State changes to commit before treating the Grant Update as processed.
+    pub changes: StateChanges,
+}
+
 /// Accepted blocked inbound Message result without consumer-visible plaintext.
 pub struct BlockedInboundMessageResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, or `None` when
@@ -716,6 +715,8 @@ pub enum InboundMessageOutcome {
     Blocked(Box<BlockedInboundMessageResult>),
     /// A Message past the limit before acceptance decrypted, and its plaintext is withheld.
     Withheld(Box<WithheldInboundMessageResult>),
+    /// A Grant Update from a contact who isn't blocked, whose Inbox Grant Roost kept.
+    GrantUpdate(Box<GrantUpdateResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
     Duplicate,
     /// The Session is permanently unrecoverable and no plaintext was produced.
@@ -890,9 +891,11 @@ impl ProtocolStateEngine {
 
     /// Unblocks a contact, given its record or the record's absence.
     ///
-    /// Existing Sessions remain usable. Unblocking a stranger blocked before they sent anything
-    /// deletes their record, since nobody asked. Unblocking doesn't restore the capability an
-    /// inbox rotation took away.
+    /// Existing Sessions remain usable, and the next Message carries the current Inbox Grant over
+    /// them. The contact may have rotated its own inbox during the block, so the first send after
+    /// an unblock asks for its prekey bundle and starts a new Session only when the bundle's
+    /// Discovery Key is newer. Unblocking a stranger blocked before they sent anything deletes
+    /// their record, since nobody asked.
     pub fn unblock_contact(
         &self,
         identity_key: ContactIdentityKey,
@@ -910,7 +913,7 @@ impl ProtocolStateEngine {
         let blob = if contact.discovery_key.is_none() {
             None
         } else {
-            contact.blocked = false;
+            contact.unblock();
             Some(contact.encode(&address, self.limits)?)
         };
         let update = ProtocolStateUpdate::replacing(address.clone(), blob, record);
@@ -990,22 +993,6 @@ impl ProtocolStateEngine {
             StateChanges::for_record(address, record, Some(update)),
             true,
         ))
-    }
-
-    /// Returns deletion updates for all protocol-state kinds at `key`.
-    #[must_use]
-    pub fn wipe(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        key: ProtocolStateKey,
-    ) -> Vec<ProtocolStateUpdate> {
-        ProtocolStateKind::all()
-            .iter()
-            .map(|kind| {
-                ProtocolStateUpdate::delete(ProtocolStateAddress::new(*kind, key.clone()))
-                    .with_snapshot(snapshot)
-            })
-            .collect()
     }
 
     /// Returns all pending acknowledgments stored for a Session.
@@ -1138,6 +1125,10 @@ pub enum ProtocolStateError {
     /// The contact is locally blocked.
     #[error("contact is blocked")]
     BlockedContact,
+    /// The contact asked and this side hasn't accepted, so a Grant Update would give it the Inbox
+    /// Grant.
+    #[error("contact asked and is not accepted")]
+    ContactNotAccepted,
     /// A received Contact Inbox Grant's signatures don't verify against its sender's Identity
     /// Key, so the whole Message is rejected.
     #[error("inbox grant does not verify")]
@@ -2261,7 +2252,9 @@ fn ensure_supported_payload_kind(opened: &OpenedMessage) -> Result<(), ProtocolS
         PayloadKind::EncryptedText
         | PayloadKind::EncryptedTextWithGrant
         | PayloadKind::ContactAcceptance
-        | PayloadKind::Acknowledgment => Ok(()),
+        | PayloadKind::Acknowledgment
+        | PayloadKind::AcknowledgmentWithGrant
+        | PayloadKind::GrantUpdate => Ok(()),
         kind @ (PayloadKind::KeyExchange | PayloadKind::RatchetHeader) => {
             Err(ProtocolStateError::InvalidMessage {
                 reason: format!("message payload kind {kind:?} is unsupported"),

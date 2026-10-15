@@ -6,7 +6,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     HandshakeError, InboundMessageOutcome, Message, MessageOperationError, ProtocolStateError,
-    ProtocolStateKey, PublicKeyError, SessionId,
+    PublicKeyError, SessionId,
 };
 use roost_crypto::{
     RatchetError, SealedFrameError, open_frame_for_discovery_key_with_associated_data,
@@ -133,12 +133,7 @@ fn a_message_naming_an_unknown_session_changes_nothing() {
         .acknowledgment
         .unwrap();
     for device in [&mut alice, &mut bob] {
-        let key = ProtocolStateKey::from_bytes(session_id.as_bytes().to_vec()).unwrap();
-        let wipe = device
-            .store
-            .protocol_engine()
-            .wipe(&device.host.snapshot(), key);
-        device.host.commit(wipe).unwrap();
+        device.host.forget_session(session_id);
     }
     let before = bob.host.snapshot_bytes();
 
@@ -313,9 +308,7 @@ fn a_peer_can_start_a_new_session_after_the_host_wipes_the_current_one() {
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
     let wiped = establish(&mut alice, &mut bob);
-    let key = ProtocolStateKey::from_bytes(wiped.as_bytes().to_vec()).unwrap();
-    let wipe = bob.store.protocol_engine().wipe(&bob.host.snapshot(), key);
-    bob.host.commit(wipe).unwrap();
+    bob.host.forget_session(wiped);
 
     alice.forget_sessions_with(&bob);
     let replacement = alice.request(&bob, b"after the wipe");
@@ -341,9 +334,7 @@ fn a_handshake_cannot_bring_back_a_session_the_host_wiped() {
     );
     let second = alice.send(&bob, b"second");
     bob.receive(&first.message);
-    let key = ProtocolStateKey::from_bytes(first.session_id.as_bytes().to_vec()).unwrap();
-    let wipe = bob.store.protocol_engine().wipe(&bob.host.snapshot(), key);
-    bob.host.commit(wipe).unwrap();
+    bob.host.forget_session(first.session_id);
     let before = bob.host.snapshot_bytes();
 
     assert!(matches!(

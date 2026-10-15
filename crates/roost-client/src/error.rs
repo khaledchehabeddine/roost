@@ -48,12 +48,13 @@ pub enum RoostError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// The contact hasn't accepted, and this side already sent the most Messages allowed before
-    /// acceptance.
-    #[error("contact is not accepted and the limit of {limit} messages is reached")]
+    /// The contact isn't accepted, so Roost refuses the send: this side already sent the most
+    /// Messages allowed before acceptance, or a Grant Update would give a requester this side
+    /// hasn't accepted its Inbox Grant.
+    #[error("contact is not accepted: {reason}")]
     ContactNotAccepted {
-        /// Distinct Messages each side may send before acceptance.
-        limit: u32,
+        /// Diagnostic context for logging only.
+        reason: String,
     },
     /// Stored discovery-key, signed-pre-key, or prepared-operation material is corrupt.
     #[error("stored key material is corrupt")]
@@ -153,6 +154,7 @@ impl RoostError {
             | RoostError::BackupImportFailed { reason }
             | RoostError::BlockedContact { reason }
             | RoostError::CertificateRejected { reason }
+            | RoostError::ContactNotAccepted { reason }
             | RoostError::InternalError { reason }
             | RoostError::InvalidData { reason }
             | RoostError::OneTimePreKeyUsed { reason }
@@ -163,7 +165,6 @@ impl RoostError {
             | RoostError::TerminalSessionRecovery { reason }
             | RoostError::UnsupportedVersion { reason } => *reason = new_reason,
             RoostError::AlreadyExists
-            | RoostError::ContactNotAccepted { .. }
             | RoostError::Corrupt
             | RoostError::DecryptionFailed
             | RoostError::InboxRotationRequired
@@ -285,7 +286,8 @@ impl From<DiscoveryKeyError> for RoostError {
             DiscoveryKeyError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
             DiscoveryKeyError::IdentityBindingSignature(_)
             | DiscoveryKeyError::InvalidBlobLength { .. }
-            | DiscoveryKeyError::Malformed => RoostError::InvalidData { reason },
+            | DiscoveryKeyError::Malformed
+            | DiscoveryKeyError::TooManyPreviousKeys { .. } => RoostError::InvalidData { reason },
             DiscoveryKeyError::NotFound => RoostError::NotFound,
             DiscoveryKeyError::Storage(_) => RoostError::Storage { reason },
         }
@@ -466,9 +468,10 @@ impl From<ProtocolStateError> for RoostError {
             | ProtocolStateError::UnsolicitedAcceptance => RoostError::InvalidData { reason },
             ProtocolStateError::InvalidInboxGrant => RoostError::AuthenticationFailed { reason },
             ProtocolStateError::BlockedContact => RoostError::BlockedContact { reason },
-            ProtocolStateError::PendingLimitReached { limit } => RoostError::ContactNotAccepted {
-                limit: limit as u32,
-            },
+            ProtocolStateError::ContactNotAccepted
+            | ProtocolStateError::PendingLimitReached { .. } => {
+                RoostError::ContactNotAccepted { reason }
+            }
             ProtocolStateError::NoDeliveryCapability => RoostError::NoDeliveryCapability,
             ProtocolStateError::NoSession | ProtocolStateError::SessionUnrecoverable => {
                 RoostError::TerminalSessionRecovery { reason }

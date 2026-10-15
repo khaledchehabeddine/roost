@@ -10,7 +10,10 @@ use roost_core::{
     MessageDestination, ReceiveSettings,
 };
 use roost_protocol::PayloadKind;
-use support::device::{Device, Encrypted, Intent, Relay};
+use support::accepted;
+use support::device::{
+    Device, Encrypted, Intent, Relay, befriended, established_verifier, requested,
+};
 
 fn first_message_route(destination: &MessageDestination) -> (u64, Option<u64>) {
     match destination {
@@ -91,37 +94,6 @@ fn the_asked_side_gets_a_contact_request_and_acknowledges_nothing() {
     assert!(!contact.blocked);
 }
 
-fn established_verifier(
-    destination: &MessageDestination,
-) -> roost_crypto::RecipientDeliveryVerifier {
-    match destination {
-        MessageDestination::Established {
-            delivery_capability,
-            ..
-        } => delivery_capability.verifier(),
-        MessageDestination::FirstMessage { .. } => panic!("expected an established Message"),
-    }
-}
-
-fn accepted(outcome: InboundMessageOutcome) -> roost_core::InboundMessageResult {
-    let InboundMessageOutcome::Accepted(result) = outcome else {
-        panic!("expected a delivered Message");
-    };
-    *result
-}
-
-// Alice asks Bob, and Bob receives the request.
-fn requested(relay: &Relay) -> (Device, Device) {
-    let mut alice = Device::new(relay, 0xa1);
-    let mut bob = Device::new(relay, 0xb0);
-    let request = alice.request(&bob, b"hi bob");
-    assert!(matches!(
-        bob.receive(&request.message),
-        InboundMessageOutcome::ContactRequest(_)
-    ));
-    (alice, bob)
-}
-
 #[test]
 fn a_reply_before_acceptance_reaches_the_requester_with_its_capability_and_no_grant() {
     let relay = Relay::new();
@@ -176,6 +148,21 @@ fn the_asked_side_acknowledges_only_after_its_first_reply() {
         alice.publication().recipient_delivery_verifier
     );
     assert!(accepted(received.outcome).acknowledgment.is_some());
+}
+
+#[test]
+fn the_asked_sides_acknowledgments_before_acceptance_carry_no_grant() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    alice.receive(&bob.send(&alice, b"who is this?").message);
+    let second = alice.send(&bob, b"it's alice");
+    let acknowledgment = accepted(bob.receive(&second.message))
+        .acknowledgment
+        .unwrap();
+
+    alice.receive(&acknowledgment);
+
+    assert!(!alice.holds_capability_for(&bob));
 }
 
 #[test]
@@ -568,20 +555,6 @@ fn an_unknown_commit_outcome_is_reconciled_at_startup_without_losing_the_one_tim
     ));
 }
 
-// Alice asks Bob, Bob accepts, and Alice receives the acceptance and acknowledges it.
-fn befriended(relay: &Relay) -> (Device, Device) {
-    let (mut alice, mut bob) = requested(relay);
-    let acceptance = bob.accept_request(&alice, b"welcome");
-    let acknowledgment = accepted(alice.receive(&acceptance.message))
-        .acknowledgment
-        .unwrap();
-    assert!(matches!(
-        bob.receive(&acknowledgment),
-        InboundMessageOutcome::AcknowledgmentMatched(_)
-    ));
-    (alice, bob)
-}
-
 #[test]
 fn a_grant_rides_on_messages_until_the_contact_acknowledges_one() {
     let relay = Relay::new();
@@ -735,6 +708,40 @@ fn a_blocked_stranger_learns_nothing_even_under_silent_receipt() {
         panic!("expected a blocked Message");
     };
     assert!(blocked.acknowledgment.is_none());
+}
+
+#[test]
+fn a_blocked_contacts_new_session_is_authenticated_and_kept_with_its_plaintext_withheld() {
+    for policy in [
+        BlockedContactAcknowledgmentPolicy::Unreachable,
+        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+    ] {
+        let relay = Relay::new();
+        let (mut alice, mut bob) = befriended(&relay);
+        bob.settings = ReceiveSettings::new(
+            ReceiveSettings::default().deduplication_capacity(),
+            policy,
+            Duration::ZERO,
+        )
+        .unwrap();
+        bob.block(alice.identity_key());
+        // Blocking rotated Bob's inbox, so Alice reaches him only with a new Session.
+        alice.forget_sessions_with(&bob);
+        let request = alice.request(&bob, b"hidden");
+
+        let InboundMessageOutcome::Blocked(hidden) = bob.receive(&request.message) else {
+            panic!("expected a blocked Message");
+        };
+
+        assert_eq!(
+            hidden.acknowledgment.is_some(),
+            policy == BlockedContactAcknowledgmentPolicy::SilentReceipt
+        );
+        bob.unblock(alice.identity_key());
+        let shown = accepted(bob.receive(&alice.send(&bob, b"shown").message));
+        assert_eq!(shown.session_id, request.session_id);
+        assert_eq!(shown.plaintext.as_slice(), b"shown");
+    }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
