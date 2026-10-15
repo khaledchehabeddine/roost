@@ -15,22 +15,20 @@
   - Avoid: account, profile
 - **Contact Request**: The first Message to a new contact, which carries the sender's Inbox Grant.
   - Avoid: introduction, invite
-- **Dead Session**: A Session that an authenticated failure has made unrecoverable, so only a new X3DH exchange can replace it.
-  - Avoid: reset session, closed conversation
 - **Deduplication Digest**: A keyed hash of a received frame and its Transport Binding that catches a repeated delivery before decryption.
   - Avoid: message hash, replay token
 - **Deduplication Set**: The limited set of recent Deduplication Digests kept for one Identity.
   - Avoid: cache
 - **Delivery Capability**: The secret, one per Epoch, that the Relay checks before it admits an established Message to an inbox.
   - Avoid: inbox token
+- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which returns Retry Instructions, signals Recovery, and gives up on Messages the Relay has dropped.
+  - Avoid: retry check, retry timer
 - **Device**: The app install that holds one Identity's private keys.
   - Avoid: client, installation, instance
 - **Discovery Key (DK)**: A rotatable key pair, signed by the Identity Key, that peers use to start Sessions with an Identity.
   - Avoid: prekey, ephemeral key
 - **Epoch**: The number of a Discovery Key and the inbox it serves, which goes up each time the inbox rotates.
   - Avoid: inbox generation, inbox counter
-- **Event**: A record of a state change that stays provisional until the app commits the matching updates.
-  - Avoid: notification, callback
 - **Grant Update**: A Message that carries only the sender's current Inbox Grant, which the app sends so a contact can keep delivering after an inbox rotation.
   - Avoid: control message, authorization update
 - **Identity**: A participant on one Device, identified by a permanent Identity Key and a rotatable Discovery Key.
@@ -49,7 +47,7 @@
   - Avoid: Device, client
 - **Message**: One Sealed Sender Frame sent within a Session.
   - Avoid: payload, packet
-- **MessageID**: The identifier of one Message within a Session.
+- **MessageID**: The identifier a sender gives a Message, which a resend after Recovery keeps so the recipient shows it once.
   - Avoid: uuid, packet id
 - **Message Operation**: One attempt to encrypt or decrypt a Message, which asks the app for the state it needs and returns its result once.
   - Avoid: transaction, job
@@ -63,12 +61,16 @@
   - Avoid: protocol state blob, prekey cache
 - **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app reserves before committing its own state, then finalizes or aborts.
   - Avoid: database transaction, deferred write
+- **Probe**: The oldest unacknowledged Message, which a Recovery that starts a new Session resends first, while the rest wait for its acknowledgment.
+  - Avoid: ping, test message
 - **Protocol State Blob**: Opaque state, including secrets, that Roost produces and the app stores between operations.
   - Avoid: cache
 - **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a contact.
   - Avoid: table, bucket, namespace
+- **Recovery**: Resending a contact's unacknowledged Messages, encrypted again, on a newer Session after the contact stops acknowledging them or starts a new Session.
+  - Avoid: session reset, retry
 - **Relay Domain**: The domain name of a Relay. A Sender Certificate names one, and a recipient refuses a certificate that names a different Relay than it expects.
-- **Retry Instruction**: A notice telling the app to resend a Message that is still unacknowledged.
+- **Retry Instruction**: A notice telling the app to resend an unacknowledged Message, unchanged, with a contact's newer Delivery Capability.
   - Avoid: resend job
 - **Safety Number**: A number derived from two Identity Keys that two people compare outside the app to verify each other.
   - Avoid: fingerprint, verification code
@@ -88,8 +90,6 @@
   - Avoid: connection, conversation, chat, login
 - **SessionID**: The identifier both peers derive from a Session's X3DH handshake, which each Message carries sealed to the recipient's Discovery Key so the recipient can find the Session.
   - Avoid: session key, selector, lookup key, conversation ID
-- **Session-Unrecoverable Event**: The one-time signal that a Session has become a Dead Session.
-  - Avoid: decrypt error, warning
 - **Transport Binding**: Public bytes the app attaches to a Message, which Roost authenticates but never reads or stores.
   - Avoid: transport envelope, route record, delivery capability
 - **Trust State**: The trust level the app records for a peer: pending while a Contact Request is open in either direction, accepted but unverified, or verified by Safety Number.

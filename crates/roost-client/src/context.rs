@@ -126,7 +126,7 @@ pub struct IdentityContext {
     pub(crate) inner: Arc<CoreKeyStore>,
 }
 
-/// Message, acknowledgment, and retry operations for one [`IdentityContext`].
+/// Message, acknowledgment, delivery-check, and recovery operations for one [`IdentityContext`].
 ///
 /// Each send and receive is a [`MessageEncryption`](crate::MessageEncryption) or
 /// [`MessageDecryption`](crate::MessageDecryption) that asks the host for exact records and
@@ -134,6 +134,11 @@ pub struct IdentityContext {
 /// application effects. Roost starts Sessions with [`Contacts::request_contact`], picks the
 /// Session for each Message, and finds it again from the SessionID each Message carries, so the
 /// host never chooses one.
+///
+/// Send each Message until the Relay accepts it, then stop: the Relay redelivers it until the
+/// contact saves it. A [`DeliveryCheck`](crate::DeliveryCheck) says when to send Messages again or
+/// recover them on a newer Session, which only the sender can tell is needed, since the contact
+/// can't tell who sent a Message it can't decrypt.
 ///
 /// The SessionID is sealed to the recipient's Discovery Key, so anyone who gets that Discovery Key
 /// can read it from recorded Messages and tell which of them belong to the same Session. Until the

@@ -8,17 +8,20 @@ use super::{
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    AdmissionRequest, ContactIdentityKey, ContactState, InboundMessageOutcome,
-    InboundSenderCertificateValidation, IncomingMessage, KeyStore, KeyStoreError,
-    KeyStoreOperationError, KnownDomainSigningKey, Message, MessageDecryptionStep,
+    AdmissionRequest, ContactIdentityKey, ContactState, DeliveryCheckResult, DeliveryCheckStep,
+    InboundMessageOutcome, InboundSenderCertificateValidation, IncomingMessage, KeyStore,
+    KeyStoreError, KeyStoreOperationError, KnownDomainSigningKey, Message, MessageDecryptionStep,
     MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    MessageStartError, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
-    PeerPreKeyBundle, PreKeyBundle, PreparedKeyStoreOperation, ProtocolStateAddress,
-    ProtocolStateKey, ProtocolStateKind, PublicIdentityKey, PublicationBundle, ReceiveSettings,
-    SessionId, SignedSenderCertificate, StateChanges, TransportBinding,
+    MessageRecoveryStep, MessageStartError, OutboundMessageResult, OutgoingGrantUpdate,
+    OutgoingMessage, OutgoingRecovery, PeerPreKeyBundle, PreKeyBundle, PreparedKeyStoreOperation,
+    ProtocolStateAddress, ProtocolStateKey, ProtocolStateKind, PublicIdentityKey,
+    PublicationBundle, ReceiveSettings, SessionId, SignedSenderCertificate, StateChanges,
+    TransportBinding,
 };
 use roost_crypto::SigningKeyPair;
 use roost_protocol::{DomainSigningKeyStatus, MessageId, PayloadKind};
+use std::collections::BTreeMap;
+use std::time::Duration;
 use zeroize::Zeroizing;
 
 /// The relay that certifies every test Device's Identity Key.
@@ -52,6 +55,7 @@ impl Relay {
 }
 
 // A Device's certificate and the relay key that vouches for every Device's certificate.
+#[derive(Clone)]
 struct Credential {
     certificate: Vec<u8>,
     signature: Vec<u8>,
@@ -167,6 +171,8 @@ pub struct Device {
     pub settings: ReceiveSettings,
     /// Whether the Relay's proofs show it admitted the first Messages this Device receives.
     pub admits: bool,
+    /// The app's copy of what each committed send carried, which a recovery encrypts again.
+    contents: BTreeMap<[u8; 16], Vec<u8>>,
     next_message: u16,
     tag: u8,
 }
@@ -192,6 +198,7 @@ impl Device {
             identity,
             settings: ReceiveSettings::default(),
             admits: true,
+            contents: BTreeMap::new(),
             next_message: 0,
             tag,
         }
@@ -204,6 +211,23 @@ impl Device {
     /// Returns another KeyStore over the same SecureStorage, as an app extension runs.
     pub fn second_instance(&self) -> KeyStore {
         self.storage.open()
+    }
+
+    /// Returns this Device as an app extension sees it: another KeyStore over the same
+    /// SecureStorage, reading a copy of the same host records.
+    pub fn second_instance_device(&self) -> Device {
+        Device {
+            store: self.storage.open(),
+            host: self.host.clone(),
+            storage: self.storage.clone(),
+            identity: self.identity.clone(),
+            credential: self.credential.clone(),
+            settings: self.settings,
+            admits: self.admits,
+            contents: self.contents.clone(),
+            next_message: self.next_message,
+            tag: self.tag,
+        }
     }
 
     /// Replaces the KeyStore with a new one over the same SecureStorage, as an app restart does.
@@ -347,6 +371,8 @@ impl Device {
 
     /// Encrypts `outgoing` as `intent` and commits the sealed Message.
     pub fn send_with(&mut self, outgoing: OutgoingMessage, intent: Intent) -> SentMessage {
+        self.contents
+            .insert(*outgoing.message_id.as_bytes(), outgoing.plaintext.to_vec());
         let (result, destination) = self.encrypt(outgoing, intent).unwrap().ready();
         let sent = SentMessage {
             session_id: result.session_id,
@@ -383,6 +409,100 @@ impl Device {
             &self.host,
             &mut ChaCha20Rng::from_seed([seed; 32]),
         )?)
+    }
+
+    /// Checks the delivery of what this Device sent `peer` at `now_millis`, and commits the
+    /// result.
+    pub fn check_deliveries(&mut self, peer: &Device, now_millis: u64) -> DeliveryCheckResult {
+        let mut result = self.observe_deliveries(peer, now_millis).unwrap();
+        let changes = std::mem::replace(&mut result.changes, StateChanges::from(Vec::new()));
+        self.commit_changes(changes).unwrap();
+        result
+    }
+
+    /// Checks the delivery of what this Device sent `peer` at `now_millis` without committing.
+    pub fn observe_deliveries(
+        &self,
+        peer: &Device,
+        now_millis: u64,
+    ) -> Result<DeliveryCheckResult, MessageOperationError> {
+        let now = std::time::UNIX_EPOCH + Duration::from_millis(now_millis);
+        let mut check = self
+            .store
+            .protocol_engine()
+            .start_delivery_check(peer.identity_key(), now)?;
+        loop {
+            match check.step()? {
+                DeliveryCheckStep::NeedsState(addresses) => {
+                    check.supply_state(self.host.read(&addresses))?;
+                }
+                DeliveryCheckStep::Ready(result) => return Ok(*result),
+            }
+        }
+    }
+
+    /// Runs one recovery of what this Device sent `peer`, supplying the app's copy of each
+    /// Message's content and `prekey_bundle`, and commits a resent Message.
+    pub fn recover(&mut self, peer: &Device, prekey_bundle: Option<PeerPreKeyBundle>) -> Recovered {
+        match self.observe_recovery(peer, prekey_bundle).unwrap() {
+            Recovered::Resent(sent) => {
+                let (result, destination) = *sent;
+                let resent = SentMessage {
+                    session_id: result.session_id,
+                    message_id: result.message_id,
+                    payload_kind: result.payload_kind,
+                    message: super::copy(&result.message),
+                    destination,
+                };
+                self.host.commit_sent(result).unwrap();
+                Recovered::Committed(Box::new(resent))
+            }
+            other @ (Recovered::Committed(_)
+            | Recovered::NeedsPreKeyBundle
+            | Recovered::AwaitingProbe(_)
+            | Recovered::Finished) => other,
+        }
+    }
+
+    /// Runs one recovery of what this Device sent `peer` without committing.
+    pub fn observe_recovery(
+        &self,
+        peer: &Device,
+        prekey_bundle: Option<PeerPreKeyBundle>,
+    ) -> Result<Recovered, DeviceError> {
+        let mut recovery = self.store.start_recovery(OutgoingRecovery {
+            recipient: peer.identity_key(),
+            sender_certificate: self.credential.signed(),
+            prekey_bundle,
+        })?;
+        let mut rng = ChaCha20Rng::from_seed([self.tag ^ 0x7e; 32]);
+        let mut destination = None;
+        loop {
+            match recovery.step(&mut rng)? {
+                MessageRecoveryStep::NeedsState(addresses) => {
+                    recovery.supply_state(self.host.read(&addresses))?;
+                }
+                MessageRecoveryStep::NeedsContent(message_id) => {
+                    let content = self.contents[message_id.as_bytes()].clone();
+                    recovery.supply_content(Zeroizing::new(content))?;
+                }
+                MessageRecoveryStep::NeedsTransport(asked) => {
+                    destination = Some(asked);
+                    recovery.supply_transport_binding(binding())?;
+                }
+                MessageRecoveryStep::NeedsPreKeyBundle(_) => {
+                    return Ok(Recovered::NeedsPreKeyBundle);
+                }
+                MessageRecoveryStep::AwaitingProbe(message_id) => {
+                    return Ok(Recovered::AwaitingProbe(message_id));
+                }
+                MessageRecoveryStep::Finished => return Ok(Recovered::Finished),
+                MessageRecoveryStep::Ready(result) => {
+                    let destination = destination.expect("a resent Message names its destination");
+                    return Ok(Recovered::Resent(Box::new((*result, destination))));
+                }
+            }
+        }
     }
 
     /// Returns what the app passes to receive `message` with this Device's settings.
@@ -559,6 +679,28 @@ pub fn run_encryption(
             MessageEncryptionStep::Ready(result) => {
                 let destination = destination.expect("a sealed Message names its destination");
                 return Ok(Encrypted::Ready(Box::new((*result, destination))));
+            }
+        }
+    }
+}
+
+/// How one recovery ended.
+pub enum Recovered {
+    /// A Message encrypted again and not yet committed.
+    Resent(Box<(OutboundMessageResult, MessageDestination)>),
+    /// A Message encrypted again, committed, and queued for sending.
+    Committed(Box<SentMessage>),
+    NeedsPreKeyBundle,
+    AwaitingProbe(MessageId),
+    Finished,
+}
+
+impl Recovered {
+    pub fn committed(self) -> SentMessage {
+        match self {
+            Self::Committed(sent) => *sent,
+            Self::Resent(_) | Self::NeedsPreKeyBundle | Self::AwaitingProbe(_) | Self::Finished => {
+                panic!("expected a committed resend")
             }
         }
     }

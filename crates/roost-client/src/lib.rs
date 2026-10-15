@@ -14,6 +14,7 @@ mod message_operation;
 mod operation;
 mod protocol;
 mod records;
+mod recovery;
 mod storage;
 mod time;
 mod transport_binding;
@@ -43,13 +44,16 @@ pub use protocol::{
     CommitCondition, ContactDiscoveryKey, ContactSafetyNumberConfirmation, ContactState,
     ContactTrustState, GrantUpdateResult, IdentityKey, InboundMessageOutcome, InboundMessageResult,
     OutboundMessageResult, PendingAcknowledgment, ProtocolHardeningLimits, ProtocolStateKind,
-    ReceiveSettings, RetryInstruction, RetryInstructionResult, SafetyNumber, SessionEvent,
-    SessionUnrecoverableReason, SessionUnrecoverableResult, StateChanges, StateEntry, StateKey,
-    StateUpdate, WithheldInboundMessageResult, derive_safety_number, protocol_hardening_limits,
+    ReceiveSettings, SafetyNumber, StateChanges, StateEntry, StateKey, StateUpdate,
+    WithheldInboundMessageResult, derive_safety_number, protocol_hardening_limits,
 };
 pub use records::{
     Identity, PreKeyBundle, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
     PublicationBundle, SessionId,
+};
+pub use recovery::{
+    DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, MessageRecovery, MessageRecoveryStep,
+    OutgoingRecovery, RetryInstruction,
 };
 pub use storage::SecureStorage;
 pub use transport_binding::TransportBinding;
