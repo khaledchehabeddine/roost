@@ -21,14 +21,14 @@
   - Avoid: cache
 - **Delivery Capability**: The secret, one per Epoch, that the Relay checks before it admits an established Message to an inbox.
   - Avoid: inbox token
+- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which returns Retry Instructions, signals Recovery, and gives up on Messages the Relay has dropped.
+  - Avoid: retry check, retry timer
 - **Device**: The app install that holds one Identity's private keys.
   - Avoid: client, installation, instance
 - **Discovery Key (DK)**: A rotatable key pair, signed by the Identity Key, that peers use to start Sessions with an Identity.
   - Avoid: prekey, ephemeral key
 - **Epoch**: The number of a Discovery Key and the inbox it serves, which goes up each time the inbox rotates.
   - Avoid: inbox generation, inbox counter
-- **Event**: A record of a state change that stays provisional until the app commits the matching updates.
-  - Avoid: notification, callback
 - **Grant Update**: A Message that carries only the sender's current Inbox Grant, which the app sends so a contact can keep delivering after an inbox rotation.
   - Avoid: control message, authorization update
 - **Identity**: A participant on one Device, identified by a permanent Identity Key and a rotatable Discovery Key.
@@ -61,6 +61,8 @@
   - Avoid: protocol state blob, prekey cache
 - **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app reserves before committing its own state, then finalizes or aborts.
   - Avoid: database transaction, deferred write
+- **Probe**: The oldest unacknowledged Message, which a Recovery that starts a new Session resends first, while the rest wait for its acknowledgment.
+  - Avoid: ping, test message
 - **Protocol State Blob**: Opaque state, including secrets, that Roost produces and the app stores between operations.
   - Avoid: cache
 - **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a contact.
