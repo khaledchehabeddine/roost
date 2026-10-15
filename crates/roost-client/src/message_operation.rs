@@ -41,6 +41,22 @@ pub struct OutgoingMessage {
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
+/// What the app sends to give a contact this identity's current Inbox Grant.
+#[derive(uniffi::Record)]
+pub struct OutgoingGrantUpdate {
+    /// The contact's Identity Key. Roost picks the Session and the contact's Discovery Key.
+    pub recipient: IdentityKey,
+    /// A MessageID from [`Messaging::create_message`], kept across retries.
+    pub message_id: MessageId,
+    /// When the app sent the Grant Update, in Unix milliseconds.
+    pub sent_at_millis: u64,
+    /// The local identity's certificate, sealed into the Message.
+    pub sender_certificate: SignedSenderCertificate,
+    /// The contact's bundle, fetched after a `NeedsPreKeyBundle` step and kept until a send uses
+    /// it. Roost ignores it when no check or new Session needs it.
+    pub prekey_bundle: Option<PreKeyBundle>,
+}
+
 /// What the app received, with what Roost needs to check and acknowledge it.
 #[derive(uniffi::Record)]
 pub struct IncomingMessage {
@@ -111,13 +127,17 @@ pub enum MessageEncryptionStep {
         /// Where the Message goes.
         destination: MessageDestination,
     },
-    /// A new Session needs the contact's prekey bundle, and the draft has none or one older than
-    /// the contact's Discovery Key. The operation has ended: release the identity's lock, fetch
-    /// the bundle, save it with the draft, and start again with the same draft.
+    /// A new Session, or the first send after an unblock, needs the contact's prekey bundle, and
+    /// the draft has none or one older than the contact's Discovery Key. The operation has ended:
+    /// release the identity's lock, fetch the bundle, save it with the draft, and start again
+    /// with the same draft.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
         identity_key: IdentityKey,
     },
+    /// The contact already acknowledged a Message carrying the current Inbox Grant, so a Grant
+    /// Update has nothing to carry. The operation has ended and there is nothing to commit.
+    NothingToSend,
     /// The sealed Message. The operation has ended.
     Ready {
         /// The Message and the state changes to commit with it.
@@ -160,10 +180,11 @@ pub enum MessageDecryptionStep {
 
 /// One attempt to encrypt a Message to a contact.
 ///
-/// Call [`Self::step`] until it returns `Ready` or `NeedsPreKeyBundle`, supplying what each other
-/// step asks for. For `NeedsState`, return exactly one entry per key, in any order, with no bytes
-/// for a record the host doesn't have. The operation does its cryptography in [`Self::step`], so
-/// asking again before supplying returns the same request without repeating it.
+/// Call [`Self::step`] until it returns `Ready`, `NeedsPreKeyBundle`, or `NothingToSend`,
+/// supplying what each other step asks for. For `NeedsState`, return exactly one entry per key,
+/// in any order, with no bytes for a record the host doesn't have. The operation does its
+/// cryptography in [`Self::step`], so asking again before supplying returns the same request
+/// without repeating it.
 ///
 /// The destination says how the Relay admits the Message: a first Message by the recipient's
 /// prekey IDs, or an established one by the recipient's Delivery Capability.
@@ -187,6 +208,8 @@ pub enum MessageDecryptionStep {
 ///             draft.prekeyBundle = try await relay.prekeyBundle(for: identityKey)
 ///             try drafts.save(draft)
 ///             break steps
+///         case .nothingToSend:
+///             return // Only a Grant Update ends here.
 ///         case .ready(let ready):
 ///             result = ready
 ///             break steps
@@ -219,6 +242,7 @@ pub enum MessageDecryptionStep {
 ///                 drafts.save(draft)
 ///                 break@steps
 ///             }
+///             is MessageEncryptionStep.NothingToSend -> return // Only a Grant Update ends here.
 ///             is MessageEncryptionStep.Ready -> {
 ///                 result = step.result
 ///                 break@steps
@@ -353,6 +377,30 @@ impl Contacts {
         Ok(Arc::new(MessageEncryption(Mutex::new(Some(operation)))))
     }
 
+    /// Starts encrypting a Grant Update, which carries only this identity's current Inbox Grant.
+    ///
+    /// After an inbox rotation, send one to each contact that should stay able to reach this
+    /// identity, after registering the new inbox with the Relay. Roost decides who may hold the
+    /// grant, so the app can send one to every contact without checking: when stepping, a blocked
+    /// contact fails with [`RoostError::BlockedContact`], a requester this side hasn't accepted
+    /// fails with [`RoostError::ContactNotAccepted`], and a contact that already acknowledged the
+    /// current grant ends with `NothingToSend`. A requester's Grant Updates don't count toward the
+    /// limit on Messages before acceptance. The recipient shows nothing.
+    ///
+    /// # Errors
+    /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or bundle is malformed.
+    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    pub fn start_grant_update(
+        &self,
+        update: OutgoingGrantUpdate,
+    ) -> Result<Arc<MessageEncryption>, RoostError> {
+        let operation = self.inner.start_grant_update(update.into_core()?)?;
+        Ok(Arc::new(MessageEncryption(Mutex::new(Some(operation)))))
+    }
+
     /// Starts encrypting a Contact Acceptance, which carries this identity's Inbox Grant and
     /// whose commit accepts the contact.
     ///
@@ -383,7 +431,8 @@ impl MessageEncryption {
     /// - [`RoostError::OperationFinished`] if the operation already returned its result or failed.
     /// - [`RoostError::BlockedContact`] if the contact is blocked.
     /// - [`RoostError::ContactNotAccepted`] if the contact hasn't accepted and this side already
-    ///   sent the most Messages allowed before acceptance.
+    ///   sent the most Messages allowed before acceptance, or a Grant Update would give a
+    ///   requester this side hasn't accepted its Inbox Grant.
     /// - [`RoostError::NoDeliveryCapability`] if an established Message needs the contact's
     ///   Delivery Capability and no Inbox Grant has supplied one.
     /// - [`RoostError::TerminalSessionRecovery`] if no live Session exists with the contact, so a
@@ -562,6 +611,22 @@ impl OutgoingMessage {
     }
 }
 
+impl OutgoingGrantUpdate {
+    fn into_core(self) -> Result<roost_core::OutgoingGrantUpdate, RoostError> {
+        Ok(roost_core::OutgoingGrantUpdate {
+            recipient: self.recipient.to_core()?,
+            message_id: self.message_id.to_core()?,
+            sent_at_millis: self.sent_at_millis,
+            sender_certificate: self.sender_certificate.into_core(),
+            prekey_bundle: self
+                .prekey_bundle
+                .as_ref()
+                .map(PreKeyBundle::to_core)
+                .transpose()?,
+        })
+    }
+}
+
 impl MessageDestination {
     fn from_core(destination: roost_core::MessageDestination) -> Self {
         match destination {
@@ -609,6 +674,7 @@ impl MessageEncryptionStep {
                     identity_key: IdentityKey::from_core(identity_key),
                 }
             }
+            roost_core::MessageEncryptionStep::NothingToSend => Self::NothingToSend,
             roost_core::MessageEncryptionStep::Ready(result) => Self::Ready {
                 result: OutboundMessageResult::from_core(*result),
             },

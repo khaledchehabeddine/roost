@@ -1191,48 +1191,6 @@ fn oversized_outbound_message_does_not_return_advanced_state() {
 }
 
 #[test]
-fn wipe_removes_all_state_kinds_for_key() {
-    let engine = ProtocolStateEngine::new();
-    let key = ProtocolStateKey::from_bytes(vec![9u8; 16]).unwrap();
-    let mut snapshot = ProtocolStateSnapshot::new();
-    let active_kinds = [
-        ProtocolStateKind::RatchetSession,
-        ProtocolStateKind::DeduplicationSet,
-        ProtocolStateKind::PendingAcknowledgments,
-        ProtocolStateKind::ContactState,
-        ProtocolStateKind::PeerSessions,
-    ];
-    assert_eq!(ProtocolStateKind::all(), active_kinds.as_slice());
-
-    for kind in active_kinds {
-        snapshot
-            .set(
-                ProtocolStateAddress::new(kind, key.clone()),
-                ProtocolStateBlob::from_bytes(vec![kind as u8, 7]),
-            )
-            .unwrap();
-    }
-
-    let updates = engine.wipe(&snapshot, key.clone());
-    assert_eq!(
-        updates
-            .iter()
-            .map(|update| update.address().kind())
-            .collect::<Vec<_>>(),
-        active_kinds
-    );
-    snapshot.apply_all(updates).unwrap();
-
-    for kind in active_kinds {
-        assert!(
-            snapshot
-                .get(&ProtocolStateAddress::new(kind, key.clone()))
-                .is_none()
-        );
-    }
-}
-
-#[test]
 fn oversized_or_corrupt_session_blob_is_a_decode_fault_without_reinitialization() {
     let fixture = ProtocolFixture::new();
     let address = session_address(fixture.session_id);
@@ -1264,21 +1222,22 @@ fn missing_required_state_is_an_explicit_failure() {
 }
 
 #[test]
-fn after_wipe_session_operation_requires_a_new_handshake() {
-    let engine = ProtocolStateEngine::new();
+fn after_the_host_loses_a_session_sending_requires_a_new_handshake() {
     let mut fixture = ProtocolFixture::new();
-    let wiped_session = fixture.session_id;
-    let key = ProtocolStateKey::from_bytes(wiped_session.as_bytes().to_vec()).unwrap();
-    let wipe = engine.wipe(&fixture.alice.host.snapshot(), key);
-    fixture.alice.host.commit(wipe).unwrap();
+    let lost_session = fixture.session_id;
+    fixture.alice.host.forget_session(lost_session);
 
     assert!(matches!(
-        failure(fixture.encrypt(&fixture.alice.host, fixture.outgoing(1, b"after wipe"), 1,)),
+        failure(fixture.encrypt(
+            &fixture.alice.host,
+            fixture.outgoing(1, b"after the loss"),
+            1,
+        )),
         ProtocolStateError::MissingRequiredState { .. }
     ));
 
     fixture.start_session();
-    assert_ne!(fixture.session_id, wiped_session);
+    assert_ne!(fixture.session_id, lost_session);
     let restored = fixture.encrypt_from_alice(2, b"restored");
     let received = fixture.decrypt_for_bob(&restored, 0x30);
     assert_eq!(received.plaintext.as_slice(), b"restored");

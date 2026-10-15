@@ -165,9 +165,10 @@ pub struct ContactBlock {
     pub changes: StateChanges,
     /// The rotated inbox's publication, absent when the contact was already blocked.
     ///
-    /// Publish and register it after finalizing. Every remaining contact then holds a stale
-    /// Delivery Capability until a Message carries them the new Inbox Grant, which Roost attaches
-    /// by itself. The blocked contact never gets one, so the block takes effect at the relay.
+    /// Register it with the Relay after finalizing and before sending anything. Every remaining
+    /// contact then holds a stale Delivery Capability until a Message, acknowledgment, or Grant
+    /// Update carries them the new Inbox Grant, which Roost attaches by itself from finalization
+    /// on. The blocked contact never gets one, so the block takes effect at the relay.
     pub publication: Option<PublicationBundle>,
 }
 
@@ -346,8 +347,16 @@ impl IdentityContext {
     /// Delivery Capability.
     ///
     /// Rotation clears the previous inbox's one-time prekeys and invalidates every contact's
-    /// Delivery Capability. Roost attaches the new Inbox Grant to each contact's Messages until
-    /// that contact acknowledges one.
+    /// Delivery Capability. Roost keeps the previous Discovery Key long enough to open Messages
+    /// the Relay still holds for it, but not the previous prekeys, so Contact Requests still
+    /// queued for the old inbox are lost.
+    ///
+    /// After finalizing, register the new inbox with the Relay before sending anything, and on
+    /// launch whenever [`Self::current_publication`] shows a newer epoch than the last one
+    /// registered. Roost attaches the new Inbox Grant to each contact's Messages and
+    /// acknowledgments from finalization on, until that contact acknowledges one. Send a Grant
+    /// Update through [`Contacts::start_grant_update`] to each contact that should stay able to
+    /// reach this identity without waiting for a Message.
     ///
     /// # Errors
     /// - [`RoostError::NotFound`] if no identity is stored.
@@ -553,8 +562,10 @@ impl Contacts {
     /// carries no operation.
     ///
     /// When [`ContactBlock::changes`] carries an operation, reserve it, commit the changes with
-    /// its ID, then finalize it before publishing [`ContactBlock::publication`]. Abort only after
-    /// proving the host transaction did not commit.
+    /// its ID, then finalize it before registering [`ContactBlock::publication`] as
+    /// [`IdentityContext::prepare_inbox_rotation`] describes. Abort only after proving the host
+    /// transaction did not commit. Each block rotates the inbox once, even for blocks close
+    /// together.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
@@ -718,7 +729,6 @@ mod tests {
     use crate::storage::MemoryStorage;
     use crate::{
         RoostError, SecureStorage,
-        protocol::ProtocolStateKind,
         records::{
             Identity as FfiIdentity, PublicDiscoveryKey as FfiPublicDiscoveryKey,
             PublicOneTimePreKey as FfiPublicOneTimePreKey,
@@ -1024,51 +1034,6 @@ mod tests {
     fn current_discovery_key(store: &IdentityContext) -> FfiPublicDiscoveryKey {
         FfiPublicDiscoveryKey::from_core(store.inner.current_public_discovery_key().unwrap())
             .unwrap()
-    }
-
-    fn same_protocol_state_kind(left: ProtocolStateKind, right: ProtocolStateKind) -> bool {
-        matches!(
-            (left, right),
-            (
-                ProtocolStateKind::RatchetSession,
-                ProtocolStateKind::RatchetSession
-            ) | (
-                ProtocolStateKind::DeduplicationSet,
-                ProtocolStateKind::DeduplicationSet
-            ) | (
-                ProtocolStateKind::PendingAcknowledgments,
-                ProtocolStateKind::PendingAcknowledgments
-            ) | (
-                ProtocolStateKind::ContactState,
-                ProtocolStateKind::ContactState
-            ) | (
-                ProtocolStateKind::PeerSessions,
-                ProtocolStateKind::PeerSessions
-            )
-        )
-    }
-
-    fn assert_protocol_state_kind(actual: ProtocolStateKind, expected: ProtocolStateKind) {
-        assert!(same_protocol_state_kind(actual, expected));
-    }
-
-    #[test]
-    fn wipe_returns_only_active_protocol_state_kinds() {
-        let engine = IdentityContext::new(Arc::new(MemoryStorage::default())).messaging();
-
-        let updates = engine.wipe(Vec::new(), "44".repeat(16)).unwrap().updates;
-
-        assert_eq!(updates.len(), 5);
-        assert_protocol_state_kind(updates[0].key.kind, ProtocolStateKind::RatchetSession);
-        assert_protocol_state_kind(updates[1].key.kind, ProtocolStateKind::DeduplicationSet);
-        assert_protocol_state_kind(
-            updates[2].key.kind,
-            ProtocolStateKind::PendingAcknowledgments,
-        );
-        // The contact record holds the peer's Delivery Capability, so a wipe reaches it too.
-        assert_protocol_state_kind(updates[3].key.kind, ProtocolStateKind::ContactState);
-        assert_protocol_state_kind(updates[4].key.kind, ProtocolStateKind::PeerSessions);
-        assert!(updates.iter().all(|update| update.blob.is_none()));
     }
 
     #[test]

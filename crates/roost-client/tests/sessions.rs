@@ -6,10 +6,10 @@ use roost_client::{
     BlockedContactAcknowledgmentPolicy, ContactSafetyNumberConfirmation, ContactTrustState,
     DomainSigningKey, DomainSigningKeyStatus, IdentityContext, IdentityKey, InboundMessageOutcome,
     IncomingMessage, Message, MessageDecryptionStep, MessageDestination, MessageEncryption,
-    MessageEncryptionStep, MessageId, OperationId, OutboundMessageResult, OutgoingMessage,
-    PreKeyBundle, ProtocolStateKind, ReceiveSettings, RevocationState, RoostError,
-    SenderCertificateValidation, SessionId, SignedSenderCertificate, StateChanges, StateEntry,
-    StateKey, TransportBinding, derive_safety_number,
+    MessageEncryptionStep, MessageId, OperationId, OutboundMessageResult, OutgoingGrantUpdate,
+    OutgoingMessage, PayloadKind, PreKeyBundle, ProtocolStateKind, ReceiveSettings,
+    RevocationState, RoostError, SenderCertificateValidation, SessionId, SignedSenderCertificate,
+    StateChanges, StateEntry, StateKey, TransportBinding, derive_safety_number,
 };
 use roost_crypto::{RecipientDeliveryCapability, SigningKeyPair};
 use std::collections::{HashMap, HashSet};
@@ -197,6 +197,16 @@ impl Host {
         }
     }
 
+    fn grant_update(&self, recipient: &Host) -> OutgoingGrantUpdate {
+        OutgoingGrantUpdate {
+            recipient: recipient.identity_key(),
+            message_id: self.context.messaging().create_message().unwrap(),
+            sent_at_millis: NOW_MILLIS,
+            sender_certificate: self.signed_certificate(),
+            prekey_bundle: None,
+        }
+    }
+
     // Runs `encryption`, and returns the contact whose bundle it needs when it asks for one.
     fn seal(&self, encryption: Arc<MessageEncryption>) -> Result<Sealed, IdentityKey> {
         let mut destination = None;
@@ -212,6 +222,7 @@ impl Host {
                 MessageEncryptionStep::NeedsPreKeyBundle { identity_key } => {
                     return Err(identity_key);
                 }
+                MessageEncryptionStep::NothingToSend => panic!("expected a Message to seal"),
                 MessageEncryptionStep::Ready { result } => {
                     return Ok(Sealed {
                         result,
@@ -560,6 +571,52 @@ fn blocking_rotates_the_inbox_through_the_operation_its_changes_carry() {
 }
 
 #[test]
+fn a_grant_update_after_a_rotation_is_acknowledged_and_then_has_nothing_to_send() {
+    let mut alice = Host::new();
+    let mut bob = Host::new();
+    establish(&mut alice, &mut bob);
+    let rotation = bob.context.prepare_inbox_rotation().unwrap();
+    complete(&bob.context, rotation.operation_id);
+    let contacts = bob.context.contacts();
+
+    let mut update = bob
+        .seal(
+            contacts
+                .start_grant_update(bob.grant_update(&alice))
+                .unwrap(),
+        )
+        .unwrap();
+
+    assert!(matches!(
+        update.result.payload_kind,
+        PayloadKind::GrantUpdate
+    ));
+    assert!(bob.commit(take_changes(&mut update.result)));
+    let InboundMessageOutcome::GrantUpdate { result } =
+        alice.decrypt(update.result.message).unwrap()
+    else {
+        panic!("expected a Grant Update");
+    };
+    let acknowledgment = result.acknowledgment.unwrap();
+    assert!(alice.commit(result.changes));
+    let InboundMessageOutcome::AcknowledgmentMatched { result } =
+        bob.decrypt(acknowledgment).unwrap()
+    else {
+        panic!("expected the Grant Update's acknowledgment");
+    };
+    assert!(bob.commit(result.changes));
+    let again = contacts
+        .start_grant_update(bob.grant_update(&alice))
+        .unwrap();
+    let mut step = again.step().unwrap();
+    while let MessageEncryptionStep::NeedsState { keys } = step {
+        again.supply_state(bob.read(&keys)).unwrap();
+        step = again.step().unwrap();
+    }
+    assert!(matches!(step, MessageEncryptionStep::NothingToSend));
+}
+
+#[test]
 fn session_ids_must_be_canonical() {
     let mut alice = Host::new();
     let mut bob = Host::new();
@@ -654,6 +711,7 @@ fn calls_from_two_threads_take_turns() {
                 MessageEncryptionStep::NeedsState { keys } => keys,
                 MessageEncryptionStep::NeedsTransport { .. }
                 | MessageEncryptionStep::NeedsPreKeyBundle { .. }
+                | MessageEncryptionStep::NothingToSend
                 | MessageEncryptionStep::Ready { .. } => panic!("expected a read"),
             })
         })

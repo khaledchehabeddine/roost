@@ -1,7 +1,5 @@
 use super::contact_record::{ContactRecord, ReceivedCount, contact_address, load_contact};
-use super::grant::{
-    DiscoveryKeyStamp, InboxGrant, LocalGrant, encode_granted_payload, open_granted_payload,
-};
+use super::grant::{InboxGrant, LocalGrant, encode_granted_payload, open_granted_payload};
 use super::session::{
     LoadedSession, PeerSessions, PendingHandshake, SessionStatus, SignedPreKeyUse, Starter,
     encode_active_session, encode_peer_sessions, encode_unrecoverable_session, load_peer_sessions,
@@ -10,15 +8,15 @@ use super::session::{
 };
 use super::{
     AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
-    InboundMessageOutcome, InboundMessageResult, InboundSenderCertificateValidation,
-    LoadedDeduplicationSet, LoadedPendingAcknowledgments, LocalSender, OpenedMessage,
-    OutboundContent, OutboundMessageResult, ProtocolHardeningLimits, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings, SenderIdentityMaterial,
-    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, SignedRecipient,
-    StateChanges, WithheldInboundMessageResult, acknowledgment_digest, authenticate_first_message,
-    authenticate_session_message, contact_identity_keys_match, contains_digest,
-    decode_acknowledgment_plaintext, deduplication_address, deduplication_digest,
+    GrantUpdateResult, InboundMessageOutcome, InboundMessageResult,
+    InboundSenderCertificateValidation, LoadedDeduplicationSet, LoadedPendingAcknowledgments,
+    LocalSender, OpenedMessage, OutboundContent, OutboundMessageResult, ProtocolHardeningLimits,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine,
+    ProtocolStateError, ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings,
+    SenderIdentityMaterial, SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult,
+    SignedRecipient, StateChanges, WithheldInboundMessageResult, acknowledgment_digest,
+    authenticate_first_message, authenticate_session_message, contact_identity_keys_match,
+    contains_digest, decode_acknowledgment_plaintext, deduplication_address, deduplication_digest,
     encode_acknowledgment_plaintext, encode_deduplication_set, encode_pending_acknowledgments,
     ensure_supported_payload_kind, inbound_contact_identity_key, load_pending_acknowledgments,
     load_required_session, match_state_entries, open_message, pending_acknowledgment_digest_seen,
@@ -62,6 +60,8 @@ pub(crate) enum SendIntent {
     Request,
     /// A Contact Acceptance, which becomes an ordinary Message once the contact is accepted.
     Acceptance,
+    /// A Grant Update, which carries only the local Inbox Grant.
+    GrantUpdate,
 }
 
 /// A domain-signed sender certificate and the domain's signature over it.
@@ -95,8 +95,37 @@ pub struct OutgoingMessage {
     /// Plaintext bytes to encrypt.
     pub plaintext: Zeroizing<Vec<u8>>,
     /// The bundle the app fetched after [`MessageEncryptionStep::NeedsPreKeyBundle`], kept with
-    /// the draft until a Session uses it.
+    /// the draft until a send uses it.
     pub prekey_bundle: Option<PeerPreKeyBundle>,
+}
+
+/// What the app sends to give a contact the current Inbox Grant: a recipient and a MessageID.
+pub struct OutgoingGrantUpdate {
+    /// The contact's Identity Key, which selects the Session and the destination.
+    pub recipient: ContactIdentityKey,
+    /// The MessageID the app allocated for this Grant Update, kept across retries.
+    pub message_id: MessageId,
+    /// Sender-observed Unix timestamp in milliseconds.
+    pub sent_at_millis: u64,
+    /// The local Identity's certificate sealed into the Message.
+    pub sender_certificate: SignedSenderCertificate,
+    /// The bundle the app fetched after [`MessageEncryptionStep::NeedsPreKeyBundle`], kept with
+    /// the Grant Update until a send uses it.
+    pub prekey_bundle: Option<PeerPreKeyBundle>,
+}
+
+impl OutgoingGrantUpdate {
+    // Returns the Grant Update as a Message with no content.
+    pub(crate) fn into_message(self) -> OutgoingMessage {
+        OutgoingMessage {
+            recipient: self.recipient,
+            message_id: self.message_id,
+            sent_at_millis: self.sent_at_millis,
+            sender_certificate: self.sender_certificate,
+            plaintext: Zeroizing::new(Vec::new()),
+            prekey_bundle: self.prekey_bundle,
+        }
+    }
 }
 
 /// What the app received, with the inputs Roost needs to check and acknowledge it.
@@ -156,10 +185,13 @@ pub enum MessageEncryptionStep {
     /// The destination whose Transport Binding to supply through
     /// [`MessageEncryption::supply_transport_binding`].
     NeedsTransport(MessageDestination),
-    /// A new Session needs this contact's prekey bundle, and the given one is missing or older
-    /// than the contact's Discovery Key. The operation has ended: fetch the bundle and start again
-    /// with the same draft.
+    /// A new Session, or the first send after an unblock, needs this contact's prekey bundle, and
+    /// the given one is missing or older than the contact's Discovery Key. The operation has
+    /// ended: fetch the bundle and start again with the same draft.
     NeedsPreKeyBundle(ContactIdentityKey),
+    /// The contact already acknowledged a Message carrying the current Inbox Grant, so a Grant
+    /// Update has nothing to carry. The operation has ended and nothing changed.
+    NothingToSend,
     /// The sealed Message and its state changes. The operation has ended.
     Ready(Box<OutboundMessageResult>),
 }
@@ -208,10 +240,10 @@ pub enum MessageOperationError {
 /// One attempt to encrypt a Message to a contact, which asks for the records it needs and returns
 /// its result once.
 ///
-/// Call [`Self::step`] until it returns [`MessageEncryptionStep::Ready`] or
-/// [`MessageEncryptionStep::NeedsPreKeyBundle`], supplying what each other step asks for. Calling
-/// [`Self::step`] again before supplying it returns the same request without repeating work.
-/// Dropping the operation commits nothing.
+/// Call [`Self::step`] until it returns [`MessageEncryptionStep::Ready`],
+/// [`MessageEncryptionStep::NeedsPreKeyBundle`], or [`MessageEncryptionStep::NothingToSend`],
+/// supplying what each other step asks for. Calling [`Self::step`] again before supplying it
+/// returns the same request without repeating work. Dropping the operation commits nothing.
 pub struct MessageEncryption(Option<Box<Encrypting>>);
 
 struct Encrypting {
@@ -234,6 +266,23 @@ enum EncryptionPhase {
     NewSessionRequested(Box<NewSession>),
     TransportRequested(Box<PreparedSeal>),
     Taken,
+}
+
+// What the first send after an unblock found in the contact's current bundle.
+enum DiscoveryKeyCheck {
+    // No bundle came with the draft, or it is older than the contact's Discovery Key.
+    NeedsBundle,
+    // The contact rotated during the block, and this send starts a Session from its bundle.
+    Rotated(Box<RotatedContact>),
+    // The send continues as usual with the checked contact.
+    Checked(Box<ContactRecord>),
+}
+
+// A contact that rotated during a block, and the bundle that names its new Discovery Key.
+struct RotatedContact {
+    contact: ContactRecord,
+    bundle: PeerPreKeyBundle,
+    bundle_discovery_key: ContactDiscoveryKey,
 }
 
 // What a send turned out to be, and the contact record after it.
@@ -357,7 +406,8 @@ impl ProtocolStateEngine {
         }))))
     }
 
-    // Starts decrypting `message` with the local Identity's `keys`, reading prekeys from `store`.
+    // Starts decrypting `message` with the local Identity's `keys`, reading prekeys and previous
+    // Discovery Keys from `store`.
     pub(crate) fn start_decryption(
         &self,
         store: KeyStore,
@@ -390,8 +440,8 @@ impl MessageEncryption {
     /// Advances the operation and returns what it needs next, or its result.
     ///
     /// Sealing happens here, never in the supply calls. Returning
-    /// [`MessageEncryptionStep::Ready`], [`MessageEncryptionStep::NeedsPreKeyBundle`], or an error
-    /// ends the operation.
+    /// [`MessageEncryptionStep::Ready`], [`MessageEncryptionStep::NeedsPreKeyBundle`],
+    /// [`MessageEncryptionStep::NothingToSend`], or an error ends the operation.
     pub fn step<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -496,6 +546,25 @@ impl Encrypting {
         if contact.as_ref().is_some_and(|contact| contact.blocked) {
             return Err(ProtocolStateError::BlockedContact.into());
         }
+        let contact = match contact {
+            Some(contact) if contact.needs_discovery_key_check => {
+                match self.check_discovery_key(contact, sessions.as_ref())? {
+                    DiscoveryKeyCheck::NeedsBundle => {
+                        return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
+                    }
+                    DiscoveryKeyCheck::Rotated(rotated) => {
+                        let RotatedContact {
+                            contact,
+                            bundle,
+                            bundle_discovery_key,
+                        } = *rotated;
+                        return self.start_session_from(rng, contact, bundle, bundle_discovery_key);
+                    }
+                    DiscoveryKeyCheck::Checked(contact) => Some(*contact),
+                }
+            }
+            contact => contact,
+        };
         let local_grant = self.sender.grant().stamp();
         let (mut contact, sessions) = match (contact, sessions) {
             (contact, None) | (contact @ None, Some(_)) if self.intent == SendIntent::Request => {
@@ -503,8 +572,12 @@ impl Encrypting {
             }
             (Some(contact), sessions) if contact.is_accepted() => {
                 let session_id = sessions.ok_or(ProtocolStateError::NoSession)?.current();
+                let carries_grant = contact.receives_grant(Starter::Local, local_grant);
+                let Some(payload_kind) = self.payload_kind(carries_grant) else {
+                    return Ok(MessageEncryptionStep::NothingToSend);
+                };
                 return Ok(self.request_session(Planned {
-                    payload_kind: text_kind(contact.needs_grant(local_grant)),
+                    payload_kind,
                     contact,
                     session_id,
                 }));
@@ -513,23 +586,35 @@ impl Encrypting {
             (None, _) if self.intent != SendIntent::Acceptance => {
                 return Err(ProtocolStateError::MissingRequiredState { address }.into());
             }
-            (Some(_), None) if self.intent == SendIntent::Message => {
+            (Some(_), None)
+                if matches!(self.intent, SendIntent::Message | SendIntent::GrantUpdate) =>
+            {
                 return Err(ProtocolStateError::NoSession.into());
             }
             (None | Some(_), _) => return Err(ProtocolStateError::NoContactRequest.into()),
         };
-        let peer_asked = sessions.current_starter() == Starter::Peer;
-        let payload_kind = match (self.intent, peer_asked) {
-            (SendIntent::Request | SendIntent::Acceptance, true) => {
+        let starter = sessions.current_starter();
+        let payload_kind = match (self.intent, starter) {
+            (SendIntent::Request | SendIntent::Acceptance, Starter::Peer) => {
                 contact.accept();
                 PayloadKind::ContactAcceptance
             }
-            (SendIntent::Acceptance, false) => {
+            (SendIntent::Acceptance, Starter::Local) => {
                 return Err(ProtocolStateError::NoContactRequest.into());
             }
             // The asked side keeps its grant private until it accepts.
+            (SendIntent::GrantUpdate, Starter::Peer) => {
+                return Err(ProtocolStateError::ContactNotAccepted.into());
+            }
+            // A Grant Update carries no content, so it doesn't count toward the limit.
+            (SendIntent::GrantUpdate, Starter::Local) => {
+                match self.payload_kind(contact.receives_grant(starter, local_grant)) {
+                    Some(payload_kind) => payload_kind,
+                    None => return Ok(MessageEncryptionStep::NothingToSend),
+                }
+            }
             (SendIntent::Message | SendIntent::Request, _) => {
-                let carries_grant = !peer_asked && contact.needs_grant(local_grant);
+                let carries_grant = contact.receives_grant(starter, local_grant);
                 contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
                 text_kind(carries_grant)
             }
@@ -539,6 +624,16 @@ impl Encrypting {
             payload_kind,
             session_id: sessions.current(),
         }))
+    }
+
+    // Returns what this send carries, or `None` for a Grant Update with no grant to carry.
+    fn payload_kind(&self, carries_grant: bool) -> Option<PayloadKind> {
+        match self.intent {
+            SendIntent::GrantUpdate => carries_grant.then_some(PayloadKind::GrantUpdate),
+            SendIntent::Message | SendIntent::Request | SendIntent::Acceptance => {
+                Some(text_kind(carries_grant))
+            }
+        }
     }
 
     fn request_session(&mut self, planned: Planned) -> MessageEncryptionStep {
@@ -556,10 +651,25 @@ impl Encrypting {
         rng: &mut R,
         contact: Option<ContactRecord>,
     ) -> Result<MessageEncryptionStep, MessageOperationError> {
-        let limits = self.engine.limits;
         let Some(bundle) = self.prekey_bundle.take() else {
             return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
         };
+        let bundle_discovery_key = self.verify_bundle(&bundle)?;
+        if contact
+            .as_ref()
+            .is_some_and(|contact| contact.has_newer_discovery_key_than(&bundle_discovery_key))
+        {
+            return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
+        }
+        let contact = contact.unwrap_or_else(|| ContactRecord::pending(self.recipient, None));
+        self.start_session_from(rng, contact, bundle, bundle_discovery_key)
+    }
+
+    // Returns the bundle's Discovery Key once the bundle proves it belongs to the recipient.
+    fn verify_bundle(
+        &self,
+        bundle: &PeerPreKeyBundle,
+    ) -> Result<ContactDiscoveryKey, ProtocolStateError> {
         let bundle_identity_key = ContactIdentityKey {
             x25519_public_key: *bundle.identity_key.public_key.as_bytes(),
             ed25519_verifying_key: bundle.identity_key.verifying_key.to_bytes(),
@@ -567,40 +677,75 @@ impl Encrypting {
         if !contact_identity_keys_match(&bundle_identity_key, &self.recipient) {
             return Err(ProtocolStateError::InvalidMessage {
                 reason: "prekey bundle belongs to another identity".into(),
-            }
-            .into());
+            });
         }
         verify_discovery_to_identity_binding(
             &bundle.identity_key,
             &bundle.bundle.discovery_key.verifying_key,
             &bundle.discovery_to_identity,
         )
-        .map_err(roost_crypto::HandshakeError::from)
-        .map_err(ProtocolStateError::from)?;
-        let bundle_discovery_key = ContactDiscoveryKey::from(&bundle.bundle.discovery_key);
-        if contact
-            .as_ref()
-            .and_then(|contact| contact.discovery_key)
-            .is_some_and(|current| {
-                DiscoveryKeyStamp::of(&bundle_discovery_key) < DiscoveryKeyStamp::of(&current)
-            })
-        {
-            return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
+        .map_err(roost_crypto::HandshakeError::from)?;
+        Ok(ContactDiscoveryKey::from(&bundle.bundle.discovery_key))
+    }
+
+    // Checks the contact's current bundle on the first send after an unblock, since the contact
+    // may have rotated its inbox during the block, and the Relay silently drops Messages sent with
+    // a dead capability.
+    fn check_discovery_key(
+        &mut self,
+        mut contact: ContactRecord,
+        sessions: Option<&PeerSessions>,
+    ) -> Result<DiscoveryKeyCheck, ProtocolStateError> {
+        let Some(bundle) = self.prekey_bundle.take() else {
+            return Ok(DiscoveryKeyCheck::NeedsBundle);
+        };
+        let bundle_discovery_key = self.verify_bundle(&bundle)?;
+        if contact.has_newer_discovery_key_than(&bundle_discovery_key) {
+            return Ok(DiscoveryKeyCheck::NeedsBundle);
+        }
+        contact.needs_discovery_key_check = false;
+        if contact.discovery_key != Some(bundle_discovery_key) {
+            let local_asked =
+                sessions.is_some_and(|sessions| sessions.current_starter() == Starter::Local);
+            if contact.is_accepted() || (local_asked && self.intent != SendIntent::Acceptance) {
+                return Ok(DiscoveryKeyCheck::Rotated(Box::new(RotatedContact {
+                    contact,
+                    bundle,
+                    bundle_discovery_key,
+                })));
+            }
+            // Only this side's acceptance answers a requester, on the requester's Session, which
+            // the dropped capability no longer reaches.
+            contact.record_discovery_key(bundle_discovery_key);
+        }
+        self.prekey_bundle = Some(bundle);
+        Ok(DiscoveryKeyCheck::Checked(Box::new(contact)))
+    }
+
+    // Starts a Session with `contact` from a bundle already checked against it.
+    fn start_session_from<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        mut contact: ContactRecord,
+        bundle: PeerPreKeyBundle,
+        bundle_discovery_key: ContactDiscoveryKey,
+    ) -> Result<MessageEncryptionStep, MessageOperationError> {
+        let local_grant = self.sender.grant().stamp();
+        let carries_grant = contact.receives_grant(Starter::Local, local_grant);
+        let Some(payload_kind) = self.payload_kind(carries_grant) else {
+            return Ok(MessageEncryptionStep::NothingToSend);
+        };
+        if !contact.is_accepted() && counts_toward_limit(payload_kind) {
+            contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
         }
         let (state, session_id, handshake) =
             initiate_handshake(rng, &bundle.identity_key, &bundle.bundle)
                 .map_err(ProtocolStateError::from)?;
-        let mut contact = contact.unwrap_or_else(|| ContactRecord::pending(self.recipient, None));
         contact.record_discovery_key(bundle_discovery_key);
-        let local_grant = self.sender.grant().stamp();
-        let carries_grant = contact.needs_grant(local_grant);
-        if !contact.is_accepted() {
-            contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
-        }
         let (peer_sessions, evicted) = match load_peer_sessions(
             self.reads.snapshot(),
             &peer_sessions_address(self.recipient),
-            limits,
+            self.engine.limits,
         )? {
             Some(mut sessions) => {
                 let evicted = sessions.start(session_id, None);
@@ -614,7 +759,7 @@ impl Encrypting {
         }
         self.phase = EncryptionPhase::NewSessionRequested(Box::new(NewSession {
             planned: Planned {
-                payload_kind: text_kind(carries_grant),
+                payload_kind,
                 contact,
                 session_id,
             },
@@ -811,6 +956,11 @@ impl Encrypting {
     }
 }
 
+// A Grant Update carries no content, so it doesn't count toward the limit before acceptance.
+fn counts_toward_limit(payload_kind: PayloadKind) -> bool {
+    payload_kind != PayloadKind::GrantUpdate
+}
+
 fn text_kind(carries_grant: bool) -> PayloadKind {
     if carries_grant {
         PayloadKind::EncryptedTextWithGrant
@@ -926,6 +1076,8 @@ struct Delivery {
     plaintext: Zeroizing<Vec<u8>>,
     sender_identity: SenderIdentityMaterial,
     delivered: Delivered,
+    // Whether an acknowledgment carries the local Inbox Grant.
+    acknowledgment_carries_grant: bool,
     // Every update except the Session's, which sealing an acknowledgment advances.
     updates: Vec<ProtocolStateUpdate>,
     one_time_prekey: Option<OneTimePreKeyUse>,
@@ -1084,15 +1236,22 @@ impl Decrypting {
                 InboundMessageOutcome::Duplicate,
             )));
         }
-        let message = open_message(
-            &self.message,
-            &self.local.keys.discovery_key,
-            &self.transport_binding,
-        )?;
+        let sealed_to = &self.message.recipient_public_key;
+        // Only an established Message outlives a rotation, which deletes the prekeys a first
+        // Message names.
+        let previous = if self.message.prekey_reference.is_none()
+            && sealed_to != self.local.keys.discovery_key.public_key().as_bytes()
+        {
+            self.store.previous_discovery_key(sealed_to)?
+        } else {
+            None
+        };
+        let discovery_key = previous.as_ref().unwrap_or(&self.local.keys.discovery_key);
+        let message = open_message(&self.message, discovery_key, &self.transport_binding)?;
         ensure_supported_payload_kind(&message)?;
         let session_id = message.metadata.session_id;
         let mut addresses = vec![session_address(session_id)];
-        if message.metadata.payload_kind == PayloadKind::Acknowledgment {
+        if message.metadata.payload_kind.is_acknowledgment() {
             addresses.push(pending_acknowledgment_address(session_id));
         }
         self.phase = DecryptionPhase::SessionRequested(Box::new(Opened {
@@ -1123,7 +1282,7 @@ impl Decrypting {
                 ))),
             };
         };
-        let is_acknowledgment = opened.message.metadata.payload_kind == PayloadKind::Acknowledgment;
+        let is_acknowledgment = opened.message.metadata.payload_kind.is_acknowledgment();
         if is_acknowledgment
             && pending_acknowledgment_digest_seen(
                 snapshot,
@@ -1246,7 +1405,7 @@ impl Decrypting {
             .into());
         }
         let payload_kind = message.metadata.payload_kind;
-        if payload_kind == PayloadKind::Acknowledgment {
+        if payload_kind.is_acknowledgment() {
             return Err(ProtocolStateError::InvalidMessage {
                 reason: "an acknowledgment cannot start a session".into(),
             }
@@ -1397,6 +1556,13 @@ impl Decrypting {
         let created = previous.is_none();
         let mut contact = match previous {
             Some(contact) => contact,
+            // Only a Contact Request creates a record, so a stranger can't skip showing one.
+            None if payload_kind == PayloadKind::GrantUpdate => {
+                return Err(ProtocolStateError::InvalidMessage {
+                    reason: "a grant update cannot start a contact".into(),
+                }
+                .into());
+            }
             // A Contact Request carries the requester's grant, which the asked side's replies use.
             None if grant.is_some() => ContactRecord::pending(sender_identity_key, None),
             None => {
@@ -1421,7 +1587,9 @@ impl Decrypting {
             // Requests that cross count as both consents.
             contact.accept();
             Some(Delivered::Accepted)
-        } else if contact.count_received(message_id) == ReceivedCount::WithinLimit {
+        } else if !counts_toward_limit(payload_kind)
+            || contact.count_received(message_id) == ReceivedCount::WithinLimit
+        {
             Some(Delivered::Accepted)
         } else {
             None
@@ -1479,6 +1647,8 @@ impl Decrypting {
                 plaintext,
                 sender_identity,
                 delivered,
+                acknowledgment_carries_grant: contact
+                    .receives_grant(Starter::Peer, self.local.grant().stamp()),
                 updates,
                 one_time_prekey,
             },
@@ -1533,8 +1703,13 @@ impl Decrypting {
             .delivery_update(snapshot, session_id, peer_identity_key)?
             .into_iter()
             .collect();
-        if payload_kind == PayloadKind::Acknowledgment {
-            let acknowledged_message_id = decode_acknowledgment_plaintext(&decoded.plaintext)?;
+        if payload_kind.is_acknowledgment() {
+            let sender = decoded.sender_identity.public_identity_key()?;
+            let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
+            let acknowledged_message_id = decode_acknowledgment_plaintext(&plaintext)?;
+            if let Some(grant) = grant {
+                contact.record_grant(grant);
+            }
             let pending_address = pending_acknowledgment_address(session_id);
             let mut pending = load_pending_acknowledgments(snapshot, &pending_address, limits)?;
             record_acknowledgment_digest(
@@ -1606,6 +1781,7 @@ impl Decrypting {
         }
         let within_limit = contact.is_accepted()
             || contact.blocked
+            || !counts_toward_limit(payload_kind)
             || contact.count_received(message.metadata.id) == ReceivedCount::WithinLimit;
         // The requester's Messages keep carrying the handshake until the peer accepts.
         let pending_handshake = pending_handshake.filter(|_| !contact.is_accepted());
@@ -1647,6 +1823,8 @@ impl Decrypting {
                 plaintext,
                 sender_identity: decoded.sender_identity,
                 delivered,
+                acknowledgment_carries_grant: contact
+                    .receives_grant(starter, self.local.grant().stamp()),
                 updates,
                 one_time_prekey: None,
             },
@@ -1728,6 +1906,15 @@ impl Decrypting {
         let mut acknowledgment_id = [0u8; 16];
         rng.try_fill_bytes(&mut acknowledgment_id)
             .map_err(ProtocolStateError::Randomness)?;
+        let plaintext = encode_acknowledgment_plaintext(delivery.message_id)?;
+        let (payload_kind, payload) = if delivery.acknowledgment_carries_grant {
+            (
+                PayloadKind::AcknowledgmentWithGrant,
+                encode_granted_payload(&self.local.grant(), &plaintext)?,
+            )
+        } else {
+            (PayloadKind::Acknowledgment, plaintext)
+        };
         let acknowledgment = seal_signed(
             rng,
             &mut delivery.state,
@@ -1735,8 +1922,8 @@ impl Decrypting {
                 session_id: delivery.session_id,
                 id: MessageId::from_bytes(acknowledgment_id),
                 sent_at_millis: self.acknowledgment_sent_at_millis,
-                payload_kind: PayloadKind::Acknowledgment,
-                payload: &encode_acknowledgment_plaintext(delivery.message_id)?,
+                payload_kind,
+                payload: &payload,
             },
             SignedRecipient {
                 discovery_key: route.discovery_key(),
@@ -1781,6 +1968,14 @@ impl Decrypting {
         Ok(match delivered {
             Delivered::Blocked => {
                 InboundMessageOutcome::Blocked(Box::new(BlockedInboundMessageResult {
+                    acknowledgment,
+                    changes,
+                }))
+            }
+            Delivered::Accepted if payload_kind == PayloadKind::GrantUpdate => {
+                InboundMessageOutcome::GrantUpdate(Box::new(GrantUpdateResult {
+                    session_id,
+                    message_id,
                     acknowledgment,
                     changes,
                 }))
@@ -1831,6 +2026,11 @@ fn open_payload(
         return Ok((None, payload));
     }
     let (grant, plaintext) = open_granted_payload(&payload, sender)?;
+    if payload_kind == PayloadKind::GrantUpdate && !plaintext.is_empty() {
+        return Err(ProtocolStateError::InvalidMessage {
+            reason: "grant update carries content".into(),
+        });
+    }
     Ok((Some(grant), plaintext))
 }
 

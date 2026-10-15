@@ -12,10 +12,10 @@ use roost_core::{
     InboundSenderCertificateValidation, IncomingMessage, KeyStore, KeyStoreError,
     KeyStoreOperationError, KnownDomainSigningKey, Message, MessageDecryptionStep,
     MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    MessageStartError, OutboundMessageResult, OutgoingMessage, PeerPreKeyBundle, PreKeyBundle,
-    PreparedKeyStoreOperation, ProtocolStateAddress, ProtocolStateKey, ProtocolStateKind,
-    PublicIdentityKey, PublicationBundle, ReceiveSettings, SessionId, SignedSenderCertificate,
-    StateChanges, TransportBinding,
+    MessageStartError, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
+    PeerPreKeyBundle, PreKeyBundle, PreparedKeyStoreOperation, ProtocolStateAddress,
+    ProtocolStateKey, ProtocolStateKind, PublicIdentityKey, PublicationBundle, ReceiveSettings,
+    SessionId, SignedSenderCertificate, StateChanges, TransportBinding,
 };
 use roost_crypto::SigningKeyPair;
 use roost_protocol::{DomainSigningKeyStatus, MessageId, PayloadKind};
@@ -85,19 +85,22 @@ pub enum Intent {
     Message,
     Request,
     Acceptance,
+    /// A Grant Update, which ignores the draft's plaintext.
+    GrantUpdate,
 }
 
 /// How an encryption ended.
 pub enum Encrypted {
     Ready(Box<(OutboundMessageResult, MessageDestination)>),
     NeedsPreKeyBundle(ContactIdentityKey),
+    NothingToSend,
 }
 
 impl Encrypted {
     pub fn ready(self) -> (OutboundMessageResult, MessageDestination) {
         match self {
             Self::Ready(sealed) => *sealed,
-            Self::NeedsPreKeyBundle(_) => panic!("expected a sealed Message"),
+            Self::NeedsPreKeyBundle(_) | Self::NothingToSend => panic!("expected a sealed Message"),
         }
     }
 }
@@ -336,6 +339,12 @@ impl Device {
         self.send_with(outgoing, Intent::Message)
     }
 
+    /// Sends `peer` a Grant Update and commits it.
+    pub fn send_grant_update(&mut self, peer: &Device) -> SentMessage {
+        let outgoing = self.outgoing(peer, b"");
+        self.send_with(outgoing, Intent::GrantUpdate)
+    }
+
     /// Encrypts `outgoing` as `intent` and commits the sealed Message.
     pub fn send_with(&mut self, outgoing: OutgoingMessage, intent: Intent) -> SentMessage {
         let (result, destination) = self.encrypt(outgoing, intent).unwrap().ready();
@@ -361,6 +370,13 @@ impl Device {
             Intent::Message => self.store.start_encryption(outgoing),
             Intent::Request => self.store.request_contact(outgoing),
             Intent::Acceptance => self.store.accept_contact(outgoing),
+            Intent::GrantUpdate => self.store.start_grant_update(OutgoingGrantUpdate {
+                recipient: outgoing.recipient,
+                message_id: outgoing.message_id,
+                sent_at_millis: outgoing.sent_at_millis,
+                sender_certificate: outgoing.sender_certificate,
+                prekey_bundle: outgoing.prekey_bundle,
+            }),
         }?;
         Ok(run_encryption(
             encryption,
@@ -473,9 +489,42 @@ impl Device {
         block.publication
     }
 
+    /// Unblocks `peer`, given whatever record this Device holds for them, and commits it.
+    pub fn unblock(&mut self, peer: ContactIdentityKey) {
+        let record = self
+            .host
+            .blob_bytes(&contact_address(peer))
+            .map(roost_core::ProtocolStateBlob::from_bytes);
+        let changes = self
+            .store
+            .protocol_engine()
+            .unblock_contact(peer, record.as_ref())
+            .unwrap();
+        self.commit_changes(changes).unwrap();
+    }
+
     /// Deletes the Deduplication Set, as if every recorded digest had aged out.
     pub fn forget_received_digests(&mut self) {
         self.host.remove(&deduplication_address());
+    }
+
+    /// Rotates the inbox outside any block, and returns the new publication.
+    pub fn rotate_inbox(&self) -> PublicationBundle {
+        let rotation = self.store.prepare_inbox_rotation().unwrap();
+        finalize(&self.store, &rotation);
+        rotation.output
+    }
+
+    /// Returns whether this Device's record for `peer` holds a Delivery Capability, read from the
+    /// stored record as a modified client could read it.
+    pub fn holds_capability_for(&self, peer: &Device) -> bool {
+        let blob = self
+            .host
+            .blob_bytes(&contact_address(peer.identity_key()))
+            .unwrap();
+        let (record, _): (ContactRecordPrefixWire, _) =
+            postcard::take_from_bytes(&blob[1..]).unwrap();
+        record.delivery_capability.is_some()
     }
 
     fn next_message_id(&mut self) -> MessageId {
@@ -506,6 +555,7 @@ pub fn run_encryption(
             MessageEncryptionStep::NeedsPreKeyBundle(identity_key) => {
                 return Ok(Encrypted::NeedsPreKeyBundle(identity_key));
             }
+            MessageEncryptionStep::NothingToSend => return Ok(Encrypted::NothingToSend),
             MessageEncryptionStep::Ready(result) => {
                 let destination = destination.expect("a sealed Message names its destination");
                 return Ok(Encrypted::Ready(Box::new((*result, destination))));
@@ -540,6 +590,57 @@ impl From<MessageStartError> for DeviceError {
 impl From<MessageOperationError> for DeviceError {
     fn from(error: MessageOperationError) -> Self {
         Self::Operation(error)
+    }
+}
+
+// The start of a contact record, up to the peer's Delivery Capability.
+#[derive(serde::Deserialize)]
+struct ContactRecordPrefixWire {
+    _identity_x25519_public_key: [u8; 32],
+    _identity_ed25519_verifying_key: [u8; 32],
+    _discovery_key: Option<DiscoveryKeyWire>,
+    delivery_capability: Option<[u8; 32]>,
+}
+
+// A Discovery Key's public keys, epoch, creation time, and identity signature.
+type DiscoveryKeyWire = ([u8; 32], [u8; 32], u32, u64, Vec<u8>);
+
+/// Alice asks Bob, and Bob receives the request.
+pub fn requested(relay: &Relay) -> (Device, Device) {
+    let mut alice = Device::new(relay, 0xa1);
+    let mut bob = Device::new(relay, 0xb0);
+    let request = alice.request(&bob, b"hi bob");
+    assert!(matches!(
+        bob.receive(&request.message),
+        InboundMessageOutcome::ContactRequest(_)
+    ));
+    (alice, bob)
+}
+
+/// Alice asks Bob, Bob accepts, and Alice receives the acceptance and acknowledges it.
+pub fn befriended(relay: &Relay) -> (Device, Device) {
+    let (mut alice, mut bob) = requested(relay);
+    let acceptance = bob.accept_request(&alice, b"welcome");
+    let acknowledgment = super::accepted(alice.receive(&acceptance.message))
+        .acknowledgment
+        .unwrap();
+    assert!(matches!(
+        bob.receive(&acknowledgment),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    (alice, bob)
+}
+
+/// Returns the verifier of the capability an established destination carries.
+pub fn established_verifier(
+    destination: &MessageDestination,
+) -> roost_crypto::RecipientDeliveryVerifier {
+    match destination {
+        MessageDestination::Established {
+            delivery_capability,
+            ..
+        } => delivery_capability.verifier(),
+        MessageDestination::FirstMessage { .. } => panic!("expected an established Message"),
     }
 }
 

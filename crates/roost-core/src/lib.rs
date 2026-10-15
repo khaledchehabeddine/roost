@@ -79,16 +79,17 @@ pub use message::{Message, MessageError};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
     AcknowledgmentResult, AdmissionRequest, BlockedContactAcknowledgmentPolicy,
-    BlockedInboundMessageResult, InboundMessageOutcome, InboundMessageResult,
+    BlockedInboundMessageResult, GrantUpdateResult, InboundMessageOutcome, InboundMessageResult,
     InboundSenderCertificateValidation, IncomingMessage, KnownDomainSigningKey,
     MAX_PROTOCOL_STATE_ENTRIES, MessageDecryption, MessageDecryptionStep, MessageDestination,
     MessageEncryption, MessageEncryptionStep, MessageOperationError, OutboundMessageResult,
-    OutgoingMessage, PeerPreKeyBundle, PendingAcknowledgment, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
-    ReceiveSettings, RetryInstruction, RetryInstructionResult, SenderIdentityMaterial,
-    SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult, SignedSenderCertificate,
-    StateChanges, StateEntryError, WithheldInboundMessageResult, commit_conditions_match,
+    OutgoingGrantUpdate, OutgoingMessage, PeerPreKeyBundle, PendingAcknowledgment,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine,
+    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
+    ProtocolStateUpdate, ReceiveSettings, RetryInstruction, RetryInstructionResult,
+    SenderIdentityMaterial, SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult,
+    SignedSenderCertificate, StateChanges, StateEntryError, WithheldInboundMessageResult,
+    commit_conditions_match,
 };
 pub use roost_crypto::{
     HandshakeError, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey, PublicKey, PublicKeyError,

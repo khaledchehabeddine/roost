@@ -134,6 +134,12 @@ impl HostStore {
         self.blobs.remove(address);
     }
 
+    /// Deletes every record stored under `session_id`, as a host that lost them does.
+    pub fn forget_session(&mut self, session_id: SessionId) {
+        let key = ProtocolStateKey::from_bytes(session_id.as_bytes().to_vec()).unwrap();
+        self.blobs.retain(|address, _| *address.key() != key);
+    }
+
     pub fn set_raw(&mut self, address: ProtocolStateAddress, blob: Vec<u8>) {
         self.blobs.insert(address, Zeroizing::new(blob));
     }
@@ -259,6 +265,7 @@ pub fn split_changes(
         }
         InboundMessageOutcome::Blocked(result) => Some(&mut result.changes),
         InboundMessageOutcome::Withheld(result) => Some(&mut result.changes),
+        InboundMessageOutcome::GrantUpdate(result) => Some(&mut result.changes),
         InboundMessageOutcome::SessionUnrecoverable(result) => Some(&mut result.changes),
         InboundMessageOutcome::AcknowledgmentMatched(result)
         | InboundMessageOutcome::AcknowledgmentUnmatched(result) => Some(&mut result.changes),
@@ -285,7 +292,9 @@ pub fn run_encryption(
             MessageEncryptionStep::NeedsTransport(_) => {
                 encryption.supply_transport_binding(binding.clone())?;
             }
-            MessageEncryptionStep::NeedsPreKeyBundle(_) => panic!("expected an existing Session"),
+            MessageEncryptionStep::NeedsPreKeyBundle(_) | MessageEncryptionStep::NothingToSend => {
+                panic!("expected an existing Session")
+            }
             MessageEncryptionStep::Ready(result) => return Ok(*result),
         }
     }

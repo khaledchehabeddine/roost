@@ -322,6 +322,11 @@ pub enum InboundMessageOutcome {
         /// Payload for this outcome.
         result: WithheldInboundMessageResult,
     },
+    /// A Grant Update: Roost kept the contact's new Inbox Grant, and there is nothing to show.
+    GrantUpdate {
+        /// Payload for this outcome.
+        result: GrantUpdateResult,
+    },
     /// An already accepted encrypted Message. No effects are produced.
     Duplicate,
     /// A dead Session and its once-only durable recovery signal.
@@ -389,6 +394,23 @@ pub struct WithheldInboundMessageResult {
     pub changes: StateChanges,
 }
 
+/// A Grant Update whose Inbox Grant Roost kept, so later Messages reach the contact's current
+/// inbox.
+///
+/// Commit the changes, and the acknowledgment when present, but show nothing.
+#[derive(uniffi::Record)]
+pub struct GrantUpdateResult {
+    /// The Session the Grant Update arrived on.
+    pub session_id: SessionId,
+    /// Authenticated MessageID.
+    pub message_id: MessageId,
+    /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it,
+    /// absent while this side doesn't acknowledge the contact yet.
+    pub acknowledgment: Option<Message>,
+    /// State changes to commit before treating the Grant Update as processed.
+    pub changes: StateChanges,
+}
+
 /// A blocked receive with no plaintext available to the caller.
 ///
 /// The acknowledgment is present only under the silent-receipt policy. Commit it with the changes
@@ -452,22 +474,6 @@ pub fn protocol_hardening_limits() -> ProtocolHardeningLimits {
 
 #[uniffi::export]
 impl Messaging {
-    /// Returns changes that delete every kind of record stored under `id`, such as a SessionID.
-    ///
-    /// Commit the changes atomically with the host effects that require the wipe.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if `id` isn't lowercase hexadecimal of a valid length, or the
-    ///   snapshot exceeds its bounds or repeats a key.
-    pub fn wipe(&self, snapshot: Vec<StateEntry>, id: String) -> Result<StateChanges, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        Ok(StateChanges::from_updates(
-            self.inner
-                .protocol_engine()
-                .wipe(&snapshot, protocol_key(&id)?),
-        ))
-    }
-
     /// Returns all pending acknowledgments for a Session.
     ///
     /// Load the Session's pending-acknowledgment blob from the committed host store. This query does not change retry state.
@@ -612,9 +618,12 @@ impl Contacts {
 
     /// Unblocks a contact locally, given the record the host holds for them or none.
     ///
-    /// Commit the changes before resuming local delivery. Existing Sessions keep working, but
-    /// unblocking doesn't restore a Delivery Capability an inbox rotation replaced. Unblocking a
-    /// stranger blocked before they sent anything deletes their record, since nobody asked.
+    /// Commit the changes before resuming local delivery. Existing Sessions keep working, and the
+    /// next Message carries this identity's current Inbox Grant over them. The contact may have
+    /// rotated its own inbox during the block, so the first send after an unblock ends with
+    /// `NeedsPreKeyBundle`: fetch the contact's bundle, and Roost starts a new Session only when
+    /// its Discovery Key is newer. Unblocking a stranger blocked before they sent anything deletes
+    /// their record, since nobody asked.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
@@ -973,6 +982,14 @@ impl InboundMessageOutcome {
                 result: WithheldInboundMessageResult {
                     session_id: SessionId::from_core(result.session_id),
                     message_id: MessageId::from_core(result.message_id),
+                    changes: StateChanges::from_core(result.changes),
+                },
+            },
+            roost_core::InboundMessageOutcome::GrantUpdate(result) => Self::GrantUpdate {
+                result: GrantUpdateResult {
+                    session_id: SessionId::from_core(result.session_id),
+                    message_id: MessageId::from_core(result.message_id),
+                    acknowledgment: result.acknowledgment.map(Message::from_core),
                     changes: StateChanges::from_core(result.changes),
                 },
             },

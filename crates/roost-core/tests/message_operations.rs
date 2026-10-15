@@ -228,7 +228,9 @@ fn seal(
             MessageEncryptionStep::NeedsTransport(_) => {
                 encryption.supply_transport_binding(binding()).unwrap();
             }
-            MessageEncryptionStep::NeedsPreKeyBundle(_) => panic!("expected an existing Session"),
+            MessageEncryptionStep::NeedsPreKeyBundle(_) | MessageEncryptionStep::NothingToSend => {
+                panic!("expected an existing Session")
+            }
             MessageEncryptionStep::Ready(sent) => return *sent,
         }
     }
@@ -395,7 +397,9 @@ fn an_operation_refuses_every_call_after_returning_its_result() {
             MessageEncryptionStep::NeedsTransport(_) => {
                 encryption.supply_transport_binding(binding()).unwrap();
             }
-            MessageEncryptionStep::NeedsPreKeyBundle(_) => panic!("expected an existing Session"),
+            MessageEncryptionStep::NeedsPreKeyBundle(_) | MessageEncryptionStep::NothingToSend => {
+                panic!("expected an existing Session")
+            }
             MessageEncryptionStep::Ready(_) => break,
         }
     }
@@ -865,7 +869,9 @@ fn dropping_an_unfinished_operation_changes_nothing_and_a_restart_sends_the_draf
                     .unwrap();
             }
             MessageEncryptionStep::NeedsTransport(_) => break,
-            MessageEncryptionStep::NeedsPreKeyBundle(_) | MessageEncryptionStep::Ready(_) => {
+            MessageEncryptionStep::NeedsPreKeyBundle(_)
+            | MessageEncryptionStep::NothingToSend
+            | MessageEncryptionStep::Ready(_) => {
                 panic!("expected the crash before sealing")
             }
         }

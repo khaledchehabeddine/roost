@@ -87,6 +87,10 @@ pub enum PayloadKind {
     EncryptedTextWithGrant,
     /// A Contact Acceptance and its encrypted application text.
     ContactAcceptance,
+    /// An acknowledgment that carried the sender's Inbox Grant, which Roost kept.
+    AcknowledgmentWithGrant,
+    /// A Grant Update, which carries only the sender's Inbox Grant.
+    GrantUpdate,
 }
 
 impl SenderIdentityMaterial {
@@ -167,6 +171,8 @@ impl PayloadKind {
             roost_protocol::PayloadKind::RatchetHeader => Self::RatchetHeader,
             roost_protocol::PayloadKind::EncryptedTextWithGrant => Self::EncryptedTextWithGrant,
             roost_protocol::PayloadKind::ContactAcceptance => Self::ContactAcceptance,
+            roost_protocol::PayloadKind::AcknowledgmentWithGrant => Self::AcknowledgmentWithGrant,
+            roost_protocol::PayloadKind::GrantUpdate => Self::GrantUpdate,
         }
     }
 }

@@ -7,10 +7,11 @@ use roost_crypto::{
 };
 use roost_protocol::{SignatureError, to_unix_secs};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
 
 const DISCOVERY_KEY: &str = "discovery/current";
+const PREVIOUS_DISCOVERY_KEYS: &str = "discovery/previous";
 // Version 2 added the recipient delivery capability. A version 1 blob is rejected by the length
 // check in `checked_blob` before the version byte is even read; it has no capability to migrate,
 // so the host must reset and re-register.
@@ -21,6 +22,16 @@ const DISCOVERY_KEY_BLOB_LEN: usize = 1 + 4 + 32 + 32 + 64 + 8 + 32;
 const CAPABILITY_OFFSET: usize = 141;
 // Identity creation starts at epoch 1.
 const FIRST_EPOCH: u32 = 1;
+const PREVIOUS_DISCOVERY_KEYS_VERSION: u8 = 1;
+// Blob layout: version (1) | count (1) | that many records.
+const PREVIOUS_DISCOVERY_KEYS_HEADER_LEN: usize = 2;
+// Record layout: the current blob's fields after its version and before its capability, which
+// the Relay refuses once the new inbox is registered, then retired_at (8).
+const PREVIOUS_DISCOVERY_KEY_RECORD_LEN: usize = CAPABILITY_OFFSET - 1 + 8;
+// Enough for several blocks close together to keep each other's queued Messages readable.
+const MAX_PREVIOUS_DISCOVERY_KEYS: usize = 5;
+// How long the Relay may hold a queued Message.
+const PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW: Duration = Duration::from_secs(30 * 86_400);
 
 /// Errors returned by discovery-key operations.
 #[derive(Debug, thiserror::Error)]
@@ -61,9 +72,23 @@ pub enum DiscoveryKeyError {
     /// No discovery key is stored.
     #[error("no discovery key stored")]
     NotFound,
+    /// The stored previous discovery keys number more than Roost keeps.
+    #[error("{count} previous discovery keys stored, more than {max}")]
+    TooManyPreviousKeys {
+        /// Number of keys the stored blob declares.
+        count: usize,
+        /// Most previous keys Roost keeps.
+        max: usize,
+    },
     /// The underlying [`SecureStorage`] returned an error.
     #[error("discovery-key storage failed")]
     Storage(#[from] StorageError),
+}
+
+// A Discovery Key a rotation replaced, kept only to open Messages already sealed to it.
+struct PreviousDiscoveryKey {
+    discovery_key: DiscoveryKey,
+    retired_at_secs: u64,
 }
 
 pub(crate) enum DiscoveryKeyStatus {
@@ -129,19 +154,23 @@ impl DiscoveryKeyManager {
     }
 
     // The next epoch increments the stored one, recovering a signature-mismatched key. A malformed
-    // blob returns `InvalidData` until cleared with `reset`.
+    // blob returns `InvalidData` until cleared with `reset`. The replaced key joins the previous
+    // keys, which drop any past the Relay's queue time and then the oldest past the limit.
     pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
         now: SystemTime,
     ) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let identity = self.identity.load_identity()?;
-        let epoch = match self.stored_status()? {
-            DiscoveryKeyStatus::Absent => FIRST_EPOCH,
-            DiscoveryKeyStatus::Present { epoch } => epoch.saturating_add(1),
+        let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
+        let (epoch, previous) = match self.stored_status()? {
+            DiscoveryKeyStatus::Absent => (FIRST_EPOCH, None),
+            DiscoveryKeyStatus::Present { epoch } => (
+                epoch.saturating_add(1),
+                Some(self.retire_current(now_secs)?),
+            ),
             DiscoveryKeyStatus::Malformed => return Err(DiscoveryKeyError::Malformed),
         };
-        let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
         let discovery_key =
             generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs)
                 .map_err(DiscoveryKeyError::DiscoveryKeySignature)?;
@@ -150,8 +179,57 @@ impl DiscoveryKeyManager {
         let capability = generate_recipient_delivery_capability(rng);
         let blob = encode_discovery_key(&discovery_key, &capability);
         let mut storage = self.lock_storage()?;
+        if let Some(previous) = previous {
+            storage.store(
+                PREVIOUS_DISCOVERY_KEYS,
+                &encode_previous_discovery_keys(&previous)?,
+            )?;
+        }
         storage.store(DISCOVERY_KEY, &*blob)?;
         Ok(discovery_key)
+    }
+
+    // Returns the previous Discovery Key with X25519 public key `public_key`, if the Relay may
+    // still hold Messages for it at `now`.
+    //
+    // Reading leaves expired keys in place, so only a rotation deletes them.
+    pub(crate) fn previous_key(
+        &self,
+        public_key: &[u8; 32],
+        now: SystemTime,
+    ) -> Result<Option<DiscoveryKey>, DiscoveryKeyError> {
+        let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
+        Ok(self
+            .load_previous()?
+            .into_iter()
+            .find(|previous| {
+                previous.discovery_key.public_key().as_bytes() == public_key
+                    && is_retained(previous.retired_at_secs, now_secs)
+            })
+            .map(|previous| previous.discovery_key))
+    }
+
+    // Returns the previous keys with the current one retired at `now_secs` added.
+    fn retire_current(
+        &self,
+        now_secs: u64,
+    ) -> Result<Vec<PreviousDiscoveryKey>, DiscoveryKeyError> {
+        let mut previous = self.load_previous()?;
+        previous.retain(|previous| is_retained(previous.retired_at_secs, now_secs));
+        previous.push(PreviousDiscoveryKey {
+            discovery_key: self.load_stored()?,
+            retired_at_secs: now_secs,
+        });
+        let excess = previous.len().saturating_sub(MAX_PREVIOUS_DISCOVERY_KEYS);
+        previous.drain(..excess);
+        Ok(previous)
+    }
+
+    fn load_previous(&self) -> Result<Vec<PreviousDiscoveryKey>, DiscoveryKeyError> {
+        match self.lock_storage()?.load(PREVIOUS_DISCOVERY_KEYS)? {
+            Some(raw) => decode_previous_discovery_keys(&raw),
+            None => Ok(Vec::with_capacity(1)),
+        }
     }
 
     // Returns the recipient delivery capability bound to the current epoch.
@@ -168,6 +246,7 @@ impl DiscoveryKeyManager {
     // Use `KeyStore::prepare_identity_deletion` to clear signed-prekey state before discovery key and identity.
     pub(crate) fn reset(&self) -> Result<(), DiscoveryKeyError> {
         let mut storage = self.lock_storage()?;
+        storage.delete(PREVIOUS_DISCOVERY_KEYS)?;
         Ok(storage.delete(DISCOVERY_KEY)?)
     }
 
@@ -277,6 +356,79 @@ fn decode_discovery_key(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> DiscoveryKey {
         u64::from_be_bytes(created_at_bytes),
         signature,
     )
+}
+
+// Returns whether a key retired at `retired_at_secs` may still open queued Messages at `now_secs`.
+fn is_retained(retired_at_secs: u64, now_secs: u64) -> bool {
+    now_secs.saturating_sub(retired_at_secs) < PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW.as_secs()
+}
+
+fn encode_previous_discovery_keys(
+    previous: &[PreviousDiscoveryKey],
+) -> Result<Zeroizing<Vec<u8>>, DiscoveryKeyError> {
+    let count = u8::try_from(previous.len())
+        .ok()
+        .filter(|count| usize::from(*count) <= MAX_PREVIOUS_DISCOVERY_KEYS)
+        .ok_or(DiscoveryKeyError::TooManyPreviousKeys {
+            count: previous.len(),
+            max: MAX_PREVIOUS_DISCOVERY_KEYS,
+        })?;
+    let mut blob = Zeroizing::new(Vec::with_capacity(
+        PREVIOUS_DISCOVERY_KEYS_HEADER_LEN + previous.len() * PREVIOUS_DISCOVERY_KEY_RECORD_LEN,
+    ));
+    blob.push(PREVIOUS_DISCOVERY_KEYS_VERSION);
+    blob.push(count);
+    for previous in previous {
+        // The capability isn't kept, so encode with a zero one and leave it out.
+        let encoded = encode_discovery_key(
+            &previous.discovery_key,
+            &RecipientDeliveryCapability::from_bytes([0; 32]),
+        );
+        blob.extend_from_slice(&encoded[1..CAPABILITY_OFFSET]);
+        blob.extend_from_slice(&previous.retired_at_secs.to_be_bytes());
+    }
+    Ok(blob)
+}
+
+fn decode_previous_discovery_keys(
+    raw: &[u8],
+) -> Result<Vec<PreviousDiscoveryKey>, DiscoveryKeyError> {
+    let (&[version, count], records) = raw
+        .split_first_chunk::<PREVIOUS_DISCOVERY_KEYS_HEADER_LEN>()
+        .ok_or(DiscoveryKeyError::InvalidBlobLength {
+            expected: PREVIOUS_DISCOVERY_KEYS_HEADER_LEN,
+            actual: raw.len(),
+        })?;
+    if version != PREVIOUS_DISCOVERY_KEYS_VERSION {
+        return Err(DiscoveryKeyError::UnsupportedVersion(version));
+    }
+    let count = usize::from(count);
+    if count > MAX_PREVIOUS_DISCOVERY_KEYS {
+        return Err(DiscoveryKeyError::TooManyPreviousKeys {
+            count,
+            max: MAX_PREVIOUS_DISCOVERY_KEYS,
+        });
+    }
+    let expected = PREVIOUS_DISCOVERY_KEYS_HEADER_LEN + count * PREVIOUS_DISCOVERY_KEY_RECORD_LEN;
+    if raw.len() != expected {
+        return Err(DiscoveryKeyError::InvalidBlobLength {
+            expected,
+            actual: raw.len(),
+        });
+    }
+    // Room for the key a rotation retires, so the list of secrets never reallocates.
+    let mut previous = Vec::with_capacity(MAX_PREVIOUS_DISCOVERY_KEYS + 1);
+    for record in records.as_chunks::<PREVIOUS_DISCOVERY_KEY_RECORD_LEN>().0 {
+        let mut blob = Zeroizing::new([0u8; DISCOVERY_KEY_BLOB_LEN]);
+        blob[1..CAPABILITY_OFFSET].copy_from_slice(&record[..CAPABILITY_OFFSET - 1]);
+        let mut retired_at = [0u8; 8];
+        retired_at.copy_from_slice(&record[CAPABILITY_OFFSET - 1..]);
+        previous.push(PreviousDiscoveryKey {
+            discovery_key: decode_discovery_key(&blob),
+            retired_at_secs: u64::from_be_bytes(retired_at),
+        });
+    }
+    Ok(previous)
 }
 
 fn read_epoch(blob: &[u8; DISCOVERY_KEY_BLOB_LEN]) -> u32 {
@@ -462,6 +614,75 @@ mod tests {
             discovery.rotate_now(&mut rng, fixed_now()).unwrap().epoch(),
             3
         );
+    }
+
+    fn is_kept(discovery: &DiscoveryKeyManager, key: &DiscoveryKey, now: SystemTime) -> bool {
+        discovery
+            .previous_key(key.public_key().as_bytes(), now)
+            .unwrap()
+            .is_some()
+    }
+
+    #[test]
+    fn previous_keys_open_queued_messages_until_the_relays_queue_time_passes() {
+        let mut rng = ChaCha20Rng::from_seed([0xbb; 32]);
+        let discovery = setup_with_identity().manager;
+        let first = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        let current = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        let window = PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW;
+
+        let last_moment = fixed_now() + window - Duration::from_secs(1);
+        assert!(is_kept(&discovery, &first, last_moment));
+        assert!(!is_kept(&discovery, &first, fixed_now() + window));
+        assert!(!is_kept(&discovery, &current, fixed_now()));
+    }
+
+    #[test]
+    fn a_rotation_drops_expired_keys_then_the_oldest_past_the_limit() {
+        let mut rng = ChaCha20Rng::from_seed([0xbc; 32]);
+        let discovery = setup_with_identity().manager;
+        let expired = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        let later = fixed_now() + PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW;
+        let mut retired = Vec::new();
+        retired.push(discovery.rotate_now(&mut rng, fixed_now()).unwrap());
+        for _ in 0..=MAX_PREVIOUS_DISCOVERY_KEYS {
+            retired.push(discovery.rotate_now(&mut rng, later).unwrap());
+        }
+
+        // The last rotation's key is current, and the one before the kept ones was evicted.
+        let (evicted, rest) = retired.split_first().unwrap();
+        let (kept, _current) = rest.split_at(MAX_PREVIOUS_DISCOVERY_KEYS);
+
+        assert!(!is_kept(&discovery, &expired, later));
+        assert!(!is_kept(&discovery, evicted, later));
+        assert!(kept.iter().all(|key| is_kept(&discovery, key, later)));
+    }
+
+    #[test]
+    fn reset_forgets_previous_keys() {
+        let mut rng = ChaCha20Rng::from_seed([0xbd; 32]);
+        let discovery = setup_with_identity().manager;
+        let first = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+
+        discovery.reset().unwrap();
+
+        assert!(!is_kept(&discovery, &first, fixed_now()));
+    }
+
+    #[test]
+    fn previous_keys_with_an_unknown_version_are_refused() {
+        let discovery = setup_with_identity().manager;
+        discovery
+            .lock_storage()
+            .unwrap()
+            .store(PREVIOUS_DISCOVERY_KEYS, &[2, 0])
+            .unwrap();
+
+        assert!(matches!(
+            discovery.previous_key(&[9; 32], fixed_now()),
+            Err(DiscoveryKeyError::UnsupportedVersion(2))
+        ));
     }
 
     #[test]
