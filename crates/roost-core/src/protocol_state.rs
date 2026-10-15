@@ -28,9 +28,11 @@ use envelope::{
 };
 use grant::DiscoveryKeyStamp;
 pub use message_operation::{
-    AdmissionRequest, IncomingMessage, MessageDecryption, MessageDecryptionStep,
-    MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    OutgoingGrantUpdate, OutgoingMessage, PeerPreKeyBundle, SignedSenderCertificate,
+    AdmissionRequest, DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, IncomingMessage,
+    MessageDecryption, MessageDecryptionStep, MessageDestination, MessageEncryption,
+    MessageEncryptionStep, MessageOperationError, MessageRecovery, MessageRecoveryStep,
+    OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery, PeerPreKeyBundle, RetryInstruction,
+    SignedSenderCertificate,
 };
 pub(crate) use message_operation::{LocalIdentityKeys, SendIntent};
 use rand::{CryptoRng, RngCore};
@@ -53,12 +55,11 @@ use roost_protocol::{
 use roost_protocol::{PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
 #[cfg(test)]
 use roost_protocol::{SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN};
-use roost_protocol::{from_unix_millis, to_unix_millis};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use session::{
-    LoadedSession, SessionStatus, encode_peer_sessions, load_peer_sessions, load_session,
-    peer_sessions_address, pending_acknowledgment_address, session_address,
+    LoadedSession, encode_peer_sessions, load_peer_sessions, load_session, peer_sessions_address,
+    pending_acknowledgment_address, session_address,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -66,7 +67,7 @@ use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const PROTOCOL_STATE_BLOB_VERSION: u8 = 1;
+const PROTOCOL_STATE_BLOB_VERSION: u8 = 2;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 1;
 const DEDUPLICATION_DIGEST_LEN: usize = 16;
 const DEDUPLICATION_KEY_LEN: usize = 32;
@@ -604,6 +605,9 @@ pub struct KnownDomainSigningKey {
 }
 
 /// Inbound plaintext and the state changes from one Message Operation.
+///
+/// A sender's recovery resends a Message under its original MessageID with new bytes, so the app
+/// shows one Message per sender and MessageID, and still commits and acknowledges each copy.
 pub struct InboundMessageResult {
     /// The Session the Message arrived on.
     pub session_id: SessionId,
@@ -658,37 +662,6 @@ pub struct BlockedInboundMessageResult {
     pub changes: StateChanges,
 }
 
-/// Reason a Session was marked permanently unrecoverable.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub enum SessionUnrecoverableReason {
-    /// The skipped-message-key retention cap was exceeded.
-    SkippedKeyLimitExceeded,
-}
-
-/// Public event produced when a Session becomes unrecoverable.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SessionEvent {
-    /// A Session is now dead and must be replaced through a fresh X3DH exchange.
-    Unrecoverable {
-        /// The Dead Session.
-        session_id: SessionId,
-        /// Terminal reason.
-        reason: SessionUnrecoverableReason,
-    },
-}
-
-/// Outcome returned for Messages addressed to a Dead Session.
-pub struct SessionUnrecoverableResult {
-    /// The Dead Session.
-    pub session_id: SessionId,
-    /// Terminal reason.
-    pub reason: SessionUnrecoverableReason,
-    /// Event to emit after committing `changes`, present at most once per Dead Session.
-    pub event: Option<SessionEvent>,
-    /// State changes to commit before surfacing the event.
-    pub changes: StateChanges,
-}
-
 /// An authenticated acknowledgment and the state it advanced.
 pub struct AcknowledgmentResult {
     /// The Session the acknowledgment arrived on.
@@ -719,10 +692,8 @@ pub enum InboundMessageOutcome {
     GrantUpdate(Box<GrantUpdateResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
     Duplicate,
-    /// The Session is permanently unrecoverable and no plaintext was produced.
-    SessionUnrecoverable(Box<SessionUnrecoverableResult>),
-    /// The Message names a Session this identity doesn't have and carries no handshake, and
-    /// nothing changed.
+    /// The Message names a Session this identity doesn't have and carries no handshake, such as
+    /// one it lost, and nothing changed.
     UnknownSession,
     /// The first Message names a Session this identity deleted, so nothing was created.
     DeletedSession,
@@ -741,28 +712,6 @@ pub struct PendingAcknowledgment {
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
     pub first_sent_at_millis: u64,
-    /// Last retry-instruction timestamp in milliseconds, if any.
-    pub last_retried_at_millis: Option<u64>,
-}
-
-/// A retry instruction for one still-unacknowledged outbound Message.
-pub struct RetryInstruction {
-    /// Original outbound Message ID.
-    pub message_id: MessageId,
-    /// Message the consumer may retransmit.
-    pub message: Message,
-    /// First-send Unix timestamp in milliseconds.
-    pub first_sent_at_millis: u64,
-    /// Previous retry-instruction timestamp in milliseconds, if any.
-    pub last_retried_at_millis: Option<u64>,
-}
-
-/// Retry instructions and any pending-state updates produced by one retry query.
-pub struct RetryInstructionResult {
-    /// Messages whose retry window has elapsed.
-    pub instructions: Vec<RetryInstruction>,
-    /// Protocol-state updates to commit after acting on the retry query.
-    pub state_updates: Vec<ProtocolStateUpdate>,
 }
 
 /// Whether a blocked sender receives an acknowledgment for an accepted-but-hidden Message.
@@ -771,8 +720,8 @@ pub struct RetryInstructionResult {
 /// recipient. Opting in to [`Self::SilentReceipt`] trades that away for delivery confirmation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BlockedContactAcknowledgmentPolicy {
-    /// Return no acknowledgment and do not advance the sending chain, so a blocked sender keeps
-    /// retrying as if the recipient were offline.
+    /// Return no acknowledgment and do not advance the sending chain, so a blocked sender can't
+    /// tell the block from a recipient who is offline.
     #[default]
     Unreachable,
     /// Return the acknowledgment an unblocked sender would get, revealing delivery; local plaintext
@@ -893,9 +842,9 @@ impl ProtocolStateEngine {
     ///
     /// Existing Sessions remain usable, and the next Message carries the current Inbox Grant over
     /// them. The contact may have rotated its own inbox during the block, so the first send after
-    /// an unblock asks for its prekey bundle and starts a new Session only when the bundle's
-    /// Discovery Key is newer. Unblocking a stranger blocked before they sent anything deletes
-    /// their record, since nobody asked.
+    /// an unblock asks for its prekey bundle, and a bundle whose Discovery Key is newer starts a
+    /// new Session. Unblocking a stranger blocked before they sent anything deletes their record,
+    /// since nobody asked.
     pub fn unblock_contact(
         &self,
         identity_key: ContactIdentityKey,
@@ -1010,62 +959,8 @@ impl ProtocolStateEngine {
                 message_id: MessageId::from_bytes(*message_id),
                 message: copy_message(&entry.message),
                 first_sent_at_millis: entry.first_sent_at_millis,
-                last_retried_at_millis: entry.last_retried_at_millis,
             })
             .collect())
-    }
-
-    /// Returns retry instructions for a Session's pending acknowledgments whose retry window has
-    /// elapsed.
-    ///
-    /// `now` is caller supplied so retry behavior is deterministic in tests and does not read the
-    /// system clock.
-    pub fn retry_instructions(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        session_id: SessionId,
-        now: SystemTime,
-        retry_window: Duration,
-    ) -> Result<RetryInstructionResult, ProtocolStateError> {
-        let address = pending_acknowledgment_address(session_id);
-        let mut pending = load_pending_acknowledgments(snapshot, &address, self.limits)?;
-        let mut instructions = Vec::new();
-        for (message_id, entry) in pending.pending.iter_mut() {
-            let reference_millis = entry
-                .last_retried_at_millis
-                .unwrap_or(entry.first_sent_at_millis);
-            let is_due = from_unix_millis(reference_millis).is_some_and(|reference| {
-                now.duration_since(reference)
-                    .is_ok_and(|elapsed| elapsed >= retry_window)
-            });
-            if is_due {
-                instructions.push(RetryInstruction {
-                    message_id: MessageId::from_bytes(*message_id),
-                    message: copy_message(&entry.message),
-                    first_sent_at_millis: entry.first_sent_at_millis,
-                    last_retried_at_millis: entry.last_retried_at_millis,
-                });
-                // `now` is at or after a Unix timestamp here, so only a value beyond `u64`
-                // milliseconds saturates.
-                entry.last_retried_at_millis = Some(to_unix_millis(now).unwrap_or(u64::MAX));
-            }
-        }
-
-        let state_updates = if instructions.is_empty() {
-            Vec::new()
-        } else {
-            vec![
-                ProtocolStateUpdate::set(
-                    address.clone(),
-                    encode_pending_acknowledgments(&address, &pending, self.limits)?,
-                )
-                .with_snapshot(snapshot),
-            ]
-        };
-        Ok(RetryInstructionResult {
-            instructions,
-            state_updates,
-        })
     }
 
     // Returns the update that makes `session_id` the Session Roost sends on, if it isn't already.
@@ -1092,24 +987,24 @@ impl ProtocolStateEngine {
         ))
     }
 
-    // Returns whether this side started `session_id` and hasn't heard back on it yet. A Session the
-    // host wiped awaits nothing, so the peer's new handshake can replace it.
+    // Returns whether this side started `session_id` and hasn't heard back on it yet, from a peer
+    // whose current Discovery Key is `peer_discovery_key`. A Session the host wiped, or one started
+    // on prekeys the peer's rotation since deleted, awaits nothing, so the peer's new handshake
+    // can replace it.
     fn awaits_reply(
         &self,
         snapshot: &ProtocolStateSnapshot,
         session_id: SessionId,
+        peer_discovery_key: &ContactDiscoveryKey,
     ) -> Result<bool, ProtocolStateError> {
         let Some(session) = load_session(snapshot, &session_address(session_id), self.limits)?
         else {
             return Ok(false);
         };
-        Ok(matches!(
-            session.status,
-            SessionStatus::Active {
-                pending_handshake: Some(_),
-                ..
-            }
-        ))
+        Ok(session.pending_handshake.is_some_and(|pending| {
+            pending.handshake.responder_discovery_key.as_bytes()
+                == &peer_discovery_key.x25519_public_key
+        }))
     }
 }
 
@@ -1125,9 +1020,9 @@ pub enum ProtocolStateError {
     /// The contact is locally blocked.
     #[error("contact is blocked")]
     BlockedContact,
-    /// The contact asked and this side hasn't accepted, so a Grant Update would give it the Inbox
-    /// Grant.
-    #[error("contact asked and is not accepted")]
+    /// The contact isn't accepted, so Roost refuses the send: a Grant Update would give a
+    /// requester the Inbox Grant, or no Session exists to send on.
+    #[error("contact is not accepted")]
     ContactNotAccepted,
     /// A received Contact Inbox Grant's signatures don't verify against its sender's Identity
     /// Key, so the whole Message is rejected.
@@ -1140,21 +1035,18 @@ pub enum ProtocolStateError {
     /// for its current Discovery Key.
     #[error("no delivery capability for this contact")]
     NoDeliveryCapability,
-    /// No Session exists with the contact, so a fresh handshake must start one.
-    #[error("no session with this contact")]
-    NoSession,
     /// This side already sent the most Messages allowed before the contact accepts.
     #[error("contact is not accepted and the limit of {limit} messages is reached")]
     PendingLimitReached {
         /// Distinct Messages each side may send before acceptance.
         limit: usize,
     },
+    /// The time a delivery check was given has no Unix timestamp in milliseconds.
+    #[error("time is out of range")]
+    TimeOutOfRange,
     /// A Contact Acceptance arrived on a Session this side didn't start with a Contact Request.
     #[error("contact acceptance answers no request")]
     UnsolicitedAcceptance,
-    /// A terminal Session must be replaced by a fresh handshake.
-    #[error("session is unrecoverable")]
-    SessionUnrecoverable,
     /// The operation snapshot exceeds its entry cap.
     #[error("protocol-state snapshot capacity exceeded")]
     SnapshotCapacityExceeded,
@@ -1392,9 +1284,29 @@ struct LoadedPendingAcknowledgment {
     message: Message,
     encoded_message: Vec<u8>,
     first_sent_at_millis: u64,
-    last_retried_at_millis: Option<u64>,
+    /// The payload kind sealed in the Message, which a recovery keeps when it resends it.
+    payload_kind: PayloadKind,
     /// The local grant the Message carried, which its acknowledgment confirms the peer holds.
     grant: Option<DiscoveryKeyStamp>,
+}
+
+impl LoadedPendingAcknowledgment {
+    fn new(
+        message: &Message,
+        first_sent_at_millis: u64,
+        payload_kind: PayloadKind,
+        grant: Option<DiscoveryKeyStamp>,
+    ) -> Result<Self, ProtocolStateError> {
+        Ok(Self {
+            message: copy_message(message),
+            encoded_message: message
+                .to_bytes()
+                .map_err(ProtocolStateError::MessageEncode)?,
+            first_sent_at_millis,
+            payload_kind,
+            grant,
+        })
+    }
 }
 
 #[derive(Serialize)]
@@ -1422,7 +1334,7 @@ struct PendingAcknowledgmentWire<'a> {
     message_id: [u8; 16],
     encoded_message: &'a [u8],
     first_sent_at_millis: u64,
-    last_retried_at_millis: Option<u64>,
+    payload_kind: u8,
     grant: Option<(u64, u32)>,
 }
 
@@ -1439,7 +1351,7 @@ struct DecodedPendingAcknowledgmentWire {
     message_id: [u8; 16],
     encoded_message: Vec<u8>,
     first_sent_at_millis: u64,
-    last_retried_at_millis: Option<u64>,
+    payload_kind: u8,
     grant: Option<(u64, u32)>,
 }
 
@@ -1657,7 +1569,7 @@ fn encode_pending_acknowledgments(
             message_id: *message_id,
             encoded_message: &entry.encoded_message,
             first_sent_at_millis: entry.first_sent_at_millis,
-            last_retried_at_millis: entry.last_retried_at_millis,
+            payload_kind: entry.payload_kind.tag(),
             grant: entry.grant.map(DiscoveryKeyStamp::to_wire),
         })
         .collect();
@@ -1763,13 +1675,16 @@ fn decode_pending_acknowledgments_payload(
                 reason: format!("pending acknowledgment message failed to decode: {e}"),
             }
         })?;
+        let payload_kind = PayloadKind::from_tag(entry.payload_kind).map_err(|_| {
+            pending_acknowledgment_decode_error(address, "pending payload kind is invalid")
+        })?;
         let replaced = pending.insert(
             entry.message_id,
             LoadedPendingAcknowledgment {
                 message,
                 encoded_message: entry.encoded_message,
                 first_sent_at_millis: entry.first_sent_at_millis,
-                last_retried_at_millis: entry.last_retried_at_millis,
+                payload_kind,
                 grant: entry
                     .grant
                     .map(|(created_at_secs, epoch)| DiscoveryKeyStamp {
@@ -1822,20 +1737,9 @@ fn decode_pending_acknowledgment_digests_payload(
         skip_postcard_varint_u64(payload, &mut offset).ok_or_else(|| {
             pending_acknowledgment_decode_error(address, "pending first-sent time is malformed")
         })?;
-        match read_postcard_u8(payload, &mut offset).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending retry time option is malformed")
-        })? {
-            0 => {}
-            1 => skip_postcard_varint_u64(payload, &mut offset).ok_or_else(|| {
-                pending_acknowledgment_decode_error(address, "pending retry time is malformed")
-            })?,
-            _ => {
-                return Err(pending_acknowledgment_decode_error(
-                    address,
-                    "pending retry time option is invalid",
-                ));
-            }
-        }
+        read_postcard_u8(payload, &mut offset).ok_or_else(|| {
+            pending_acknowledgment_decode_error(address, "pending payload kind is malformed")
+        })?;
         match read_postcard_u8(payload, &mut offset).ok_or_else(|| {
             pending_acknowledgment_decode_error(address, "pending grant option is malformed")
         })? {
@@ -2347,9 +2251,7 @@ fn record_pending_acknowledgment(
     address: &ProtocolStateAddress,
     state: &mut LoadedPendingAcknowledgments,
     message_id: MessageId,
-    first_sent_at_millis: u64,
-    message: &Message,
-    grant: Option<DiscoveryKeyStamp>,
+    entry: LoadedPendingAcknowledgment,
     limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
     let message_id_bytes = *message_id.as_bytes();
@@ -2361,19 +2263,7 @@ fn record_pending_acknowledgment(
             reason: "pending-acknowledgment count reached limit".into(),
         });
     }
-    let encoded_message = message
-        .to_bytes()
-        .map_err(ProtocolStateError::MessageEncode)?;
-    state.pending.insert(
-        message_id_bytes,
-        LoadedPendingAcknowledgment {
-            message: copy_message(message),
-            encoded_message,
-            first_sent_at_millis,
-            last_retried_at_millis: None,
-            grant,
-        },
-    );
+    state.pending.insert(message_id_bytes, entry);
     Ok(())
 }
 

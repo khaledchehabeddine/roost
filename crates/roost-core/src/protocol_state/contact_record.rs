@@ -40,6 +40,25 @@ struct SentBeforeAcceptance {
     grant: Option<DiscoveryKeyStamp>,
 }
 
+/// A recovery a delivery check signaled for the contact's unacknowledged Messages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RecoverySignal {
+    /// When the delivery check signaled it, in Unix milliseconds.
+    pub(super) signaled_at_millis: u64,
+    pub(super) progress: RecoveryProgress,
+}
+
+/// How far a signaled recovery got.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum RecoveryProgress {
+    /// Nothing is resent yet.
+    Signaled,
+    /// Messages went out again on a Session the contact delivered on.
+    Resent,
+    /// This Message went out first on a new Session, and the rest wait for its acknowledgment.
+    Probed(MessageId),
+}
+
 /// A contact as Roost stores it, including the peer's Delivery Capability.
 pub(super) struct ContactRecord {
     pub(super) identity_key: ContactIdentityKey,
@@ -55,6 +74,15 @@ pub(super) struct ContactRecord {
     /// Whether the next send first checks the contact's current prekey bundle, since the contact
     /// may have rotated its inbox while blocked.
     pub(super) needs_discovery_key_check: bool,
+    /// Whether the contact's capability changed since the last delivery check, so the Messages it
+    /// hasn't acknowledged go out again to its current inbox.
+    retries_due: bool,
+    /// When a delivery check last resent Messages to a newer inbox, in Unix milliseconds, which
+    /// restarts the wait before a recovery.
+    retried_at_millis: Option<u64>,
+    /// The recovery signaled for the contact's unacknowledged Messages, until none is left or the
+    /// contact proves a newer grant or Session.
+    recovery: Option<RecoverySignal>,
 }
 
 impl ContactRecord {
@@ -73,6 +101,9 @@ impl ContactRecord {
             sent_before_acceptance: Vec::new(),
             received_before_acceptance: Vec::new(),
             needs_discovery_key_check: false,
+            retries_due: false,
+            retried_at_millis: None,
+            recovery: None,
         }
     }
 
@@ -185,7 +216,66 @@ impl ContactRecord {
         if is_newer || completes_current {
             self.discovery_key = Some(grant.discovery_key);
             self.delivery_capability = Some(grant.delivery_capability);
+            self.retries_due = true;
+            self.recovery = None;
         }
+    }
+
+    /// Returns the recovery signaled for the contact's unacknowledged Messages, if any.
+    pub(super) fn recovery(&self) -> Option<RecoverySignal> {
+        self.recovery
+    }
+
+    /// Forgets the signaled recovery, so the next delivery check may signal one again.
+    pub(super) fn forget_recovery(&mut self) {
+        self.recovery = None;
+    }
+
+    /// Records a recovery signaled at `now_millis`.
+    pub(super) fn signal_recovery(&mut self, now_millis: u64) {
+        self.recovery = Some(RecoverySignal {
+            signaled_at_millis: now_millis,
+            progress: RecoveryProgress::Signaled,
+        });
+    }
+
+    /// Records that a recovery resent a Message, as the probe on a new Session when `probe` holds
+    /// its ID.
+    ///
+    /// The first resend attaches the local grant again until the contact acknowledges it, since a
+    /// contact that lost its Session may have lost the grant too.
+    pub(super) fn record_resend(&mut self, probe: Option<MessageId>) {
+        if self
+            .recovery
+            .is_none_or(|recovery| recovery.progress == RecoveryProgress::Signaled)
+        {
+            self.acknowledged_grant = None;
+        }
+        if let Some(recovery) = &mut self.recovery {
+            recovery.progress = probe.map_or(RecoveryProgress::Resent, RecoveryProgress::Probed);
+        }
+    }
+
+    /// Returns whether the contact's capability changed since the last call, so its
+    /// unacknowledged Messages go out again to its current inbox.
+    pub(super) fn take_retries_due(&mut self) -> bool {
+        std::mem::take(&mut self.retries_due)
+    }
+
+    /// Records that Messages went out again to the contact's newer inbox at `now_millis`.
+    pub(super) fn record_retries(&mut self, now_millis: u64) {
+        self.retried_at_millis = Some(now_millis);
+    }
+
+    /// Returns when Messages last went out again to the contact's newer inbox, in Unix
+    /// milliseconds.
+    pub(super) fn retried_at_millis(&self) -> Option<u64> {
+        self.retried_at_millis
+    }
+
+    /// Returns whether the contact holds a capability for its current Discovery Key.
+    pub(super) fn has_delivery_capability(&self) -> bool {
+        self.delivery_capability.is_some()
     }
 
     /// Returns the peer's Discovery Key and capability, which an established Message needs.
@@ -282,6 +372,20 @@ impl ContactRecord {
             sent_before_acceptance: &sent,
             received_before_acceptance: &received,
             needs_discovery_key_check: self.needs_discovery_key_check,
+            retries_due: self.retries_due,
+            retried_at_millis: self.retried_at_millis,
+            recovery: self.recovery.map(|recovery| {
+                (
+                    recovery.signaled_at_millis,
+                    match recovery.progress {
+                        RecoveryProgress::Signaled => RecoveryProgressWire::Signaled,
+                        RecoveryProgress::Resent => RecoveryProgressWire::Resent,
+                        RecoveryProgress::Probed(probe) => {
+                            RecoveryProgressWire::Probed(*probe.as_bytes())
+                        }
+                    },
+                )
+            }),
         })
         .map_err(|_| ProtocolStateError::BlobEncode {
             address: address.clone(),
@@ -340,6 +444,20 @@ impl ContactRecord {
             trust_state: wire.trust_state,
             blocked: wire.blocked,
             needs_discovery_key_check: wire.needs_discovery_key_check,
+            retries_due: wire.retries_due,
+            retried_at_millis: wire.retried_at_millis,
+            recovery: wire
+                .recovery
+                .map(|(signaled_at_millis, progress)| RecoverySignal {
+                    signaled_at_millis,
+                    progress: match progress {
+                        RecoveryProgressWire::Signaled => RecoveryProgress::Signaled,
+                        RecoveryProgressWire::Resent => RecoveryProgress::Resent,
+                        RecoveryProgressWire::Probed(probe) => {
+                            RecoveryProgress::Probed(MessageId::from_bytes(probe))
+                        }
+                    },
+                }),
             sent_before_acceptance: wire
                 .sent_before_acceptance
                 .iter()
@@ -402,6 +520,16 @@ fn decode_error(address: &ProtocolStateAddress, reason: &str) -> ProtocolStateEr
 // A MessageID sent before acceptance and the stamp of the grant it carried.
 type SentBeforeAcceptanceWire = ([u8; MESSAGE_ID_LEN], Option<(u64, u32)>);
 
+// When a recovery was signaled, and how far it got.
+type RecoverySignalWire = (u64, RecoveryProgressWire);
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+enum RecoveryProgressWire {
+    Signaled,
+    Resent,
+    Probed([u8; MESSAGE_ID_LEN]),
+}
+
 #[derive(Serialize)]
 struct ContactRecordWire<'a> {
     identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
@@ -414,6 +542,9 @@ struct ContactRecordWire<'a> {
     sent_before_acceptance: &'a [SentBeforeAcceptanceWire],
     received_before_acceptance: &'a [[u8; MESSAGE_ID_LEN]],
     needs_discovery_key_check: bool,
+    retries_due: bool,
+    retried_at_millis: Option<u64>,
+    recovery: Option<RecoverySignalWire>,
 }
 
 #[derive(Serialize)]
@@ -448,6 +579,12 @@ struct DecodedContactRecordWire {
     received_before_acceptance: Vec<[u8; MESSAGE_ID_LEN]>,
     #[zeroize(skip)]
     needs_discovery_key_check: bool,
+    #[zeroize(skip)]
+    retries_due: bool,
+    #[zeroize(skip)]
+    retried_at_millis: Option<u64>,
+    #[zeroize(skip)]
+    recovery: Option<RecoverySignalWire>,
 }
 
 #[derive(Deserialize)]

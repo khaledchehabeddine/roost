@@ -36,8 +36,10 @@ pub struct OutgoingMessage {
     pub sender_certificate: SignedSenderCertificate,
     /// The plaintext to encrypt.
     pub plaintext: Vec<u8>,
-    /// The contact's bundle, fetched after a `NeedsPreKeyBundle` step and saved with the draft
-    /// until a Session uses it. Roost ignores it when no new Session is needed.
+    /// The contact's bundle, fetched after a `NeedsPreKeyBundle` step or taken from a fresh
+    /// contact link, and saved with the draft until a Session uses it. A bundle whose Discovery
+    /// Key is newer than the contact's starts a new Session, and Roost ignores any other bundle
+    /// when no new Session is needed.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
@@ -128,9 +130,10 @@ pub enum MessageEncryptionStep {
         destination: MessageDestination,
     },
     /// A new Session, or the first send after an unblock, needs the contact's prekey bundle, and
-    /// the draft has none or one older than the contact's Discovery Key. The operation has ended:
-    /// release the identity's lock, fetch the bundle, save it with the draft, and start again
-    /// with the same draft.
+    /// the draft has none or one older than the contact's Discovery Key. A send to an accepted
+    /// contact whose Session records are missing starts a new Session too. The operation has
+    /// ended: release the identity's lock, fetch the bundle, save it with the draft, and start
+    /// again with the same draft.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
         identity_key: IdentityKey,
@@ -431,12 +434,10 @@ impl MessageEncryption {
     /// - [`RoostError::OperationFinished`] if the operation already returned its result or failed.
     /// - [`RoostError::BlockedContact`] if the contact is blocked.
     /// - [`RoostError::ContactNotAccepted`] if the contact hasn't accepted and this side already
-    ///   sent the most Messages allowed before acceptance, or a Grant Update would give a
-    ///   requester this side hasn't accepted its Inbox Grant.
+    ///   sent the most Messages allowed before acceptance, no Session exists to send on, or a
+    ///   Grant Update would give a requester this side hasn't accepted its Inbox Grant.
     /// - [`RoostError::NoDeliveryCapability`] if an established Message needs the contact's
     ///   Delivery Capability and no Inbox Grant has supplied one.
-    /// - [`RoostError::TerminalSessionRecovery`] if no live Session exists with the contact, so a
-    ///   fresh handshake must start one.
     /// - [`RoostError::AuthenticationFailed`] if a bundle's signatures don't bind its Discovery Key
     ///   and the contact's identity in both directions.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed.
@@ -576,7 +577,7 @@ impl MessageDecryption {
 }
 
 // A call that panicked while holding the lock ends the operation, as any error does.
-fn lock<T>(operation: &Mutex<Option<T>>) -> MutexGuard<'_, Option<T>> {
+pub(crate) fn lock<T>(operation: &Mutex<Option<T>>) -> MutexGuard<'_, Option<T>> {
     operation.lock().unwrap_or_else(|poisoned| {
         let mut operation = poisoned.into_inner();
         *operation = None;
@@ -585,7 +586,7 @@ fn lock<T>(operation: &Mutex<Option<T>>) -> MutexGuard<'_, Option<T>> {
 }
 
 impl SignedSenderCertificate {
-    fn into_core(self) -> roost_core::SignedSenderCertificate {
+    pub(crate) fn into_core(self) -> roost_core::SignedSenderCertificate {
         roost_core::SignedSenderCertificate {
             certificate: self.certificate,
             signature: self.signature,
@@ -628,7 +629,7 @@ impl OutgoingGrantUpdate {
 }
 
 impl MessageDestination {
-    fn from_core(destination: roost_core::MessageDestination) -> Self {
+    pub(crate) fn from_core(destination: roost_core::MessageDestination) -> Self {
         match destination {
             roost_core::MessageDestination::FirstMessage {
                 identity_key,
@@ -654,7 +655,7 @@ impl MessageDestination {
     }
 }
 
-fn state_keys(addresses: &[roost_core::ProtocolStateAddress]) -> Vec<StateKey> {
+pub(crate) fn state_keys(addresses: &[roost_core::ProtocolStateAddress]) -> Vec<StateKey> {
     addresses.iter().map(StateKey::from_core).collect()
 }
 

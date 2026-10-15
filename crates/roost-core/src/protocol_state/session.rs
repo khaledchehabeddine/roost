@@ -2,8 +2,8 @@
 
 use super::{
     ContactIdentityKeyWire, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, SessionUnrecoverableReason,
-    blob_body, encode_blob, encode_zeroizing, validate_session_contact_identity_key,
+    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, blob_body, encode_blob,
+    encode_zeroizing, validate_session_contact_identity_key,
 };
 use crate::contact::ContactIdentityKey;
 use crate::hardening::ProtocolHardeningLimits;
@@ -46,20 +46,10 @@ impl From<SessionId> for ProtocolStateKey {
 pub(super) struct LoadedSession {
     /// The peer the handshake authenticated, fixed for the Session's life.
     pub(super) peer_identity_key: ContactIdentityKey,
-    pub(super) status: SessionStatus,
-}
-
-pub(super) enum SessionStatus {
-    Active {
-        state: Box<RatchetState>,
-        /// The handshake this side started, which its Messages carry until the peer replies, or for
-        /// a Contact Request until the peer accepts.
-        pending_handshake: Option<PendingHandshake>,
-    },
-    Unrecoverable {
-        reason: SessionUnrecoverableReason,
-        event_emitted: bool,
-    },
+    pub(super) state: Box<RatchetState>,
+    /// The handshake this side started, which its Messages carry until the peer replies, or for a
+    /// Contact Request until the peer accepts.
+    pub(super) pending_handshake: Option<PendingHandshake>,
 }
 
 /// A handshake this side started, and the signed prekey ID its route names.
@@ -81,7 +71,7 @@ pub(super) fn load_session(
         .transpose()
 }
 
-pub(super) fn encode_active_session(
+pub(super) fn encode_session(
     address: &ProtocolStateAddress,
     peer_identity_key: ContactIdentityKey,
     state: &RatchetState,
@@ -89,45 +79,12 @@ pub(super) fn encode_active_session(
     limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
     let ratchet_state = state.to_bytes()?;
-    encode_session_wire(
-        address,
-        &SessionWire {
-            peer_identity_key: peer_identity_key.into(),
-            status: SessionStatusWire::Active {
-                ratchet_state: &ratchet_state,
-                pending_handshake: pending_handshake.map(HandshakeWire::from),
-            },
-        },
-        limits,
-    )
-}
-
-pub(super) fn encode_unrecoverable_session(
-    address: &ProtocolStateAddress,
-    peer_identity_key: ContactIdentityKey,
-    reason: SessionUnrecoverableReason,
-    event_emitted: bool,
-    limits: ProtocolHardeningLimits,
-) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    encode_session_wire(
-        address,
-        &SessionWire {
-            peer_identity_key: peer_identity_key.into(),
-            status: SessionStatusWire::Unrecoverable {
-                reason,
-                event_emitted,
-            },
-        },
-        limits,
-    )
-}
-
-fn encode_session_wire(
-    address: &ProtocolStateAddress,
-    wire: &SessionWire<'_>,
-    limits: ProtocolHardeningLimits,
-) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    let body = encode_zeroizing(wire).map_err(|_| ProtocolStateError::BlobEncode {
+    let wire = SessionWire {
+        peer_identity_key: peer_identity_key.into(),
+        ratchet_state: &ratchet_state,
+        pending_handshake: pending_handshake.map(HandshakeWire::from),
+    };
+    let body = encode_zeroizing(&wire).map_err(|_| ProtocolStateError::BlobEncode {
         address: address.clone(),
         reason: "ratchet/session state failed to encode".into(),
     })?;
@@ -151,30 +108,16 @@ fn decode_session(
     }
     let peer_identity_key =
         validate_session_contact_identity_key(address, wire.peer_identity_key.into())?;
-    let status = match wire.status {
-        SessionStatusWire::Active {
-            ratchet_state,
-            pending_handshake,
-        } => SessionStatus::Active {
-            state: Box::new(
-                RatchetState::from_bytes(ratchet_state)
-                    .map_err(|_| decode_error(address, "ratchet/session state failed to decode"))?,
-            ),
-            pending_handshake: pending_handshake
-                .map(|handshake| handshake.to_handshake(address))
-                .transpose()?,
-        },
-        SessionStatusWire::Unrecoverable {
-            reason,
-            event_emitted,
-        } => SessionStatus::Unrecoverable {
-            reason,
-            event_emitted,
-        },
-    };
     Ok(LoadedSession {
         peer_identity_key,
-        status,
+        state: Box::new(
+            RatchetState::from_bytes(wire.ratchet_state)
+                .map_err(|_| decode_error(address, "ratchet/session state failed to decode"))?,
+        ),
+        pending_handshake: wire
+            .pending_handshake
+            .map(|handshake| handshake.to_handshake(address))
+            .transpose()?,
     })
 }
 
@@ -256,6 +199,13 @@ impl PeerSessions {
             .chain(&self.older)
             .find(|entry| entry.session_id == session_id)
             .map(SessionEntry::starter)
+    }
+
+    /// Returns every Session kept with this peer, the one Roost sends on first.
+    pub(super) fn session_ids(&self) -> impl Iterator<Item = SessionId> + '_ {
+        std::iter::once(&self.current)
+            .chain(&self.older)
+            .map(|entry| entry.session_id)
     }
 
     /// Returns whether `session_id` is one of this peer's Sessions.
@@ -426,20 +376,8 @@ fn decode_error(address: &ProtocolStateAddress, reason: &str) -> ProtocolStateEr
 struct SessionWire<'a> {
     peer_identity_key: ContactIdentityKeyWire,
     #[serde(borrow)]
-    status: SessionStatusWire<'a>,
-}
-
-#[derive(Deserialize, Serialize)]
-enum SessionStatusWire<'a> {
-    Active {
-        #[serde(borrow)]
-        ratchet_state: &'a [u8],
-        pending_handshake: Option<HandshakeWire>,
-    },
-    Unrecoverable {
-        reason: SessionUnrecoverableReason,
-        event_emitted: bool,
-    },
+    ratchet_state: &'a [u8],
+    pending_handshake: Option<HandshakeWire>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -605,10 +543,8 @@ mod tests {
         bytes.extend(
             postcard::to_stdvec(&SessionWire {
                 peer_identity_key: peer_identity_key.into(),
-                status: SessionStatusWire::Active {
-                    ratchet_state: &[0x42],
-                    pending_handshake: None,
-                },
+                ratchet_state: &[0x42],
+                pending_handshake: None,
             })
             .unwrap(),
         );

@@ -1,22 +1,28 @@
+mod recovery;
+
+pub use recovery::{
+    DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, MessageRecovery, MessageRecoveryStep,
+    OutgoingRecovery, RetryInstruction,
+};
+
 use super::contact_record::{ContactRecord, ReceivedCount, contact_address, load_contact};
 use super::grant::{InboxGrant, LocalGrant, encode_granted_payload, open_granted_payload};
 use super::session::{
-    LoadedSession, PeerSessions, PendingHandshake, SessionStatus, SignedPreKeyUse, Starter,
-    encode_active_session, encode_peer_sessions, encode_unrecoverable_session, load_peer_sessions,
-    load_session, peer_sessions_address, pending_acknowledgment_address, session_address,
-    session_record_addresses,
+    LoadedSession, PeerSessions, PendingHandshake, SignedPreKeyUse, Starter, encode_peer_sessions,
+    encode_session, load_peer_sessions, load_session, peer_sessions_address,
+    pending_acknowledgment_address, session_address, session_record_addresses,
 };
 use super::{
     AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
     GrantUpdateResult, InboundMessageOutcome, InboundMessageResult,
-    InboundSenderCertificateValidation, LoadedDeduplicationSet, LoadedPendingAcknowledgments,
-    LocalSender, OpenedMessage, OutboundContent, OutboundMessageResult, ProtocolHardeningLimits,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings,
-    SenderIdentityMaterial, SessionEvent, SessionUnrecoverableReason, SessionUnrecoverableResult,
-    SignedRecipient, StateChanges, WithheldInboundMessageResult, acknowledgment_digest,
-    authenticate_first_message, authenticate_session_message, contact_identity_keys_match,
-    contains_digest, decode_acknowledgment_plaintext, deduplication_address, deduplication_digest,
+    InboundSenderCertificateValidation, LoadedDeduplicationSet, LoadedPendingAcknowledgment,
+    LoadedPendingAcknowledgments, LocalSender, OpenedMessage, OutboundContent,
+    OutboundMessageResult, ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError, ProtocolStateSnapshot,
+    ProtocolStateUpdate, ReceiveSettings, SenderIdentityMaterial, SignedRecipient, StateChanges,
+    WithheldInboundMessageResult, acknowledgment_digest, authenticate_first_message,
+    authenticate_session_message, contact_identity_keys_match, contains_digest,
+    decode_acknowledgment_plaintext, deduplication_address, deduplication_digest,
     encode_acknowledgment_plaintext, encode_deduplication_set, encode_pending_acknowledgments,
     ensure_supported_payload_kind, inbound_contact_identity_key, load_pending_acknowledgments,
     load_required_session, match_state_entries, open_message, pending_acknowledgment_digest_seen,
@@ -186,7 +192,8 @@ pub enum MessageEncryptionStep {
     /// [`MessageEncryption::supply_transport_binding`].
     NeedsTransport(MessageDestination),
     /// A new Session, or the first send after an unblock, needs this contact's prekey bundle, and
-    /// the given one is missing or older than the contact's Discovery Key. The operation has
+    /// the given one is missing or older than the contact's Discovery Key. A send to an accepted
+    /// contact whose Session records are missing starts a new Session too. The operation has
     /// ended: fetch the bundle and start again with the same draft.
     NeedsPreKeyBundle(ContactIdentityKey),
     /// The contact already acknowledged a Message carrying the current Inbox Grant, so a Grant
@@ -228,6 +235,9 @@ pub enum MessageOperationError {
     /// A Transport Binding was supplied while the operation wasn't waiting for one.
     #[error("message operation isn't waiting for a transport binding")]
     NotAwaitingTransportBinding,
+    /// A Message's content was supplied while a recovery wasn't waiting for it.
+    #[error("message recovery isn't waiting for content")]
+    NotAwaitingContent,
     /// Reading the prekeys a first Message names, or staging the use of a one-time prekey,
     /// failed.
     #[error(transparent)]
@@ -257,6 +267,8 @@ struct Encrypting {
     prekey_bundle: Option<PeerPreKeyBundle>,
     reads: StateReads,
     phase: EncryptionPhase,
+    // The Session whose copy of this Message a recovery replaces, which sealing deletes.
+    replaces: Option<SessionId>,
 }
 
 enum EncryptionPhase {
@@ -268,17 +280,18 @@ enum EncryptionPhase {
     Taken,
 }
 
-// What the first send after an unblock found in the contact's current bundle.
+// What the bundle the app passed says about the contact's Discovery Key.
 enum DiscoveryKeyCheck {
-    // No bundle came with the draft, or it is older than the contact's Discovery Key.
+    // The first send after an unblock has no bundle, or one older than the contact's Discovery
+    // Key.
     NeedsBundle,
-    // The contact rotated during the block, and this send starts a Session from its bundle.
+    // The contact rotated, and this send starts a Session from the bundle.
     Rotated(Box<RotatedContact>),
     // The send continues as usual with the checked contact.
     Checked(Box<ContactRecord>),
 }
 
-// A contact that rotated during a block, and the bundle that names its new Discovery Key.
+// A contact that rotated its inbox, and the bundle that names its new Discovery Key.
 struct RotatedContact {
     contact: ContactRecord,
     bundle: PeerPreKeyBundle,
@@ -389,10 +402,21 @@ impl ProtocolStateEngine {
         message: OutgoingMessage,
         intent: SendIntent,
     ) -> Result<MessageEncryption, ProtocolStateError> {
+        Ok(MessageEncryption(Some(Box::new(
+            self.encrypting(keys, message, intent)?,
+        ))))
+    }
+
+    fn encrypting(
+        &self,
+        keys: LocalIdentityKeys,
+        message: OutgoingMessage,
+        intent: SendIntent,
+    ) -> Result<Encrypting, ProtocolStateError> {
         validate_contact_identity_key(&contact_address(message.recipient), &message.recipient)?;
         let sender = LocalSenderKeys::new(keys, message.sender_certificate)?;
         validate_sender_identity(&sender.identity, self.limits)?;
-        Ok(MessageEncryption(Some(Box::new(Encrypting {
+        Ok(Encrypting {
             engine: *self,
             sender,
             intent,
@@ -403,7 +427,8 @@ impl ProtocolStateEngine {
             prekey_bundle: message.prekey_bundle,
             reads: StateReads::default(),
             phase: EncryptionPhase::Started,
-        }))))
+            replaces: None,
+        })
     }
 
     // Starts decrypting `message` with the local Identity's `keys`, reading prekeys and previous
@@ -477,18 +502,43 @@ impl MessageEncryption {
         transport_binding: TransportBinding,
     ) -> Result<(), MessageOperationError> {
         let encrypting = self.0.as_mut().ok_or(MessageOperationError::Finished)?;
-        if let EncryptionPhase::TransportRequested(prepared) = &mut encrypting.phase
+        let supplied = encrypting.supply_transport_binding(transport_binding);
+        if supplied.is_err() {
+            self.0 = None;
+        }
+        supplied
+    }
+}
+
+impl Encrypting {
+    fn supply_transport_binding(
+        &mut self,
+        transport_binding: TransportBinding,
+    ) -> Result<(), MessageOperationError> {
+        if let EncryptionPhase::TransportRequested(prepared) = &mut self.phase
             && prepared.transport_binding.is_none()
         {
             prepared.transport_binding = Some(transport_binding);
             return Ok(());
         }
-        self.0 = None;
         Err(MessageOperationError::NotAwaitingTransportBinding)
     }
-}
 
-impl Encrypting {
+    // Makes this an encryption of a Message sent earlier on `session_id`, keeping its MessageID
+    // and send time, whose sealing replaces that copy.
+    fn resend(
+        &mut self,
+        session_id: SessionId,
+        message_id: MessageId,
+        sent_at_millis: u64,
+        plaintext: Zeroizing<Vec<u8>>,
+    ) {
+        self.message_id = message_id;
+        self.sent_at_millis = sent_at_millis;
+        self.plaintext = plaintext;
+        self.replaces = Some(session_id);
+    }
+
     fn advance<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -506,6 +556,14 @@ impl Encrypting {
             }
             EncryptionPhase::ContactRequested => self.plan(rng),
             EncryptionPhase::SessionRequested(planned) => {
+                let lost = self
+                    .reads
+                    .snapshot()
+                    .get(&session_address(planned.session_id))
+                    .is_none();
+                if lost && planned.contact.is_accepted() {
+                    return self.start_session(rng, Some(planned.contact));
+                }
                 let prepared = self.prepare_seal(*planned)?;
                 Ok(self.request_transport(prepared))
             }
@@ -547,18 +605,14 @@ impl Encrypting {
             return Err(ProtocolStateError::BlockedContact.into());
         }
         let contact = match contact {
-            Some(contact) if contact.needs_discovery_key_check => {
-                match self.check_discovery_key(contact, sessions.as_ref())? {
+            // A contact with no Session and no consent has no Session for a bundle to replace.
+            Some(contact) if contact.is_accepted() || sessions.is_some() => {
+                match self.check_discovery_key(contact)? {
                     DiscoveryKeyCheck::NeedsBundle => {
                         return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
                     }
                     DiscoveryKeyCheck::Rotated(rotated) => {
-                        let RotatedContact {
-                            contact,
-                            bundle,
-                            bundle_discovery_key,
-                        } = *rotated;
-                        return self.start_session_from(rng, contact, bundle, bundle_discovery_key);
+                        return self.start_rotated_session(rng, *rotated, sessions.as_ref());
                     }
                     DiscoveryKeyCheck::Checked(contact) => Some(*contact),
                 }
@@ -570,8 +624,12 @@ impl Encrypting {
             (contact, None) | (contact @ None, Some(_)) if self.intent == SendIntent::Request => {
                 return self.start_session(rng, contact);
             }
-            (Some(contact), sessions) if contact.is_accepted() => {
-                let session_id = sessions.ok_or(ProtocolStateError::NoSession)?.current();
+            // An accepted contact has a Session unless the host lost its records.
+            (Some(contact), None) if contact.is_accepted() => {
+                return self.start_session(rng, Some(contact));
+            }
+            (Some(contact), Some(sessions)) if contact.is_accepted() => {
+                let session_id = sessions.current();
                 let carries_grant = contact.receives_grant(Starter::Local, local_grant);
                 let Some(payload_kind) = self.payload_kind(carries_grant) else {
                     return Ok(MessageEncryptionStep::NothingToSend);
@@ -589,7 +647,7 @@ impl Encrypting {
             (Some(_), None)
                 if matches!(self.intent, SendIntent::Message | SendIntent::GrantUpdate) =>
             {
-                return Err(ProtocolStateError::NoSession.into());
+                return Err(ProtocolStateError::ContactNotAccepted.into());
             }
             (None | Some(_), _) => return Err(ProtocolStateError::NoContactRequest.into()),
         };
@@ -688,38 +746,69 @@ impl Encrypting {
         Ok(ContactDiscoveryKey::from(&bundle.bundle.discovery_key))
     }
 
-    // Checks the contact's current bundle on the first send after an unblock, since the contact
-    // may have rotated its inbox during the block, and the Relay silently drops Messages sent with
-    // a dead capability.
+    // Checks the bundle the app passed against the contact. A bundle naming a newer Discovery Key,
+    // such as one from a fresh contact link, starts a new Session, since the Relay silently drops
+    // Messages sent with the old capability. The first send after an unblock needs a bundle, since
+    // the contact may have rotated during the block.
     fn check_discovery_key(
         &mut self,
         mut contact: ContactRecord,
-        sessions: Option<&PeerSessions>,
     ) -> Result<DiscoveryKeyCheck, ProtocolStateError> {
         let Some(bundle) = self.prekey_bundle.take() else {
-            return Ok(DiscoveryKeyCheck::NeedsBundle);
+            return Ok(if contact.needs_discovery_key_check {
+                DiscoveryKeyCheck::NeedsBundle
+            } else {
+                DiscoveryKeyCheck::Checked(Box::new(contact))
+            });
         };
         let bundle_discovery_key = self.verify_bundle(&bundle)?;
         if contact.has_newer_discovery_key_than(&bundle_discovery_key) {
-            return Ok(DiscoveryKeyCheck::NeedsBundle);
-        }
-        contact.needs_discovery_key_check = false;
-        if contact.discovery_key != Some(bundle_discovery_key) {
-            let local_asked =
-                sessions.is_some_and(|sessions| sessions.current_starter() == Starter::Local);
-            if contact.is_accepted() || (local_asked && self.intent != SendIntent::Acceptance) {
+            if contact.needs_discovery_key_check {
+                return Ok(DiscoveryKeyCheck::NeedsBundle);
+            }
+        } else {
+            contact.needs_discovery_key_check = false;
+            if contact.discovery_key != Some(bundle_discovery_key) {
                 return Ok(DiscoveryKeyCheck::Rotated(Box::new(RotatedContact {
                     contact,
                     bundle,
                     bundle_discovery_key,
                 })));
             }
-            // Only this side's acceptance answers a requester, on the requester's Session, which
-            // the dropped capability no longer reaches.
-            contact.record_discovery_key(bundle_discovery_key);
         }
         self.prekey_bundle = Some(bundle);
         Ok(DiscoveryKeyCheck::Checked(Box::new(contact)))
+    }
+
+    // Starts a Session with a contact that rotated its inbox. The asked side's acceptance counts
+    // only on the requester's Session, whose inbox is gone, so a send to a requester asks again,
+    // and the requests cross, which accepts both sides.
+    fn start_rotated_session<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+        rotated: RotatedContact,
+        sessions: Option<&PeerSessions>,
+    ) -> Result<MessageEncryptionStep, MessageOperationError> {
+        let RotatedContact {
+            mut contact,
+            bundle,
+            bundle_discovery_key,
+        } = rotated;
+        let peer_asked =
+            sessions.is_some_and(|sessions| sessions.current_starter() == Starter::Peer);
+        if !contact.is_accepted() {
+            match (self.intent, peer_asked) {
+                (SendIntent::GrantUpdate, true) => {
+                    return Err(ProtocolStateError::ContactNotAccepted.into());
+                }
+                (SendIntent::Acceptance, false) => {
+                    return Err(ProtocolStateError::NoContactRequest.into());
+                }
+                (_, true) => contact.accept(),
+                (_, false) => {}
+            }
+        }
+        self.start_session_from(rng, contact, bundle, bundle_discovery_key)
     }
 
     // Starts a Session with `contact` from a bundle already checked against it.
@@ -808,7 +897,8 @@ impl Encrypting {
         let address = session_address(planned.session_id);
         let LoadedSession {
             peer_identity_key,
-            status,
+            state,
+            pending_handshake,
         } = load_required_session(snapshot, &address, limits)?;
         if !contact_identity_keys_match(&peer_identity_key, &self.recipient) {
             return Err(ProtocolStateError::InvalidStateBinding {
@@ -816,13 +906,6 @@ impl Encrypting {
                 reason: "session belongs to another peer".into(),
             });
         }
-        let SessionStatus::Active {
-            state,
-            pending_handshake,
-        } = status
-        else {
-            return Err(ProtocolStateError::SessionUnrecoverable);
-        };
         let pending = load_pending_acknowledgments(
             snapshot,
             &pending_acknowledgment_address(planned.session_id),
@@ -911,9 +994,12 @@ impl Encrypting {
                 &pending_address,
                 &mut pending,
                 self.message_id,
-                self.sent_at_millis,
-                &message,
-                payload_kind.carries_grant().then(|| grant.stamp()),
+                LoadedPendingAcknowledgment::new(
+                    &message,
+                    self.sent_at_millis,
+                    payload_kind,
+                    payload_kind.carries_grant().then(|| grant.stamp()),
+                )?,
                 limits,
             )?;
         }
@@ -934,7 +1020,8 @@ impl Encrypting {
             .with_snapshot(snapshot),
         ];
         updates.extend(contact_update(snapshot, &contact, limits)?);
-        if let Some((peer_sessions, evicted)) = started {
+        let mut evicted = Vec::new();
+        if let Some((peer_sessions, started_evicted)) = started {
             let peer_address = peer_sessions_address(self.recipient);
             updates.push(
                 ProtocolStateUpdate::set(
@@ -943,7 +1030,20 @@ impl Encrypting {
                 )
                 .with_snapshot(snapshot),
             );
-            updates.extend(session_deletions(snapshot, &evicted));
+            updates.extend(session_deletions(snapshot, &started_evicted));
+            evicted = started_evicted;
+        }
+        // A Session this send evicts takes its copy with it.
+        if let Some(replaced) = self.replaces.filter(|replaced| !evicted.contains(replaced)) {
+            let address = pending_acknowledgment_address(replaced);
+            let mut replaced_pending = load_pending_acknowledgments(snapshot, &address, limits)?;
+            replaced_pending.pending.remove(self.message_id.as_bytes());
+            updates.push(recovery::pending_update(
+                snapshot,
+                replaced,
+                &replaced_pending,
+                limits,
+            )?);
         }
         Ok(OutboundMessageResult {
             session_id,
@@ -1295,30 +1395,11 @@ impl Decrypting {
                 InboundMessageOutcome::Duplicate,
             )));
         }
-        let peer_identity_key = session.peer_identity_key;
-        let (state, pending_handshake) = match session.status {
-            SessionStatus::Active {
-                state,
-                pending_handshake,
-            } => (state, pending_handshake),
-            SessionStatus::Unrecoverable {
-                reason,
-                event_emitted,
-            } => {
-                return Ok(MessageDecryptionStep::Ready(Box::new(
-                    InboundMessageOutcome::SessionUnrecoverable(Box::new(
-                        session_unrecoverable_result(
-                            &self.reads,
-                            session_id,
-                            peer_identity_key,
-                            reason,
-                            event_emitted,
-                            limits,
-                        )?,
-                    )),
-                )));
-            }
-        };
+        let LoadedSession {
+            peer_identity_key,
+            state,
+            pending_handshake,
+        } = session;
         let addresses = vec![
             contact_address(peer_identity_key),
             peer_sessions_address(peer_identity_key),
@@ -1541,7 +1622,11 @@ impl Decrypting {
                             && held.public_key.as_bytes() == &signed_prekey.public_key
                     })
                 });
-                let evicted = if self.engine.awaits_reply(snapshot, sessions.current())? {
+                let evicted = if self.engine.awaits_reply(
+                    snapshot,
+                    sessions.current(),
+                    &sender_discovery_key,
+                )? {
                     sessions.start_alongside(session_id, Some(accepted_with))
                 } else {
                     sessions.start(session_id, Some(accepted_with))
@@ -1555,7 +1640,11 @@ impl Decrypting {
         };
         let created = previous.is_none();
         let mut contact = match previous {
-            Some(contact) => contact,
+            // A new Session proves the contact may have lost the old ones.
+            Some(mut contact) => {
+                contact.forget_recovery();
+                contact
+            }
             // Only a Contact Request creates a record, so a stranger can't skip showing one.
             None if payload_kind == PayloadKind::GrantUpdate => {
                 return Err(ProtocolStateError::InvalidMessage {
@@ -2045,7 +2134,7 @@ fn session_update(
     let address = session_address(session_id);
     Ok(ProtocolStateUpdate::set(
         address.clone(),
-        encode_active_session(
+        encode_session(
             &address,
             peer_identity_key,
             state,
@@ -2224,36 +2313,6 @@ impl StateReads {
             .map(|address| (address.clone(), ProtocolStateCommitCondition::Absent));
         present.chain(absent).collect()
     }
-}
-
-fn session_unrecoverable_result(
-    reads: &StateReads,
-    session_id: SessionId,
-    peer_identity_key: ContactIdentityKey,
-    reason: SessionUnrecoverableReason,
-    event_emitted: bool,
-    limits: ProtocolHardeningLimits,
-) -> Result<SessionUnrecoverableResult, ProtocolStateError> {
-    let (event, state_updates) = if event_emitted {
-        (None, Vec::new())
-    } else {
-        let address = session_address(session_id);
-        let update = ProtocolStateUpdate::set(
-            address.clone(),
-            encode_unrecoverable_session(&address, peer_identity_key, reason, true, limits)?,
-        )
-        .with_snapshot(reads.snapshot());
-        (
-            Some(SessionEvent::Unrecoverable { session_id, reason }),
-            vec![update],
-        )
-    };
-    Ok(SessionUnrecoverableResult {
-        session_id,
-        reason,
-        event,
-        changes: changes(reads, state_updates),
-    })
 }
 
 #[cfg(test)]

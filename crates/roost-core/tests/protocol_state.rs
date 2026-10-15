@@ -9,22 +9,20 @@ use roost_core::{
     InboundMessageOutcome, InboundSenderCertificateValidation, MIN_DEDUPLICATION_CAPACITY, Message,
     MessageError, MessageOperationError, MessageStartError, OutboundMessageResult,
     ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
-    ReceiveSettings, SessionEvent, SessionId, SessionUnrecoverableReason,
-    SessionUnrecoverableResult, SignedSenderCertificate,
+    ProtocolStateError, ProtocolStateKey, ProtocolStateKind, ReceiveSettings, SessionId,
+    SignedSenderCertificate,
 };
 use roost_crypto::{KeyPair, RatchetError, SealedFrameError};
 use roost_protocol::{
     DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, PayloadKind,
-    SenderCertificateIdentityKey, SenderCertificateValidationError, from_unix_millis,
+    SenderCertificateIdentityKey, SenderCertificateValidationError,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use support::device::{Device, Relay};
 use support::{
-    CREATED_AT_SECS, HostStore, ProtocolFixture, accepted, dead_session_blob,
-    deduplication_address, session_address, trusted_domain_signing_key, trusted_validation,
-    validation,
+    CREATED_AT_SECS, HostStore, ProtocolFixture, accepted, deduplication_address, session_address,
+    trusted_domain_signing_key, trusted_validation, validation,
 };
 
 #[derive(Deserialize, Serialize)]
@@ -38,7 +36,7 @@ struct TestPendingAcknowledgmentWire {
     message_id: [u8; 16],
     encoded_message: Vec<u8>,
     first_sent_at_millis: u64,
-    last_retried_at_millis: Option<u64>,
+    payload_kind: u8,
     grant: Option<(u64, u32)>,
 }
 
@@ -124,13 +122,6 @@ fn settings_with_policy(policy: BlockedContactAcknowledgmentPolicy) -> ReceiveSe
 fn blocked(outcome: InboundMessageOutcome) -> roost_core::BlockedInboundMessageResult {
     let InboundMessageOutcome::Blocked(result) = outcome else {
         panic!("message was not blocked")
-    };
-    *result
-}
-
-fn session_unrecoverable(outcome: InboundMessageOutcome) -> SessionUnrecoverableResult {
-    let InboundMessageOutcome::SessionUnrecoverable(result) = outcome else {
-        panic!("session was not unrecoverable")
     };
     *result
 }
@@ -340,7 +331,7 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
         message_id: [0x44; 16],
         encoded_message: vec![0xaa],
         first_sent_at_millis: 1_700_000_100_123,
-        last_retried_at_millis: None,
+        payload_kind: 0,
         grant: None,
     });
     let mut malformed_pending_blob = pending_blob[..1].to_vec();
@@ -354,57 +345,12 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
 }
 
 #[test]
-fn retry_instructions_are_windowed_and_persisted() {
-    let engine = ProtocolStateEngine::new();
-    let mut fixture = ProtocolFixture::new();
-    let encrypted = alice_sends(&fixture, 0x33, b"retry later");
-    let sent_at = encrypted.sent_at_millis;
-    let message_id = encrypted.message_id;
-    fixture
-        .alice
-        .host
-        .commit_changes(encrypted.changes)
-        .unwrap();
-    let retry = |snapshot: &ProtocolStateSnapshot, now_millis: u64| {
-        ProtocolStateEngine::new()
-            .retry_instructions(
-                snapshot,
-                fixture.session_id,
-                from_unix_millis(now_millis).unwrap(),
-                Duration::from_millis(1_000),
-            )
-            .unwrap()
-    };
-
-    let early = retry(&fixture.alice.host.snapshot(), sent_at + 999);
-    assert!(early.instructions.is_empty());
-    assert!(early.state_updates.is_empty());
-
-    let due = retry(&fixture.alice.host.snapshot(), sent_at + 1_000);
-    assert_eq!(due.instructions.len(), 1);
-    assert_eq!(due.instructions[0].message_id, message_id);
-    let mut alice_store = fixture.alice.host.clone();
-    alice_store.commit(due.state_updates).unwrap();
-
-    let repeated = retry(&alice_store.snapshot(), sent_at + 1_000);
-    assert!(repeated.instructions.is_empty());
-    assert!(repeated.state_updates.is_empty());
-    assert_eq!(
-        engine
-            .pending_acknowledgments(&alice_store.snapshot(), fixture.session_id)
-            .unwrap()
-            .len(),
-        1
-    );
-}
-
-#[test]
 fn pending_acknowledgment_state_faults_on_bad_blobs() {
     let engine = ProtocolStateEngine::new();
     let fixture = ProtocolFixture::new();
     let address = pending_address(fixture.session_id);
     let mut corrupt = fixture.alice.host.clone();
-    corrupt.set_raw(address.clone(), vec![1, 0, 0xaa]);
+    corrupt.set_raw(address.clone(), vec![2, 0, 0xaa]);
     assert!(matches!(
         failure(fixture.encrypt(
             &corrupt,
@@ -415,12 +361,12 @@ fn pending_acknowledgment_state_faults_on_bad_blobs() {
     ));
 
     let mut unsupported = fixture.alice.host.clone();
-    unsupported.set_raw(address.clone(), vec![2, 0, 0xaa]);
+    unsupported.set_raw(address.clone(), vec![3, 0, 0xaa]);
     assert!(matches!(
         engine.pending_acknowledgments(&unsupported.snapshot(), fixture.session_id),
         Err(ProtocolStateError::UnsupportedBlobVersion {
             address: actual,
-            version: 2,
+            version: 3,
         }) if actual == address
     ));
 }
@@ -543,7 +489,7 @@ fn replay_storm_returns_duplicate_without_state_churn() {
 }
 
 #[test]
-fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
+fn skipped_key_total_overflow_rejects_the_message_on_every_attempt() {
     let mut fixture = ProtocolFixture::new();
     let mut sequence = 0u16;
     // Each round skips 100 of Alice's Messages, the most one header may skip, then has Bob reply
@@ -593,49 +539,7 @@ fn skipped_key_total_overflow_rejects_without_marking_session_unrecoverable() {
 }
 
 #[test]
-fn dead_session_marker_reports_once_without_reset() {
-    let mut fixture = ProtocolFixture::new();
-    let address = session_address(fixture.session_id);
-    let dead_message = alice_sends(&fixture, 0x80, b"dead marker probe").message;
-    fixture.bob.host.set_raw(
-        address.clone(),
-        dead_session_blob(false, fixture.alice.identity_key())
-            .as_bytes()
-            .to_vec(),
-    );
-
-    let unrecoverable = session_unrecoverable(
-        bob_receives_validated(&fixture, &fixture.bob.host, &dead_message, 0xe0).unwrap(),
-    );
-    assert_eq!(unrecoverable.session_id, fixture.session_id);
-    assert_eq!(
-        unrecoverable.reason,
-        SessionUnrecoverableReason::SkippedKeyLimitExceeded
-    );
-    assert_eq!(unrecoverable.changes.updates().len(), 1);
-    assert_eq!(unrecoverable.changes.updates()[0].address(), &address);
-    assert_eq!(
-        unrecoverable.event,
-        Some(SessionEvent::Unrecoverable {
-            session_id: fixture.session_id,
-            reason: SessionUnrecoverableReason::SkippedKeyLimitExceeded,
-        })
-    );
-    fixture
-        .bob
-        .host
-        .commit_changes(unrecoverable.changes)
-        .unwrap();
-
-    let repeated = session_unrecoverable(
-        bob_receives_validated(&fixture, &fixture.bob.host, &dead_message, 0xe1).unwrap(),
-    );
-    assert!(repeated.event.is_none());
-    assert!(repeated.changes.updates().is_empty());
-}
-
-#[test]
-fn transient_aead_failure_does_not_mark_session_unrecoverable() {
+fn a_tampered_message_fails_and_the_original_still_decrypts() {
     let fixture = ProtocolFixture::new();
     let encrypted = alice_sends(&fixture, 0x70, b"valid after tamper").message;
     let mut tampered = support::copy(&encrypted);
@@ -666,7 +570,7 @@ fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
     fixture
         .bob
         .host
-        .set_raw(session_address(fixture.session_id), vec![1, 0, 0xaa]);
+        .set_raw(session_address(fixture.session_id), vec![2, 0, 0xaa]);
 
     let duplicate = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 22).unwrap();
 
@@ -781,7 +685,7 @@ fn duplicate_blocked_inbound_message_does_not_load_or_advance_ratchet_state() {
     fixture
         .bob
         .host
-        .set_raw(session_address(fixture.session_id), vec![1, 0, 0xaa]);
+        .set_raw(session_address(fixture.session_id), vec![2, 0, 0xaa]);
 
     let duplicate = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x53).unwrap();
 
@@ -1065,17 +969,17 @@ fn deduplication_receive_rejects_bad_state() {
         |store: &HostStore, seed: u8| bob_receives_validated(&fixture, store, &encrypted, seed);
 
     let mut corrupt = fixture.bob.host.clone();
-    corrupt.set_raw(deduplication_address.clone(), vec![1, 0, 0xaa]);
+    corrupt.set_raw(deduplication_address.clone(), vec![2, 0, 0xaa]);
     assert!(matches!(
         failure(receive(&corrupt, 24)),
         ProtocolStateError::BlobDecode { address, .. } if address == deduplication_address
     ));
 
     let mut unsupported = fixture.bob.host.clone();
-    unsupported.set_raw(deduplication_address.clone(), vec![2, 0, 0xaa]);
+    unsupported.set_raw(deduplication_address.clone(), vec![3, 0, 0xaa]);
     assert!(matches!(
         failure(receive(&unsupported, 25)),
-        ProtocolStateError::UnsupportedBlobVersion { address, version: 2 }
+        ProtocolStateError::UnsupportedBlobVersion { address, version: 3 }
             if address == deduplication_address
     ));
 }
@@ -1194,7 +1098,7 @@ fn oversized_outbound_message_does_not_return_advanced_state() {
 fn oversized_or_corrupt_session_blob_is_a_decode_fault_without_reinitialization() {
     let fixture = ProtocolFixture::new();
     let address = session_address(fixture.session_id);
-    for stored in [vec![1; 128 * 1024], vec![1, 0, 0xaa]] {
+    for stored in [vec![1; 128 * 1024], vec![2, 0, 0xaa]] {
         let mut alice_store = fixture.alice.host.clone();
         alice_store.set_raw(address.clone(), stored.clone());
 
@@ -1211,7 +1115,7 @@ fn oversized_or_corrupt_session_blob_is_a_decode_fault_without_reinitialization(
 #[test]
 fn missing_required_state_is_an_explicit_failure() {
     let fixture = ProtocolFixture::new();
-    let address = session_address(fixture.session_id);
+    let address = pending_address(fixture.session_id);
     let mut alice_store = fixture.alice.host.clone();
     alice_store.remove(&address);
 
@@ -1219,26 +1123,4 @@ fn missing_required_state_is_an_explicit_failure() {
         failure(fixture.encrypt(&alice_store, fixture.outgoing(1, b"lost"), 1)),
         ProtocolStateError::MissingRequiredState { address: actual } if actual == address
     ));
-}
-
-#[test]
-fn after_the_host_loses_a_session_sending_requires_a_new_handshake() {
-    let mut fixture = ProtocolFixture::new();
-    let lost_session = fixture.session_id;
-    fixture.alice.host.forget_session(lost_session);
-
-    assert!(matches!(
-        failure(fixture.encrypt(
-            &fixture.alice.host,
-            fixture.outgoing(1, b"after the loss"),
-            1,
-        )),
-        ProtocolStateError::MissingRequiredState { .. }
-    ));
-
-    fixture.start_session();
-    assert_ne!(fixture.session_id, lost_session);
-    let restored = fixture.encrypt_from_alice(2, b"restored");
-    let received = fixture.decrypt_for_bob(&restored, 0x30);
-    assert_eq!(received.plaintext.as_slice(), b"restored");
 }

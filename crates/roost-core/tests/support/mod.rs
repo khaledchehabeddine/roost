@@ -12,7 +12,7 @@ use roost_core::{
     MessageOperationError, MessageStartError, OutboundMessageResult, OutgoingMessage,
     ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind,
     ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings, SessionId,
-    SessionUnrecoverableResult, SignedSenderCertificate, StateChanges, TransportBinding,
+    SignedSenderCertificate, StateChanges, TransportBinding,
 };
 use roost_crypto::{SigningKeyPair, generate_signing_key_pair};
 use roost_protocol::{
@@ -266,7 +266,6 @@ pub fn split_changes(
         InboundMessageOutcome::Blocked(result) => Some(&mut result.changes),
         InboundMessageOutcome::Withheld(result) => Some(&mut result.changes),
         InboundMessageOutcome::GrantUpdate(result) => Some(&mut result.changes),
-        InboundMessageOutcome::SessionUnrecoverable(result) => Some(&mut result.changes),
         InboundMessageOutcome::AcknowledgmentMatched(result)
         | InboundMessageOutcome::AcknowledgmentUnmatched(result) => Some(&mut result.changes),
         InboundMessageOutcome::Duplicate
@@ -557,25 +556,6 @@ pub fn accepted(outcome: InboundMessageOutcome) -> roost_core::InboundMessageRes
         panic!("expected an accepted message")
     };
     *result
-}
-
-pub fn session_unrecoverable(outcome: InboundMessageOutcome) -> SessionUnrecoverableResult {
-    let InboundMessageOutcome::SessionUnrecoverable(result) = outcome else {
-        panic!("expected an unrecoverable session")
-    };
-    *result
-}
-
-pub fn dead_session_blob(
-    event_emitted: bool,
-    peer_identity_key: ContactIdentityKey,
-) -> ProtocolStateBlob {
-    // Blob version 1, the peer's two key halves, Unrecoverable variant 1, reason 0, event flag.
-    let mut bytes = vec![1];
-    bytes.extend_from_slice(&peer_identity_key.x25519_public_key);
-    bytes.extend_from_slice(&peer_identity_key.ed25519_verifying_key);
-    bytes.extend_from_slice(&[1, 0, u8::from(event_emitted)]);
-    ProtocolStateBlob::from_bytes(bytes)
 }
 
 pub fn sender_certificate_bytes(

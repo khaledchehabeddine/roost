@@ -2,7 +2,8 @@ use super::{KeyStore, KeyStoreError, KeyStoreOperationId};
 use crate::protocol_state::{LocalIdentityKeys, SendIntent};
 use crate::{
     DiscoveryKeyError, IdentityError, IncomingMessage, KeyStoreOperationError, MessageDecryption,
-    MessageEncryption, OutgoingGrantUpdate, OutgoingMessage, ProtocolStateError,
+    MessageEncryption, MessageRecovery, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery,
+    ProtocolStateError,
 };
 use roost_crypto::{
     DiscoveryKey, HandshakeError, OneTimePreKey, PublicSignedPreKey, SealedFramePreKeyReference,
@@ -83,17 +84,32 @@ impl KeyStore {
         self.start_send(update.into_message(), SendIntent::GrantUpdate)
     }
 
+    /// Starts one step of recovering a contact's unacknowledged Messages on a newer Session.
+    ///
+    /// The app runs steps as the recovery job a delivery check signaled, committing each resent
+    /// Message, until one ends with nothing left to resend or waiting for the probe. The operation
+    /// loads the local Identity's keys now and touches SecureStorage no more.
+    pub fn start_recovery(
+        &self,
+        recovery: OutgoingRecovery,
+    ) -> Result<MessageRecovery, MessageStartError> {
+        let keys = self.message_keys()?;
+        Ok(self.0.engine.start_recovery(keys, recovery)?)
+    }
+
     fn start_send(
         &self,
         message: OutgoingMessage,
         intent: SendIntent,
     ) -> Result<MessageEncryption, MessageStartError> {
-        let keys = {
-            let _lifecycle = self.lifecycle_guard();
-            self.ensure_no_recovery_required()?;
-            self.load_local_identity_keys()?
-        };
+        let keys = self.message_keys()?;
         Ok(self.0.engine.start_encryption(keys, message, intent)?)
+    }
+
+    fn message_keys(&self) -> Result<LocalIdentityKeys, MessageStartError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
+        self.load_local_identity_keys()
     }
 
     /// Starts decrypting a received Message.
@@ -106,11 +122,7 @@ impl KeyStore {
         &self,
         message: IncomingMessage,
     ) -> Result<MessageDecryption, MessageStartError> {
-        let keys = {
-            let _lifecycle = self.lifecycle_guard();
-            self.ensure_no_recovery_required()?;
-            self.load_local_identity_keys()?
-        };
+        let keys = self.message_keys()?;
         Ok(self
             .0
             .engine

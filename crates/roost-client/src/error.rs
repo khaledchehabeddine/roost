@@ -49,8 +49,8 @@ pub enum RoostError {
         reason: String,
     },
     /// The contact isn't accepted, so Roost refuses the send: this side already sent the most
-    /// Messages allowed before acceptance, or a Grant Update would give a requester this side
-    /// hasn't accepted its Inbox Grant.
+    /// Messages allowed before acceptance, no Session exists to send on, or a Grant Update would
+    /// give a requester this side hasn't accepted its Inbox Grant.
     #[error("contact is not accepted: {reason}")]
     ContactNotAccepted {
         /// Diagnostic context for logging only.
@@ -128,12 +128,6 @@ pub enum RoostError {
         /// Stable SecureStorage entry name that changed.
         key: String,
     },
-    /// No live Session exists with the contact, so a fresh handshake must start one.
-    #[error("terminal session recovery required: {reason}")]
-    TerminalSessionRecovery {
-        /// Diagnostic context for logging only.
-        reason: String,
-    },
     /// The bounded prepared-operation journal has no free unfinished-operation slot.
     #[error("too many unfinished prepared operations")]
     TooManyUnfinishedOperations,
@@ -162,7 +156,6 @@ impl RoostError {
             | RoostError::OperationRecoveryRequired { reason, .. }
             | RoostError::ProtocolStateFault { reason }
             | RoostError::Storage { reason }
-            | RoostError::TerminalSessionRecovery { reason }
             | RoostError::UnsupportedVersion { reason } => *reason = new_reason,
             RoostError::AlreadyExists
             | RoostError::Corrupt
@@ -465,6 +458,7 @@ impl From<ProtocolStateError> for RoostError {
             | ProtocolStateError::NoContactRequest
             | ProtocolStateError::SnapshotCapacityExceeded
             | ProtocolStateError::StateEntry(_)
+            | ProtocolStateError::TimeOutOfRange
             | ProtocolStateError::UnsolicitedAcceptance => RoostError::InvalidData { reason },
             ProtocolStateError::InvalidInboxGrant => RoostError::AuthenticationFailed { reason },
             ProtocolStateError::BlockedContact => RoostError::BlockedContact { reason },
@@ -473,9 +467,6 @@ impl From<ProtocolStateError> for RoostError {
                 RoostError::ContactNotAccepted { reason }
             }
             ProtocolStateError::NoDeliveryCapability => RoostError::NoDeliveryCapability,
-            ProtocolStateError::NoSession | ProtocolStateError::SessionUnrecoverable => {
-                RoostError::TerminalSessionRecovery { reason }
-            }
             ProtocolStateError::Handshake(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::BlobEncode { .. } | ProtocolStateError::Randomness(_) => {
                 RoostError::InternalError { reason }
@@ -543,6 +534,7 @@ impl From<MessageOperationError> for RoostError {
         match e {
             MessageOperationError::Finished => RoostError::OperationFinished,
             MessageOperationError::NotAwaitingAdmission
+            | MessageOperationError::NotAwaitingContent
             | MessageOperationError::NotAwaitingState
             | MessageOperationError::NotAwaitingTransportBinding => {
                 RoostError::InvalidData { reason }

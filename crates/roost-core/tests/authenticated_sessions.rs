@@ -14,7 +14,7 @@ use roost_crypto::{
 };
 use roost_protocol::{SenderCertificateValidationError, SignatureError};
 use support::device::{Device, DeviceError, Intent, Relay, SentMessage};
-use support::{CREATED_AT_SECS, ProtocolFixture, dead_session_blob, session_address};
+use support::{CREATED_AT_SECS, ProtocolFixture, session_address};
 
 fn accepted_message(outcome: InboundMessageOutcome) -> roost_core::InboundMessageResult {
     let (InboundMessageOutcome::Accepted(result) | InboundMessageOutcome::ContactRequest(result)) =
@@ -343,32 +343,6 @@ fn a_handshake_cannot_bring_back_a_session_the_host_wiped() {
     ));
 
     assert_eq!(bob.host.snapshot_bytes(), before);
-}
-
-#[test]
-fn a_dead_session_is_never_sent_on_until_a_new_handshake() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let mut bob = Device::new(&relay, 0xb0);
-    let dead = establish(&mut alice, &mut bob);
-    alice.host.set_raw(
-        session_address(dead),
-        dead_session_blob(true, bob.identity_key())
-            .as_bytes()
-            .to_vec(),
-    );
-
-    assert!(matches!(
-        alice.encrypt_to(&bob, b"on a dead session"),
-        Err(DeviceError::Operation(
-            MessageOperationError::ProtocolState(ProtocolStateError::SessionUnrecoverable)
-        ))
-    ));
-
-    let replacement = reestablish(&mut alice, &mut bob);
-    let sent = alice.send(&bob, b"on the replacement");
-    assert_eq!(sent.session_id, replacement);
-    accepted_message(bob.receive(&sent.message));
 }
 
 #[test]

@@ -4,10 +4,11 @@ mod support;
 
 use roost_client::{
     BlockedContactAcknowledgmentPolicy, ContactSafetyNumberConfirmation, ContactTrustState,
-    DomainSigningKey, DomainSigningKeyStatus, IdentityContext, IdentityKey, InboundMessageOutcome,
-    IncomingMessage, Message, MessageDecryptionStep, MessageDestination, MessageEncryption,
-    MessageEncryptionStep, MessageId, OperationId, OutboundMessageResult, OutgoingGrantUpdate,
-    OutgoingMessage, PayloadKind, PreKeyBundle, ProtocolStateKind, ReceiveSettings,
+    DeliveryCheckResult, DeliveryCheckStep, DomainSigningKey, DomainSigningKeyStatus,
+    IdentityContext, IdentityKey, InboundMessageOutcome, IncomingMessage, Message,
+    MessageDecryptionStep, MessageDestination, MessageEncryption, MessageEncryptionStep, MessageId,
+    MessageRecoveryStep, OperationId, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
+    OutgoingRecovery, PayloadKind, PreKeyBundle, ProtocolStateKind, ReceiveSettings,
     RevocationState, RoostError, SenderCertificateValidation, SessionId, SignedSenderCertificate,
     StateChanges, StateEntry, StateKey, TransportBinding, derive_safety_number,
 };
@@ -286,6 +287,74 @@ impl Host {
                     decryption.supply_acknowledgment_transport_binding(binding())?;
                 }
                 MessageDecryptionStep::Ready { outcome } => return Ok(outcome),
+            }
+        }
+    }
+}
+
+impl Host {
+    // Checks the delivery of what this host sent `peer`, and commits the result.
+    fn check_deliveries(&mut self, peer: &Host, now_millis: u64) -> DeliveryCheckResult {
+        let check = self
+            .context
+            .messaging()
+            .start_delivery_check(peer.identity_key(), now_millis)
+            .unwrap();
+        loop {
+            match check.step().unwrap() {
+                DeliveryCheckStep::NeedsState { keys } => {
+                    check.supply_state(self.read(&keys)).unwrap();
+                }
+                DeliveryCheckStep::Ready { mut result } => {
+                    let changes = std::mem::replace(
+                        &mut result.changes,
+                        StateChanges {
+                            conditions: Vec::new(),
+                            updates: Vec::new(),
+                            operation_id: None,
+                        },
+                    );
+                    assert!(self.commit(changes));
+                    return result;
+                }
+            }
+        }
+    }
+
+    // Runs one recovery of what this host sent `peer`, supplying `content` for the Message it
+    // names, and returns how it ended with the destination it named.
+    fn recover(
+        &self,
+        peer: &Host,
+        prekey_bundle: Option<PreKeyBundle>,
+        content: &[u8],
+    ) -> (MessageRecoveryStep, Option<MessageDestination>) {
+        let recovery = self
+            .context
+            .messaging()
+            .start_recovery(OutgoingRecovery {
+                recipient: peer.identity_key(),
+                sender_certificate: self.signed_certificate(),
+                prekey_bundle,
+            })
+            .unwrap();
+        let mut destination = None;
+        loop {
+            match recovery.step().unwrap() {
+                MessageRecoveryStep::NeedsState { keys } => {
+                    recovery.supply_state(self.read(&keys)).unwrap();
+                }
+                MessageRecoveryStep::NeedsContent { .. } => {
+                    recovery.supply_content(content.to_vec()).unwrap();
+                }
+                MessageRecoveryStep::NeedsTransport { destination: asked } => {
+                    destination = Some(asked);
+                    recovery.supply_transport_binding(binding()).unwrap();
+                }
+                ended @ (MessageRecoveryStep::NeedsPreKeyBundle { .. }
+                | MessageRecoveryStep::AwaitingProbe { .. }
+                | MessageRecoveryStep::Finished
+                | MessageRecoveryStep::Ready { .. }) => return (ended, destination),
             }
         }
     }
@@ -746,4 +815,44 @@ fn matches_refuses_stale_and_malformed_records() {
         sent.changes.matches(missing),
         Err(RoostError::InvalidData { .. })
     ));
+}
+
+#[test]
+fn a_silent_contact_gets_its_unacknowledged_message_again_through_a_probe() {
+    const DAY_MILLIS: u64 = 24 * 60 * 60 * 1000;
+    let mut alice = Host::new();
+    let mut bob = Host::new();
+    establish(&mut alice, &mut bob);
+    let (_, message_id, _) = alice.send(&bob, b"are you there?");
+
+    assert!(
+        alice
+            .check_deliveries(&bob, NOW_MILLIS + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let (needs_bundle, _) = alice.recover(&bob, None, b"are you there?");
+    assert!(matches!(
+        needs_bundle,
+        MessageRecoveryStep::NeedsPreKeyBundle { identity_key } if identity_key == bob.identity_key()
+    ));
+    let (MessageRecoveryStep::Ready { mut result }, Some(destination)) =
+        alice.recover(&bob, Some(bob.bundle()), b"are you there?")
+    else {
+        panic!("expected a resent Message");
+    };
+    assert!(matches!(
+        destination,
+        MessageDestination::FirstMessage { .. }
+    ));
+    assert_eq!(result.message_id, message_id);
+    assert_eq!(result.sent_at_millis, NOW_MILLIS);
+    assert!(alice.commit(take_changes(&mut result)));
+
+    assert!(matches!(
+        alice.recover(&bob, None, b"").0,
+        MessageRecoveryStep::AwaitingProbe { message_id: probe } if probe == message_id
+    ));
+    let delivered = received(bob.decrypt(result.message).unwrap());
+    assert_eq!(delivered.message_id, message_id);
+    assert_eq!(delivered.plaintext, b"are you there?");
 }

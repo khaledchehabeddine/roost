@@ -5,7 +5,7 @@ use crate::error::RoostError;
 use crate::message::{Message, MessageId, PayloadKind, SenderIdentityMaterial};
 use crate::operation::OperationId;
 use crate::records::{SessionId, fixed_32, hex_bytes, hex_text};
-use crate::time::{millis_from_secs, time_from_millis};
+use crate::time::millis_from_secs;
 use roost_core::{
     ContactSafetyNumberConfirmation as CoreSafetyNumberConfirmation,
     ProtocolStateAddress as CoreProtocolStateAddress, ProtocolStateBlob as CoreProtocolStateBlob,
@@ -234,30 +234,6 @@ pub struct PendingAcknowledgment {
     pub message: Message,
     /// First-send Unix timestamp in milliseconds.
     pub first_sent_at_millis: u64,
-    /// Last retry-instruction timestamp in milliseconds.
-    pub last_retried_at_millis: Option<u64>,
-}
-
-/// Retry instruction for an unacknowledged Message.
-#[derive(uniffi::Record)]
-pub struct RetryInstruction {
-    /// Original outbound Message ID.
-    pub message_id: MessageId,
-    /// Message the host may retransmit.
-    pub message: Message,
-    /// First-send Unix timestamp in milliseconds.
-    pub first_sent_at_millis: u64,
-    /// Previous retry-instruction timestamp in milliseconds.
-    pub last_retried_at_millis: Option<u64>,
-}
-
-/// Retry instructions plus pending-state updates.
-#[derive(uniffi::Record)]
-pub struct RetryInstructionResult {
-    /// Messages whose retry window elapsed.
-    pub instructions: Vec<RetryInstruction>,
-    /// State changes to commit.
-    pub changes: StateChanges,
 }
 
 /// An outbound Message and the state changes from one Message Operation.
@@ -277,27 +253,11 @@ pub struct OutboundMessageResult {
     pub changes: StateChanges,
 }
 
-/// Terminal Session reason.
-#[derive(uniffi::Enum)]
-pub enum SessionUnrecoverableReason {
-    /// The skipped-message-key retention cap was exceeded.
-    SkippedKeyLimitExceeded,
-}
-
-/// Session event emitted after committing the returned changes.
-#[derive(uniffi::Record)]
-pub struct SessionEvent {
-    /// The Dead Session.
-    pub session_id: SessionId,
-    /// Terminal reason.
-    pub reason: SessionUnrecoverableReason,
-}
-
 /// A provisional receive result. Commit its changes and effects atomically before use.
 ///
 /// Switch on the outcome to obtain only the fields that case permits. The host transaction must
 /// check the changes with [`StateChanges::matches`] and persist effects before plaintext is
-/// displayed, an acknowledgment is sent, or recovery is scheduled.
+/// displayed or an acknowledgment is sent.
 #[derive(uniffi::Enum)]
 pub enum InboundMessageOutcome {
     /// Authenticated plaintext, and an acknowledgment when this side acknowledges, for a unique
@@ -329,13 +289,8 @@ pub enum InboundMessageOutcome {
     },
     /// An already accepted encrypted Message. No effects are produced.
     Duplicate,
-    /// A dead Session and its once-only durable recovery signal.
-    SessionUnrecoverable {
-        /// Payload for this outcome.
-        result: SessionUnrecoverableResult,
-    },
-    /// The Message names a Session this identity doesn't have and carries no handshake. No
-    /// effects are produced.
+    /// The Message names a Session this identity doesn't have and carries no handshake, such as
+    /// one it lost. No effects are produced.
     UnknownSession,
     /// The first Message names a Session this identity deleted, so nothing was created. No
     /// effects are produced.
@@ -359,6 +314,10 @@ pub enum InboundMessageOutcome {
 /// The host commits the Message, acknowledgment, and state changes in one transaction. When the
 /// changes carry an operation, the host finalizes it before showing the plaintext. Plaintext is
 /// host-owned secret bytes; clear discarded copies promptly.
+///
+/// A sender's recovery resends a Message under its original MessageID with new bytes, so show one
+/// Message per sender and MessageID, and check before notifying, including in a notification
+/// extension. When one is already shown, still commit the changes and send the acknowledgment.
 #[derive(uniffi::Record)]
 pub struct InboundMessageResult {
     /// The Session the Message arrived on.
@@ -423,23 +382,6 @@ pub struct BlockedInboundMessageResult {
     pub changes: StateChanges,
 }
 
-/// A terminal Session and the recovery work required after durable commit.
-///
-/// An event accompanies the first durable observation. Persist it with the state changes so
-/// restarts can resume recovery without reporting it twice. Only a fresh handshake, which gets its
-/// own SessionID, replaces the Session; this result never resets it.
-#[derive(uniffi::Record)]
-pub struct SessionUnrecoverableResult {
-    /// Session to replace through a fresh handshake.
-    pub session_id: SessionId,
-    /// Typed terminal reason.
-    pub reason: SessionUnrecoverableReason,
-    /// Once-only recovery signal to persist atomically with the state changes.
-    pub event: Option<SessionEvent>,
-    /// State changes that record delivery of the recovery signal.
-    pub changes: StateChanges,
-}
-
 /// An authenticated acknowledgment and the state it advanced.
 #[derive(uniffi::Record)]
 pub struct AcknowledgmentResult {
@@ -476,7 +418,7 @@ pub fn protocol_hardening_limits() -> ProtocolHardeningLimits {
 impl Messaging {
     /// Returns all pending acknowledgments for a Session.
     ///
-    /// Load the Session's pending-acknowledgment blob from the committed host store. This query does not change retry state.
+    /// Load the Session's pending-acknowledgment blob from the committed host store.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if the SessionID isn't canonical or the snapshot exceeds its
@@ -496,34 +438,6 @@ impl Messaging {
             .into_iter()
             .map(PendingAcknowledgment::from_core)
             .collect())
-    }
-
-    /// Returns retry instructions whose retry window elapsed.
-    ///
-    /// Commit the returned changes with the host retry work. Preserve each Message's originally supplied Transport Binding when submitting it again.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if the SessionID isn't canonical or the snapshot exceeds its
-    ///   bounds or repeats an address.
-    /// - [`RoostError::InternalError`] if updated retry state cannot be encoded.
-    /// - [`RoostError::ProtocolStateFault`] if pending-acknowledgment state is missing or malformed.
-    /// - [`RoostError::UnsupportedVersion`] if a stored blob has an unsupported version.
-    pub fn retry_instructions(
-        &self,
-        snapshot: Vec<StateEntry>,
-        session_id: SessionId,
-        now_millis: u64,
-        retry_window_millis: u64,
-    ) -> Result<RetryInstructionResult, RoostError> {
-        let snapshot = snapshot_input_from_entries(snapshot)?;
-        Ok(RetryInstructionResult::from_core(
-            self.inner.protocol_engine().retry_instructions(
-                &snapshot,
-                session_id.to_core()?,
-                time_from_millis(now_millis, "now_millis")?,
-                Duration::from_millis(retry_window_millis),
-            )?,
-        ))
     }
 }
 
@@ -621,9 +535,12 @@ impl Contacts {
     /// Commit the changes before resuming local delivery. Existing Sessions keep working, and the
     /// next Message carries this identity's current Inbox Grant over them. The contact may have
     /// rotated its own inbox during the block, so the first send after an unblock ends with
-    /// `NeedsPreKeyBundle`: fetch the contact's bundle, and Roost starts a new Session only when
-    /// its Discovery Key is newer. Unblocking a stranger blocked before they sent anything deletes
-    /// their record, since nobody asked.
+    /// `NeedsPreKeyBundle`: fetch the contact's bundle by its stored Discovery Key. When the Relay
+    /// answers that it doesn't know that key, the contact rotated: keep the draft and ask for a
+    /// fresh contact link, whose bundle starts a new Session. When the contact's own request is
+    /// still open, that Session's first Message is a Contact Request, which accepts the contact
+    /// on both sides. Unblocking a stranger blocked before they sent anything deletes their
+    /// record, since nobody asked.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
@@ -692,11 +609,6 @@ impl StateChanges {
                 .map(StateUpdate::from_core)
                 .collect(),
         }
-    }
-
-    // Conditions come from each update, for operations that read only what they write.
-    pub(crate) fn from_updates(updates: Vec<CoreProtocolStateUpdate>) -> Self {
-        Self::from_core(CoreStateChanges::from(updates))
     }
 }
 
@@ -912,31 +824,6 @@ impl PendingAcknowledgment {
             message_id: MessageId::from_core(value.message_id),
             message: Message::from_core(value.message),
             first_sent_at_millis: value.first_sent_at_millis,
-            last_retried_at_millis: value.last_retried_at_millis,
-        }
-    }
-}
-
-impl RetryInstruction {
-    fn from_core(value: roost_core::RetryInstruction) -> Self {
-        Self {
-            message_id: MessageId::from_core(value.message_id),
-            message: Message::from_core(value.message),
-            first_sent_at_millis: value.first_sent_at_millis,
-            last_retried_at_millis: value.last_retried_at_millis,
-        }
-    }
-}
-
-impl RetryInstructionResult {
-    fn from_core(value: roost_core::RetryInstructionResult) -> Self {
-        Self {
-            instructions: value
-                .instructions
-                .into_iter()
-                .map(RetryInstruction::from_core)
-                .collect(),
-            changes: StateChanges::from_updates(value.state_updates),
         }
     }
 }
@@ -1000,11 +887,6 @@ impl InboundMessageOutcome {
                 },
             },
             roost_core::InboundMessageOutcome::Duplicate => Self::Duplicate,
-            roost_core::InboundMessageOutcome::SessionUnrecoverable(result) => {
-                Self::SessionUnrecoverable {
-                    result: SessionUnrecoverableResult::from_core(*result),
-                }
-            }
             roost_core::InboundMessageOutcome::UnknownSession => Self::UnknownSession,
             roost_core::InboundMessageOutcome::DeletedSession => Self::DeletedSession,
             roost_core::InboundMessageOutcome::AcknowledgmentMatched(result) => {
@@ -1021,17 +903,6 @@ impl InboundMessageOutcome {
     }
 }
 
-impl SessionUnrecoverableResult {
-    fn from_core(result: roost_core::SessionUnrecoverableResult) -> Self {
-        Self {
-            session_id: SessionId::from_core(result.session_id),
-            reason: SessionUnrecoverableReason::from_core(result.reason),
-            event: result.event.map(SessionEvent::from_core),
-            changes: StateChanges::from_core(result.changes),
-        }
-    }
-}
-
 impl AcknowledgmentResult {
     fn from_core(result: roost_core::AcknowledgmentResult) -> Self {
         Self {
@@ -1041,27 +912,6 @@ impl AcknowledgmentResult {
             acknowledged_message_id: MessageId::from_core(result.acknowledged_message_id),
             sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
             changes: StateChanges::from_core(result.changes),
-        }
-    }
-}
-
-impl SessionEvent {
-    fn from_core(value: roost_core::SessionEvent) -> Self {
-        match value {
-            roost_core::SessionEvent::Unrecoverable { session_id, reason } => Self {
-                session_id: SessionId::from_core(session_id),
-                reason: SessionUnrecoverableReason::from_core(reason),
-            },
-        }
-    }
-}
-
-impl SessionUnrecoverableReason {
-    fn from_core(value: roost_core::SessionUnrecoverableReason) -> Self {
-        match value {
-            roost_core::SessionUnrecoverableReason::SkippedKeyLimitExceeded => {
-                Self::SkippedKeyLimitExceeded
-            }
         }
     }
 }

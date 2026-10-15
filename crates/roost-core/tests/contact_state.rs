@@ -107,7 +107,7 @@ fn a_contact_record_under_another_identitys_address_is_a_fault() {
     assert!(matches!(
         alice.store.protocol_engine().decode_contact(
             &contact_address(bob.identity_key()),
-            &ProtocolStateBlob::from_bytes(vec![1, 0, 0xaa])
+            &ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa])
         ),
         Err(ProtocolStateError::BlobDecode { .. })
     ));
@@ -284,23 +284,6 @@ fn a_blocked_contact_refuses_outgoing_messages() {
         alice.encrypt(outgoing, Intent::Message),
         Err(DeviceError::Operation(
             MessageOperationError::ProtocolState(ProtocolStateError::BlockedContact)
-        ))
-    ));
-}
-
-#[test]
-fn an_accepted_contact_without_a_session_needs_a_handshake() {
-    let relay = Relay::new();
-    let (mut alice, bob) = befriended(&relay);
-    alice
-        .host
-        .remove(&peer_sessions_address(bob.identity_key()));
-    let outgoing = alice.outgoing(&bob, b"never sent");
-
-    assert!(matches!(
-        alice.encrypt(outgoing, Intent::Message),
-        Err(DeviceError::Operation(
-            MessageOperationError::ProtocolState(ProtocolStateError::NoSession)
         ))
     ));
 }

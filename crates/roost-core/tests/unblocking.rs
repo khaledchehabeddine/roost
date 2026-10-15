@@ -89,3 +89,94 @@ fn a_contact_that_rotated_during_the_block_gets_a_new_session() {
     assert_eq!(contact.trust_state, ContactTrustState::Unverified);
     assert!(!contact.blocked);
 }
+
+#[test]
+fn a_bundle_from_a_fresh_link_with_a_newer_discovery_key_starts_a_new_session() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let kept = alice.send(&bob, b"before the rotation").session_id;
+    // Bob rotates without telling Alice, and a fresh contact link gives her his new bundle.
+    let rotation = bob.rotate_inbox();
+    let mut outgoing = alice.outgoing(&bob, b"found you again");
+    outgoing.prekey_bundle = Some(bob.bundle());
+
+    let sent = alice.send_with(outgoing, Intent::Message);
+
+    assert_ne!(sent.session_id, kept);
+    assert!(matches!(
+        Route::of(&sent.destination),
+        Route::FirstMessage { discovery_key, .. }
+            if discovery_key == *rotation.discovery_key.public_key.as_bytes()
+    ));
+    assert_eq!(
+        accepted(bob.receive(&sent.message)).plaintext.as_slice(),
+        b"found you again"
+    );
+}
+
+// Alice asks Bob, Bob blocks her before answering, and Alice rotates her inbox during the block.
+fn requester_rotated_during_the_block(relay: &Relay) -> (Device, Device) {
+    let (alice, mut bob) = support::device::requested(relay);
+    bob.block(alice.identity_key());
+    alice.rotate_inbox();
+    bob.unblock(alice.identity_key());
+    (alice, bob)
+}
+
+#[test]
+fn accepting_a_requester_that_rotated_during_the_block_sends_a_crossing_request() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requester_rotated_during_the_block(&relay);
+    let mut outgoing = bob.outgoing(&alice, b"sorry, welcome");
+    outgoing.prekey_bundle = Some(alice.bundle());
+
+    let sent = bob.send_with(outgoing, Intent::Acceptance);
+
+    assert_eq!(sent.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert!(matches!(
+        Route::of(&sent.destination),
+        Route::FirstMessage { .. }
+    ));
+    assert_eq!(
+        bob.contact(&alice).unwrap().trust_state,
+        ContactTrustState::Unverified
+    );
+    let acknowledgment = accepted(alice.receive(&sent.message))
+        .acknowledgment
+        .unwrap();
+    assert_eq!(
+        alice.contact(&bob).unwrap().trust_state,
+        ContactTrustState::Unverified
+    );
+    assert!(matches!(
+        bob.receive(&acknowledgment),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    let reply = alice.send(&bob, b"thanks");
+    assert_eq!(reply.session_id, sent.session_id);
+    assert_eq!(
+        accepted(bob.receive(&reply.message)).plaintext.as_slice(),
+        b"thanks"
+    );
+}
+
+#[test]
+fn a_message_to_a_requester_that_rotated_during_the_block_accepts_it() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requester_rotated_during_the_block(&relay);
+    let mut outgoing = bob.outgoing(&alice, b"still there?");
+    outgoing.prekey_bundle = Some(alice.bundle());
+
+    let sent = bob.send_with(outgoing, Intent::Message);
+
+    assert_eq!(sent.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(
+        bob.contact(&alice).unwrap().trust_state,
+        ContactTrustState::Unverified
+    );
+    assert!(
+        accepted(alice.receive(&sent.message))
+            .acknowledgment
+            .is_some()
+    );
+}
