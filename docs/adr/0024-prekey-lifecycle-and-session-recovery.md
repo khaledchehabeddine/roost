@@ -1,6 +1,6 @@
 # Prekey Lifecycle and Session Recovery
 
-Prekeys live in SecureStorage under KeyStore, which already manages secret keys, rotating the Discovery Key destroys all prekeys from earlier Epochs, and a Dead Session is never repaired, so only a new X3DH exchange with a fresh prekey bundle replaces it. Signed prekeys rotate on a schedule, and KeyStore keeps a few old ones as long as the Relay may hold a first Message, but uses one only after the app proves the Relay admitted that exact first Message against it, since the Relay admits only first Messages that name its current signed prekey. The proof guards what the app passes to Roost, not against the Relay itself, because Roost relies on the Relay for admission and availability but never for confidentiality or authenticity.
+Prekeys live in SecureStorage under KeyStore, which already manages secret keys, rotating the Discovery Key destroys all prekeys from earlier Epochs, and a Session is never repaired, so recovery replaces one only with a new X3DH exchange from a fresh prekey bundle (ADR 0050). Signed prekeys rotate on a schedule, and KeyStore keeps a few old ones as long as the Relay may hold a first Message, but uses one only after the app proves the Relay admitted that exact first Message against it, since the Relay admits only first Messages that name its current signed prekey. The proof guards what the app passes to Roost, not against the Relay itself, because Roost relies on the Relay for admission and availability but never for confidentiality or authenticity.
 
 ## Alternatives
 

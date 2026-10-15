@@ -4,5 +4,5 @@ Two peers can hold several Sessions with each other, such as when both start one
 
 ## Alternatives
 
-- The lower SessionID always wins: a new Session replacing a Dead Session would lose half the time.
+- The lower SessionID always wins: a Session started by recovery would lose half the time.
 - Never send on the losing Session again: if the peers ever disagreed on which one lost, they would stay split instead of settling.
