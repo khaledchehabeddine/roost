@@ -31,6 +31,8 @@
   - Avoid: inbox generation, inbox counter
 - **Event**: A record of a state change that stays provisional until the app commits the matching updates.
   - Avoid: notification, callback
+- **Grant Update**: A Message that carries only the sender's current Inbox Grant, which the app sends so a contact can keep delivering after an inbox rotation.
+  - Avoid: control message, authorization update
 - **Identity**: A participant on one Device, identified by a permanent Identity Key and a rotatable Discovery Key.
   - Avoid: user, account, profile
 - **Identity Backup**: A passphrase-encrypted copy of an Identity's keys that restores the Identity onto a new Device.
