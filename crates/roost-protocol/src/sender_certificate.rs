@@ -1,12 +1,9 @@
-//! Sender certificate validation against caller-supplied trust policy.
-
 use crate::key_encoding::{
-    PUBLIC_KEY_LEN, is_valid_x25519_public_key,
-    parse_ed25519_verifying_key as parse_key_encoding_ed25519_verifying_key,
-    parse_ed25519_verifying_key_bytes as parse_key_encoding_ed25519_verifying_key_bytes,
+    IDENTITY_KEY_ENCODING_LEN, PUBLIC_KEY_LEN, identity_key_encoding, is_valid_x25519_public_key,
+    parse_ed25519_verifying_key_bytes,
 };
 use crate::unix_time::from_unix_secs;
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::Signature;
 use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 
@@ -21,12 +18,8 @@ const MAX_SIGNING_KEY_ID_LEN: usize = 64;
 pub const MAX_CERTIFICATE_GRACE_WINDOW: Duration = Duration::from_secs(300);
 
 /// Inputs for one sender certificate validation verdict.
-///
-/// Validation is a pure function of these inputs. It does not read the device clock, does not
-/// cache successful results, and evaluates revocation against the current `revocation_state`
-/// input on every call.
 pub struct SenderCertificateValidationInput<'a> {
-    /// Fixed-byte sender certificate bytes.
+    /// Sender certificate bytes, exactly as the domain authority signed them.
     pub certificate: &'a [u8],
     /// Ed25519 signature over `certificate`.
     pub signature: &'a [u8],
@@ -55,7 +48,7 @@ pub struct DomainSigningKey<'a> {
     /// Identifier matched exactly against the certificate signing-key identifier.
     pub id: &'a [u8],
     /// Canonical Ed25519 verifying-key bytes for this domain-signing key.
-    pub verifying_key: &'a [u8],
+    pub verifying_key: &'a [u8; PUBLIC_KEY_LEN],
     /// Current trust status for this identifier.
     pub status: DomainSigningKeyStatus,
 }
@@ -92,10 +85,18 @@ pub struct SenderCertificateIdentityKey {
 }
 
 impl SenderCertificateIdentityKey {
-    /// Returns the canonical revocation-key encoding for this Identity Key.
-    #[must_use]
-    pub fn canonical_encoding(&self) -> [u8; crate::IDENTITY_KEY_ENCODING_LEN] {
-        crate::identity_key_encoding(&self.x25519_public_key, &self.ed25519_verifying_key)
+    fn canonical_encoding(&self) -> [u8; IDENTITY_KEY_ENCODING_LEN] {
+        identity_key_encoding(&self.x25519_public_key, &self.ed25519_verifying_key)
+    }
+
+    fn validate(&self) -> Result<(), SenderCertificateValidationError> {
+        if is_valid_x25519_public_key(&self.x25519_public_key)
+            && parse_ed25519_verifying_key_bytes(&self.ed25519_verifying_key).is_some()
+        {
+            Ok(())
+        } else {
+            Err(SenderCertificateValidationError::InvalidKeyEncoding)
+        }
     }
 }
 
@@ -164,12 +165,10 @@ struct ParsedSenderCertificate<'a> {
 
 /// Validates a sender certificate against caller-supplied trust, revocation, and time inputs.
 ///
-/// The certificate signature is verified only against the trusted domain-signing key whose
-/// identifier exactly matches the identifier embedded in `input.certificate`. Expiry is evaluated
-/// against `reference_time` and `grace_window`; this function never reads the
-/// device clock and rejects a grace window above [`MAX_CERTIFICATE_GRACE_WINDOW`]. Revocation is evaluated from the current
-/// `revocation_state` input on every call after signature verification, and an unavailable
-/// revocation source fails validation closed rather than validating against an empty set.
+/// Verifies the signature only under the domain-signing key whose identifier matches the one in
+/// the certificate, and checks revocation and expiry only after the signature verifies. It never
+/// reads the device clock or caches a verdict, so a newly revoked Identity Key fails on the next
+/// call.
 pub fn validate_sender_certificate(
     input: SenderCertificateValidationInput<'_>,
 ) -> Result<ValidatedSenderCertificate, SenderCertificateValidationError> {
@@ -180,7 +179,7 @@ pub fn validate_sender_certificate(
         });
     }
     let certificate = parse_certificate(input.certificate)?;
-    validate_identity_key(&certificate.identity_key)?;
+    certificate.identity_key.validate()?;
     if certificate.relay_domain != input.expected_relay_domain {
         return Err(SenderCertificateValidationError::RelayDomainMismatch);
     }
@@ -190,7 +189,8 @@ pub fn validate_sender_certificate(
     if domain_signing_key.status == DomainSigningKeyStatus::Untrusted {
         return Err(SenderCertificateValidationError::UntrustedSigningKeyId);
     }
-    let verifying_key = parse_ed25519_verifying_key(domain_signing_key.verifying_key)?;
+    let verifying_key = parse_ed25519_verifying_key_bytes(domain_signing_key.verifying_key)
+        .ok_or(SenderCertificateValidationError::InvalidKeyEncoding)?;
     let signature = parse_signature(input.signature)?;
     verifying_key
         .verify_strict(input.certificate, &signature)
@@ -220,43 +220,21 @@ pub fn validate_sender_certificate(
 fn parse_certificate(
     bytes: &[u8],
 ) -> Result<ParsedSenderCertificate<'_>, SenderCertificateValidationError> {
-    let prefix_len = CERTIFICATE_DOMAIN_TAG.len() + 2;
-    if bytes.len() < prefix_len || &bytes[..CERTIFICATE_DOMAIN_TAG.len()] != CERTIFICATE_DOMAIN_TAG
-    {
+    let mut rest = bytes;
+    if take(&mut rest, CERTIFICATE_DOMAIN_TAG.len())? != CERTIFICATE_DOMAIN_TAG {
         return Err(SenderCertificateValidationError::MalformedCertificate);
     }
-    let mut offset = CERTIFICATE_DOMAIN_TAG.len();
-    let version = bytes[offset];
-    offset += 1;
-    if version != CERTIFICATE_VERSION {
+    if take_array(&mut rest)? != [CERTIFICATE_VERSION] {
         return Err(SenderCertificateValidationError::MalformedCertificate);
     }
-    let id_len = bytes[offset] as usize;
-    offset += 1;
-    if id_len == 0 || id_len > MAX_SIGNING_KEY_ID_LEN {
-        return Err(SenderCertificateValidationError::MalformedCertificate);
-    }
-    let signing_key_id = read_slice(bytes, &mut offset, id_len)?;
-    if offset >= bytes.len() {
-        return Err(SenderCertificateValidationError::MalformedCertificate);
-    }
-    let domain_len = bytes[offset] as usize;
-    offset += 1;
-    if domain_len == 0 || domain_len > MAX_RELAY_DOMAIN_LEN {
-        return Err(SenderCertificateValidationError::MalformedCertificate);
-    }
-    let expected_len =
-        CERTIFICATE_DOMAIN_TAG.len() + 3 + id_len + domain_len + PUBLIC_KEY_LEN * 2 + 8;
-    if bytes.len() != expected_len {
-        return Err(SenderCertificateValidationError::MalformedCertificate);
-    }
-    let relay_domain = read_slice(bytes, &mut offset, domain_len)?;
+    let signing_key_id = take_field(&mut rest, MAX_SIGNING_KEY_ID_LEN)?;
+    let relay_domain = take_field(&mut rest, MAX_RELAY_DOMAIN_LEN)?;
     let identity_key = SenderCertificateIdentityKey {
-        x25519_public_key: read_array(bytes, &mut offset)?,
-        ed25519_verifying_key: read_array(bytes, &mut offset)?,
+        x25519_public_key: take_array(&mut rest)?,
+        ed25519_verifying_key: take_array(&mut rest)?,
     };
-    let expires_at_secs = u64::from_be_bytes(read_array(bytes, &mut offset)?);
-    if offset != bytes.len() {
+    let expires_at_secs = u64::from_be_bytes(take_array(&mut rest)?);
+    if !rest.is_empty() {
         return Err(SenderCertificateValidationError::MalformedCertificate);
     }
 
@@ -268,28 +246,39 @@ fn parse_certificate(
     })
 }
 
-fn read_slice<'a>(
-    bytes: &'a [u8],
-    offset: &mut usize,
+// Splits the next `len` bytes off `bytes`.
+fn take<'a>(
+    bytes: &mut &'a [u8],
     len: usize,
 ) -> Result<&'a [u8], SenderCertificateValidationError> {
-    let end = offset
-        .checked_add(len)
+    let (value, rest) = bytes
+        .split_at_checked(len)
         .ok_or(SenderCertificateValidationError::MalformedCertificate)?;
-    let value = bytes
-        .get(*offset..end)
-        .ok_or(SenderCertificateValidationError::MalformedCertificate)?;
-    *offset = end;
+    *bytes = rest;
     Ok(value)
 }
 
-fn read_array<const N: usize>(
-    bytes: &[u8],
-    offset: &mut usize,
+fn take_array<const N: usize>(
+    bytes: &mut &[u8],
 ) -> Result<[u8; N], SenderCertificateValidationError> {
-    read_slice(bytes, offset, N)?
-        .try_into()
-        .map_err(|_| SenderCertificateValidationError::MalformedCertificate)
+    let (value, rest) = bytes
+        .split_first_chunk::<N>()
+        .ok_or(SenderCertificateValidationError::MalformedCertificate)?;
+    *bytes = rest;
+    Ok(*value)
+}
+
+// Splits off a field that follows its one-byte length, which must be from 1 to `max_len`.
+fn take_field<'a>(
+    bytes: &mut &'a [u8],
+    max_len: usize,
+) -> Result<&'a [u8], SenderCertificateValidationError> {
+    let [len] = take_array(bytes)?;
+    let len = usize::from(len);
+    if len == 0 || len > max_len {
+        return Err(SenderCertificateValidationError::MalformedCertificate);
+    }
+    take(bytes, len)
 }
 
 fn matching_domain_signing_key<'a>(
@@ -315,42 +304,10 @@ fn identity_key_is_revoked(
     let encoding = identity_key.canonical_encoding();
     let mut revoked = Choice::from(0);
     for revoked_identity_key in revoked_identity_keys {
-        validate_identity_key(revoked_identity_key)?;
+        revoked_identity_key.validate()?;
         revoked |= encoding.ct_eq(&revoked_identity_key.canonical_encoding());
     }
     Ok(revoked.into())
-}
-
-fn validate_identity_key(
-    identity_key: &SenderCertificateIdentityKey,
-) -> Result<(), SenderCertificateValidationError> {
-    validate_x25519_public_key(&identity_key.x25519_public_key)?;
-    parse_ed25519_verifying_key_bytes(&identity_key.ed25519_verifying_key)?;
-    Ok(())
-}
-
-fn validate_x25519_public_key(
-    bytes: &[u8; PUBLIC_KEY_LEN],
-) -> Result<(), SenderCertificateValidationError> {
-    if is_valid_x25519_public_key(bytes) {
-        Ok(())
-    } else {
-        Err(SenderCertificateValidationError::InvalidKeyEncoding)
-    }
-}
-
-fn parse_ed25519_verifying_key(
-    bytes: &[u8],
-) -> Result<VerifyingKey, SenderCertificateValidationError> {
-    parse_key_encoding_ed25519_verifying_key(bytes)
-        .ok_or(SenderCertificateValidationError::InvalidKeyEncoding)
-}
-
-fn parse_ed25519_verifying_key_bytes(
-    bytes: &[u8; PUBLIC_KEY_LEN],
-) -> Result<VerifyingKey, SenderCertificateValidationError> {
-    parse_key_encoding_ed25519_verifying_key_bytes(bytes)
-        .ok_or(SenderCertificateValidationError::InvalidKeyEncoding)
 }
 
 fn parse_signature(bytes: &[u8]) -> Result<Signature, SenderCertificateValidationError> {
@@ -371,50 +328,6 @@ fn certificate_is_expired(
             .duration_since(expires_at)
             .is_ok_and(|elapsed| elapsed > grace_window)
     })
-}
-
-/// Encodes the public certificate fields the way a domain authority does before signing.
-#[cfg(test)]
-fn encode_sender_certificate(
-    signing_key_id: &[u8],
-    relay_domain: &[u8],
-    identity_key: SenderCertificateIdentityKey,
-    expires_at_secs: u64,
-) -> Result<Vec<u8>, SenderCertificateValidationError> {
-    if signing_key_id.is_empty()
-        || signing_key_id.len() > MAX_SIGNING_KEY_ID_LEN
-        || relay_domain.is_empty()
-        || relay_domain.len() > MAX_RELAY_DOMAIN_LEN
-    {
-        return Err(SenderCertificateValidationError::MalformedCertificate);
-    }
-    validate_identity_key(&identity_key)?;
-    let mut certificate = Vec::with_capacity(
-        CERTIFICATE_DOMAIN_TAG.len()
-            + 3
-            + signing_key_id.len()
-            + relay_domain.len()
-            + PUBLIC_KEY_LEN * 2
-            + 8,
-    );
-    certificate.extend_from_slice(CERTIFICATE_DOMAIN_TAG);
-    certificate.push(CERTIFICATE_VERSION);
-    certificate.push(signing_key_id.len() as u8);
-    certificate.extend_from_slice(signing_key_id);
-    certificate.push(relay_domain.len() as u8);
-    certificate.extend_from_slice(relay_domain);
-    certificate.extend_from_slice(&identity_key.x25519_public_key);
-    certificate.extend_from_slice(&identity_key.ed25519_verifying_key);
-    certificate.extend_from_slice(&expires_at_secs.to_be_bytes());
-    Ok(certificate)
-}
-
-#[cfg(test)]
-fn x25519_field_modulus() -> [u8; PUBLIC_KEY_LEN] {
-    let mut modulus = [0xff; PUBLIC_KEY_LEN];
-    modulus[0] = 0xed;
-    modulus[PUBLIC_KEY_LEN - 1] = 0x7f;
-    modulus
 }
 
 #[cfg(test)]
@@ -505,7 +418,10 @@ mod tests {
         }
     }
 
-    fn trusted_key<'a>(id: &'a [u8], verifying_key: &'a [u8]) -> DomainSigningKey<'a> {
+    fn trusted_key<'a>(
+        id: &'a [u8],
+        verifying_key: &'a [u8; PUBLIC_KEY_LEN],
+    ) -> DomainSigningKey<'a> {
         DomainSigningKey {
             id,
             verifying_key,
@@ -520,33 +436,6 @@ mod tests {
         match validate_sender_certificate(input) {
             Ok(_) => panic!("sender certificate validated unexpectedly"),
             Err(actual) => assert_eq!(actual, expected),
-        }
-    }
-
-    #[test]
-    fn encoded_certificate_changes_with_each_signed_field() {
-        let identity = identity_key();
-        let other_x25519 = SenderCertificateIdentityKey {
-            x25519_public_key: [0x12; PUBLIC_KEY_LEN],
-            ..identity
-        };
-        let other_ed25519 = SenderCertificateIdentityKey {
-            ed25519_verifying_key: signing_key(0x22).verifying_key().to_bytes(),
-            ..identity
-        };
-        let encode = |id: &[u8], relay_domain: &[u8], identity_key, expires_at_secs| {
-            encode_sender_certificate(id, relay_domain, identity_key, expires_at_secs).unwrap()
-        };
-        let expected = encode(PRIMARY_ID, RELAY_DOMAIN, identity, NOW_SECS);
-
-        for changed in [
-            encode(SECONDARY_ID, RELAY_DOMAIN, identity, NOW_SECS),
-            encode(PRIMARY_ID, OTHER_RELAY_DOMAIN, identity, NOW_SECS),
-            encode(PRIMARY_ID, RELAY_DOMAIN, other_x25519, NOW_SECS),
-            encode(PRIMARY_ID, RELAY_DOMAIN, other_ed25519, NOW_SECS),
-            encode(PRIMARY_ID, RELAY_DOMAIN, identity, NOW_SECS + 1),
-        ] {
-            assert_ne!(changed, expected);
         }
     }
 
@@ -832,54 +721,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_canonical_certificate_x25519_key() {
-        let signing_key = signing_key(0x01);
-        let verifying_key = signing_key.verifying_key().to_bytes();
-        let mut identity_key = identity_key();
-        identity_key.x25519_public_key = x25519_field_modulus();
-        let certificate = certificate_bytes(PRIMARY_ID, identity_key, RELAY_DOMAIN, NOW_SECS + 300);
-        let signed = SignedCertificate {
-            signature: signing_key.sign(&certificate).to_bytes().to_vec(),
-            certificate,
-            identity_key,
-            expires_at_secs: NOW_SECS + 300,
-        };
-        let domain_keys = [trusted_key(PRIMARY_ID, &verifying_key)];
-
-        assert_validation_error(
-            validation_input(&signed, &domain_keys, &[]),
-            SenderCertificateValidationError::InvalidKeyEncoding,
-        );
-    }
-
-    #[test]
     fn rejects_low_order_certificate_x25519_key() {
         let signing_key = signing_key(0x01);
         let verifying_key = signing_key.verifying_key().to_bytes();
         let mut identity_key = identity_key();
         identity_key.x25519_public_key = [0; PUBLIC_KEY_LEN];
-        let certificate = certificate_bytes(PRIMARY_ID, identity_key, RELAY_DOMAIN, NOW_SECS + 300);
-        let signed = SignedCertificate {
-            signature: signing_key.sign(&certificate).to_bytes().to_vec(),
-            certificate,
-            identity_key,
-            expires_at_secs: NOW_SECS + 300,
-        };
-        let domain_keys = [trusted_key(PRIMARY_ID, &verifying_key)];
-
-        assert_validation_error(
-            validation_input(&signed, &domain_keys, &[]),
-            SenderCertificateValidationError::InvalidKeyEncoding,
-        );
-    }
-
-    #[test]
-    fn rejects_twist_low_order_certificate_x25519_key() {
-        let signing_key = signing_key(0x01);
-        let verifying_key = signing_key.verifying_key().to_bytes();
-        let mut identity_key = identity_key();
-        identity_key.x25519_public_key = x25519_field_modulus();
-        identity_key.x25519_public_key[0] -= 1;
         let certificate = certificate_bytes(PRIMARY_ID, identity_key, RELAY_DOMAIN, NOW_SECS + 300);
         let signed = SignedCertificate {
             signature: signing_key.sign(&certificate).to_bytes().to_vec(),

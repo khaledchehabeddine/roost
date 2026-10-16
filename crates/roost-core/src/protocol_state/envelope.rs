@@ -201,7 +201,7 @@ pub(super) fn open_message(
             "message frame plaintext carries an invalid public key",
         ));
     }
-    let payload_kind = PayloadKind::from_tag(wire.payload_kind).map_err(|_| {
+    let payload_kind = PayloadKind::from_tag(wire.payload_kind).ok_or_else(|| {
         invalid(&format!(
             "unsupported message payload kind: {}",
             wire.payload_kind

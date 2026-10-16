@@ -1,8 +1,9 @@
-//! Shared encodings and stateless authenticity verification for Roost consumers.
+//! Wire formats, signature framing, and sender certificate validation shared by the Roost crates.
 //!
-//! This is an implementation dependency of Client. It owns certificates, canonical key validation,
-//! Message transcript framing, and padding.
-//! It has no device state, secret-key lifecycle, storage, session engine, or network I/O.
+//! Handles Session and Message identifiers, payload kinds, the Message Transcript, Sealed Payload
+//! Padding, public key validation and the Identity Key encoding, context-framed Ed25519
+//! verification, sender certificate validation, and Unix time conversions. It holds no state,
+//! secret keys, storage, or network I/O.
 
 mod key_encoding;
 mod message;
@@ -15,9 +16,9 @@ pub use key_encoding::{
     parse_ed25519_verifying_key_bytes,
 };
 pub use message::{
-    MESSAGE_TRANSCRIPT_CONTEXT, MessageEncodingError, MessageId, MessageTranscriptInput,
-    PayloadKind, SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN, SealedPayloadError,
-    SessionId, message_transcript, pad_sealed_payload, unpad_sealed_payload,
+    MESSAGE_TRANSCRIPT_CONTEXT, MessageId, MessageTranscriptError, MessageTranscriptInput,
+    PayloadKind, SealedPayloadError, SessionId, message_transcript, pad_sealed_payload,
+    unpad_sealed_payload,
 };
 pub use sender_certificate::{
     DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, RevocationState,

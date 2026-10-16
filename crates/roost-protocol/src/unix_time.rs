@@ -1,5 +1,3 @@
-//! Conversions between [`SystemTime`] and the integer Unix timestamps used in encodings.
-
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Returns whole seconds since the Unix epoch, or `None` before the epoch.

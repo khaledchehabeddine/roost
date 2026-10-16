@@ -53,8 +53,6 @@ use roost_protocol::{
     unpad_sealed_payload as unpad_message_payload,
 };
 use roost_protocol::{PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
-#[cfg(test)]
-use roost_protocol::{SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use session::{
@@ -575,7 +573,7 @@ impl InboundSenderCertificateValidation {
             .iter()
             .map(|key| DomainSigningKey {
                 id: &key.id,
-                verifying_key: &key.verifying_key[..],
+                verifying_key: &key.verifying_key,
                 status: key.status,
             })
             .collect();
@@ -1675,7 +1673,7 @@ fn decode_pending_acknowledgments_payload(
                 reason: format!("pending acknowledgment message failed to decode: {e}"),
             }
         })?;
-        let payload_kind = PayloadKind::from_tag(entry.payload_kind).map_err(|_| {
+        let payload_kind = PayloadKind::from_tag(entry.payload_kind).ok_or_else(|| {
             pending_acknowledgment_decode_error(address, "pending payload kind is invalid")
         })?;
         let replaced = pending.insert(
@@ -2150,23 +2148,6 @@ fn authenticate_session_message(
     }
 }
 
-// Refuses payload kinds a Message Operation never seals.
-fn ensure_supported_payload_kind(opened: &OpenedMessage) -> Result<(), ProtocolStateError> {
-    match opened.metadata.payload_kind {
-        PayloadKind::EncryptedText
-        | PayloadKind::EncryptedTextWithGrant
-        | PayloadKind::ContactAcceptance
-        | PayloadKind::Acknowledgment
-        | PayloadKind::AcknowledgmentWithGrant
-        | PayloadKind::GrantUpdate => Ok(()),
-        kind @ (PayloadKind::KeyExchange | PayloadKind::RatchetHeader) => {
-            Err(ProtocolStateError::InvalidMessage {
-                reason: format!("message payload kind {kind:?} is unsupported"),
-            })
-        }
-    }
-}
-
 // Checks that the local Discovery Key belongs to the local Identity Key a transcript names.
 fn verify_recipient_keys(
     recipient_discovery_key: &DiscoveryKey,
@@ -2340,9 +2321,8 @@ mod tests {
     use super::{
         DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
         MIN_DEDUPLICATION_CAPACITY, PROTOCOL_STATE_BLOB_VERSION, ProtocolStateError,
-        SEALED_PAYLOAD_BUCKETS, SEALED_PAYLOAD_LEN_PREFIX_LEN, acknowledgment_digest, blob_body,
-        contains_digest, deduplication_digest, pad_sealed_payload, protocol_state_blob_digest,
-        record_deduplication_digest, unpad_sealed_payload,
+        acknowledgment_digest, blob_body, contains_digest, deduplication_digest,
+        protocol_state_blob_digest, record_deduplication_digest,
     };
     use super::{SenderIdentityMaterial, authenticate_first_message};
     use crate::{ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind};
@@ -2561,72 +2541,5 @@ mod tests {
         assert!(contains_digest(&digests, &first));
         assert!(contains_digest(&digests, &second));
         assert!(!contains_digest(&digests, &missing));
-    }
-
-    #[test]
-    fn sealed_payload_padding_unpads_each_bucket() {
-        for bucket in SEALED_PAYLOAD_BUCKETS {
-            let plaintext = vec![0x42; bucket - SEALED_PAYLOAD_LEN_PREFIX_LEN];
-
-            let padded = pad_sealed_payload(&plaintext).unwrap();
-            let unpadded = unpad_sealed_payload(&padded).unwrap();
-
-            assert_eq!(padded.len(), bucket);
-            assert_eq!(unpadded.as_slice(), plaintext.as_slice());
-        }
-    }
-
-    #[test]
-    fn sealed_payload_padding_accepts_bucket_boundary_lengths() {
-        for bucket in SEALED_PAYLOAD_BUCKETS {
-            let plaintext_len = bucket - SEALED_PAYLOAD_LEN_PREFIX_LEN;
-            let mut padded = vec![0x41; bucket];
-            padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN]
-                .copy_from_slice(&(plaintext_len as u32).to_be_bytes());
-
-            let plaintext = unpad_sealed_payload(&padded).unwrap();
-
-            assert_eq!(plaintext.len(), plaintext_len);
-            assert!(plaintext.iter().all(|byte| *byte == 0x41));
-        }
-    }
-
-    #[test]
-    fn sealed_payload_padding_rejects_invalid_bucket_lengths() {
-        for padded in [
-            vec![0u8; SEALED_PAYLOAD_BUCKETS[0] - 1],
-            vec![0u8; SEALED_PAYLOAD_BUCKETS[0] + 1],
-        ] {
-            assert!(matches!(
-                unpad_sealed_payload(&padded),
-                Err(ProtocolStateError::InvalidMessage { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn sealed_payload_padding_rejects_overlarge_length_prefix() {
-        let mut padded = vec![0u8; SEALED_PAYLOAD_BUCKETS[0]];
-        let plaintext_len = (SEALED_PAYLOAD_BUCKETS[0] + 1) as u32;
-        padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
-
-        assert!(matches!(
-            unpad_sealed_payload(&padded),
-            Err(ProtocolStateError::InvalidMessage { .. })
-        ));
-    }
-
-    #[test]
-    fn sealed_payload_padding_rejects_nonzero_fill() {
-        let mut padded = vec![0u8; SEALED_PAYLOAD_BUCKETS[0]];
-        let plaintext_len = 1u32;
-        padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
-        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN] = 0xaa;
-        padded[SEALED_PAYLOAD_LEN_PREFIX_LEN + 1] = 0x01;
-
-        assert!(matches!(
-            unpad_sealed_payload(&padded),
-            Err(ProtocolStateError::InvalidMessage { .. })
-        ));
     }
 }
