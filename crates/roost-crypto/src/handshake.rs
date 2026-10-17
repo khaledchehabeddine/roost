@@ -18,9 +18,6 @@ use subtle::ConstantTimeEq;
 use x25519_dalek::SharedSecret;
 use zeroize::Zeroizing;
 
-// The X3DH specification's `F`: 32 0xFF bytes before the key agreement outputs, which separate
-// this derivation from XEdDSA's.
-const HKDF_INPUT_PREFIX: [u8; 32] = [0xFF; 32];
 const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:with-opk";
 const SESSION_ID_INFO: &[u8] = b"RoostSessionId-v1:";
@@ -320,27 +317,26 @@ fn validate_one_time_prekey(
     }
 }
 
-// Runs HKDF-SHA256 once over HKDF_INPUT_PREFIX || DH outputs and expands the root key and the
-// SessionID under separate labels.
+// Runs HKDF-SHA256 once over the DH outputs and expands the root key and the SessionID under
+// separate labels.
 //
-// Using no salt means the RFC 5869 zero salt. That is acceptable here because the input keying
-// material is already uniformly random and the info strings provide domain separation.
+// No salt means RFC 5869's all-zero salt, which X3DH also uses. The extract step turns the DH
+// outputs into a pseudorandom key, and the info labels keep the root key and SessionID apart.
 fn derive_root_key_and_session_id(
     discovery_key_shared_secret: &SharedSecret,
     signed_prekey_shared_secret: &SharedSecret,
     one_time_prekey_shared_secret: Option<&SharedSecret>,
 ) -> Result<(RootKey, SessionId), HandshakeError> {
-    let mut input_keying_material = Zeroizing::new([0u8; 32 * 4]);
-    input_keying_material[..32].copy_from_slice(&HKDF_INPUT_PREFIX);
-    input_keying_material[32..64].copy_from_slice(discovery_key_shared_secret.as_bytes());
-    input_keying_material[64..96].copy_from_slice(signed_prekey_shared_secret.as_bytes());
+    let mut input_keying_material = Zeroizing::new([0u8; 32 * 3]);
+    input_keying_material[..32].copy_from_slice(discovery_key_shared_secret.as_bytes());
+    input_keying_material[32..64].copy_from_slice(signed_prekey_shared_secret.as_bytes());
     let (input_keying_material, root_key_info) = match one_time_prekey_shared_secret {
         Some(secret) => {
-            input_keying_material[96..].copy_from_slice(secret.as_bytes());
+            input_keying_material[64..].copy_from_slice(secret.as_bytes());
             (&input_keying_material[..], HKDF_INFO_WITH_ONE_TIME_PREKEY)
         }
         None => (
-            &input_keying_material[..96],
+            &input_keying_material[..64],
             HKDF_INFO_WITHOUT_ONE_TIME_PREKEY,
         ),
     };
