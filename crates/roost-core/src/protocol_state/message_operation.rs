@@ -24,8 +24,8 @@ use super::{
     authenticate_session_message, contact_identity_keys_match, contains_digest,
     decode_acknowledgment_plaintext, deduplication_address, deduplication_digest,
     encode_acknowledgment_plaintext, encode_deduplication_set, encode_pending_acknowledgments,
-    ensure_supported_payload_kind, inbound_contact_identity_key, load_pending_acknowledgments,
-    load_required_session, match_state_entries, open_message, pending_acknowledgment_digest_seen,
+    inbound_contact_identity_key, load_pending_acknowledgments, load_required_session,
+    match_state_entries, open_message, pending_acknowledgment_digest_seen,
     receiving_deduplication_set, record_acknowledgment_digest, record_deduplication_digest,
     record_pending_acknowledgment, seal_proved, seal_signed, session_deletions,
     validate_contact_identity_key, validate_sender_identity, verify_recipient_keys,
@@ -1348,7 +1348,6 @@ impl Decrypting {
         };
         let discovery_key = previous.as_ref().unwrap_or(&self.local.keys.discovery_key);
         let message = open_message(&self.message, discovery_key, &self.transport_binding)?;
-        ensure_supported_payload_kind(&message)?;
         let session_id = message.metadata.session_id;
         let mut addresses = vec![session_address(session_id)];
         if message.metadata.payload_kind.is_acknowledgment() {

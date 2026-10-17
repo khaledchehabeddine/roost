@@ -79,10 +79,6 @@ pub enum PayloadKind {
     EncryptedText,
     /// Delivery or processing acknowledgment.
     Acknowledgment,
-    /// Session-establishment key exchange bytes.
-    KeyExchange,
-    /// Double Ratchet header bytes.
-    RatchetHeader,
     /// Encrypted application text that carried the sender's Inbox Grant, which Roost kept.
     EncryptedTextWithGrant,
     /// A Contact Acceptance and its encrypted application text.
@@ -167,8 +163,6 @@ impl PayloadKind {
         match value {
             roost_protocol::PayloadKind::EncryptedText => Self::EncryptedText,
             roost_protocol::PayloadKind::Acknowledgment => Self::Acknowledgment,
-            roost_protocol::PayloadKind::KeyExchange => Self::KeyExchange,
-            roost_protocol::PayloadKind::RatchetHeader => Self::RatchetHeader,
             roost_protocol::PayloadKind::EncryptedTextWithGrant => Self::EncryptedTextWithGrant,
             roost_protocol::PayloadKind::ContactAcceptance => Self::ContactAcceptance,
             roost_protocol::PayloadKind::AcknowledgmentWithGrant => Self::AcknowledgmentWithGrant,

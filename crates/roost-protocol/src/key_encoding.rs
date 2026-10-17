@@ -10,11 +10,6 @@ pub fn is_valid_x25519_public_key(bytes: &[u8; PUBLIC_KEY_LEN]) -> bool {
     is_canonical_x25519_public_key(bytes) && !is_low_order_x25519_public_key(bytes)
 }
 
-pub(crate) fn parse_ed25519_verifying_key(bytes: &[u8]) -> Option<VerifyingKey> {
-    let bytes: [u8; PUBLIC_KEY_LEN] = bytes.try_into().ok()?;
-    parse_ed25519_verifying_key_bytes(&bytes)
-}
-
 /// Parses a canonical, non-weak Ed25519 public key.
 pub fn parse_ed25519_verifying_key_bytes(bytes: &[u8; PUBLIC_KEY_LEN]) -> Option<VerifyingKey> {
     let verifying_key = VerifyingKey::from_bytes(bytes).ok()?;
@@ -71,6 +66,21 @@ pub fn identity_key_encoding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x25519_validation_rejects_non_canonical_key() {
+        assert!(!is_valid_x25519_public_key(&x25519_field_modulus()));
+    }
+
+    #[test]
+    fn x25519_validation_rejects_low_order_keys() {
+        let mut twist_low_order = x25519_field_modulus();
+        twist_low_order[0] -= 1;
+
+        for key in [[0; PUBLIC_KEY_LEN], twist_low_order] {
+            assert!(!is_valid_x25519_public_key(&key));
+        }
+    }
 
     #[test]
     fn identity_key_encoding_changes_with_each_half() {

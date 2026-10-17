@@ -1,12 +1,10 @@
-//! Shared context framing and Ed25519 verification.
-
 use ed25519_dalek::{Signature, VerifyingKey};
 use zeroize::Zeroizing;
 
 /// An error returned while framing or verifying a signature.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SignatureError {
-    /// The signature context is empty or the combined length overflows.
+    /// The signature context is empty.
     #[error("signature context is invalid")]
     InvalidSignatureContext,
     /// The signature does not authenticate the supplied bytes.
@@ -23,9 +21,6 @@ pub fn verify_with_context(
 ) -> Result<(), SignatureError> {
     use ed25519_dalek::Verifier;
 
-    if context.is_empty() {
-        return Err(SignatureError::InvalidSignatureContext);
-    }
     verifying_key
         .verify(&contextual_message(context, message)?, signature)
         .map_err(|_| SignatureError::SignatureInvalid)
@@ -39,12 +34,8 @@ pub fn contextual_message(
     if context.is_empty() {
         return Err(SignatureError::InvalidSignatureContext);
     }
-    let mut signed = Zeroizing::new(Vec::with_capacity(
-        context
-            .len()
-            .checked_add(message.len())
-            .ok_or(SignatureError::InvalidSignatureContext)?,
-    ));
+    // Each slice is at most `isize::MAX` bytes, so the sum fits in `usize`.
+    let mut signed = Zeroizing::new(Vec::with_capacity(context.len() + message.len()));
     signed.extend_from_slice(context);
     signed.extend_from_slice(message);
     Ok(signed)
