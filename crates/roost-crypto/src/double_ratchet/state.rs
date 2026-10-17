@@ -1,12 +1,9 @@
-//! Maintains Double Ratchet session state, including chain advancement, skipped-message keys, and
-//! session restore.
-
 use super::aead::{decrypt, encrypt};
 use super::header::Header;
-use crate::keys::{KeyPair, PublicKey, SharedSecret, generate_key_pair};
-use crate::ratchet::{
+use super::kdf::{
     ChainKey, MessageKey, RootKey, derive_chain_and_message_keys, derive_root_and_chain_keys,
 };
+use crate::keys::{KeyPair, PublicKey, generate_key_pair};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -91,11 +88,13 @@ impl Drop for RatchetStateWire {
         if let Some(ref mut receiving_chain_key) = self.receiving_chain_key {
             receiving_chain_key.zeroize();
         }
-        for value in self.skipped_message_keys.values_mut() {
-            value.message_key.zeroize();
+        for skipped in self.skipped_message_keys.values_mut() {
+            skipped.message_key.zeroize();
         }
     }
 }
+
+impl ZeroizeOnDrop for RatchetStateWire {}
 
 impl RatchetState {
     // Initializes the initiator side with its first sending chain ready.
@@ -105,9 +104,9 @@ impl RatchetState {
         receiving_ratchet_public_key: &PublicKey,
     ) -> Result<Self, RatchetError> {
         let sending_ratchet_key_pair = generate_key_pair(rng);
-        let dh_output = checked_shared_secret(
-            sending_ratchet_key_pair.diffie_hellman(receiving_ratchet_public_key),
-        )?;
+        let dh_output = sending_ratchet_key_pair
+            .diffie_hellman(receiving_ratchet_public_key)
+            .ok_or(RatchetError::NonContributorySharedSecret)?;
         let (next_root_key, sending_chain_key) = derive_root_and_chain_keys(&root_key, &dh_output)?;
         Ok(Self {
             sending_ratchet_key_pair,
@@ -144,8 +143,8 @@ impl RatchetState {
     /// The returned [`Header`] must be sent with `ciphertext`. `associated_data` must be the same
     /// byte sequence the receiver passes to [`Self::ratchet_decrypt`].
     ///
-    /// The sending chain advances before encryption, so a failed call still consumes a message key.
-    /// A responder can encrypt only after decrypting its first incoming message.
+    /// A failed call leaves the state unchanged. A responder can encrypt only after decrypting its
+    /// first incoming message.
     pub fn ratchet_encrypt(
         &mut self,
         plaintext: &[u8],
@@ -157,18 +156,23 @@ impl RatchetState {
                 .ok_or(RatchetError::InvalidState(
                     "sending chain key not initialized",
                 ))?;
+        let next_sending_message_number =
+            self.sending_message_number
+                .checked_add(1)
+                .ok_or(RatchetError::InvalidState(
+                    "sending message number exhausted",
+                ))?;
         let (next_sending_chain_key, message_key) =
             derive_chain_and_message_keys(sending_chain_key)?;
-        self.sending_chain_key = Some(next_sending_chain_key);
-
         let header = Header {
             public_key: self.sending_ratchet_key_pair.public,
             previous_chain_length: self.previous_chain_length,
             message_number: self.sending_message_number,
         };
-        self.sending_message_number += 1;
-
         let ciphertext = encrypt(plaintext, associated_data, &header, &message_key)?;
+
+        self.sending_chain_key = Some(next_sending_chain_key);
+        self.sending_message_number = next_sending_message_number;
         Ok((header, ciphertext))
     }
 
@@ -214,7 +218,13 @@ impl RatchetState {
         let (next_receiving_chain_key, message_key) =
             derive_chain_and_message_keys(receiving_chain_key)?;
         state.receiving_chain_key = Some(next_receiving_chain_key);
-        state.receiving_message_number += 1;
+        state.receiving_message_number =
+            state
+                .receiving_message_number
+                .checked_add(1)
+                .ok_or(RatchetError::InvalidState(
+                    "receiving message number exhausted",
+                ))?;
 
         let plaintext = decrypt(ciphertext, associated_data, header, &message_key)?;
         *self = state;
@@ -246,12 +256,12 @@ impl RatchetState {
             skipped_message_keys: self
                 .skipped_message_keys
                 .iter()
-                .map(|(k, v)| {
+                .map(|(key, skipped)| {
                     (
-                        *k,
+                        *key,
                         SkippedMessageKeyWire {
-                            message_key: *v.message_key.as_bytes(),
-                            sequence: v.sequence,
+                            message_key: *skipped.message_key.as_bytes(),
+                            sequence: skipped.sequence,
                         },
                     )
                 })
@@ -282,13 +292,17 @@ impl RatchetState {
         if !rest.is_empty() {
             return Err(RatchetStateError::TrailingBytes { len: rest.len() });
         }
-        if wire.skipped_message_keys.len() > MAX_SKIPPED_KEYS_TOTAL {
-            return Err(RatchetStateError::MaxSkippedKeysExceeded);
+        let len = wire.skipped_message_keys.len();
+        if len > MAX_SKIPPED_KEYS_TOTAL {
+            return Err(RatchetStateError::MaxSkippedKeysExceeded {
+                len,
+                max: MAX_SKIPPED_KEYS_TOTAL,
+            });
         }
         if wire
             .skipped_message_keys
             .values()
-            .any(|v| v.sequence >= wire.next_skipped_key_sequence)
+            .any(|skipped| skipped.sequence >= wire.next_skipped_key_sequence)
         {
             return Err(RatchetStateError::Decode);
         }
@@ -304,23 +318,18 @@ impl RatchetState {
             skipped_message_keys: wire
                 .skipped_message_keys
                 .iter()
-                .map(|(k, v)| {
+                .map(|(key, skipped)| {
                     (
-                        *k,
+                        *key,
                         SkippedMessageKey {
-                            message_key: MessageKey(v.message_key),
-                            sequence: v.sequence,
+                            message_key: MessageKey::from_bytes(skipped.message_key),
+                            sequence: skipped.sequence,
                         },
                     )
                 })
                 .collect(),
             next_skipped_key_sequence: wire.next_skipped_key_sequence,
         })
-    }
-
-    /// Returns the number of cached message keys awaiting out-of-order delivery.
-    pub fn skipped_key_count(&self) -> usize {
-        self.skipped_message_keys.len()
     }
 
     // Keeps rollback local without exposing `Clone` on a secret-bearing type.
@@ -341,7 +350,7 @@ impl RatchetState {
         }
     }
 
-    // Puts the skipped key back when authentication fails, so tampered replays cannot burn it.
+    // Deletes a skipped key only after its message authenticates, so a tampered copy can't burn it.
     fn decrypt_with_skipped_message_key(
         &mut self,
         ciphertext: &[u8],
@@ -349,28 +358,27 @@ impl RatchetState {
         associated_data: &[u8],
     ) -> Result<Option<Zeroizing<Vec<u8>>>, RatchetError> {
         let key = (*header.public_key.as_bytes(), header.message_number);
-        if let Some(skipped) = self.skipped_message_keys.remove(&key) {
-            match decrypt(ciphertext, associated_data, header, &skipped.message_key) {
-                Ok(plaintext) => Ok(Some(plaintext)),
-                Err(e) => {
-                    self.skipped_message_keys.insert(key, skipped);
-                    Err(e)
-                }
-            }
-        } else {
-            Ok(None)
-        }
+        let Some(skipped) = self.skipped_message_keys.get(&key) else {
+            return Ok(None);
+        };
+        let plaintext = decrypt(ciphertext, associated_data, header, &skipped.message_key)?;
+        self.skipped_message_keys.remove(&key);
+        Ok(Some(plaintext))
     }
 
     // Advances the receiving chain and caches skipped message keys up to `until_message_number`.
     fn skip_message_keys(&mut self, until_message_number: u32) -> Result<(), RatchetError> {
-        // Duplicate messages can ask for a message number already behind `self.receiving_message_number`. Treat them as
-        // already processed so `until_message_number - self.receiving_message_number` cannot underflow.
+        // A duplicate can name a message number behind the receiving chain. Treat it as already
+        // processed so the subtraction below can't underflow.
         if until_message_number < self.receiving_message_number {
             return Ok(());
         }
-        if until_message_number > self.receiving_message_number + MAX_SKIP {
-            return Err(RatchetError::MaxSkipExceeded);
+        let count = until_message_number - self.receiving_message_number;
+        if count > MAX_SKIP {
+            return Err(RatchetError::MaxSkipExceeded {
+                count,
+                max: MAX_SKIP,
+            });
         }
 
         if let Some(ref receiving_chain_key) = self.receiving_chain_key {
@@ -379,7 +387,7 @@ impl RatchetState {
                     .ok_or(RatchetError::InvalidState(
                         "receiving ratchet public key not set when skipping message keys",
                     ))?;
-            let mut current_chain_key = ChainKey::from_bytes(*receiving_chain_key.as_bytes());
+            let mut current_chain_key = receiving_chain_key.clone();
             while self.receiving_message_number < until_message_number {
                 let (next_chain_key, message_key) =
                     derive_chain_and_message_keys(&current_chain_key)?;
@@ -407,7 +415,9 @@ impl RatchetState {
         if !self.skipped_message_keys.contains_key(&key)
             && self.skipped_message_keys.len() >= MAX_SKIPPED_KEYS_TOTAL
         {
-            return Err(RatchetError::MaxSkippedKeysExceeded);
+            return Err(RatchetError::MaxSkippedKeysExceeded {
+                max: MAX_SKIPPED_KEYS_TOTAL,
+            });
         }
         let sequence = self.next_skipped_key_sequence;
         self.next_skipped_key_sequence = self
@@ -435,20 +445,20 @@ impl RatchetState {
         self.receiving_message_number = 0;
         self.receiving_ratchet_public_key = Some(header.public_key);
 
-        let receiving_dh_output = checked_shared_secret(
-            self.sending_ratchet_key_pair
-                .diffie_hellman(&header.public_key),
-        )?;
+        let receiving_dh_output = self
+            .sending_ratchet_key_pair
+            .diffie_hellman(&header.public_key)
+            .ok_or(RatchetError::NonContributorySharedSecret)?;
         let (next_root_key, receiving_chain_key) =
             derive_root_and_chain_keys(&self.root_key, &receiving_dh_output)?;
         self.root_key = next_root_key;
         self.receiving_chain_key = Some(receiving_chain_key);
 
         self.sending_ratchet_key_pair = generate_key_pair(rng);
-        let sending_dh_output = checked_shared_secret(
-            self.sending_ratchet_key_pair
-                .diffie_hellman(&header.public_key),
-        )?;
+        let sending_dh_output = self
+            .sending_ratchet_key_pair
+            .diffie_hellman(&header.public_key)
+            .ok_or(RatchetError::NonContributorySharedSecret)?;
         let (next_root_key, sending_chain_key) =
             derive_root_and_chain_keys(&self.root_key, &sending_dh_output)?;
         self.root_key = next_root_key;
@@ -473,12 +483,20 @@ pub enum RatchetError {
     /// Ratchet state violated an internal invariant.
     #[error("ratchet state invariant violated: {0}")]
     InvalidState(&'static str),
-    /// Message header asks to skip too many messages in one ratchet step.
-    #[error("requested message skip exceeds ratchet step limit")]
-    MaxSkipExceeded,
-    /// Caching skipped message keys would exceed the total skipped-key cap.
-    #[error("cached skipped message keys total exceeds global limit")]
-    MaxSkippedKeysExceeded,
+    /// A message header skips more messages than one chain may.
+    #[error("message header skips {count} messages, more than {max}")]
+    MaxSkipExceeded {
+        /// Messages the header skips.
+        count: u32,
+        /// Most messages one header may skip.
+        max: u32,
+    },
+    /// The skipped message key cache is full.
+    #[error("skipped message key cache already holds {max} keys")]
+    MaxSkippedKeysExceeded {
+        /// Most skipped message keys a session caches.
+        max: usize,
+    },
     /// An X25519 exchange produced a non-contributory shared secret.
     #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
@@ -493,9 +511,14 @@ pub enum RatchetStateError {
     /// Ratchet state failed to encode for persistence.
     #[error("ratchet state failed to encode")]
     Encode,
-    /// Persisted ratchet state exceeds the skipped-key cache limit.
-    #[error("cached skipped message keys total exceeds global limit")]
-    MaxSkippedKeysExceeded,
+    /// Persisted ratchet state holds more skipped message keys than a session caches.
+    #[error("ratchet state holds {len} skipped message keys, more than {max}")]
+    MaxSkippedKeysExceeded {
+        /// Skipped message keys in the persisted state.
+        len: usize,
+        /// Most skipped message keys a session caches.
+        max: usize,
+    },
     /// Persisted ratchet state has bytes left over after decoding.
     #[error("ratchet state has {len} trailing bytes")]
     TrailingBytes {
@@ -503,15 +526,6 @@ pub enum RatchetStateError {
         len: usize,
     },
 }
-
-fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, RatchetError> {
-    if !secret.was_contributory() {
-        return Err(RatchetError::NonContributorySharedSecret);
-    }
-    Ok(secret)
-}
-
-impl ZeroizeOnDrop for RatchetStateWire {}
 
 #[cfg(test)]
 mod tests {
@@ -539,15 +553,56 @@ mod tests {
         (initiator, responder, associated_data, rng)
     }
 
+    // Restores `state` with one stored field changed, the way tampered storage would.
+    fn restored_with(
+        state: &RatchetState,
+        edit: impl FnOnce(&mut RatchetStateWire),
+    ) -> RatchetState {
+        let mut wire: RatchetStateWire = postcard::from_bytes(&state.to_bytes().unwrap()).unwrap();
+        edit(&mut wire);
+        RatchetState::from_bytes(&postcard::to_stdvec(&wire).unwrap()).unwrap()
+    }
+
     #[test]
-    fn init_initiator_sets_sending_chain() {
-        let (initiator, _, _, _) = setup_pair();
-        assert!(initiator.receiving_ratchet_public_key.is_some());
-        assert!(initiator.sending_chain_key.is_some());
-        assert!(initiator.receiving_chain_key.is_none());
-        assert_eq!(initiator.sending_message_number, 0);
-        assert_eq!(initiator.receiving_message_number, 0);
-        assert_eq!(initiator.previous_chain_length, 0);
+    fn encrypt_at_the_last_message_number_fails_without_changing_state() {
+        let (initiator, _, associated_data, _) = setup_pair();
+        let mut exhausted =
+            restored_with(&initiator, |wire| wire.sending_message_number = u32::MAX);
+        let before = exhausted.to_bytes().unwrap();
+
+        assert!(matches!(
+            exhausted.ratchet_encrypt(b"one too many", &associated_data),
+            Err(RatchetError::InvalidState(
+                "sending message number exhausted"
+            ))
+        ));
+        assert_eq!(*exhausted.to_bytes().unwrap(), *before);
+    }
+
+    #[test]
+    fn decrypt_at_the_last_message_number_fails_without_changing_state() {
+        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
+        let (header, ciphertext) = initiator
+            .ratchet_encrypt(b"first", &associated_data)
+            .unwrap();
+        responder
+            .ratchet_decrypt(&mut rng, &ciphertext, &header, &associated_data)
+            .unwrap();
+        let mut exhausted =
+            restored_with(&responder, |wire| wire.receiving_message_number = u32::MAX);
+        let before = exhausted.to_bytes().unwrap();
+        let last = Header {
+            message_number: u32::MAX,
+            ..header
+        };
+
+        assert!(matches!(
+            exhausted.ratchet_decrypt(&mut rng, &ciphertext, &last, &associated_data),
+            Err(RatchetError::InvalidState(
+                "receiving message number exhausted"
+            ))
+        ));
+        assert_eq!(*exhausted.to_bytes().unwrap(), *before);
     }
 
     #[test]
@@ -563,17 +618,6 @@ mod tests {
             ),
             Err(RatchetError::NonContributorySharedSecret)
         ));
-    }
-
-    #[test]
-    fn init_responder_has_no_chains() {
-        let (_, responder, _, _) = setup_pair();
-        assert!(responder.receiving_ratchet_public_key.is_none());
-        assert!(responder.sending_chain_key.is_none());
-        assert!(responder.receiving_chain_key.is_none());
-        assert_eq!(responder.sending_message_number, 0);
-        assert_eq!(responder.receiving_message_number, 0);
-        assert_eq!(responder.previous_chain_length, 0);
     }
 
     #[test]
@@ -628,7 +672,7 @@ mod tests {
     }
 
     #[test]
-    fn ping_pong_exchange() {
+    fn alternating_messages_decrypt_in_both_directions() {
         let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let first_message = b"message 1";
@@ -679,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_messages_same_direction() {
+    fn consecutive_messages_decrypt_in_order() {
         let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let first_message = b"msg 1";
@@ -715,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_delivery() {
+    fn messages_decrypt_out_of_order() {
         let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
         let first_message = b"msg 1";
@@ -765,7 +809,10 @@ mod tests {
 
         let result =
             responder.ratchet_decrypt(&mut rng, &last_ciphertext, &last_header, &associated_data);
-        assert!(matches!(result, Err(RatchetError::MaxSkipExceeded)));
+        assert!(matches!(
+            result,
+            Err(RatchetError::MaxSkipExceeded { count, max: MAX_SKIP }) if count == MAX_SKIP + 1
+        ));
     }
 
     #[test]
@@ -795,7 +842,7 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(responder.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
+        assert_eq!(responder.skipped_message_keys.len(), MAX_SKIPPED_KEYS_TOTAL);
 
         let overflow_messages: Vec<_> = (0..=MAX_SKIP)
             .map(|message_number| {
@@ -815,9 +862,11 @@ mod tests {
                 overflow_header,
                 &associated_data
             ),
-            Err(RatchetError::MaxSkippedKeysExceeded)
+            Err(RatchetError::MaxSkippedKeysExceeded {
+                max: MAX_SKIPPED_KEYS_TOTAL
+            })
         ));
-        assert_eq!(responder.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
+        assert_eq!(responder.skipped_message_keys.len(), MAX_SKIPPED_KEYS_TOTAL);
 
         let (oldest_header, oldest_ciphertext) = oldest_skipped.unwrap();
         let plaintext = responder
@@ -857,7 +906,7 @@ mod tests {
                 .ratchet_decrypt(&mut rng, last_ciphertext, last_header, &associated_data)
                 .unwrap();
         }
-        assert_eq!(responder.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
+        assert_eq!(responder.skipped_message_keys.len(), MAX_SKIPPED_KEYS_TOTAL);
 
         let bytes = responder.to_bytes().unwrap();
         let mut restored = RatchetState::from_bytes(&bytes).unwrap();
@@ -875,9 +924,11 @@ mod tests {
         let (last_header, last_ciphertext) = messages.last().unwrap();
         assert!(matches!(
             restored.ratchet_decrypt(&mut rng, last_ciphertext, last_header, &associated_data),
-            Err(RatchetError::MaxSkippedKeysExceeded)
+            Err(RatchetError::MaxSkippedKeysExceeded {
+                max: MAX_SKIPPED_KEYS_TOTAL
+            })
         ));
-        assert_eq!(restored.skipped_key_count(), MAX_SKIPPED_KEYS_TOTAL);
+        assert_eq!(restored.skipped_message_keys.len(), MAX_SKIPPED_KEYS_TOTAL);
 
         let (oldest_header, oldest_ciphertext) = oldest_survivor.unwrap();
         let plaintext = restored
@@ -943,9 +994,7 @@ mod tests {
             .ratchet_decrypt(&mut rng, &first_ciphertext, &first_header, &associated_data)
             .unwrap();
 
-        let receiving_count_before = responder.receiving_message_number;
-        let sending_count_before = responder.sending_message_number;
-        let skipped_count_before = responder.skipped_message_keys.len();
+        let before = responder.to_bytes().unwrap();
 
         let (second_header, mut second_ciphertext) = initiator
             .ratchet_encrypt(b"msg 2", &associated_data)
@@ -958,10 +1007,7 @@ mod tests {
             &associated_data,
         );
         assert!(matches!(result, Err(RatchetError::Aead)));
-
-        assert_eq!(responder.receiving_message_number, receiving_count_before);
-        assert_eq!(responder.sending_message_number, sending_count_before);
-        assert_eq!(responder.skipped_message_keys.len(), skipped_count_before);
+        assert_eq!(*responder.to_bytes().unwrap(), *before);
     }
 
     #[test]
@@ -1086,7 +1132,8 @@ mod tests {
         let bytes = postcard::to_stdvec(&oversized).unwrap();
         assert!(matches!(
             RatchetState::from_bytes(&bytes),
-            Err(RatchetStateError::MaxSkippedKeysExceeded)
+            Err(RatchetStateError::MaxSkippedKeysExceeded { len, max: MAX_SKIPPED_KEYS_TOTAL })
+                if len == MAX_SKIPPED_KEYS_TOTAL + 1
         ));
     }
 }

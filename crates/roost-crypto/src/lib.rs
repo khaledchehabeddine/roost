@@ -1,8 +1,8 @@
 //! Cryptographic primitives for private end-to-end encrypted messaging.
 //!
-//! This crate provides key generation, signing, X3DH handshakes, and Double Ratchet message
-//! encryption for Rust crates that need protocol-level crypto. Higher layers handle persistence,
-//! replay tracking, and transport framing.
+//! Handles key generation, Identity Key and Discovery Key binding signatures, signed and one-time
+//! pre-keys, Delivery Capabilities, X3DH handshakes and sender proofs, Double Ratchet encryption,
+//! and Sealed Sender Frames. Higher layers handle persistence, replay tracking, and transport.
 //!
 //! The identity key signs the public discovery key. The discovery key signs the public signed
 //! pre-key. Initiators verify both responder signatures, use [`initiate_handshake`] to create the
@@ -56,7 +56,6 @@ mod double_ratchet;
 mod handshake;
 mod keys;
 mod one_time_prekey;
-mod ratchet;
 mod sealed_frame;
 mod signed_prekey;
 
@@ -74,8 +73,8 @@ pub use handshake::{
     SenderProofTranscript, accept_handshake, initiate_handshake, prove_sender, verify_sender_proof,
 };
 pub use keys::{
-    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, Signature, SigningKeyPair,
-    VerifyingKey, generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
+    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, Signature, SigningKeyPair, VerifyingKey,
+    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
     verify_public_identity_key,
 };
 pub use one_time_prekey::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
@@ -83,6 +82,4 @@ pub use sealed_frame::{
     SealedFrame, SealedFrameError, SealedFramePreKeyReference,
     open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
 };
-pub use signed_prekey::{
-    PublicSignedPreKey, SignedPreKey, generate_signed_prekey, verify_public_signed_prekey,
-};
+pub use signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_public_signed_prekey};

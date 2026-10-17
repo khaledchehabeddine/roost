@@ -356,7 +356,7 @@ impl From<HandshakeError> for RoostError {
             HandshakeError::DiscoveryKeyMismatch
             | HandshakeError::MissingOneTimePreKey
             | HandshakeError::SenderProofFieldTooLong { .. }
-            | HandshakeError::StalePreKey => RoostError::InvalidData { reason },
+            | HandshakeError::StalePreKey { .. } => RoostError::InvalidData { reason },
         }
     }
 }
@@ -382,8 +382,8 @@ impl From<RatchetError> for RoostError {
                 RoostError::InternalError { reason }
             }
             RatchetError::InvalidState(_)
-            | RatchetError::MaxSkipExceeded
-            | RatchetError::MaxSkippedKeysExceeded => RoostError::InvalidData { reason },
+            | RatchetError::MaxSkipExceeded { .. }
+            | RatchetError::MaxSkippedKeysExceeded { .. } => RoostError::InvalidData { reason },
         }
     }
 }
@@ -394,7 +394,7 @@ impl From<RatchetStateError> for RoostError {
         match e {
             RatchetStateError::Encode => RoostError::InternalError { reason },
             RatchetStateError::Decode
-            | RatchetStateError::MaxSkippedKeysExceeded
+            | RatchetStateError::MaxSkippedKeysExceeded { .. }
             | RatchetStateError::TrailingBytes { .. } => RoostError::InvalidData { reason },
         }
     }
@@ -410,7 +410,15 @@ impl From<SealedFrameError> for RoostError {
             SealedFrameError::Encode | SealedFrameError::HkdfExpand => {
                 RoostError::InternalError { reason }
             }
-            SealedFrameError::Decode => RoostError::InvalidData { reason },
+            SealedFrameError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
+            SealedFrameError::AssociatedDataTooLong { .. }
+            | SealedFrameError::CiphertextTooLong { .. }
+            | SealedFrameError::Decode
+            | SealedFrameError::FrameTooLong { .. }
+            | SealedFrameError::IncompleteOneTimePreKey
+            | SealedFrameError::InvalidPublicKey
+            | SealedFrameError::RecipientMismatch
+            | SealedFrameError::TrailingBytes { .. } => RoostError::InvalidData { reason },
         }
     }
 }

@@ -809,7 +809,7 @@ mod tests {
         let bundle = key_store.generate_one_time_prekeys(1).unwrap().remove(0);
 
         let prekey = key_store.consume_one_time_prekey(epoch, bundle.id).unwrap();
-        assert_eq!(prekey.id(), bundle.id);
+        assert_eq!(prekey.public().id, bundle.id);
         assert!(matches!(
             key_store.consume_one_time_prekey(epoch, bundle.id),
             Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::NotFound))
@@ -863,7 +863,7 @@ mod tests {
         let epoch = key_store.current_public_discovery_key().unwrap().epoch;
         let bundle = key_store.replenish_one_time_prekeys().unwrap().remove(0);
         let prekey = key_store.consume_one_time_prekey(epoch, bundle.id).unwrap();
-        assert_eq!(prekey.id(), bundle.id);
+        assert_eq!(prekey.public().id, bundle.id);
         assert!(matches!(
             key_store.consume_one_time_prekey(epoch, bundle.id),
             Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::NotFound))
@@ -888,7 +888,7 @@ mod tests {
                 key_store
                     .consume_one_time_prekey(epoch, bundle.id)
                     .ok()
-                    .map(|prekey| prekey.id())
+                    .map(|prekey| prekey.public().id)
             }));
         }
         let successes: Vec<u64> = threads

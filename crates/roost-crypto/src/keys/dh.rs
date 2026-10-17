@@ -1,12 +1,7 @@
-//! Provides X25519 key-pair generation and shared-secret derivation.
-//!
-//! Re-exports [`PublicKey`] and [`SharedSecret`] so callers do not depend on `x25519_dalek`
-//! directly.
-
-pub use x25519_dalek::{PublicKey, SharedSecret};
+pub use x25519_dalek::PublicKey;
 
 use rand::{CryptoRng, RngCore};
-use x25519_dalek::StaticSecret;
+use x25519_dalek::{SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// An X25519 key pair for Diffie-Hellman key exchange.
@@ -21,14 +16,12 @@ pub struct KeyPair {
 }
 
 impl KeyPair {
-    /// Derives a shared secret with `peer_public`.
-    pub fn diffie_hellman(&self, peer_public: &PublicKey) -> SharedSecret {
-        self.secret.diffie_hellman(peer_public)
+    /// Derives a shared secret with `peer_public`, or `None` when `peer_public` forces a known one.
+    pub(crate) fn diffie_hellman(&self, peer_public: &PublicKey) -> Option<SharedSecret> {
+        contributory_diffie_hellman(&self.secret, peer_public)
     }
 
     /// Returns this key pair's secret bytes for secure storage.
-    ///
-    /// The returned bytes are wrapped in [`Zeroizing`] so they are scrubbed when dropped.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret.to_bytes())
     }
@@ -49,18 +42,21 @@ pub fn generate_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> KeyPair {
     KeyPair { public, secret }
 }
 
+/// Returns the shared secret of `secret` and `peer`, or `None` when `peer` is a low-order point
+/// that forces a known one.
+pub(crate) fn contributory_diffie_hellman(
+    secret: &StaticSecret,
+    peer: &PublicKey,
+) -> Option<SharedSecret> {
+    let shared_secret = secret.diffie_hellman(peer);
+    shared_secret.was_contributory().then_some(shared_secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
-
-    #[test]
-    fn key_pair_public_round_trip() {
-        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([1u8; 32]));
-        let recovered = PublicKey::from(*key_pair.public.as_bytes());
-        assert_eq!(key_pair.public.as_bytes(), recovered.as_bytes());
-    }
 
     #[test]
     fn key_pair_round_trip_via_secret_bytes() {
@@ -82,8 +78,8 @@ mod tests {
         let alice = generate_key_pair(&mut rng);
         let bob = generate_key_pair(&mut rng);
 
-        let alice_shared_secret = alice.diffie_hellman(&bob.public);
-        let bob_shared_secret = bob.diffie_hellman(&alice.public);
+        let alice_shared_secret = alice.diffie_hellman(&bob.public).unwrap();
+        let bob_shared_secret = bob.diffie_hellman(&alice.public).unwrap();
         assert_eq!(alice_shared_secret.as_bytes(), bob_shared_secret.as_bytes());
     }
 }

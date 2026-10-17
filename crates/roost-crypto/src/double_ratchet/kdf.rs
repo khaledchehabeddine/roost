@@ -1,7 +1,9 @@
-use crate::{RatchetError, SharedSecret};
+use super::state::RatchetError;
 use hkdf::Hkdf;
+use hmac::digest::FixedOutput;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use x25519_dalek::SharedSecret;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const ROOT_KEY_INFO: &[u8] = b"RoostRatchet_RK";
@@ -11,7 +13,7 @@ const NEXT_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 // Root key for the Double Ratchet root chain.
 // Clone stays crate-private for ratchet rollback and chain advancement snapshots.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub(crate) struct RootKey(pub(crate) [u8; 32]);
+pub(crate) struct RootKey([u8; 32]);
 
 impl RootKey {
     pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
@@ -26,14 +28,14 @@ impl RootKey {
 // Chain key for the Double Ratchet sending/receiving chain.
 // Clone stays crate-private for ratchet rollback and chain advancement snapshots.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub(crate) struct ChainKey(pub(crate) [u8; 32]);
+pub(super) struct ChainKey([u8; 32]);
 
 impl ChainKey {
-    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+    pub(super) fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub(super) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -41,10 +43,14 @@ impl ChainKey {
 // Single-use message encryption key derived from a chain key.
 // Clone stays crate-private for skipped-key rollback after failed authentication.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
-pub(crate) struct MessageKey(pub(crate) [u8; 32]);
+pub(super) struct MessageKey([u8; 32]);
 
 impl MessageKey {
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+    pub(super) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub(super) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
@@ -56,7 +62,7 @@ impl MessageKey {
 // Uses HKDF-SHA256 with the root key as salt, DH output as input keying material, and
 // ROOT_KEY_INFO as the info string. Produces 64 bytes of output, split into a 32-byte root key and
 // a 32-byte chain key.
-pub(crate) fn derive_root_and_chain_keys(
+pub(super) fn derive_root_and_chain_keys(
     root_key: &RootKey,
     dh_output: &SharedSecret,
 ) -> Result<(RootKey, ChainKey), RatchetError> {
@@ -77,26 +83,20 @@ pub(crate) fn derive_root_and_chain_keys(
 // message key from a chain key.
 //
 // Uses HMAC-SHA256 with the chain key as the HMAC key.
-pub(crate) fn derive_chain_and_message_keys(
+pub(super) fn derive_chain_and_message_keys(
     chain_key: &ChainKey,
 ) -> Result<(ChainKey, MessageKey), RatchetError> {
     let mut message_key_mac =
         Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| RatchetError::InvalidHmacKey)?;
     message_key_mac.update(MESSAGE_KEY_INPUT);
-    let mut message_key_output = message_key_mac.finalize().into_bytes();
+    let mut message_key = Zeroizing::new([0u8; 32]);
+    message_key_mac.finalize_into((&mut *message_key).into());
 
     let mut chain_key_mac =
         Hmac::<Sha256>::new_from_slice(&chain_key.0).map_err(|_| RatchetError::InvalidHmacKey)?;
     chain_key_mac.update(NEXT_CHAIN_KEY_INPUT);
-    let mut chain_key_output = chain_key_mac.finalize().into_bytes();
-
-    let mut message_key = Zeroizing::new([0u8; 32]);
     let mut next_chain_key = Zeroizing::new([0u8; 32]);
-    message_key.copy_from_slice(&message_key_output);
-    next_chain_key.copy_from_slice(&chain_key_output);
-
-    message_key_output.zeroize();
-    chain_key_output.zeroize();
+    chain_key_mac.finalize_into((&mut *next_chain_key).into());
 
     Ok((ChainKey(*next_chain_key), MessageKey(*message_key)))
 }
@@ -112,7 +112,7 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([seed; 32]);
         let local = generate_key_pair(&mut rng);
         let remote = generate_key_pair(&mut rng);
-        local.diffie_hellman(&remote.public)
+        local.diffie_hellman(&remote.public).unwrap()
     }
 
     #[test]

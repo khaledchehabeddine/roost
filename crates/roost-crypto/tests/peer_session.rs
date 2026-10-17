@@ -156,22 +156,20 @@ fn skipped_keys_are_consumed_after_use() {
         messages.push((header, ciphertext));
     }
 
-    assert_eq!(bob.skipped_key_count(), 0);
-    bob.ratchet_decrypt(&mut rng, &messages[0].1, &messages[0].0, associated_data)
-        .unwrap();
-    assert_eq!(bob.skipped_key_count(), 0);
-    bob.ratchet_decrypt(&mut rng, &messages[2].1, &messages[2].0, associated_data)
-        .unwrap();
-    assert_eq!(bob.skipped_key_count(), 1);
-    bob.ratchet_decrypt(&mut rng, &messages[4].1, &messages[4].0, associated_data)
-        .unwrap();
-    assert_eq!(bob.skipped_key_count(), 2);
-    bob.ratchet_decrypt(&mut rng, &messages[1].1, &messages[1].0, associated_data)
-        .unwrap();
-    assert_eq!(bob.skipped_key_count(), 1);
-    bob.ratchet_decrypt(&mut rng, &messages[3].1, &messages[3].0, associated_data)
-        .unwrap();
-    assert_eq!(bob.skipped_key_count(), 0);
+    for index in [0, 2, 4, 1, 3] {
+        let (header, ciphertext) = &messages[index];
+        bob.ratchet_decrypt(&mut rng, ciphertext, header, associated_data)
+            .unwrap();
+    }
+    let delivered = bob.to_bytes().unwrap();
+
+    for (header, ciphertext) in &messages {
+        assert!(matches!(
+            bob.ratchet_decrypt(&mut rng, ciphertext, header, associated_data),
+            Err(RatchetError::Aead)
+        ));
+    }
+    assert_eq!(*bob.to_bytes().unwrap(), *delivered);
 }
 
 #[test]
@@ -206,6 +204,7 @@ fn tampered_header_rolls_back_state() {
     let associated_data = ASSOCIATED_DATA;
 
     let (header, ciphertext) = alice.ratchet_encrypt(b"legit", associated_data).unwrap();
+    let before = bob.to_bytes().unwrap();
     let tampered = Header {
         public_key: header.public_key,
         previous_chain_length: header.previous_chain_length,
@@ -215,11 +214,7 @@ fn tampered_header_rolls_back_state() {
         bob.ratchet_decrypt(&mut rng, &ciphertext, &tampered, associated_data),
         Err(RatchetError::Aead)
     ));
-    assert_eq!(
-        bob.skipped_key_count(),
-        0,
-        "failed decrypt must not leak skipped keys from the discarded snapshot",
-    );
+    assert_eq!(*bob.to_bytes().unwrap(), *before);
 
     let decrypted = bob
         .ratchet_decrypt(&mut rng, &ciphertext, &header, associated_data)

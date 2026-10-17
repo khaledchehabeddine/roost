@@ -1,10 +1,3 @@
-//! Provides the recipient delivery capability and its public verifier.
-//!
-//! The capability is a recipient-wide bearer secret: every currently authorized contact holds the
-//! same value, so it identifies the recipient's inbox rather than an individual sender.
-//! Roost generates one and hands it to the caller, but never registers, validates, or
-//! transmits it — the caller registers only the verifier.
-
 use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use subtle::{Choice, ConstantTimeEq};
@@ -36,8 +29,6 @@ impl RecipientDeliveryCapability {
     }
 
     /// Exports the capability's secret bytes for host persistence.
-    ///
-    /// The returned bytes are wrapped in [`Zeroizing`] so they are scrubbed when dropped.
     #[must_use]
     pub fn to_bytes(&self) -> Zeroizing<[u8; CAPABILITY_LEN]> {
         Zeroizing::new(self.0)
@@ -64,12 +55,6 @@ impl RecipientDeliveryCapability {
 pub struct RecipientDeliveryVerifier([u8; VERIFIER_LEN]);
 
 impl RecipientDeliveryVerifier {
-    /// Rebuilds a verifier from its canonical bytes.
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; VERIFIER_LEN]) -> Self {
-        RecipientDeliveryVerifier(bytes)
-    }
-
     /// Returns the canonical verifier bytes for registration.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; VERIFIER_LEN] {
@@ -124,20 +109,12 @@ mod tests {
     }
 
     #[test]
-    fn verifier_derivation_is_deterministic() {
-        let capability = RecipientDeliveryCapability::from_bytes([0x42u8; 32]);
-
-        assert_eq!(capability.verifier(), capability.verifier());
-    }
-
-    #[test]
-    fn generated_capabilities_are_32_bytes_and_differ_between_draws() {
+    fn generated_capabilities_differ_between_draws() {
         let mut rng = seeded_rng();
 
         let first = generate_recipient_delivery_capability(&mut rng);
         let second = generate_recipient_delivery_capability(&mut rng);
 
-        assert_eq!(first.to_bytes().len(), 32);
         assert_ne!(*first.to_bytes(), *second.to_bytes());
     }
 

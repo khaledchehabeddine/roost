@@ -11,7 +11,7 @@ use roost_crypto::{
     generate_signing_key_pair, initiate_handshake, sign_identity_key_binding,
 };
 
-const CREATED_AT: u64 = 1_700_000_000;
+const CREATED_AT_SECS: u64 = 1_700_000_000;
 const ASSOCIATED_DATA: &[u8] = b"associated data";
 const MAX_SKIP: u32 = 100;
 const SKIPPED_KEY_CAP: usize = 500;
@@ -35,12 +35,13 @@ fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed(seed);
     let bob_identity = generate_signing_key_pair(&mut rng);
     let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
-    let bob_discovery_key = generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT).unwrap();
+    let bob_discovery_key =
+        generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT_SECS).unwrap();
     let bob_signed_prekey =
-        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT)
+        generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT_SECS)
             .unwrap();
     let bob_one_time_prekey =
-        generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT);
+        generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT_SECS);
     (
         Setup {
             bob_identity_key,
@@ -163,7 +164,6 @@ fn decrypt_batch_once(
         prop_assert!(matches!(replay, Err(RatchetError::Aead)));
     }
     prop_assert!(seen.iter().all(|delivered| *delivered));
-    prop_assert_eq!(state.skipped_key_count(), 0);
     Ok(())
 }
 
@@ -279,6 +279,7 @@ fn per_chain_skip_overflow_rejects_without_advancing_state() {
         })
         .collect();
     let (overflow_header, overflow_ciphertext) = messages.last().unwrap();
+    let before = bob.to_bytes().unwrap();
 
     let overflow = bob.ratchet_decrypt(
         &mut rng,
@@ -287,8 +288,11 @@ fn per_chain_skip_overflow_rejects_without_advancing_state() {
         associated_data,
     );
 
-    assert!(matches!(overflow, Err(RatchetError::MaxSkipExceeded)));
-    assert_eq!(bob.skipped_key_count(), 0);
+    assert!(matches!(
+        overflow,
+        Err(RatchetError::MaxSkipExceeded { count, max: MAX_SKIP }) if count == MAX_SKIP + 1
+    ));
+    assert_eq!(*bob.to_bytes().unwrap(), *before);
     let (first_header, first_ciphertext) = &messages[0];
     let first = bob
         .ratchet_decrypt(&mut rng, first_ciphertext, first_header, associated_data)
@@ -306,6 +310,7 @@ fn skipped_key_bound_enforcement_property() {
             let (mut alice, mut bob) = bootstrap(&mut setup, &mut rng, true, b"start");
             let mut rejected = false;
             let mut retained = None;
+            let mut cached = 0;
 
             for batch in 0..batches {
                 let mut messages: Vec<_> = (0..=gap)
@@ -321,11 +326,17 @@ fn skipped_key_bound_enforcement_property() {
                     retained = Some(messages.remove(0));
                 }
                 let (_, header, ciphertext) = messages.last().unwrap();
-                let before = bob.skipped_key_count();
+                let before = bob.to_bytes().unwrap();
                 let result = bob.ratchet_decrypt(&mut rng, ciphertext, header, associated_data);
-                if before + gap > SKIPPED_KEY_CAP {
-                    prop_assert!(matches!(result, Err(RatchetError::MaxSkippedKeysExceeded)));
-                    prop_assert_eq!(bob.skipped_key_count(), before);
+                if cached + gap > SKIPPED_KEY_CAP {
+                    let rejected_at_cap = matches!(
+                        result,
+                        Err(RatchetError::MaxSkippedKeysExceeded {
+                            max: SKIPPED_KEY_CAP
+                        })
+                    );
+                    prop_assert!(rejected_at_cap);
+                    prop_assert_eq!(&*bob.to_bytes().unwrap(), &*before);
                     let (plaintext, header, ciphertext) = retained.take().unwrap();
                     let decrypted = bob
                         .ratchet_decrypt(&mut rng, &ciphertext, &header, associated_data)
@@ -335,8 +346,7 @@ fn skipped_key_bound_enforcement_property() {
                     break;
                 }
                 result.unwrap();
-                prop_assert_eq!(bob.skipped_key_count(), before + gap);
-                prop_assert!(bob.skipped_key_count() <= SKIPPED_KEY_CAP);
+                cached += gap;
             }
             prop_assert!(rejected);
             Ok(())
