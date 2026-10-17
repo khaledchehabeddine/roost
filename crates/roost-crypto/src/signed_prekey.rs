@@ -10,7 +10,7 @@ use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // Domain separator for signatures over signed pre-key public keys and epoch metadata.
-const SIGNED_PREKEY_CONTEXT: &[u8] = b"AetherSPK-v1:";
+const SIGNED_PREKEY_CONTEXT: &[u8] = b"RoostSPK-v1:";
 
 /// An X25519 pre-key signed by an Ed25519 signing key.
 ///
@@ -236,10 +236,12 @@ mod tests {
         )
         .unwrap();
         let bundle = signed_prekey.public();
-        let mut signed = b"AetherSPK-v1:".to_vec();
-        signed.extend_from_slice(bundle.public_key.as_bytes());
-        signed.extend_from_slice(&FIXED_EPOCH.to_be_bytes());
-        signed.extend_from_slice(&FIXED_CREATED_AT_SECS.to_be_bytes());
+        let mut message = bundle.public_key.as_bytes().to_vec();
+        message.extend_from_slice(&FIXED_EPOCH.to_be_bytes());
+        message.extend_from_slice(&FIXED_CREATED_AT_SECS.to_be_bytes());
+        let mut signed = b"RoostSPK-v1:".to_vec();
+        signed.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
+        signed.extend_from_slice(&message);
         assert_eq!(bundle.signature, signing_key.sign(&signed));
         assert!(verify_public_signed_prekey(&bundle, &signing_key.verifying).is_ok());
     }

@@ -7,7 +7,7 @@ use ed25519_dalek::Signature;
 use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
 const CERTIFICATE_VERSION: u8 = 2;
 // A relay domain is a DNS name; 255 is the widest a single length byte can express.
 const MAX_RELAY_DOMAIN_LEN: usize = 255;

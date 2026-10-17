@@ -12,9 +12,9 @@ use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 const SEALED_FRAME_VERSION: u8 = 1;
-const SEALED_FRAME_KEY_INFO: &[u8] = b"AetherSealedFrame-v1:key";
-const SEALED_FRAME_NONCE_INFO: &[u8] = b"AetherSealedFrame-v1:nonce";
-const EXTERNAL_ASSOCIATED_DATA_CONTEXT: &[u8] = b"AetherSealedFrame-v1:external-ad";
+const SEALED_FRAME_KEY_INFO: &[u8] = b"RoostSealedFrame-v1:key";
+const SEALED_FRAME_NONCE_INFO: &[u8] = b"RoostSealedFrame-v1:nonce";
+const EXTERNAL_ASSOCIATED_DATA_CONTEXT: &[u8] = b"RoostSealedFrame-v1:external-ad";
 const XCHACHA20_POLY1305_KEY_LEN: usize = 32;
 const XCHACHA20_POLY1305_NONCE_LEN: usize = 24;
 const MAX_SEALED_FRAME_CIPHERTEXT_LEN: usize = 128 * 1024;

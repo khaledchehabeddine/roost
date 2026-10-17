@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const ROOT_KEY_INFO: &[u8] = b"AetherRatchet_RK";
+const ROOT_KEY_INFO: &[u8] = b"RoostRatchet_RK";
 const MESSAGE_KEY_INPUT: &[u8] = &[0x01];
 const NEXT_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 

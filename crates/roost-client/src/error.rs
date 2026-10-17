@@ -420,7 +420,9 @@ impl From<SignatureError> for RoostError {
         let reason = reason_from_chain(&e);
         match e {
             SignatureError::SignatureInvalid => RoostError::AuthenticationFailed { reason },
-            SignatureError::InvalidSignatureContext => RoostError::InvalidData { reason },
+            SignatureError::InvalidSignatureContext | SignatureError::MessageTooLong { .. } => {
+                RoostError::InvalidData { reason }
+            }
         }
     }
 }

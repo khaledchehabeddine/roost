@@ -19,7 +19,7 @@ const MAX_STORAGE_KEY_LEN: usize = 128;
 const MAX_STAGED_VALUE_LEN: usize = 128 * 1024;
 const MAX_OPERATION_JOURNAL_LEN: usize = 2 * 1024 * 1024;
 const ID_GENERATION_ATTEMPTS: usize = 8;
-const SECURE_STORAGE_PRECONDITION_CONTEXT: &str = "AetherSecureStoragePrecondition-v1";
+const SECURE_STORAGE_PRECONDITION_CONTEXT: &str = "RoostSecureStoragePrecondition-v1";
 
 /// Stable identifier for one prepared KeyStore operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

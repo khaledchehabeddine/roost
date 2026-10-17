@@ -76,11 +76,11 @@ fn safety_number_matches_expected_hash_and_display() {
     let number = derive_safety_number(first, second).unwrap();
     assert_eq!(
         number.raw_bytes,
-        bytes("349f7fdde676ae10533bd755edcfebb10a8513ff988597e9c4979ddd9fad1cdd")
+        bytes("11ec6a72d8289a704f13391812abedf2d580658ddb0a045f6e255ab29b584c0e")
     );
     assert_eq!(
         number.grouped_decimal,
-        "32361 23425 39384 52205 48501 64357 11666 54322 91485 22401 21720 41437"
+        "37847 72638 08075 94309 68303 47906 65306 81346 83769 30836 34772 40846"
     );
     assert_eq!(
         derive_safety_number(second, first).unwrap().raw_bytes,

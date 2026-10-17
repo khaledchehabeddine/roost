@@ -43,7 +43,7 @@ fn x25519_field_modulus() -> [u8; PUBLIC_KEY_LEN] {
     modulus
 }
 
-const IDENTITY_KEY_DOMAIN_TAG: &[u8] = b"AetherIK-v1:";
+const IDENTITY_KEY_DOMAIN_TAG: &[u8] = b"RoostIK-v1:";
 /// Length of the canonical two-half Identity Key encoding.
 pub const IDENTITY_KEY_ENCODING_LEN: usize = IDENTITY_KEY_DOMAIN_TAG.len() + PUBLIC_KEY_LEN * 2;
 
