@@ -31,7 +31,7 @@ mod tests {
 
     #[test]
     fn serialize_writes_public_key_and_counters() {
-        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([5u8; 32]));
+        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([5u8; 32])).unwrap();
         let previous_chain_length = 42;
         let message_number = 7;
         let header = Header {

@@ -6,12 +6,23 @@ use roost_protocol::{
     PUBLIC_KEY_LEN, SignatureError, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
 };
 
-pub(crate) use dh::contributory_diffie_hellman;
 pub use dh::{KeyPair, PublicKey, generate_key_pair};
+pub(crate) use dh::{contributory_diffie_hellman, generate_static_secret};
 pub use identity::{PublicIdentityKey, sign_identity_key_binding, verify_public_identity_key};
 // Shared by both binding directions; not part of the public surface.
 pub(crate) use identity::identity_key_binding_payload;
 pub use signing::{Signature, SigningKeyPair, VerifyingKey, generate_signing_key_pair};
+
+/// An error returned while generating a Discovery Key or signed pre-key.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyGenerationError {
+    /// The random number generator failed.
+    #[error("randomness failed")]
+    Randomness(#[source] rand::Error),
+    /// Signing the new key failed.
+    #[error("signing the new key failed")]
+    Signature(#[from] SignatureError),
+}
 
 /// An error returned while parsing or verifying a public key.
 #[derive(Debug, thiserror::Error)]

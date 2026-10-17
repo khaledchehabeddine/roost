@@ -1,7 +1,7 @@
 use crate::keys::{
-    PublicIdentityKey, PublicKeyError, SigningKeyPair, contributory_diffie_hellman,
-    generate_signing_key_pair, identity_key_binding_payload, parse_public_key, parse_signature,
-    parse_verifying_key,
+    KeyGenerationError, PublicIdentityKey, PublicKeyError, SigningKeyPair,
+    contributory_diffie_hellman, generate_signing_key_pair, generate_static_secret,
+    identity_key_binding_payload, parse_public_key, parse_signature, parse_verifying_key,
 };
 use crate::signed_prekey::{SignedPreKey, generate_signed_prekey};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -193,10 +193,11 @@ pub fn generate_discovery_key<R: RngCore + CryptoRng>(
     identity: &SigningKeyPair,
     epoch: u32,
     created_at_secs: u64,
-) -> Result<DiscoveryKey, SignatureError> {
-    let key_agreement_secret = StaticSecret::random_from_rng(&mut *rng);
+) -> Result<DiscoveryKey, KeyGenerationError> {
+    let key_agreement_secret =
+        generate_static_secret(rng).map_err(KeyGenerationError::Randomness)?;
     let key_agreement_public = PublicKey::from(&key_agreement_secret);
-    let signing = generate_signing_key_pair(rng);
+    let signing = generate_signing_key_pair(rng).map_err(KeyGenerationError::Randomness)?;
     let payload = discovery_key_payload(
         &key_agreement_public,
         &signing.verifying,
@@ -258,7 +259,7 @@ pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
     discovery_key: &DiscoveryKey,
     id: u64,
     created_at_secs: u64,
-) -> Result<SignedPreKey, SignatureError> {
+) -> Result<SignedPreKey, KeyGenerationError> {
     generate_signed_prekey(
         rng,
         &discovery_key.signing,
@@ -279,6 +280,30 @@ mod tests {
     const FIXED_EPOCH: u32 = 7;
     const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
 
+    // Fails every draw. Only `try_fill_bytes` reports the failure, so a generator that calls any
+    // other method panics, as `OsRng` does.
+    struct FailingRng;
+
+    impl RngCore for FailingRng {
+        fn next_u32(&mut self) -> u32 {
+            panic!("generator failed")
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            panic!("generator failed")
+        }
+
+        fn fill_bytes(&mut self, _dest: &mut [u8]) {
+            panic!("generator failed")
+        }
+
+        fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), rand::Error> {
+            Err(rand::Error::new("generator failed"))
+        }
+    }
+
+    impl CryptoRng for FailingRng {}
+
     struct DiscoveryKeySetup {
         rng: ChaCha20Rng,
         identity: SigningKeyPair,
@@ -291,7 +316,7 @@ mod tests {
 
     fn setup() -> DiscoveryKeySetup {
         let mut rng = seeded_rng();
-        let identity = generate_signing_key_pair(&mut rng);
+        let identity = generate_signing_key_pair(&mut rng).unwrap();
         let discovery_key =
             generate_discovery_key(&mut rng, &identity, FIXED_EPOCH, FIXED_CREATED_AT_SECS)
                 .unwrap();
@@ -437,7 +462,7 @@ mod tests {
     #[test]
     fn verify_rejects_wrong_identity() {
         let mut setup = setup();
-        let other_identity = generate_signing_key_pair(&mut setup.rng);
+        let other_identity = generate_signing_key_pair(&mut setup.rng).unwrap();
         let bundle = setup.discovery_key.public();
         assert!(matches!(
             verify_public_discovery_key(&bundle, &other_identity.verifying),
@@ -460,7 +485,7 @@ mod tests {
         ));
 
         let mut bundle = setup.discovery_key.public();
-        bundle.verifying_key = generate_signing_key_pair(&mut setup.rng).verifying;
+        bundle.verifying_key = generate_signing_key_pair(&mut setup.rng).unwrap().verifying;
         assert!(matches!(
             verify_public_discovery_key(&bundle, identity),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
@@ -636,6 +661,21 @@ mod tests {
                 &signature,
             ),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
+        ));
+    }
+
+    #[test]
+    fn generate_discovery_key_returns_generator_failure() {
+        let identity = generate_signing_key_pair(&mut seeded_rng()).unwrap();
+
+        assert!(matches!(
+            generate_discovery_key(
+                &mut FailingRng,
+                &identity,
+                FIXED_EPOCH,
+                FIXED_CREATED_AT_SECS
+            ),
+            Err(KeyGenerationError::Randomness(_))
         ));
     }
 }

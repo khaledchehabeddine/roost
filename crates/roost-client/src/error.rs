@@ -209,7 +209,9 @@ impl From<IdentityError> for RoostError {
             | IdentityError::BindingSignature(_)
             | IdentityError::InvalidBlobLength { .. }
             | IdentityError::InvalidKeyLength { .. } => RoostError::InvalidData { reason },
-            IdentityError::LockPoisoned => RoostError::InternalError { reason },
+            IdentityError::LockPoisoned | IdentityError::Randomness(_) => {
+                RoostError::InternalError { reason }
+            }
             IdentityError::NotFound => RoostError::NotFound,
             IdentityError::Storage(_) => RoostError::Storage { reason },
         }
@@ -222,7 +224,7 @@ impl From<SignedPreKeyError> for RoostError {
         match e {
             SignedPreKeyError::Clock
             | SignedPreKeyError::LockPoisoned
-            | SignedPreKeyError::SignedPreKeySignature(_) => RoostError::InternalError { reason },
+            | SignedPreKeyError::SignedPreKeyGeneration(_) => RoostError::InternalError { reason },
             SignedPreKeyError::Corrupt => RoostError::Corrupt,
             SignedPreKeyError::Discovery(e) => RoostError::from(e).with_reason(reason),
             SignedPreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
@@ -246,9 +248,9 @@ impl From<OneTimePreKeyError> for RoostError {
     fn from(e: OneTimePreKeyError) -> Self {
         let reason = reason_from_chain(&e);
         match e {
-            OneTimePreKeyError::Clock | OneTimePreKeyError::LockPoisoned => {
-                RoostError::InternalError { reason }
-            }
+            OneTimePreKeyError::Clock
+            | OneTimePreKeyError::LockPoisoned
+            | OneTimePreKeyError::Randomness(_) => RoostError::InternalError { reason },
             OneTimePreKeyError::Discovery(e) => RoostError::from(e).with_reason(reason),
             OneTimePreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
             OneTimePreKeyError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
@@ -272,8 +274,9 @@ impl From<DiscoveryKeyError> for RoostError {
         let reason = reason_from_chain(&e);
         match e {
             DiscoveryKeyError::Clock
-            | DiscoveryKeyError::LockPoisoned
-            | DiscoveryKeyError::DiscoveryKeySignature(_) => RoostError::InternalError { reason },
+            | DiscoveryKeyError::DeliveryCapabilityRandomness(_)
+            | DiscoveryKeyError::DiscoveryKeyGeneration(_)
+            | DiscoveryKeyError::LockPoisoned => RoostError::InternalError { reason },
             DiscoveryKeyError::Corrupt => RoostError::Corrupt,
             DiscoveryKeyError::Identity(e) => RoostError::from(e).with_reason(reason),
             DiscoveryKeyError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
@@ -352,7 +355,9 @@ impl From<HandshakeError> for RoostError {
             HandshakeError::UnsupportedPreKeyBundleVersion(_) => {
                 RoostError::UnsupportedVersion { reason }
             }
-            HandshakeError::HkdfExpand => RoostError::InternalError { reason },
+            HandshakeError::HkdfExpand | HandshakeError::Randomness(_) => {
+                RoostError::InternalError { reason }
+            }
             HandshakeError::DiscoveryKeyMismatch
             | HandshakeError::MissingOneTimePreKey
             | HandshakeError::SenderProofFieldTooLong { .. }
@@ -378,9 +383,9 @@ impl From<RatchetError> for RoostError {
             RatchetError::Aead | RatchetError::NonContributorySharedSecret => {
                 RoostError::AuthenticationFailed { reason }
             }
-            RatchetError::HkdfExpand | RatchetError::InvalidHmacKey => {
-                RoostError::InternalError { reason }
-            }
+            RatchetError::HkdfExpand
+            | RatchetError::InvalidHmacKey
+            | RatchetError::Randomness(_) => RoostError::InternalError { reason },
             RatchetError::InvalidState(_)
             | RatchetError::MaxSkipExceeded { .. }
             | RatchetError::MaxSkippedKeysExceeded { .. } => RoostError::InvalidData { reason },
@@ -407,9 +412,9 @@ impl From<SealedFrameError> for RoostError {
             SealedFrameError::Aead | SealedFrameError::NonContributorySharedSecret => {
                 RoostError::AuthenticationFailed { reason }
             }
-            SealedFrameError::Encode | SealedFrameError::HkdfExpand => {
-                RoostError::InternalError { reason }
-            }
+            SealedFrameError::Encode
+            | SealedFrameError::HkdfExpand
+            | SealedFrameError::Randomness(_) => RoostError::InternalError { reason },
             SealedFrameError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
             SealedFrameError::AssociatedDataTooLong { .. }
             | SealedFrameError::CiphertextTooLong { .. }

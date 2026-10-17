@@ -10,7 +10,7 @@ use roost_crypto::{
 
 fn recipient_discovery_key(seed: u8) -> DiscoveryKey {
     let mut rng = ChaCha20Rng::from_seed([seed; 32]);
-    let signing_key = generate_signing_key_pair(&mut rng);
+    let signing_key = generate_signing_key_pair(&mut rng).unwrap();
     generate_discovery_key(&mut rng, &signing_key, 1, 1_700_000_000).unwrap()
 }
 
@@ -27,7 +27,7 @@ fn current_frame_version() -> u8 {
 #[test]
 fn sealed_frame_authenticates_external_associated_data() {
     let mut rng = ChaCha20Rng::from_seed([0x10; 32]);
-    let signing_key = generate_signing_key_pair(&mut rng);
+    let signing_key = generate_signing_key_pair(&mut rng).unwrap();
     let recipient = generate_discovery_key(&mut rng, &signing_key, 1, 1_700_000_000).unwrap();
     let frame = seal_frame_with_associated_data(
         &mut rng,

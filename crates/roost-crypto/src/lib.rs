@@ -73,9 +73,9 @@ pub use handshake::{
     SenderProofTranscript, accept_handshake, initiate_handshake, prove_sender, verify_sender_proof,
 };
 pub use keys::{
-    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, Signature, SigningKeyPair, VerifyingKey,
-    generate_key_pair, generate_signing_key_pair, sign_identity_key_binding,
-    verify_public_identity_key,
+    KeyGenerationError, KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, Signature,
+    SigningKeyPair, VerifyingKey, generate_key_pair, generate_signing_key_pair,
+    sign_identity_key_binding, verify_public_identity_key,
 };
 pub use one_time_prekey::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 pub use sealed_frame::{

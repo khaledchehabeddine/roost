@@ -26,7 +26,7 @@ struct Setup {
 
 fn setup() -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed([0x33u8; 32]);
-    let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity = generate_signing_key_pair(&mut rng).unwrap();
     let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
     let bob_discovery_key =
         generate_discovery_key(&mut rng, &bob_identity, 2, FIXED_CREATED_AT_SECS).unwrap();
@@ -42,7 +42,8 @@ fn setup() -> (Setup, ChaCha20Rng) {
         7,
         bob_discovery_key.epoch(),
         FIXED_CREATED_AT_SECS,
-    );
+    )
+    .unwrap();
     let setup = Setup {
         bob_identity_key,
         bob_discovery_key,
@@ -85,7 +86,7 @@ fn bootstrap(
 }
 
 fn public_identity_key(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> PublicIdentityKey {
-    let agreement_key = generate_key_pair(rng);
+    let agreement_key = generate_key_pair(rng).unwrap();
     let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
     PublicIdentityKey {
         public_key: agreement_key.public,

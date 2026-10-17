@@ -12,10 +12,10 @@ struct Setup {
 
 fn setup() -> Setup {
     let mut rng = ChaCha20Rng::from_seed([0x19; 32]);
-    let local_signing = generate_signing_key_pair(&mut rng);
-    let local_key_pair = generate_key_pair(&mut rng);
-    let contact_signing = generate_signing_key_pair(&mut rng);
-    let contact_key_pair = generate_key_pair(&mut rng);
+    let local_signing = generate_signing_key_pair(&mut rng).unwrap();
+    let local_key_pair = generate_key_pair(&mut rng).unwrap();
+    let contact_signing = generate_signing_key_pair(&mut rng).unwrap();
+    let contact_key_pair = generate_key_pair(&mut rng).unwrap();
 
     Setup {
         local_identity: IdentityKey {
@@ -92,8 +92,11 @@ fn safety_number_matches_expected_hash_and_display() {
 fn safety_number_changes_with_each_identity_key_half() {
     let setup = setup();
     let mut rng = ChaCha20Rng::from_seed([0x5A; 32]);
-    let other_x25519 = *generate_key_pair(&mut rng).public.as_bytes();
-    let other_ed25519 = generate_signing_key_pair(&mut rng).verifying.to_bytes();
+    let other_x25519 = *generate_key_pair(&mut rng).unwrap().public.as_bytes();
+    let other_ed25519 = generate_signing_key_pair(&mut rng)
+        .unwrap()
+        .verifying
+        .to_bytes();
     let local = setup.local_identity;
     let contact = setup.contact_identity;
     let expected = derive_safety_number(local, contact).unwrap();

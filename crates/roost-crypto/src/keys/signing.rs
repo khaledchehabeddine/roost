@@ -53,11 +53,16 @@ impl SigningKeyPair {
 }
 
 /// Generates a fresh Ed25519 key pair using `rng`.
-#[must_use]
-pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> SigningKeyPair {
-    let signing = SigningKey::generate(&mut *rng);
+///
+/// dalek's `SigningKey::generate` panics when `rng` fails, so this fills the bytes itself.
+pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(
+    rng: &mut R,
+) -> Result<SigningKeyPair, rand::Error> {
+    let mut secret = Zeroizing::new([0u8; 32]);
+    rng.try_fill_bytes(&mut secret[..])?;
+    let signing = SigningKey::from_bytes(&secret);
     let verifying = signing.verifying_key();
-    SigningKeyPair { signing, verifying }
+    Ok(SigningKeyPair { signing, verifying })
 }
 
 #[cfg(test)]
@@ -73,7 +78,7 @@ mod tests {
     use roost_protocol::verify_with_context;
 
     fn generated_key_pair() -> SigningKeyPair {
-        generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]))
+        generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32])).unwrap()
     }
 
     #[test]
@@ -130,7 +135,7 @@ mod tests {
     #[test]
     fn identity_key_binding_rejects_swapped_x25519_half() {
         let mut rng = ChaCha20Rng::from_seed([0x15; 32]);
-        let signing_key = generate_signing_key_pair(&mut rng);
+        let signing_key = generate_signing_key_pair(&mut rng).unwrap();
         let agreement_key = KeyPair::from_secret_bytes([0x44; 32]);
         let other_agreement_key = KeyPair::from_secret_bytes([0x45; 32]);
         let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
@@ -150,8 +155,8 @@ mod tests {
     #[test]
     fn identity_key_binding_rejects_swapped_ed25519_half() {
         let mut rng = ChaCha20Rng::from_seed([0x16; 32]);
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let other_signing_key = generate_signing_key_pair(&mut rng);
+        let signing_key = generate_signing_key_pair(&mut rng).unwrap();
+        let other_signing_key = generate_signing_key_pair(&mut rng).unwrap();
         let agreement_key = KeyPair::from_secret_bytes([0x46; 32]);
         let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
 

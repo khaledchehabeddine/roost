@@ -1,4 +1,6 @@
-use crate::keys::{PublicKeyError, contributory_diffie_hellman, parse_public_key};
+use crate::keys::{
+    PublicKeyError, contributory_diffie_hellman, generate_static_secret, parse_public_key,
+};
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -101,22 +103,21 @@ impl PublicOneTimePreKey {
 }
 
 /// Generates a one-time pre-key using `rng`.
-#[must_use]
 pub fn generate_one_time_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     id: u64,
     epoch: u32,
     created_at_secs: u64,
-) -> OneTimePreKey {
-    let secret_key = StaticSecret::random_from_rng(&mut *rng);
+) -> Result<OneTimePreKey, rand::Error> {
+    let secret_key = generate_static_secret(rng)?;
     let public_key = PublicKey::from(&secret_key);
-    OneTimePreKey {
+    Ok(OneTimePreKey {
         id,
         secret_key,
         public_key,
         epoch,
         created_at_secs,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -128,7 +129,7 @@ mod tests {
     #[test]
     fn public_fields_match_one_time_prekey() {
         let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
-        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
+        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000).unwrap();
         let bundle = one_time_prekey.public();
         assert_eq!(bundle.id, one_time_prekey.id());
         assert_eq!(
@@ -142,7 +143,7 @@ mod tests {
     #[test]
     fn public_from_bytes_round_trip_preserves_fields() {
         let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
-        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
+        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000).unwrap();
         let bundle = one_time_prekey.public();
 
         let parsed = PublicOneTimePreKey::from_bytes(
@@ -170,8 +171,8 @@ mod tests {
     #[test]
     fn from_secret_bytes_restores_diffie_hellman_secret() {
         let mut rng = ChaCha20Rng::from_seed([0x55u8; 32]);
-        let original = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
-        let peer = generate_one_time_prekey(&mut rng, 10, 3, 1_700_000_000);
+        let original = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000).unwrap();
+        let peer = generate_one_time_prekey(&mut rng, 10, 3, 1_700_000_000).unwrap();
         let restored = OneTimePreKey::from_secret_bytes(
             original.id(),
             *original.to_secret_bytes(),

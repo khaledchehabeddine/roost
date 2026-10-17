@@ -33,7 +33,7 @@ struct TraceBatch {
 
 fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     let mut rng = ChaCha20Rng::from_seed(seed);
-    let bob_identity = generate_signing_key_pair(&mut rng);
+    let bob_identity = generate_signing_key_pair(&mut rng).unwrap();
     let bob_identity_key = public_identity_key(&mut rng, &bob_identity);
     let bob_discovery_key =
         generate_discovery_key(&mut rng, &bob_identity, 2, CREATED_AT_SECS).unwrap();
@@ -41,7 +41,7 @@ fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
         generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT_SECS)
             .unwrap();
     let bob_one_time_prekey =
-        generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT_SECS);
+        generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT_SECS).unwrap();
     (
         Setup {
             bob_identity_key,
@@ -88,7 +88,7 @@ fn bootstrap(
 }
 
 fn public_identity_key(rng: &mut ChaCha20Rng, signing_key: &SigningKeyPair) -> PublicIdentityKey {
-    let agreement_key = generate_key_pair(rng);
+    let agreement_key = generate_key_pair(rng).unwrap();
     let binding_signature = sign_identity_key_binding(signing_key, &agreement_key.public).unwrap();
     PublicIdentityKey {
         public_key: agreement_key.public,

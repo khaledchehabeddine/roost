@@ -252,7 +252,7 @@ pub fn certificate_until(
 }
 
 fn test_domain_key() -> SigningKeyPair {
-    generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x90; 32]))
+    generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x90; 32])).unwrap()
 }
 
 /// Takes the changes an outcome asks the host to commit, if any, leaving empty changes behind.

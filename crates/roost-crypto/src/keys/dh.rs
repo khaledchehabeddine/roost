@@ -35,11 +35,21 @@ impl KeyPair {
 }
 
 /// Generates a fresh X25519 key pair using `rng`.
-#[must_use]
-pub fn generate_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> KeyPair {
-    let secret = StaticSecret::random_from_rng(&mut *rng);
+pub fn generate_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Result<KeyPair, rand::Error> {
+    let secret = generate_static_secret(rng)?;
     let public = PublicKey::from(&secret);
-    KeyPair { public, secret }
+    Ok(KeyPair { public, secret })
+}
+
+/// Generates an X25519 secret from `rng`.
+///
+/// dalek's `random_from_rng` panics when `rng` fails, so this fills the bytes itself.
+pub(crate) fn generate_static_secret<R: RngCore + CryptoRng>(
+    rng: &mut R,
+) -> Result<StaticSecret, rand::Error> {
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    rng.try_fill_bytes(&mut bytes[..])?;
+    Ok(StaticSecret::from(*bytes))
 }
 
 /// Returns the shared secret of `secret` and `peer`, or `None` when `peer` is a low-order point
@@ -60,7 +70,7 @@ mod tests {
 
     #[test]
     fn key_pair_round_trip_via_secret_bytes() {
-        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([1u8; 32]));
+        let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([1u8; 32])).unwrap();
         let restored = KeyPair::from_secret_bytes(*key_pair.to_secret_bytes());
         assert_eq!(key_pair.public.as_bytes(), restored.public.as_bytes());
     }
@@ -75,8 +85,8 @@ mod tests {
     #[test]
     fn diffie_hellman_agreement_is_symmetric() {
         let mut rng = ChaCha20Rng::from_seed([2u8; 32]);
-        let alice = generate_key_pair(&mut rng);
-        let bob = generate_key_pair(&mut rng);
+        let alice = generate_key_pair(&mut rng).unwrap();
+        let bob = generate_key_pair(&mut rng).unwrap();
 
         let alice_shared_secret = alice.diffie_hellman(&bob.public).unwrap();
         let bob_shared_secret = bob.diffie_hellman(&alice.public).unwrap();

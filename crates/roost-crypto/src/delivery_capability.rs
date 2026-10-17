@@ -81,13 +81,12 @@ impl Eq for RecipientDeliveryVerifier {}
 /// Generates a fresh 32-byte recipient delivery capability from `rng`.
 ///
 /// Production callers must pass an OS CSPRNG.
-#[must_use]
 pub fn generate_recipient_delivery_capability<R: RngCore + CryptoRng>(
     rng: &mut R,
-) -> RecipientDeliveryCapability {
+) -> Result<RecipientDeliveryCapability, rand::Error> {
     let mut bytes = Zeroizing::new([0u8; CAPABILITY_LEN]);
-    rng.fill_bytes(bytes.as_mut());
-    RecipientDeliveryCapability(*bytes)
+    rng.try_fill_bytes(bytes.as_mut())?;
+    Ok(RecipientDeliveryCapability(*bytes))
 }
 
 #[cfg(test)]
@@ -112,8 +111,8 @@ mod tests {
     fn generated_capabilities_differ_between_draws() {
         let mut rng = seeded_rng();
 
-        let first = generate_recipient_delivery_capability(&mut rng);
-        let second = generate_recipient_delivery_capability(&mut rng);
+        let first = generate_recipient_delivery_capability(&mut rng).unwrap();
+        let second = generate_recipient_delivery_capability(&mut rng).unwrap();
 
         assert_ne!(*first.to_bytes(), *second.to_bytes());
     }
@@ -123,7 +122,7 @@ mod tests {
     #[test]
     fn capability_round_trips_through_secret_bytes() {
         let mut rng = seeded_rng();
-        let original = generate_recipient_delivery_capability(&mut rng);
+        let original = generate_recipient_delivery_capability(&mut rng).unwrap();
 
         let restored = RecipientDeliveryCapability::from_bytes(*original.to_bytes());
 

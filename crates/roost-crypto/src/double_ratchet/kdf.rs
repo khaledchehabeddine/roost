@@ -110,8 +110,8 @@ mod tests {
 
     fn dh_output(seed: u8) -> SharedSecret {
         let mut rng = ChaCha20Rng::from_seed([seed; 32]);
-        let local = generate_key_pair(&mut rng);
-        let remote = generate_key_pair(&mut rng);
+        let local = generate_key_pair(&mut rng).unwrap();
+        let remote = generate_key_pair(&mut rng).unwrap();
         local.diffie_hellman(&remote.public).unwrap()
     }
 

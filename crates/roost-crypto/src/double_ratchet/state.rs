@@ -103,7 +103,7 @@ impl RatchetState {
         root_key: RootKey,
         receiving_ratchet_public_key: &PublicKey,
     ) -> Result<Self, RatchetError> {
-        let sending_ratchet_key_pair = generate_key_pair(rng);
+        let sending_ratchet_key_pair = generate_key_pair(rng).map_err(RatchetError::Randomness)?;
         let dh_output = sending_ratchet_key_pair
             .diffie_hellman(receiving_ratchet_public_key)
             .ok_or(RatchetError::NonContributorySharedSecret)?;
@@ -454,7 +454,7 @@ impl RatchetState {
         self.root_key = next_root_key;
         self.receiving_chain_key = Some(receiving_chain_key);
 
-        self.sending_ratchet_key_pair = generate_key_pair(rng);
+        self.sending_ratchet_key_pair = generate_key_pair(rng).map_err(RatchetError::Randomness)?;
         let sending_dh_output = self
             .sending_ratchet_key_pair
             .diffie_hellman(&header.public_key)
@@ -500,6 +500,9 @@ pub enum RatchetError {
     /// An X25519 exchange produced a non-contributory shared secret.
     #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
+    /// The random number generator failed while generating a ratchet key.
+    #[error("ratchet randomness failed")]
+    Randomness(#[source] rand::Error),
 }
 
 /// An error returned while persisting or restoring a [`RatchetState`].
@@ -538,7 +541,7 @@ mod tests {
     fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>, ChaCha20Rng) {
         let mut rng = ChaCha20Rng::from_seed([0x11u8; 32]);
         let shared_secret = [0x42u8; 32];
-        let responder_key_pair = generate_key_pair(&mut rng);
+        let responder_key_pair = generate_key_pair(&mut rng).unwrap();
         let responder_public_key = responder_key_pair.public;
 
         let initiator = RatchetState::init_initiator(

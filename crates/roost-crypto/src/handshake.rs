@@ -91,7 +91,7 @@ pub fn initiate_handshake<R: RngCore + CryptoRng>(
     )?;
     validate_bundle_epochs(responder_prekey_bundle)?;
 
-    let base_key = generate_key_pair(rng);
+    let base_key = generate_key_pair(rng).map_err(HandshakeError::Randomness)?;
     let signed_prekey_public_key = responder_prekey_bundle.signed_prekey.public_key;
     let one_time_prekey = responder_prekey_bundle.one_time_prekey.as_ref();
     let discovery_key_shared_secret = base_key
@@ -244,6 +244,9 @@ pub enum HandshakeError {
     /// Handshake one-time pre-key reference does not match the local one.
     #[error("handshake one-time pre-key reference does not match local one-time pre-key")]
     OneTimePreKeyMismatch,
+    /// The random number generator failed while generating the base key.
+    #[error("handshake randomness failed")]
+    Randomness(#[source] rand::Error),
     /// Seeding the ratchet failed.
     #[error("handshake ratchet operation failed")]
     Ratchet(#[from] RatchetError),
@@ -446,15 +449,15 @@ mod tests {
 
     fn setup() -> (Setup, ChaCha20Rng) {
         let mut rng = ChaCha20Rng::from_seed([0x42u8; 32]);
-        let alice_identity = generate_signing_key_pair(&mut rng);
-        let alice_identity_key_pair = generate_key_pair(&mut rng);
+        let alice_identity = generate_signing_key_pair(&mut rng).unwrap();
+        let alice_identity_key_pair = generate_key_pair(&mut rng).unwrap();
         let alice_identity_key =
             public_identity_key(&alice_identity, alice_identity_key_pair.public);
         let alice_discovery_key =
             generate_discovery_key(&mut rng, &alice_identity, 2, FIXED_CREATED_AT_SECS).unwrap();
-        let bob_identity = generate_signing_key_pair(&mut rng);
+        let bob_identity = generate_signing_key_pair(&mut rng).unwrap();
         let bob_identity_key =
-            public_identity_key(&bob_identity, generate_key_pair(&mut rng).public);
+            public_identity_key(&bob_identity, generate_key_pair(&mut rng).unwrap().public);
         let bob_discovery_key =
             generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_CREATED_AT_SECS).unwrap();
         let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
@@ -469,7 +472,8 @@ mod tests {
             9,
             bob_discovery_key.epoch(),
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let setup = Setup {
             alice_identity_key_pair,
             alice_identity_key,
@@ -596,7 +600,8 @@ mod tests {
         let secret = |seed: u8| {
             let mut rng = ChaCha20Rng::from_seed([seed; 32]);
             generate_key_pair(&mut rng)
-                .diffie_hellman(&generate_key_pair(&mut rng).public)
+                .unwrap()
+                .diffie_hellman(&generate_key_pair(&mut rng).unwrap().public)
                 .unwrap()
         };
         let (discovery, signed, one_time, other) = (secret(1), secret(2), secret(3), secret(4));
@@ -640,7 +645,8 @@ mod tests {
             10,
             setup.bob_discovery_key.epoch(),
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let (_, _, handshake) =
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
 
@@ -725,7 +731,8 @@ mod tests {
             10,
             setup.bob_discovery_key.epoch() + 1,
             FIXED_CREATED_AT_SECS,
-        );
+        )
+        .unwrap();
         let bundle = PreKeyBundle {
             one_time_prekey: Some(stale_one_time_prekey.public()),
             ..bundle(&setup, false)
@@ -786,8 +793,8 @@ mod tests {
         let sender_discovery_key = setup.alice_discovery_key.public();
         let transcript = proof_transcript(&setup, &handshake, &sender_discovery_key);
         let proof = prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap();
-        let other_key = generate_key_pair(&mut rng).public;
-        let other_signing_key = generate_signing_key_pair(&mut rng);
+        let other_key = generate_key_pair(&mut rng).unwrap().public;
+        let other_signing_key = generate_signing_key_pair(&mut rng).unwrap();
         let mut other_one_time_prekey = handshake;
         other_one_time_prekey.prekey_reference.one_time_prekey_id = Some(10);
         let mut without_one_time_prekey = handshake;
@@ -873,7 +880,7 @@ mod tests {
         ] {
             changed.push(*prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap());
         }
-        changed.push(*prove_sender(&generate_key_pair(&mut rng), &transcript).unwrap());
+        changed.push(*prove_sender(&generate_key_pair(&mut rng).unwrap(), &transcript).unwrap());
 
         for other in changed {
             assert_ne!(other, *proof);
@@ -887,7 +894,7 @@ mod tests {
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
         let sender_discovery_key = setup.alice_discovery_key.public();
         let transcript = proof_transcript(&setup, &handshake, &sender_discovery_key);
-        let forged = prove_sender(&generate_key_pair(&mut rng), &transcript).unwrap();
+        let forged = prove_sender(&generate_key_pair(&mut rng).unwrap(), &transcript).unwrap();
 
         assert!(matches!(
             verify_sender_proof(&setup.bob_signed_prekey, &transcript, &forged),

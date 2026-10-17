@@ -2,8 +2,10 @@ use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
 use crate::prekey_state::INBOX_ROTATION_REQUIRED_MARKER;
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
-use roost_crypto::{PublicSignedPreKey, SignedPreKey, generate_signed_prekey_for_discovery_key};
-use roost_protocol::{SignatureError, from_unix_secs, to_unix_secs};
+use roost_crypto::{
+    KeyGenerationError, PublicSignedPreKey, SignedPreKey, generate_signed_prekey_for_discovery_key,
+};
+use roost_protocol::{from_unix_secs, to_unix_secs};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 use subtle::ConstantTimeEq;
@@ -101,9 +103,9 @@ pub enum SignedPreKeyError {
         /// Current signed pre-key's identifier.
         current_id: u64,
     },
-    /// Signing a new signed pre-key with the discovery key failed.
-    #[error("signing the signed pre-key failed")]
-    SignedPreKeySignature(#[source] SignatureError),
+    /// Generating a new signed pre-key or signing it with the discovery key failed.
+    #[error("generating the signed pre-key failed")]
+    SignedPreKeyGeneration(#[source] KeyGenerationError),
     /// More retained signed pre-keys are stored than the limit allows.
     #[error("{count} retained signed pre-keys exceed the limit of {max}")]
     TooManyRetained {
@@ -251,7 +253,7 @@ impl SignedPreKeyManager {
             .ok_or(SignedPreKeyError::IdentifiersExhausted)?;
         let signed_prekey =
             generate_signed_prekey_for_discovery_key(rng, &discovery_key, next_id, now_secs)
-                .map_err(SignedPreKeyError::SignedPreKeySignature)?;
+                .map_err(SignedPreKeyError::SignedPreKeyGeneration)?;
         let mut retained = Vec::new();
         if let Some(mut store) = previous.filter(|_| same_epoch) {
             retained = std::mem::take(&mut store.retained);
@@ -557,7 +559,7 @@ mod tests {
         created_at_secs: u64,
     ) -> SignedPreKey {
         let mut rng = ChaCha20Rng::from_seed([0x91; 32]);
-        let signing_key = generate_signing_key_pair(&mut rng);
+        let signing_key = generate_signing_key_pair(&mut rng).unwrap();
         let discovery_key =
             generate_discovery_key(&mut rng, &signing_key, FIXED_EPOCH, FIXED_NOW).unwrap();
         let signed_prekey =
@@ -960,7 +962,7 @@ mod tests {
     #[test]
     fn encode_decode_signed_prekey_round_trip() {
         let mut rng = ChaCha20Rng::from_seed([0xa2; 32]);
-        let identity_signing_key = generate_signing_key_pair(&mut rng);
+        let identity_signing_key = generate_signing_key_pair(&mut rng).unwrap();
         let discovery_key =
             generate_discovery_key(&mut rng, &identity_signing_key, FIXED_EPOCH, FIXED_NOW)
                 .unwrap();

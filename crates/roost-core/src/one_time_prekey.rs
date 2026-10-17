@@ -80,6 +80,9 @@ pub enum OneTimePreKeyError {
     /// The requested one-time pre-key was never created.
     #[error("one-time pre-key not found")]
     NotFound,
+    /// The random number generator failed while generating a one-time pre-key.
+    #[error("one-time pre-key randomness failed")]
+    Randomness(#[source] rand::Error),
     /// A Session already used the requested one-time pre-key.
     #[error("one-time pre-key {id} was already used")]
     Used {
@@ -302,7 +305,8 @@ fn append_batch<R: RngCore + CryptoRng>(
             .next_id
             .checked_add(1)
             .ok_or(OneTimePreKeyError::IdentifiersExhausted)?;
-        let one_time_prekey = generate_one_time_prekey(rng, id, epoch, created_at_secs);
+        let one_time_prekey = generate_one_time_prekey(rng, id, epoch, created_at_secs)
+            .map_err(OneTimePreKeyError::Randomness)?;
         pool.entries.push(OneTimePreKeyEntry {
             id,
             secret: *one_time_prekey.to_secret_bytes(),

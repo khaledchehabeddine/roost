@@ -132,7 +132,7 @@ pub fn seal_frame_with_associated_data<R: RngCore + CryptoRng>(
     plaintext: &[u8],
     additional_associated_data: &[u8],
 ) -> Result<SealedFrame, SealedFrameError> {
-    let ephemeral_key = generate_key_pair(rng);
+    let ephemeral_key = generate_key_pair(rng).map_err(SealedFrameError::Randomness)?;
     let mut frame = SealedFrame {
         version: SEALED_FRAME_VERSION,
         recipient_public_key: *recipient_public_key.as_bytes(),
@@ -242,6 +242,9 @@ pub enum SealedFrameError {
     /// An X25519 exchange produced a non-contributory shared secret.
     #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
+    /// The random number generator failed while generating the ephemeral key.
+    #[error("sealed-sender frame randomness failed")]
+    Randomness(#[source] rand::Error),
     /// The frame is sealed to another Discovery Key.
     #[error("sealed-sender frame targets another discovery key")]
     RecipientMismatch,

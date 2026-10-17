@@ -5,7 +5,7 @@ The app holds private keys and messages and reads bytes from anyone, so a mistak
 ## Primitives
 
 - Use an established crate for every cryptographic primitive and construction, even one that looks simple, such as HMAC instead of hashing a key with a message.
-- Take the random number generator as a parameter, and pass `OsRng` in production and a seeded generator in tests.
+- Take the random number generator as a generic parameter, pass `OsRng` in production and a seeded generator in tests, and fill secret bytes with `try_fill_bytes` so a failing generator returns an error.
 - Never encrypt more than one message with the same key and nonce.
 - Compare secrets, tags, tokens, and keys in constant time, with `ct_eq` or the crate's verify method.
 

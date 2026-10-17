@@ -2,8 +2,9 @@ use crate::identity::{IdentityError, IdentityManager};
 use crate::storage::{SecureStorage, StorageError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    DiscoveryKey, PublicDiscoveryKey, RecipientDeliveryCapability, Signature, SigningKeyPair,
-    generate_discovery_key, generate_recipient_delivery_capability, verify_public_discovery_key,
+    DiscoveryKey, KeyGenerationError, PublicDiscoveryKey, RecipientDeliveryCapability, Signature,
+    SigningKeyPair, generate_discovery_key, generate_recipient_delivery_capability,
+    verify_public_discovery_key,
 };
 use roost_protocol::{SignatureError, to_unix_secs};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -63,9 +64,12 @@ pub enum DiscoveryKeyError {
     /// The stored discovery key is malformed and must be reset before a new one replaces it.
     #[error("stored discovery key is malformed")]
     Malformed,
-    /// Signing a new discovery key with the identity key failed.
-    #[error("signing the discovery key failed")]
-    DiscoveryKeySignature(#[source] SignatureError),
+    /// Generating a new discovery key or signing it with the identity key failed.
+    #[error("generating the discovery key failed")]
+    DiscoveryKeyGeneration(#[source] KeyGenerationError),
+    /// The random number generator failed while generating the Delivery Capability.
+    #[error("delivery capability randomness failed")]
+    DeliveryCapabilityRandomness(#[source] rand::Error),
     /// The internal storage lock was poisoned by a panicked thread.
     #[error("internal lock poisoned")]
     LockPoisoned,
@@ -173,10 +177,11 @@ impl DiscoveryKeyManager {
         };
         let discovery_key =
             generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs)
-                .map_err(DiscoveryKeyError::DiscoveryKeySignature)?;
+                .map_err(DiscoveryKeyError::DiscoveryKeyGeneration)?;
         // The capability rotates with the discovery key because both belong to one epoch, and
         // they are written in one store so they cannot diverge.
-        let capability = generate_recipient_delivery_capability(rng);
+        let capability = generate_recipient_delivery_capability(rng)
+            .map_err(DiscoveryKeyError::DeliveryCapabilityRandomness)?;
         let blob = encode_discovery_key(&discovery_key, &capability);
         let mut storage = self.lock_storage()?;
         if let Some(previous) = previous {
@@ -766,7 +771,7 @@ mod tests {
         let loaded = identity.load_identity().unwrap();
         let original =
             generate_discovery_key(&mut rng, loaded.signing_key_pair(), 9, FIXED_NOW).unwrap();
-        let capability = generate_recipient_delivery_capability(&mut rng);
+        let capability = generate_recipient_delivery_capability(&mut rng).unwrap();
         let blob = encode_discovery_key(&original, &capability);
         assert_eq!(blob.len(), DISCOVERY_KEY_BLOB_LEN);
         let restored = decode_discovery_key(&blob);

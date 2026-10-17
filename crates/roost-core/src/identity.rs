@@ -94,6 +94,9 @@ pub enum IdentityError {
     /// No identity is stored.
     #[error("no identity found")]
     NotFound,
+    /// The random number generator failed while generating the Identity Key.
+    #[error("identity key randomness failed")]
+    Randomness(#[source] rand::Error),
     /// The underlying [`SecureStorage`] returned an error.
     #[error("identity storage failed")]
     Storage(#[from] StorageError),
@@ -163,8 +166,8 @@ impl IdentityManager {
             return Err(IdentityError::AlreadyExists);
         }
 
-        let key_pair = generate_key_pair(rng);
-        let signing_key_pair = generate_signing_key_pair(rng);
+        let key_pair = generate_key_pair(rng).map_err(IdentityError::Randomness)?;
+        let signing_key_pair = generate_signing_key_pair(rng).map_err(IdentityError::Randomness)?;
         let blob = encode_identity_key_blob(
             &key_pair.to_secret_bytes(),
             &signing_key_pair.to_signing_bytes(),
