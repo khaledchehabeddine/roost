@@ -19,7 +19,7 @@ Follow the [template](templates/glossary.md) when editing `GLOSSARY.md`.
 Follow the [template](templates/adr.md) when writing an ADR in `docs/adr/`.
 
 - Write an ADR only when a decision is costly to reverse, surprising without context, and the result of a real trade-off.
-- State the context, decision, and reason in one to three sentences.
+- State the context, decision, and reason in one short paragraph, one idea per sentence.
 - List an alternative only when a reader might ask why it wasn't chosen, and give the reason in one sentence.
 - Record each decision in one ADR.
 - Leave out code details, such as caller duties, limits, test coverage, and encodings.
