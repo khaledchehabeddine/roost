@@ -676,7 +676,9 @@ fn blocking_a_stranger_rotates_the_inbox_and_hides_their_request() {
         bob.observe(&stale.message),
         Err(support::device::DeviceError::Operation(
             roost_core::MessageOperationError::ProtocolState(
-                roost_core::ProtocolStateError::SealedFrame(roost_crypto::SealedFrameError::Decode)
+                roost_core::ProtocolStateError::SealedFrame(
+                    roost_crypto::SealedFrameError::RecipientMismatch
+                )
             )
         ))
     ));

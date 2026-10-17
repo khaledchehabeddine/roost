@@ -2,13 +2,12 @@
 //! Message's sender holds their Identity Key.
 
 use crate::discovery_key::{DiscoveryKey, PublicDiscoveryKey, verify_public_discovery_key};
-use crate::double_ratchet::{RatchetError, RatchetState};
+use crate::double_ratchet::{RatchetError, RatchetState, RootKey};
 use crate::keys::{
-    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, SharedSecret, generate_key_pair,
+    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, generate_key_pair,
     verify_public_identity_key,
 };
 use crate::one_time_prekey::{OneTimePreKey, PublicOneTimePreKey};
-use crate::ratchet::RootKey;
 use crate::sealed_frame::SealedFramePreKeyReference;
 use crate::signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_public_signed_prekey};
 use hkdf::Hkdf;
@@ -16,11 +15,9 @@ use rand::{CryptoRng, RngCore};
 use roost_protocol::SessionId;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use x25519_dalek::SharedSecret;
 use zeroize::Zeroizing;
 
-// Fixed prefix on the HKDF input. Future incompatible handshake derivations should change these
-// bytes so peers fail during the first decrypt.
-const F_PREFIX: [u8; 32] = [0xFF; 32];
 const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:with-opk";
 const SESSION_ID_INFO: &[u8] = b"RoostSessionId-v1:";
@@ -97,13 +94,18 @@ pub fn initiate_handshake<R: RngCore + CryptoRng>(
     let base_key = generate_key_pair(rng);
     let signed_prekey_public_key = responder_prekey_bundle.signed_prekey.public_key;
     let one_time_prekey = responder_prekey_bundle.one_time_prekey.as_ref();
-    let discovery_key_shared_secret = checked_shared_secret(
-        base_key.diffie_hellman(&responder_prekey_bundle.discovery_key.public_key),
-    )?;
-    let signed_prekey_shared_secret =
-        checked_shared_secret(base_key.diffie_hellman(&signed_prekey_public_key))?;
+    let discovery_key_shared_secret = base_key
+        .diffie_hellman(&responder_prekey_bundle.discovery_key.public_key)
+        .ok_or(HandshakeError::NonContributorySharedSecret)?;
+    let signed_prekey_shared_secret = base_key
+        .diffie_hellman(&signed_prekey_public_key)
+        .ok_or(HandshakeError::NonContributorySharedSecret)?;
     let one_time_prekey_shared_secret = one_time_prekey
-        .map(|prekey| checked_shared_secret(base_key.diffie_hellman(&prekey.public_key)))
+        .map(|prekey| {
+            base_key
+                .diffie_hellman(&prekey.public_key)
+                .ok_or(HandshakeError::NonContributorySharedSecret)
+        })
         .transpose()?;
     let (root_key, session_id) = derive_root_key_and_session_id(
         &discovery_key_shared_secret,
@@ -143,11 +145,11 @@ pub fn accept_handshake(
     if !discovery_key_matches {
         return Err(HandshakeError::DiscoveryKeyMismatch);
     }
-    if reference.discovery_epoch != responder_discovery_key.epoch()
-        || responder_signed_prekey.epoch() != responder_discovery_key.epoch()
-    {
-        return Err(HandshakeError::StalePreKey);
-    }
+    check_epoch(reference.discovery_epoch, responder_discovery_key.epoch())?;
+    check_epoch(
+        responder_signed_prekey.epoch(),
+        responder_discovery_key.epoch(),
+    )?;
     let signed_prekey_matches: bool = reference
         .signed_prekey_public_key
         .ct_eq(responder_signed_prekey.public_key().as_bytes())
@@ -159,13 +161,19 @@ pub fn accept_handshake(
         validate_one_time_prekey(&reference, responder_one_time_prekey)?;
 
     let base_key = &handshake.base_key;
-    let discovery_key_shared_secret =
-        checked_shared_secret(responder_discovery_key.diffie_hellman(base_key))?;
-    let signed_prekey_shared_secret =
-        checked_shared_secret(responder_signed_prekey.diffie_hellman(base_key))?;
+    let discovery_key_shared_secret = responder_discovery_key
+        .diffie_hellman(base_key)
+        .ok_or(HandshakeError::NonContributorySharedSecret)?;
+    let signed_prekey_shared_secret = responder_signed_prekey
+        .diffie_hellman(base_key)
+        .ok_or(HandshakeError::NonContributorySharedSecret)?;
     let one_time_prekey_shared_secret = responder_one_time_prekey
         .as_ref()
-        .map(|prekey| checked_shared_secret(prekey.diffie_hellman(base_key)))
+        .map(|prekey| {
+            prekey
+                .diffie_hellman(base_key)
+                .ok_or(HandshakeError::NonContributorySharedSecret)
+        })
         .transpose()?;
     let (root_key, session_id) = derive_root_key_and_session_id(
         &discovery_key_shared_secret,
@@ -192,8 +200,9 @@ pub fn prove_sender(
             .prekey_reference
             .signed_prekey_public_key,
     );
-    let secret =
-        checked_shared_secret(sender_identity_key_pair.diffie_hellman(&signed_prekey_public_key))?;
+    let secret = sender_identity_key_pair
+        .diffie_hellman(&signed_prekey_public_key)
+        .ok_or(HandshakeError::NonContributorySharedSecret)?;
     derive_sender_proof(&secret, &sender_proof_transcript(transcript)?)
 }
 
@@ -203,9 +212,9 @@ pub fn verify_sender_proof(
     transcript: &SenderProofTranscript<'_>,
     proof: &[u8; SENDER_PROOF_LEN],
 ) -> Result<(), HandshakeError> {
-    let secret = checked_shared_secret(
-        responder_signed_prekey.diffie_hellman(&transcript.sender_identity_key.public_key),
-    )?;
+    let secret = responder_signed_prekey
+        .diffie_hellman(&transcript.sender_identity_key.public_key)
+        .ok_or(HandshakeError::NonContributorySharedSecret)?;
     let expected = derive_sender_proof(&secret, &sender_proof_transcript(transcript)?)?;
     let proof_matches: bool = expected.as_ref().ct_eq(proof).into();
     if !proof_matches {
@@ -252,23 +261,33 @@ pub enum HandshakeError {
     /// Handshake targets a different signed pre-key than the local one.
     #[error("handshake signed pre-key reference does not match local signed pre-key")]
     SignedPreKeyMismatch,
-    /// Pre-key material belongs to a superseded discovery-key epoch.
-    #[error("pre-key belongs to a superseded discovery-key epoch")]
-    StalePreKey,
+    /// Pre-key material belongs to another epoch than the discovery key.
+    #[error("pre-key epoch {epoch} doesn't match discovery key epoch {discovery_epoch}")]
+    StalePreKey {
+        /// The epoch of the pre-key, or of the pre-keys the handshake names.
+        epoch: u32,
+        /// The discovery key's epoch.
+        discovery_epoch: u32,
+    },
     /// Pre-key bundle uses a format version this build does not understand.
     #[error("unsupported pre-key bundle format version: {0}")]
     UnsupportedPreKeyBundleVersion(u8),
 }
 
 fn validate_bundle_epochs(bundle: &PreKeyBundle) -> Result<(), HandshakeError> {
-    let epoch = bundle.discovery_key.epoch;
-    if bundle.signed_prekey.epoch != epoch {
-        return Err(HandshakeError::StalePreKey);
+    check_epoch(bundle.signed_prekey.epoch, bundle.discovery_key.epoch)?;
+    if let Some(one_time_prekey) = &bundle.one_time_prekey {
+        check_epoch(one_time_prekey.epoch, bundle.discovery_key.epoch)?;
     }
-    if let Some(one_time_prekey) = &bundle.one_time_prekey
-        && one_time_prekey.epoch != epoch
-    {
-        return Err(HandshakeError::StalePreKey);
+    Ok(())
+}
+
+fn check_epoch(epoch: u32, discovery_epoch: u32) -> Result<(), HandshakeError> {
+    if epoch != discovery_epoch {
+        return Err(HandshakeError::StalePreKey {
+            epoch,
+            discovery_epoch,
+        });
     }
     Ok(())
 }
@@ -292,42 +311,32 @@ fn validate_one_time_prekey(
             if prekey.id() != expected_id || !public_matches {
                 return Err(HandshakeError::OneTimePreKeyMismatch);
             }
-            if prekey.epoch() != reference.discovery_epoch {
-                return Err(HandshakeError::StalePreKey);
-            }
+            check_epoch(prekey.epoch(), reference.discovery_epoch)?;
             Ok(Some(prekey))
         }
     }
 }
 
-fn checked_shared_secret(secret: SharedSecret) -> Result<SharedSecret, HandshakeError> {
-    if !secret.was_contributory() {
-        return Err(HandshakeError::NonContributorySharedSecret);
-    }
-    Ok(secret)
-}
-
-// Runs HKDF-SHA256 once over F_PREFIX || DH outputs and expands the root key and the SessionID
-// under separate labels.
+// Runs HKDF-SHA256 once over the DH outputs and expands the root key and the SessionID under
+// separate labels.
 //
-// Using no salt means the RFC 5869 zero salt. That is acceptable here because the input keying
-// material is already uniformly random and the info strings provide domain separation.
+// No salt means RFC 5869's all-zero salt, which X3DH also uses. The extract step turns the DH
+// outputs into a pseudorandom key, and the info labels keep the root key and SessionID apart.
 fn derive_root_key_and_session_id(
     discovery_key_shared_secret: &SharedSecret,
     signed_prekey_shared_secret: &SharedSecret,
     one_time_prekey_shared_secret: Option<&SharedSecret>,
 ) -> Result<(RootKey, SessionId), HandshakeError> {
-    let mut input_keying_material = Zeroizing::new([0u8; 32 * 4]);
-    input_keying_material[..32].copy_from_slice(&F_PREFIX);
-    input_keying_material[32..64].copy_from_slice(discovery_key_shared_secret.as_bytes());
-    input_keying_material[64..96].copy_from_slice(signed_prekey_shared_secret.as_bytes());
+    let mut input_keying_material = Zeroizing::new([0u8; 32 * 3]);
+    input_keying_material[..32].copy_from_slice(discovery_key_shared_secret.as_bytes());
+    input_keying_material[32..64].copy_from_slice(signed_prekey_shared_secret.as_bytes());
     let (input_keying_material, root_key_info) = match one_time_prekey_shared_secret {
         Some(secret) => {
-            input_keying_material[96..].copy_from_slice(secret.as_bytes());
+            input_keying_material[64..].copy_from_slice(secret.as_bytes());
             (&input_keying_material[..], HKDF_INFO_WITH_ONE_TIME_PREKEY)
         }
         None => (
-            &input_keying_material[..96],
+            &input_keying_material[..64],
             HKDF_INFO_WITHOUT_ONE_TIME_PREKEY,
         ),
     };
@@ -422,7 +431,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
     use roost_protocol::SignatureError;
 
-    const FIXED_TS: u64 = 1_700_000_000;
+    const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
     const ASSOCIATED_DATA: &[u8] = b"associated data";
 
     struct Setup {
@@ -442,17 +451,25 @@ mod tests {
         let alice_identity_key =
             public_identity_key(&alice_identity, alice_identity_key_pair.public);
         let alice_discovery_key =
-            generate_discovery_key(&mut rng, &alice_identity, 2, FIXED_TS).unwrap();
+            generate_discovery_key(&mut rng, &alice_identity, 2, FIXED_CREATED_AT_SECS).unwrap();
         let bob_identity = generate_signing_key_pair(&mut rng);
         let bob_identity_key =
             public_identity_key(&bob_identity, generate_key_pair(&mut rng).public);
         let bob_discovery_key =
-            generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_TS).unwrap();
-        let bob_signed_prekey =
-            generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, FIXED_TS)
-                .unwrap();
-        let bob_one_time_prekey =
-            generate_one_time_prekey(&mut rng, 9, bob_discovery_key.epoch(), FIXED_TS);
+            generate_discovery_key(&mut rng, &bob_identity, 3, FIXED_CREATED_AT_SECS).unwrap();
+        let bob_signed_prekey = generate_signed_prekey_for_discovery_key(
+            &mut rng,
+            &bob_discovery_key,
+            0,
+            FIXED_CREATED_AT_SECS,
+        )
+        .unwrap();
+        let bob_one_time_prekey = generate_one_time_prekey(
+            &mut rng,
+            9,
+            bob_discovery_key.epoch(),
+            FIXED_CREATED_AT_SECS,
+        );
         let setup = Setup {
             alice_identity_key_pair,
             alice_identity_key,
@@ -479,7 +496,7 @@ mod tests {
             prekey.id(),
             *prekey.to_secret_bytes(),
             prekey.epoch(),
-            prekey.created_at_secs(),
+            FIXED_CREATED_AT_SECS,
         )
     }
 
@@ -578,7 +595,9 @@ mod tests {
     fn root_key_and_session_id_change_with_each_key_agreement_input() {
         let secret = |seed: u8| {
             let mut rng = ChaCha20Rng::from_seed([seed; 32]);
-            generate_key_pair(&mut rng).diffie_hellman(&generate_key_pair(&mut rng).public)
+            generate_key_pair(&mut rng)
+                .diffie_hellman(&generate_key_pair(&mut rng).public)
+                .unwrap()
         };
         let (discovery, signed, one_time, other) = (secret(1), secret(2), secret(3), secret(4));
         let (root_key, session_id) =
@@ -616,8 +635,12 @@ mod tests {
     #[test]
     fn accept_rejects_mismatched_one_time_prekey() {
         let (setup, mut rng) = setup();
-        let wrong_one_time_prekey =
-            generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch(), FIXED_TS);
+        let wrong_one_time_prekey = generate_one_time_prekey(
+            &mut rng,
+            10,
+            setup.bob_discovery_key.epoch(),
+            FIXED_CREATED_AT_SECS,
+        );
         let (_, _, handshake) =
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
 
@@ -639,7 +662,7 @@ mod tests {
             &mut rng,
             &setup.bob_discovery_key,
             1,
-            FIXED_TS,
+            FIXED_CREATED_AT_SECS,
         )
         .unwrap();
         let (_, _, handshake) =
@@ -697,8 +720,12 @@ mod tests {
     #[test]
     fn initiate_rejects_stale_one_time_prekey_epoch() {
         let (setup, mut rng) = setup();
-        let stale_one_time_prekey =
-            generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch() + 1, FIXED_TS);
+        let stale_one_time_prekey = generate_one_time_prekey(
+            &mut rng,
+            10,
+            setup.bob_discovery_key.epoch() + 1,
+            FIXED_CREATED_AT_SECS,
+        );
         let bundle = PreKeyBundle {
             one_time_prekey: Some(stale_one_time_prekey.public()),
             ..bundle(&setup, false)
@@ -706,7 +733,8 @@ mod tests {
 
         assert!(matches!(
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle),
-            Err(HandshakeError::StalePreKey)
+            Err(HandshakeError::StalePreKey { epoch, discovery_epoch })
+                if epoch == discovery_epoch + 1
         ));
     }
 

@@ -1,11 +1,6 @@
-//! XChaCha20-Poly1305 encryption for Double Ratchet messages.
-//!
-//! Each message key expands into an encryption key and nonce with HKDF-SHA256. The caller's
-//! associated data and the serialized header are authenticated with the ciphertext.
-
 use super::header::Header;
+use super::kdf::MessageKey;
 use super::state::RatchetError;
-use crate::ratchet::MessageKey;
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
@@ -81,8 +76,9 @@ mod tests {
 
     #[test]
     fn message_key_expansion_changes_with_the_message_key() {
-        let (encryption_key, nonce) = expand_message_key(&MessageKey([1; 32])).unwrap();
-        let (other_encryption_key, other_nonce) = expand_message_key(&MessageKey([2; 32])).unwrap();
+        let (encryption_key, nonce) = expand_message_key(&MessageKey::from_bytes([1; 32])).unwrap();
+        let (other_encryption_key, other_nonce) =
+            expand_message_key(&MessageKey::from_bytes([2; 32])).unwrap();
 
         assert_ne!(*other_encryption_key, *encryption_key);
         assert_ne!(other_nonce, nonce);

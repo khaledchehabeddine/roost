@@ -507,7 +507,7 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_crypto::{
-        generate_signed_prekey, generate_signed_prekey_for_discovery_key,
+        generate_discovery_key, generate_signed_prekey_for_discovery_key,
         generate_signing_key_pair, verify_public_signed_prekey,
     };
     use roost_protocol::from_unix_secs;
@@ -558,8 +558,10 @@ mod tests {
     ) -> SignedPreKey {
         let mut rng = ChaCha20Rng::from_seed([0x91; 32]);
         let signing_key = generate_signing_key_pair(&mut rng);
+        let discovery_key =
+            generate_discovery_key(&mut rng, &signing_key, FIXED_EPOCH, FIXED_NOW).unwrap();
         let signed_prekey =
-            generate_signed_prekey(&mut rng, &signing_key, 0, FIXED_EPOCH, created_at_secs)
+            generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, 0, created_at_secs)
                 .unwrap();
         let blob = encode_signed_prekey(&signed_prekey);
         manager
@@ -959,8 +961,11 @@ mod tests {
     fn encode_decode_signed_prekey_round_trip() {
         let mut rng = ChaCha20Rng::from_seed([0xa2; 32]);
         let identity_signing_key = generate_signing_key_pair(&mut rng);
+        let discovery_key =
+            generate_discovery_key(&mut rng, &identity_signing_key, FIXED_EPOCH, FIXED_NOW)
+                .unwrap();
         let original =
-            generate_signed_prekey(&mut rng, &identity_signing_key, 0, FIXED_EPOCH, FIXED_NOW)
+            generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, 0, FIXED_NOW)
                 .unwrap();
         let blob = encode_signed_prekey(&original);
         assert_eq!(blob.len(), SIGNED_PREKEY_HEADER_LEN);

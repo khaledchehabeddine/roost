@@ -126,7 +126,7 @@ fn sealed_frame_aad_binds_transport_visible_fields() {
 
     assert!(matches!(
         open_frame_for_discovery_key_with_associated_data(&recipient, &wrong_version, &[]),
-        Err(SealedFrameError::Decode)
+        Err(SealedFrameError::UnsupportedVersion(version)) if version == wrong_version.version
     ));
     assert!(matches!(
         open_frame_for_discovery_key_with_associated_data(&other_recipient, &wrong_recipient, &[]),
@@ -146,7 +146,18 @@ fn sealed_frame_from_bytes_rejects_oversized_before_decode() {
 
     assert!(matches!(
         SealedFrame::from_bytes(&bytes),
-        Err(SealedFrameError::Decode)
+        Err(SealedFrameError::FrameTooLong { len, max: SealedFrame::MAX_ENCODED_LEN })
+            if len == bytes.len()
+    ));
+}
+
+#[test]
+fn sealed_frame_from_bytes_rejects_an_unknown_version_before_decoding() {
+    let unknown = current_frame_version() + 1;
+
+    assert!(matches!(
+        SealedFrame::from_bytes(&[unknown]),
+        Err(SealedFrameError::UnsupportedVersion(version)) if version == unknown
     ));
 }
 
@@ -160,11 +171,17 @@ fn sealed_frame_rejects_invalid_public_keys() {
         ciphertext: vec![0x51; 16],
     };
 
-    assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
+    assert!(matches!(
+        frame.to_bytes(),
+        Err(SealedFrameError::InvalidPublicKey)
+    ));
 
     frame.recipient_public_key = *recipient_discovery_key(0x42).public_key().as_bytes();
     frame.ephemeral_public_key = [0u8; 32];
-    assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
+    assert!(matches!(
+        frame.to_bytes(),
+        Err(SealedFrameError::InvalidPublicKey)
+    ));
 }
 
 #[test]
@@ -180,7 +197,10 @@ fn sealed_frame_rejects_mismatched_one_time_prekey_reference_halves() {
         ciphertext: vec![0x61; 16],
     };
 
-    assert!(matches!(frame.to_bytes(), Err(SealedFrameError::Encode)));
+    assert!(matches!(
+        frame.to_bytes(),
+        Err(SealedFrameError::IncompleteOneTimePreKey)
+    ));
 }
 
 #[test]
@@ -194,6 +214,6 @@ fn sealed_frame_open_rejects_recipient_key_mismatch() {
 
     assert!(matches!(
         open_frame_for_discovery_key_with_associated_data(&other_recipient, &frame, &[]),
-        Err(SealedFrameError::Decode)
+        Err(SealedFrameError::RecipientMismatch)
     ));
 }

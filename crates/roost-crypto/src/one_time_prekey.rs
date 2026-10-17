@@ -1,7 +1,4 @@
-//! Provides one-time X25519 pre-keys for X3DH.
-
-use crate::keys::PublicKeyError;
-use crate::keys::is_valid_x25519_public_key;
+use crate::keys::{PublicKeyError, contributory_diffie_hellman, parse_public_key};
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -35,7 +32,7 @@ impl OneTimePreKey {
     }
 
     /// Returns the caller-assigned pre-key identifier.
-    pub fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
@@ -45,18 +42,13 @@ impl OneTimePreKey {
     }
 
     /// Returns the discovery-key epoch this pre-key was produced under.
-    pub fn epoch(&self) -> u32 {
+    pub(crate) fn epoch(&self) -> u32 {
         self.epoch
     }
 
-    /// Returns the Unix timestamp (seconds) when this pre-key was generated.
-    pub fn created_at_secs(&self) -> u64 {
-        self.created_at_secs
-    }
-
-    /// Performs an X25519 Diffie-Hellman exchange between this pre-key's secret and `peer`.
-    pub fn diffie_hellman(&self, peer: &PublicKey) -> SharedSecret {
-        self.secret_key.diffie_hellman(peer)
+    /// Derives a shared secret with `peer`, or `None` when `peer` forces a known one.
+    pub(crate) fn diffie_hellman(&self, peer: &PublicKey) -> Option<SharedSecret> {
+        contributory_diffie_hellman(&self.secret_key, peer)
     }
 
     /// Exports the one-time pre-key's secret bytes for secure persistence.
@@ -91,23 +83,17 @@ pub struct PublicOneTimePreKey {
 impl PublicOneTimePreKey {
     /// Builds a public one-time pre-key from received wire bytes.
     ///
-    /// This validates byte lengths only. The epoch must still match the public discovery key used
-    /// for session establishment.
+    /// This checks only the key's encoding. [`initiate_handshake`](crate::initiate_handshake)
+    /// rejects a pre-key from another epoch than the bundle's discovery key.
     pub fn from_bytes(
         id: u64,
         public_key: &[u8],
         epoch: u32,
         created_at_secs: u64,
     ) -> Result<Self, PublicKeyError> {
-        let public_key_bytes: [u8; 32] = public_key
-            .try_into()
-            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
-        if !is_valid_x25519_public_key(&public_key_bytes) {
-            return Err(PublicKeyError::InvalidKeyEncoding);
-        }
         Ok(Self {
             id,
-            public_key: PublicKey::from(public_key_bytes),
+            public_key: parse_public_key(public_key)?,
             epoch,
             created_at_secs,
         })
@@ -150,7 +136,7 @@ mod tests {
             one_time_prekey.public_key().as_bytes()
         );
         assert_eq!(bundle.epoch, one_time_prekey.epoch());
-        assert_eq!(bundle.created_at_secs, one_time_prekey.created_at_secs());
+        assert_eq!(bundle.created_at_secs, 1_700_000_000);
     }
 
     #[test]
@@ -190,11 +176,17 @@ mod tests {
             original.id(),
             *original.to_secret_bytes(),
             original.epoch(),
-            original.created_at_secs(),
+            1_700_000_000,
         );
         assert_eq!(
-            original.diffie_hellman(peer.public_key()).as_bytes(),
-            restored.diffie_hellman(peer.public_key()).as_bytes()
+            original
+                .diffie_hellman(peer.public_key())
+                .unwrap()
+                .as_bytes(),
+            restored
+                .diffie_hellman(peer.public_key())
+                .unwrap()
+                .as_bytes()
         );
     }
 }

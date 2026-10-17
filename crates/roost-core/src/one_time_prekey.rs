@@ -476,7 +476,7 @@ mod tests {
         let prekey = manager
             .consume_one_time_prekey(discovery.current().unwrap().epoch(), bundle.id)
             .unwrap();
-        assert_eq!(prekey.id(), bundle.id);
+        assert_eq!(prekey.public().id, bundle.id);
         assert!(matches!(
             manager.consume_one_time_prekey(discovery.current().unwrap().epoch(), bundle.id),
             Err(OneTimePreKeyError::NotFound)
@@ -529,7 +529,8 @@ mod tests {
             manager
                 .consume_one_time_prekey(epoch, full_batch[0].id)
                 .unwrap()
-                .id(),
+                .public()
+                .id,
             0
         );
     }

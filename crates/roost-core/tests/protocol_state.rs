@@ -533,7 +533,7 @@ fn skipped_key_total_overflow_rejects_the_message_on_every_attempt() {
                 &terminal,
                 seed
             )),
-            ProtocolStateError::Ratchet(RatchetError::MaxSkippedKeysExceeded)
+            ProtocolStateError::Ratchet(RatchetError::MaxSkippedKeysExceeded { .. })
         ));
     }
 }

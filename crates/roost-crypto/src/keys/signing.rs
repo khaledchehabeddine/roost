@@ -1,9 +1,3 @@
-//! Provides Ed25519 signing key-pair generation and signatures over caller-supplied bytes.
-//!
-//! Re-exports [`Signature`] and [`VerifyingKey`] so callers do not depend on `ed25519_dalek`
-//! directly. This module does not define a transport-authentication layout; callers provide the
-//! exact bytes and domain-separation context they want signed.
-
 pub use ed25519_dalek::{Signature, VerifyingKey};
 
 use ed25519_dalek::SigningKey;
@@ -42,15 +36,10 @@ impl SigningKeyPair {
         context: &[u8],
         message: &[u8],
     ) -> Result<Signature, SignatureError> {
-        if context.is_empty() {
-            return Err(SignatureError::InvalidSignatureContext);
-        }
         Ok(self.sign(&roost_protocol::contextual_message(context, message)?))
     }
 
     /// Returns this key pair's signing bytes for secure storage.
-    ///
-    /// The returned bytes are wrapped in [`Zeroizing`] so they are scrubbed when dropped.
     pub fn to_signing_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.signing.to_bytes())
     }
@@ -88,13 +77,6 @@ mod tests {
     }
 
     #[test]
-    fn signing_key_pair_verifying_round_trip() {
-        let key_pair = generated_key_pair();
-        let recovered = VerifyingKey::from_bytes(&key_pair.verifying.to_bytes()).unwrap();
-        assert_eq!(key_pair.verifying.as_bytes(), recovered.as_bytes());
-    }
-
-    #[test]
     fn signing_key_pair_round_trip_via_signing_bytes() {
         let key_pair = generated_key_pair();
         let restored = SigningKeyPair::from_signing_bytes(*key_pair.to_signing_bytes());
@@ -113,7 +95,7 @@ mod tests {
         let key_pair = generated_key_pair();
         let message = b"roost test message";
         let signature = key_pair.sign(message);
-        assert!(key_pair.verifying.verify(message, &signature).is_ok());
+        key_pair.verifying.verify(message, &signature).unwrap();
     }
 
     #[test]

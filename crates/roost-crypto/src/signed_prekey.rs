@@ -1,11 +1,7 @@
-//! Provides signed X25519 pre-keys for the X3DH handshake.
-
-use crate::keys::{
-    PublicKeyError, SigningKeyPair, is_valid_x25519_public_key, verify_with_context,
-};
+use crate::keys::{PublicKeyError, SigningKeyPair, contributory_diffie_hellman};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
-use roost_protocol::SignatureError;
+use roost_protocol::{SignatureError, verify_with_context};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -59,9 +55,9 @@ impl SignedPreKey {
         self.created_at_secs
     }
 
-    /// Performs an X25519 Diffie-Hellman exchange between this signed pre-key's secret and `peer`.
-    pub fn diffie_hellman(&self, peer: &PublicKey) -> SharedSecret {
-        self.secret_key.diffie_hellman(peer)
+    /// Derives a shared secret with `peer`, or `None` when `peer` forces a known one.
+    pub(crate) fn diffie_hellman(&self, peer: &PublicKey) -> Option<SharedSecret> {
+        contributory_diffie_hellman(&self.secret_key, peer)
     }
 
     /// Exports the signed pre-key's secret bytes for secure persistence.
@@ -127,44 +123,12 @@ pub struct PublicSignedPreKey {
     pub created_at_secs: u64,
 }
 
-impl PublicSignedPreKey {
-    /// Builds a public signed pre-key from received wire bytes.
-    ///
-    /// This validates byte lengths only. Call [`verify_public_signed_prekey`] with the discovery
-    /// verifying key to authenticate the public key, epoch, and creation time. The identifier is
-    /// authenticated separately only when the host includes it in the initial Transport Binding.
-    pub fn from_bytes(
-        public_key: &[u8],
-        signature: &[u8],
-        id: u64,
-        epoch: u32,
-        created_at_secs: u64,
-    ) -> Result<Self, PublicKeyError> {
-        let public_key_bytes: [u8; 32] = public_key
-            .try_into()
-            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
-        if !is_valid_x25519_public_key(&public_key_bytes) {
-            return Err(PublicKeyError::InvalidKeyEncoding);
-        }
-        let signature_bytes: [u8; 64] = signature
-            .try_into()
-            .map_err(|_| PublicKeyError::InvalidKeyEncoding)?;
-        Ok(Self {
-            public_key: PublicKey::from(public_key_bytes),
-            signature: Signature::from_bytes(&signature_bytes),
-            id,
-            epoch,
-            created_at_secs,
-        })
-    }
-}
-
 /// Generates a signed pre-key with the supplied Ed25519 signing key and caller-allocated
 /// identifier.
 ///
 /// `id` is stable lookup metadata within one discovery-key epoch. It is not part of the signature
 /// payload; a route-bound caller authenticates it as associated data with the encrypted initial.
-pub fn generate_signed_prekey<R: RngCore + CryptoRng>(
+pub(crate) fn generate_signed_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     signing_key: &SigningKeyPair,
     id: u64,
@@ -243,7 +207,7 @@ mod tests {
         signed.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
         signed.extend_from_slice(&message);
         assert_eq!(bundle.signature, signing_key.sign(&signed));
-        assert!(verify_public_signed_prekey(&bundle, &signing_key.verifying).is_ok());
+        verify_public_signed_prekey(&bundle, &signing_key.verifying).unwrap();
     }
 
     #[test]
@@ -414,60 +378,6 @@ mod tests {
     }
 
     #[test]
-    fn public_from_bytes_round_trip_preserves_fields() {
-        let mut rng = seeded_rng();
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(
-            &mut rng,
-            &signing_key,
-            FIXED_ID,
-            FIXED_EPOCH,
-            FIXED_CREATED_AT_SECS,
-        )
-        .unwrap();
-        let bundle = signed_prekey.public();
-
-        let parsed = PublicSignedPreKey::from_bytes(
-            bundle.public_key.as_bytes(),
-            &bundle.signature.to_bytes(),
-            bundle.id,
-            bundle.epoch,
-            bundle.created_at_secs,
-        )
-        .unwrap();
-
-        assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
-        assert_eq!(parsed.signature.to_bytes(), bundle.signature.to_bytes());
-        assert_eq!(parsed.id, bundle.id);
-        assert_eq!(parsed.epoch, bundle.epoch);
-        assert_eq!(parsed.created_at_secs, bundle.created_at_secs);
-    }
-
-    #[test]
-    fn public_from_bytes_rejects_wrong_lengths() {
-        assert!(matches!(
-            PublicSignedPreKey::from_bytes(
-                &[0u8; 31],
-                &[0u8; 64],
-                FIXED_ID,
-                FIXED_EPOCH,
-                FIXED_CREATED_AT_SECS,
-            ),
-            Err(PublicKeyError::InvalidKeyEncoding)
-        ));
-        assert!(matches!(
-            PublicSignedPreKey::from_bytes(
-                &[0u8; 32],
-                &[0u8; 63],
-                FIXED_ID,
-                FIXED_EPOCH,
-                FIXED_CREATED_AT_SECS,
-            ),
-            Err(PublicKeyError::InvalidKeyEncoding)
-        ));
-    }
-
-    #[test]
     fn from_secret_bytes_round_trip() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
@@ -520,8 +430,8 @@ mod tests {
             original.created_at_secs(),
         );
         let peer = generate_key_pair(&mut rng);
-        let original_shared_secret = original.diffie_hellman(&peer.public);
-        let restored_shared_secret = restored.diffie_hellman(&peer.public);
+        let original_shared_secret = original.diffie_hellman(&peer.public).unwrap();
+        let restored_shared_secret = restored.diffie_hellman(&peer.public).unwrap();
         assert_eq!(
             original_shared_secret.as_bytes(),
             restored_shared_secret.as_bytes()

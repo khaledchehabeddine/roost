@@ -11,7 +11,7 @@ The app holds private keys and messages and reads bytes from anyone, so a mistak
 
 ## Labels
 
-- Give each key derivation, signature, and hash its own label starting with `Roost`, such as `b"RoostExample-v1:"`.
+- Give each key derivation, signature, and hash its own label starting with `Roost`, such as `b"RoostExample-v1:"`, unless the input comes from a published specification.
 - When a label changes, bump the version of each encoding whose keys, signatures, or hashes depend on it.
 - In bytes that are signed, hashed, or used to derive a key, put a big-endian `u32` length before each variable-length field.
 

@@ -382,7 +382,7 @@ fn a_tampered_or_misdelivered_first_message_changes_nothing() {
     ));
     assert!(matches!(
         protocol_fault(carol.decrypt(&request.message)),
-        ProtocolStateError::SealedFrame(SealedFrameError::Decode)
+        ProtocolStateError::SealedFrame(SealedFrameError::RecipientMismatch)
     ));
     assert_eq!(bob.host.snapshot_bytes(), bob_before);
     assert_eq!(carol.host.snapshot_bytes(), carol_before);
