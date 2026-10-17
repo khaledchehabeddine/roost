@@ -6,7 +6,7 @@ use zeroize::Zeroizing;
 const SESSION_ID_LEN: usize = 16;
 const MESSAGE_ID_LEN: usize = 16;
 /// Domain separator for established Message signatures.
-pub const MESSAGE_TRANSCRIPT_CONTEXT: &[u8] = b"AetherMessageTranscript-v1:";
+pub const MESSAGE_TRANSCRIPT_CONTEXT: &[u8] = b"RoostMessageTranscript-v1:";
 // Length of the plaintext-size prefix at the start of a padded payload.
 const SEALED_PAYLOAD_LEN_PREFIX_LEN: usize = 4;
 // Padded payload lengths, including the length prefix.

@@ -4,7 +4,7 @@ use roost_protocol::{
     PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
 };
 
-const SAFETY_NUMBER_DOMAIN_TAG: &[u8] = b"AetherSafetyNumber-v1:";
+const SAFETY_NUMBER_DOMAIN_TAG: &[u8] = b"RoostSafetyNumber-v1:";
 const SAFETY_NUMBER_DIGITS: usize = 60;
 const SAFETY_NUMBER_GROUP_SIZE: usize = 5;
 const SAFETY_NUMBER_GROUPS: usize = 12;

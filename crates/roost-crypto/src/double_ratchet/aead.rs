@@ -12,7 +12,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-const MESSAGE_KEY_HKDF_INFO: &[u8] = b"AetherRatchet_MK";
+const MESSAGE_KEY_HKDF_INFO: &[u8] = b"RoostRatchet_MK";
 
 pub(super) fn encrypt(
     plaintext: &[u8],

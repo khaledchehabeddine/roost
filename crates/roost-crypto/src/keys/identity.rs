@@ -4,7 +4,7 @@ use super::signing::{Signature, SigningKeyPair, VerifyingKey};
 use roost_protocol::{SignatureError, verify_with_context};
 use roost_protocol::{is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes};
 
-const IDENTITY_KEY_BINDING_CONTEXT: &[u8] = b"AetherIKBinding-v1:";
+const IDENTITY_KEY_BINDING_CONTEXT: &[u8] = b"RoostIKBinding-v1:";
 const PUBLIC_KEY_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
 
@@ -87,8 +87,8 @@ pub fn verify_public_identity_key(bundle: &PublicIdentityKey) -> Result<(), Publ
 
 /// Returns the identity key's two public halves, the bytes both binding directions cover.
 ///
-/// The IK self-binding signs these under `AetherIKBinding-v1:`, and a discovery key signs the same
-/// bytes under `AetherDKToIK-v1:`. Only the context separates the two, so both
+/// The IK self-binding signs these under `RoostIKBinding-v1:`, and a discovery key signs the same
+/// bytes under `RoostDKToIK-v1:`. Only the context separates the two, so both
 /// directions must derive the payload here rather than rebuilding it.
 pub(crate) fn identity_key_binding_payload(
     public_key: &PublicKey,

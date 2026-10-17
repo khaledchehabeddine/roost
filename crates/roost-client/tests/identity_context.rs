@@ -13,7 +13,7 @@ use std::sync::Arc;
 use support::MemoryStorage;
 
 const PASSPHRASE: &str = "correct horse battery staple";
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
 const CERTIFICATE_VERSION: u8 = 2;
 const DOMAIN_SIGNING_KEY_ID: &[u8] = b"relay-signing-key";
 const CERTIFICATE_RELAY_DOMAIN: &[u8] = b"relay.example";

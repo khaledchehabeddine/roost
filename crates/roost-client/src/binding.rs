@@ -24,7 +24,7 @@ use roost_protocol::parse_ed25519_verifying_key_bytes;
 /// Verifies that an identity's binding signature ties its agreement key to its signing key (the IK
 /// self-binding).
 ///
-/// This is the `AetherIKBinding-v1:` direction. It says only that whoever holds the Ed25519 half
+/// This is the `RoostIKBinding-v1:` direction. It says only that whoever holds the Ed25519 half
 /// claimed the X25519 half beside it; it says nothing about which discovery key, if any, points at
 /// this identity. Pair it with [`verify_discovery_to_identity_binding`] when the identity arrived
 /// from a discovery-key lookup, and check that one against the discovery key the *user* supplied —
@@ -44,7 +44,7 @@ pub fn verify_identity_key_binding(identity: Identity) -> Result<(), RoostError>
 /// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (the DK→IK
 /// direction).
 ///
-/// This is the `AetherDKToIK-v1:` direction, and it is the whole security of adding a contact by
+/// This is the `RoostDKToIK-v1:` direction, and it is the whole security of adding a contact by
 /// discovery key: the relay answers a lookup with an identity, and nothing about the transport says
 /// that identity is the one the discovery key authorized. Pass the discovery key the user typed,
 /// never one read back out of the response being checked.
@@ -184,7 +184,7 @@ mod tests {
         }
     }
 
-    /// `AetherIKBinding-v1:` and `AetherDKToIK-v1:` sign a byte-identical 64-byte payload, so only
+    /// `RoostIKBinding-v1:` and `RoostDKToIK-v1:` sign a byte-identical 64-byte payload, so only
     /// the context separates them. Exporting the two directions as one function that took a
     /// caller-chosen context would have handed that separation to the caller; exporting them as two
     /// functions that each fix their own is what keeps it here.

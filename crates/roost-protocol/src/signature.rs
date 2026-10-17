@@ -7,12 +7,18 @@ pub enum SignatureError {
     /// The signature context is empty.
     #[error("signature context is invalid")]
     InvalidSignatureContext,
+    /// The message is too long for its `u32` length prefix.
+    #[error("signed message is {len} bytes, more than a u32 length can hold")]
+    MessageTooLong {
+        /// Length of the message.
+        len: usize,
+    },
     /// The signature does not authenticate the supplied bytes.
     #[error("signature verification failed")]
     SignatureInvalid,
 }
 
-/// Verifies a signature over caller-supplied `context || message` bytes.
+/// Verifies a signature over the bytes [`contextual_message`] builds from `context` and `message`.
 pub fn verify_with_context(
     verifying_key: &VerifyingKey,
     context: &[u8],
@@ -26,7 +32,8 @@ pub fn verify_with_context(
         .map_err(|_| SignatureError::SignatureInvalid)
 }
 
-/// Joins a non-empty domain context and message in zeroizing memory.
+/// Returns a non-empty domain context, the message's big-endian `u32` length, and the message,
+/// joined in zeroizing memory.
 pub fn contextual_message(
     context: &[u8],
     message: &[u8],
@@ -34,9 +41,27 @@ pub fn contextual_message(
     if context.is_empty() {
         return Err(SignatureError::InvalidSignatureContext);
     }
-    // Each slice is at most `isize::MAX` bytes, so the sum fits in `usize`.
-    let mut signed = Zeroizing::new(Vec::with_capacity(context.len() + message.len()));
+    let too_long = || SignatureError::MessageTooLong { len: message.len() };
+    let message_len = u32::try_from(message.len()).map_err(|_| too_long())?;
+    let capacity = context
+        .len()
+        .checked_add(size_of::<u32>() + message.len())
+        .ok_or_else(too_long)?;
+    let mut signed = Zeroizing::new(Vec::with_capacity(capacity));
     signed.extend_from_slice(context);
+    signed.extend_from_slice(&message_len.to_be_bytes());
     signed.extend_from_slice(message);
     Ok(signed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contextual_message_puts_the_message_length_after_the_context() {
+        let signed = contextual_message(b"RoostExample-v1:", b"abc").unwrap();
+
+        assert_eq!(signed.as_slice(), b"RoostExample-v1:\0\0\0\x03abc");
+    }
 }

@@ -21,10 +21,10 @@ use zeroize::Zeroizing;
 // Fixed prefix on the HKDF input. Future incompatible handshake derivations should change these
 // bytes so peers fail during the first decrypt.
 const F_PREFIX: [u8; 32] = [0xFF; 32];
-const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:without-opk";
-const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"AetherX3DH-v1:with-opk";
+const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:without-opk";
+const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:with-opk";
 const SESSION_ID_INFO: &[u8] = b"RoostSessionId-v1:";
-const SENDER_PROOF_CONTEXT: &[u8] = b"AetherX3DH-v1:sender-proof:";
+const SENDER_PROOF_CONTEXT: &[u8] = b"RoostX3DH-v1:sender-proof:";
 /// Current public pre-key bundle format version.
 pub const PREKEY_BUNDLE_VERSION: u8 = 1;
 /// Length of the proof a first Message carries.

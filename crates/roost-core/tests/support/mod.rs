@@ -23,7 +23,7 @@ use zeroize::Zeroizing;
 
 pub const CREATED_AT_SECS: u64 = 1_700_000_000;
 pub const TEST_RELAY_DOMAIN: &[u8] = b"relay.test";
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"AetherSenderCertificate-v2:";
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
 const CERTIFICATE_VERSION: u8 = 2;
 const TEST_DOMAIN_ID: &[u8] = b"test-domain";
 

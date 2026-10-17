@@ -20,7 +20,7 @@ use roost_protocol::{
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const RATCHETED_PAYLOAD_CONTEXT: &[u8] = b"AetherRatchetedPayload-v1:";
+const RATCHETED_PAYLOAD_CONTEXT: &[u8] = b"RoostRatchetedPayload-v1:";
 const SIGNATURE_LEN: usize = 64;
 
 /// Sender identity material decoded only after a Message's ciphertext authenticates.

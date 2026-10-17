@@ -33,12 +33,10 @@ impl SigningKeyPair {
         self.signing.sign(message)
     }
 
-    /// Signs `context || message` with this key pair.
+    /// Signs `message` under a domain `context` with this key pair.
     ///
-    /// `context` must be a non-empty domain separator naming the signature purpose. Both inputs are
-    /// caller-supplied bytes; this helper does not define a transport signing layout.
-    /// Contexts used with the same key must be prefix-free: no context may be a prefix of another.
-    /// This method inserts no delimiter or length prefix and does not enforce that requirement.
+    /// `context` must be a non-empty domain separator naming the signature purpose. The signed
+    /// bytes are the context, the message's big-endian `u32` length, and the message.
     pub fn sign_with_context(
         &self,
         context: &[u8],
@@ -133,13 +131,13 @@ mod tests {
         let key_pair = generated_key_pair();
         let message = b"context-bound message";
         let signature = key_pair
-            .sign_with_context(b"AetherTest-v1:first", message)
+            .sign_with_context(b"RoostTest-v1:first", message)
             .unwrap();
 
         assert!(matches!(
             verify_with_context(
                 &key_pair.verifying,
-                b"AetherTest-v1:second",
+                b"RoostTest-v1:second",
                 message,
                 &signature,
             ),

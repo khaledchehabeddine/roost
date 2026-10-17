@@ -17,10 +17,10 @@ use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 // Domain separator for identity-key signatures over discovery keys (IK→DK).
-const DISCOVERY_KEY_CONTEXT: &[u8] = b"AetherDK-v1:";
+const DISCOVERY_KEY_CONTEXT: &[u8] = b"RoostDK-v1:";
 
 // Domain separator for discovery-key signatures over identity keys (DK→IK).
-const DISCOVERY_TO_IDENTITY_CONTEXT: &[u8] = b"AetherDKToIK-v1:";
+const DISCOVERY_TO_IDENTITY_CONTEXT: &[u8] = b"RoostDKToIK-v1:";
 
 /// A rotatable discovery key signed by the identity key.
 ///
