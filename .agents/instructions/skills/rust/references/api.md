@@ -62,7 +62,8 @@ enum ExampleError {
 
 ## Stored Data
 
-- Start each encoding with its version, and reject an unknown version with its own error before decoding the rest. An encoding stored only inside another one shares that one's version.
+- Start each encoding with its version, and reject an unknown version with its own error before decoding the rest.
+- Leave the version off an encoding that only ever sits inside another one.
 - Bump the version when a change alters how an existing value encodes or gives old bytes a new meaning.
 - Don't write migration code for older versions until a release promises that stored data survives upgrades.
 - Encode each type through one private `*Wire` struct, not the domain type, and derive both `Serialize` and `Deserialize` on it.
