@@ -312,6 +312,7 @@ impl Host {
                             conditions: Vec::new(),
                             updates: Vec::new(),
                             operation_id: None,
+                            undelivered: Vec::new(),
                         },
                     );
                     assert!(self.commit(changes));
@@ -383,6 +384,7 @@ fn take_changes(result: &mut OutboundMessageResult) -> StateChanges {
             conditions: Vec::new(),
             updates: Vec::new(),
             operation_id: None,
+            undelivered: Vec::new(),
         },
     )
 }

@@ -48,7 +48,7 @@ fn verify(device: &mut Device, peer: &Device) {
     let ContactSafetyNumberConfirmation::Matched(changes) = confirmation else {
         panic!("safety number did not match");
     };
-    device.commit_changes(changes).unwrap();
+    device.commit_changes(&changes).unwrap();
 }
 
 fn unblock(device: &mut Device, peer: ContactIdentityKey) {
@@ -57,7 +57,7 @@ fn unblock(device: &mut Device, peer: ContactIdentityKey) {
         .protocol_engine()
         .unblock_contact(peer, record(device, peer).as_ref())
         .unwrap();
-    device.commit_changes(changes).unwrap();
+    device.commit_changes(&changes).unwrap();
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn a_contact_record_under_another_identitys_address_is_a_fault() {
     assert!(matches!(
         alice.store.protocol_engine().decode_contact(
             &contact_address(bob.identity_key()),
-            &ProtocolStateBlob::from_bytes(vec![2, 0, 0xaa])
+            &ProtocolStateBlob::from_bytes(alice.host.malformed_blob())
         ),
         Err(ProtocolStateError::BlobDecode { .. })
     ));
@@ -213,7 +213,7 @@ fn a_confirmation_cannot_commit_after_the_record_changed() {
     alice.block(bob.identity_key());
 
     assert_eq!(
-        alice.commit_changes(stale),
+        alice.commit_changes(&stale),
         Err(HostCommitError::StaleCondition)
     );
     let contact = alice.contact(&bob).unwrap();

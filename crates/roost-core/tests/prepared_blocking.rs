@@ -5,7 +5,9 @@
 
 mod support;
 
-use roost_core::{ContactIdentityKey, KeyStoreOperationStatus, ProtocolStateBlob};
+use roost_core::{
+    ContactIdentityKey, KeyStoreOperationStatus, ProtocolStateBlob, commit_conditions_match,
+};
 use support::device::{Device, Relay, contact_address};
 use zeroize::Zeroizing;
 
@@ -54,7 +56,7 @@ fn prepared_block_commits_contact_and_rotation_without_a_cross_store_partial_sta
     assert_eq!(epoch(&bob), before);
     let operation = block.changes.operation().unwrap();
     bob.store.reserve_operation(operation).unwrap();
-    bob.host.commit_changes(block.changes).unwrap();
+    bob.host.commit_changes(&block.changes).unwrap();
     bob.store.finalize_operation(operation).unwrap();
 
     assert_eq!(epoch(&bob), before + 1);
@@ -92,10 +94,17 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
             .prepare_block_contact(alice, Some(&record))
             .unwrap();
         let id = block.changes.operation().unwrap();
+        let addresses: Vec<_> = block
+            .changes
+            .conditions()
+            .iter()
+            .map(|(address, _)| address.clone())
+            .collect();
+        let current = bob.host.read(&addresses);
+        let conditions = block.changes.conditions().to_vec();
         let updates = block.changes.into_updates();
         assert_eq!(updates.len(), 1);
         let address = updates[0].address().clone();
-        let mut snapshot = bob.host.snapshot();
         let directory =
             std::env::temp_dir().join(format!("roost-host-commit-{}", hex::encode(id.as_bytes()),));
         std::fs::create_dir(&directory).unwrap();
@@ -111,18 +120,10 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
             .unwrap();
 
         bob.store.reserve_operation(id).unwrap();
-        assert!(updates.iter().all(|update| {
-            update
-                .commit_condition()
-                .is_satisfied_by(snapshot.get(update.address()))
-        }));
-        snapshot.apply_all(updates).unwrap();
+        assert!(commit_conditions_match(&conditions, &current).unwrap());
         let staged = Zeroizing::new(
-            postcard::to_allocvec(&(
-                Some(*id.as_bytes()),
-                snapshot.get(&address).unwrap().as_bytes(),
-            ))
-            .unwrap(),
+            postcard::to_allocvec(&(Some(*id.as_bytes()), updates[0].blob().unwrap().as_bytes()))
+                .unwrap(),
         );
         std::fs::write(&staged_path, &staged).unwrap();
         std::fs::File::open(&staged_path)
@@ -141,7 +142,7 @@ fn uncertain_host_block_commit_recovers_both_decisions_from_durable_operation_re
                 .iter()
                 .any(|operation| operation.status == KeyStoreOperationStatus::Reserved)
         );
-        drop(snapshot);
+        drop(updates);
 
         let recovered = bob.second_instance();
         let unfinished = recovered.unfinished_operations().unwrap();

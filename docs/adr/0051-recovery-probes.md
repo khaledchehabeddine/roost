@@ -1,6 +1,6 @@
 # Recovery Probes
 
-A recovery may turn out unneeded, and resending a contact's whole backlog each time would flood its inbox with copies and fill the Relay's queue for first Messages, so a recovery that starts a new Session resends only the oldest unacknowledged Message and sends the rest once the contact acknowledges it. A probe that stays unacknowledged gets the recovery check again after a longer wait, and Messages still unacknowledged once the Relay would have dropped them show as not delivered, so nothing waits forever and the app always knows what didn't arrive. A recovery onto a Session the contact started resends everything at once, because the contact just proved it's reachable there, and those Messages travel as ordinary Messages, not first Messages.
+A recovery may turn out unneeded, and resending a contact's whole backlog each time would flood its inbox with copies and fill the Relay's queue for first Messages, so a recovery that starts a new Session resends only the oldest unacknowledged Message and sends the rest once the contact acknowledges it. A probe that stays unacknowledged gets the recovery check again after a longer wait, and Messages still unacknowledged once the Relay would have dropped them, or once their Session is deleted, show as not delivered, so nothing waits forever and the app always knows what didn't arrive. A recovery onto a Session the contact started resends everything at once, because the contact just proved it's reachable there, and those Messages travel as ordinary Messages, not first Messages.
 
 ## Alternatives
 

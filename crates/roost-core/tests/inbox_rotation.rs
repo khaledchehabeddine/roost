@@ -2,14 +2,17 @@
 
 mod support;
 
-use roost_core::{BlockedContactAcknowledgmentPolicy, InboundMessageOutcome, ReceiveSettings};
+use roost_core::{
+    BlockedContactAcknowledgmentPolicy, InboundMessageOutcome, ProtocolHardeningLimits,
+    ReceiveSettings,
+};
 use std::time::Duration;
 use support::accepted;
 use support::device::{Device, Relay, befriended, established_verifier};
 
 fn silent_receipt() -> ReceiveSettings {
     ReceiveSettings::new(
-        ReceiveSettings::default().deduplication_capacity(),
+        ProtocolHardeningLimits::default().default_deduplication_capacity,
         BlockedContactAcknowledgmentPolicy::SilentReceipt,
         Duration::ZERO,
     )

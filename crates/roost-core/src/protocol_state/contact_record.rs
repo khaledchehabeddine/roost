@@ -6,17 +6,14 @@ use super::grant::{
 use super::session::Starter;
 use super::{
     ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError, ProtocolStateKind,
-    ProtocolStateSnapshot, blob_body, encode_blob, encode_zeroizing,
+    ProtocolStateSnapshot, blob_body, deserialize_bounded, encode_blob, encode_zeroizing,
 };
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey, ContactState, ContactTrustState};
 use crate::hardening::{MAX_MESSAGES_BEFORE_ACCEPTANCE, ProtocolHardeningLimits};
 use crate::safety_number::identity_key_is_valid;
 use roost_crypto::RecipientDeliveryCapability;
 use roost_protocol::{MessageId, PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
-use serde::de::{Error as DeError, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt;
-use std::marker::PhantomData;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -293,7 +290,7 @@ impl ContactRecord {
 
     /// Returns whether the contact hasn't yet acknowledged a Message carrying the local grant
     /// stamped `current`.
-    pub(super) fn needs_grant(&self, current: DiscoveryKeyStamp) -> bool {
+    fn needs_grant(&self, current: DiscoveryKeyStamp) -> bool {
         self.acknowledged_grant
             .is_none_or(|acknowledged| acknowledged < current)
     }
@@ -572,10 +569,10 @@ struct DecodedContactRecordWire {
     #[zeroize(skip)]
     blocked: bool,
     #[zeroize(skip)]
-    #[serde(deserialize_with = "deserialize_counted")]
+    #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_MESSAGES_BEFORE_ACCEPTANCE>")]
     sent_before_acceptance: Vec<SentBeforeAcceptanceWire>,
     #[zeroize(skip)]
-    #[serde(deserialize_with = "deserialize_counted")]
+    #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_MESSAGES_BEFORE_ACCEPTANCE>")]
     received_before_acceptance: Vec<[u8; MESSAGE_ID_LEN]>,
     #[zeroize(skip)]
     needs_discovery_key_check: bool,
@@ -594,42 +591,6 @@ struct DecodedDiscoveryKeyWire {
     epoch: u32,
     created_at_secs: u64,
     identity_signature: Vec<u8>,
-}
-
-// Decodes a list of Messages counted before acceptance, refusing more than the limit.
-fn deserialize_counted<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct CountedVisitor<T>(PhantomData<T>);
-
-    impl<'de, T: Deserialize<'de>> Visitor<'de> for CountedVisitor<T> {
-        type Value = Vec<T>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(
-                f,
-                "at most {MAX_MESSAGES_BEFORE_ACCEPTANCE} counted messages"
-            )
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let mut counted = Vec::with_capacity(MAX_MESSAGES_BEFORE_ACCEPTANCE);
-            while let Some(entry) = seq.next_element()? {
-                if counted.len() == MAX_MESSAGES_BEFORE_ACCEPTANCE {
-                    return Err(A::Error::custom("counted messages exceed the limit"));
-                }
-                counted.push(entry);
-            }
-            Ok(counted)
-        }
-    }
-
-    deserializer.deserialize_seq(CountedVisitor(PhantomData))
 }
 
 #[cfg(test)]

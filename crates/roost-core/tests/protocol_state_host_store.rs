@@ -18,11 +18,11 @@ fn core_conditions_reject_stale_absence_and_digest_before_host_effects() {
         ProtocolStateCommitCondition::Absent
     ));
     let stale_operation = stale.changes.operation().unwrap();
-    bob.commit_changes(first.changes).unwrap();
+    bob.commit_changes(&first.changes).unwrap();
     let address = contact_address(stranger);
     let before = bob.host.blob_bytes(&address);
     assert_eq!(
-        bob.host.commit_changes(stale.changes),
+        bob.host.commit_changes(&stale.changes),
         Err(HostCommitError::StaleCondition)
     );
     assert_eq!(bob.host.blob_bytes(&address), before);

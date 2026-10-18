@@ -48,7 +48,6 @@ mod discovery_key;
 mod hardening;
 mod identity;
 mod key_store;
-mod message;
 mod one_time_prekey;
 mod prekey_state;
 mod protocol_state;
@@ -64,10 +63,7 @@ pub use contact::{
     ContactTrustState,
 };
 pub use discovery_key::DiscoveryKeyError;
-pub use hardening::{
-    DEFAULT_DEDUPLICATION_CAPACITY, MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY,
-    ProtocolHardeningLimits,
-};
+pub use hardening::ProtocolHardeningLimits;
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
     ContactBlock, JournalCorruption, KeyStore, KeyStoreError, KeyStoreOperation,
@@ -75,7 +71,6 @@ pub use key_store::{
     PreparedKeyStoreOperation, PublicationBundle, SecureStorageExpectedValue,
     SecureStoragePrecondition, UnfinishedKeyStoreOperation,
 };
-pub use message::{Message, MessageError};
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
     AcknowledgmentResult, AdmissionRequest, BlockedContactAcknowledgmentPolicy,
@@ -92,10 +87,11 @@ pub use protocol_state::{
     StateChanges, StateEntryError, WithheldInboundMessageResult, commit_conditions_match,
 };
 pub use roost_crypto::{
-    HandshakeError, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey, PublicKey, PublicKeyError,
-    PublicOneTimePreKey, PublicSignedPreKey, RatchetError, RatchetStateError,
-    RecipientDeliveryCapability, SealedFrameError, SealedFramePreKeyReference, Signature,
-    verify_discovery_to_identity_binding, verify_public_identity_key,
+    HandshakeError, OneTimePreKeyReference, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,
+    PublicKey, PublicKeyError, PublicOneTimePreKey, PublicSignedPreKey, RatchetError,
+    RatchetStateError, RecipientDeliveryCapability, SealedFrame, SealedFrameError,
+    SealedFramePreKeyReference, Signature, verify_discovery_to_identity_binding,
+    verify_public_identity_key,
 };
 pub use roost_protocol::SessionId;
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};

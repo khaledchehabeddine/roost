@@ -3,11 +3,14 @@
 use super::{
     ContactIdentityKeyWire, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, blob_body, encode_blob,
-    encode_zeroizing, validate_session_contact_identity_key,
+    encode_zeroizing,
 };
 use crate::contact::ContactIdentityKey;
 use crate::hardening::ProtocolHardeningLimits;
-use roost_crypto::{Handshake, PublicKey, RatchetState, SealedFramePreKeyReference};
+use crate::safety_number::identity_key_is_valid;
+use roost_crypto::{
+    Handshake, OneTimePreKeyReference, PublicKey, RatchetState, SealedFramePreKeyReference,
+};
 use roost_protocol::{PUBLIC_KEY_LEN, SessionId, is_valid_x25519_public_key};
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +74,18 @@ pub(super) fn load_session(
         .transpose()
 }
 
+pub(super) fn load_required_session(
+    snapshot: &ProtocolStateSnapshot,
+    address: &ProtocolStateAddress,
+    limits: ProtocolHardeningLimits,
+) -> Result<LoadedSession, ProtocolStateError> {
+    load_session(snapshot, address, limits)?.ok_or_else(|| {
+        ProtocolStateError::MissingRequiredState {
+            address: address.clone(),
+        }
+    })
+}
+
 pub(super) fn encode_session(
     address: &ProtocolStateAddress,
     peer_identity_key: ContactIdentityKey,
@@ -106,8 +121,13 @@ fn decode_session(
             "ratchet/session state has trailing bytes",
         ));
     }
-    let peer_identity_key =
-        validate_session_contact_identity_key(address, wire.peer_identity_key.into())?;
+    let peer_identity_key = ContactIdentityKey::from(wire.peer_identity_key);
+    if !identity_key_is_valid(&peer_identity_key) {
+        return Err(decode_error(
+            address,
+            "session contact identity key is invalid",
+        ));
+    }
     Ok(LoadedSession {
         peer_identity_key,
         state: Box::new(
@@ -400,8 +420,8 @@ impl From<&PendingHandshake> for HandshakeWire {
             signed_prekey_id: value.signed_prekey_id,
             signed_prekey_public_key: reference.signed_prekey_public_key,
             one_time_prekey: reference
-                .one_time_prekey_id
-                .zip(reference.one_time_prekey_public_key),
+                .one_time_prekey
+                .map(|prekey| (prekey.id, prekey.public_key)),
         }
     }
 }
@@ -429,8 +449,9 @@ impl HandshakeWire {
                 prekey_reference: SealedFramePreKeyReference {
                     discovery_epoch: self.discovery_epoch,
                     signed_prekey_public_key: self.signed_prekey_public_key,
-                    one_time_prekey_id: self.one_time_prekey.map(|(id, _)| id),
-                    one_time_prekey_public_key: self.one_time_prekey.map(|(_, key)| key),
+                    one_time_prekey: self
+                        .one_time_prekey
+                        .map(|(id, public_key)| OneTimePreKeyReference { id, public_key }),
                 },
             },
             signed_prekey_id: self.signed_prekey_id,

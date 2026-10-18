@@ -76,13 +76,14 @@ pub struct CommitCondition {
     pub digest: Option<Vec<u8>>,
 }
 
-/// The records an operation's result relies on, the records it writes, and the operation that
-/// commits with them, if any.
+/// The records an operation's result relies on, the records it writes, the operation that commits
+/// with them, if any, and the sent Messages Roost stops waiting for.
 ///
 /// Inside one transaction, read the record under each condition's key, call [`Self::matches`],
 /// and only when it returns `true` write every update together with the result's effects, such as
-/// a Message to send. When it returns `false`, another operation changed a record first: roll
-/// back, then start the operation again from fresh reads.
+/// a Message to send, and show each of [`Self::undelivered`] that has content as not delivered.
+/// When it returns `false`, another operation changed a record first: roll back, then start the
+/// operation again from fresh reads.
 ///
 /// When [`Self::operation_id`] is present, the changes also change SecureStorage, such as using a
 /// one-time prekey or rotating the inbox:
@@ -103,6 +104,9 @@ pub struct StateChanges {
     pub updates: Vec<StateUpdate>,
     /// The operation to reserve before the commit and finalize after it, if any.
     pub operation_id: Option<OperationId>,
+    /// Sent Messages Roost stops waiting for, oldest first, because the Relay would have dropped
+    /// them by now or the Session they wait on is gone.
+    pub undelivered: Vec<MessageId>,
 }
 
 /// Roost's fixed limits on what one Message or record may cost, and the Deduplication Set's range.
@@ -603,6 +607,12 @@ impl StateChanges {
         Self {
             conditions,
             operation_id: changes.operation().map(OperationId::from_core),
+            undelivered: changes
+                .undelivered()
+                .iter()
+                .copied()
+                .map(MessageId::from_core)
+                .collect(),
             updates: changes
                 .into_updates()
                 .into_iter()

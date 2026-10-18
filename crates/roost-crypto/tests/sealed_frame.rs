@@ -3,10 +3,11 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_crypto::{
-    DiscoveryKey, KeyPair, SealedFrame, SealedFrameError, SealedFramePreKeyReference,
-    generate_discovery_key, generate_signing_key_pair,
+    DiscoveryKey, KeyPair, OneTimePreKeyReference, SealedFrame, SealedFrameError,
+    SealedFramePreKeyReference, generate_discovery_key, generate_signing_key_pair,
     open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
 };
+use serde::Serialize;
 
 fn recipient_discovery_key(seed: u8) -> DiscoveryKey {
     let mut rng = ChaCha20Rng::from_seed([seed; 32]);
@@ -66,8 +67,10 @@ fn prekey_reference() -> SealedFramePreKeyReference {
     SealedFramePreKeyReference {
         discovery_epoch: 7,
         signed_prekey_public_key: [0x51; 32],
-        one_time_prekey_id: Some(9),
-        one_time_prekey_public_key: Some([0x61; 32]),
+        one_time_prekey: Some(OneTimePreKeyReference {
+            id: 9,
+            public_key: [0x61; 32],
+        }),
     }
 }
 
@@ -162,6 +165,22 @@ fn sealed_frame_from_bytes_rejects_an_unknown_version_before_decoding() {
 }
 
 #[test]
+fn sealed_frame_from_bytes_rejects_trailing_bytes() {
+    let mut rng = ChaCha20Rng::from_seed([0x15; 32]);
+    let recipient = recipient_discovery_key(0x42);
+    let frame =
+        seal_frame_with_associated_data(&mut rng, recipient.public_key(), None, b"payload", &[])
+            .unwrap();
+    let mut bytes = frame.to_bytes().unwrap();
+    bytes.push(0);
+
+    assert!(matches!(
+        SealedFrame::from_bytes(&bytes),
+        Err(SealedFrameError::TrailingBytes { len: 1 })
+    ));
+}
+
+#[test]
 fn sealed_frame_rejects_invalid_public_keys() {
     let mut frame = SealedFrame {
         version: current_frame_version(),
@@ -185,20 +204,40 @@ fn sealed_frame_rejects_invalid_public_keys() {
 }
 
 #[test]
-fn sealed_frame_rejects_mismatched_one_time_prekey_reference_halves() {
-    let mut reference = prekey_reference();
-    reference.one_time_prekey_public_key = None;
+fn sealed_frame_from_bytes_rejects_half_of_a_one_time_prekey() {
+    #[derive(Serialize)]
+    struct HalfReferenceWire {
+        discovery_epoch: u32,
+        signed_prekey_public_key: [u8; 32],
+        one_time_prekey_id: Option<u64>,
+        one_time_prekey_public_key: Option<[u8; 32]>,
+    }
 
-    let frame = SealedFrame {
+    #[derive(Serialize)]
+    struct FrameWire {
+        version: u8,
+        recipient_public_key: [u8; 32],
+        prekey_reference: Option<HalfReferenceWire>,
+        ephemeral_public_key: [u8; 32],
+        ciphertext: Vec<u8>,
+    }
+
+    let bytes = postcard::to_stdvec(&FrameWire {
         version: current_frame_version(),
         recipient_public_key: *recipient_discovery_key(0x42).public_key().as_bytes(),
-        prekey_reference: Some(reference),
+        prekey_reference: Some(HalfReferenceWire {
+            discovery_epoch: 7,
+            signed_prekey_public_key: [0x51; 32],
+            one_time_prekey_id: Some(9),
+            one_time_prekey_public_key: None,
+        }),
         ephemeral_public_key: *KeyPair::from_secret_bytes([0x52; 32]).public.as_bytes(),
         ciphertext: vec![0x61; 16],
-    };
+    })
+    .unwrap();
 
     assert!(matches!(
-        frame.to_bytes(),
+        SealedFrame::from_bytes(&bytes),
         Err(SealedFrameError::IncompleteOneTimePreKey)
     ));
 }

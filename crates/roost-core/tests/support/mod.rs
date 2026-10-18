@@ -8,11 +8,11 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     ContactIdentityKey, InboundMessageOutcome, InboundSenderCertificateValidation, IncomingMessage,
-    KnownDomainSigningKey, Message, MessageDecryptionStep, MessageEncryptionStep,
-    MessageOperationError, MessageStartError, OutboundMessageResult, OutgoingMessage,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind,
-    ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings, SessionId,
-    SignedSenderCertificate, StateChanges, TransportBinding,
+    KnownDomainSigningKey, MessageDecryptionStep, MessageEncryptionStep, MessageOperationError,
+    MessageStartError, OutboundMessageResult, OutgoingMessage, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot,
+    ProtocolStateUpdate, ReceiveSettings, SealedFrame, SessionId, SignedSenderCertificate,
+    StateChanges, TransportBinding, commit_conditions_match,
 };
 use roost_crypto::{SigningKeyPair, generate_signing_key_pair};
 use roost_protocol::{
@@ -57,27 +57,8 @@ impl HostStore {
         snapshot
     }
 
-    pub fn commit(&mut self, updates: Vec<ProtocolStateUpdate>) -> Result<(), HostCommitError> {
-        self.commit_with(updates, None)
-    }
-
-    pub fn commit_outbound(
-        &mut self,
-        updates: Vec<ProtocolStateUpdate>,
-        message_id: MessageId,
-        message: &Message,
-    ) -> Result<(), HostCommitError> {
-        self.commit_with(
-            updates,
-            Some(OutboxRecord {
-                message_id,
-                message: message.to_bytes().unwrap(),
-            }),
-        )
-    }
-
     /// Commits `changes` in one transaction when every Commit Condition still holds.
-    pub fn commit_changes(&mut self, changes: StateChanges) -> Result<(), HostCommitError> {
+    pub fn commit_changes(&mut self, changes: &StateChanges) -> Result<(), HostCommitError> {
         self.commit_changes_with(changes, None)
     }
 
@@ -87,7 +68,7 @@ impl HostStore {
             message_id: sent.message_id,
             message: sent.message.to_bytes().unwrap(),
         };
-        self.commit_changes_with(sent.changes, Some(outbox))
+        self.commit_changes_with(&sent.changes, Some(outbox))
     }
 
     /// Returns the host's entry for each requested record, with `None` where it holds none.
@@ -110,7 +91,7 @@ impl HostStore {
 
     fn commit_changes_with(
         &mut self,
-        changes: StateChanges,
+        changes: &StateChanges,
         outbox: Option<OutboxRecord>,
     ) -> Result<(), HostCommitError> {
         let addresses: Vec<_> = changes
@@ -118,10 +99,10 @@ impl HostStore {
             .iter()
             .map(|(address, _)| address.clone())
             .collect();
-        if !changes.matches(&self.read(&addresses)).unwrap() {
+        if !commit_conditions_match(changes.conditions(), &self.read(&addresses)).unwrap() {
             return Err(HostCommitError::StaleCondition);
         }
-        self.apply_all(changes.into_updates());
+        self.apply_all(changes.updates());
         self.outbox.extend(outbox);
         Ok(())
     }
@@ -152,30 +133,19 @@ impl HostStore {
             .collect()
     }
 
+    /// Returns a blob in the version this host's blobs carry whose body doesn't decode.
+    pub fn malformed_blob(&self) -> Vec<u8> {
+        let version = self.blobs.values().next().expect("the host stores a blob")[0];
+        vec![version, 0, 0xaa]
+    }
+
     pub fn blob_bytes(&self, address: &ProtocolStateAddress) -> Option<Vec<u8>> {
         self.blobs.get(address).map(|blob| blob.to_vec())
     }
 
-    fn commit_with(
-        &mut self,
-        updates: Vec<ProtocolStateUpdate>,
-        outbox: Option<OutboxRecord>,
-    ) -> Result<(), HostCommitError> {
-        let snapshot = self.snapshot();
-        if updates.iter().any(|update| {
-            !update
-                .commit_condition()
-                .is_satisfied_by(snapshot.get(update.address()))
-        }) {
-            return Err(HostCommitError::StaleCondition);
-        }
-        // Validate the entire write set before changing either blobs or outbox effects.
-        self.apply_all(updates);
-        self.outbox.extend(outbox);
-        Ok(())
-    }
-
-    pub fn apply_all(&mut self, updates: impl IntoIterator<Item = ProtocolStateUpdate>) {
+    /// Writes `updates` without checking any condition, as a host that commits only part of a
+    /// result does.
+    pub fn apply_all(&mut self, updates: &[ProtocolStateUpdate]) {
         for update in updates {
             match update.blob() {
                 Some(blob) => {
@@ -201,15 +171,15 @@ pub struct OutboxRecord {
 }
 
 impl OutboxRecord {
-    pub fn message(&self) -> Message {
-        Message::from_bytes(&self.message).unwrap()
+    pub fn message(&self) -> SealedFrame {
+        SealedFrame::from_bytes(&self.message).unwrap()
     }
 }
 
 pub struct StoredMessage {
     pub message_id: MessageId,
     pub plaintext: Vec<u8>,
-    pub message: Message,
+    pub message: SealedFrame,
 }
 
 /// The test domain's signing key, which every Device's Relay certificate names.
@@ -255,25 +225,21 @@ fn test_domain_key() -> SigningKeyPair {
     generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x90; 32]))
 }
 
-/// Takes the changes an outcome asks the host to commit, if any, leaving empty changes behind.
-pub fn split_changes(
-    mut outcome: InboundMessageOutcome,
-) -> (InboundMessageOutcome, Option<StateChanges>) {
-    let changes = match &mut outcome {
+/// Returns the changes an outcome asks the host to commit, if any.
+pub fn changes_of(outcome: &InboundMessageOutcome) -> Option<&StateChanges> {
+    match outcome {
         InboundMessageOutcome::Accepted(result) | InboundMessageOutcome::ContactRequest(result) => {
-            Some(&mut result.changes)
+            Some(&result.changes)
         }
-        InboundMessageOutcome::Blocked(result) => Some(&mut result.changes),
-        InboundMessageOutcome::Withheld(result) => Some(&mut result.changes),
-        InboundMessageOutcome::GrantUpdate(result) => Some(&mut result.changes),
+        InboundMessageOutcome::Blocked(result) => Some(&result.changes),
+        InboundMessageOutcome::Withheld(result) => Some(&result.changes),
+        InboundMessageOutcome::GrantUpdate(result) => Some(&result.changes),
         InboundMessageOutcome::AcknowledgmentMatched(result)
-        | InboundMessageOutcome::AcknowledgmentUnmatched(result) => Some(&mut result.changes),
+        | InboundMessageOutcome::AcknowledgmentUnmatched(result) => Some(&result.changes),
         InboundMessageOutcome::Duplicate
         | InboundMessageOutcome::UnknownSession
         | InboundMessageOutcome::DeletedSession => None,
     }
-    .map(|changes| std::mem::replace(changes, StateChanges::from(Vec::new())));
-    (outcome, changes)
 }
 
 /// Runs `encryption` over `host`'s records, supplying `binding` when it asks for a transport.
@@ -393,12 +359,12 @@ impl ProtocolFixture {
     /// Returns Bob's input for receiving `message` with `settings` and certificate `validation`.
     pub fn incoming(
         &self,
-        message: &Message,
+        message: &SealedFrame,
         settings: ReceiveSettings,
         validation: InboundSenderCertificateValidation,
     ) -> IncomingMessage {
         IncomingMessage {
-            message: copy(message),
+            message: message.clone(),
             transport_binding: self.binding.clone(),
             settings,
             sender_certificate_validation: validation,
@@ -441,7 +407,7 @@ impl ProtocolFixture {
     pub fn receive(
         &self,
         store: &HostStore,
-        message: &Message,
+        message: &SealedFrame,
         rng_seed: u8,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
         self.decrypt(
@@ -454,7 +420,7 @@ impl ProtocolFixture {
     /// Has Alice receive `message` over her store, such as Bob's reply, without committing.
     pub fn alice_receives(
         &self,
-        message: &Message,
+        message: &SealedFrame,
         rng_seed: u8,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
         self.alice_receives_over(&self.alice.host, message, rng_seed)
@@ -464,12 +430,12 @@ impl ProtocolFixture {
     pub fn alice_receives_over(
         &self,
         store: &HostStore,
-        message: &Message,
+        message: &SealedFrame,
         rng_seed: u8,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
         run_decryption(
             started(self.alice.store.start_decryption(IncomingMessage {
-                message: copy(message),
+                message: message.clone(),
                 transport_binding: self.binding.clone(),
                 settings: ReceiveSettings::default(),
                 sender_certificate_validation: trusted_validation(),
@@ -492,7 +458,7 @@ impl ProtocolFixture {
             )
             .unwrap();
         let message_id = encrypted.message_id;
-        let message = copy(&encrypted.message);
+        let message = encrypted.message.clone();
         self.alice.host.commit_sent(encrypted).unwrap();
         StoredMessage {
             message_id,
@@ -507,7 +473,7 @@ impl ProtocolFixture {
             self.receive(&self.bob.host, &message.message, rng_seed)
                 .unwrap(),
         );
-        self.bob.host.commit_changes(decrypted.changes).unwrap();
+        self.bob.host.commit_changes(&decrypted.changes).unwrap();
         ReceivedMessage {
             message_id: decrypted.message_id,
             plaintext: decrypted.plaintext,
@@ -522,18 +488,7 @@ impl ProtocolFixture {
 pub struct ReceivedMessage {
     pub message_id: MessageId,
     pub plaintext: Zeroizing<Vec<u8>>,
-    pub acknowledgment: Message,
-}
-
-/// Returns a copy of `message`, even one too large to encode.
-pub fn copy(message: &Message) -> Message {
-    Message {
-        version: message.version,
-        recipient_public_key: message.recipient_public_key,
-        prekey_reference: message.prekey_reference,
-        ephemeral_public_key: message.ephemeral_public_key,
-        ciphertext: message.ciphertext.clone(),
-    }
+    pub acknowledgment: SealedFrame,
 }
 
 pub fn session_address(session_id: SessionId) -> ProtocolStateAddress {

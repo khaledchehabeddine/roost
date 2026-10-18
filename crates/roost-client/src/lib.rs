@@ -27,8 +27,8 @@ pub use certificate::{
 pub use context::{ContactBlock, Contacts, IdentityContext, Messaging};
 pub use error::RoostError;
 pub use message::{
-    FramePreKeyReference, Message, MessageId, PayloadKind, SenderIdentityMaterial, decode_message,
-    encode_message,
+    FrameOneTimePreKeyReference, FramePreKeyReference, Message, MessageId, PayloadKind,
+    SenderIdentityMaterial, decode_message, encode_message,
 };
 pub use message_operation::{
     AdmissionRequest, IncomingMessage, MessageDecryption, MessageDecryptionStep,

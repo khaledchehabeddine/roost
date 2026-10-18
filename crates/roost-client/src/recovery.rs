@@ -32,10 +32,8 @@ pub struct DeliveryCheckResult {
     /// Whether a recovery starts. Create a recovery job for the contact in the same transaction
     /// as the changes, and run it with [`Messaging::start_recovery`].
     pub starts_recovery: bool,
-    /// Messages the Relay would have dropped by now, oldest first, which Roost stops waiting for.
-    /// Show the ones with content as not delivered.
-    pub undelivered: Vec<MessageId>,
-    /// State changes to commit with the retries, the recovery job, and the undelivered Messages.
+    /// State changes to commit with the retries and the recovery job. They list the Messages the
+    /// Relay would have dropped by now as undelivered.
     pub changes: StateChanges,
 }
 
@@ -49,7 +47,7 @@ pub enum DeliveryCheckStep {
     },
     /// What the check found. The check has ended.
     Ready {
-        /// The retries, the recovery signal, and the undelivered Messages, with their changes.
+        /// The retries and the recovery signal, with their changes.
         result: DeliveryCheckResult,
     },
 }
@@ -396,11 +394,6 @@ impl DeliveryCheckResult {
                 })
                 .collect(),
             starts_recovery: result.starts_recovery,
-            undelivered: result
-                .undelivered
-                .into_iter()
-                .map(MessageId::from_core)
-                .collect(),
             changes: StateChanges::from_core(result.changes),
         }
     }

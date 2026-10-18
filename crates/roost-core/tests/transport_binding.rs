@@ -9,9 +9,7 @@ use roost_core::{
     ReceiveSettings, TransportBinding, TransportBindingError,
 };
 use roost_crypto::SealedFrameError;
-use support::{
-    ProtocolFixture, accepted, copy, run_decryption, run_encryption, trusted_validation,
-};
+use support::{ProtocolFixture, accepted, run_decryption, run_encryption, trusted_validation};
 
 #[test]
 fn transport_binding_preserves_exact_caller_bytes() {
@@ -61,7 +59,7 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
     )
     .unwrap();
     let message_id = outbound.message_id;
-    let message = copy(&outbound.message);
+    let message = outbound.message.clone();
     fixture.alice.host.commit_sent(outbound).unwrap();
 
     let receive = |binding: &TransportBinding| {
@@ -82,9 +80,9 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
         ))
     ));
     let received = accepted(receive(&message_binding).unwrap());
-    let acknowledgment = copy(received.acknowledgment.as_ref().unwrap());
+    let acknowledgment = received.acknowledgment.as_ref().unwrap().clone();
     assert_eq!(received.plaintext.as_slice(), b"transport bound");
-    fixture.bob.host.commit_changes(received.changes).unwrap();
+    fixture.bob.host.commit_changes(&received.changes).unwrap();
 
     let process = |binding: &TransportBinding| {
         run_decryption(
@@ -92,7 +90,7 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
                 .alice
                 .store
                 .start_decryption(IncomingMessage {
-                    message: copy(&acknowledgment),
+                    message: acknowledgment.clone(),
                     transport_binding: binding.clone(),
                     settings: ReceiveSettings::default(),
                     sender_certificate_validation: trusted_validation(),
@@ -120,5 +118,5 @@ fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
         panic!("expected the pending Message to be acknowledged");
     };
     assert_eq!(matched.acknowledged_message_id, message_id);
-    fixture.alice.host.commit_changes(matched.changes).unwrap();
+    fixture.alice.host.commit_changes(&matched.changes).unwrap();
 }

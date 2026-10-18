@@ -8,7 +8,7 @@ use crate::keys::{
     verify_public_identity_key,
 };
 use crate::one_time_prekey::{OneTimePreKey, PublicOneTimePreKey};
-use crate::sealed_frame::SealedFramePreKeyReference;
+use crate::sealed_frame::{OneTimePreKeyReference, SealedFramePreKeyReference};
 use crate::signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_public_signed_prekey};
 use hkdf::Hkdf;
 use rand::{CryptoRng, RngCore};
@@ -119,8 +119,10 @@ pub fn initiate_handshake<R: RngCore + CryptoRng>(
         prekey_reference: SealedFramePreKeyReference {
             discovery_epoch: responder_prekey_bundle.discovery_key.epoch,
             signed_prekey_public_key: *signed_prekey_public_key.as_bytes(),
-            one_time_prekey_id: one_time_prekey.map(|prekey| prekey.id),
-            one_time_prekey_public_key: one_time_prekey.map(|prekey| *prekey.public_key.as_bytes()),
+            one_time_prekey: one_time_prekey.map(|prekey| OneTimePreKeyReference {
+                id: prekey.id,
+                public_key: *prekey.public_key.as_bytes(),
+            }),
         },
     };
     Ok((state, session_id, handshake))
@@ -296,19 +298,15 @@ fn validate_one_time_prekey(
     reference: &SealedFramePreKeyReference,
     one_time_prekey: Option<OneTimePreKey>,
 ) -> Result<Option<OneTimePreKey>, HandshakeError> {
-    match (
-        reference.one_time_prekey_id,
-        reference.one_time_prekey_public_key,
-        one_time_prekey,
-    ) {
-        (None, None, _) => Ok(None),
-        (Some(_), None, _) | (None, Some(_), _) => Err(HandshakeError::OneTimePreKeyMismatch),
-        (Some(_), Some(_), None) => Err(HandshakeError::MissingOneTimePreKey),
-        (Some(expected_id), Some(expected_public_key), Some(prekey)) => {
-            let public_matches: bool = expected_public_key
+    match (reference.one_time_prekey, one_time_prekey) {
+        (None, _) => Ok(None),
+        (Some(_), None) => Err(HandshakeError::MissingOneTimePreKey),
+        (Some(expected), Some(prekey)) => {
+            let public_matches: bool = expected
+                .public_key
                 .ct_eq(prekey.public_key().as_bytes())
                 .into();
-            if prekey.id() != expected_id || !public_matches {
+            if prekey.id() != expected.id || !public_matches {
                 return Err(HandshakeError::OneTimePreKeyMismatch);
             }
             check_epoch(prekey.epoch(), reference.discovery_epoch)?;
@@ -374,17 +372,13 @@ fn sender_proof_transcript(
     transcript.extend_from_slice(handshake.responder_discovery_key.as_bytes());
     transcript.extend_from_slice(&reference.discovery_epoch.to_be_bytes());
     transcript.extend_from_slice(&reference.signed_prekey_public_key);
-    match (
-        reference.one_time_prekey_id,
-        reference.one_time_prekey_public_key,
-    ) {
-        (Some(id), Some(public_key)) => {
+    match reference.one_time_prekey {
+        Some(prekey) => {
             transcript.push(1);
-            transcript.extend_from_slice(&id.to_be_bytes());
-            transcript.extend_from_slice(&public_key);
+            transcript.extend_from_slice(&prekey.id.to_be_bytes());
+            transcript.extend_from_slice(&prekey.public_key);
         }
-        (None, None) => transcript.push(0),
-        (Some(_), None) | (None, Some(_)) => return Err(HandshakeError::OneTimePreKeyMismatch),
+        None => transcript.push(0),
     }
     transcript.extend_from_slice(input.sender_identity_key.public_key.as_bytes());
     transcript.extend_from_slice(input.sender_identity_key.verifying_key.as_bytes());
@@ -583,10 +577,10 @@ mod tests {
             SealedFramePreKeyReference {
                 discovery_epoch: setup.bob_discovery_key.epoch(),
                 signed_prekey_public_key: *setup.bob_signed_prekey.public_key().as_bytes(),
-                one_time_prekey_id: Some(setup.bob_one_time_prekey.id()),
-                one_time_prekey_public_key: Some(
-                    *setup.bob_one_time_prekey.public_key().as_bytes()
-                ),
+                one_time_prekey: Some(OneTimePreKeyReference {
+                    id: setup.bob_one_time_prekey.id(),
+                    public_key: *setup.bob_one_time_prekey.public_key().as_bytes(),
+                }),
             }
         );
     }
@@ -788,17 +782,19 @@ mod tests {
         let proof = prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap();
         let other_key = generate_key_pair(&mut rng).public;
         let other_signing_key = generate_signing_key_pair(&mut rng);
+        let one_time_prekey = handshake.prekey_reference.one_time_prekey.unwrap();
         let mut other_one_time_prekey = handshake;
-        other_one_time_prekey.prekey_reference.one_time_prekey_id = Some(10);
+        other_one_time_prekey.prekey_reference.one_time_prekey = Some(OneTimePreKeyReference {
+            id: 10,
+            ..one_time_prekey
+        });
         let mut without_one_time_prekey = handshake;
-        without_one_time_prekey.prekey_reference.one_time_prekey_id = None;
-        without_one_time_prekey
-            .prekey_reference
-            .one_time_prekey_public_key = None;
+        without_one_time_prekey.prekey_reference.one_time_prekey = None;
         let mut other_one_time_prekey_key = handshake;
-        other_one_time_prekey_key
-            .prekey_reference
-            .one_time_prekey_public_key = Some(*other_key.as_bytes());
+        other_one_time_prekey_key.prekey_reference.one_time_prekey = Some(OneTimePreKeyReference {
+            public_key: *other_key.as_bytes(),
+            ..one_time_prekey
+        });
         let mut other_signed_prekey = handshake;
         other_signed_prekey
             .prekey_reference

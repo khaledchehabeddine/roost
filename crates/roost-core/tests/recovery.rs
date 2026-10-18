@@ -3,7 +3,7 @@
 
 mod support;
 
-use roost_core::{InboundMessageOutcome, ProtocolStateEngine};
+use roost_core::InboundMessageOutcome;
 use roost_protocol::PayloadKind;
 use support::HostCommitError;
 use support::device::{
@@ -29,7 +29,7 @@ fn a_message_unacknowledged_for_less_than_a_day_signals_nothing() {
 
     assert!(!checked.starts_recovery);
     assert!(checked.retries.is_empty());
-    assert!(checked.undelivered.is_empty());
+    assert!(checked.changes.undelivered().is_empty());
 }
 
 #[test]
@@ -90,9 +90,12 @@ fn messages_unacknowledged_for_thirty_days_show_as_not_delivered_once() {
     let checked = alice.check_deliveries(&bob, sent_at_millis() + 30 * DAY_MILLIS + HOUR_MILLIS);
     let again = alice.check_deliveries(&bob, sent_at_millis() + 31 * DAY_MILLIS);
 
-    assert_eq!(checked.undelivered, [first.message_id, second.message_id]);
+    assert_eq!(
+        checked.changes.undelivered(),
+        [first.message_id, second.message_id]
+    );
     assert!(!checked.starts_recovery);
-    assert!(again.undelivered.is_empty());
+    assert!(again.changes.undelivered().is_empty());
     assert!(
         alice
             .store
@@ -175,7 +178,9 @@ fn waiting_on(
     device: &Device,
     session_id: roost_core::SessionId,
 ) -> Vec<roost_protocol::MessageId> {
-    ProtocolStateEngine::new()
+    device
+        .store
+        .protocol_engine()
         .pending_acknowledgments(&device.host.snapshot(), session_id)
         .map(|pending| pending.into_iter().map(|entry| entry.message_id).collect())
         .unwrap_or_default()
@@ -323,6 +328,44 @@ fn an_unacknowledged_probe_is_sent_again_on_another_session_after_the_recheck() 
     assert_ne!(again.session_id, probe.session_id);
     assert!(waiting_on(&alice, probe.session_id).is_empty());
     assert_eq!(waiting_on(&alice, again.session_id), [sent.message_id]);
+}
+
+#[test]
+fn a_probe_that_evicts_its_own_session_isnt_listed_as_undelivered() {
+    let relay = Relay::new();
+    let (mut alice, bob) = befriended(&relay);
+    let sent = alice.send(&bob, b"are you there?");
+    // Each rotation makes Alice's next send start a Session, until hers with the Message is the
+    // oldest one kept.
+    for _ in 0..5 {
+        bob.rotate_inbox();
+        let mut outgoing = alice.outgoing(&bob, b"to the newer inbox");
+        outgoing.prekey_bundle = Some(bob.bundle());
+        alice.send_with(outgoing, Intent::Message);
+    }
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+
+    let Recovered::Resent(resent) = alice.observe_recovery(&bob, Some(bob.bundle())).unwrap()
+    else {
+        panic!("expected the probe");
+    };
+    let (probe, _) = *resent;
+
+    assert_eq!(probe.message_id, sent.message_id);
+    assert!(probe.changes.undelivered().is_empty());
+    let probe_session = probe.session_id;
+    alice.host.commit_sent(probe).unwrap();
+    assert!(
+        alice
+            .host
+            .blob_bytes(&support::session_address(sent.session_id))
+            .is_none()
+    );
+    assert_eq!(waiting_on(&alice, probe_session), [sent.message_id]);
 }
 
 #[test]
@@ -511,7 +554,7 @@ fn messages_to_a_blocked_contact_still_show_as_not_delivered_but_are_never_recov
     let after_thirty_days = alice.check_deliveries(&bob, sent_at_millis() + 31 * DAY_MILLIS);
 
     assert!(!after_a_day.starts_recovery);
-    assert_eq!(after_thirty_days.undelivered, [sent.message_id]);
+    assert_eq!(after_thirty_days.changes.undelivered(), [sent.message_id]);
 }
 
 #[test]

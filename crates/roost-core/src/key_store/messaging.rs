@@ -6,8 +6,7 @@ use crate::{
     ProtocolStateError,
 };
 use roost_crypto::{
-    DiscoveryKey, HandshakeError, OneTimePreKey, PublicSignedPreKey, SealedFramePreKeyReference,
-    SignedPreKey,
+    DiscoveryKey, OneTimePreKey, PublicSignedPreKey, SealedFramePreKeyReference, SignedPreKey,
 };
 use std::time::SystemTime;
 
@@ -169,22 +168,16 @@ impl KeyStore {
             &reference.signed_prekey_public_key,
             now,
         )?;
-        let one_time_prekey = match (
-            reference.one_time_prekey_id,
-            reference.one_time_prekey_public_key,
-        ) {
-            (None, None) => None,
-            (Some(id), Some(public_key)) => {
-                Some(self.0.one_time_prekey.one_time_prekey_for_public_key(
+        let one_time_prekey = reference
+            .one_time_prekey
+            .map(|prekey| {
+                self.0.one_time_prekey.one_time_prekey_for_public_key(
                     reference.discovery_epoch,
-                    id,
-                    &public_key,
-                )?)
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(ProtocolStateError::from(HandshakeError::OneTimePreKeyMismatch).into());
-            }
-        };
+                    prekey.id,
+                    &prekey.public_key,
+                )
+            })
+            .transpose()?;
         Ok(FirstMessagePreKeys {
             signed_prekey,
             one_time_prekey,

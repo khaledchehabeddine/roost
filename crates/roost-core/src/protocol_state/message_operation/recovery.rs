@@ -4,15 +4,18 @@
 use super::super::contact_record::{
     ContactRecord, RecoveryProgress, contact_address, load_contact,
 };
+use super::super::pending_acknowledgment::{
+    LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, decode_pending_acknowledgments,
+    encode_pending_acknowledgments,
+};
 use super::super::session::{
     PeerSessions, Starter, load_peer_sessions, load_session, peer_sessions_address,
     pending_acknowledgment_address, session_address, session_record_addresses,
 };
 use super::super::{
-    LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, ProtocolHardeningLimits,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateSnapshot, ProtocolStateUpdate, StateChanges, copy_message,
-    decode_pending_acknowledgments, encode_pending_acknowledgments, validate_contact_identity_key,
+    ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateEngine,
+    ProtocolStateError, ProtocolStateSnapshot, ProtocolStateUpdate, StateChanges,
+    validate_contact_identity_key,
 };
 use super::{
     Encrypting, LocalIdentityKeys, MessageDestination, MessageEncryptionStep,
@@ -21,8 +24,9 @@ use super::{
     text_kind,
 };
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
-use crate::{Message, MessageId, PayloadKind, TransportBinding};
+use crate::{MessageId, PayloadKind, TransportBinding};
 use rand::{CryptoRng, RngCore};
+use roost_crypto::SealedFrame;
 use roost_protocol::{SessionId, to_unix_millis};
 use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
@@ -40,7 +44,7 @@ pub struct RetryInstruction {
     /// The Message's ID.
     pub message_id: MessageId,
     /// The Message as first sent, which the contact can still open.
-    pub message: Message,
+    pub message: SealedFrame,
     /// The contact's current inbox.
     pub destination: MessageDestination,
 }
@@ -51,9 +55,8 @@ pub struct DeliveryCheckResult {
     pub retries: Vec<RetryInstruction>,
     /// Whether a recovery starts. The app commits its recovery job with these changes.
     pub starts_recovery: bool,
-    /// Messages the Relay would have dropped by now, oldest first, which Roost stops waiting for.
-    pub undelivered: Vec<MessageId>,
-    /// State changes to commit with the retries, the recovery job, and the undelivered Messages.
+    /// State changes to commit with the retries and the recovery job. They list the Messages the
+    /// Relay would have dropped by now as undelivered.
     pub changes: StateChanges,
 }
 
@@ -187,8 +190,7 @@ impl Checking {
         DeliveryCheckStep::Ready(Box::new(DeliveryCheckResult {
             retries: checked.retries,
             starts_recovery: checked.starts_recovery,
-            undelivered: checked.undelivered,
-            changes: changes(&self.reads, checked.updates),
+            changes: changes(&self.reads, checked.updates).with_undelivered(checked.undelivered),
         }))
     }
 
@@ -439,7 +441,7 @@ fn take_retries(
         })
         .map(|message| RetryInstruction {
             message_id: message.message_id,
-            message: copy_message(&message.entry.message),
+            message: message.entry.message.clone(),
             destination: route.destination(contact.identity_key),
         })
         .collect();

@@ -5,14 +5,14 @@ mod support;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    HandshakeError, InboundMessageOutcome, Message, MessageOperationError, ProtocolStateError,
-    PublicKeyError, SessionId,
+    HandshakeError, InboundMessageOutcome, MessageOperationError, ProtocolStateError,
+    PublicKeyError, SealedFrame, SessionId,
 };
 use roost_crypto::{
     RatchetError, SealedFrameError, open_frame_for_discovery_key_with_associated_data,
     seal_frame_with_associated_data,
 };
-use roost_protocol::{SenderCertificateValidationError, SignatureError};
+use roost_protocol::{SealedPayloadError, SenderCertificateValidationError, SignatureError};
 use support::device::{Device, DeviceError, Intent, Relay, SentMessage};
 use support::{CREATED_AT_SECS, ProtocolFixture, session_address};
 
@@ -267,6 +267,65 @@ fn sessions_beyond_five_older_ones_are_deleted_and_stop_receiving() {
     ));
 }
 
+// Returns the MessageIDs `device` still waits to have acknowledged on `session_id`.
+fn waiting_on(device: &Device, session_id: SessionId) -> Vec<roost_protocol::MessageId> {
+    device
+        .store
+        .protocol_engine()
+        .pending_acknowledgments(&device.host.snapshot(), session_id)
+        .unwrap()
+        .into_iter()
+        .map(|pending| pending.message_id)
+        .collect()
+}
+
+#[test]
+fn a_session_the_peer_evicts_lists_its_unacknowledged_messages_as_undelivered() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let mut bob = Device::new(&relay, 0xb0);
+    let oldest = establish(&mut alice, &mut bob);
+    let stranded = bob.send(&alice, b"never acknowledged");
+    for _ in 0..5 {
+        reestablish(&mut alice, &mut bob);
+    }
+    let waiting = waiting_on(&bob, oldest);
+    assert!(waiting.contains(&stranded.message_id));
+    alice.forget_sessions_with(&bob);
+    let request = alice.request(&bob, b"hello again");
+
+    let received = accepted_message(bob.receive(&request.message));
+
+    assert_eq!(received.changes.undelivered(), waiting);
+    assert!(bob.host.blob_bytes(&session_address(oldest)).is_none());
+}
+
+#[test]
+fn a_session_a_send_evicts_lists_its_unacknowledged_messages_as_undelivered() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let mut bob = Device::new(&relay, 0xb0);
+    let oldest = establish(&mut alice, &mut bob);
+    let stranded = alice.send(&bob, b"never acknowledged");
+    // Each rotation makes Alice's next send start a Session from Bob's newer bundle.
+    for _ in 0..5 {
+        bob.rotate_inbox();
+        let mut outgoing = alice.outgoing(&bob, b"to the newer inbox");
+        outgoing.prekey_bundle = Some(bob.bundle());
+        alice.send_with(outgoing, Intent::Message);
+    }
+    assert_eq!(waiting_on(&alice, oldest), [stranded.message_id]);
+    bob.rotate_inbox();
+    let mut outgoing = alice.outgoing(&bob, b"evicts the oldest");
+    outgoing.prekey_bundle = Some(bob.bundle());
+
+    let (sent, _) = alice.encrypt(outgoing, Intent::Message).unwrap().ready();
+
+    assert_eq!(sent.changes.undelivered(), [stranded.message_id]);
+    alice.host.commit_sent(sent).unwrap();
+    assert!(alice.host.blob_bytes(&session_address(oldest)).is_none());
+}
+
 #[test]
 fn a_replayed_first_message_cannot_revive_a_deleted_session() {
     let relay = Relay::new();
@@ -371,7 +430,7 @@ fn a_tampered_or_misdelivered_first_message_changes_nothing() {
     let mut bob = Device::new(&relay, 0xb0);
     let carol = Device::new(&relay, 0xc0);
     let request = alice.request(&bob, b"for bob");
-    let mut tampered = Message::from_bytes(&request.message.to_bytes().unwrap()).unwrap();
+    let mut tampered = request.message.clone();
     *tampered.ciphertext.last_mut().unwrap() ^= 0x01;
     let bob_before = bob.host.snapshot_bytes();
     let carol_before = carol.host.snapshot_bytes();
@@ -420,28 +479,24 @@ fn a_request_refuses_a_discovery_key_that_does_not_vouch_for_the_identity() {
 
 // Re-seals a Message's layer sealed to `recipient` after `edit` changes its plaintext.
 fn reseal(
-    message: &Message,
+    message: &SealedFrame,
     recipient: &roost_crypto::DiscoveryKey,
     binding: &roost_core::TransportBinding,
     edit: impl FnOnce(&mut Vec<u8>),
-) -> Message {
-    let mut plaintext = open_frame_for_discovery_key_with_associated_data(
-        recipient,
-        &roost_crypto::SealedFrame::from_bytes(&message.to_bytes().unwrap()).unwrap(),
-        binding.as_bytes(),
-    )
-    .unwrap()
-    .to_vec();
+) -> SealedFrame {
+    let mut plaintext =
+        open_frame_for_discovery_key_with_associated_data(recipient, message, binding.as_bytes())
+            .unwrap()
+            .to_vec();
     edit(&mut plaintext);
-    let frame = seal_frame_with_associated_data(
+    seal_frame_with_associated_data(
         &mut ChaCha20Rng::from_seed([0x5e; 32]),
         recipient.public_key(),
         message.prekey_reference,
         &plaintext,
         binding.as_bytes(),
     )
-    .unwrap();
-    Message::from_bytes(&frame.to_bytes().unwrap()).unwrap()
+    .unwrap()
 }
 
 #[test]
@@ -521,13 +576,12 @@ fn a_first_message_keeps_the_padding_and_size_limits() {
     // The request's Inbox Grant shares the largest padding bucket with the plaintext.
     let mut too_large = alice.outgoing(&bob, &[0; 65_533]);
     too_large.prekey_bundle = Some(bob.bundle());
-    let Err(DeviceError::Operation(MessageOperationError::ProtocolState(
-        ProtocolStateError::InvalidMessage { reason },
-    ))) = alice.encrypt(too_large, Intent::Request)
-    else {
-        panic!("expected the oversized request to be refused");
-    };
-    assert!(reason.starts_with("sealed payload length exceeds limit"));
+    assert!(matches!(
+        alice.encrypt(too_large, Intent::Request),
+        Err(DeviceError::Operation(MessageOperationError::ProtocolState(
+            ProtocolStateError::SealedPayload(SealedPayloadError::PlaintextTooLong { len, max }),
+        ))) if len > max
+    ));
 
     let largest = vec![0x2a; 65_200];
     let request = alice.request(&bob, &largest);

@@ -1,13 +1,11 @@
-//! Defines opaque caller-owned bytes authenticated with encrypted Messages.
-
 const MAX_TRANSPORT_BINDING_LEN: usize = 1024;
 
 /// Opaque public bytes supplied by a Caller-Owned Transport.
 ///
 /// Core authenticates these bytes with one encrypted Message, but never interprets, transmits, or
-/// stores them. Established-Message and acknowledgment receive paths also include the bytes in
-/// deduplication. The caller must retain the exact value with an outbound Message and supply the
-/// same value for receive or retransmission.
+/// stores them. Each receive also includes them in the digest that catches a repeated delivery.
+/// The caller must retain the exact value with an outbound Message and supply the same value for
+/// receive or retransmission.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TransportBinding(Vec<u8>);
 
