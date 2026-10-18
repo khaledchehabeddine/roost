@@ -66,4 +66,4 @@ enum ExampleError {
 - Leave the version off an encoding that only ever sits inside another one.
 - Bump the version when a change alters how an existing value encodes or gives old bytes a new meaning.
 - Don't write migration code for older versions until a release promises that stored data survives upgrades.
-- Encode each type through one private `*Wire` struct, not the domain type, and derive both `Serialize` and `Deserialize` on it. Pair a borrowing encode struct with an owning decode struct when one struct would copy a secret or a large buffer to encode.
+- Encode each type through one private `*Wire` struct, not the domain type, and derive both `Serialize` and `Deserialize` on it. When that struct would copy a secret or a large buffer to encode, split it into a borrowing `*Wire` struct for encoding and an owning `Decoded*Wire` struct for decoding.
