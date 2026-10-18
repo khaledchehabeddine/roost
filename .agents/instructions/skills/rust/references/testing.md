@@ -9,9 +9,8 @@ Broken code can still round-trip data and reject bad input, so a round trip or a
 
 ## Placement
 
-- Test a module's own logic in a `#[cfg(test)]` module in the same file.
-- Test flows that span modules or Devices in the crate's `tests/integration` binary.
-- Put test-only code in `src/` under `#[cfg(test)]`.
+- Write unit tests for a module's own logic in a `#[cfg(test)]` module in the same file.
+- Write integration tests for flows that span modules in `tests/integration/`.
 
 ## Names
 
