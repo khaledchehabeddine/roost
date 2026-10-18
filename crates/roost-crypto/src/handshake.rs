@@ -484,6 +484,15 @@ mod tests {
         }
     }
 
+    fn copy_one_time_prekey(prekey: &OneTimePreKey) -> OneTimePreKey {
+        OneTimePreKey::from_secret_bytes(
+            prekey.id(),
+            *prekey.to_secret_bytes(),
+            prekey.epoch(),
+            FIXED_CREATED_AT_SECS,
+        )
+    }
+
     fn public_identity_key(
         signing_key: &SigningKeyPair,
         public_key: PublicKey,
@@ -818,5 +827,107 @@ mod tests {
             verify_sender_proof(&setup.bob_signed_prekey, &transcript, &forged),
             Err(HandshakeError::SenderProofInvalid)
         ));
+    }
+
+    // X3DH from fixed keys: the initiator's base key and the responder's Discovery Key, signed
+    // prekey, and one-time prekey.
+    const BASE_KEY_SECRET: [u8; 32] = [0x11; 32];
+    const DISCOVERY_KEY_SECRET: [u8; 32] = [0x22; 32];
+    const SIGNED_PREKEY_SECRET: [u8; 32] = [0x33; 32];
+    const ONE_TIME_PREKEY_SECRET: [u8; 32] = [0x44; 32];
+
+    // Computed by this crate, and independently by a Go program on crypto/ecdh and crypto/hkdf
+    // and a Python script with its own X25519 ladder and HKDF-SHA256 over hmac.
+    const ROOT_KEY_WITHOUT_ONE_TIME_PREKEY: &str =
+        "462b3b388c7cd9155420c8c615aaf7058a709e42467b30a3de4fbd16bf029666";
+    const SESSION_ID_WITHOUT_ONE_TIME_PREKEY: &str = "7d0f83c954a222e6d8037b841f5b10eb";
+    const ROOT_KEY_WITH_ONE_TIME_PREKEY: &str =
+        "40c5a1527c6e7021c34b60cf0e9012d1249fa47abc8cea0c2fc692557b158d50";
+    const SESSION_ID_WITH_ONE_TIME_PREKEY: &str = "f4af04ad707dd75f2cdfe80efc160b0a";
+
+    #[test]
+    fn x3dh_derives_the_pinned_root_keys_and_session_ids() {
+        let base_key = KeyPair::from_secret_bytes(BASE_KEY_SECRET).public;
+        let shared_secret = |secret| {
+            KeyPair::from_secret_bytes(secret)
+                .diffie_hellman(&base_key)
+                .unwrap()
+        };
+        let discovery_key = shared_secret(DISCOVERY_KEY_SECRET);
+        let signed_prekey = shared_secret(SIGNED_PREKEY_SECRET);
+        let one_time_prekey = shared_secret(ONE_TIME_PREKEY_SECRET);
+
+        let (root_key, session_id) =
+            derive_root_key_and_session_id(&discovery_key, &signed_prekey, None).unwrap();
+        assert_eq!(
+            hex::encode(root_key.as_bytes()),
+            ROOT_KEY_WITHOUT_ONE_TIME_PREKEY
+        );
+        assert_eq!(
+            hex::encode(session_id.as_bytes()),
+            SESSION_ID_WITHOUT_ONE_TIME_PREKEY
+        );
+        let (root_key, session_id) =
+            derive_root_key_and_session_id(&discovery_key, &signed_prekey, Some(&one_time_prekey))
+                .unwrap();
+        assert_eq!(
+            hex::encode(root_key.as_bytes()),
+            ROOT_KEY_WITH_ONE_TIME_PREKEY
+        );
+        assert_eq!(
+            hex::encode(session_id.as_bytes()),
+            SESSION_ID_WITH_ONE_TIME_PREKEY
+        );
+    }
+
+    #[test]
+    fn accepting_a_handshake_pairs_each_prekey_with_the_base_key() {
+        let discovery_key = DiscoveryKey::from_secret_bytes(
+            DISCOVERY_KEY_SECRET,
+            [0x23; 32],
+            1,
+            FIXED_CREATED_AT_SECS,
+            [0x24; 64],
+        );
+        let signed_prekey = SignedPreKey::from_secret_bytes(
+            SIGNED_PREKEY_SECRET,
+            [0x34; 64],
+            0,
+            1,
+            FIXED_CREATED_AT_SECS,
+        );
+        let one_time_prekey =
+            OneTimePreKey::from_secret_bytes(9, ONE_TIME_PREKEY_SECRET, 1, FIXED_CREATED_AT_SECS);
+        let handshake = |one_time_prekey: Option<&OneTimePreKey>| Handshake {
+            base_key: KeyPair::from_secret_bytes(BASE_KEY_SECRET).public,
+            responder_discovery_key: *discovery_key.public_key(),
+            prekey_reference: SealedFramePreKeyReference {
+                discovery_epoch: 1,
+                signed_prekey_public_key: *signed_prekey.public_key().as_bytes(),
+                one_time_prekey: one_time_prekey.map(|prekey| OneTimePreKeyReference {
+                    id: prekey.id(),
+                    public_key: *prekey.public_key().as_bytes(),
+                }),
+            },
+        };
+
+        let (_, without) =
+            accept_handshake(&handshake(None), &discovery_key, &signed_prekey, None).unwrap();
+        let (_, with) = accept_handshake(
+            &handshake(Some(&one_time_prekey)),
+            &discovery_key,
+            &signed_prekey,
+            Some(copy_one_time_prekey(&one_time_prekey)),
+        )
+        .unwrap();
+
+        assert_eq!(
+            hex::encode(without.as_bytes()),
+            SESSION_ID_WITHOUT_ONE_TIME_PREKEY
+        );
+        assert_eq!(
+            hex::encode(with.as_bytes()),
+            SESSION_ID_WITH_ONE_TIME_PREKEY
+        );
     }
 }
