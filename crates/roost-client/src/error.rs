@@ -597,4 +597,14 @@ mod tests {
             ));
         }
     }
+
+    #[test]
+    fn an_unknown_backup_version_is_an_unsupported_version() {
+        assert!(matches!(
+            RoostError::from(KeyStoreError::Identity(
+                IdentityError::UnsupportedBackupVersion(0xff)
+            )),
+            RoostError::UnsupportedVersion { .. }
+        ));
+    }
 }

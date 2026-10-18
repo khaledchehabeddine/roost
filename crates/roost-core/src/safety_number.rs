@@ -21,7 +21,7 @@ pub struct IdentityKey {
 impl IdentityKey {
     /// Returns the canonical Identity Key encoding used for Safety Numbers and IK-keyed state.
     #[must_use]
-    pub fn canonical_encoding(&self) -> [u8; roost_protocol::IDENTITY_KEY_ENCODING_LEN] {
+    pub(crate) fn canonical_encoding(&self) -> [u8; roost_protocol::IDENTITY_KEY_ENCODING_LEN] {
         roost_protocol::identity_key_encoding(&self.x25519_public_key, &self.ed25519_verifying_key)
     }
 }

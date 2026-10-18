@@ -1,5 +1,7 @@
 use crate::RoostError;
 use roost_core::{SecureStorage as CoreSecureStorage, StorageError};
+#[cfg(test)]
+use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
@@ -44,27 +46,31 @@ pub trait SecureStorage: Send + Sync {
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct MemoryStorage {
-    inner: Mutex<roost_core::InMemorySecureStorage>,
+    entries: Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
 }
 
 #[cfg(test)]
 impl SecureStorage for MemoryStorage {
     fn save(&self, key: String, value: Vec<u8>) -> Result<(), RoostError> {
-        let value = Zeroizing::new(value);
-        Ok(self.inner.lock().unwrap().store(&key, &value)?)
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(key, Zeroizing::new(value));
+        Ok(())
     }
 
     fn load(&self, key: String) -> Result<Option<Vec<u8>>, RoostError> {
         Ok(self
-            .inner
+            .entries
             .lock()
             .unwrap()
-            .load(&key)?
+            .get(&key)
             .map(|value| value.to_vec()))
     }
 
     fn remove(&self, key: String) -> Result<(), RoostError> {
-        Ok(self.inner.lock().unwrap().delete(&key)?)
+        self.entries.lock().unwrap().remove(&key);
+        Ok(())
     }
 }
 

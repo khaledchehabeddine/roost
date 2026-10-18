@@ -96,5 +96,5 @@ pub use roost_crypto::{
 pub use roost_protocol::SessionId;
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use signed_prekey::SignedPreKeyError;
-pub use storage::{InMemorySecureStorage, SecureStorage, StorageError};
+pub use storage::{SecureStorage, StorageError};
 pub use transport_binding::{TransportBinding, TransportBindingError};

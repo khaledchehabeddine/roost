@@ -74,6 +74,9 @@ pub struct CommitCondition {
 /// The records an operation's result relies on, the records it writes, the operation that commits
 /// with them, if any, and the sent Messages Roost stops waiting for.
 ///
+/// Message operations and delivery checks return these beside their result. They're empty when
+/// the result changes nothing, such as a duplicate.
+///
 /// Inside one transaction, read the record under each condition's key, call [`Self::matches`],
 /// and only when it returns `true` write every update together with the result's effects, such as
 /// a Message to send, and show each of [`Self::undelivered`] that has content as not delivered.

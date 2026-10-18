@@ -401,6 +401,7 @@ struct SealedFrameAssociatedDataWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keys::KeyPair;
 
     #[test]
     fn frame_key_and_nonce_change_with_the_secret() {
@@ -409,5 +410,31 @@ mod tests {
 
         assert_ne!(*other_key, *key);
         assert_ne!(other_nonce, nonce);
+    }
+
+    #[test]
+    fn sealed_frame_from_bytes_rejects_half_of_a_one_time_prekey() {
+        for (one_time_prekey_id, one_time_prekey_public_key) in
+            [(Some(9), None), (None, Some([0x53; 32]))]
+        {
+            let bytes = postcard::to_stdvec(&SealedFrameWire {
+                version: SEALED_FRAME_VERSION,
+                recipient_public_key: *KeyPair::from_secret_bytes([0x51; 32]).public.as_bytes(),
+                prekey_reference: Some(SealedFramePreKeyReferenceWire {
+                    discovery_epoch: 7,
+                    signed_prekey_public_key: [0x51; 32],
+                    one_time_prekey_id,
+                    one_time_prekey_public_key,
+                }),
+                ephemeral_public_key: *KeyPair::from_secret_bytes([0x52; 32]).public.as_bytes(),
+                ciphertext: vec![0x61; 16],
+            })
+            .unwrap();
+
+            assert!(matches!(
+                SealedFrame::from_bytes(&bytes),
+                Err(SealedFrameError::IncompleteOneTimePreKey)
+            ));
+        }
     }
 }
