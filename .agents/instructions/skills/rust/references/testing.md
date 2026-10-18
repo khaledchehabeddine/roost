@@ -7,6 +7,12 @@ Broken code can still round-trip data and reject bad input, so a round trip or a
 - Add a test only when no existing test covers an important app flow, a costly failure, or a likely regression.
 - Test what a caller can observe, such as outputs, errors, and stored state.
 
+## Placement
+
+- Test a module's own logic in its `#[cfg(test)]` module, and flows between Devices in one `tests/it` binary per crate.
+- Write integration-test support only as a caller of the public API. When a test needs more, change the API.
+- Scope test-only helpers with `#[cfg(test)]` or `pub(crate)`, since Cargo feature unification can switch a test feature on in production builds.
+
 ## Names
 
 - Name each test for the behavior it checks, such as `decode_example_rejects_unknown_version`, not `test_decode`.
