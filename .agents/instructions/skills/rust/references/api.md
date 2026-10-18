@@ -29,7 +29,8 @@ fn derive_example_key(secret: &[u8; 32]) -> ExampleKey {
 ## Visibility
 
 - Keep modules private and re-export the public API from `lib.rs` by name, not with `*`.
-- Give each item the narrowest visibility its callers need: private, `pub(super)`, `pub(crate)`, or `pub`. A re-export isn't a caller, and neither is a test unless the item is its only way to read or set stored state without consuming a result.
+- Give each item the narrowest visibility its callers need: private, `pub(super)`, `pub(crate)`, or `pub`.
+- A re-export isn't a caller. A test is a caller only when the item is its only way to read or set stored state.
 - Re-export what callers need from lower workspace crates.
 - Import another workspace crate's items into tests through `[dev-dependencies]`, never by making or re-exporting them publicly.
 - Keep a type that holds a secret private unless callers must pass or receive that secret.
