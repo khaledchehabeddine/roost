@@ -169,10 +169,12 @@ pub enum MessageEncryptionStep {
     /// The contact already acknowledged a Message carrying the current Inbox Grant, so a Grant
     /// Update has nothing to carry. The operation has ended and there is nothing to commit.
     NothingToSend,
-    /// The sealed Message. The operation has ended.
+    /// The sealed Message, and the state changes to commit with it. The operation has ended.
     Ready {
-        /// The Message and the state changes to commit with it.
+        /// The sealed Message.
         result: OutboundMessageResult,
+        /// The state changes to commit with the Message.
+        changes: StateChanges,
     },
 }
 
@@ -202,14 +204,17 @@ pub enum MessageDecryptionStep {
         /// Where the acknowledgment goes: the sender, after it authenticated.
         destination: MessageDestination,
     },
-    /// What the Message turned out to be. The operation has ended.
+    /// What the Message turned out to be, and the state changes to commit with its effects. The
+    /// operation has ended.
     Ready {
-        /// The outcome and any state changes to commit.
+        /// What the Message turned out to be.
         outcome: InboundMessageOutcome,
+        /// The state changes to commit with the outcome's effects, empty when it has none.
+        changes: StateChanges,
     },
 }
 
-/// An outbound Message and the state changes from one Message Operation.
+/// An outbound Message from one Message Operation.
 #[derive(uniffi::Record)]
 pub struct OutboundMessageResult {
     /// The Session Roost selected for the Message.
@@ -222,15 +227,14 @@ pub struct OutboundMessageResult {
     pub payload_kind: PayloadKind,
     /// Message to send after durable commit.
     pub message: Message,
-    /// State changes to commit atomically with the Message.
-    pub changes: StateChanges,
 }
 
-/// A provisional receive result. Commit its changes and effects atomically before use.
+/// A provisional receive result. Commit it atomically with the changes that come beside it before
+/// use.
 ///
 /// Switch on the outcome to obtain only the fields that case permits. The host transaction must
-/// check the changes with [`StateChanges::matches`] and persist effects before plaintext is
-/// displayed or an acknowledgment is sent.
+/// check the changes with [`StateChanges::matches`] and persist the outcome's effects before
+/// plaintext is displayed or an acknowledgment is sent.
 #[derive(uniffi::Enum)]
 pub enum InboundMessageOutcome {
     /// Authenticated plaintext, and an acknowledgment when this side acknowledges, for a unique
@@ -260,13 +264,13 @@ pub enum InboundMessageOutcome {
         /// Payload for this outcome.
         result: GrantUpdateResult,
     },
-    /// An already accepted encrypted Message. No effects are produced.
+    /// An already accepted encrypted Message. No effects are produced, and its changes are empty.
     Duplicate,
     /// The Message names a Session this identity doesn't have and carries no handshake, such as
-    /// one it lost. No effects are produced.
+    /// one it lost. No effects are produced, and its changes are empty.
     UnknownSession,
     /// The first Message names a Session this identity deleted, so nothing was created. No
-    /// effects are produced.
+    /// effects are produced, and its changes are empty.
     DeletedSession,
     /// An acknowledgment cleared one of this identity's Pending Acknowledgments. Commit it before
     /// treating the acknowledged Message as delivered. Roost sends no reply to an acknowledgment.
@@ -308,8 +312,6 @@ pub struct InboundMessageResult {
     /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it,
     /// absent while the contact isn't accepted and this side doesn't acknowledge yet.
     pub acknowledgment: Option<Message>,
-    /// State changes to commit with the accepted Message and acknowledgment.
-    pub changes: StateChanges,
 }
 
 /// A Message from a contact who hasn't accepted, past the limit on Messages before acceptance.
@@ -322,8 +324,6 @@ pub struct WithheldInboundMessageResult {
     pub session_id: SessionId,
     /// Authenticated MessageID.
     pub message_id: MessageId,
-    /// State changes to commit before treating the Message as processed.
-    pub changes: StateChanges,
 }
 
 /// A Grant Update whose Inbox Grant Roost kept, so later Messages reach the contact's current
@@ -339,8 +339,6 @@ pub struct GrantUpdateResult {
     /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it,
     /// absent while this side doesn't acknowledge the contact yet.
     pub acknowledgment: Option<Message>,
-    /// State changes to commit before treating the Grant Update as processed.
-    pub changes: StateChanges,
 }
 
 /// A blocked receive with no plaintext available to the caller.
@@ -351,11 +349,11 @@ pub struct GrantUpdateResult {
 pub struct BlockedInboundMessageResult {
     /// Acknowledgment when the receive's policy permits one.
     pub acknowledgment: Option<Message>,
-    /// State changes to commit before treating the Message as processed.
-    pub changes: StateChanges,
 }
 
-/// An authenticated acknowledgment and the state it advanced.
+/// An authenticated acknowledgment.
+///
+/// Commit its changes before clearing the host's own delivery state.
 #[derive(uniffi::Record)]
 pub struct AcknowledgmentResult {
     /// The Session the acknowledgment arrived on.
@@ -368,8 +366,6 @@ pub struct AcknowledgmentResult {
     pub acknowledged_message_id: MessageId,
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
-    /// State changes to commit before clearing the host's own delivery state.
-    pub changes: StateChanges,
 }
 
 /// One attempt to encrypt a Message to a contact.
@@ -389,8 +385,8 @@ pub struct AcknowledgmentResult {
 /// operation commits nothing. Calls from two threads take turns.
 ///
 /// ```swift
-/// var result: OutboundMessageResult?
-/// while result == nil {
+/// var sealed: (OutboundMessageResult, StateChanges)?
+/// while sealed == nil {
 ///     let encryption = try contacts.requestContact(message: draft)
 ///     steps: while true {
 ///         switch try encryption.step() {
@@ -405,26 +401,26 @@ pub struct AcknowledgmentResult {
 ///             break steps
 ///         case .nothingToSend:
 ///             return // Only a Grant Update ends here.
-///         case .ready(let ready):
-///             result = ready
+///         case .ready(let result, let changes):
+///             sealed = (result, changes)
 ///             break steps
 ///         }
 ///     }
 /// }
+/// let (result, changes) = sealed!
 /// try database.transaction { db in
-///     let changes = result!.changes
 ///     guard try changes.matches(current: db.entries(for: changes.conditions.map(\.key))) else {
 ///         throw CommitError.conflict // Start again from fresh reads.
 ///     }
 ///     try db.write(changes.updates)
 ///     try db.markNotDelivered(changes.undelivered)
-///     try db.queue(result!.message, messageId: result!.messageId)
+///     try db.queue(result.message, messageId: result.messageId)
 /// }
 /// ```
 ///
 /// ```kotlin
-/// var result: OutboundMessageResult? = null
-/// while (result == null) {
+/// var ready: MessageEncryptionStep.Ready? = null
+/// while (ready == null) {
 ///     val encryption = contacts.requestContact(draft)
 ///     steps@ while (true) {
 ///         when (val step = encryption.step()) {
@@ -440,14 +436,14 @@ pub struct AcknowledgmentResult {
 ///             }
 ///             is MessageEncryptionStep.NothingToSend -> return // Only a Grant Update ends here.
 ///             is MessageEncryptionStep.Ready -> {
-///                 result = step.result
+///                 ready = step
 ///                 break@steps
 ///             }
 ///         }
 ///     }
 /// }
+/// val (result, changes) = ready
 /// database.transaction { db ->
-///     val changes = result.changes
 ///     if (!changes.matches(db.entries(changes.conditions.map { it.key }))) {
 ///         throw CommitConflict() // Start again from fresh reads.
 ///     }
@@ -468,9 +464,10 @@ pub struct MessageEncryption(Mutex<Option<roost_core::MessageEncryption>>);
 /// not reach the sender. An acknowledgment the app receives decrypts here too and never asks for
 /// one.
 ///
-/// When the result's changes carry an operation, such as one that uses up a one-time prekey,
-/// commit them as [`StateChanges`] describes, and show the plaintext or send the acknowledgment
-/// only after finalizing it.
+/// The result comes with the state changes beside the outcome. Commit the changes and the
+/// outcome's effects in one transaction, as [`StateChanges`] describes. When the changes carry an
+/// operation, such as one that uses up a one-time prekey, show the plaintext or send the
+/// acknowledgment only after finalizing it.
 ///
 /// The operation returns its result once. After that, and after any error, every call returns
 /// [`RoostError::OperationFinished`]. Releasing an operation commits nothing. Calls from two
@@ -851,8 +848,9 @@ impl MessageEncryptionStep {
                 }
             }
             roost_core::MessageEncryptionStep::NothingToSend => Self::NothingToSend,
-            roost_core::MessageEncryptionStep::Ready(result) => Self::Ready {
+            roost_core::MessageEncryptionStep::Ready { result, changes } => Self::Ready {
                 result: OutboundMessageResult::from_core(*result),
+                changes: StateChanges::from_core(changes),
             },
         }
     }
@@ -875,8 +873,9 @@ impl MessageDecryptionStep {
                     destination: MessageDestination::from_core(destination),
                 }
             }
-            roost_core::MessageDecryptionStep::Ready(outcome) => Self::Ready {
-                outcome: InboundMessageOutcome::from_core(*outcome),
+            roost_core::MessageDecryptionStep::Ready { outcome, changes } => Self::Ready {
+                outcome: InboundMessageOutcome::from_core(outcome),
+                changes: StateChanges::from_core(changes),
             },
         }
     }
@@ -913,7 +912,6 @@ impl OutboundMessageResult {
             sent_at_millis: value.sent_at_millis,
             payload_kind: PayloadKind::from_protocol(value.payload_kind),
             message: Message::from_core(value.message),
-            changes: StateChanges::from_core(value.changes),
         }
     }
 }
@@ -928,7 +926,6 @@ impl InboundMessageResult {
             plaintext: value.plaintext.to_vec(),
             sender_identity: SenderIdentityMaterial::from_core(value.sender_identity),
             acknowledgment: value.acknowledgment.map(Message::from_core),
-            changes: StateChanges::from_core(value.changes),
         }
     }
 }
@@ -946,7 +943,6 @@ impl InboundMessageOutcome {
                 result: WithheldInboundMessageResult {
                     session_id: SessionId::from_core(result.session_id),
                     message_id: MessageId::from_core(result.message_id),
-                    changes: StateChanges::from_core(result.changes),
                 },
             },
             roost_core::InboundMessageOutcome::GrantUpdate(result) => Self::GrantUpdate {
@@ -954,13 +950,11 @@ impl InboundMessageOutcome {
                     session_id: SessionId::from_core(result.session_id),
                     message_id: MessageId::from_core(result.message_id),
                     acknowledgment: result.acknowledgment.map(Message::from_core),
-                    changes: StateChanges::from_core(result.changes),
                 },
             },
             roost_core::InboundMessageOutcome::Blocked(result) => Self::Blocked {
                 result: BlockedInboundMessageResult {
                     acknowledgment: result.acknowledgment.map(Message::from_core),
-                    changes: StateChanges::from_core(result.changes),
                 },
             },
             roost_core::InboundMessageOutcome::Duplicate => Self::Duplicate,
@@ -988,7 +982,6 @@ impl AcknowledgmentResult {
             sent_at_millis: result.sent_at_millis,
             acknowledged_message_id: MessageId::from_core(result.acknowledged_message_id),
             sender_identity: SenderIdentityMaterial::from_core(result.sender_identity),
-            changes: StateChanges::from_core(result.changes),
         }
     }
 }

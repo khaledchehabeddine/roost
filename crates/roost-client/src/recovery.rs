@@ -24,18 +24,15 @@ pub struct RetryInstruction {
     pub destination: MessageDestination,
 }
 
-/// What a delivery check found, and the state changes to commit with the app's work for it.
+/// What a delivery check found.
 #[derive(uniffi::Record)]
 pub struct DeliveryCheckResult {
     /// Messages to send again, unchanged, to the contact's newer inbox. Send each with the
     /// Transport Binding it was first sent with.
     pub retries: Vec<RetryInstruction>,
     /// Whether a recovery starts. Create a recovery job for the contact in the same transaction
-    /// as the changes, and run it with [`Messaging::start_recovery`].
+    /// as the check's changes, and run it with [`Messaging::start_recovery`].
     pub starts_recovery: bool,
-    /// State changes to commit with the retries and the recovery job. They list the Messages the
-    /// Relay would have dropped by now as undelivered.
-    pub changes: StateChanges,
 }
 
 /// What a [`DeliveryCheck`] needs next, or its result.
@@ -46,10 +43,14 @@ pub enum DeliveryCheckStep {
         /// The records to read.
         keys: Vec<StateKey>,
     },
-    /// What the check found. The check has ended.
+    /// What the check found, and the state changes to commit with the app's work for it. The
+    /// check has ended.
     Ready {
-        /// The retries and the recovery signal, with their changes.
+        /// The retries and the recovery signal.
         result: DeliveryCheckResult,
+        /// The state changes to commit with the retries and the recovery job. They list the
+        /// Messages the Relay would have dropped by now as undelivered.
+        changes: StateChanges,
     },
 }
 
@@ -112,11 +113,13 @@ pub enum MessageRecoveryStep {
     /// Nothing is left to resend. The recovery has ended and there is nothing to commit: end the
     /// job.
     Finished,
-    /// One Message encrypted again. The recovery has ended: commit it, then start again.
+    /// One Message encrypted again, and the state changes to commit with it. The recovery has
+    /// ended: commit them, then start again.
     Ready {
-        /// The Message under its original MessageID, send time, and kind, and the state changes
-        /// to commit with it.
+        /// The Message under its original MessageID, send time, and kind.
         result: OutboundMessageResult,
+        /// The state changes to commit with the Message.
+        changes: StateChanges,
     },
 }
 
@@ -154,8 +157,9 @@ pub enum MessageRecoveryStep {
 ///                 break steps
 ///             case .awaitingProbe, .finished:
 ///                 return try jobs.end(job)
-///             case .ready(let result):
-///                 try database.commitResend(result) // Replaces the send work for its MessageID.
+///             case .ready(let result, let changes):
+///                 // Replaces the send work for its MessageID.
+///                 try database.commitResend(result, changes: changes)
 ///                 break steps
 ///             }
 ///         }
@@ -184,7 +188,8 @@ pub enum MessageRecoveryStep {
 ///                 is MessageRecoveryStep.AwaitingProbe, is MessageRecoveryStep.Finished ->
 ///                     return jobs.end(job)
 ///                 is MessageRecoveryStep.Ready -> {
-///                     database.commitResend(step.result) // Replaces the send work for its MessageID.
+///                     // Replaces the send work for its MessageID.
+///                     database.commitResend(step.result, step.changes)
 ///                     break@steps
 ///                 }
 ///             }
@@ -352,8 +357,9 @@ impl DeliveryCheckStep {
             roost_core::DeliveryCheckStep::NeedsState(addresses) => Self::NeedsState {
                 keys: state_keys(&addresses),
             },
-            roost_core::DeliveryCheckStep::Ready(result) => Self::Ready {
-                result: DeliveryCheckResult::from_core(*result),
+            roost_core::DeliveryCheckStep::Ready { result, changes } => Self::Ready {
+                result: DeliveryCheckResult::from_core(result),
+                changes: StateChanges::from_core(changes),
             },
         }
     }
@@ -372,7 +378,6 @@ impl DeliveryCheckResult {
                 })
                 .collect(),
             starts_recovery: result.starts_recovery,
-            changes: StateChanges::from_core(result.changes),
         }
     }
 }
@@ -398,8 +403,9 @@ impl MessageRecoveryStep {
                 message_id: MessageId::from_core(message_id),
             },
             roost_core::MessageRecoveryStep::Finished => Self::Finished,
-            roost_core::MessageRecoveryStep::Ready(result) => Self::Ready {
+            roost_core::MessageRecoveryStep::Ready { result, changes } => Self::Ready {
                 result: OutboundMessageResult::from_core(*result),
+                changes: StateChanges::from_core(changes),
             },
         }
     }

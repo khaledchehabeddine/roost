@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::HashMap;
 use zeroize::Zeroizing;
 
@@ -29,21 +30,21 @@ pub enum StorageError {
     IO(String),
 }
 
-/// An in-memory [`SecureStorage`] implementation for tests.
-///
-/// Not suitable for production as data is not persisted and has no platform security guarantees.
+// A SecureStorage held in memory, for this crate's unit tests.
+#[cfg(test)]
 #[derive(Default)]
-pub struct InMemorySecureStorage {
+pub(crate) struct InMemorySecureStorage {
     entries: HashMap<String, Zeroizing<Vec<u8>>>,
 }
 
+#[cfg(test)]
 impl InMemorySecureStorage {
-    /// Creates an empty in-memory storage instance.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(test)]
 impl SecureStorage for InMemorySecureStorage {
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.entries

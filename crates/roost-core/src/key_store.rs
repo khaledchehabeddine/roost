@@ -111,14 +111,16 @@ struct KeyStoreInner {
 /// Reserve the operation, persist its output and id in the host transaction, then finalize:
 ///
 /// ```
-/// use roost_core::{InMemorySecureStorage, KeyStore};
+/// use roost_core::{KeyStore, KeyStoreError, SecureStorage};
 ///
-/// let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-/// let prepared = store.prepare_identity_creation()?;
-/// store.reserve_operation(prepared.operation.id)?;
-/// // Persist or publish `prepared.output` with the host operation id.
-/// store.finalize_operation(prepared.operation.id)?;
-/// # Ok::<(), roost_core::KeyStoreError>(())
+/// fn create_identity(storage: Box<dyn SecureStorage>) -> Result<(), KeyStoreError> {
+///     let store = KeyStore::new(storage);
+///     let prepared = store.prepare_identity_creation()?;
+///     store.reserve_operation(prepared.operation.id)?;
+///     // Persist or publish `prepared.output` with the host operation id.
+///     store.finalize_operation(prepared.operation.id)?;
+///     Ok(())
+/// }
 /// ```
 #[derive(Clone)]
 pub struct KeyStore(Arc<KeyStoreInner>);

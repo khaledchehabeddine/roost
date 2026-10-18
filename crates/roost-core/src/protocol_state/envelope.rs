@@ -790,7 +790,9 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_crypto::{
-        generate_discovery_key, generate_signed_prekey_for_discovery_key, sign_identity_key_binding,
+        PREKEY_BUNDLE_VERSION, PreKeyBundle, RatchetError, accept_handshake,
+        generate_discovery_key, generate_signed_prekey_for_discovery_key, initiate_handshake,
+        sign_identity_key_binding,
     };
     use roost_protocol::SignatureError;
 
@@ -1026,5 +1028,112 @@ mod tests {
             Err(ProtocolStateError::InvalidMessage { reason })
                 if reason == "sender discovery key does not sign its identity key"
         ));
+    }
+
+    #[test]
+    fn a_session_id_swapped_under_the_discovery_key_fails_the_ratchet_layer() {
+        let alice = sender(0x10);
+        let alice_discovery_key = discovery_key(&alice, 0x11);
+        let bob = sender(0x30);
+        let bob_discovery_key = discovery_key(&bob, 0x31);
+        let signed_prekey = generate_signed_prekey_for_discovery_key(
+            &mut ChaCha20Rng::from_seed([0x32; 32]),
+            &bob_discovery_key,
+            0,
+            1_700_000_000,
+        )
+        .unwrap();
+        let bundle = PreKeyBundle {
+            version: PREKEY_BUNDLE_VERSION,
+            discovery_key: bob_discovery_key.public(),
+            signed_prekey: signed_prekey.public(),
+            one_time_prekey: None,
+        };
+        let mut rng = ChaCha20Rng::from_seed([0x33; 32]);
+        let (mut sending, session_id, handshake) =
+            initiate_handshake(&mut rng, &bob.identity, &bundle).unwrap();
+        let (mut receiving, _) =
+            accept_handshake(&handshake, &bob_discovery_key, &signed_prekey, None).unwrap();
+        let binding = TransportBinding::new(b"route".to_vec()).unwrap();
+        let limits = ProtocolHardeningLimits::default();
+        let agreement_key = KeyPair::from_secret_bytes([0x11; 32]);
+        let alice_public_discovery_key = alice_discovery_key.public();
+        let discovery_to_identity = alice_discovery_key
+            .sign_identity_binding(&alice.identity)
+            .unwrap();
+        let message = seal_signed(
+            &mut rng,
+            &mut sending,
+            OutboundContent {
+                session_id,
+                id: MessageId::from_bytes([3; 16]),
+                sent_at_millis: 4,
+                payload_kind: PayloadKind::EncryptedText,
+                payload: b"hello bob",
+            },
+            SignedRecipient {
+                discovery_key: *bob_discovery_key.public_key().as_bytes(),
+                identity_verifying_key: &bob.material.identity_verifying_key,
+            },
+            &LocalSender {
+                identity: &alice.material,
+                signing_key: &alice.signing_key,
+                agreement_key: &agreement_key,
+                discovery_key: &alice_public_discovery_key,
+                discovery_to_identity: &discovery_to_identity,
+            },
+            &binding,
+            limits,
+        )
+        .unwrap();
+        // Whoever holds Bob's Discovery Key seals the same ratchet ciphertext under another
+        // SessionID.
+        let plaintext = open_frame_for_discovery_key_with_associated_data(
+            &bob_discovery_key,
+            &message,
+            binding.as_bytes(),
+        )
+        .unwrap();
+        let wire: DecodedFramePlaintextWire = postcard::from_bytes(&plaintext).unwrap();
+        let swapped = seal_frame_with_associated_data(
+            &mut rng,
+            bob_discovery_key.public_key(),
+            None,
+            &postcard::to_stdvec(&FramePlaintextWire {
+                session_id: [0x75; 16],
+                base_key: wire.base_key,
+                id: wire.id,
+                sent_at_millis: wire.sent_at_millis,
+                payload_kind: wire.payload_kind,
+                ratchet_public_key: wire.ratchet_public_key,
+                previous_chain_length: wire.previous_chain_length,
+                message_number: wire.message_number,
+                ciphertext: &wire.ciphertext,
+            })
+            .unwrap(),
+            binding.as_bytes(),
+        )
+        .unwrap();
+        let stored = receiving.to_bytes().unwrap();
+
+        let swapped = open_message(&swapped, &bob_discovery_key, &binding).unwrap();
+        assert_eq!(
+            swapped.metadata.session_id,
+            SessionId::from_bytes([0x75; 16])
+        );
+        assert!(matches!(
+            swapped.decrypt(&mut rng, &mut receiving, limits),
+            Err(ProtocolStateError::Ratchet(RatchetError::Aead))
+        ));
+        // The stored state still opens the genuine Message.
+        let original = open_message(&message, &bob_discovery_key, &binding).unwrap();
+        let decoded = original
+            .decrypt(
+                &mut rng,
+                &mut RatchetState::from_bytes(&stored).unwrap(),
+                limits,
+            )
+            .unwrap();
+        assert_eq!(&*decoded.plaintext, b"hello bob");
     }
 }

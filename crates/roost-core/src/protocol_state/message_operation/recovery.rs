@@ -49,23 +49,27 @@ pub struct RetryInstruction {
     pub destination: MessageDestination,
 }
 
-/// What a delivery check found, and the state changes to commit with the app's work for it.
+/// What a delivery check found.
 pub struct DeliveryCheckResult {
     /// Messages to send again, unchanged, because the contact sent a newer Inbox Grant.
     pub retries: Vec<RetryInstruction>,
-    /// Whether a recovery starts. The app commits its recovery job with these changes.
+    /// Whether a recovery starts. The app commits its recovery job with the check's changes.
     pub starts_recovery: bool,
-    /// State changes to commit with the retries and the recovery job. They list the Messages the
-    /// Relay would have dropped by now as undelivered.
-    pub changes: StateChanges,
 }
 
 /// What a [`DeliveryCheck`] needs next, or its result.
 pub enum DeliveryCheckStep {
     /// The records to supply through [`DeliveryCheck::supply_state`].
     NeedsState(Vec<ProtocolStateAddress>),
-    /// What the check found. The check has ended.
-    Ready(Box<DeliveryCheckResult>),
+    /// What the check found, and the state changes to commit with the app's work for it. The
+    /// check has ended.
+    Ready {
+        /// What the check found.
+        result: DeliveryCheckResult,
+        /// The state changes to commit with the retries and the recovery job. They list the
+        /// Messages the Relay would have dropped by now as undelivered.
+        changes: StateChanges,
+    },
 }
 
 /// A check, at a time the app passes, of the Messages this identity sent one contact that the
@@ -187,11 +191,13 @@ impl Checking {
     }
 
     fn ready(&self, checked: Checked) -> DeliveryCheckStep {
-        DeliveryCheckStep::Ready(Box::new(DeliveryCheckResult {
-            retries: checked.retries,
-            starts_recovery: checked.starts_recovery,
+        DeliveryCheckStep::Ready {
+            result: DeliveryCheckResult {
+                retries: checked.retries,
+                starts_recovery: checked.starts_recovery,
+            },
             changes: changes(&self.reads, checked.updates).with_undelivered(checked.undelivered),
-        }))
+        }
     }
 
     // Gives up on Messages the Relay has dropped, resends the rest to a newer inbox, and signals
@@ -486,9 +492,14 @@ pub enum MessageRecoveryStep {
     AwaitingProbe(MessageId),
     /// Nothing is left to resend. The recovery has ended and nothing changed.
     Finished,
-    /// One Message encrypted again under its MessageID, and its state changes. The recovery has
-    /// ended.
-    Ready(Box<OutboundMessageResult>),
+    /// One Message encrypted again under its MessageID, and the state changes to commit with it.
+    /// The recovery has ended.
+    Ready {
+        /// The Message encrypted again.
+        result: Box<OutboundMessageResult>,
+        /// The state changes to commit with the Message.
+        changes: StateChanges,
+    },
 }
 
 /// One step of a recovery, which encrypts one unacknowledged Message again on a newer Session and
@@ -835,6 +846,8 @@ fn recovery_step(step: MessageEncryptionStep) -> MessageRecoveryStep {
             MessageRecoveryStep::NeedsPreKeyBundle(identity_key)
         }
         MessageEncryptionStep::NothingToSend => MessageRecoveryStep::Finished,
-        MessageEncryptionStep::Ready(result) => MessageRecoveryStep::Ready(result),
+        MessageEncryptionStep::Ready { result, changes } => {
+            MessageRecoveryStep::Ready { result, changes }
+        }
     }
 }

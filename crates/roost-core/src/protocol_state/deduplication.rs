@@ -207,4 +207,34 @@ mod tests {
         assert!(!set.contains(&oldest));
         assert!(set.contains(&newest));
     }
+
+    #[test]
+    fn the_deduplication_set_has_one_fixed_address() {
+        let address = deduplication_address();
+
+        assert_eq!(address.kind(), ProtocolStateKind::DeduplicationSet);
+        assert_eq!(address.key().as_bytes(), [0]);
+    }
+
+    #[test]
+    fn a_deduplication_set_of_another_version_is_unsupported() {
+        let address = deduplication_address();
+        let limits = ProtocolHardeningLimits::default();
+        let set = LoadedDeduplicationSet {
+            capacity: MIN_DEDUPLICATION_CAPACITY,
+            digest_key: Zeroizing::new([7u8; DEDUPLICATION_KEY_LEN]),
+            digests: Vec::new(),
+        };
+        let mut bytes = encode_deduplication_set(&address, &set, limits)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        bytes[0] += 1;
+
+        assert!(matches!(
+            decode_deduplication_set(&address, &ProtocolStateBlob::from_bytes(bytes), limits),
+            Err(ProtocolStateError::UnsupportedBlobVersion { address: actual, version })
+                if actual == address && version == super::super::PROTOCOL_STATE_BLOB_VERSION + 1
+        ));
+    }
 }
