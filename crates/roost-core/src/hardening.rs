@@ -21,8 +21,6 @@ pub(crate) const MAX_MESSAGES_BEFORE_ACCEPTANCE: usize = 3;
 pub struct ProtocolHardeningLimits {
     /// Maximum encoded sealed-sender Message bytes accepted before parsing.
     pub max_encoded_message_len: usize,
-    /// Maximum Message ciphertext payload bytes accepted after frame decode.
-    pub max_message_payload_len: usize,
     /// Maximum general Protocol State Blob bytes accepted before body decode.
     pub max_protocol_state_blob_len: usize,
     /// Maximum sender certificate bytes accepted after sealed-sender decrypt.
@@ -47,7 +45,6 @@ impl Default for ProtocolHardeningLimits {
     fn default() -> Self {
         Self {
             max_encoded_message_len: SealedFrame::MAX_ENCODED_LEN,
-            max_message_payload_len: SealedFrame::MAX_CIPHERTEXT_LEN,
             max_protocol_state_blob_len: MAX_PROTOCOL_STATE_BLOB_LEN,
             max_sender_certificate_len: MAX_SENDER_CERTIFICATE_LEN,
             max_sender_signature_len: MAX_SENDER_SIGNATURE_LEN,

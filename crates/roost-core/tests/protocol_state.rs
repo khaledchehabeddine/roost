@@ -380,7 +380,7 @@ fn pending_acknowledgment_state_faults_on_bad_blobs() {
 fn oversized_inbound_message_rejects_before_any_read() {
     let fixture = ProtocolFixture::new();
     let mut oversized = alice_sends(&fixture, 0x36, b"oversized").message;
-    oversized.ciphertext = vec![0; ProtocolHardeningLimits::default().max_message_payload_len + 1];
+    oversized.ciphertext = vec![0; SealedFrame::MAX_CIPHERTEXT_LEN + 1];
 
     let result = fixture.bob.store.start_decryption(fixture.incoming(
         &oversized,
