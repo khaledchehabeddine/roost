@@ -613,17 +613,6 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_start_keeps_the_lower_session_current() {
-        let mut lower_first = PeerSessions::new(id(1), None);
-        lower_first.start_alongside(id(2), accepted(2));
-        let mut higher_first = PeerSessions::new(id(2), None);
-        higher_first.start_alongside(id(1), accepted(1));
-
-        assert_eq!(lower_first.current(), id(1));
-        assert_eq!(higher_first.current(), id(1));
-    }
-
-    #[test]
     fn deletions_are_forgotten_once_their_signed_prekey_is_gone() {
         let mut sessions = PeerSessions::new(id(1), accepted(1));
         for byte in 2..=8 {

@@ -1,6 +1,9 @@
 //! A host drives identity creation, backup, prekeys, and deletion through one IdentityContext.
 
-use crate::support::MemoryStorage;
+use crate::support::{
+    DOMAIN_SIGNING_KEY_ID, MemoryStorage, RELAY_DOMAIN, complete, domain_signing_key,
+    issue_certificate,
+};
 use roost_client::{
     DomainSigningKey, DomainSigningKeyStatus, IdentityContext, IdentityKey, OperationId,
     OperationStatus, RevocationState, RoostError, SenderCertificateValidation,
@@ -11,18 +14,8 @@ use roost_protocol::SenderCertificateValidationError;
 use std::sync::Arc;
 
 const PASSPHRASE: &str = "correct horse battery staple";
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
-const CERTIFICATE_VERSION: u8 = 2;
-const DOMAIN_SIGNING_KEY_ID: &[u8] = b"relay-signing-key";
-const CERTIFICATE_RELAY_DOMAIN: &[u8] = b"relay.example";
 const CERTIFICATE_EXPIRES_AT_SECS: u64 = 1_800_000_000;
 const CERTIFICATE_EXPIRES_AT_MILLIS: u64 = CERTIFICATE_EXPIRES_AT_SECS * 1_000;
-
-/// Reserves and finalizes an operation, as a host does around its own commit.
-fn complete(context: &IdentityContext, id: OperationId) {
-    context.reserve_operation(id.clone()).unwrap();
-    context.finalize_operation(id).unwrap();
-}
 
 #[test]
 fn identity_is_absent_until_its_creation_finalizes() {
@@ -159,25 +152,13 @@ impl IssuedCertificate {
                 .to_bytes()
                 .to_vec(),
         };
-        // Encoded as a relay's domain authority does before signing.
-        let certificate = [
-            CERTIFICATE_DOMAIN_TAG,
-            &[CERTIFICATE_VERSION],
-            &[u8::try_from(DOMAIN_SIGNING_KEY_ID.len()).unwrap()],
-            DOMAIN_SIGNING_KEY_ID,
-            &[u8::try_from(CERTIFICATE_RELAY_DOMAIN.len()).unwrap()],
-            CERTIFICATE_RELAY_DOMAIN,
-            &identity_key.agreement_key,
-            &identity_key.signing_key,
-            &CERTIFICATE_EXPIRES_AT_SECS.to_be_bytes(),
-        ]
-        .concat();
-        let domain_signing_key = SigningKeyPair::from_signing_bytes([0x41; 32]);
+        let (certificate, signature) =
+            issue_certificate(&identity_key, CERTIFICATE_EXPIRES_AT_SECS);
         Self {
             identity_key,
-            signature: domain_signing_key.sign(&certificate).to_bytes().to_vec(),
+            signature,
             certificate,
-            domain_verifying_key: domain_signing_key.verifying.to_bytes().to_vec(),
+            domain_verifying_key: domain_signing_key().verifying.to_bytes().to_vec(),
         }
     }
 
@@ -189,7 +170,7 @@ impl IssuedCertificate {
                 verifying_key: self.domain_verifying_key.clone(),
                 status: DomainSigningKeyStatus::Trusted,
             }],
-            expected_relay_domain: CERTIFICATE_RELAY_DOMAIN.to_vec(),
+            expected_relay_domain: RELAY_DOMAIN.to_vec(),
             revocation_state: RevocationState {
                 available: true,
                 revoked_identity_keys: Vec::new(),
@@ -241,7 +222,7 @@ fn expired_sender_certificate_validates_only_within_the_passed_grace() {
         .validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS, 0)
         .unwrap();
     assert_eq!(validated.identity_key, signed.identity_key);
-    assert_eq!(validated.relay_domain, CERTIFICATE_RELAY_DOMAIN);
+    assert_eq!(validated.relay_domain, RELAY_DOMAIN);
     assert_eq!(validated.expires_at_millis, CERTIFICATE_EXPIRES_AT_MILLIS);
     assert_rejected_for(
         signed.validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS + 1, 0),

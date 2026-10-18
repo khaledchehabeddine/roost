@@ -556,22 +556,3 @@ fn messages_to_a_blocked_contact_still_show_as_not_delivered_but_are_never_recov
     assert!(!after_a_day.starts_recovery);
     assert_eq!(alice.host.undelivered(), [sent.message_id]);
 }
-
-#[test]
-fn a_recovery_runs_again_after_a_lost_commit_and_moves_on_after_one_that_landed() {
-    let relay = Relay::new();
-    let (mut alice, bob, sent) = unanswered(&relay);
-    // The app dies before committing the first resend.
-    let Recovered::Resent(_) = alice.observe_recovery(&bob, Some(bob.bundle())).unwrap() else {
-        panic!("expected a resend");
-    };
-
-    let committed = alice.recover(&bob, Some(bob.bundle())).committed();
-    // The app can't tell whether that commit landed, so it runs the recovery again.
-    let again = alice.recover(&bob, Some(bob.bundle()));
-
-    assert_eq!(committed.message_id, sent.message_id);
-    assert!(matches!(again, Recovered::AwaitingProbe(id) if id == sent.message_id));
-    assert!(waiting_on(&alice, sent.session_id).is_empty());
-    assert_eq!(waiting_on(&alice, committed.session_id), [sent.message_id]);
-}

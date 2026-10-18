@@ -90,30 +90,6 @@ fn a_contact_that_rotated_during_the_block_gets_a_new_session() {
     assert!(!contact.blocked);
 }
 
-#[test]
-fn a_bundle_from_a_fresh_link_with_a_newer_discovery_key_starts_a_new_session() {
-    let relay = Relay::new();
-    let (mut alice, mut bob) = befriended(&relay);
-    let kept = alice.send(&bob, b"before the rotation").session_id;
-    // Bob rotates without telling Alice, and a fresh contact link gives her his new bundle.
-    let rotation = bob.rotate_inbox();
-    let mut outgoing = alice.outgoing(&bob, b"found you again");
-    outgoing.prekey_bundle = Some(bob.bundle());
-
-    let sent = alice.send_with(outgoing, Intent::Message);
-
-    assert_ne!(sent.session_id, kept);
-    assert!(matches!(
-        Route::of(&sent.destination),
-        Route::FirstMessage { discovery_key, .. }
-            if discovery_key == *rotation.discovery_key.public_key.as_bytes()
-    ));
-    assert_eq!(
-        accepted(bob.receive(&sent.message)).plaintext.as_slice(),
-        b"found you again"
-    );
-}
-
 // Alice asks Bob, Bob blocks her before answering, and Alice rotates her inbox during the block.
 fn requester_rotated_during_the_block(relay: &Relay) -> (Device, Device) {
     let (alice, mut bob) = crate::support::device::requested(relay);

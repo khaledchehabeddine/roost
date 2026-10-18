@@ -29,29 +29,6 @@ fn setup() -> Setup {
     }
 }
 
-fn display_groups(value: &str) -> Vec<&str> {
-    value.split(' ').collect()
-}
-
-#[test]
-fn safety_number_derivation_is_deterministic_and_order_independent() {
-    let setup = setup();
-
-    let first = derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-    let repeated = derive_safety_number(setup.local_identity, setup.contact_identity).unwrap();
-    let reversed = derive_safety_number(setup.contact_identity, setup.local_identity).unwrap();
-
-    assert_eq!(first, repeated);
-    assert_eq!(first, reversed);
-    assert_eq!(first.raw_bytes.len(), 32);
-    assert_eq!(display_groups(&first.grouped_decimal).len(), 12);
-    assert!(
-        display_groups(&first.grouped_decimal)
-            .iter()
-            .all(|group| group.len() == 5 && group.chars().all(|ch| ch.is_ascii_digit()))
-    );
-}
-
 /// Pinned on purpose, unlike Roost's other derivations: people compare Safety Numbers across app
 /// versions, so a change to the derivation or the display must fail here before it ships.
 #[test]

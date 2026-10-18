@@ -11,33 +11,24 @@ use roost_core::{
 use roost_crypto::SealedFrameError;
 
 #[test]
-fn transport_binding_preserves_exact_caller_bytes() {
-    let bytes = vec![0x41, 0x00, 0xff, 0x7f];
-    let binding = TransportBinding::new(bytes.clone()).expect("binding should be valid");
-
-    assert_eq!(binding.as_bytes(), bytes);
-}
-
-#[test]
-fn transport_binding_rejects_empty_bytes() {
-    assert_eq!(
-        TransportBinding::new(Vec::new()),
-        Err(TransportBindingError::Empty)
-    );
-}
-
-#[test]
-fn transport_binding_enforces_the_external_associated_data_limit() {
+fn a_transport_binding_keeps_exact_bytes_up_to_the_associated_data_limit() {
     const MAX_LEN: usize = 1024;
+    for (bytes, expected) in [
+        (vec![0x41, 0x00, 0xff, 0x7f], Ok(())),
+        (vec![0x41; MAX_LEN], Ok(())),
+        (Vec::new(), Err(TransportBindingError::Empty)),
+        (
+            vec![0x41; MAX_LEN + 1],
+            Err(TransportBindingError::TooLong {
+                length: MAX_LEN + 1,
+                maximum: MAX_LEN,
+            }),
+        ),
+    ] {
+        let bound = TransportBinding::new(bytes.clone()).map(|binding| binding.as_bytes().to_vec());
 
-    assert!(TransportBinding::new(vec![0x41; MAX_LEN]).is_ok());
-    assert_eq!(
-        TransportBinding::new(vec![0x41; MAX_LEN + 1]),
-        Err(TransportBindingError::TooLong {
-            length: MAX_LEN + 1,
-            maximum: MAX_LEN,
-        })
-    );
+        assert_eq!(bound, expected.map(|()| bytes));
+    }
 }
 
 #[test]

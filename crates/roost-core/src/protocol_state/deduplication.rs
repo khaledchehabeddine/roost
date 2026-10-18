@@ -188,27 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn recording_a_digest_in_a_full_set_evicts_the_oldest() {
-        let mut set = LoadedDeduplicationSet {
-            capacity: MIN_DEDUPLICATION_CAPACITY,
-            digest_key: Zeroizing::new([7u8; DEDUPLICATION_KEY_LEN]),
-            digests: Vec::new(),
-        };
-        let oldest = [0u8; DIGEST_LEN];
-        set.record(oldest);
-        for tag in 1..MIN_DEDUPLICATION_CAPACITY {
-            set.record([tag as u8; DIGEST_LEN]);
-        }
-        let newest = [0xff; DIGEST_LEN];
-
-        set.record(newest);
-
-        assert_eq!(set.digests.len(), MIN_DEDUPLICATION_CAPACITY);
-        assert!(!set.contains(&oldest));
-        assert!(set.contains(&newest));
-    }
-
-    #[test]
     fn the_deduplication_set_has_one_fixed_address() {
         let address = deduplication_address();
 

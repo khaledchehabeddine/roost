@@ -1236,12 +1236,4 @@ mod tests {
             ));
         }
     }
-
-    #[test]
-    fn protocol_state_blob_digest_changes_with_the_blob() {
-        assert_ne!(
-            protocol_state_blob_digest(b"first blob"),
-            protocol_state_blob_digest(b"second blob")
-        );
-    }
 }

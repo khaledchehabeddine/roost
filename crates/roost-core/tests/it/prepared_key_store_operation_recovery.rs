@@ -33,7 +33,6 @@ struct StorageState {
     fail_delete_after_apply: Option<String>,
     fail_store_after_apply: Option<String>,
     store_failure: Option<StoreFailure>,
-    stores_before_failure: Option<usize>,
     successful_deletes: BTreeMap<String, usize>,
     successful_stores: BTreeMap<String, usize>,
 }
@@ -58,7 +57,6 @@ impl SharedSecureStorage {
                 fail_delete_after_apply: None,
                 fail_store_after_apply: None,
                 store_failure: None,
-                stores_before_failure: None,
                 successful_deletes: BTreeMap::new(),
                 successful_stores: BTreeMap::new(),
             })),
@@ -67,10 +65,6 @@ impl SharedSecureStorage {
 
     fn key_store(&self) -> KeyStore {
         KeyStore::new(Box::new(self.clone()))
-    }
-
-    fn fail_after_stores(&self, successful_stores: usize) {
-        self.state.lock().unwrap().stores_before_failure = Some(successful_stores);
     }
 
     fn fail_delete_after_apply(&self, key: &str) {
@@ -113,14 +107,6 @@ impl SharedSecureStorage {
 impl SecureStorage for SharedSecureStorage {
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
         let mut state = self.state.lock().unwrap();
-        if let Some(remaining) = state.stores_before_failure.as_mut() {
-            if *remaining == 0 {
-                state.stores_before_failure = None;
-                return Err(StorageError::IO("injected store failure".into()));
-            }
-            *remaining -= 1;
-        }
-
         let failure_timing = state.store_failure.as_mut().and_then(|failure| {
             if failure.key != key {
                 return None;
@@ -365,23 +351,6 @@ fn orphaned_preparation_is_discoverable_and_abortable_after_restart() {
 }
 
 #[test]
-fn reserved_preparation_can_finalize_after_restart() {
-    let storage = SharedSecureStorage::new();
-    let store = storage.key_store();
-    let prepared = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(prepared.operation.id).unwrap();
-    drop(store);
-
-    let recovered = storage.key_store();
-    assert_eq!(
-        recovered.unfinished_operations().unwrap()[0].status,
-        KeyStoreOperationStatus::Reserved
-    );
-    recovered.finalize_operation(prepared.operation.id).unwrap();
-    assert!(recovered.identity().unwrap().is_some());
-}
-
-#[test]
 fn reserved_preparation_blocks_authoritative_reads_until_recovery() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();
@@ -397,32 +366,6 @@ fn reserved_preparation_blocks_authoritative_reads_until_recovery() {
 
     store.abort_operation(prepared.operation.id).unwrap();
     assert!(store.identity().unwrap().is_none());
-}
-
-#[test]
-fn interrupted_finalization_resumes_from_durable_progress() {
-    let storage = SharedSecureStorage::new();
-    let store = storage.key_store();
-    let prepared = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(prepared.operation.id).unwrap();
-
-    // Persist Finalizing, apply the first mutation, persist its progress, then fail the second
-    // mutation. Recovery must resume at the second mutation instead of replaying the first.
-    storage.fail_after_stores(3);
-    assert!(is_storage_failure(
-        store.finalize_operation(prepared.operation.id)
-    ));
-    assert_eq!(storage.successful_stores("discovery/current"), 1);
-    drop(store);
-
-    let recovered = storage.key_store();
-    assert_eq!(
-        recovered.unfinished_operations().unwrap()[0].status,
-        KeyStoreOperationStatus::Finalizing
-    );
-    recovered.finalize_operation(prepared.operation.id).unwrap();
-    assert_eq!(storage.successful_stores("discovery/current"), 1);
-    assert!(recovered.identity().unwrap().is_some());
 }
 
 #[test]

@@ -1,29 +1,24 @@
 //! Two hosts become contacts and exchange Messages through the exported Message Operations.
 
-use crate::support::MemoryStorage;
+use crate::support::{
+    DOMAIN_SIGNING_KEY_ID, MemoryStorage, RELAY_DOMAIN, complete, domain_signing_key,
+    issue_certificate,
+};
 use roost_client::{
     BlockedContactAcknowledgmentPolicy, ContactSafetyNumberConfirmation, ContactTrustState,
     DeliveryCheckResult, DeliveryCheckStep, DomainSigningKey, DomainSigningKeyStatus,
     IdentityContext, IdentityKey, InboundMessageOutcome, IncomingMessage, Message,
     MessageDecryptionStep, MessageDestination, MessageEncryption, MessageEncryptionStep, MessageId,
-    MessageRecoveryStep, OperationId, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
+    MessageRecoveryStep, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
     OutgoingRecovery, PayloadKind, PreKeyBundle, ProtocolStateKind, ReceiveSettings,
     RevocationState, RoostError, SenderCertificateValidation, SessionId, SignedSenderCertificate,
     StateChanges, StateEntry, StateKey, TransportBinding, derive_safety_number,
 };
-use roost_crypto::{RecipientDeliveryCapability, SigningKeyPair};
+use roost_crypto::RecipientDeliveryCapability;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
-const CERTIFICATE_VERSION: u8 = 2;
-const DOMAIN_SIGNING_KEY_ID: &[u8] = b"relay-signing-key";
-const RELAY_DOMAIN: &[u8] = b"relay.example";
 const NOW_MILLIS: u64 = 1_700_000_000_000;
-
-fn domain_signing_key() -> SigningKeyPair {
-    SigningKeyPair::from_signing_bytes([0x41; 32])
-}
 
 fn binding() -> TransportBinding {
     TransportBinding {
@@ -83,21 +78,10 @@ impl Host {
         complete(&context, identity.operation_id);
         let signed_prekey = context.prepare_signed_prekey_rotation().unwrap();
         complete(&context, signed_prekey.operation_id);
-        // Encoded as a relay's domain authority does before signing.
-        let certificate = [
-            CERTIFICATE_DOMAIN_TAG,
-            &[CERTIFICATE_VERSION],
-            &[u8::try_from(DOMAIN_SIGNING_KEY_ID.len()).unwrap()],
-            DOMAIN_SIGNING_KEY_ID,
-            &[u8::try_from(RELAY_DOMAIN.len()).unwrap()],
-            RELAY_DOMAIN,
-            &identity.identity.key.agreement_key,
-            &identity.identity.key.signing_key,
-            &(NOW_MILLIS / 1_000 + 3_600).to_be_bytes(),
-        ]
-        .concat();
+        let (certificate, certificate_signature) =
+            issue_certificate(&identity.identity.key, NOW_MILLIS / 1_000 + 3_600);
         Self {
-            certificate_signature: domain_signing_key().sign(&certificate).to_bytes().to_vec(),
+            certificate_signature,
             certificate,
             records: HashMap::new(),
             context,
@@ -377,11 +361,6 @@ fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
         plaintext: draft.plaintext.clone(),
         prekey_bundle: draft.prekey_bundle.clone(),
     }
-}
-
-fn complete(context: &IdentityContext, id: OperationId) {
-    context.reserve_operation(id.clone()).unwrap();
-    context.finalize_operation(id).unwrap();
 }
 
 fn received(outcome: InboundMessageOutcome) -> roost_client::InboundMessageResult {

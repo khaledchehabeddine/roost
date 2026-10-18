@@ -1,7 +1,7 @@
 //! A device's SecureStorage and the app's identity records, both surviving a process restart.
 
 use roost_core::{
-    Identity, KeyStore, KeyStoreError, KeyStoreOperationId, KeyStoreOperationStatus, SecureStorage,
+    KeyStore, KeyStoreError, KeyStoreOperationId, KeyStoreOperationStatus, SecureStorage,
     StorageError,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -42,8 +42,6 @@ impl SecureStorage for DeviceStorage {
 pub(crate) enum HostCommit {
     /// The transaction commits and the host sees that it did.
     Applies,
-    /// A condition fails, so nothing commits and the host sees that it didn't.
-    Conflicts,
     /// The transaction commits, but a lost reply or a cancellation hides that it did.
     AppliesWithUnknownOutcome,
     /// Nothing commits, and the host can't tell whether it did.
@@ -54,7 +52,6 @@ pub(crate) enum HostCommit {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum CommitResult {
     Committed,
-    Conflict,
     Unknown,
 }
 
@@ -64,17 +61,15 @@ pub(crate) struct IdentityDatabase(Arc<Mutex<IdentityRecords>>);
 
 #[derive(Default)]
 struct IdentityRecords {
-    identity_public_key: Option<[u8; 32]>,
     committed_operations: BTreeSet<[u8; 16]>,
     pending_finalizations: BTreeSet<[u8; 16]>,
 }
 
 impl IdentityDatabase {
-    /// Saves the identity's public key with the operation ID in one transaction.
+    /// Saves the identity's operation ID in one transaction.
     pub(crate) fn commit_identity(
         &self,
         operation: KeyStoreOperationId,
-        identity: &Identity,
         commit: HostCommit,
     ) -> CommitResult {
         let applies = matches!(
@@ -83,22 +78,15 @@ impl IdentityDatabase {
         );
         if applies {
             let mut records = self.0.lock().unwrap();
-            records.identity_public_key = Some(*identity.public_key().as_bytes());
             records.committed_operations.insert(*operation.as_bytes());
             records.pending_finalizations.insert(*operation.as_bytes());
         }
         match commit {
             HostCommit::Applies => CommitResult::Committed,
-            HostCommit::Conflicts => CommitResult::Conflict,
             HostCommit::AppliesWithUnknownOutcome | HostCommit::FailsWithUnknownOutcome => {
                 CommitResult::Unknown
             }
         }
-    }
-
-    /// Returns the identity public key the host saved, if any.
-    pub(crate) fn identity_public_key(&self) -> Option<[u8; 32]> {
-        self.0.lock().unwrap().identity_public_key
     }
 
     /// Records that SecureStorage finalized the operation.

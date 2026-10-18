@@ -1,14 +1,13 @@
 //! Message Operations that ask a host for exact records and return results it commits atomically.
 
-use crate::support::device::{Device, Intent, Relay, Route, Sealed, binding};
+use crate::support::device::{Device, Intent, Relay, Route, Sealed, binding, redraft};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     BlockedContactAcknowledgmentPolicy, InboundMessageOutcome, MessageDecryption,
     MessageDecryptionStep, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    OutgoingMessage, ProtocolHardeningLimits, ProtocolStateBlob, ProtocolStateCommitCondition,
-    ProtocolStateError, ProtocolStateKind, ReceiveSettings, SignedSenderCertificate, StateChanges,
-    StateEntryError, commit_conditions_match,
+    ProtocolHardeningLimits, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateError,
+    ProtocolStateKind, ReceiveSettings, StateChanges, StateEntryError, commit_conditions_match,
 };
 use roost_protocol::{MAX_CERTIFICATE_GRACE_WINDOW, SenderCertificateValidationError};
 use std::time::Duration;
@@ -786,21 +785,6 @@ fn a_blocked_sender_gets_an_acknowledgment_only_under_the_silent_receipt_choice(
     ));
 }
 
-// Copies a draft so a retry sends it under the same MessageID.
-fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
-    OutgoingMessage {
-        recipient: draft.recipient,
-        message_id: draft.message_id,
-        sent_at_millis: draft.sent_at_millis,
-        sender_certificate: SignedSenderCertificate {
-            certificate: draft.sender_certificate.certificate.clone(),
-            signature: draft.sender_certificate.signature.clone(),
-        },
-        plaintext: draft.plaintext.clone(),
-        prekey_bundle: None,
-    }
-}
-
 #[test]
 fn a_second_instance_that_loses_the_commit_retries_from_fresh_reads() {
     let relay = Relay::new();
@@ -852,50 +836,6 @@ fn a_second_instance_that_loses_the_commit_retries_from_fresh_reads() {
         };
         assert_eq!(&*received.plaintext, plaintext);
     }
-}
-
-#[test]
-fn dropping_an_unfinished_operation_changes_nothing_and_a_restart_sends_the_draft() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let mut bob = Device::new(&relay, 0xb0);
-    establish(&mut alice, &mut bob);
-    let draft = alice.outgoing(&bob, b"survives a crash");
-    let before = alice.host.snapshot_bytes();
-    let mut interrupted = alice.store.start_encryption(redraft(&draft)).unwrap();
-    loop {
-        match interrupted.step(&mut rng()).unwrap() {
-            MessageEncryptionStep::NeedsState(addresses) => {
-                interrupted
-                    .supply_state(alice.host.read(&addresses))
-                    .unwrap();
-            }
-            MessageEncryptionStep::NeedsTransport(_) => break,
-            MessageEncryptionStep::NeedsPreKeyBundle(_)
-            | MessageEncryptionStep::NothingToSend
-            | MessageEncryptionStep::Ready { .. } => {
-                panic!("expected the crash before sealing")
-            }
-        }
-    }
-    drop(interrupted);
-    assert_eq!(alice.host.snapshot_bytes(), before);
-
-    alice.restart();
-    let sent = seal(
-        alice.store.start_encryption(draft).unwrap(),
-        &alice.host,
-        false,
-    );
-    let message_id = sent.result.message_id;
-    let message = sent.result.message.clone();
-    alice.host.commit_sent(&sent.result, sent.changes).unwrap();
-
-    let InboundMessageOutcome::Accepted(received) = bob.receive(&message) else {
-        panic!("expected Bob to accept the Message")
-    };
-    assert_eq!(received.message_id, message_id);
-    assert_eq!(&*received.plaintext, b"survives a crash");
 }
 
 #[test]

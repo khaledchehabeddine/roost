@@ -39,7 +39,7 @@ pub(crate) struct ProtocolFixture {
 #[derive(Clone, Default)]
 pub(crate) struct HostStore {
     blobs: BTreeMap<ProtocolStateAddress, Zeroizing<Vec<u8>>>,
-    outbox: Vec<OutboxRecord>,
+    outbox: Vec<SealedFrame>,
     undelivered: Vec<MessageId>,
 }
 
@@ -72,11 +72,7 @@ impl HostStore {
         sent: &OutboundMessageResult,
         changes: StateChanges,
     ) -> Result<Vec<ProtocolStateUpdate>, HostCommitError> {
-        let outbox = OutboxRecord {
-            message_id: sent.message_id,
-            message: sent.message.to_bytes().unwrap(),
-        };
-        self.commit_with(changes, Some(outbox))
+        self.commit_with(changes, Some(sent.message.clone()))
     }
 
     /// Returns the host's entry for each requested record, with `None` where it holds none.
@@ -102,7 +98,7 @@ impl HostStore {
     fn commit_with(
         &mut self,
         changes: StateChanges,
-        outbox: Option<OutboxRecord>,
+        outbox: Option<SealedFrame>,
     ) -> Result<Vec<ProtocolStateUpdate>, HostCommitError> {
         let addresses: Vec<_> = changes
             .conditions()
@@ -119,7 +115,7 @@ impl HostStore {
         Ok(updates)
     }
 
-    pub(crate) fn outbox(&self) -> &[OutboxRecord] {
+    pub(crate) fn outbox(&self) -> &[SealedFrame] {
         &self.outbox
     }
 
@@ -205,18 +201,6 @@ impl HostStore {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum HostCommitError {
     StaleCondition,
-}
-
-#[derive(Clone)]
-pub(crate) struct OutboxRecord {
-    pub(crate) message_id: MessageId,
-    message: Vec<u8>,
-}
-
-impl OutboxRecord {
-    pub(crate) fn message(&self) -> SealedFrame {
-        SealedFrame::from_bytes(&self.message).unwrap()
-    }
 }
 
 pub(crate) struct StoredMessage {

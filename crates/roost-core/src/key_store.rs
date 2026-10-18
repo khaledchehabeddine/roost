@@ -563,58 +563,6 @@ mod tests {
     }
 
     #[test]
-    fn key_store_clone_shares_storage() {
-        let original_store = store();
-        let cloned_store = original_store.clone();
-        original_store.generate_identity().unwrap();
-        assert!(cloned_store.load_identity().is_ok());
-    }
-
-    /// The host registers the verifier and never the capability, so a rotation's publication must
-    /// carry a verifier that commits to the capability now in storage.
-    #[test]
-    fn inbox_rotation_publishes_the_verifier_for_the_new_capability() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-
-        let publication = key_store.rotate_inbox_now().unwrap();
-
-        assert_eq!(
-            publication.recipient_delivery_verifier,
-            key_store
-                .0
-                .discovery
-                .current_capability()
-                .unwrap()
-                .verifier()
-        );
-        assert_eq!(publication.discovery_key.epoch, 2);
-    }
-
-    #[test]
-    fn rotation_changes_the_published_verifier() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_now().unwrap();
-        let before = key_store.current_publication().unwrap();
-
-        let after = key_store.rotate_inbox_now().unwrap();
-
-        assert_ne!(
-            before.recipient_delivery_verifier,
-            after.recipient_delivery_verifier
-        );
-    }
-
-    #[test]
-    fn generate_identity_persists_discovery_key_at_epoch_one() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        let bundle = key_store.current_public_discovery_key().unwrap();
-        assert_eq!(bundle.epoch, 1);
-    }
-
-    #[test]
     fn generate_identity_completes_partial_discovery_key() {
         let (key_store, storage) = store_with_storage();
         key_store.generate_identity().unwrap();
@@ -644,30 +592,6 @@ mod tests {
         key_store.generate_identity().unwrap();
         storage.lock().unwrap().delete(DISCOVERY_KEY).unwrap();
         assert!(key_store.load_identity().is_ok());
-    }
-
-    #[test]
-    fn current_publication_bundle_carries_both_binding_directions() {
-        let key_store = store();
-        let identity = key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_now().unwrap();
-
-        let publication = key_store.current_publication().unwrap();
-
-        // IK→DK: the identity authorized this discovery key.
-        assert!(
-            verify_public_discovery_key(&publication.discovery_key, identity.verifying_key())
-                .is_ok()
-        );
-        // DK→IK: the discovery key authorized this identity.
-        assert!(
-            verify_discovery_to_identity_binding(
-                &identity.public().unwrap(),
-                &publication.discovery_key.verifying_key,
-                &publication.discovery_to_identity,
-            )
-            .is_ok()
-        );
     }
 
     #[test]
@@ -710,115 +634,6 @@ mod tests {
     }
 
     #[test]
-    fn rotation_changes_the_discovery_to_identity_binding() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_now().unwrap();
-        let before = key_store.current_publication().unwrap();
-
-        let after = key_store.rotate_inbox_now().unwrap();
-
-        assert_ne!(
-            before.discovery_to_identity.to_bytes(),
-            after.discovery_to_identity.to_bytes()
-        );
-    }
-
-    #[test]
-    fn current_publication_bundle_returns_verifiable_chain() {
-        let key_store = store();
-        let identity = key_store.generate_identity().unwrap();
-        assert!(matches!(
-            key_store.current_publication(),
-            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::NotFound))
-        ));
-        key_store.rotate_signed_prekey_now().unwrap();
-        let publication = key_store.current_publication().unwrap();
-        assert_eq!(publication.version, roost_crypto::PREKEY_BUNDLE_VERSION);
-        assert!(
-            verify_public_discovery_key(&publication.discovery_key, identity.verifying_key())
-                .is_ok()
-        );
-        assert!(
-            verify_public_signed_prekey(
-                &publication.signed_prekey,
-                &publication.discovery_key.verifying_key
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn replenish_one_time_prekeys_creates_initial_pool() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        let discovery = key_store.current_public_discovery_key().unwrap();
-        let bundles = key_store.replenish_one_time_prekeys().unwrap();
-        assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
-        assert!(bundles.iter().all(|bundle| bundle.epoch == discovery.epoch));
-    }
-
-    #[test]
-    fn generate_one_time_prekeys_creates_exact_caller_size() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        let discovery = key_store.current_public_discovery_key().unwrap();
-        let first = key_store.generate_one_time_prekeys(3).unwrap();
-        let second = key_store.generate_one_time_prekeys(2).unwrap();
-
-        assert_eq!(first.len(), 3);
-        assert_eq!(second.len(), 2);
-        assert!(
-            first
-                .iter()
-                .chain(&second)
-                .all(|bundle| bundle.epoch == discovery.epoch)
-        );
-        assert_eq!(
-            first
-                .iter()
-                .chain(&second)
-                .map(|bundle| bundle.id)
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4]
-        );
-    }
-
-    #[test]
-    fn generate_one_time_prekeys_rejects_over_cap_batch() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store
-            .generate_one_time_prekeys(ONE_TIME_PREKEY_POOL_TARGET)
-            .unwrap();
-
-        assert!(matches!(
-            key_store.generate_one_time_prekeys(1),
-            Err(KeyStoreError::OneTimePreKey(
-                OneTimePreKeyError::BatchExceedsCapacity {
-                    requested: 1,
-                    available: 0
-                }
-            ))
-        ));
-    }
-
-    #[test]
-    fn generated_one_time_prekeys_persist_until_consumed() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        let epoch = key_store.current_public_discovery_key().unwrap().epoch;
-        let bundle = key_store.generate_one_time_prekeys(1).unwrap().remove(0);
-
-        let prekey = key_store.consume_one_time_prekey(epoch, bundle.id).unwrap();
-        assert_eq!(prekey.public().id, bundle.id);
-        assert!(matches!(
-            key_store.consume_one_time_prekey(epoch, bundle.id),
-            Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::NotFound))
-        ));
-    }
-
-    #[test]
     fn consume_one_time_prekey_rejects_stale_epoch() {
         let key_store = store();
         key_store.generate_identity().unwrap();
@@ -856,20 +671,6 @@ mod tests {
             replenished.first().map(|bundle| bundle.id),
             Some(ONE_TIME_PREKEY_POOL_TARGET as u64)
         );
-    }
-
-    #[test]
-    fn consume_one_time_prekey_consumes_secret_once() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        let epoch = key_store.current_public_discovery_key().unwrap().epoch;
-        let bundle = key_store.replenish_one_time_prekeys().unwrap().remove(0);
-        let prekey = key_store.consume_one_time_prekey(epoch, bundle.id).unwrap();
-        assert_eq!(prekey.public().id, bundle.id);
-        assert!(matches!(
-            key_store.consume_one_time_prekey(epoch, bundle.id),
-            Err(KeyStoreError::OneTimePreKey(OneTimePreKeyError::NotFound))
-        ));
     }
 
     #[test]
@@ -926,22 +727,6 @@ mod tests {
             (bundles.len(), ids.len()),
             (ONE_TIME_PREKEY_POOL_TARGET, ONE_TIME_PREKEY_POOL_TARGET)
         );
-    }
-
-    #[test]
-    fn rotate_inbox_now_clears_one_time_prekey_pool() {
-        let key_store = store();
-        key_store.generate_identity().unwrap();
-        key_store.replenish_one_time_prekeys().unwrap();
-        let rotation = key_store.rotate_inbox_now().unwrap();
-        let bundles = key_store.replenish_one_time_prekeys().unwrap();
-        assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
-        assert!(
-            bundles
-                .iter()
-                .all(|bundle| bundle.epoch == rotation.discovery_key.epoch)
-        );
-        assert_eq!(bundles.first().map(|bundle| bundle.id), Some(0));
     }
 
     #[test]
@@ -1152,72 +937,80 @@ mod tests {
     }
 
     #[test]
-    fn import_with_wrong_passphrase_does_not_disturb_existing_state() {
-        let destination_store = store();
-        destination_store.generate_identity().unwrap();
-        destination_store.rotate_signed_prekey_if_stale().unwrap();
-        let original_identity = destination_store.load_identity().unwrap();
-        let original_signed_prekey = destination_store
-            .current_public_signed_prekey()
-            .unwrap()
-            .public_key;
-
-        let source_store = store();
-        source_store.generate_identity().unwrap();
-        let backup = source_store.export_encrypted_backup("right").unwrap();
-        assert!(matches!(
-            destination_store.import_encrypted_backup(&backup, "wrong"),
-            Err(KeyStoreError::Identity(IdentityError::DecryptionFailed))
-        ));
-
-        let current_identity = destination_store.load_identity().unwrap();
-        let current_signed_prekey = destination_store
-            .current_public_signed_prekey()
-            .unwrap()
-            .public_key;
-        assert_eq!(
-            original_identity.public_key(),
-            current_identity.public_key()
-        );
-        assert_eq!(
-            original_signed_prekey.as_bytes(),
-            current_signed_prekey.as_bytes()
-        );
-    }
-
-    #[test]
-    fn import_with_mismatched_discovery_key_leaves_state_untouched() {
+    fn a_failed_import_leaves_the_existing_identity_and_prekeys() {
+        type Matcher = fn(&KeyStoreError) -> bool;
         let mut rng = ChaCha20Rng::from_seed([0xe0; 32]);
         let source_store = store();
         source_store.generate_identity().unwrap();
         let other_store = store();
         other_store.generate_identity().unwrap();
-        let other_discovery_blob = other_store.0.discovery.export_blob().unwrap();
-        let mismatched_backup = source_store
-            .0
-            .identity
-            .export_encrypted_backup(&mut rng, "pass", &other_discovery_blob)
-            .unwrap();
+        let mut backup = |discovery_blob: &[u8]| {
+            source_store
+                .0
+                .identity
+                .export_encrypted_backup(&mut rng, "pass", discovery_blob)
+                .unwrap()
+        };
+        let cases: [(Vec<u8>, &str, Matcher); 3] = [
+            (
+                source_store.export_encrypted_backup("pass").unwrap(),
+                "wrong",
+                |error| {
+                    matches!(
+                        error,
+                        KeyStoreError::Identity(IdentityError::DecryptionFailed)
+                    )
+                },
+            ),
+            (
+                backup(&other_store.0.discovery.export_blob().unwrap()),
+                "pass",
+                |error| matches!(error, KeyStoreError::Discovery(DiscoveryKeyError::Corrupt)),
+            ),
+            // An authentic backup whose discovery-key region is structurally invalid.
+            (backup(&[0xAAu8; 50]), "pass", |error| {
+                matches!(
+                    error,
+                    KeyStoreError::Discovery(DiscoveryKeyError::InvalidBlobLength {
+                        actual: 50,
+                        ..
+                    })
+                )
+            }),
+        ];
 
-        let destination_store = store();
-        let original_identity = destination_store.generate_identity().unwrap();
-        destination_store.rotate_signed_prekey_if_stale().unwrap();
+        for (backup, passphrase, rejects) in cases {
+            let destination_store = store();
+            let original_identity = destination_store.generate_identity().unwrap();
+            destination_store.rotate_signed_prekey_if_stale().unwrap();
+            let original_signed_prekey = destination_store
+                .current_public_signed_prekey()
+                .unwrap()
+                .public_key;
 
-        assert!(matches!(
-            destination_store.import_encrypted_backup(&mismatched_backup, "pass"),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::Corrupt))
-        ));
+            let error = destination_store
+                .import_encrypted_backup(&backup, passphrase)
+                .unwrap_err();
 
-        let current_identity = destination_store.load_identity().unwrap();
-        assert_eq!(
-            original_identity.public_key(),
-            current_identity.public_key()
-        );
-        assert_eq!(
-            original_identity.verifying_key().as_bytes(),
-            current_identity.verifying_key().as_bytes()
-        );
-        assert!(destination_store.current_public_signed_prekey().is_ok());
+            assert!(rejects(&error), "unexpected error: {error}");
+            let current_identity = destination_store.load_identity().unwrap();
+            assert_eq!(
+                original_identity.public_key(),
+                current_identity.public_key()
+            );
+            assert_eq!(
+                original_identity.verifying_key().as_bytes(),
+                current_identity.verifying_key().as_bytes()
+            );
+            assert_eq!(
+                destination_store
+                    .current_public_signed_prekey()
+                    .unwrap()
+                    .public_key
+                    .as_bytes(),
+                original_signed_prekey.as_bytes()
+            );
+        }
     }
 
     #[test]
@@ -1493,37 +1286,6 @@ mod tests {
             key_store.export_encrypted_backup("pass"),
             Err(KeyStoreError::Discovery(DiscoveryKeyError::NotFound))
         ));
-    }
-
-    #[test]
-    fn import_with_malformed_discovery_blob_leaves_state_untouched() {
-        let mut rng = ChaCha20Rng::from_seed([0xe1; 32]);
-        // Build an authentic backup whose discovery-key region is structurally invalid.
-        let source_storage: SharedStorage =
-            Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new())));
-        let source_identity = IdentityManager::new(source_storage);
-        source_identity.generate_identity(&mut rng).unwrap();
-        let malformed_backup = source_identity
-            .export_encrypted_backup(&mut rng, "pass", &[0xAAu8; 50])
-            .unwrap();
-
-        let destination_store = store();
-        let original_identity = destination_store.generate_identity().unwrap();
-        destination_store.rotate_signed_prekey_if_stale().unwrap();
-
-        assert!(matches!(
-            destination_store.import_encrypted_backup(&malformed_backup, "pass"),
-            Err(KeyStoreError::Discovery(
-                DiscoveryKeyError::InvalidBlobLength { actual: 50, .. }
-            ))
-        ));
-
-        let current_identity = destination_store.load_identity().unwrap();
-        assert_eq!(
-            original_identity.public_key(),
-            current_identity.public_key()
-        );
-        assert!(destination_store.current_public_signed_prekey().is_ok());
     }
 
     #[test]

@@ -625,31 +625,11 @@ impl IdentityContext {
         self.complete_prepared(prepared.operation_id, prepared.identity)
     }
 
-    pub(crate) fn generate_one_time_prekeys(
-        &self,
-        batch_size: u32,
-    ) -> Result<Vec<PublicOneTimePreKey>, RoostError> {
-        let prepared = self.prepare_one_time_prekeys(batch_size)?;
-        self.complete_prepared(prepared.operation_id, prepared.one_time_prekeys)
-    }
-
     pub(crate) fn replenish_one_time_prekeys(
         &self,
     ) -> Result<Vec<PublicOneTimePreKey>, RoostError> {
         let prepared = self.prepare_one_time_prekey_replenishment()?;
         self.complete_prepared(prepared.operation_id, prepared.one_time_prekeys)
-    }
-
-    pub(crate) fn rotate_inbox_now(&self) -> Result<PublicationBundle, RoostError> {
-        let prepared = self.prepare_inbox_rotation()?;
-        self.complete_prepared(prepared.operation_id, prepared.publication)
-    }
-
-    pub(crate) fn rotate_signed_prekey_if_stale(
-        &self,
-    ) -> Result<Option<PublicSignedPreKey>, RoostError> {
-        let prepared = self.prepare_signed_prekey_rotation_if_stale()?;
-        self.complete_prepared(prepared.operation_id, prepared.signed_prekey)
     }
 
     pub(crate) fn rotate_signed_prekey_now(&self) -> Result<PublicSignedPreKey, RoostError> {
@@ -773,36 +753,33 @@ mod tests {
     /// over Roost's own preimages: the identity key is what signs identity bindings,
     /// discovery-key bindings, and message transcripts. Every context Roost signs or verifies
     /// under starts with `Roost`, so refusing that prefix makes the two preimage sets disjoint.
+    /// Roost names its labels with a `Roost` prefix, which is refused in any letter case, and
+    /// every preimage Roost signs itself is refused too.
     #[test]
-    fn sign_authentication_transcript_refuses_reserved_preimages() {
+    fn sign_authentication_transcript_refuses_reserved_preimages_and_prefixes() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
+        let preimages = DOMAIN_REGISTRY.iter().map(|context| {
+            [
+                context.as_bytes(),
+                &identity.key.agreement_key,
+                &identity.key.signing_key,
+            ]
+            .concat()
+        });
+        let prefixed = ["Roost", "roost", "ROOST"]
+            .iter()
+            .map(|prefix| [prefix.as_bytes(), &[0x41; 32]].concat());
 
-        for context in DOMAIN_REGISTRY {
-            let mut preimage = context.as_bytes().to_vec();
-            preimage.extend_from_slice(&identity.key.agreement_key);
-            preimage.extend_from_slice(&identity.key.signing_key);
-            match store.sign_authentication_transcript(preimage) {
-                Err(RoostError::InvalidData { .. }) => {}
-                Err(error) => panic!("expected InvalidData for {context}, got {error}"),
-                Ok(_) => panic!("expected InvalidData for {context}"),
-            }
-        }
-    }
-
-    /// Roost names its labels with a `Roost` prefix, which is refused in any letter case.
-    #[test]
-    fn sign_authentication_transcript_refuses_reserved_prefixes_in_any_case() {
-        let store = key_store();
-        store.generate_identity().unwrap();
-
-        for prefix in ["Roost", "roost", "ROOST"] {
-            let mut transcript = prefix.as_bytes().to_vec();
-            transcript.extend_from_slice(&[0x41; 32]);
-            match store.sign_authentication_transcript(transcript) {
-                Err(RoostError::InvalidData { .. }) => {}
-                other => panic!("expected InvalidData for {prefix}, got {other:?}"),
-            }
+        for transcript in preimages.chain(prefixed) {
+            let start = String::from_utf8_lossy(&transcript[..10]).into_owned();
+            assert!(
+                matches!(
+                    store.sign_authentication_transcript(transcript),
+                    Err(RoostError::InvalidData { .. })
+                ),
+                "expected InvalidData for a transcript starting {start}"
+            );
         }
     }
 
@@ -922,23 +899,6 @@ mod tests {
         assert_discovery_to_identity_verifies(identity, publication, &discovery);
     }
 
-    /// The host registers the verifier, so it must cross the FFI boundary unchanged, and the
-    /// capability it commits to never does.
-    #[test]
-    fn publication_carries_the_delivery_verifier_across_ffi() {
-        let key_store = key_store();
-        key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_now().unwrap();
-
-        let publication = key_store.current_publication().unwrap();
-
-        let core = key_store.inner.current_publication().unwrap();
-        assert_eq!(
-            publication.recipient_delivery_verifier,
-            core.recipient_delivery_verifier.as_bytes()
-        );
-    }
-
     fn assert_one_time_prekey_record(bundle: &FfiPublicOneTimePreKey, epoch: u32) {
         assert_eq!(bundle.public_key.len(), 32);
         assert_eq!(bundle.epoch, epoch);
@@ -960,51 +920,11 @@ mod tests {
     }
 
     #[test]
-    fn rotate_signed_prekey_if_stale_returns_verifiable_record() {
-        let store = key_store();
-        let identity = store.generate_identity().unwrap();
-        let signed_prekey = store
-            .rotate_signed_prekey_if_stale()
-            .unwrap()
-            .expect("first rotate must produce a bundle");
-        let discovery = store.current_publication().unwrap().discovery_key;
-        let crypto_discovery = assert_discovery_key_verifies(&identity, &discovery);
-        assert_signed_prekey_verifies(&signed_prekey, &crypto_discovery);
-    }
-
-    #[test]
     fn current_publication_bundle_returns_verifiable_records() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
         store.rotate_signed_prekey_now().unwrap();
         let publication = store.current_publication().unwrap();
-        assert_publication_verifies(&identity, &publication);
-    }
-
-    #[test]
-    fn generate_one_time_prekeys_returns_public_records() {
-        let store = key_store();
-        store.generate_identity().unwrap();
-        let epoch = current_epoch(&store);
-        let bundles = store.generate_one_time_prekeys(3).unwrap();
-
-        assert_eq!(bundles.len(), 3);
-        assert_eq!(
-            bundles.iter().map(|bundle| bundle.id).collect::<Vec<_>>(),
-            vec![0, 1, 2]
-        );
-        for bundle in &bundles {
-            assert_one_time_prekey_record(bundle, epoch);
-        }
-    }
-
-    #[test]
-    fn rotate_inbox_now_advances_epoch_and_returns_verifiable_records() {
-        let store = key_store();
-        let identity = store.generate_identity().unwrap();
-        let initial_epoch = current_epoch(&store);
-        let publication = store.rotate_inbox_now().unwrap();
-        assert_eq!(publication.discovery_key.epoch, initial_epoch + 1);
         assert_publication_verifies(&identity, &publication);
     }
 

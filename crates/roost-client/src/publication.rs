@@ -228,33 +228,3 @@ impl PreKeyBundle {
         })
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use roost_crypto::KeyPair;
-
-    #[test]
-    fn prekey_records_preserve_unsigned_id_boundaries() {
-        let public_key = KeyPair::from_secret_bytes([0x42; 32])
-            .public
-            .as_bytes()
-            .to_vec();
-        let signed = PublicSignedPreKey {
-            id: u64::MAX,
-            public_key: public_key.clone(),
-            signature: vec![0; 64],
-            epoch: u32::MAX,
-            created_at_millis: u64::MAX / 1_000 * 1_000,
-        };
-        let one_time = PublicOneTimePreKey {
-            id: u64::MAX,
-            public_key,
-            epoch: u32::MAX,
-            created_at_millis: u64::MAX / 1_000 * 1_000,
-        };
-
-        assert_eq!(signed.to_core().unwrap().id, u64::MAX);
-        assert_eq!(one_time.to_core().unwrap().id, u64::MAX);
-    }
-}

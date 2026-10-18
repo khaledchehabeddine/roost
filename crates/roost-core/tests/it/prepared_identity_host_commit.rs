@@ -9,43 +9,6 @@ use crate::support::host_identity::{
 };
 
 #[test]
-fn confirmed_conflict_aborts_and_retry_creates_one_identity() {
-    let storage = DeviceStorage::default();
-    let database = IdentityDatabase::default();
-    let store = storage.open();
-
-    let conflicted = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(conflicted.operation.id).unwrap();
-    assert_eq!(
-        database.commit_identity(
-            conflicted.operation.id,
-            &conflicted.output,
-            HostCommit::Conflicts
-        ),
-        CommitResult::Conflict
-    );
-    store.abort_operation(conflicted.operation.id).unwrap();
-    assert!(store.identity().unwrap().is_none());
-
-    let created = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(created.operation.id).unwrap();
-    assert_eq!(
-        database.commit_identity(created.operation.id, &created.output, HostCommit::Applies),
-        CommitResult::Committed
-    );
-    store.finalize_operation(created.operation.id).unwrap();
-    database.mark_finalized(created.operation.id);
-
-    let identity = store.identity().unwrap().unwrap();
-    assert_eq!(identity.public_key(), created.output.public_key());
-    assert_eq!(
-        database.identity_public_key(),
-        Some(*created.output.public_key().as_bytes())
-    );
-    assert!(store.unfinished_operations().unwrap().is_empty());
-}
-
-#[test]
 fn unknown_outcome_that_committed_finalizes_after_restart() {
     let storage = DeviceStorage::default();
     let database = IdentityDatabase::default();
@@ -53,11 +16,7 @@ fn unknown_outcome_that_committed_finalizes_after_restart() {
     let prepared = store.prepare_identity_creation().unwrap();
     store.reserve_operation(prepared.operation.id).unwrap();
     assert_eq!(
-        database.commit_identity(
-            prepared.operation.id,
-            &prepared.output,
-            HostCommit::AppliesWithUnknownOutcome
-        ),
+        database.commit_identity(prepared.operation.id, HostCommit::AppliesWithUnknownOutcome),
         CommitResult::Unknown
     );
     drop(store);
@@ -79,11 +38,7 @@ fn unknown_outcome_that_did_not_commit_aborts_after_restart() {
     let lost = store.prepare_identity_creation().unwrap();
     store.reserve_operation(lost.operation.id).unwrap();
     assert_eq!(
-        database.commit_identity(
-            lost.operation.id,
-            &lost.output,
-            HostCommit::FailsWithUnknownOutcome
-        ),
+        database.commit_identity(lost.operation.id, HostCommit::FailsWithUnknownOutcome),
         CommitResult::Unknown
     );
     drop(store);
@@ -95,7 +50,7 @@ fn unknown_outcome_that_did_not_commit_aborts_after_restart() {
 
     let created = restarted.prepare_identity_creation().unwrap();
     restarted.reserve_operation(created.operation.id).unwrap();
-    database.commit_identity(created.operation.id, &created.output, HostCommit::Applies);
+    database.commit_identity(created.operation.id, HostCommit::Applies);
     restarted.finalize_operation(created.operation.id).unwrap();
     assert_eq!(
         restarted.identity().unwrap().unwrap().public_key(),
@@ -110,7 +65,7 @@ fn finalization_the_host_never_recorded_is_reconciled_after_restart() {
     let store = storage.open();
     let prepared = store.prepare_identity_creation().unwrap();
     store.reserve_operation(prepared.operation.id).unwrap();
-    database.commit_identity(prepared.operation.id, &prepared.output, HostCommit::Applies);
+    database.commit_identity(prepared.operation.id, HostCommit::Applies);
     store.finalize_operation(prepared.operation.id).unwrap();
     drop(store);
     assert_eq!(database.pending_finalizations(), [prepared.operation.id]);

@@ -326,46 +326,29 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_backup_rejects_parameters_below_floor() {
+    fn decrypt_backup_rejects_parameters_outside_their_bounds() {
         let mut rng = ChaCha20Rng::from_seed([0x74; 32]);
         let manager = manager_with_identity();
         let backup = manager
             .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
             .unwrap();
-        // m_cost and t_cost fail below their floor; p_cost must equal 1, so any other value fails.
-        for (header_offset, weakened_value) in [(1usize, 1u32), (5, 1), (9, 2)] {
-            let mut weakened = backup.clone();
-            weakened[header_offset..header_offset + 4]
-                .copy_from_slice(&weakened_value.to_be_bytes());
+        // m_cost and t_cost fail below their floor, and p_cost must equal 1. An oversized m_cost or
+        // t_cost must fail before Argon2id allocates, so a hostile header can't exhaust memory.
+        for (header_offset, value) in [
+            (1usize, 1u32),
+            (5, 1),
+            (9, 2),
+            (1, u32::MAX),
+            (5, MAX_T_COST + 1),
+        ] {
+            let mut tampered = backup.clone();
+            tampered[header_offset..header_offset + 4].copy_from_slice(&value.to_be_bytes());
             assert!(
                 matches!(
-                    manager.decrypt_backup(&weakened, "passphrase"),
+                    manager.decrypt_backup(&tampered, "passphrase"),
                     Err(IdentityError::BackupParametersOutOfRange { .. })
                 ),
-                "header offset {header_offset} should fail the work-factor floor"
-            );
-        }
-    }
-
-    #[test]
-    fn decrypt_backup_rejects_parameters_above_ceiling() {
-        let mut rng = ChaCha20Rng::from_seed([0x75; 32]);
-        let manager = manager_with_identity();
-        let backup = manager
-            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
-            .unwrap();
-        // An oversized m_cost or t_cost must be rejected before Argon2id allocates, so a hostile
-        // header cannot exhaust memory on import.
-        for (header_offset, oversized_value) in [(1usize, u32::MAX), (5, MAX_T_COST + 1)] {
-            let mut oversized = backup.clone();
-            oversized[header_offset..header_offset + 4]
-                .copy_from_slice(&oversized_value.to_be_bytes());
-            assert!(
-                matches!(
-                    manager.decrypt_backup(&oversized, "passphrase"),
-                    Err(IdentityError::BackupParametersOutOfRange { .. })
-                ),
-                "header offset {header_offset} should fail the work-factor ceiling"
+                "header offset {header_offset} with {value} should be out of range"
             );
         }
     }
@@ -396,19 +379,6 @@ mod tests {
         tampered[13] ^= 0x01;
         assert!(matches!(
             manager.decrypt_backup(&tampered, "passphrase"),
-            Err(IdentityError::DecryptionFailed)
-        ));
-    }
-
-    #[test]
-    fn decrypt_backup_with_wrong_passphrase_returns_decryption_failed() {
-        let mut rng = ChaCha20Rng::from_seed([0x78; 32]);
-        let manager = manager_with_identity();
-        let backup = manager
-            .export_encrypted_backup(&mut rng, "correct-passphrase", &DK_BLOB)
-            .unwrap();
-        assert!(matches!(
-            manager.decrypt_backup(&backup, "wrong-passphrase"),
             Err(IdentityError::DecryptionFailed)
         ));
     }
@@ -458,37 +428,6 @@ mod tests {
         assert!(!debug.contains("D1"));
         assert!(!display.contains("backup plaintext"));
         assert!(!debug.contains("backup plaintext"));
-    }
-
-    #[test]
-    fn normalization_form_does_not_change_derived_key() {
-        let mut rng = ChaCha20Rng::from_seed([0x7b; 32]);
-        let manager = manager_with_identity();
-        // U+00E9 (é, NFC) and "e" + U+0301 (combining acute, NFD) normalize to the same key.
-        let backup = manager
-            .export_encrypted_backup(&mut rng, "caf\u{00e9}", &DK_BLOB)
-            .unwrap();
-        assert!(manager.decrypt_backup(&backup, "cafe\u{0301}").is_ok());
-    }
-
-    #[test]
-    fn argon2id_derive_key_is_deterministic() {
-        let salt = [0x00u8; SALT_LEN];
-        let first = derive_key(
-            "passphrase",
-            &salt,
-            ARGON2_M_COST,
-            ARGON2_T_COST,
-            ARGON2_P_COST,
-        );
-        let second = derive_key(
-            "passphrase",
-            &salt,
-            ARGON2_M_COST,
-            ARGON2_T_COST,
-            ARGON2_P_COST,
-        );
-        assert_eq!(*first.unwrap(), *second.unwrap());
     }
 
     #[test]

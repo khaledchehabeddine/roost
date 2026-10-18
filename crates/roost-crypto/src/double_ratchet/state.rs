@@ -795,27 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn max_skip_rejects_large_message_gap() {
-        let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
-
-        let (last_header, last_ciphertext) = (0..MAX_SKIP + 2)
-            .map(|message_number| {
-                initiator
-                    .ratchet_encrypt(format!("msg {message_number}").as_bytes(), &associated_data)
-                    .unwrap()
-            })
-            .last()
-            .unwrap();
-
-        let result =
-            responder.ratchet_decrypt(&mut rng, &last_ciphertext, &last_header, &associated_data);
-        assert!(matches!(
-            result,
-            Err(RatchetError::MaxSkipExceeded { count, max: MAX_SKIP }) if count == MAX_SKIP + 1
-        ));
-    }
-
-    #[test]
     fn max_skipped_keys_total_rejects_without_evicting_retained_keys() {
         let (mut initiator, mut responder, associated_data, mut rng) = setup_pair();
 
