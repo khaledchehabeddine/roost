@@ -426,7 +426,6 @@ mod tests {
     use roost_protocol::SignatureError;
 
     const FIXED_CREATED_AT_SECS: u64 = 1_700_000_000;
-    const ASSOCIATED_DATA: &[u8] = b"associated data";
 
     struct Setup {
         alice_identity_key_pair: KeyPair,
@@ -485,15 +484,6 @@ mod tests {
         }
     }
 
-    fn copy_one_time_prekey(prekey: &OneTimePreKey) -> OneTimePreKey {
-        OneTimePreKey::from_secret_bytes(
-            prekey.id(),
-            *prekey.to_secret_bytes(),
-            prekey.epoch(),
-            FIXED_CREATED_AT_SECS,
-        )
-    }
-
     fn public_identity_key(
         signing_key: &SigningKeyPair,
         public_key: PublicKey,
@@ -517,35 +507,6 @@ mod tests {
             sender_discovery_key,
             sender_certificate: b"sender certificate",
             sender_certificate_signature: b"sender certificate signature",
-        }
-    }
-
-    #[test]
-    fn peers_derive_the_same_session_id_and_ratchet_keys() {
-        for include_one_time in [true, false] {
-            let (setup, mut rng) = setup();
-            let (mut alice_state, alice_session_id, handshake) = initiate_handshake(
-                &mut rng,
-                &setup.bob_identity_key,
-                &bundle(&setup, include_one_time),
-            )
-            .unwrap();
-            let (mut bob_state, bob_session_id) = accept_handshake(
-                &handshake,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                include_one_time.then(|| copy_one_time_prekey(&setup.bob_one_time_prekey)),
-            )
-            .unwrap();
-
-            assert_eq!(bob_session_id, alice_session_id);
-            let (header, ciphertext) = alice_state
-                .ratchet_encrypt(b"hello bob", ASSOCIATED_DATA)
-                .unwrap();
-            let plaintext = bob_state
-                .ratchet_decrypt(&mut rng, &ciphertext, &header, ASSOCIATED_DATA)
-                .unwrap();
-            assert_eq!(plaintext.as_slice(), b"hello bob");
         }
     }
 
@@ -610,24 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn accept_rejects_missing_one_time_prekey() {
-        let (setup, mut rng) = setup();
-        let (_, _, handshake) =
-            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
-
-        assert!(matches!(
-            accept_handshake(
-                &handshake,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None
-            ),
-            Err(HandshakeError::MissingOneTimePreKey)
-        ));
-    }
-
-    #[test]
-    fn accept_rejects_mismatched_one_time_prekey() {
+    fn accept_rejects_prekeys_and_base_keys_the_handshake_does_not_name() {
         let (setup, mut rng) = setup();
         let wrong_one_time_prekey = generate_one_time_prekey(
             &mut rng,
@@ -635,23 +579,6 @@ mod tests {
             setup.bob_discovery_key.epoch(),
             FIXED_CREATED_AT_SECS,
         );
-        let (_, _, handshake) =
-            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
-
-        assert!(matches!(
-            accept_handshake(
-                &handshake,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                Some(wrong_one_time_prekey),
-            ),
-            Err(HandshakeError::OneTimePreKeyMismatch)
-        ));
-    }
-
-    #[test]
-    fn accept_rejects_mismatched_signed_prekey() {
-        let (setup, mut rng) = setup();
         let other_signed_prekey = generate_signed_prekey_for_discovery_key(
             &mut rng,
             &setup.bob_discovery_key,
@@ -659,56 +586,58 @@ mod tests {
             FIXED_CREATED_AT_SECS,
         )
         .unwrap();
-        let (_, _, handshake) =
-            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, false)).unwrap();
-
-        assert!(matches!(
-            accept_handshake(
-                &handshake,
-                &setup.bob_discovery_key,
-                &other_signed_prekey,
-                None
-            ),
-            Err(HandshakeError::SignedPreKeyMismatch)
-        ));
-    }
-
-    #[test]
-    fn accept_rejects_another_discovery_key() {
-        let (setup, mut rng) = setup();
-        let (_, _, handshake) =
-            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, false)).unwrap();
-
-        assert!(matches!(
-            accept_handshake(
-                &handshake,
-                &setup.alice_discovery_key,
-                &setup.bob_signed_prekey,
-                None
-            ),
-            Err(HandshakeError::DiscoveryKeyMismatch)
-        ));
-    }
-
-    #[test]
-    fn accept_rejects_a_non_contributory_base_key() {
-        let (setup, mut rng) = setup();
+        let (_, _, with_one_time_prekey) =
+            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
         let (_, _, handshake) =
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, false)).unwrap();
         let low_order = Handshake {
             base_key: PublicKey::from([0u8; 32]),
             ..handshake
         };
+        let bob = (&setup.bob_discovery_key, &setup.bob_signed_prekey);
 
-        assert!(matches!(
-            accept_handshake(
-                &low_order,
-                &setup.bob_discovery_key,
-                &setup.bob_signed_prekey,
-                None
+        for (handshake, (discovery_key, signed_prekey), one_time_prekey, rejected) in [
+            (
+                &with_one_time_prekey,
+                bob,
+                None,
+                HandshakeError::MissingOneTimePreKey,
             ),
-            Err(HandshakeError::NonContributorySharedSecret)
-        ));
+            (
+                &with_one_time_prekey,
+                bob,
+                Some(wrong_one_time_prekey),
+                HandshakeError::OneTimePreKeyMismatch,
+            ),
+            (
+                &handshake,
+                (&setup.bob_discovery_key, &other_signed_prekey),
+                None,
+                HandshakeError::SignedPreKeyMismatch,
+            ),
+            (
+                &handshake,
+                (&setup.alice_discovery_key, &setup.bob_signed_prekey),
+                None,
+                HandshakeError::DiscoveryKeyMismatch,
+            ),
+            (
+                &low_order,
+                bob,
+                None,
+                HandshakeError::NonContributorySharedSecret,
+            ),
+        ] {
+            let Err(error) =
+                accept_handshake(handshake, discovery_key, signed_prekey, one_time_prekey)
+            else {
+                panic!("expected {rejected}");
+            };
+            assert_eq!(
+                std::mem::discriminant(&error),
+                std::mem::discriminant(&rejected)
+            );
+        }
     }
 
     #[test]

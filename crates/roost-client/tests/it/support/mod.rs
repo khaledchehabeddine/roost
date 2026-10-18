@@ -1,8 +1,47 @@
-use roost_client::{RoostError, SecureStorage};
+use roost_client::{IdentityContext, IdentityKey, OperationId, RoostError, SecureStorage};
+use roost_crypto::SigningKeyPair;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
+
+const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
+const CERTIFICATE_VERSION: u8 = 2;
+pub(crate) const DOMAIN_SIGNING_KEY_ID: &[u8] = b"relay-signing-key";
+pub(crate) const RELAY_DOMAIN: &[u8] = b"relay.example";
+
+/// Reserves and finalizes an operation, as a host does around its own commit.
+pub(crate) fn complete(context: &IdentityContext, id: OperationId) {
+    context.reserve_operation(id.clone()).unwrap();
+    context.finalize_operation(id).unwrap();
+}
+
+/// Returns the relay domain's signing key, which every test certificate names.
+pub(crate) fn domain_signing_key() -> SigningKeyPair {
+    SigningKeyPair::from_signing_bytes([0x41; 32])
+}
+
+/// Returns a Sender Certificate for `identity_key` that expires at `expires_at_secs`, encoded as a
+/// relay's domain authority does before signing, and the domain's signature over it.
+pub(crate) fn issue_certificate(
+    identity_key: &IdentityKey,
+    expires_at_secs: u64,
+) -> (Vec<u8>, Vec<u8>) {
+    let certificate = [
+        CERTIFICATE_DOMAIN_TAG,
+        &[CERTIFICATE_VERSION],
+        &[u8::try_from(DOMAIN_SIGNING_KEY_ID.len()).unwrap()],
+        DOMAIN_SIGNING_KEY_ID,
+        &[u8::try_from(RELAY_DOMAIN.len()).unwrap()],
+        RELAY_DOMAIN,
+        &identity_key.agreement_key,
+        &identity_key.signing_key,
+        &expires_at_secs.to_be_bytes(),
+    ]
+    .concat();
+    let signature = domain_signing_key().sign(&certificate).to_bytes().to_vec();
+    (certificate, signature)
+}
 
 /// Secure storage held in memory, standing in for a platform store.
 #[derive(Default)]

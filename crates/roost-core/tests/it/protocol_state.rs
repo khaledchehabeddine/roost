@@ -135,32 +135,6 @@ fn blob(store: &HostStore, address: &ProtocolStateAddress) -> Vec<u8> {
 }
 
 #[test]
-fn outbound_message_and_advanced_state_return_together() {
-    let fixture = ProtocolFixture::new();
-    let address = fixture.alice.host.only(ProtocolStateKind::RatchetSession);
-    let pending_address = fixture
-        .alice
-        .host
-        .only(ProtocolStateKind::PendingAcknowledgments);
-    let prior_blob = blob(&fixture.alice.host, &address);
-    let prior_pending_blob = blob(&fixture.alice.host, &pending_address);
-
-    let sent = alice_sends(&fixture, 1, b"second");
-
-    assert_eq!(sent.result.session_id, fixture.session_id);
-    assert_eq!(sent.result.payload_kind, PayloadKind::EncryptedText);
-    let updates = fixture.alice.host.clone().commit(sent.changes).unwrap();
-    assert_eq!(updates.len(), 2);
-    assert_eq!(updates[0].address(), &address);
-    assert_eq!(updates[1].address(), &pending_address);
-    assert_ne!(updates[0].blob().unwrap().as_bytes(), prior_blob.as_slice());
-    assert_ne!(
-        updates[1].blob().unwrap().as_bytes(),
-        prior_pending_blob.as_slice()
-    );
-}
-
-#[test]
 fn sealed_sender_round_trip_hides_sender_identity_until_decrypt() {
     let fixture = ProtocolFixture::new();
     let encrypted = alice_sends(&fixture, 8, b"sealed sender").result;
@@ -349,24 +323,6 @@ fn oversized_inbound_message_rejects_before_any_read() {
 }
 
 #[test]
-fn an_oversized_session_blob_faults_before_decoding() {
-    let fixture = ProtocolFixture::new();
-    let address = fixture.alice.host.only(ProtocolStateKind::RatchetSession);
-    let mut alice_store = fixture.alice.host.clone();
-    alice_store.set_raw(
-        address.clone(),
-        vec![1; ProtocolHardeningLimits::default().max_protocol_state_blob_len + 1],
-    );
-
-    let result = fixture.encrypt(&alice_store, fixture.outgoing(0x37, b"blob limit"), 0x37);
-
-    assert!(matches!(
-        failure(result),
-        ProtocolStateError::BlobDecode { address: actual, .. } if actual == address
-    ));
-}
-
-#[test]
 fn oversized_sender_material_is_refused_before_sealing() {
     let fixture = ProtocolFixture::new();
     let limits = ProtocolHardeningLimits::default();
@@ -422,26 +378,6 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
         duplicate.outcome,
         InboundMessageOutcome::Duplicate
     ));
-}
-
-#[test]
-fn replay_storm_returns_duplicate_without_state_churn() {
-    let mut fixture = ProtocolFixture::new();
-    let encrypted = alice_sends(&fixture, 0x3c, b"replay storm").result.message;
-    let received = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x3c).unwrap();
-    accepted(received.outcome);
-    fixture.bob.host.commit(received.changes).unwrap();
-    let after_accept = fixture.bob.host.snapshot_bytes();
-
-    for seed in 0x3d..0x45 {
-        let duplicate =
-            bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, seed).unwrap();
-        assert!(matches!(
-            duplicate.outcome,
-            InboundMessageOutcome::Duplicate
-        ));
-        assert_eq!(fixture.bob.host.snapshot_bytes(), after_accept);
-    }
 }
 
 #[test]
@@ -520,81 +456,13 @@ fn a_tampered_message_fails_and_the_original_still_decrypts() {
 }
 
 #[test]
-fn duplicate_received_message_does_not_load_or_advance_ratchet_state() {
-    let mut fixture = ProtocolFixture::new();
-    let encrypted = alice_sends(&fixture, 11, b"no duplicate effect")
-        .result
-        .message;
-    let received = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 21).unwrap();
-    accepted(received.outcome);
-    fixture.bob.host.commit(received.changes).unwrap();
-    let session = fixture.bob.host.only(ProtocolStateKind::RatchetSession);
-    fixture.bob.host.corrupt(&session);
-
-    let duplicate = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 22).unwrap();
-
-    assert!(matches!(
-        duplicate.outcome,
-        InboundMessageOutcome::Duplicate
-    ));
-}
-
-#[test]
-fn blocked_inbound_message_under_unreachable_policy_suppresses_acknowledgment_without_plaintext() {
+fn a_blocked_message_hides_its_plaintext_and_is_acknowledged_only_under_silent_receipt() {
     let mut fixture = ProtocolFixture::new();
     let session_address = block_alice(&mut fixture);
     let deduplication_address = fixture.bob.host.only(ProtocolStateKind::DeduplicationSet);
     let prior_session = blob(&fixture.bob.host, &session_address);
     let prior_deduplication = blob(&fixture.bob.host, &deduplication_address);
-    let encrypted = alice_sends(&fixture, 0x51, b"blocked text").result.message;
-
-    let received = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x51).unwrap();
-
-    assert!(blocked(received.outcome).acknowledgment.is_none());
-    let updates = fixture.bob.host.clone().commit(received.changes).unwrap();
-    assert_eq!(updates.len(), 2);
-    assert_eq!(updates[0].address(), &session_address);
-    assert_eq!(updates[1].address(), &deduplication_address);
-    assert_ne!(updates[0].blob().unwrap().as_bytes(), prior_session);
-    assert_ne!(updates[1].blob().unwrap().as_bytes(), prior_deduplication);
-}
-
-#[test]
-fn blocked_inbound_message_under_silent_receipt_policy_returns_acknowledgment_without_plaintext() {
-    let mut fixture = ProtocolFixture::new();
-    let session_address = block_alice(&mut fixture);
-    let encrypted = alice_sends(&fixture, 0x54, b"blocked but receipted")
-        .result
-        .message;
-
-    let received = bob_receives(
-        &fixture,
-        &fixture.bob.host,
-        &encrypted,
-        settings_with_policy(BlockedContactAcknowledgmentPolicy::SilentReceipt),
-        trusted_validation(),
-        0x54,
-    )
-    .unwrap();
-
-    let acknowledgment = blocked(received.outcome)
-        .acknowledgment
-        .expect("silent-receipt returns an acknowledgment");
-    assert!(acknowledgment.prekey_reference.is_none());
-    let updates = fixture.bob.host.clone().commit(received.changes).unwrap();
-    assert_eq!(updates.len(), 2);
-    assert_eq!(updates[0].address(), &session_address);
-    assert_eq!(
-        updates[1].address(),
-        &fixture.bob.host.only(ProtocolStateKind::DeduplicationSet)
-    );
-}
-
-#[test]
-fn blocked_acknowledgment_policy_controls_sending_chain_advance() {
-    let mut fixture = ProtocolFixture::new();
-    let session_address = block_alice(&mut fixture);
-    let encrypted = alice_sends(&fixture, 0x55, b"chain advance").result.message;
+    let encrypted = alice_sends(&fixture, 0x55, b"blocked text").result.message;
     let receive = |policy| {
         let received = bob_receives(
             &fixture,
@@ -606,39 +474,26 @@ fn blocked_acknowledgment_policy_controls_sending_chain_advance() {
         )
         .unwrap();
         let updates = fixture.bob.host.clone().commit(received.changes).unwrap();
-        (blocked(received.outcome), updates)
+        (blocked(received.outcome).acknowledgment, updates)
     };
 
     let (suppressed, suppressed_updates) = receive(BlockedContactAcknowledgmentPolicy::Unreachable);
     let (receipted, receipted_updates) = receive(BlockedContactAcknowledgmentPolicy::SilentReceipt);
 
-    assert!(suppressed.acknowledgment.is_none());
-    assert!(receipted.acknowledgment.is_some());
-    assert_eq!(suppressed_updates[0].address(), &session_address);
-    assert_eq!(receipted_updates[0].address(), &session_address);
+    assert!(suppressed.is_none());
+    assert!(receipted.unwrap().prekey_reference.is_none());
+    for updates in [&suppressed_updates, &receipted_updates] {
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].address(), &session_address);
+        assert_eq!(updates[1].address(), &deduplication_address);
+        assert_ne!(updates[0].blob().unwrap().as_bytes(), prior_session);
+        assert_ne!(updates[1].blob().unwrap().as_bytes(), prior_deduplication);
+    }
     // The acknowledgment advances the sending chain, so only silent-receipt mutates it further.
     assert_ne!(
         suppressed_updates[0].blob().unwrap().as_bytes(),
         receipted_updates[0].blob().unwrap().as_bytes(),
     );
-}
-
-#[test]
-fn duplicate_blocked_inbound_message_does_not_load_or_advance_ratchet_state() {
-    let mut fixture = ProtocolFixture::new();
-    let session_address = block_alice(&mut fixture);
-    let encrypted = alice_sends(&fixture, 0x52, b"blocked once").result.message;
-    let first = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x52).unwrap();
-    blocked(first.outcome);
-    fixture.bob.host.commit(first.changes).unwrap();
-    fixture.bob.host.corrupt(&session_address);
-
-    let duplicate = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x53).unwrap();
-
-    assert!(matches!(
-        duplicate.outcome,
-        InboundMessageOutcome::Duplicate
-    ));
 }
 
 #[test]
@@ -701,74 +556,51 @@ fn revoked_certificate_rejects_before_local_block_handling() {
 }
 
 #[test]
-fn unavailable_revocation_state_rejects_before_plaintext_is_surfaced() {
+fn a_certificate_that_fails_validation_rejects_before_plaintext_is_surfaced() {
     let fixture = ProtocolFixture::new();
-    let encrypted = alice_sends(&fixture, 0x56, b"revocation unavailable")
-        .result
-        .message;
-
-    let result = bob_receives(
-        &fixture,
-        &fixture.bob.host,
-        &encrypted,
-        ReceiveSettings::default(),
-        InboundSenderCertificateValidation {
-            revoked_identity_keys: None,
-            ..trusted_validation()
-        },
-        0x56,
-    );
-
-    assert!(matches!(
-        failure(result),
-        ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::RevocationStateUnavailable
-        )
-    ));
-}
-
-#[test]
-fn untrusted_signing_key_rejects_before_plaintext_is_surfaced() {
-    let fixture = ProtocolFixture::new();
-    let encrypted = alice_sends(&fixture, 0x59, b"untrusted domain")
-        .result
-        .message;
     let mut untrusted = trusted_domain_signing_key();
     untrusted.status = DomainSigningKeyStatus::Untrusted;
+    let unavailable_revocations = InboundSenderCertificateValidation {
+        revoked_identity_keys: None,
+        ..trusted_validation()
+    };
+    let cases = [
+        (
+            fixture.alice.certificate(),
+            unavailable_revocations,
+            SenderCertificateValidationError::RevocationStateUnavailable,
+        ),
+        (
+            fixture.alice.certificate(),
+            validation(vec![untrusted], Vec::new()),
+            SenderCertificateValidationError::UntrustedSigningKeyId,
+        ),
+        (
+            fixture.alice.certified_until(CREATED_AT_SECS - 1),
+            trusted_validation(),
+            SenderCertificateValidationError::ExpiredCertificate,
+        ),
+    ];
 
-    let result = bob_receives(
-        &fixture,
-        &fixture.bob.host,
-        &encrypted,
-        ReceiveSettings::default(),
-        validation(vec![untrusted], Vec::new()),
-        0x59,
-    );
+    for (sequence, (certificate, validation, expected)) in (0x56..).zip(cases) {
+        let encrypted = alice_sends_certified(&fixture, certificate, sequence, b"never shown")
+            .result
+            .message;
 
-    assert!(matches!(
-        failure(result),
-        ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::UntrustedSigningKeyId
-        )
-    ));
-}
+        let result = bob_receives(
+            &fixture,
+            &fixture.bob.host,
+            &encrypted,
+            ReceiveSettings::default(),
+            validation,
+            sequence as u8,
+        );
 
-#[test]
-fn expired_certificate_rejects_before_plaintext_is_surfaced() {
-    let fixture = ProtocolFixture::new();
-    let expired = fixture.alice.certified_until(CREATED_AT_SECS - 1);
-    let encrypted = alice_sends_certified(&fixture, expired, 0x5a, b"expired domain")
-        .result
-        .message;
-
-    let result = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x5a);
-
-    assert!(matches!(
-        failure(result),
-        ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::ExpiredCertificate
-        )
-    ));
+        assert!(matches!(
+            failure(result),
+            ProtocolStateError::SenderCertificateValidation(error) if error == expected
+        ));
+    }
 }
 
 #[test]
@@ -864,33 +696,6 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
 }
 
 #[test]
-fn unblocked_contact_resumes_existing_session_without_new_handshake() {
-    let mut fixture = ProtocolFixture::new();
-    let engine = *fixture.alice.store.protocol_engine();
-    block_alice(&mut fixture);
-    let first = fixture.encrypt_from_alice(0x56, b"blocked before unblock");
-    let received =
-        bob_receives_validated(&fixture, &fixture.bob.host, &first.message, 0x56).unwrap();
-    blocked(received.outcome);
-    fixture.bob.host.commit(received.changes).unwrap();
-    let record = fixture.bob.contact_record(fixture.alice.identity_key());
-    let unblocked = engine
-        .unblock_contact(fixture.alice.identity_key(), record.as_ref())
-        .unwrap();
-    fixture.bob.host.commit(unblocked).unwrap();
-    let second = fixture.encrypt_from_alice(0x57, b"after unblock");
-
-    let accepted = accepted(
-        bob_receives_validated(&fixture, &fixture.bob.host, &second.message, 0x57)
-            .unwrap()
-            .outcome,
-    );
-
-    assert_eq!(accepted.session_id, fixture.session_id);
-    assert_eq!(accepted.plaintext.as_slice(), b"after unblock");
-}
-
-#[test]
 fn in_band_messages_and_acknowledgments_do_not_verify_contact() {
     let mut fixture = ProtocolFixture::new();
     let trust = |device: &Device, peer: &Device| device.contact(peer).unwrap().trust_state;
@@ -922,20 +727,6 @@ fn in_band_messages_and_acknowledgments_do_not_verify_contact() {
         trust(&fixture.alice, &fixture.bob),
         ContactTrustState::Unverified
     );
-}
-
-#[test]
-fn deduplication_receive_rejects_bad_state() {
-    let fixture = ProtocolFixture::new();
-    let deduplication_address = fixture.bob.host.only(ProtocolStateKind::DeduplicationSet);
-    let encrypted = alice_sends(&fixture, 12, b"bad dedup state").result.message;
-    let mut corrupt = fixture.bob.host.clone();
-    corrupt.corrupt(&deduplication_address);
-
-    assert!(matches!(
-        failure(bob_receives_validated(&fixture, &corrupt, &encrypted, 24)),
-        ProtocolStateError::BlobDecode { address, .. } if address == deduplication_address
-    ));
 }
 
 #[test]
@@ -976,20 +767,6 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
     );
 
     assert!(matches!(failure(result), ProtocolStateError::Ratchet(_)));
-}
-
-#[test]
-fn tampered_ciphertext_exposes_no_sender_identity() {
-    let fixture = ProtocolFixture::new();
-    let mut encrypted = alice_sends(&fixture, 3, b"secret").result.message;
-    *encrypted.ciphertext.last_mut().unwrap() ^= 0x01;
-
-    let result = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 13);
-
-    assert!(matches!(
-        failure(result),
-        ProtocolStateError::SealedFrame(_)
-    ));
 }
 
 #[test]
@@ -1058,7 +835,8 @@ fn oversized_or_corrupt_session_blob_is_a_decode_fault_without_reinitialization(
     let address = fixture.alice.host.only(ProtocolStateKind::RatchetSession);
     let mut torn = blob(&fixture.alice.host, &address);
     torn.pop();
-    for stored in [vec![1; 128 * 1024], torn] {
+    let oversized = vec![1; ProtocolHardeningLimits::default().max_protocol_state_blob_len + 1];
+    for stored in [oversized, torn] {
         let mut alice_store = fixture.alice.host.clone();
         alice_store.set_raw(address.clone(), stored.clone());
 

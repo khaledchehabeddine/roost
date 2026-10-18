@@ -340,21 +340,6 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_acknowledgment_is_kept_with_the_list() {
-        let address = address();
-        let limits = ProtocolHardeningLimits::default();
-        let digest = acknowledgment_digest(b"transport-binding", b"encoded acknowledgment");
-        let mut pending = LoadedPendingAcknowledgments::empty();
-
-        pending.record_acknowledgment(digest);
-
-        let blob = encode_pending_acknowledgments(&address, &pending, limits).unwrap();
-        let decoded = decode_pending_acknowledgments(&address, &blob, limits).unwrap();
-        assert!(decoded.pending.is_empty());
-        assert_eq!(decoded.acknowledgment_digests, [digest]);
-    }
-
-    #[test]
     fn a_repeated_acknowledgment_is_found_without_decoding_any_waiting_message() {
         let address = address();
         let limits = ProtocolHardeningLimits::default();

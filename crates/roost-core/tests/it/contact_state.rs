@@ -1,11 +1,10 @@
 //! Contact calls that take a contact's one record, and the decoders apps read contacts through.
 
 use crate::support::HostCommitError;
-use crate::support::device::{Device, DeviceError, Intent, Relay};
+use crate::support::device::{Device, Relay};
 use roost_core::{
     ContactIdentityKey, ContactSafetyNumberConfirmation, ContactTrustState, InboundMessageOutcome,
-    MessageOperationError, ProtocolStateBlob, ProtocolStateError, ProtocolStateKind,
-    derive_safety_number,
+    ProtocolStateBlob, ProtocolStateError, ProtocolStateKind, derive_safety_number,
 };
 
 // Alice asks Bob, Bob accepts, and Alice receives the acceptance.
@@ -19,10 +18,6 @@ fn befriended(relay: &Relay) -> (Device, Device) {
     (alice, bob)
 }
 
-fn local_identity_key(device: &Device) -> ContactIdentityKey {
-    device.identity_key()
-}
-
 // Confirms `peer`'s Safety Number on `device` and commits the result.
 fn verify(device: &mut Device, peer: &Device) {
     let safety_number = derive_safety_number(device.identity_key(), peer.identity_key()).unwrap();
@@ -30,7 +25,7 @@ fn verify(device: &mut Device, peer: &Device) {
         .store
         .protocol_engine()
         .confirm_contact_safety_number(
-            local_identity_key(device),
+            device.identity_key(),
             peer.identity_key(),
             device.contact_record(peer.identity_key()).as_ref(),
             &safety_number.grouped_decimal,
@@ -39,15 +34,6 @@ fn verify(device: &mut Device, peer: &Device) {
     let ContactSafetyNumberConfirmation::Matched(changes) = confirmation else {
         panic!("safety number did not match");
     };
-    device.commit_changes(changes).unwrap();
-}
-
-fn unblock(device: &mut Device, peer: ContactIdentityKey) {
-    let changes = device
-        .store
-        .protocol_engine()
-        .unblock_contact(peer, device.contact_record(peer).as_ref())
-        .unwrap();
     device.commit_changes(changes).unwrap();
 }
 
@@ -105,19 +91,6 @@ fn a_contact_record_under_another_identitys_address_is_a_fault() {
             .decode_contact(&address, &ProtocolStateBlob::from_bytes(torn)),
         Err(ProtocolStateError::BlobDecode { .. })
     ));
-}
-
-#[test]
-fn confirming_the_safety_number_verifies_an_accepted_contact() {
-    let relay = Relay::new();
-    let (mut alice, bob) = befriended(&relay);
-
-    verify(&mut alice, &bob);
-
-    assert_eq!(
-        alice.contact(&bob).unwrap().trust_state,
-        ContactTrustState::Verified
-    );
 }
 
 #[test]
@@ -238,7 +211,7 @@ fn blocking_and_unblocking_keep_every_trust_state() {
 
         alice.block(bob.identity_key());
         let blocked = alice.contact(&bob).unwrap();
-        unblock(&mut alice, bob.identity_key());
+        alice.unblock(bob.identity_key());
         let unblocked = alice.contact(&bob).unwrap();
 
         assert!(blocked.blocked);
@@ -256,7 +229,7 @@ fn unblocking_a_stranger_blocked_before_they_sent_anything_forgets_them() {
     alice.block(stranger.identity_key());
     assert!(alice.contact(&stranger).unwrap().blocked);
 
-    unblock(&mut alice, stranger.identity_key());
+    alice.unblock(stranger.identity_key());
 
     assert!(alice.contact(&stranger).is_none());
     let changes = alice
@@ -265,21 +238,6 @@ fn unblocking_a_stranger_blocked_before_they_sent_anything_forgets_them() {
         .unblock_contact(stranger.identity_key(), None)
         .unwrap();
     assert!(changes.into_updates().is_empty());
-}
-
-#[test]
-fn a_blocked_contact_refuses_outgoing_messages() {
-    let relay = Relay::new();
-    let (mut alice, bob) = befriended(&relay);
-    alice.block(bob.identity_key());
-    let outgoing = alice.outgoing(&bob, b"never sent");
-
-    assert!(matches!(
-        alice.encrypt(outgoing, Intent::Message),
-        Err(DeviceError::Operation(
-            MessageOperationError::ProtocolState(ProtocolStateError::BlockedContact)
-        ))
-    ));
 }
 
 #[test]

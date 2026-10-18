@@ -3,16 +3,7 @@
 //! Crosses the keystore boundary into protocol state: the contact flag lives in protocol state
 //! while the inbox lives in secure storage, and blocking must move both.
 
-use crate::support::device::{Device, Relay};
-
-// Bob holds Alice's Contact Request.
-fn requested(relay: &Relay) -> (Device, Device) {
-    let mut alice = Device::new(relay, 0xa1);
-    let mut bob = Device::new(relay, 0xb0);
-    let request = alice.request(&bob, b"hi bob");
-    bob.receive(&request.message);
-    (alice, bob)
-}
+use crate::support::device::{Relay, requested};
 
 #[test]
 fn blocking_a_contact_rotates_the_inbox() {

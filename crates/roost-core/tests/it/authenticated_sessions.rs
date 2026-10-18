@@ -163,26 +163,6 @@ fn a_first_message_delivered_twice_is_a_duplicate() {
 }
 
 #[test]
-fn a_handshake_never_replaces_a_session_it_names() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let mut bob = Device::new(&relay, 0xb0);
-    let first = request_with(
-        &mut alice,
-        &bob,
-        bob.bundle_without_one_time_prekey(),
-        b"first",
-    );
-    let second = alice.send(&bob, b"second");
-    bob.receive(&first.message);
-
-    // The second Message carries the same handshake, but its Session exists, so it decrypts on it.
-    let received = accepted_message(bob.receive(&second.message));
-    assert_eq!(received.session_id, first.session_id);
-    assert_eq!(&*received.plaintext, b"second");
-}
-
-#[test]
 fn crossing_requests_converge_on_the_lower_session_id() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);

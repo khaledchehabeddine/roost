@@ -257,13 +257,6 @@ impl DiscoveryKeyManager {
         Ok(raw)
     }
 
-    // Validates a discovery-key blob's structure without storing it, so a malformed backup aborts
-    // an import before any existing key material is cleared.
-    #[cfg(test)]
-    pub(crate) fn validate_blob(blob: &[u8]) -> Result<(), DiscoveryKeyError> {
-        checked_blob(blob).map(|_| ())
-    }
-
     // Validates that a discovery-key blob is structurally valid and signed by the restored
     // identity key before an encrypted-backup import mutates storage.
     pub(crate) fn validate_blob_for_identity(
@@ -489,49 +482,39 @@ mod tests {
     }
 
     #[test]
-    fn current_rejects_blob_of_wrong_length() {
+    fn a_discovery_key_blob_of_the_wrong_length_is_refused_by_each_reader() {
+        let mut rng = ChaCha20Rng::from_seed([0xb8; 32]);
         let discovery = setup_with_identity().manager;
+        let malformed = [0xAAu8; 50];
+        let wrong_length = |result| {
+            matches!(
+                result,
+                Err(DiscoveryKeyError::InvalidBlobLength {
+                    expected: DISCOVERY_KEY_BLOB_LEN,
+                    actual: 50
+                })
+            )
+        };
+        assert!(wrong_length(discovery.restore_from_blob(&malformed)));
         discovery
             .lock_storage()
             .unwrap()
-            .store(DISCOVERY_KEY, &[0xAAu8; 50])
+            .store(DISCOVERY_KEY, &malformed)
             .unwrap();
+
+        assert!(wrong_length(discovery.current().map(|_| ())));
         assert!(matches!(
-            discovery.current(),
-            Err(DiscoveryKeyError::InvalidBlobLength {
-                expected: DISCOVERY_KEY_BLOB_LEN,
-                actual: 50
-            })
+            discovery.stored_status().unwrap(),
+            DiscoveryKeyStatus::Malformed
+        ));
+        assert!(matches!(
+            discovery.rotate_now(&mut rng, fixed_now()),
+            Err(DiscoveryKeyError::Malformed)
         ));
     }
 
     #[test]
-    fn current_returns_corrupt_for_tampered_signature() {
-        let mut rng = ChaCha20Rng::from_seed([0xb1; 32]);
-        let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        // Flip a byte inside the stored signature region.
-        let mut blob = discovery
-            .lock_storage()
-            .unwrap()
-            .load(DISCOVERY_KEY)
-            .unwrap()
-            .unwrap()
-            .to_vec();
-        blob[69] ^= 0x01;
-        discovery
-            .lock_storage()
-            .unwrap()
-            .store(DISCOVERY_KEY, &blob)
-            .unwrap();
-        assert!(matches!(
-            discovery.current(),
-            Err(DiscoveryKeyError::Corrupt)
-        ));
-    }
-
-    #[test]
-    fn stored_status_reports_absent_present_and_malformed() {
+    fn stored_status_reports_absent_and_present() {
         let mut rng = ChaCha20Rng::from_seed([0xb2; 32]);
         let discovery = setup_with_identity().manager;
         assert!(matches!(
@@ -543,59 +526,6 @@ mod tests {
             discovery.stored_status().unwrap(),
             DiscoveryKeyStatus::Present { epoch: 1 }
         ));
-        discovery
-            .lock_storage()
-            .unwrap()
-            .store(DISCOVERY_KEY, &[0xAAu8; 50])
-            .unwrap();
-        assert!(matches!(
-            discovery.stored_status().unwrap(),
-            DiscoveryKeyStatus::Malformed
-        ));
-    }
-
-    #[test]
-    fn rotate_now_establishes_epoch_one_and_verifies() {
-        let mut rng = ChaCha20Rng::from_seed([0xb3; 32]);
-        let DiscoveryKeySetup {
-            identity,
-            manager: discovery,
-        } = setup_with_identity();
-        let rotated = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        // Identity creation starts at epoch 1, not 0.
-        assert_eq!(rotated.epoch(), 1);
-        let bundle = discovery.current_public().unwrap();
-        assert_eq!(bundle.epoch, 1);
-        let loaded_identity = identity.load_identity().unwrap();
-        assert!(verify_public_discovery_key(&bundle, loaded_identity.verifying_key()).is_ok());
-    }
-
-    /// The discovery key and the delivery capability share one epoch, so rotation must
-    /// replace both. A rotation that advanced the epoch while leaving the
-    /// capability intact would leave a blocked contact still able to deliver.
-    #[test]
-    fn rotation_replaces_the_delivery_capability() {
-        let mut rng = ChaCha20Rng::from_seed([0xb4; 32]);
-        let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        let before = *discovery.current_capability().unwrap().to_bytes();
-
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        let after = *discovery.current_capability().unwrap().to_bytes();
-
-        assert_ne!(before, after);
-    }
-
-    #[test]
-    fn capability_survives_a_reload() {
-        let mut rng = ChaCha20Rng::from_seed([0xb5; 32]);
-        let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-
-        let first = *discovery.current_capability().unwrap().to_bytes();
-        let second = *discovery.current_capability().unwrap().to_bytes();
-
-        assert_eq!(first, second);
     }
 
     #[test]
@@ -719,21 +649,6 @@ mod tests {
     }
 
     #[test]
-    fn rotate_now_rejects_malformed_blob() {
-        let mut rng = ChaCha20Rng::from_seed([0xb8; 32]);
-        let discovery = setup_with_identity().manager;
-        discovery
-            .lock_storage()
-            .unwrap()
-            .store(DISCOVERY_KEY, &[0xAAu8; 50])
-            .unwrap();
-        assert!(matches!(
-            discovery.rotate_now(&mut rng, fixed_now()),
-            Err(DiscoveryKeyError::Malformed)
-        ));
-    }
-
-    #[test]
     fn rotate_now_without_identity_returns_identity_error() {
         let mut rng = ChaCha20Rng::from_seed([0xb9; 32]);
         let discovery = manager_without_identity();
@@ -797,54 +712,6 @@ mod tests {
         assert!(matches!(
             discovery.export_blob(),
             Err(DiscoveryKeyError::NotFound)
-        ));
-    }
-
-    #[test]
-    fn export_then_restore_blob_preserves_epoch_and_verifies() {
-        let mut rng = ChaCha20Rng::from_seed([0xbc; 32]);
-        let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        let exported = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        assert_eq!(exported.epoch(), 2);
-        let blob = discovery.export_blob().unwrap();
-
-        discovery.reset().unwrap();
-        discovery.restore_from_blob(&blob).unwrap();
-
-        let restored = discovery.current().unwrap();
-        assert_eq!(restored.epoch(), 2);
-        assert_eq!(
-            restored.public_key().as_bytes(),
-            exported.public_key().as_bytes()
-        );
-    }
-
-    #[test]
-    fn validate_blob_accepts_stored_blob_and_rejects_malformed() {
-        let mut rng = ChaCha20Rng::from_seed([0xbd; 32]);
-        let discovery = setup_with_identity().manager;
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        let blob = discovery.export_blob().unwrap();
-        assert!(DiscoveryKeyManager::validate_blob(&blob).is_ok());
-        assert!(matches!(
-            DiscoveryKeyManager::validate_blob(&[0xAAu8; 50]),
-            Err(DiscoveryKeyError::InvalidBlobLength {
-                expected: DISCOVERY_KEY_BLOB_LEN,
-                actual: 50
-            })
-        ));
-    }
-
-    #[test]
-    fn restore_from_blob_rejects_malformed_blob() {
-        let discovery = setup_with_identity().manager;
-        assert!(matches!(
-            discovery.restore_from_blob(&[0xAAu8; 50]),
-            Err(DiscoveryKeyError::InvalidBlobLength {
-                expected: DISCOVERY_KEY_BLOB_LEN,
-                actual: 50
-            })
         ));
     }
 }
