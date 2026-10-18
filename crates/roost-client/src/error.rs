@@ -1,5 +1,3 @@
-//! Error mapping for failures crossing the UniFFI boundary.
-
 use roost_core::{
     DiscoveryKeyError, HandshakeError, IdentityError, KeyStoreError, KeyStoreOperationError,
     MessageOperationError, MessageStartError, OneTimePreKeyError, ProtocolStateError,
@@ -8,11 +6,10 @@ use roost_core::{
 };
 use roost_protocol::{SenderCertificateValidationError, SignatureError};
 
-/// Errors surfaced across the UniFFI boundary.
+/// The error Roost's calls throw.
 ///
-/// Variants group storage, identity, backup, and internal failures returned through generated
-/// bindings. `reason` fields are diagnostic strings for logs and must not drive application
-/// logic.
+/// Each variant is a failure the host handles differently. `reason` fields are diagnostic strings
+/// for logs and must not drive application logic.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum RoostError {
     /// An identity already exists in storage.
@@ -27,12 +24,6 @@ pub enum RoostError {
     /// Encrypted backup creation failed during randomness, key derivation, or encryption.
     #[error("backup failed: {reason}")]
     BackupFailed {
-        /// Diagnostic failure context for logs only.
-        reason: String,
-    },
-    /// Backup import failed before an identity was restored.
-    #[error("backup import failed: {reason}")]
-    BackupImportFailed {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
@@ -56,7 +47,7 @@ pub enum RoostError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// Stored discovery-key, signed-pre-key, or prepared-operation material is corrupt.
+    /// Stored Discovery Key, signed prekey, or prepared-operation material is corrupt.
     #[error("stored key material is corrupt")]
     Corrupt,
     /// Backup decryption failed because the passphrase or backup bytes did not authenticate.
@@ -81,7 +72,7 @@ pub enum RoostError {
     /// the contact has supplied one for its current Discovery Key.
     #[error("no delivery capability for this contact")]
     NoDeliveryCapability,
-    /// Requested identity, discovery-key, or signed-pre-key material is not stored.
+    /// Requested identity, Discovery Key, or prekey material is not stored.
     #[error("key material not found")]
     NotFound,
     /// A different first Message already used the one-time prekey this one names, so Roost refuses
@@ -122,7 +113,8 @@ pub enum RoostError {
         /// [`SecureStorage`](crate::SecureStorage) implementation returned.
         reason: String,
     },
-    /// A SecureStorage input changed after a KeyStore operation was prepared.
+    /// A SecureStorage entry that a prepared operation read changed before the operation was
+    /// reserved.
     #[error("secure-storage precondition changed for {key}")]
     SecureStoragePreconditionChanged {
         /// Stable SecureStorage entry name that changed.
@@ -131,7 +123,15 @@ pub enum RoostError {
     /// The bounded prepared-operation journal has no free unfinished-operation slot.
     #[error("too many unfinished prepared operations")]
     TooManyUnfinishedOperations,
-    /// A message, blob, backup, or prekey major version is unsupported.
+    /// The most sent Messages allowed already wait for the contact's acknowledgment on the
+    /// Session, so Roost refuses another. Keep the draft and send it once the contact acknowledges
+    /// some, or a delivery check gives up on them.
+    #[error("{limit} messages already wait for an acknowledgment")]
+    TooManyPendingAcknowledgments {
+        /// Most Messages that wait for an acknowledgment on one Session.
+        limit: u64,
+    },
+    /// A Message, blob, backup, or prekey version is unsupported.
     #[error("unsupported version: {reason}")]
     UnsupportedVersion {
         /// Diagnostic context for logging only.
@@ -145,7 +145,6 @@ impl RoostError {
         match &mut self {
             RoostError::AuthenticationFailed { reason }
             | RoostError::BackupFailed { reason }
-            | RoostError::BackupImportFailed { reason }
             | RoostError::BlockedContact { reason }
             | RoostError::CertificateRejected { reason }
             | RoostError::ContactNotAccepted { reason }
@@ -165,6 +164,7 @@ impl RoostError {
             | RoostError::NotFound
             | RoostError::OperationFinished
             | RoostError::SecureStoragePreconditionChanged { .. }
+            | RoostError::TooManyPendingAcknowledgments { .. }
             | RoostError::TooManyUnfinishedOperations => {}
         }
         self
@@ -183,10 +183,12 @@ pub(crate) fn reason_from_chain(error: &dyn std::error::Error) -> String {
     reason
 }
 
+// SecureStorage is the only foreign trait, so a callback that throws something other than a
+// `RoostError` is a storage failure.
 impl From<uniffi::UnexpectedUniFFICallbackError> for RoostError {
-    fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
-        RoostError::InternalError {
-            reason: "unexpected foreign callback failure".into(),
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        RoostError::Storage {
+            reason: error.reason,
         }
     }
 }
@@ -450,7 +452,6 @@ impl From<ProtocolStateError> for RoostError {
             | ProtocolStateError::EmptyStateKey
             | ProtocolStateError::MessageTranscript(_)
             | ProtocolStateError::NoContactRequest
-            | ProtocolStateError::PendingAcknowledgmentLimitReached { .. }
             | ProtocolStateError::SealedPayload(_)
             | ProtocolStateError::SnapshotCapacityExceeded { .. }
             | ProtocolStateError::StateKeyTooLong { .. }
@@ -464,6 +465,12 @@ impl From<ProtocolStateError> for RoostError {
                 RoostError::ContactNotAccepted { reason }
             }
             ProtocolStateError::NoDeliveryCapability => RoostError::NoDeliveryCapability,
+            // Every limit is a fixed constant well inside `u64`.
+            ProtocolStateError::PendingAcknowledgmentLimitReached { limit } => {
+                RoostError::TooManyPendingAcknowledgments {
+                    limit: limit as u64,
+                }
+            }
             ProtocolStateError::Handshake(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::BlobEncode { .. } | ProtocolStateError::Randomness(_) => {
                 RoostError::InternalError { reason }
@@ -560,6 +567,22 @@ impl From<TransportBindingError> for RoostError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_acknowledgment_limit_has_its_own_variant() {
+        assert!(matches!(
+            RoostError::from(ProtocolStateError::PendingAcknowledgmentLimitReached { limit: 1024 }),
+            RoostError::TooManyPendingAcknowledgments { limit: 1024 }
+        ));
+    }
+
+    #[test]
+    fn unexpected_storage_callback_failure_keeps_the_host_reason() {
+        assert!(matches!(
+            RoostError::from(uniffi::UnexpectedUniFFICallbackError::new("disk full")),
+            RoostError::Storage { reason } if reason == "disk full"
+        ));
+    }
 
     #[test]
     fn message_input_rejections_remain_invalid_data_across_protocol_error_boundary() {

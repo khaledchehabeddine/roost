@@ -11,9 +11,9 @@
 //! own context and rebuilds the payload from the identity key it was handed, so a caller chooses
 //! neither the context nor the shape of the signed bytes.
 
+use crate::encoding::{fixed_32, fixed_64};
 use crate::error::RoostError;
-use crate::protocol::IdentityKey;
-use crate::records::{Identity, fixed_32, fixed_64};
+use crate::identity::{Identity, IdentityKey};
 use roost_core::{
     PublicIdentityKey as CorePublicIdentityKey, Signature,
     verify_discovery_to_identity_binding as crypto_verify_discovery_to_identity_binding,
@@ -21,46 +21,37 @@ use roost_core::{
 };
 use roost_protocol::parse_ed25519_verifying_key_bytes;
 
-/// Verifies that an identity's binding signature ties its agreement key to its signing key (the IK
-/// self-binding).
+/// Verifies that an identity's binding signature ties its agreement key to its signing key.
 ///
-/// This is the `RoostIKBinding-v1:` direction. It says only that whoever holds the Ed25519 half
-/// claimed the X25519 half beside it; it says nothing about which discovery key, if any, points at
-/// this identity. Pair it with [`verify_discovery_to_identity_binding`] when the identity arrived
-/// from a discovery-key lookup, and check that one against the discovery key the *user* supplied —
-/// verifying a relay's signature under a key the same relay handed over proves only that the relay
-/// is self-consistent.
+/// It shows only that whoever holds the signing key claimed the agreement key beside it, not which
+/// Discovery Key, if any, vouches for the identity. When the identity came from a Discovery Key
+/// lookup, also check it with [`verify_discovery_to_identity_binding`] against the Discovery Key
+/// the user supplied. A relay's signature checked under a key the same relay handed over proves
+/// only that the relay is self-consistent.
 ///
 /// # Errors
-/// - [`RoostError::AuthenticationFailed`] when the signature does not validate. This is the
-///   answer that matters: the identity does not bind.
-/// - [`RoostError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or the
-///   Ed25519 half does not decompress to a valid point.
+/// - [`RoostError::AuthenticationFailed`] if the signature doesn't verify, so the identity doesn't
+///   bind.
+/// - [`RoostError::InvalidData`] if a key isn't 32 bytes, the signature isn't 64, or the signing
+///   key isn't a valid point.
 #[uniffi::export]
 pub fn verify_identity_key_binding(identity: Identity) -> Result<(), RoostError> {
     Ok(verify_public_identity_key(&identity.to_core()?)?)
 }
 
-/// Verifies that `discovery_verifying_key` signed `identity`'s two public halves (the DK→IK
-/// direction).
+/// Verifies that `discovery_verifying_key` signed `identity`'s two public keys.
 ///
-/// This is the `RoostDKToIK-v1:` direction, and it is the whole security of adding a contact by
-/// discovery key: the relay answers a lookup with an identity, and nothing about the transport says
-/// that identity is the one the discovery key authorized. Pass the discovery key the user typed,
-/// never one read back out of the response being checked.
-///
-/// `identity` carries no binding signature because this direction does not cover one — the payload
-/// is exactly the two identity halves. Whether the identity vouches for itself is a separate
-/// question with a separate context, answered by [`verify_identity_key_binding`]; a caller
-/// resolving an unknown identity wants both.
+/// This check is the whole security of adding a contact by Discovery Key: the relay answers a
+/// lookup with an identity, and nothing else shows that the Discovery Key authorized it. Pass the
+/// Discovery Key the user typed, never one read from the response being checked. The signature
+/// doesn't cover the identity's own binding signature, so check that with
+/// [`verify_identity_key_binding`] too.
 ///
 /// # Errors
-/// - [`RoostError::AuthenticationFailed`] when the signature does not validate — including when
-///   it is a perfectly good signature made under the other identity context, which is what the
-///   domain separation is for.
-/// - [`RoostError::InvalidData`] when a key is not 32 bytes, the signature is not 64, or either
-///   Ed25519 value is not a canonically encoded, non-weak point. The discovery key is held to the
-///   same standard a public discovery key is, because it arrives from the same place.
+/// - [`RoostError::AuthenticationFailed`] if the signature doesn't verify, including a valid
+///   signature made for the identity's own binding.
+/// - [`RoostError::InvalidData`] if a key isn't 32 bytes, the signature isn't 64, or either
+///   signing key isn't a canonically encoded, non-weak point.
 #[uniffi::export]
 pub fn verify_discovery_to_identity_binding(
     identity: IdentityKey,
@@ -84,8 +75,8 @@ pub fn verify_discovery_to_identity_binding(
     )?)
 }
 
-/// Builds the public identity key the DK→IK verifier takes from an identity key that carries no
-/// signature.
+/// Builds the public identity key the Discovery Key's verifier takes from an identity key that
+/// carries no signature.
 ///
 /// [`crypto_verify_discovery_to_identity_binding`] reads exactly two fields of the key, the
 /// X25519 and Ed25519 halves, because those two are the entire signed payload. The signature slot
@@ -109,7 +100,7 @@ fn binding_payload_identity_key(
 mod tests {
     use super::{verify_discovery_to_identity_binding, verify_identity_key_binding};
     use crate::storage::MemoryStorage;
-    use crate::{Identity, IdentityContext, RoostError, SecureStorage, protocol::IdentityKey};
+    use crate::{Identity, IdentityContext, IdentityKey, RoostError, SecureStorage};
     use roost_crypto::{
         DiscoveryKey, PublicIdentityKey, Signature, SigningKeyPair, sign_identity_key_binding,
     };
