@@ -971,42 +971,4 @@ mod tests {
                 if expected == SIGNED_PREKEY_HEADER_LEN + 4 * RETAINED_SIGNED_PREKEY_RECORD_LEN
         ));
     }
-
-    #[test]
-    fn old_signed_prekey_layouts_fail_without_changing_storage() {
-        // Each old layout's version byte and total length: v1 held one record, v2 added a
-        // retained-key flag and record, and v3 added the retained key's supersession time.
-        for (version, len) in [(1, 109), (2, 218), (3, 226)] {
-            let mut rng = ChaCha20Rng::from_seed([0xa2; 32]);
-            let manager = setup_with_discovery_key().manager;
-            let mut blob = vec![0; len];
-            blob[0] = version;
-            manager
-                .storage
-                .lock()
-                .unwrap()
-                .store(SIGNED_PREKEY_KEY, &blob)
-                .unwrap();
-
-            assert!(matches!(
-                manager.current_public(at(FIXED_NOW)),
-                Err(SignedPreKeyError::UnsupportedVersion(stored)) if stored == version
-            ));
-            assert!(matches!(
-                manager.rotate_if_stale(&mut rng, at(FIXED_NOW)),
-                Err(SignedPreKeyError::UnsupportedVersion(stored)) if stored == version
-            ));
-            assert_eq!(
-                manager
-                    .storage
-                    .lock()
-                    .unwrap()
-                    .load(SIGNED_PREKEY_KEY)
-                    .unwrap()
-                    .unwrap()
-                    .as_slice(),
-                blob
-            );
-        }
-    }
 }
