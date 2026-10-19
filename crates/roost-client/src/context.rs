@@ -236,7 +236,7 @@ impl IdentityContext {
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_identity_deletion(&self) -> Result<OperationId, RoostError> {
         Ok(OperationId::from_core(
-            self.inner.prepare_identity_deletion()?.operation.id,
+            self.inner.prepare_identity_deletion()?.id,
         ))
     }
 
@@ -312,7 +312,6 @@ impl IdentityContext {
         Ok(OperationId::from_core(
             self.inner
                 .prepare_backup_import(backup.as_slice(), passphrase.as_str())?
-                .operation
                 .id,
         ))
     }
@@ -364,7 +363,8 @@ impl IdentityContext {
         })
     }
 
-    /// Prepares a new signed prekey if the current one is missing or stale.
+    /// Prepares a new signed prekey if the current one is missing or stale, and deletes the
+    /// previous Discovery Keys the Relay can no longer hold Messages for.
     ///
     /// Call this at launch. Finalize or abort the operation even when it returns no signed prekey.
     ///
@@ -544,7 +544,7 @@ fn convert_prepared<T, U>(
     prepared: CorePreparedKeyStoreOperation<T>,
     convert: impl FnOnce(T) -> Result<U, RoostError>,
 ) -> Result<(OperationId, U), RoostError> {
-    let id = prepared.operation.id;
+    let id = prepared.id;
     match convert(prepared.output) {
         Ok(output) => Ok((OperationId::from_core(id), output)),
         Err(error) => Err(abort_unconverted(store, Some(id), error)),
@@ -904,10 +904,6 @@ mod tests {
         assert_eq!(bundle.epoch, epoch);
     }
 
-    fn current_epoch(store: &IdentityContext) -> u32 {
-        store.inner.current_public_discovery_key().unwrap().epoch
-    }
-
     #[test]
     fn generate_identity_returns_ffi_safe_public_keys() {
         let store = key_store();
@@ -932,7 +928,8 @@ mod tests {
     fn replenish_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        let epoch = current_epoch(&store);
+        store.rotate_signed_prekey_now().unwrap();
+        let epoch = store.current_publication().unwrap().discovery_key.epoch;
         let bundles = store.replenish_one_time_prekeys().unwrap();
 
         assert_eq!(bundles.len(), 100);

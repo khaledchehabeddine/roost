@@ -247,8 +247,8 @@ fn a_new_discovery_key_keeps_trust_blocking_and_the_safety_number() {
     verify(&mut alice, &bob);
     let safety_number = derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap();
     let rotation = bob.store.prepare_inbox_rotation().unwrap();
-    bob.store.reserve_operation(rotation.operation.id).unwrap();
-    bob.store.finalize_operation(rotation.operation.id).unwrap();
+    bob.store.reserve_operation(rotation.id).unwrap();
+    bob.store.finalize_operation(rotation.id).unwrap();
     let message = bob.send(&alice, b"new inbox");
 
     assert!(matches!(

@@ -14,9 +14,9 @@ fn unknown_outcome_that_committed_finalizes_after_restart() {
     let database = IdentityDatabase::default();
     let store = storage.open();
     let prepared = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.id).unwrap();
     assert_eq!(
-        database.commit_identity(prepared.operation.id, HostCommit::AppliesWithUnknownOutcome),
+        database.commit_identity(prepared.id, HostCommit::AppliesWithUnknownOutcome),
         CommitResult::Unknown
     );
     drop(store);
@@ -36,9 +36,9 @@ fn unknown_outcome_that_did_not_commit_aborts_after_restart() {
     let database = IdentityDatabase::default();
     let store = storage.open();
     let lost = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(lost.operation.id).unwrap();
+    store.reserve_operation(lost.id).unwrap();
     assert_eq!(
-        database.commit_identity(lost.operation.id, HostCommit::FailsWithUnknownOutcome),
+        database.commit_identity(lost.id, HostCommit::FailsWithUnknownOutcome),
         CommitResult::Unknown
     );
     drop(store);
@@ -49,9 +49,9 @@ fn unknown_outcome_that_did_not_commit_aborts_after_restart() {
     assert!(restarted.unfinished_operations().unwrap().is_empty());
 
     let created = restarted.prepare_identity_creation().unwrap();
-    restarted.reserve_operation(created.operation.id).unwrap();
-    database.commit_identity(created.operation.id, HostCommit::Applies);
-    restarted.finalize_operation(created.operation.id).unwrap();
+    restarted.reserve_operation(created.id).unwrap();
+    database.commit_identity(created.id, HostCommit::Applies);
+    restarted.finalize_operation(created.id).unwrap();
     assert_eq!(
         restarted.identity().unwrap().unwrap().public_key(),
         created.output.public_key()
@@ -64,11 +64,11 @@ fn finalization_the_host_never_recorded_is_reconciled_after_restart() {
     let database = IdentityDatabase::default();
     let store = storage.open();
     let prepared = store.prepare_identity_creation().unwrap();
-    store.reserve_operation(prepared.operation.id).unwrap();
-    database.commit_identity(prepared.operation.id, HostCommit::Applies);
-    store.finalize_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.id).unwrap();
+    database.commit_identity(prepared.id, HostCommit::Applies);
+    store.finalize_operation(prepared.id).unwrap();
     drop(store);
-    assert_eq!(database.pending_finalizations(), [prepared.operation.id]);
+    assert_eq!(database.pending_finalizations(), [prepared.id]);
 
     let restarted = storage.open();
     recover(&restarted, &database).unwrap();

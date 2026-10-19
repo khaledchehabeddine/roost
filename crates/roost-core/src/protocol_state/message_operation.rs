@@ -36,9 +36,9 @@ use super::{
     SenderIdentityMaterial, StateChanges, WithheldInboundMessageResult,
     contact_identity_keys_match, match_state_entries, validate_contact_identity_key,
 };
+use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
 use crate::key_store::{KeyStore, KeyStoreError};
-use crate::{MessageId, PayloadKind, TransportBinding};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
     DiscoveryKey, Handshake, KeyPair, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,
@@ -46,8 +46,9 @@ use roost_crypto::{
     SealedFramePreKeyReference, Signature, SigningKeyPair, accept_handshake, initiate_handshake,
     sign_identity_key_binding, verify_discovery_to_identity_binding,
 };
-use roost_protocol::{PUBLIC_KEY_LEN, SessionId};
+use roost_protocol::{MessageId, PUBLIC_KEY_LEN, PayloadKind, SessionId};
 use std::collections::BTreeMap;
+use std::time::SystemTime;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
@@ -450,10 +451,11 @@ impl ProtocolStateEngine {
     }
 
     // Starts decrypting `message` with the local Identity's `keys`, reading prekeys and previous
-    // Discovery Keys from `store`.
+    // Discovery Keys from `store` as they stand at `now`.
     pub(crate) fn start_decryption(
         &self,
         store: KeyStore,
+        now: SystemTime,
         keys: LocalIdentityKeys,
         message: IncomingMessage,
     ) -> Result<MessageDecryption, ProtocolStateError> {
@@ -463,6 +465,7 @@ impl ProtocolStateEngine {
         Ok(MessageDecryption(Some(Box::new(Decrypting {
             engine: *self,
             store,
+            now,
             local,
             message: message.message,
             encoded,
@@ -1101,6 +1104,8 @@ pub struct MessageDecryption(Option<Box<Decrypting>>);
 struct Decrypting {
     engine: ProtocolStateEngine,
     store: KeyStore,
+    // When the operation started, the one time it reads for every key lookup.
+    now: SystemTime,
     local: LocalSenderKeys,
     message: SealedFrame,
     encoded: Vec<u8>,
@@ -1356,7 +1361,7 @@ impl Decrypting {
         let previous = if self.message.prekey_reference.is_none()
             && sealed_to != self.local.keys.discovery_key.public_key().as_bytes()
         {
-            self.store.previous_discovery_key(sealed_to)?
+            self.store.previous_discovery_key(sealed_to, self.now)?
         } else {
             None
         };
@@ -1436,6 +1441,7 @@ impl Decrypting {
         let Some(signed_prekey_id) = self.store.signed_prekey_needing_admission(
             reference.discovery_epoch,
             &reference.signed_prekey_public_key,
+            self.now,
         )?
         else {
             return self.accept_first_message(rng, opened, reference);
@@ -1467,7 +1473,7 @@ impl Decrypting {
             digest,
             message,
         } = opened;
-        let prekeys = self.store.first_message_prekeys(&reference)?;
+        let prekeys = self.store.first_message_prekeys(&reference, self.now)?;
         let session_id = message.metadata.session_id;
         let base_key =
             message
@@ -2345,7 +2351,6 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_crypto::generate_discovery_key;
-    use std::time::SystemTime;
 
     #[test]
     fn local_keys_whose_discovery_key_another_identity_signed_are_refused() {
@@ -2380,11 +2385,11 @@ mod tests {
     fn key_store() -> (KeyStore, PublicIdentityKey) {
         let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
         let created = store.prepare_identity_creation().unwrap();
-        store.reserve_operation(created.operation.id).unwrap();
-        store.finalize_operation(created.operation.id).unwrap();
+        store.reserve_operation(created.id).unwrap();
+        store.finalize_operation(created.id).unwrap();
         let rotated = store.prepare_signed_prekey_rotation().unwrap();
-        store.reserve_operation(rotated.operation.id).unwrap();
-        store.finalize_operation(rotated.operation.id).unwrap();
+        store.reserve_operation(rotated.id).unwrap();
+        store.finalize_operation(rotated.id).unwrap();
         (store, created.output.public().unwrap())
     }
 

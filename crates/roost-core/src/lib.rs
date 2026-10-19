@@ -49,14 +49,12 @@ mod hardening;
 mod identity;
 mod key_store;
 mod one_time_prekey;
-mod prekey_state;
 mod protocol_state;
 mod safety_number;
 mod signed_prekey;
 mod storage;
+mod stored_data;
 mod transport_binding;
-
-use roost_protocol::{MessageId, PayloadKind};
 
 pub use contact::{
     ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
@@ -66,10 +64,9 @@ pub use discovery_key::DiscoveryKeyError;
 pub use hardening::ProtocolHardeningLimits;
 pub use identity::{Identity, IdentityError};
 pub use key_store::{
-    ContactBlock, JournalCorruption, KeyStore, KeyStoreError, KeyStoreOperation,
-    KeyStoreOperationError, KeyStoreOperationId, KeyStoreOperationStatus, MessageStartError,
-    PreparedKeyStoreOperation, PublicationBundle, SecureStorageExpectedValue,
-    SecureStoragePrecondition, UnfinishedKeyStoreOperation,
+    ContactBlock, JournalCorruption, KeyStore, KeyStoreError, KeyStoreOperationError,
+    KeyStoreOperationId, KeyStoreOperationStatus, MessageStartError, PreparedKeyStoreOperation,
+    PublicationBundle, UnfinishedKeyStoreOperation,
 };
 pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
@@ -89,12 +86,12 @@ pub use protocol_state::{
 pub use roost_crypto::{
     HandshakeError, OneTimePreKeyReference, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,
     PublicKey, PublicKeyError, PublicOneTimePreKey, PublicSignedPreKey, RatchetError,
-    RatchetStateError, RecipientDeliveryCapability, SealedFrame, SealedFrameError,
-    SealedFramePreKeyReference, Signature, verify_discovery_to_identity_binding,
-    verify_public_identity_key,
+    RatchetStateError, SealedFrame, SealedFrameError, SealedFramePreKeyReference, Signature,
+    verify_discovery_to_identity_binding, verify_public_identity_key,
 };
 pub use roost_protocol::SessionId;
 pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{SecureStorage, StorageError};
+pub use stored_data::StoredDataError;
 pub use transport_binding::{TransportBinding, TransportBindingError};

@@ -1,12 +1,8 @@
-//! Contact identity and trust-state records.
-
 use crate::protocol_state::StateChanges;
 use crate::safety_number::IdentityKey;
-use roost_crypto::PublicDiscoveryKey;
+use roost_crypto::{PublicDiscoveryKey, Signature};
 use roost_protocol::PUBLIC_KEY_LEN;
 use serde::{Deserialize, Serialize};
-
-const SIGNATURE_LEN: usize = 64;
 
 /// A peer Identity Key that owns contact, trust, and blocking state.
 pub type ContactIdentityKey = IdentityKey;
@@ -16,14 +12,14 @@ pub type ContactIdentityKey = IdentityKey;
 pub struct ContactDiscoveryKey {
     /// Canonical X25519 public key bytes used to look up the contact prekey bundle.
     pub x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    /// Canonical Ed25519 verifying-key bytes used to validate signed pre-keys.
+    /// Canonical Ed25519 verifying-key bytes used to validate signed prekeys.
     pub ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
     /// Discovery Key epoch, monotonic within one storage lineage.
     pub epoch: u32,
     /// Signed creation timestamp used to compare restored storage lineages.
     pub created_at_secs: u64,
     /// Identity-key signature over the public Discovery Key.
-    pub identity_signature: [u8; SIGNATURE_LEN],
+    pub identity_signature: [u8; Signature::BYTE_SIZE],
 }
 
 impl From<&PublicDiscoveryKey> for ContactDiscoveryKey {

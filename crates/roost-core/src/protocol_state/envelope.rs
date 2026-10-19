@@ -6,9 +6,9 @@ use super::{
     InboundSenderCertificateValidation, ProtocolStateError, contact_identity_keys_match,
     encode_zeroizing,
 };
+use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
 use crate::hardening::ProtocolHardeningLimits;
-use crate::{MessageId, PayloadKind, TransportBinding};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
     DiscoveryKey, Handshake, Header, KeyPair, PublicDiscoveryKey, PublicIdentityKey, PublicKey,
@@ -18,8 +18,8 @@ use roost_crypto::{
     verify_public_discovery_key, verify_public_identity_key, verify_sender_proof,
 };
 use roost_protocol::{
-    MESSAGE_TRANSCRIPT_CONTEXT, MessageTranscriptInput, PUBLIC_KEY_LEN, SessionId,
-    is_valid_x25519_public_key, message_transcript, pad_sealed_payload,
+    MESSAGE_TRANSCRIPT_CONTEXT, MessageId, MessageTranscriptInput, PUBLIC_KEY_LEN, PayloadKind,
+    SessionId, is_valid_x25519_public_key, message_transcript, pad_sealed_payload,
     parse_ed25519_verifying_key_bytes, unpad_sealed_payload, verify_with_context,
 };
 use serde::{Deserialize, Serialize};

@@ -23,11 +23,11 @@ use super::{
     Route, SendIntent, SignedSenderCertificate, StateReads, changes, contact_update, supply_state,
     text_kind,
 };
+use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
-use crate::{MessageId, PayloadKind, TransportBinding};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::SealedFrame;
-use roost_protocol::{SessionId, to_unix_millis};
+use roost_protocol::{MessageId, PayloadKind, SessionId, to_unix_millis};
 use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
 

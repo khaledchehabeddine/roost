@@ -319,8 +319,8 @@ fn a_bundle_older_than_the_contacts_discovery_key_asks_again() {
     let (mut alice, mut bob) = requested(&relay);
     let stale = bob.bundle_without_one_time_prekey();
     let rotation = bob.store.prepare_inbox_rotation().unwrap();
-    bob.store.reserve_operation(rotation.operation.id).unwrap();
-    bob.store.finalize_operation(rotation.operation.id).unwrap();
+    bob.store.reserve_operation(rotation.id).unwrap();
+    bob.store.finalize_operation(rotation.id).unwrap();
     let acceptance = bob.accept_request(&alice, b"welcome");
     alice.receive(&acceptance.message);
     // Alice's host lost her Sessions with Bob but kept his record, which the grant updated.
@@ -342,14 +342,8 @@ fn a_bundle_older_than_the_contacts_discovery_key_asks_again() {
 
 fn rotate_signed_prekey(device: &Device) {
     let rotation = device.store.prepare_signed_prekey_rotation().unwrap();
-    device
-        .store
-        .reserve_operation(rotation.operation.id)
-        .unwrap();
-    device
-        .store
-        .finalize_operation(rotation.operation.id)
-        .unwrap();
+    device.store.reserve_operation(rotation.id).unwrap();
+    device.store.finalize_operation(rotation.id).unwrap();
 }
 
 #[test]
@@ -411,7 +405,7 @@ fn a_first_message_on_a_one_time_prekey_commits_its_use_with_the_session() {
             .unfinished_operations()
             .unwrap()
             .iter()
-            .any(|unfinished| unfinished.operation.id == operation)
+            .any(|unfinished| unfinished.id == operation)
     );
     bob.commit_changes(observed.changes).unwrap();
 
@@ -529,7 +523,7 @@ fn an_unknown_commit_outcome_is_reconciled_at_startup_without_losing_the_one_tim
 
     let unfinished = bob.store.unfinished_operations().unwrap();
     assert_eq!(unfinished.len(), 1);
-    assert_eq!(unfinished[0].operation.id, operation);
+    assert_eq!(unfinished[0].id, operation);
     bob.store.finalize_operation(operation).unwrap();
     assert!(matches!(
         bob.observe(&request.message).unwrap().outcome,
@@ -565,8 +559,8 @@ fn after_an_inbox_rotation_contacts_get_the_new_grant() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
     let rotation = bob.store.prepare_inbox_rotation().unwrap();
-    bob.store.reserve_operation(rotation.operation.id).unwrap();
-    bob.store.finalize_operation(rotation.operation.id).unwrap();
+    bob.store.reserve_operation(rotation.id).unwrap();
+    bob.store.finalize_operation(rotation.id).unwrap();
 
     let message = bob.send(&alice, b"new inbox");
     assert_eq!(message.payload_kind, PayloadKind::EncryptedTextWithGrant);
@@ -584,8 +578,8 @@ fn a_grant_for_an_older_discovery_key_changes_nothing() {
     let (mut alice, mut bob) = befriended(&relay);
     let delayed = bob.send(&alice, b"sent before the rotation");
     let rotation = bob.store.prepare_inbox_rotation().unwrap();
-    bob.store.reserve_operation(rotation.operation.id).unwrap();
-    bob.store.finalize_operation(rotation.operation.id).unwrap();
+    bob.store.reserve_operation(rotation.id).unwrap();
+    bob.store.finalize_operation(rotation.id).unwrap();
     let current = bob.send(&alice, b"sent after the rotation");
     alice.receive(&current.message);
 

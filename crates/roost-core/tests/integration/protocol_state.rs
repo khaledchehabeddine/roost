@@ -501,16 +501,8 @@ fn discovery_key_rotation_does_not_bypass_blocked_inbound_message() {
     let mut fixture = ProtocolFixture::new();
     block_alice(&mut fixture);
     let rotation = fixture.alice.store.prepare_inbox_rotation().unwrap();
-    fixture
-        .alice
-        .store
-        .reserve_operation(rotation.operation.id)
-        .unwrap();
-    fixture
-        .alice
-        .store
-        .finalize_operation(rotation.operation.id)
-        .unwrap();
+    fixture.alice.store.reserve_operation(rotation.id).unwrap();
+    fixture.alice.store.finalize_operation(rotation.id).unwrap();
     let encrypted = alice_sends(&fixture, 0x54, b"rotated blocked").result;
     assert_eq!(encrypted.payload_kind, PayloadKind::EncryptedTextWithGrant);
 

@@ -8,9 +8,8 @@ use super::{
 use crate::hardening::{
     MAX_ACKNOWLEDGMENT_DIGESTS, MAX_PENDING_ACKNOWLEDGMENTS, ProtocolHardeningLimits,
 };
-use crate::{MessageId, PayloadKind};
 use roost_crypto::SealedFrame;
-use roost_protocol::SessionId;
+use roost_protocol::{MessageId, PayloadKind, SessionId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;

@@ -4,31 +4,19 @@
 //! and finalizes the prepared operation, including idempotent lifecycle calls.
 
 use crate::support::host_identity::DeviceStorage;
-use roost_core::{
-    KeyStoreError, KeyStoreOperationError, KeyStoreOperationStatus, SecureStorageExpectedValue,
-};
+use roost_core::{KeyStoreError, KeyStoreOperationError, KeyStoreOperationStatus};
 
 #[test]
 fn prepared_identity_creation_becomes_visible_only_after_finalize() {
     let store = DeviceStorage::default().open();
 
     let prepared = store.prepare_identity_creation().unwrap();
-    let id = prepared.operation.id;
+    let id = prepared.id;
 
     assert!(store.identity().unwrap().is_none());
     assert_eq!(
         store.operation_status(id).unwrap(),
         KeyStoreOperationStatus::Prepared
-    );
-    assert!(
-        prepared
-            .operation
-            .secure_storage_preconditions
-            .iter()
-            .all(|precondition| matches!(
-                precondition.expected_value,
-                SecureStorageExpectedValue::Absent
-            ))
     );
 
     assert_eq!(
@@ -61,21 +49,21 @@ fn prepared_operation_rejects_secure_state_changed_after_preparation() {
     let first = store.prepare_identity_creation().unwrap();
     let stale = store.prepare_identity_creation().unwrap();
 
-    store.reserve_operation(first.operation.id).unwrap();
-    store.finalize_operation(first.operation.id).unwrap();
+    store.reserve_operation(first.id).unwrap();
+    store.finalize_operation(first.id).unwrap();
 
     assert!(matches!(
-        store.reserve_operation(stale.operation.id),
+        store.reserve_operation(stale.id),
         Err(KeyStoreError::Operation(
             KeyStoreOperationError::PreconditionChanged { .. }
         ))
     ));
     assert_eq!(
-        store.abort_operation(stale.operation.id).unwrap(),
+        store.abort_operation(stale.id).unwrap(),
         KeyStoreOperationStatus::Aborted
     );
     assert_eq!(
-        store.abort_operation(stale.operation.id).unwrap(),
+        store.abort_operation(stale.id).unwrap(),
         KeyStoreOperationStatus::Aborted
     );
 }

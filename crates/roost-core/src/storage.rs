@@ -14,8 +14,6 @@ pub trait SecureStorage: Send {
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError>;
 
     /// Returns the value stored under `key`, or `None` if not present.
-    ///
-    /// The returned bytes are wrapped in [`Zeroizing`].
     fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError>;
 
     /// Removes the value stored under `key`. Does nothing if the key is not present.
