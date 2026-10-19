@@ -113,10 +113,10 @@ impl KeyStore {
 
     /// Starts decrypting a received Message.
     ///
-    /// The operation loads the local Identity's keys now. It reads SecureStorage again only for
-    /// the prekeys a first Message names, or the previous Discovery Key an established Message was
-    /// sealed to before a rotation, and stages the use of a one-time prekey as a Prepared KeyStore
-    /// Operation that travels in the result's state changes.
+    /// The operation loads the local Identity's keys and reads the clock now. It reads
+    /// SecureStorage again only for the prekeys a first Message names, or the previous Discovery
+    /// Key an established Message was sealed to before a rotation, and stages the use of a
+    /// one-time prekey as a Prepared KeyStore Operation that travels in the result's state changes.
     pub fn start_decryption(
         &self,
         message: IncomingMessage,
@@ -125,20 +125,18 @@ impl KeyStore {
         Ok(self
             .0
             .engine
-            .start_decryption(self.clone(), keys, message)?)
+            .start_decryption(self.clone(), SystemTime::now(), keys, message)?)
     }
 
     // Returns the Discovery Key a rotation replaced whose X25519 public key is `public_key`, while
-    // the Relay may still hold Messages sealed to it.
+    // the Relay may still hold Messages sealed to it at `now`.
     pub(crate) fn previous_discovery_key(
         &self,
         public_key: &[u8; 32],
+        now: SystemTime,
     ) -> Result<Option<DiscoveryKey>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        Ok(self
-            .0
-            .discovery
-            .previous_key(public_key, SystemTime::now())?)
+        Ok(self.0.discovery.previous_key(public_key, now)?)
     }
 
     // Returns the ID of the signed prekey a first Message names when it is one kept after a
@@ -147,12 +145,13 @@ impl KeyStore {
         &self,
         epoch: u32,
         public_key: &[u8; 32],
+        now: SystemTime,
     ) -> Result<Option<u64>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        let (signed_prekey, is_current) =
-            self.0
-                .signed_prekey
-                .prekey_for_first_message(epoch, public_key, SystemTime::now())?;
+        let (signed_prekey, is_current) = self
+            .0
+            .signed_prekey
+            .prekey_for_first_message(epoch, public_key, now)?;
         Ok((!is_current).then(|| signed_prekey.id()))
     }
 
@@ -160,9 +159,9 @@ impl KeyStore {
     pub(crate) fn first_message_prekeys(
         &self,
         reference: &SealedFramePreKeyReference,
+        now: SystemTime,
     ) -> Result<FirstMessagePreKeys, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        let now = SystemTime::now();
         let (signed_prekey, _) = self.0.signed_prekey.prekey_for_first_message(
             reference.discovery_epoch,
             &reference.signed_prekey_public_key,
@@ -192,14 +191,13 @@ impl KeyStore {
         id: u64,
     ) -> Result<KeyStoreOperationId, KeyStoreError> {
         let prepared = self.prepare_operation(|staged| {
-            let _lifecycle = staged.lifecycle_guard();
             staged
                 .0
                 .one_time_prekey
                 .consume_one_time_prekey(epoch, id)
                 .map_err(KeyStoreError::from)
         })?;
-        Ok(prepared.operation.id)
+        Ok(prepared.id)
     }
 
     fn load_local_identity_keys(&self) -> Result<LocalIdentityKeys, MessageStartError> {

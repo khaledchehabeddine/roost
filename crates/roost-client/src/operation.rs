@@ -76,7 +76,7 @@ pub struct UnfinishedOperation {
 impl UnfinishedOperation {
     pub(crate) fn from_core(operation: CoreUnfinishedKeyStoreOperation) -> Self {
         Self {
-            id: OperationId::from_core(operation.operation.id),
+            id: OperationId::from_core(operation.id),
             status: OperationStatus::from_core(operation.status),
         }
     }

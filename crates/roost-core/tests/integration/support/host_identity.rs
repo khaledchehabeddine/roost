@@ -123,7 +123,7 @@ impl IdentityDatabase {
 /// Panics when SecureStorage and the host disagree, since a host must stop rather than guess.
 pub(crate) fn recover(store: &KeyStore, database: &IdentityDatabase) -> Result<(), KeyStoreError> {
     for unfinished in store.unfinished_operations()? {
-        let id = unfinished.operation.id;
+        let id = unfinished.id;
         match (unfinished.status, database.has_committed(id)) {
             (KeyStoreOperationStatus::Reserved | KeyStoreOperationStatus::Finalizing, true) => {
                 store.finalize_operation(id)?;

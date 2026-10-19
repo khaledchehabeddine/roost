@@ -1,5 +1,3 @@
-//! Safety Number derivation from permanent Identity Keys.
-
 use roost_protocol::{
     PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
 };
@@ -9,7 +7,7 @@ const SAFETY_NUMBER_DIGITS: usize = 60;
 const SAFETY_NUMBER_GROUP_SIZE: usize = 5;
 const SAFETY_NUMBER_GROUPS: usize = 12;
 
-/// A permanent Identity Key used for IK-bound safety, trust, and certificate decisions.
+/// A permanent Identity Key, which owns Safety Numbers, trust, and certificate decisions.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct IdentityKey {
     /// Canonical X25519 public key bytes.
@@ -19,7 +17,7 @@ pub struct IdentityKey {
 }
 
 impl IdentityKey {
-    /// Returns the canonical Identity Key encoding used for Safety Numbers and IK-keyed state.
+    /// Returns the canonical Identity Key encoding that Safety Numbers and contact state use.
     #[must_use]
     pub(crate) fn canonical_encoding(&self) -> [u8; roost_protocol::IDENTITY_KEY_ENCODING_LEN] {
         roost_protocol::identity_key_encoding(&self.x25519_public_key, &self.ed25519_verifying_key)
@@ -47,8 +45,8 @@ pub enum SafetyNumberError {
 ///
 /// Both inputs must use canonical X25519 and Ed25519 public-key encodings. Discovery Keys are not
 /// inputs, so Discovery Key rotation does not change the Safety Number for the same two Identity
-/// Keys. The two canonical IK encodings are sorted before hashing so both parties derive the same
-/// value.
+/// Keys. The two canonical Identity Key encodings are sorted before hashing so both parties derive
+/// the same value.
 pub fn derive_safety_number(
     first: IdentityKey,
     second: IdentityKey,

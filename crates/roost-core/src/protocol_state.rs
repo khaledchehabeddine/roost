@@ -15,7 +15,7 @@ use crate::hardening::{
 };
 use crate::key_store::KeyStoreOperationId;
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
-use crate::{MessageId, PayloadKind};
+use crate::stored_data::{deserialize_bounded, encode_zeroizing};
 use contact_record::{ContactRecord, contact_address};
 pub use envelope::SenderIdentityMaterial;
 pub use message_operation::{
@@ -29,19 +29,18 @@ pub(crate) use message_operation::{LocalIdentityKeys, SendIntent};
 pub use pending_acknowledgment::PendingAcknowledgment;
 use roost_crypto::SealedFrame;
 use roost_protocol::{
-    DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, MessageTranscriptError,
-    PUBLIC_KEY_LEN, RevocationState, SealedPayloadError, SenderCertificateIdentityKey,
-    SenderCertificateValidationError, SenderCertificateValidationInput, SessionId, SignatureError,
-    ValidatedSenderCertificate, validate_sender_certificate,
+    DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, MessageId,
+    MessageTranscriptError, PUBLIC_KEY_LEN, PayloadKind, RevocationState, SealedPayloadError,
+    SenderCertificateIdentityKey, SenderCertificateValidationError,
+    SenderCertificateValidationInput, SessionId, SignatureError, ValidatedSenderCertificate,
+    validate_sender_certificate,
 };
-use serde::de::{Error as DeError, SeqAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use session::{
     encode_peer_sessions, load_peer_sessions, load_session, peer_sessions_address, session_address,
 };
 use std::collections::BTreeMap;
 use std::fmt;
-use std::marker::PhantomData;
 use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
@@ -1041,18 +1040,6 @@ fn encode_blob(
     Ok(ProtocolStateBlob::from_zeroizing(bytes))
 }
 
-// Encodes `wire` into a buffer sized up front, so secret bytes are never left behind in memory a
-// growing `Vec` freed.
-fn encode_zeroizing<T: Serialize>(wire: &T) -> Result<Zeroizing<Vec<u8>>, postcard::Error> {
-    let len = postcard::experimental::serialized_size(wire)?;
-    let mut bytes = Zeroizing::new(vec![0; len]);
-    let written = postcard::to_slice(wire, &mut bytes)?.len();
-    if written != len {
-        return Err(postcard::Error::SerializeBufferFull);
-    }
-    Ok(bytes)
-}
-
 // Checks a blob's length and version before anything decodes its body.
 fn blob_body<'a>(
     address: &ProtocolStateAddress,
@@ -1171,43 +1158,6 @@ fn push_bounded(digests: &mut Vec<[u8; DIGEST_LEN]>, digest: [u8; DIGEST_LEN], c
 fn keep_newest(digests: &mut Vec<[u8; DIGEST_LEN]>, capacity: usize) {
     let excess = digests.len().saturating_sub(capacity);
     digests.drain(..excess);
-}
-
-// Decodes a list, refusing one longer than `MAX` before it allocates for more.
-fn deserialize_bounded<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    struct BoundedVisitor<T, const MAX: usize>(PhantomData<T>);
-
-    impl<'de, T: Deserialize<'de>, const MAX: usize> Visitor<'de> for BoundedVisitor<T, MAX> {
-        type Value = Vec<T>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "at most {MAX} entries")
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            let too_many = || A::Error::custom(format_args!("more than {MAX} entries"));
-            if seq.size_hint().is_some_and(|len| len > MAX) {
-                return Err(too_many());
-            }
-            let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX));
-            while let Some(entry) = seq.next_element()? {
-                if entries.len() == MAX {
-                    return Err(too_many());
-                }
-                entries.push(entry);
-            }
-            Ok(entries)
-        }
-    }
-
-    deserializer.deserialize_seq(BoundedVisitor::<T, MAX>(PhantomData))
 }
 
 fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {

@@ -823,6 +823,6 @@ fn sent_at_millis(message_id: MessageId) -> u64 {
 }
 
 fn finalize<T>(store: &KeyStore, prepared: &PreparedKeyStoreOperation<T>) {
-    store.reserve_operation(prepared.operation.id).unwrap();
-    store.finalize_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.id).unwrap();
+    store.finalize_operation(prepared.id).unwrap();
 }

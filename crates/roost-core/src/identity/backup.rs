@@ -1,30 +1,28 @@
 //! Passphrase-encrypted identity backup using Argon2id and XChaCha20-Poly1305.
 //!
-//! The backup is a self-describing envelope. A cleartext header carries the format version and
-//! the Argon2id parameters and is authenticated as the AEAD associated data. An unknown version is
+//! A backup starts with its version and a cleartext header that carries the Argon2id parameters,
+//! salt and nonce, and the cipher authenticates both as associated data. An unknown version is
 //! rejected before key derivation, and a work-factor parameter can't be altered without failing
-//! decryption. The encrypted
-//! body holds the identity-key halves followed by the verbatim discovery-key blob, which this
-//! module treats as opaque so discovery-key versioning stays owned by `discovery_key.rs`.
-//!
-//! Envelope: `version(1) | m_cost(4) | t_cost(4) | p_cost(4) | salt(16) | nonce(24)`, then
-//! `XChaCha20-Poly1305(aad = header, plaintext = ik_x25519(32) | ik_ed25519(32) | discovery_key_blob)`.
+//! decryption. The ciphertext holds the Identity Key's secret halves and the verbatim Discovery
+//! Key entry, which this module treats as opaque so its version stays owned by `discovery_key.rs`.
 
-use super::{IDENTITY_CURRENT_KEY, IdentityError, IdentityManager, encode_identity_key_blob};
+use super::{Identity, IdentityError, IdentityManager, IdentitySecretsWire};
+use crate::stored_data::{
+    decode_exact, decode_versioned_prefix, encode_versioned, encode_zeroizing,
+};
 use argon2::{Argon2, Params};
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, Payload},
 };
 use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const BACKUP_FORMAT_VERSION: u8 = 2;
+const BACKUP_FORMAT_VERSION: u8 = 3;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
-const HEADER_LEN: usize = 1 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN;
-const IDENTITY_KEY_LEN: usize = 64;
 
 // Argon2id memory cost is in KiB. Memory is the primary brute-force defense; time adds CPU work
 // without raising memory use. Parameters travel in the header so future backups can raise the work
@@ -50,154 +48,113 @@ const _: () = assert!(
         && ARGON2_T_COST <= MAX_T_COST
 );
 
-// Decrypted backup contents: the identity-key halves and the opaque discovery-key blob.
-type DecryptedBackup = (Zeroizing<[u8; IDENTITY_KEY_LEN]>, Zeroizing<Vec<u8>>);
+#[derive(Deserialize, Serialize)]
+struct BackupHeaderWire {
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
+    salt: [u8; SALT_LEN],
+    nonce: [u8; NONCE_LEN],
+}
+
+#[derive(Serialize)]
+struct BackupContentsWire<'a> {
+    identity: IdentitySecretsWire,
+    discovery_key: &'a [u8],
+}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+struct DecodedBackupContentsWire {
+    identity: IdentitySecretsWire,
+    discovery_key: Vec<u8>,
+}
 
 impl IdentityManager {
-    // Exports the current identity and the given discovery-key blob as an encrypted backup.
+    // Exports the current identity and the given Discovery Key entry as an encrypted backup.
     pub(crate) fn export_encrypted_backup<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
         passphrase: &str,
-        discovery_key_blob: &[u8],
+        discovery_key_entry: &[u8],
     ) -> Result<Vec<u8>, IdentityError> {
-        let (x25519_bytes, ed25519_bytes) = self.load_identity_key_bytes()?;
-
-        let mut plaintext = Zeroizing::new(Vec::with_capacity(
-            IDENTITY_KEY_LEN + discovery_key_blob.len(),
-        ));
-        plaintext.extend_from_slice(&*x25519_bytes);
-        plaintext.extend_from_slice(&*ed25519_bytes);
-        plaintext.extend_from_slice(discovery_key_blob);
-
-        let salt: [u8; SALT_LEN] = random_bytes(rng)?;
-        let nonce_bytes: [u8; NONCE_LEN] = random_bytes(rng)?;
-        let header = encode_header(
-            ARGON2_M_COST,
-            ARGON2_T_COST,
-            ARGON2_P_COST,
-            &salt,
-            &nonce_bytes,
-        );
+        let contents = encode_zeroizing(&BackupContentsWire {
+            identity: self.load_secrets()?,
+            discovery_key: discovery_key_entry,
+        })
+        .map_err(IdentityError::BackupFormat)?;
+        let header = BackupHeaderWire {
+            memory_kib: ARGON2_M_COST,
+            iterations: ARGON2_T_COST,
+            parallelism: ARGON2_P_COST,
+            salt: random_bytes(rng)?,
+            nonce: random_bytes(rng)?,
+        };
+        let associated_data = encode_versioned(BACKUP_FORMAT_VERSION, &header)
+            .map_err(IdentityError::BackupFormat)?;
 
         let key_bytes = derive_key(
             passphrase,
-            &salt,
-            ARGON2_M_COST,
-            ARGON2_T_COST,
-            ARGON2_P_COST,
+            &header.salt,
+            header.memory_kib,
+            header.iterations,
+            header.parallelism,
         )?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
         let ciphertext = cipher
             .encrypt(
-                XNonce::from_slice(&nonce_bytes),
+                XNonce::from_slice(&header.nonce),
                 Payload {
-                    msg: plaintext.as_slice(),
-                    aad: &header,
+                    msg: &contents,
+                    aad: &associated_data,
                 },
             )
             .map_err(|_| IdentityError::BackupEncryption)?;
 
-        let mut backup = Vec::with_capacity(HEADER_LEN + ciphertext.len());
-        backup.extend_from_slice(&header);
+        let mut backup = Vec::with_capacity(associated_data.len() + ciphertext.len());
+        backup.extend_from_slice(&associated_data);
         backup.extend_from_slice(&ciphertext);
         Ok(backup)
     }
-
-    // Decrypts a backup blob into the identity-key halves and the opaque discovery-key blob.
-    pub(crate) fn decrypt_backup(
-        &self,
-        data: &[u8],
-        passphrase: &str,
-    ) -> Result<DecryptedBackup, IdentityError> {
-        if let Some(&version) = data.first()
-            && version != BACKUP_FORMAT_VERSION
-        {
-            return Err(IdentityError::UnsupportedBackupVersion(version));
-        }
-        if data.len() < HEADER_LEN {
-            return Err(IdentityError::BackupTooShort {
-                len: data.len(),
-                min_len: HEADER_LEN,
-            });
-        }
-        let (header, ciphertext) = data.split_at(HEADER_LEN);
-        let m_cost = read_u32(&header[1..5]);
-        let t_cost = read_u32(&header[5..9]);
-        let p_cost = read_u32(&header[9..13]);
-        // Bound the work factor before spending Argon2id memory: the floor blocks downgrade, the
-        // ceiling blocks an unauthenticated memory-exhaustion DoS from a hostile header.
-        validate_import_argon2_params(m_cost, t_cost, p_cost)?;
-        let salt = &header[13..13 + SALT_LEN];
-        let nonce_bytes = &header[13 + SALT_LEN..HEADER_LEN];
-
-        let key_bytes = derive_key(passphrase, salt, m_cost, t_cost, p_cost)?;
-        let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
-        let plaintext = Zeroizing::new(
-            cipher
-                .decrypt(
-                    XNonce::from_slice(nonce_bytes),
-                    Payload {
-                        msg: ciphertext,
-                        aad: header,
-                    },
-                )
-                .map_err(|_| IdentityError::DecryptionFailed)?,
-        );
-
-        let identity_key: [u8; IDENTITY_KEY_LEN] = plaintext
-            .get(..IDENTITY_KEY_LEN)
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or(IdentityError::BackupPlaintextTooShort {
-                len: plaintext.len(),
-                min_len: IDENTITY_KEY_LEN,
-            })?;
-        let discovery_key_blob = Zeroizing::new(plaintext[IDENTITY_KEY_LEN..].to_vec());
-        Ok((Zeroizing::new(identity_key), discovery_key_blob))
-    }
-
-    // Stores decrypted identity-key halves as one versioned blob.
-    pub(crate) fn store_decrypted_identity(
-        &self,
-        identity_key: &[u8; IDENTITY_KEY_LEN],
-    ) -> Result<(), IdentityError> {
-        let (x25519, ed25519) = identity_key.split_at(32);
-        let invalid_key_length = |half: &[u8]| IdentityError::InvalidKeyLength {
-            expected: 32,
-            actual: half.len(),
-        };
-        let x25519 = x25519.try_into().map_err(|_| invalid_key_length(x25519))?;
-        let ed25519 = ed25519
-            .try_into()
-            .map_err(|_| invalid_key_length(ed25519))?;
-        let blob = encode_identity_key_blob(x25519, ed25519);
-        let mut storage = self.lock_storage()?;
-        storage.store(IDENTITY_CURRENT_KEY, &*blob)?;
-        Ok(())
-    }
 }
 
-fn encode_header(
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
-    salt: &[u8; SALT_LEN],
-    nonce: &[u8; NONCE_LEN],
-) -> [u8; HEADER_LEN] {
-    let mut header = [0u8; HEADER_LEN];
-    header[0] = BACKUP_FORMAT_VERSION;
-    header[1..5].copy_from_slice(&m_cost.to_be_bytes());
-    header[5..9].copy_from_slice(&t_cost.to_be_bytes());
-    header[9..13].copy_from_slice(&p_cost.to_be_bytes());
-    header[13..13 + SALT_LEN].copy_from_slice(salt);
-    header[13 + SALT_LEN..].copy_from_slice(nonce);
-    header
-}
+// Decrypts a backup into its Identity and the opaque Discovery Key entry.
+pub(crate) fn decrypt_backup(
+    data: &[u8],
+    passphrase: &str,
+) -> Result<(Identity, Zeroizing<Vec<u8>>), IdentityError> {
+    let (header, ciphertext): (BackupHeaderWire, &[u8]) =
+        decode_versioned_prefix(BACKUP_FORMAT_VERSION, data)
+            .map_err(IdentityError::BackupFormat)?;
+    // Bound the work factor before spending Argon2id memory: the floor blocks downgrade, the
+    // ceiling blocks an unauthenticated memory-exhaustion DoS from a hostile header.
+    validate_import_argon2_params(header.memory_kib, header.iterations, header.parallelism)?;
+    let associated_data = &data[..data.len() - ciphertext.len()];
 
-fn read_u32(bytes: &[u8]) -> u32 {
-    let mut buf = [0u8; 4];
-    buf.copy_from_slice(bytes);
-    u32::from_be_bytes(buf)
+    let key_bytes = derive_key(
+        passphrase,
+        &header.salt,
+        header.memory_kib,
+        header.iterations,
+        header.parallelism,
+    )?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key_bytes));
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                XNonce::from_slice(&header.nonce),
+                Payload {
+                    msg: ciphertext,
+                    aad: associated_data,
+                },
+            )
+            .map_err(|_| IdentityError::DecryptionFailed)?,
+    );
+    let mut contents: DecodedBackupContentsWire =
+        decode_exact(&plaintext).map_err(IdentityError::BackupFormat)?;
+    Ok((
+        Identity::from_wire(&contents.identity),
+        Zeroizing::new(std::mem::take(&mut contents.discovery_key)),
+    ))
 }
 
 fn validate_import_argon2_params(
@@ -253,12 +210,13 @@ fn derive_key(
 mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
+    use crate::stored_data::StoredDataError;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use std::sync::{Arc, Mutex};
 
-    // An arbitrary opaque "discovery-key blob" — this module never inspects its bytes.
-    const DK_BLOB: [u8; 8] = [0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8];
+    // An arbitrary opaque Discovery Key entry, since this module never inspects its bytes.
+    const DISCOVERY_KEY_ENTRY: [u8; 8] = [0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8];
 
     fn manager() -> IdentityManager {
         IdentityManager::new(Arc::new(Mutex::new(Box::new(InMemorySecureStorage::new()))))
@@ -271,12 +229,34 @@ mod tests {
         manager
     }
 
+    fn export(manager: &IdentityManager, seed: u8, passphrase: &str) -> Vec<u8> {
+        manager
+            .export_encrypted_backup(
+                &mut ChaCha20Rng::from_seed([seed; 32]),
+                passphrase,
+                &DISCOVERY_KEY_ENTRY,
+            )
+            .unwrap()
+    }
+
+    // Returns `backup` with its header changed by `change` and its ciphertext kept.
+    fn with_header(backup: &[u8], change: impl FnOnce(&mut BackupHeaderWire)) -> Vec<u8> {
+        let (mut header, ciphertext): (BackupHeaderWire, &[u8]) =
+            decode_versioned_prefix(BACKUP_FORMAT_VERSION, backup).unwrap();
+        change(&mut header);
+        let mut changed = encode_versioned(BACKUP_FORMAT_VERSION, &header)
+            .unwrap()
+            .to_vec();
+        changed.extend_from_slice(ciphertext);
+        changed
+    }
+
     #[test]
     fn export_backup_without_identity_returns_not_found() {
         let mut rng = ChaCha20Rng::from_seed([0x71; 32]);
         let manager = manager();
         assert!(matches!(
-            manager.export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB),
+            manager.export_encrypted_backup(&mut rng, "passphrase", &DISCOVERY_KEY_ENTRY),
             Err(IdentityError::NotFound)
         ));
     }
@@ -286,113 +266,92 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([0x72; 32]);
         let manager = manager_with_identity();
         let first = manager
-            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DISCOVERY_KEY_ENTRY)
             .unwrap();
         let second = manager
-            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
+            .export_encrypted_backup(&mut rng, "passphrase", &DISCOVERY_KEY_ENTRY)
             .unwrap();
         // Nonce reuse would break XChaCha20-Poly1305 confidentiality.
         assert_ne!(first, second);
     }
 
     #[test]
-    fn export_decrypt_round_trip_recovers_identity_and_discovery_blob() {
-        let mut rng = ChaCha20Rng::from_seed([0x73; 32]);
+    fn export_decrypt_round_trip_recovers_identity_and_discovery_key_entry() {
         let manager = manager_with_identity();
-        let (expected_x25519, expected_ed25519) = manager.load_identity_key_bytes().unwrap();
-        let backup = manager
-            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
-            .unwrap();
+        let expected = manager.load_identity().unwrap();
+        let backup = export(&manager, 0x73, "passphrase");
 
-        let (identity_key, discovery_key_blob) =
-            manager.decrypt_backup(&backup, "passphrase").unwrap();
-        assert_eq!(&identity_key[..32], &*expected_x25519);
-        assert_eq!(&identity_key[32..], &*expected_ed25519);
-        assert_eq!(discovery_key_blob.as_slice(), &DK_BLOB);
+        let (identity, discovery_key_entry) = decrypt_backup(&backup, "passphrase").unwrap();
+        assert_eq!(identity.public_key(), expected.public_key());
+        assert_eq!(identity.verifying_key(), expected.verifying_key());
+        assert_eq!(discovery_key_entry.as_slice(), &DISCOVERY_KEY_ENTRY);
     }
 
     #[test]
-    fn decrypt_backup_rejects_data_shorter_than_header() {
-        let manager = manager();
-        let mut short = [0u8; 10];
-        short[0] = BACKUP_FORMAT_VERSION;
+    fn decrypt_backup_rejects_an_unknown_version_before_its_header() {
         assert!(matches!(
-            manager.decrypt_backup(&short, "passphrase"),
-            Err(IdentityError::BackupTooShort {
-                len: 10,
-                min_len: HEADER_LEN
-            })
+            decrypt_backup(&[BACKUP_FORMAT_VERSION + 1], "passphrase"),
+            Err(IdentityError::BackupFormat(StoredDataError::UnsupportedVersion(version)))
+                if version == BACKUP_FORMAT_VERSION + 1
+        ));
+    }
+
+    #[test]
+    fn decrypt_backup_rejects_a_truncated_header() {
+        let backup = export(&manager_with_identity(), 0x75, "passphrase");
+        assert!(matches!(
+            decrypt_backup(&backup[..10], "passphrase"),
+            Err(IdentityError::BackupFormat(StoredDataError::Decode(_)))
         ));
     }
 
     #[test]
     fn decrypt_backup_rejects_parameters_outside_their_bounds() {
-        let mut rng = ChaCha20Rng::from_seed([0x74; 32]);
-        let manager = manager_with_identity();
-        let backup = manager
-            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
-            .unwrap();
+        let backup = export(&manager_with_identity(), 0x74, "passphrase");
         // m_cost and t_cost fail below their floor, and p_cost must equal 1. An oversized m_cost or
         // t_cost must fail before Argon2id allocates, so a hostile header can't exhaust memory.
-        for (header_offset, value) in [
-            (1usize, 1u32),
-            (5, 1),
-            (9, 2),
-            (1, u32::MAX),
-            (5, MAX_T_COST + 1),
-        ] {
-            let mut tampered = backup.clone();
-            tampered[header_offset..header_offset + 4].copy_from_slice(&value.to_be_bytes());
-            assert!(
-                matches!(
-                    manager.decrypt_backup(&tampered, "passphrase"),
-                    Err(IdentityError::BackupParametersOutOfRange { .. })
-                ),
-                "header offset {header_offset} with {value} should be out of range"
-            );
+        let changes: [fn(&mut BackupHeaderWire); 5] = [
+            |header| header.memory_kib = 1,
+            |header| header.iterations = 1,
+            |header| header.parallelism = 2,
+            |header| header.memory_kib = u32::MAX,
+            |header| header.iterations = MAX_T_COST + 1,
+        ];
+        for change in changes {
+            assert!(matches!(
+                decrypt_backup(&with_header(&backup, change), "passphrase"),
+                Err(IdentityError::BackupParametersOutOfRange { .. })
+            ));
         }
     }
 
     #[test]
     fn decrypt_backup_rejects_tampered_in_range_kdf_metadata() {
-        let mut rng = ChaCha20Rng::from_seed([0x76; 32]);
-        let manager = manager_with_identity();
-        let mut backup = manager
-            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
-            .unwrap();
-        backup[5..9].copy_from_slice(&(ARGON2_T_COST + 1).to_be_bytes());
+        let backup = export(&manager_with_identity(), 0x76, "passphrase");
+        let tampered = with_header(&backup, |header| header.iterations = ARGON2_T_COST + 1);
         assert!(matches!(
-            manager.decrypt_backup(&backup, "passphrase"),
+            decrypt_backup(&tampered, "passphrase"),
             Err(IdentityError::DecryptionFailed)
         ));
     }
 
     #[test]
     fn decrypt_backup_rejects_tampered_header_field() {
-        let mut rng = ChaCha20Rng::from_seed([0x77; 32]);
-        let manager = manager_with_identity();
-        let backup = manager
-            .export_encrypted_backup(&mut rng, "passphrase", &DK_BLOB)
-            .unwrap();
-        // Flip a salt byte: the header is the AEAD associated data, so authentication must fail.
-        let mut tampered = backup.clone();
-        tampered[13] ^= 0x01;
+        let backup = export(&manager_with_identity(), 0x77, "passphrase");
+        // The header is the AEAD associated data, so changing the salt must fail authentication.
+        let tampered = with_header(&backup, |header| header.salt[0] ^= 0x01);
         assert!(matches!(
-            manager.decrypt_backup(&tampered, "passphrase"),
+            decrypt_backup(&tampered, "passphrase"),
             Err(IdentityError::DecryptionFailed)
         ));
     }
 
     #[test]
     fn decrypt_backup_wrong_passphrase_error_formats_are_redacted() {
-        let mut rng = ChaCha20Rng::from_seed([0x79; 32]);
-        let manager = manager_with_identity();
-        let backup = manager
-            .export_encrypted_backup(&mut rng, "correct-passphrase", &DK_BLOB)
+        let backup = export(&manager_with_identity(), 0x79, "correct-passphrase");
+        let err = decrypt_backup(&backup, "wrong-passphrase-secret")
+            .err()
             .unwrap();
-        let err = manager
-            .decrypt_backup(&backup, "wrong-passphrase-secret")
-            .unwrap_err();
         let display = err.to_string();
         let debug = format!("{err:?}");
 
@@ -408,17 +367,11 @@ mod tests {
 
     #[test]
     fn decrypt_backup_tampered_ciphertext_error_formats_are_redacted() {
-        let mut rng = ChaCha20Rng::from_seed([0x7a; 32]);
-        let manager = manager_with_identity();
-        let mut backup = manager
-            .export_encrypted_backup(&mut rng, "correct-passphrase", &DK_BLOB)
-            .unwrap();
+        let mut backup = export(&manager_with_identity(), 0x7a, "correct-passphrase");
         let last = backup.len() - 1;
         backup[last] ^= 0xAA;
 
-        let err = manager
-            .decrypt_backup(&backup, "correct-passphrase")
-            .unwrap_err();
+        let err = decrypt_backup(&backup, "correct-passphrase").err().unwrap();
         let display = err.to_string();
         let debug = format!("{err:?}");
 

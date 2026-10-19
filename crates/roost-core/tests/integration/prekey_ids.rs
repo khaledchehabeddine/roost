@@ -36,6 +36,6 @@ fn prekey_ids_are_stable_and_restart_with_each_discovery_key_epoch() {
 }
 
 fn finalize<T>(store: &KeyStore, prepared: &PreparedKeyStoreOperation<T>) {
-    store.reserve_operation(prepared.operation.id).unwrap();
-    store.finalize_operation(prepared.operation.id).unwrap();
+    store.reserve_operation(prepared.id).unwrap();
+    store.finalize_operation(prepared.id).unwrap();
 }

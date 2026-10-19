@@ -18,7 +18,12 @@ fn setup() -> (Device, ContactIdentityKey, ProtocolStateBlob) {
 }
 
 fn epoch(device: &Device) -> u32 {
-    device.store.current_public_discovery_key().unwrap().epoch
+    device
+        .store
+        .current_publication()
+        .unwrap()
+        .discovery_key
+        .epoch
 }
 
 fn blocked(device: &Device, address: &roost_core::ProtocolStateAddress, blob: &[u8]) -> bool {
