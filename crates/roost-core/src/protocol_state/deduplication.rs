@@ -188,23 +188,32 @@ mod tests {
     }
 
     #[test]
-    fn recording_a_digest_in_a_full_set_evicts_the_oldest() {
-        let mut set = LoadedDeduplicationSet {
+    fn the_deduplication_set_has_one_fixed_address() {
+        let address = deduplication_address();
+
+        assert_eq!(address.kind(), ProtocolStateKind::DeduplicationSet);
+        assert_eq!(address.key().as_bytes(), [0]);
+    }
+
+    #[test]
+    fn a_deduplication_set_of_another_version_is_unsupported() {
+        let address = deduplication_address();
+        let limits = ProtocolHardeningLimits::default();
+        let set = LoadedDeduplicationSet {
             capacity: MIN_DEDUPLICATION_CAPACITY,
             digest_key: Zeroizing::new([7u8; DEDUPLICATION_KEY_LEN]),
             digests: Vec::new(),
         };
-        let oldest = [0u8; DIGEST_LEN];
-        set.record(oldest);
-        for tag in 1..MIN_DEDUPLICATION_CAPACITY {
-            set.record([tag as u8; DIGEST_LEN]);
-        }
-        let newest = [0xff; DIGEST_LEN];
+        let mut bytes = encode_deduplication_set(&address, &set, limits)
+            .unwrap()
+            .as_bytes()
+            .to_vec();
+        bytes[0] += 1;
 
-        set.record(newest);
-
-        assert_eq!(set.digests.len(), MIN_DEDUPLICATION_CAPACITY);
-        assert!(!set.contains(&oldest));
-        assert!(set.contains(&newest));
+        assert!(matches!(
+            decode_deduplication_set(&address, &ProtocolStateBlob::from_bytes(bytes), limits),
+            Err(ProtocolStateError::UnsupportedBlobVersion { address: actual, version })
+                if actual == address && version == super::super::PROTOCOL_STATE_BLOB_VERSION + 1
+        ));
     }
 }

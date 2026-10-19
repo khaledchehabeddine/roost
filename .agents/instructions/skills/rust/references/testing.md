@@ -7,6 +7,11 @@ Broken code can still round-trip data and reject bad input, so a round trip or a
 - Add a test only when no existing test covers an important app flow, a costly failure, or a likely regression.
 - Test what a caller can observe, such as outputs, errors, and stored state.
 
+## Placement
+
+- Write unit tests for a module's own logic in a `#[cfg(test)]` module in the same file.
+- Write integration tests for flows that span modules in `tests/integration/`.
+
 ## Names
 
 - Name each test for the behavior it checks, such as `decode_example_rejects_unknown_version`, not `test_decode`.

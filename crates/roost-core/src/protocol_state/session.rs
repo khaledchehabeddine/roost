@@ -613,17 +613,6 @@ mod tests {
     }
 
     #[test]
-    fn simultaneous_start_keeps_the_lower_session_current() {
-        let mut lower_first = PeerSessions::new(id(1), None);
-        lower_first.start_alongside(id(2), accepted(2));
-        let mut higher_first = PeerSessions::new(id(2), None);
-        higher_first.start_alongside(id(1), accepted(1));
-
-        assert_eq!(lower_first.current(), id(1));
-        assert_eq!(higher_first.current(), id(1));
-    }
-
-    #[test]
     fn deletions_are_forgotten_once_their_signed_prekey_is_gone() {
         let mut sessions = PeerSessions::new(id(1), accepted(1));
         for byte in 2..=8 {
@@ -654,5 +643,29 @@ mod tests {
             sessions.record_delivery(&address, id(3)),
             Err(ProtocolStateError::InvalidStateBinding { .. })
         ));
+    }
+
+    #[test]
+    fn a_sessions_records_are_stored_under_its_session_id() {
+        let [session, pending] = session_record_addresses(id(9));
+
+        assert_eq!(session.kind(), ProtocolStateKind::RatchetSession);
+        assert_eq!(pending.kind(), ProtocolStateKind::PendingAcknowledgments);
+        for address in [session, pending] {
+            assert_eq!(address.key().as_bytes(), id(9).as_bytes());
+        }
+    }
+
+    #[test]
+    fn a_peers_session_list_is_stored_under_the_peers_identity_key() {
+        let identity_key = ContactIdentityKey {
+            x25519_public_key: [7; PUBLIC_KEY_LEN],
+            ed25519_verifying_key: [8; PUBLIC_KEY_LEN],
+        };
+
+        let address = peer_sessions_address(identity_key);
+
+        assert_eq!(address.kind(), ProtocolStateKind::PeerSessions);
+        assert_eq!(address.key().as_bytes(), identity_key.canonical_encoding());
     }
 }

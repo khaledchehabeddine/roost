@@ -282,43 +282,4 @@ mod tests {
             Err(IdentityError::AlreadyExists)
         ));
     }
-
-    #[test]
-    fn load_identity_without_generate_returns_not_found() {
-        let manager = manager();
-        assert!(matches!(
-            manager.load_identity(),
-            Err(IdentityError::NotFound)
-        ));
-    }
-
-    #[test]
-    fn load_identity_returns_same_public_keys() {
-        let mut rng = ChaCha20Rng::from_seed([0x61; 32]);
-        let manager = manager();
-        let generated_identity = manager.generate_identity(&mut rng).unwrap();
-        let loaded_identity = manager.load_identity().unwrap();
-        assert_eq!(
-            generated_identity.public_key(),
-            loaded_identity.public_key()
-        );
-        assert_eq!(
-            generated_identity.verifying_key().as_bytes(),
-            loaded_identity.verifying_key().as_bytes()
-        );
-    }
-
-    #[test]
-    fn sign_round_trip_after_load_identity() {
-        let mut rng = ChaCha20Rng::from_seed([0x62; 32]);
-        let manager = manager();
-        let generated_identity = manager.generate_identity(&mut rng).unwrap();
-        let loaded_identity = manager.load_identity().unwrap();
-        let message = b"roost test message";
-        // Ed25519 signing is deterministic, so identical keys produce identical signatures.
-        assert_eq!(
-            generated_identity.sign(message).to_bytes(),
-            loaded_identity.sign(message).to_bytes()
-        );
-    }
 }

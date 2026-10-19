@@ -686,4 +686,34 @@ mod tests {
             ReceivedCount::PastLimit
         );
     }
+
+    #[test]
+    fn the_asked_side_keeps_its_grant_until_it_accepts_and_a_blocked_contact_never_gets_it() {
+        let current = DiscoveryKeyStamp {
+            created_at_secs: 100,
+            epoch: 1,
+        };
+        let mut contact = contact(discovery_key(1, 100, 1));
+
+        assert!(!contact.receives_grant(Starter::Peer, current));
+        assert!(contact.receives_grant(Starter::Local, current));
+        contact.accept();
+        assert!(contact.receives_grant(Starter::Peer, current));
+        contact.blocked = true;
+        assert!(!contact.receives_grant(Starter::Peer, current));
+        assert!(!contact.receives_grant(Starter::Local, current));
+    }
+
+    #[test]
+    fn a_contact_record_is_stored_under_the_contacts_identity_key() {
+        let identity_key = ContactIdentityKey {
+            x25519_public_key: [7; PUBLIC_KEY_LEN],
+            ed25519_verifying_key: [8; PUBLIC_KEY_LEN],
+        };
+
+        let address = contact_address(identity_key);
+
+        assert_eq!(address.kind(), ProtocolStateKind::ContactState);
+        assert_eq!(address.key().as_bytes(), identity_key.canonical_encoding());
+    }
 }

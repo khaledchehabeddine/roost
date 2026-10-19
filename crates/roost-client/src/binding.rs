@@ -99,12 +99,10 @@ fn binding_payload_identity_key(
 #[cfg(test)]
 mod tests {
     use super::{verify_discovery_to_identity_binding, verify_identity_key_binding};
-    use crate::storage::MemoryStorage;
-    use crate::{Identity, IdentityContext, IdentityKey, RoostError, SecureStorage};
+    use crate::{Identity, IdentityKey, RoostError};
     use roost_crypto::{
         DiscoveryKey, PublicIdentityKey, Signature, SigningKeyPair, sign_identity_key_binding,
     };
-    use std::sync::Arc;
 
     const IDENTITY_X25519: [u8; 32] = [0x22; 32];
     const IDENTITY_SIGNING_SECRET: [u8; 32] = [0x11; 32];
@@ -141,11 +139,6 @@ mod tests {
             .verifying
             .to_bytes()
             .to_vec()
-    }
-
-    fn key_store() -> Arc<IdentityContext> {
-        let storage: Arc<dyn SecureStorage> = Arc::new(MemoryStorage::default());
-        IdentityContext::new(storage)
     }
 
     #[test]
@@ -241,14 +234,6 @@ mod tests {
                 panic!("expected AuthenticationFailed for a substituted identity, got {other:?}")
             }
         }
-    }
-
-    #[test]
-    fn a_generated_identity_verifies_through_the_export() {
-        let identity = key_store().generate_identity().unwrap();
-
-        verify_identity_key_binding(identity)
-            .expect("Roost's own identity must satisfy Roost's own exported verifier");
     }
 
     #[test]

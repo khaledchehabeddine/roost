@@ -205,8 +205,13 @@ pub enum MessageEncryptionStep {
     /// The contact already acknowledged a Message carrying the current Inbox Grant, so a Grant
     /// Update has nothing to carry. The operation has ended and nothing changed.
     NothingToSend,
-    /// The sealed Message and its state changes. The operation has ended.
-    Ready(Box<OutboundMessageResult>),
+    /// The sealed Message, and the state changes to commit with it. The operation has ended.
+    Ready {
+        /// The sealed Message.
+        result: Box<OutboundMessageResult>,
+        /// The state changes to commit with the Message.
+        changes: StateChanges,
+    },
 }
 
 /// What a [`MessageDecryption`] needs next, or its result.
@@ -220,8 +225,14 @@ pub enum MessageDecryptionStep {
     /// The destination whose Transport Binding the acknowledgment needs, to supply through
     /// [`MessageDecryption::supply_acknowledgment_transport_binding`].
     NeedsAcknowledgmentTransport(MessageDestination),
-    /// What the Message turned out to be. The operation has ended.
-    Ready(Box<InboundMessageOutcome>),
+    /// What the Message turned out to be, and the state changes to commit with its effects. The
+    /// operation has ended.
+    Ready {
+        /// What the Message turned out to be.
+        outcome: InboundMessageOutcome,
+        /// The state changes to commit with the outcome's effects, empty when it has none.
+        changes: StateChanges,
+    },
 }
 
 /// Errors returned by a Message Operation's calls.
@@ -577,9 +588,7 @@ impl Encrypting {
             }
             EncryptionPhase::TransportRequested(mut prepared) => {
                 match prepared.transport_binding.take() {
-                    Some(transport_binding) => Ok(MessageEncryptionStep::Ready(Box::new(
-                        self.seal(rng, *prepared, &transport_binding)?,
-                    ))),
+                    Some(transport_binding) => Ok(self.seal(rng, *prepared, &transport_binding)?),
                     None => Ok(self.request_transport(*prepared)),
                 }
             }
@@ -935,7 +944,7 @@ impl Encrypting {
         rng: &mut R,
         prepared: PreparedSeal,
         transport_binding: &TransportBinding,
-    ) -> Result<OutboundMessageResult, ProtocolStateError> {
+    ) -> Result<MessageEncryptionStep, ProtocolStateError> {
         let limits = self.engine.limits;
         let PreparedSeal {
             planned,
@@ -1052,12 +1061,14 @@ impl Encrypting {
                 limits,
             )?);
         }
-        Ok(OutboundMessageResult {
-            session_id,
-            message_id: self.message_id,
-            sent_at_millis: self.sent_at_millis,
-            payload_kind,
-            message,
+        Ok(MessageEncryptionStep::Ready {
+            result: Box::new(OutboundMessageResult {
+                session_id,
+                message_id: self.message_id,
+                sent_at_millis: self.sent_at_millis,
+                payload_kind,
+                message,
+            }),
             changes: changes(&self.reads, updates).with_undelivered(undelivered),
         })
     }
@@ -1304,9 +1315,9 @@ impl Decrypting {
             }
             DecryptionPhase::AcknowledgmentTransportRequested(mut acknowledging) => {
                 match acknowledging.transport_binding.take() {
-                    Some(transport_binding) => Ok(MessageDecryptionStep::Ready(Box::new(
-                        self.acknowledge(rng, *acknowledging, &transport_binding)?,
-                    ))),
+                    Some(transport_binding) => {
+                        self.acknowledge(rng, *acknowledging, &transport_binding)
+                    }
                     None => {
                         let destination = acknowledging
                             .route
@@ -1337,9 +1348,7 @@ impl Decrypting {
         )?;
         let digest = deduplication.digest(self.transport_binding.as_bytes(), &self.encoded);
         if deduplication.contains(&digest) {
-            return Ok(MessageDecryptionStep::Ready(Box::new(
-                InboundMessageOutcome::Duplicate,
-            )));
+            return Ok(unchanged(InboundMessageOutcome::Duplicate));
         }
         let sealed_to = &self.message.recipient_public_key;
         // Only an established Message outlives a rotation, which deletes the prekeys a first
@@ -1381,9 +1390,7 @@ impl Decrypting {
         let Some(session) = load_session(snapshot, &session_address(session_id), limits)? else {
             return match self.message.prekey_reference {
                 Some(reference) => self.check_admission(rng, opened, reference),
-                None => Ok(MessageDecryptionStep::Ready(Box::new(
-                    InboundMessageOutcome::UnknownSession,
-                ))),
+                None => Ok(unchanged(InboundMessageOutcome::UnknownSession)),
             };
         };
         let is_acknowledgment = opened.message.metadata.payload_kind.is_acknowledgment();
@@ -1395,9 +1402,7 @@ impl Decrypting {
                 limits,
             )?
         {
-            return Ok(MessageDecryptionStep::Ready(Box::new(
-                InboundMessageOutcome::Duplicate,
-            )));
+            return Ok(unchanged(InboundMessageOutcome::Duplicate));
         }
         let LoadedSession {
             peer_identity_key,
@@ -1613,9 +1618,7 @@ impl Decrypting {
             // The Session's blob is gone by now, so one the list still names was wiped by the
             // host.
             Some(sessions) if sessions.was_deleted(session_id) || sessions.contains(session_id) => {
-                return Ok(MessageDecryptionStep::Ready(Box::new(
-                    InboundMessageOutcome::DeletedSession,
-                )));
+                return Ok(unchanged(InboundMessageOutcome::DeletedSession));
             }
             Some(mut sessions) => {
                 sessions.forget_deletions_unless(|signed_prekey| {
@@ -1846,15 +1849,15 @@ impl Decrypting {
                 sent_at_millis: message.metadata.sent_at_millis,
                 acknowledged_message_id,
                 sender_identity: decoded.sender_identity,
-                changes: changes(&self.reads, updates),
             });
-            return Ok(MessageDecryptionStep::Ready(Box::new(
-                if matched.is_some() {
+            return Ok(MessageDecryptionStep::Ready {
+                outcome: if matched.is_some() {
                     InboundMessageOutcome::AcknowledgmentMatched(result)
                 } else {
                     InboundMessageOutcome::AcknowledgmentUnmatched(result)
                 },
-            )));
+                changes: changes(&self.reads, updates),
+            });
         }
         let sender = decoded.sender_identity.public_identity_key()?;
         let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
@@ -1952,13 +1955,13 @@ impl Decrypting {
             changes(&self.reads, updates).with_undelivered(undelivered),
             one_time_prekey,
         )?;
-        Ok(MessageDecryptionStep::Ready(Box::new(
-            InboundMessageOutcome::Withheld(Box::new(WithheldInboundMessageResult {
+        Ok(MessageDecryptionStep::Ready {
+            outcome: InboundMessageOutcome::Withheld(Box::new(WithheldInboundMessageResult {
                 session_id,
                 message_id,
-                changes,
             })),
-        )))
+            changes,
+        })
     }
 
     // Returns the delivered Message, or first asks where its acknowledgment goes.
@@ -1976,9 +1979,7 @@ impl Decrypting {
                 delivery.pending_handshake.as_ref(),
                 self.engine.limits,
             )?;
-            return Ok(MessageDecryptionStep::Ready(Box::new(
-                self.outcome(delivery, session, None)?,
-            )));
+            return self.outcome(delivery, session, None);
         };
         let destination = route.destination(delivery.peer_identity_key);
         self.phase = DecryptionPhase::AcknowledgmentTransportRequested(Box::new(Acknowledging {
@@ -1997,7 +1998,7 @@ impl Decrypting {
         rng: &mut R,
         acknowledging: Acknowledging,
         transport_binding: &TransportBinding,
-    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
         let limits = self.engine.limits;
         let Acknowledging {
             mut delivery,
@@ -2050,7 +2051,7 @@ impl Decrypting {
         delivery: Delivery,
         session: ProtocolStateUpdate,
         acknowledgment: Option<SealedFrame>,
-    ) -> Result<InboundMessageOutcome, MessageOperationError> {
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
         let Delivery {
             session_id,
             message_id,
@@ -2069,11 +2070,10 @@ impl Decrypting {
             changes(&self.reads, updates).with_undelivered(undelivered),
             one_time_prekey,
         )?;
-        Ok(match delivered {
+        let outcome = match delivered {
             Delivered::Blocked => {
                 InboundMessageOutcome::Blocked(Box::new(BlockedInboundMessageResult {
                     acknowledgment,
-                    changes,
                 }))
             }
             Delivered::Accepted if payload_kind == PayloadKind::GrantUpdate => {
@@ -2081,7 +2081,6 @@ impl Decrypting {
                     session_id,
                     message_id,
                     acknowledgment,
-                    changes,
                 }))
             }
             Delivered::Accepted | Delivered::ContactRequest => {
@@ -2093,7 +2092,6 @@ impl Decrypting {
                     plaintext,
                     sender_identity,
                     acknowledgment,
-                    changes,
                 });
                 if delivered == Delivered::ContactRequest {
                     InboundMessageOutcome::ContactRequest(result)
@@ -2101,7 +2099,8 @@ impl Decrypting {
                     InboundMessageOutcome::Accepted(result)
                 }
             }
-        })
+        };
+        Ok(MessageDecryptionStep::Ready { outcome, changes })
     }
 
     // Stages the use of the one-time prekey a new Session consumed, so it commits with `changes`.
@@ -2116,6 +2115,14 @@ impl Decrypting {
             }
             None => changes,
         })
+    }
+}
+
+// Returns an outcome that changes nothing, such as a duplicate.
+fn unchanged(outcome: InboundMessageOutcome) -> MessageDecryptionStep {
+    MessageDecryptionStep::Ready {
+        outcome,
+        changes: StateChanges::empty(),
     }
 }
 
@@ -2334,9 +2341,11 @@ impl StateReads {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::InMemorySecureStorage;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_crypto::generate_discovery_key;
+    use std::time::SystemTime;
 
     #[test]
     fn local_keys_whose_discovery_key_another_identity_signed_are_refused() {
@@ -2364,6 +2373,136 @@ mod tests {
             ),
             Err(ProtocolStateError::InvalidMessage { reason })
                 if reason == "recipient discovery key does not match recipient identity key"
+        ));
+    }
+
+    // Returns a KeyStore holding an identity and a signed prekey, as an app sets one up.
+    fn key_store() -> (KeyStore, PublicIdentityKey) {
+        let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
+        let created = store.prepare_identity_creation().unwrap();
+        store.reserve_operation(created.operation.id).unwrap();
+        store.finalize_operation(created.operation.id).unwrap();
+        let rotated = store.prepare_signed_prekey_rotation().unwrap();
+        store.reserve_operation(rotated.operation.id).unwrap();
+        store.finalize_operation(rotated.operation.id).unwrap();
+        (store, created.output.public().unwrap())
+    }
+
+    // Runs `store`'s decryption of `message` over a host that holds no records.
+    fn decrypt_over_no_records(
+        store: &KeyStore,
+        message: SealedFrame,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let mut decryption = store
+            .start_decryption(IncomingMessage {
+                message,
+                transport_binding: TransportBinding::new(b"route".to_vec()).unwrap(),
+                settings: ReceiveSettings::default(),
+                sender_certificate_validation: InboundSenderCertificateValidation {
+                    domain_signing_keys: Vec::new(),
+                    expected_relay_domain: b"relay.test".to_vec(),
+                    revoked_identity_keys: Some(Vec::new()),
+                    reference_time: SystemTime::UNIX_EPOCH,
+                },
+                acknowledgment_sent_at_millis: 0,
+                acknowledgment_sender_certificate: SignedSenderCertificate {
+                    certificate: Vec::new(),
+                    signature: Vec::new(),
+                },
+            })
+            .unwrap();
+        let mut rng = ChaCha20Rng::from_seed([0x40; 32]);
+        loop {
+            match decryption.step(&mut rng)? {
+                MessageDecryptionStep::NeedsState(addresses) => decryption.supply_state(
+                    addresses
+                        .into_iter()
+                        .map(|address| (address, None))
+                        .collect(),
+                )?,
+                step @ (MessageDecryptionStep::NeedsAdmission(_)
+                | MessageDecryptionStep::NeedsAcknowledgmentTransport(_)
+                | MessageDecryptionStep::Ready { .. }) => return Ok(step),
+            }
+        }
+    }
+
+    #[test]
+    fn a_first_message_whose_session_id_does_not_match_its_handshake_is_rejected() {
+        let (bob, bob_identity) = key_store();
+        let publication = bob.current_publication().unwrap();
+        let bundle = PreKeyBundle {
+            version: publication.version,
+            discovery_key: publication.discovery_key,
+            signed_prekey: publication.signed_prekey,
+            one_time_prekey: None,
+        };
+        let mut rng = ChaCha20Rng::from_seed([0x41; 32]);
+        let (mut state, session_id, handshake) =
+            initiate_handshake(&mut rng, &bob_identity, &bundle).unwrap();
+        let signing_key = SigningKeyPair::from_signing_bytes([0x10; 32]);
+        let agreement_key = KeyPair::from_secret_bytes([0x11; 32]);
+        let identity_key = PublicIdentityKey {
+            public_key: agreement_key.public,
+            verifying_key: signing_key.verifying,
+            binding_signature: sign_identity_key_binding(&signing_key, &agreement_key.public)
+                .unwrap(),
+        };
+        let discovery_key = generate_discovery_key(
+            &mut ChaCha20Rng::from_seed([0x12; 32]),
+            &signing_key,
+            1,
+            1_700_000_000,
+        )
+        .unwrap();
+        let identity = SenderIdentityMaterial {
+            identity_key: *identity_key.public_key.as_bytes(),
+            identity_verifying_key: identity_key.verifying_key.to_bytes(),
+            identity_binding_signature: identity_key.binding_signature.to_bytes().to_vec(),
+            certificate: Vec::new(),
+            signature: Vec::new(),
+        };
+        let public_discovery_key = discovery_key.public();
+        let discovery_to_identity = discovery_key.sign_identity_binding(&identity_key).unwrap();
+        let sender = LocalSender {
+            identity: &identity,
+            signing_key: &signing_key,
+            agreement_key: &agreement_key,
+            discovery_key: &public_discovery_key,
+            discovery_to_identity: &discovery_to_identity,
+        };
+        let mut seal = |session_id| {
+            seal_proved(
+                &mut rng,
+                &mut state,
+                OutboundContent {
+                    session_id,
+                    id: MessageId::from_bytes([3; 16]),
+                    sent_at_millis: 4,
+                    payload_kind: PayloadKind::EncryptedTextWithGrant,
+                    payload: b"hi bob",
+                },
+                &handshake,
+                &sender,
+                &TransportBinding::new(b"route".to_vec()).unwrap(),
+                ProtocolHardeningLimits::default(),
+            )
+            .unwrap()
+        };
+        let substituted = seal(SessionId::from_bytes([0x75; 16]));
+        let genuine = seal(session_id);
+
+        assert!(matches!(
+            decrypt_over_no_records(&bob, substituted),
+            Err(MessageOperationError::ProtocolState(ProtocolStateError::InvalidMessage { reason }))
+                if reason == "session id does not match its handshake"
+        ));
+        // The genuine Message gets past the handshake, as far as its sender's empty certificate.
+        assert!(matches!(
+            decrypt_over_no_records(&bob, genuine),
+            Err(MessageOperationError::ProtocolState(
+                ProtocolStateError::SenderCertificateValidation(_)
+            ))
         ));
     }
 }

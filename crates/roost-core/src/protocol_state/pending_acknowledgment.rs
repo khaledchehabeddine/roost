@@ -334,4 +334,60 @@ mod tests {
             expected
         );
     }
+
+    fn address() -> ProtocolStateAddress {
+        pending_acknowledgment_address(SessionId::from_bytes([9; 16]))
+    }
+
+    #[test]
+    fn a_repeated_acknowledgment_is_found_without_decoding_any_waiting_message() {
+        let address = address();
+        let limits = ProtocolHardeningLimits::default();
+        let digest = acknowledgment_digest(b"transport-binding", b"encoded acknowledgment");
+        let body = postcard::to_stdvec(&PendingAcknowledgmentsWire {
+            pending: vec![PendingAcknowledgmentWire {
+                message_id: [0x44; 16],
+                encoded_message: &[0xaa],
+                first_sent_at_millis: 1_700_000_100_123,
+                payload_kind: 0,
+                grant: None,
+            }],
+            acknowledgment_digests: vec![digest],
+        })
+        .unwrap();
+        let mut snapshot = ProtocolStateSnapshot::new();
+        snapshot
+            .set(
+                address.clone(),
+                encode_blob(&address, &body, usize::MAX).unwrap(),
+            )
+            .unwrap();
+
+        assert!(has_seen_acknowledgment(&snapshot, &address, digest, limits).unwrap());
+        assert!(matches!(
+            load_pending_acknowledgments(&snapshot, &address, limits),
+            Err(ProtocolStateError::BlobDecode { .. })
+        ));
+    }
+
+    #[test]
+    fn pending_acknowledgments_of_another_version_are_unsupported() {
+        let address = address();
+        let limits = ProtocolHardeningLimits::default();
+        let mut bytes = encode_pending_acknowledgments(
+            &address,
+            &LoadedPendingAcknowledgments::empty(),
+            limits,
+        )
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+        bytes[0] += 1;
+
+        assert!(matches!(
+            decode_pending_acknowledgments(&address, &ProtocolStateBlob::from_bytes(bytes), limits),
+            Err(ProtocolStateError::UnsupportedBlobVersion { address: actual, version })
+                if actual == address && version == super::super::PROTOCOL_STATE_BLOB_VERSION + 1
+        ));
+    }
 }

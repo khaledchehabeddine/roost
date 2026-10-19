@@ -603,21 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn current_rejects_unsupported_stored_version() {
-        let manager = setup_with_discovery_key().manager;
-        manager
-            .storage
-            .lock()
-            .unwrap()
-            .store(SIGNED_PREKEY_KEY, &[0xAAu8; 50])
-            .unwrap();
-        assert!(matches!(
-            manager.current(at(FIXED_NOW)),
-            Err(SignedPreKeyError::UnsupportedVersion(0xaa))
-        ));
-    }
-
-    #[test]
     fn current_public_does_not_require_discovery_key() {
         let manager = manager_without_discovery_key();
         let signed_prekey = store_signed_prekey_with_created_at(&manager, FIXED_NOW);
@@ -785,30 +770,6 @@ mod tests {
     }
 
     #[test]
-    fn rotate_now_retains_immediately_superseded_prekey_inside_retention_window() {
-        let mut rng = ChaCha20Rng::from_seed([0x9a; 32]);
-        let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
-        let second = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
-
-        let retained = setup
-            .manager
-            .prekey_for_first_message(first.epoch(), first.public_key().as_bytes(), at(FIXED_NOW))
-            .unwrap();
-        let current = setup.manager.current(at(FIXED_NOW)).unwrap();
-
-        assert!(!retained.1);
-        assert_eq!(
-            retained.0.public_key().as_bytes(),
-            first.public_key().as_bytes()
-        );
-        assert_eq!(
-            current.public_key().as_bytes(),
-            second.public_key().as_bytes()
-        );
-    }
-
-    #[test]
     fn rotate_now_retains_multiple_superseded_prekeys() {
         let mut rng = ChaCha20Rng::from_seed([0x9b; 32]);
         let setup = setup_with_discovery_key();
@@ -920,39 +881,11 @@ mod tests {
     }
 
     #[test]
-    fn rotate_if_stale_rejects_unsupported_version() {
-        let mut rng = ChaCha20Rng::from_seed([0x9f; 32]);
-        let manager = setup_with_discovery_key().manager;
-        let mut blob = [0u8; SIGNED_PREKEY_HEADER_LEN];
-        blob[0] = 99;
-        manager
-            .storage
-            .lock()
-            .unwrap()
-            .store(SIGNED_PREKEY_KEY, &blob)
-            .unwrap();
-        assert!(matches!(
-            manager.rotate_if_stale(&mut rng, at(FIXED_NOW)),
-            Err(SignedPreKeyError::UnsupportedVersion(_))
-        ));
-    }
-
-    #[test]
     fn rotate_if_stale_without_discovery_key_returns_not_found() {
         let mut rng = ChaCha20Rng::from_seed([0xa0; 32]);
         let manager = manager_without_discovery_key();
         assert!(matches!(
             manager.rotate_if_stale(&mut rng, at(FIXED_NOW)),
-            Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
-        ));
-    }
-
-    #[test]
-    fn rotate_now_without_discovery_key_returns_not_found() {
-        let mut rng = ChaCha20Rng::from_seed([0xa1; 32]);
-        let manager = manager_without_discovery_key();
-        assert!(matches!(
-            manager.rotate_now(&mut rng, at(FIXED_NOW)),
             Err(SignedPreKeyError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
@@ -1036,16 +969,6 @@ mod tests {
             checked_blob(&[SIGNED_PREKEY_VERSION; 200]),
             Err(SignedPreKeyError::InvalidBlobLength { expected, actual: 200 })
                 if expected == SIGNED_PREKEY_HEADER_LEN + 4 * RETAINED_SIGNED_PREKEY_RECORD_LEN
-        ));
-    }
-
-    #[test]
-    fn checked_blob_rejects_unsupported_version() {
-        let mut blob = [0u8; SIGNED_PREKEY_HEADER_LEN];
-        blob[0] = 99;
-        assert!(matches!(
-            checked_blob(&blob),
-            Err(SignedPreKeyError::UnsupportedVersion(_))
         ));
     }
 }

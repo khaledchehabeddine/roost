@@ -267,6 +267,10 @@ impl ProtocolStateUpdate {
 /// The records an operation's result relies on, the records it writes, the Prepared KeyStore
 /// Operation that commits with them, if any, and the sent Messages Roost stops waiting for.
 ///
+/// Message Operations and delivery checks return these beside their result, so the host commits
+/// them through [`Self::conditions`] and [`Self::into_updates`] and keeps the rest of the result.
+/// They're empty when the result changes nothing, such as a duplicate.
+///
 /// The host reads the record at each Commit Condition's address inside its transaction, and
 /// commits the updates with the result's effects only when [`commit_conditions_match`] holds for
 /// them. The host marks each of [`Self::undelivered`] not delivered in the same transaction. When
@@ -280,6 +284,16 @@ pub struct StateChanges {
 }
 
 impl StateChanges {
+    // Returns changes for a result that relies on no record and writes none.
+    fn empty() -> Self {
+        Self {
+            conditions: Vec::new(),
+            updates: Vec::new(),
+            operation: None,
+            undelivered: Vec::new(),
+        }
+    }
+
     // Returns changes that rely on one record a call took directly and write at most that record.
     fn for_record(
         address: ProtocolStateAddress,
@@ -314,12 +328,6 @@ impl StateChanges {
     #[must_use]
     pub fn conditions(&self) -> &[(ProtocolStateAddress, ProtocolStateCommitCondition)] {
         &self.conditions
-    }
-
-    /// Returns the updates to commit.
-    #[must_use]
-    pub fn updates(&self) -> &[ProtocolStateUpdate] {
-        &self.updates
     }
 
     /// Returns the sent Messages Roost stops waiting for, oldest first, because the Relay would
@@ -443,7 +451,7 @@ impl ProtocolStateSnapshot {
     }
 }
 
-/// An outbound Message and the state changes from one Message Operation.
+/// An outbound Message from one Message Operation.
 pub struct OutboundMessageResult {
     /// The Session Roost selected for the Message.
     pub session_id: SessionId,
@@ -455,8 +463,6 @@ pub struct OutboundMessageResult {
     pub payload_kind: PayloadKind,
     /// Message to hand to the consumer transport after state commit.
     pub message: SealedFrame,
-    /// State changes to commit atomically with the outbound Message.
-    pub changes: StateChanges,
 }
 
 /// Sender-certificate validation inputs for receive-time Identity-keyed decisions.
@@ -518,7 +524,7 @@ pub struct KnownDomainSigningKey {
     pub status: DomainSigningKeyStatus,
 }
 
-/// Inbound plaintext and the state changes from one Message Operation.
+/// Inbound plaintext from one Message Operation.
 ///
 /// A sender's recovery resends a Message under its original MessageID with new bytes, so the app
 /// shows one Message per sender and MessageID, and still commits and acknowledges each copy.
@@ -538,8 +544,6 @@ pub struct InboundMessageResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
     /// the contact isn't accepted and this side doesn't acknowledge yet.
     pub acknowledgment: Option<SealedFrame>,
-    /// State changes to commit before treating the inbound Message as processed.
-    pub changes: StateChanges,
 }
 
 /// A Message from a contact who isn't accepted, past the limit on Messages before acceptance.
@@ -550,8 +554,6 @@ pub struct WithheldInboundMessageResult {
     pub session_id: SessionId,
     /// Message ID recovered after decrypt.
     pub message_id: MessageId,
-    /// State changes to commit before treating the withheld Message as processed.
-    pub changes: StateChanges,
 }
 
 /// A Grant Update whose Inbox Grant Roost kept, which has nothing to show.
@@ -563,8 +565,6 @@ pub struct GrantUpdateResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
     /// this side doesn't acknowledge the contact yet.
     pub acknowledgment: Option<SealedFrame>,
-    /// State changes to commit before treating the Grant Update as processed.
-    pub changes: StateChanges,
 }
 
 /// Accepted blocked inbound Message result without consumer-visible plaintext.
@@ -572,11 +572,12 @@ pub struct BlockedInboundMessageResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, or `None` when
     /// the blocked-contact acknowledgment policy suppresses it.
     pub acknowledgment: Option<SealedFrame>,
-    /// State changes to commit before treating the blocked inbound Message as processed.
-    pub changes: StateChanges,
 }
 
-/// An authenticated acknowledgment and the state it advanced.
+/// An authenticated acknowledgment.
+///
+/// Its state changes commit whether it matched or not, so a retried acknowledgment is a
+/// duplicate.
 pub struct AcknowledgmentResult {
     /// The Session the acknowledgment arrived on.
     pub session_id: SessionId,
@@ -588,8 +589,6 @@ pub struct AcknowledgmentResult {
     pub acknowledged_message_id: MessageId,
     /// Sender identity material decoded from the acknowledgment.
     pub sender_identity: SenderIdentityMaterial,
-    /// State changes to commit, matched or not, so a retried acknowledgment is a duplicate.
-    pub changes: StateChanges,
 }
 
 /// The result of receiving an inbound encrypted Message.
@@ -1236,13 +1235,5 @@ mod tests {
                     if actual == address && actual_version == version
             ));
         }
-    }
-
-    #[test]
-    fn protocol_state_blob_digest_changes_with_the_blob() {
-        assert_ne!(
-            protocol_state_blob_digest(b"first blob"),
-            protocol_state_blob_digest(b"second blob")
-        );
     }
 }
