@@ -1,11 +1,12 @@
 use crate::context::Messaging;
 use crate::error::RoostError;
+use crate::identity::IdentityKey;
 use crate::message::{Message, MessageId};
-use crate::message_operation::{MessageDestination, SignedSenderCertificate, lock, state_keys};
-use crate::protocol::{
-    IdentityKey, OutboundMessageResult, StateChanges, StateEntry, StateKey, entries_to_core,
+use crate::message_operation::{
+    MessageDestination, OutboundMessageResult, SignedSenderCertificate, with_operation,
 };
-use crate::records::PreKeyBundle;
+use crate::publication::PreKeyBundle;
+use crate::state::{StateChanges, StateEntry, StateKey, entries_to_core, state_keys};
 use crate::time::time_from_millis;
 use crate::transport_binding::TransportBinding;
 use rand::rngs::OsRng;
@@ -67,8 +68,8 @@ pub struct OutgoingRecovery {
     pub recipient: IdentityKey,
     /// The local identity's certificate, sealed into the resent Message.
     pub sender_certificate: SignedSenderCertificate,
-    /// The contact's bundle, fetched after a `NeedsPreKeyBundle` step and kept with the recovery
-    /// job until a Session uses it.
+    /// The contact's bundle, fetched after a [`MessageRecoveryStep::NeedsPreKeyBundle`] step and
+    /// kept with the recovery job until a Session uses it.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
@@ -126,9 +127,9 @@ pub enum MessageRecoveryStep {
 /// the copy keeps its MessageID, send time, and kind, so the contact shows it once. Roost picks
 /// the Message and the Session: one the contact delivered on since, or else a new Session from
 /// the contact's bundle, where the oldest Message goes first as a probe and the rest wait for a
-/// delivery check after the contact acknowledges it. Each `Ready` result replaces the Message's
-/// earlier copy, so commit it in one transaction with replacing the app's send work for that
-/// MessageID, and never send the old copy again.
+/// delivery check after the contact acknowledges it. Each [`MessageRecoveryStep::Ready`] result
+/// replaces the Message's earlier copy, so commit it in one transaction with replacing the app's
+/// send work for that MessageID, and never send the old copy again.
 ///
 /// Track each recovery as its own job, apart from the Message's original send, whose record
 /// already says it's done. Drive each step as [`MessageEncryption`](crate::MessageEncryption)
@@ -251,27 +252,20 @@ impl DeliveryCheck {
     /// - [`RoostError::ProtocolStateFault`] if a record is malformed.
     /// - [`RoostError::UnsupportedVersion`] if a record uses an unknown format version.
     pub fn step(&self) -> Result<DeliveryCheckStep, RoostError> {
-        let mut check = lock(&self.0);
-        let checking = check.as_mut().ok_or(RoostError::OperationFinished)?;
-        // Core ends the check itself once it returns its result or fails.
-        Ok(DeliveryCheckStep::from_core(checking.step()?))
+        with_operation(&self.0, |check| {
+            Ok(DeliveryCheckStep::from_core(check.step()?))
+        })
     }
 
-    /// Supplies one entry for each key the pending `NeedsState` step named.
+    /// Supplies one entry for each key the pending [`DeliveryCheckStep::NeedsState`] named.
     ///
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the check already returned its result or failed.
     /// - [`RoostError::InvalidData`] if the entries miss, repeat, or add a key, a key is malformed,
     ///   or the check isn't waiting for state.
     pub fn supply_state(&self, entries: Vec<StateEntry>) -> Result<(), RoostError> {
-        let mut check = lock(&self.0);
-        let checking = check.as_mut().ok_or(RoostError::OperationFinished)?;
-        let supplied =
-            entries_to_core(entries).and_then(|entries| Ok(checking.supply_state(entries)?));
-        if supplied.is_err() {
-            *check = None;
-        }
-        supplied
+        let entries = entries_to_core(entries);
+        with_operation(&self.0, |check| Ok(check.supply_state(entries?)?))
     }
 }
 
@@ -284,53 +278,43 @@ impl MessageRecovery {
     /// - [`RoostError::BlockedContact`] if the contact is blocked.
     /// - [`RoostError::NoDeliveryCapability`] if the Message goes to a Session the contact
     ///   delivered on, and no Inbox Grant has supplied the contact's Delivery Capability.
+    /// - [`RoostError::TooManyPendingAcknowledgments`] if the most Messages allowed already wait
+    ///   for the contact's acknowledgment on that Session.
     /// - [`RoostError::AuthenticationFailed`] if a bundle's signatures don't bind its Discovery Key
     ///   and the contact's identity in both directions.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed.
     /// - [`RoostError::UnsupportedVersion`] if a record uses an unknown format version.
     /// - [`RoostError::InvalidData`] if the content is too large to seal.
     pub fn step(&self) -> Result<MessageRecoveryStep, RoostError> {
-        let mut recovery = lock(&self.0);
-        let recovering = recovery.as_mut().ok_or(RoostError::OperationFinished)?;
-        // Core ends the recovery itself once it returns its result or fails.
-        Ok(MessageRecoveryStep::from_core(recovering.step(&mut OsRng)?))
+        with_operation(&self.0, |recovery| {
+            Ok(MessageRecoveryStep::from_core(recovery.step(&mut OsRng)?))
+        })
     }
 
-    /// Supplies one entry for each key the pending `NeedsState` step named.
+    /// Supplies one entry for each key the pending [`MessageRecoveryStep::NeedsState`] named.
     ///
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the recovery already returned its result or failed.
     /// - [`RoostError::InvalidData`] if the entries miss, repeat, or add a key, a key is malformed,
     ///   or the recovery isn't waiting for state.
     pub fn supply_state(&self, entries: Vec<StateEntry>) -> Result<(), RoostError> {
-        let mut recovery = lock(&self.0);
-        let recovering = recovery.as_mut().ok_or(RoostError::OperationFinished)?;
-        let supplied =
-            entries_to_core(entries).and_then(|entries| Ok(recovering.supply_state(entries)?));
-        if supplied.is_err() {
-            *recovery = None;
-        }
-        supplied
+        let entries = entries_to_core(entries);
+        with_operation(&self.0, |recovery| Ok(recovery.supply_state(entries?)?))
     }
 
-    /// Supplies the content the app sent under the MessageID the pending `NeedsContent` step
-    /// named.
+    /// Supplies the content the app sent under the MessageID the pending
+    /// [`MessageRecoveryStep::NeedsContent`] named.
     ///
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the recovery already returned its result or failed.
     /// - [`RoostError::InvalidData`] if the recovery isn't waiting for content.
     pub fn supply_content(&self, content: Vec<u8>) -> Result<(), RoostError> {
         let content = Zeroizing::new(content);
-        let mut recovery = lock(&self.0);
-        let recovering = recovery.as_mut().ok_or(RoostError::OperationFinished)?;
-        let supplied = recovering.supply_content(content);
-        if supplied.is_err() {
-            *recovery = None;
-        }
-        Ok(supplied?)
+        with_operation(&self.0, |recovery| Ok(recovery.supply_content(content)?))
     }
 
-    /// Supplies the Transport Binding the pending `NeedsTransport` step asked for.
+    /// Supplies the Transport Binding the pending [`MessageRecoveryStep::NeedsTransport`] asked
+    /// for.
     ///
     /// Retain the exact binding with the Message for sending.
     ///
@@ -342,15 +326,9 @@ impl MessageRecovery {
         &self,
         transport_binding: TransportBinding,
     ) -> Result<(), RoostError> {
-        let mut recovery = lock(&self.0);
-        let recovering = recovery.as_mut().ok_or(RoostError::OperationFinished)?;
-        let supplied = transport_binding
-            .into_core()
-            .and_then(|binding| Ok(recovering.supply_transport_binding(binding)?));
-        if supplied.is_err() {
-            *recovery = None;
-        }
-        supplied
+        with_operation(&self.0, |recovery| {
+            Ok(recovery.supply_transport_binding(transport_binding.into_core()?)?)
+        })
     }
 }
 

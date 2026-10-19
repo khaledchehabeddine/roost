@@ -1,9 +1,9 @@
 //! Prepared SecureStorage operations and the records that carry their provisional output.
 
+use crate::encoding::{hex_identifier, hex_text};
 use crate::error::RoostError;
-use crate::records::{
-    Identity, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle, hex_identifier, hex_text,
-};
+use crate::identity::Identity;
+use crate::publication::{PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle};
 use roost_core::{
     KeyStoreOperationId as CoreKeyStoreOperationId,
     KeyStoreOperationStatus as CoreKeyStoreOperationStatus,

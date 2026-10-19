@@ -2,16 +2,15 @@
 
 use crate::SecureStorage;
 use crate::error::RoostError;
+use crate::identity::Identity;
 use crate::operation::{
     OperationId, OperationStatus, PreparedIdentity, PreparedInboxRotation, PreparedOneTimePreKeys,
     PreparedSignedPreKeyRotation, UnfinishedOperation,
 };
-use crate::protocol::{IdentityKey, StateChanges};
-use crate::records::{Identity, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle};
+use crate::publication::{PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle};
 use crate::storage::SecureStorageAdapter;
 use roost_core::{
     KeyStore as CoreKeyStore, PreparedKeyStoreOperation as CorePreparedKeyStoreOperation,
-    ProtocolStateBlob as CoreProtocolStateBlob,
 };
 use std::sync::Arc;
 use zeroize::Zeroizing;
@@ -130,10 +129,10 @@ pub struct IdentityContext {
 ///
 /// Each send and receive is a [`MessageEncryption`](crate::MessageEncryption) or
 /// [`MessageDecryption`](crate::MessageDecryption) that asks the host for exact records and
-/// Transport Bindings. The host commits each result's [`StateChanges`] together with its
-/// application effects. Roost starts Sessions with [`Contacts::request_contact`], picks the
-/// Session for each Message, and finds it again from the SessionID each Message carries, so the
-/// host never chooses one.
+/// Transport Bindings. The host commits each result's [`StateChanges`](crate::StateChanges)
+/// together with its application effects. Roost starts Sessions with [`Contacts::request_contact`],
+/// picks the Session for each Message, and finds it again from the SessionID each Message carries,
+/// so the host never chooses one.
 ///
 /// Send each Message until the Relay accepts it, then stop: the Relay redelivers it until the
 /// contact saves it. A [`DeliveryCheck`](crate::DeliveryCheck) says when to send Messages again or
@@ -160,21 +159,6 @@ pub struct Messaging {
 #[derive(uniffi::Object)]
 pub struct Contacts {
     pub(crate) inner: Arc<CoreKeyStore>,
-}
-
-/// Result of blocking a contact.
-#[derive(uniffi::Record)]
-pub struct ContactBlock {
-    /// The contact change to commit, carrying the inbox rotation's operation when the block
-    /// rotated the inbox.
-    pub changes: StateChanges,
-    /// The rotated inbox's publication, absent when the contact was already blocked.
-    ///
-    /// Register it with the Relay after finalizing and before sending anything. Every remaining
-    /// contact then holds a stale Delivery Capability until a Message, acknowledgment, or Grant
-    /// Update carries them the new Inbox Grant, which Roost attaches by itself from finalization
-    /// on. The blocked contact never gets one, so the block takes effect at the relay.
-    pub publication: Option<PublicationBundle>,
 }
 
 #[uniffi::export]
@@ -555,56 +539,6 @@ impl IdentityContext {
     }
 }
 
-#[uniffi::export]
-impl Contacts {
-    /// Prepares blocking a contact, given the record the host holds for them or none, and rotates
-    /// the inbox so the block takes effect at the relay.
-    ///
-    /// Blocking stops this device sending to the contact and surfacing their Messages, even a
-    /// stranger's: one with no record gets a record that holds only the block. Rotation replaces
-    /// the inbox's prekeys and Delivery Capability, so a blocked person can't come back with a new
-    /// identity at the same address. Blocking an already-blocked contact rotates nothing and
-    /// carries no operation.
-    ///
-    /// When [`ContactBlock::changes`] carries an operation, reserve it, commit the changes with
-    /// its ID, then finalize it before registering [`ContactBlock::publication`] as
-    /// [`IdentityContext::prepare_inbox_rotation`] describes. Abort only after proving the host
-    /// transaction did not commit. Each block rotates the inbox once, even for blocks close
-    /// together.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
-    /// - [`RoostError::InternalError`] on storage lock poisoning or system clock anomaly.
-    /// - [`RoostError::TooManyUnfinishedOperations`] if the unfinished-operation limit is reached.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::ProtocolStateFault`] if the record is malformed or belongs to someone
-    ///   else.
-    /// - [`RoostError::Storage`] on platform storage failure.
-    pub fn prepare_block_contact(
-        &self,
-        identity_key: IdentityKey,
-        record: Option<Vec<u8>>,
-    ) -> Result<ContactBlock, RoostError> {
-        let record = record.map(CoreProtocolStateBlob::from_bytes);
-        let block = self
-            .inner
-            .prepare_block_contact(identity_key.to_core()?, record.as_ref())?;
-        let operation = block.changes.operation();
-        let publication = match block
-            .publication
-            .map(PublicationBundle::from_core)
-            .transpose()
-        {
-            Ok(publication) => publication,
-            Err(error) => return Err(abort_unconverted(&self.inner, operation, error)),
-        };
-        Ok(ContactBlock {
-            changes: StateChanges::from_core(block.changes),
-            publication,
-        })
-    }
-}
-
 fn convert_prepared<T, U>(
     store: &CoreKeyStore,
     prepared: CorePreparedKeyStoreOperation<T>,
@@ -619,7 +553,7 @@ fn convert_prepared<T, U>(
 
 // Aborts the operation whose prepared output failed to convert, since the host never sees it, or
 // returns its identifier so the host can reconcile an uncertain cleanup after restart.
-fn abort_unconverted(
+pub(crate) fn abort_unconverted(
     store: &CoreKeyStore,
     operation: Option<roost_core::KeyStoreOperationId>,
     error: RoostError,
@@ -732,12 +666,9 @@ mod tests {
     use super::{IdentityContext, MAX_AUTHENTICATION_TRANSCRIPT_LEN};
     use crate::storage::MemoryStorage;
     use crate::{
-        RoostError, SecureStorage,
-        records::{
-            Identity as FfiIdentity, PublicDiscoveryKey as FfiPublicDiscoveryKey,
-            PublicOneTimePreKey as FfiPublicOneTimePreKey,
-            PublicSignedPreKey as FfiPublicSignedPreKey, PublicationBundle as FfiPublicationBundle,
-        },
+        Identity as FfiIdentity, PublicDiscoveryKey as FfiPublicDiscoveryKey,
+        PublicOneTimePreKey as FfiPublicOneTimePreKey, PublicSignedPreKey as FfiPublicSignedPreKey,
+        PublicationBundle as FfiPublicationBundle, RoostError, SecureStorage,
     };
     use roost_crypto::{
         PublicDiscoveryKey as CryptoPublicDiscoveryKey,
@@ -818,7 +749,7 @@ mod tests {
         assert_eq!(signature_bytes.len(), 64);
         let signature = signature_from(&signature_bytes);
         let verifying = verifying_key(&identity);
-        assert!(verifying.verify_strict(&transcript, &signature).is_ok());
+        verifying.verify_strict(&transcript, &signature).unwrap();
         // Re-prepending the transcript's own context is the exact shape a contextual signature
         // would have had. It must not verify, or this export would be signing the wrong preimage.
         assert!(matches!(
@@ -890,11 +821,9 @@ mod tests {
             Err(RoostError::InvalidData { .. }) => {}
             other => panic!("expected InvalidData past the length cap, got {other:?}"),
         }
-        assert!(
-            store
-                .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN])
-                .is_ok()
-        );
+        store
+            .sign_authentication_transcript(vec![0x41; MAX_AUTHENTICATION_TRANSCRIPT_LEN])
+            .unwrap();
     }
 
     #[test]
@@ -958,7 +887,7 @@ mod tests {
         discovery: &FfiPublicDiscoveryKey,
     ) -> CryptoPublicDiscoveryKey {
         let crypto_discovery = public_discovery_key(discovery);
-        assert!(verify_public_discovery_key(&crypto_discovery, &verifying_key(identity)).is_ok());
+        verify_public_discovery_key(&crypto_discovery, &verifying_key(identity)).unwrap();
         crypto_discovery
     }
 
@@ -967,7 +896,7 @@ mod tests {
         discovery: &CryptoPublicDiscoveryKey,
     ) {
         let crypto_prekey = public_signed_prekey(signed_prekey);
-        assert!(verify_public_signed_prekey(&crypto_prekey, &discovery.verifying_key).is_ok());
+        verify_public_signed_prekey(&crypto_prekey, &discovery.verifying_key).unwrap();
     }
 
     fn assert_discovery_to_identity_verifies(
@@ -978,14 +907,12 @@ mod tests {
         let signature = Signature::from_bytes(
             &<[u8; 64]>::try_from(publication.discovery_to_identity.as_slice()).unwrap(),
         );
-        assert!(
-            verify_discovery_to_identity_binding(
-                &public_identity_key(identity),
-                &discovery.verifying_key,
-                &signature,
-            )
-            .is_ok()
-        );
+        verify_discovery_to_identity_binding(
+            &public_identity_key(identity),
+            &discovery.verifying_key,
+            &signature,
+        )
+        .unwrap();
     }
 
     fn assert_publication_verifies(identity: &FfiIdentity, publication: &FfiPublicationBundle) {
@@ -1012,30 +939,13 @@ mod tests {
         );
     }
 
-    /// The DK→IK binding must survive the FFI boundary as 64 usable bytes, not merely exist on the
-    /// Rust side. A host reads this field straight out of the generated record to populate
-    /// `relay.cloud.v1.KeyBindingSignatures.discovery_to_identity`.
-    #[test]
-    fn publication_bundle_carries_discovery_to_identity_binding_across_ffi() {
-        let key_store = key_store();
-        let identity = key_store.generate_identity().unwrap();
-        key_store.rotate_signed_prekey_now().unwrap();
-
-        let publication = key_store.current_publication().unwrap();
-
-        assert_eq!(publication.discovery_to_identity.len(), 64);
-        assert_ne!(publication.discovery_to_identity, vec![0u8; 64]);
-        assert_publication_verifies(&identity, &publication);
-    }
-
     fn assert_one_time_prekey_record(bundle: &FfiPublicOneTimePreKey, epoch: u32) {
         assert_eq!(bundle.public_key.len(), 32);
         assert_eq!(bundle.epoch, epoch);
     }
 
-    fn current_discovery_key(store: &IdentityContext) -> FfiPublicDiscoveryKey {
-        FfiPublicDiscoveryKey::from_core(store.inner.current_public_discovery_key().unwrap())
-            .unwrap()
+    fn current_epoch(store: &IdentityContext) -> u32 {
+        store.inner.current_public_discovery_key().unwrap().epoch
     }
 
     #[test]
@@ -1046,7 +956,7 @@ mod tests {
         assert_eq!(identity.key.signing_key.len(), 32);
         assert_eq!(identity.binding_signature.len(), 64);
         verifying_key(&identity);
-        assert!(verify_public_identity_key(&public_identity_key(&identity)).is_ok());
+        verify_public_identity_key(&public_identity_key(&identity)).unwrap();
     }
 
     #[test]
@@ -1057,7 +967,7 @@ mod tests {
             .rotate_signed_prekey_if_stale()
             .unwrap()
             .expect("first rotate must produce a bundle");
-        let discovery = current_discovery_key(&store);
+        let discovery = store.current_publication().unwrap().discovery_key;
         let crypto_discovery = assert_discovery_key_verifies(&identity, &discovery);
         assert_signed_prekey_verifies(&signed_prekey, &crypto_discovery);
     }
@@ -1075,7 +985,7 @@ mod tests {
     fn generate_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        let discovery = current_discovery_key(&store);
+        let epoch = current_epoch(&store);
         let bundles = store.generate_one_time_prekeys(3).unwrap();
 
         assert_eq!(bundles.len(), 3);
@@ -1084,7 +994,7 @@ mod tests {
             vec![0, 1, 2]
         );
         for bundle in &bundles {
-            assert_one_time_prekey_record(bundle, discovery.epoch);
+            assert_one_time_prekey_record(bundle, epoch);
         }
     }
 
@@ -1092,9 +1002,9 @@ mod tests {
     fn rotate_inbox_now_advances_epoch_and_returns_verifiable_records() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        let initial_discovery = current_discovery_key(&store);
+        let initial_epoch = current_epoch(&store);
         let publication = store.rotate_inbox_now().unwrap();
-        assert_eq!(publication.discovery_key.epoch, initial_discovery.epoch + 1);
+        assert_eq!(publication.discovery_key.epoch, initial_epoch + 1);
         assert_publication_verifies(&identity, &publication);
     }
 
@@ -1102,12 +1012,12 @@ mod tests {
     fn replenish_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        let discovery = current_discovery_key(&store);
+        let epoch = current_epoch(&store);
         let bundles = store.replenish_one_time_prekeys().unwrap();
 
         assert_eq!(bundles.len(), 100);
         for bundle in &bundles {
-            assert_one_time_prekey_record(bundle, discovery.epoch);
+            assert_one_time_prekey_record(bundle, epoch);
         }
         assert!(store.replenish_one_time_prekeys().unwrap().is_empty());
     }

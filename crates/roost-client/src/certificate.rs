@@ -1,10 +1,8 @@
-//! Sender-certificate validation records exposed through UniFFI.
-
 use crate::IdentityContext;
+use crate::encoding::fixed_32;
 use crate::error::RoostError;
+use crate::identity::IdentityKey;
 use crate::message_operation::SignedSenderCertificate;
-use crate::protocol::IdentityKey;
-use crate::records::fixed_32;
 use crate::time::{millis_from_secs, time_from_millis};
 use roost_core::{InboundSenderCertificateValidation, KnownDomainSigningKey};
 use roost_protocol::{
@@ -43,7 +41,8 @@ pub struct RevocationState {
 
 /// The trust, revocation, and time inputs for validating a sender certificate.
 ///
-/// The grace for expired certificates comes with each receive, in [`ReceiveSettings`](crate::ReceiveSettings).
+/// The grace for expired certificates comes with each receive, in
+/// [`ReceiveSettings`](crate::ReceiveSettings).
 #[derive(uniffi::Record)]
 pub struct SenderCertificateValidation {
     /// Known domain-signing keys.
@@ -52,7 +51,7 @@ pub struct SenderCertificateValidation {
     pub expected_relay_domain: Vec<u8>,
     /// Caller-supplied revocation state.
     pub revocation_state: RevocationState,
-    /// Caller-supplied Unix timestamp in milliseconds.
+    /// The time to validate the certificate at, in Unix milliseconds.
     pub reference_time_millis: u64,
 }
 

@@ -1,7 +1,6 @@
-//! FFI-safe sealed-sender Message records and encode/decode helpers.
-
+use crate::encoding::{fixed_32, hex_identifier, hex_text};
 use crate::error::RoostError;
-use crate::records::{fixed_32, hex_identifier, hex_text};
+use crate::identity::{Identity, IdentityKey};
 use roost_core::{OneTimePreKeyReference, SealedFrame, SealedFramePreKeyReference};
 
 /// The identifier of one Message within a Session.
@@ -25,6 +24,23 @@ impl MessageId {
             &self.value,
             "message id",
         )?))
+    }
+}
+
+/// The identifier both peers derive for a Session, which addresses its state.
+///
+/// The value is 32 lowercase hexadecimal digits, so it compares and hashes as a plain string.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
+pub struct SessionId {
+    /// The identifier's canonical text.
+    pub value: String,
+}
+
+impl SessionId {
+    pub(crate) fn from_core(id: roost_core::SessionId) -> Self {
+        Self {
+            value: hex_text(id.as_bytes()),
+        }
     }
 }
 
@@ -63,15 +79,11 @@ pub struct Message {
     pub ciphertext: Vec<u8>,
 }
 
-/// Sender identity material revealed only after ciphertext authentication.
+/// The sender's identity and certificate, revealed only after the Message authenticates.
 #[derive(uniffi::Record)]
 pub struct SenderIdentityMaterial {
-    /// Sender Identity Key X25519 public bytes. Always 32 bytes.
-    pub identity_key: Vec<u8>,
-    /// Sender Identity Key Ed25519 verifying-key bytes. Always 32 bytes.
-    pub identity_verifying_key: Vec<u8>,
-    /// Signature binding the sender Identity Key halves.
-    pub identity_binding_signature: Vec<u8>,
+    /// The sender's identity.
+    pub identity: Identity,
     /// Opaque sender certificate bytes.
     pub certificate: Vec<u8>,
     /// Opaque sender signature bytes.
@@ -98,9 +110,13 @@ pub enum PayloadKind {
 impl SenderIdentityMaterial {
     pub(crate) fn from_core(value: roost_core::SenderIdentityMaterial) -> Self {
         Self {
-            identity_key: value.identity_key.to_vec(),
-            identity_verifying_key: value.identity_verifying_key.to_vec(),
-            identity_binding_signature: value.identity_binding_signature.clone(),
+            identity: Identity {
+                key: IdentityKey {
+                    agreement_key: value.identity_key.to_vec(),
+                    signing_key: value.identity_verifying_key.to_vec(),
+                },
+                binding_signature: value.identity_binding_signature.clone(),
+            },
             certificate: value.certificate.clone(),
             signature: value.signature.clone(),
         }
@@ -120,7 +136,7 @@ impl Message {
         }
     }
 
-    pub(crate) fn to_core(&self) -> Result<SealedFrame, RoostError> {
+    pub(crate) fn into_core(self) -> Result<SealedFrame, RoostError> {
         Ok(SealedFrame {
             version: self.version,
             recipient_public_key: fixed_32(&self.recipient_public_key, "recipient public key")?,
@@ -130,7 +146,7 @@ impl Message {
                 .map(FramePreKeyReference::to_core)
                 .transpose()?,
             ephemeral_public_key: fixed_32(&self.ephemeral_public_key, "ephemeral public key")?,
-            ciphertext: self.ciphertext.clone(),
+            ciphertext: self.ciphertext,
         })
     }
 }
@@ -151,7 +167,7 @@ impl FramePreKeyReference {
             discovery_epoch: self.discovery_epoch,
             signed_prekey_public_key: fixed_32(
                 &self.signed_prekey_public_key,
-                "signed pre-key public key",
+                "signed prekey public key",
             )?,
             one_time_prekey: self
                 .one_time_prekey
@@ -192,12 +208,20 @@ impl PayloadKind {
 }
 
 /// Encodes a Message into canonical sealed-frame bytes.
+///
+/// # Errors
+/// - [`RoostError::InvalidData`] if a key has the wrong length or the Message is longer than
+///   Roost's limits.
 #[uniffi::export]
 pub fn encode_message(message: Message) -> Result<Vec<u8>, RoostError> {
-    Ok(message.to_core()?.to_bytes()?)
+    Ok(message.into_core()?.to_bytes()?)
 }
 
 /// Decodes canonical sealed-frame bytes into transport-visible fields.
+///
+/// # Errors
+/// - [`RoostError::UnsupportedVersion`] if the Message uses an unknown version.
+/// - [`RoostError::InvalidData`] if the bytes are malformed or longer than Roost's limits.
 #[uniffi::export]
 pub fn decode_message(bytes: Vec<u8>) -> Result<Message, RoostError> {
     Ok(Message::from_core(SealedFrame::from_bytes(&bytes)?))

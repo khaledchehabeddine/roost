@@ -160,7 +160,7 @@ impl Host {
 
     // Writes `changes` only when every condition holds, as one host transaction does, around the
     // operation the changes carry.
-    fn commit(&mut self, changes: StateChanges) -> bool {
+    fn commit(&mut self, changes: &StateChanges) -> bool {
         if let Some(operation) = &changes.operation_id {
             self.context.reserve_operation(operation.clone()).unwrap();
         }
@@ -170,19 +170,19 @@ impl Host {
             .map(|condition| condition.key.clone())
             .collect();
         if !changes.matches(self.read(&keys)).unwrap() {
-            if let Some(operation) = changes.operation_id {
-                self.context.abort_operation(operation).unwrap();
+            if let Some(operation) = &changes.operation_id {
+                self.context.abort_operation(operation.clone()).unwrap();
             }
             return false;
         }
-        for update in changes.updates {
-            match update.blob {
-                Some(blob) => self.records.insert(update.key, blob),
+        for update in &changes.updates {
+            match &update.blob {
+                Some(blob) => self.records.insert(update.key.clone(), blob.clone()),
                 None => self.records.remove(&update.key),
             };
         }
-        if let Some(operation) = changes.operation_id {
-            self.context.finalize_operation(operation).unwrap();
+        if let Some(operation) = &changes.operation_id {
+            self.context.finalize_operation(operation.clone()).unwrap();
         }
         true
     }
@@ -241,7 +241,7 @@ impl Host {
 
     fn send(&mut self, recipient: &Host, plaintext: &[u8]) -> (SessionId, MessageId, Message) {
         let sent = self.encrypt(self.outgoing(recipient, plaintext)).unwrap();
-        assert!(self.commit(sent.changes));
+        assert!(self.commit(&sent.changes));
         (sent.session_id, sent.message_id, sent.message)
     }
 
@@ -252,8 +252,8 @@ impl Host {
         let first = self.seal(contacts.request_contact(redraft(&draft)).unwrap());
         assert_eq!(first.err(), Some(recipient.identity_key()));
         draft.prekey_bundle = Some(recipient.bundle());
-        let mut sealed = self.seal(contacts.request_contact(draft).unwrap()).unwrap();
-        assert!(self.commit(take_changes(&mut sealed.result)));
+        let sealed = self.seal(contacts.request_contact(draft).unwrap()).unwrap();
+        assert!(self.commit(&sealed.result.changes));
         sealed
     }
 
@@ -263,8 +263,8 @@ impl Host {
             .contacts()
             .accept_contact(self.outgoing(requester, plaintext))
             .unwrap();
-        let mut sealed = self.seal(encryption).unwrap();
-        assert!(self.commit(take_changes(&mut sealed.result)));
+        let sealed = self.seal(encryption).unwrap();
+        assert!(self.commit(&sealed.result.changes));
         sealed
     }
 
@@ -305,17 +305,8 @@ impl Host {
                 DeliveryCheckStep::NeedsState { keys } => {
                     check.supply_state(self.read(&keys)).unwrap();
                 }
-                DeliveryCheckStep::Ready { mut result } => {
-                    let changes = std::mem::replace(
-                        &mut result.changes,
-                        StateChanges {
-                            conditions: Vec::new(),
-                            updates: Vec::new(),
-                            operation_id: None,
-                            undelivered: Vec::new(),
-                        },
-                    );
-                    assert!(self.commit(changes));
+                DeliveryCheckStep::Ready { result } => {
+                    assert!(self.commit(&result.changes));
                     return result;
                 }
             }
@@ -376,19 +367,6 @@ fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
     }
 }
 
-// Takes the changes a sealed Message commits with, leaving none behind.
-fn take_changes(result: &mut OutboundMessageResult) -> StateChanges {
-    std::mem::replace(
-        &mut result.changes,
-        StateChanges {
-            conditions: Vec::new(),
-            updates: Vec::new(),
-            operation_id: None,
-            undelivered: Vec::new(),
-        },
-    )
-}
-
 fn complete(context: &IdentityContext, id: OperationId) {
     context.reserve_operation(id.clone()).unwrap();
     context.finalize_operation(id).unwrap();
@@ -427,10 +405,10 @@ fn establish(alice: &mut Host, bob: &mut Host) -> (SessionId, SessionId) {
         panic!("expected a contact request");
     };
     assert_eq!(result.plaintext, b"hello bob");
-    assert!(bob.commit(result.changes));
+    assert!(bob.commit(&result.changes));
     let acceptance = bob.accept(alice, b"hello alice");
     let accepted = received(alice.decrypt(acceptance.result.message).unwrap());
-    assert!(alice.commit(accepted.changes));
+    assert!(alice.commit(&accepted.changes));
     (request.result.session_id, result.session_id)
 }
 
@@ -461,7 +439,7 @@ fn a_request_routes_to_the_bundle_and_commits_its_one_time_prekey_with_the_conta
     };
     assert!(result.acknowledgment.is_none());
     assert!(result.changes.operation_id.is_some());
-    assert!(bob.commit(result.changes));
+    assert!(bob.commit(&result.changes));
     let contact = bob
         .context
         .contacts()
@@ -482,7 +460,7 @@ fn an_acceptance_opens_established_routes_to_both_inboxes() {
     let mut alice = Host::new();
     let mut bob = Host::new();
     let request = alice.request(&bob, b"hello bob");
-    assert!(bob.commit(received(bob.decrypt(request.result.message).unwrap()).changes));
+    assert!(bob.commit(&received(bob.decrypt(request.result.message).unwrap()).changes));
 
     let acceptance = bob.accept(&alice, b"welcome");
 
@@ -494,7 +472,7 @@ fn an_acceptance_opens_established_routes_to_both_inboxes() {
             .unwrap()
             .recipient_delivery_verifier
     );
-    assert!(alice.commit(received(alice.decrypt(acceptance.result.message).unwrap()).changes));
+    assert!(alice.commit(&received(alice.decrypt(acceptance.result.message).unwrap()).changes));
     let message = alice.encrypt(alice.outgoing(&bob, b"thanks")).unwrap();
     assert!(message.message.prekey_reference.is_none());
     let sealed = alice
@@ -540,7 +518,7 @@ fn a_reply_and_its_acknowledgment_round_trip_on_one_canonical_session_id() {
     assert_eq!(result.session_id, alice_view);
     assert_eq!(result.message_id, message_id);
     assert_eq!(result.plaintext, b"hello again");
-    assert!(alice.commit(result.changes));
+    assert!(alice.commit(&result.changes));
 
     let Ok(InboundMessageOutcome::AcknowledgmentMatched { result: matched }) =
         bob.decrypt(result.acknowledgment.unwrap())
@@ -548,15 +526,7 @@ fn a_reply_and_its_acknowledgment_round_trip_on_one_canonical_session_id() {
         panic!("expected the reply's acknowledgment");
     };
     assert_eq!(matched.acknowledged_message_id, message_id);
-    assert!(bob.commit(matched.changes));
-    assert!(
-        bob.context
-            .messaging()
-            .pending_acknowledgments(bob.snapshot(), bob_view)
-            .unwrap()
-            .iter()
-            .all(|pending| pending.message_id != message_id)
-    );
+    assert!(bob.commit(&matched.changes));
 }
 
 #[test]
@@ -590,7 +560,7 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
     else {
         panic!("expected the Safety Number to match");
     };
-    assert!(alice.commit(changes));
+    assert!(alice.commit(&changes));
 
     let record = alice.contact_record(&bob);
     let contact = alice
@@ -626,7 +596,7 @@ fn blocking_rotates_the_inbox_through_the_operation_its_changes_carry() {
 
     assert!(block.changes.operation_id.is_some());
     let publication = block.publication.unwrap();
-    assert!(alice.commit(block.changes));
+    assert!(alice.commit(&block.changes));
     assert_eq!(
         alice.context.current_publication().unwrap().discovery_key,
         publication.discovery_key
@@ -638,7 +608,7 @@ fn blocking_rotates_the_inbox_through_the_operation_its_changes_carry() {
         .unblock_contact(bob.identity_key(), alice.contact_record(&bob))
         .unwrap();
     assert!(unblock.operation_id.is_none());
-    assert!(alice.commit(unblock));
+    assert!(alice.commit(&unblock));
 }
 
 #[test]
@@ -650,7 +620,7 @@ fn a_grant_update_after_a_rotation_is_acknowledged_and_then_has_nothing_to_send(
     complete(&bob.context, rotation.operation_id);
     let contacts = bob.context.contacts();
 
-    let mut update = bob
+    let update = bob
         .seal(
             contacts
                 .start_grant_update(bob.grant_update(&alice))
@@ -662,20 +632,20 @@ fn a_grant_update_after_a_rotation_is_acknowledged_and_then_has_nothing_to_send(
         update.result.payload_kind,
         PayloadKind::GrantUpdate
     ));
-    assert!(bob.commit(take_changes(&mut update.result)));
+    assert!(bob.commit(&update.result.changes));
     let InboundMessageOutcome::GrantUpdate { result } =
         alice.decrypt(update.result.message).unwrap()
     else {
         panic!("expected a Grant Update");
     };
     let acknowledgment = result.acknowledgment.unwrap();
-    assert!(alice.commit(result.changes));
+    assert!(alice.commit(&result.changes));
     let InboundMessageOutcome::AcknowledgmentMatched { result } =
         bob.decrypt(acknowledgment).unwrap()
     else {
         panic!("expected the Grant Update's acknowledgment");
     };
-    assert!(bob.commit(result.changes));
+    assert!(bob.commit(&result.changes));
     let again = contacts
         .start_grant_update(bob.grant_update(&alice))
         .unwrap();
@@ -685,27 +655,6 @@ fn a_grant_update_after_a_rotation_is_acknowledged_and_then_has_nothing_to_send(
         step = again.step().unwrap();
     }
     assert!(matches!(step, MessageEncryptionStep::NothingToSend));
-}
-
-#[test]
-fn session_ids_must_be_canonical() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
-    let (session_id, _) = establish(&mut alice, &mut bob);
-
-    for value in [
-        session_id.value.to_uppercase(),
-        session_id.value[..30].to_string(),
-        format!("{}0", session_id.value),
-    ] {
-        assert!(matches!(
-            alice
-                .context
-                .messaging()
-                .pending_acknowledgments(alice.snapshot(), SessionId { value }),
-            Err(RoostError::InvalidData { .. })
-        ));
-    }
 }
 
 #[test]
@@ -837,7 +786,7 @@ fn a_silent_contact_gets_its_unacknowledged_message_again_through_a_probe() {
         needs_bundle,
         MessageRecoveryStep::NeedsPreKeyBundle { identity_key } if identity_key == bob.identity_key()
     ));
-    let (MessageRecoveryStep::Ready { mut result }, Some(destination)) =
+    let (MessageRecoveryStep::Ready { result }, Some(destination)) =
         alice.recover(&bob, Some(bob.bundle()), b"are you there?")
     else {
         panic!("expected a resent Message");
@@ -848,7 +797,7 @@ fn a_silent_contact_gets_its_unacknowledged_message_again_through_a_probe() {
     ));
     assert_eq!(result.message_id, message_id);
     assert_eq!(result.sent_at_millis, NOW_MILLIS);
-    assert!(alice.commit(take_changes(&mut result)));
+    assert!(alice.commit(&result.changes));
 
     assert!(matches!(
         alice.recover(&bob, None, b"").0,
