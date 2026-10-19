@@ -65,7 +65,10 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                     prop_assert_eq!(decrypted.plaintext.as_slice(), message.plaintext.as_slice());
 
                     let mut corrupt_store = fixture.bob.host.clone();
-                    corrupt_store.set_raw(session_address(fixture.session_id), vec![2, 0, 0xaa]);
+                    corrupt_store.set_raw(
+                        session_address(fixture.session_id),
+                        corrupt_store.malformed_blob(),
+                    );
                     let duplicate = fixture
                         .decrypt(
                             &corrupt_store,

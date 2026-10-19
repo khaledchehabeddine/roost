@@ -29,7 +29,7 @@ fn derive_example_key(secret: &[u8; 32]) -> ExampleKey {
 ## Visibility
 
 - Keep modules private and re-export the public API from `lib.rs` by name, not with `*`.
-- Give each item the narrowest visibility its callers need: private, `pub(super)`, `pub(crate)`, or `pub`. A re-export isn't a caller, and neither is a test unless the item is its only way to read or set stored state.
+- Give each item the narrowest visibility its callers need: private, `pub(super)`, `pub(crate)`, or `pub`. A re-export isn't a caller, and neither is a test unless the item is its only way to read or set stored state without consuming a result.
 - Re-export what callers need from lower workspace crates.
 - Import another workspace crate's items into tests through `[dev-dependencies]`, never by making or re-exporting them publicly.
 - Keep a type that holds a secret private unless callers must pass or receive that secret.
@@ -66,4 +66,4 @@ enum ExampleError {
 - Leave the version off an encoding that only ever sits inside another one.
 - Bump the version when a change alters how an existing value encodes or gives old bytes a new meaning.
 - Don't write migration code for older versions until a release promises that stored data survives upgrades.
-- Encode each type through one private `*Wire` struct, not the domain type, and derive both `Serialize` and `Deserialize` on it.
+- Encode each type through one private `*Wire` struct, not the domain type, and derive both `Serialize` and `Deserialize` on it. When that struct would copy a secret or a large buffer to encode, split it into a borrowing `*Wire` struct for encoding and an owning `Decoded*Wire` struct for decoding.

@@ -6,37 +6,43 @@ pub use recovery::{
 };
 
 use super::contact_record::{ContactRecord, ReceivedCount, contact_address, load_contact};
+use super::deduplication::{
+    LoadedDeduplicationSet, deduplication_address, encode_deduplication_set,
+    receiving_deduplication_set,
+};
+use super::envelope::{
+    LocalSender, OpenedMessage, OutboundContent, SignedRecipient, authenticate_first_message,
+    authenticate_session_message, certified_sender_identity_key, decode_acknowledgment_plaintext,
+    encode_acknowledgment_plaintext, open_message, seal_proved, seal_signed,
+    validate_sender_identity, verify_recipient_keys,
+};
 use super::grant::{InboxGrant, LocalGrant, encode_granted_payload, open_granted_payload};
+use super::pending_acknowledgment::{
+    LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, acknowledgment_digest,
+    encode_pending_acknowledgments, evict_sessions, has_seen_acknowledgment,
+    load_pending_acknowledgments,
+};
 use super::session::{
     LoadedSession, PeerSessions, PendingHandshake, SignedPreKeyUse, Starter, encode_peer_sessions,
-    encode_session, load_peer_sessions, load_session, peer_sessions_address,
+    encode_session, load_peer_sessions, load_required_session, load_session, peer_sessions_address,
     pending_acknowledgment_address, session_address, session_record_addresses,
 };
 use super::{
     AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
-    GrantUpdateResult, InboundMessageOutcome, InboundMessageResult,
-    InboundSenderCertificateValidation, LoadedDeduplicationSet, LoadedPendingAcknowledgment,
-    LoadedPendingAcknowledgments, LocalSender, OpenedMessage, OutboundContent,
-    OutboundMessageResult, ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateBlob,
-    ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError, ProtocolStateSnapshot,
-    ProtocolStateUpdate, ReceiveSettings, SenderIdentityMaterial, SignedRecipient, StateChanges,
-    WithheldInboundMessageResult, acknowledgment_digest, authenticate_first_message,
-    authenticate_session_message, contact_identity_keys_match, contains_digest,
-    decode_acknowledgment_plaintext, deduplication_address, deduplication_digest,
-    encode_acknowledgment_plaintext, encode_deduplication_set, encode_pending_acknowledgments,
-    inbound_contact_identity_key, load_pending_acknowledgments, load_required_session,
-    match_state_entries, open_message, pending_acknowledgment_digest_seen,
-    receiving_deduplication_set, record_acknowledgment_digest, record_deduplication_digest,
-    record_pending_acknowledgment, seal_proved, seal_signed, session_deletions,
-    validate_contact_identity_key, validate_sender_identity, verify_recipient_keys,
+    DIGEST_LEN, GrantUpdateResult, InboundMessageOutcome, InboundMessageResult,
+    InboundSenderCertificateValidation, OutboundMessageResult, ProtocolHardeningLimits,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine,
+    ProtocolStateError, ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings,
+    SenderIdentityMaterial, StateChanges, WithheldInboundMessageResult,
+    contact_identity_keys_match, match_state_entries, validate_contact_identity_key,
 };
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
 use crate::key_store::{KeyStore, KeyStoreError};
-use crate::{Message, MessageId, PayloadKind, TransportBinding};
+use crate::{MessageId, PayloadKind, TransportBinding};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
     DiscoveryKey, Handshake, KeyPair, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,
-    PublicKey, PublicSignedPreKey, RatchetState, RecipientDeliveryCapability,
+    PublicKey, PublicSignedPreKey, RatchetState, RecipientDeliveryCapability, SealedFrame,
     SealedFramePreKeyReference, Signature, SigningKeyPair, accept_handshake, initiate_handshake,
     sign_identity_key_binding, verify_discovery_to_identity_binding,
 };
@@ -137,7 +143,7 @@ impl OutgoingGrantUpdate {
 /// What the app received, with the inputs Roost needs to check and acknowledge it.
 pub struct IncomingMessage {
     /// The received Message.
-    pub message: Message,
+    pub message: SealedFrame,
     /// The exact Transport Binding the Message arrived with.
     pub transport_binding: TransportBinding,
     /// The app's settings for this receive.
@@ -338,7 +344,8 @@ impl Route {
             one_time_prekey_id: pending_handshake
                 .handshake
                 .prekey_reference
-                .one_time_prekey_id,
+                .one_time_prekey
+                .map(|prekey| prekey.id),
         }
     }
 
@@ -439,10 +446,7 @@ impl ProtocolStateEngine {
         keys: LocalIdentityKeys,
         message: IncomingMessage,
     ) -> Result<MessageDecryption, ProtocolStateError> {
-        let encoded = message
-            .message
-            .to_bytes()
-            .map_err(ProtocolStateError::MessageEncode)?;
+        let encoded = message.message.to_bytes()?;
         let local = LocalSenderKeys::new(keys, message.acknowledgment_sender_certificate)?;
         validate_sender_identity(&local.identity, self.limits)?;
         Ok(MessageDecryption(Some(Box::new(Decrypting {
@@ -981,8 +985,7 @@ impl Encrypting {
                     discovery_key: route.discovery_key(),
                     identity_verifying_key: &self.recipient.ed25519_verifying_key,
                 },
-                sender.identity,
-                sender.signing_key,
+                &sender,
                 transport_binding,
                 limits,
             )?,
@@ -990,9 +993,7 @@ impl Encrypting {
         let pending_address = pending_acknowledgment_address(session_id);
         // A contact that hasn't accepted acknowledges nothing yet, so nothing waits for it.
         if contact.is_accepted() {
-            record_pending_acknowledgment(
-                &pending_address,
-                &mut pending,
+            pending.record(
                 self.message_id,
                 LoadedPendingAcknowledgment::new(
                     &message,
@@ -1000,7 +1001,6 @@ impl Encrypting {
                     payload_kind,
                     payload_kind.carries_grant().then(|| grant.stamp()),
                 )?,
-                limits,
             )?;
         }
         let snapshot = self.reads.snapshot();
@@ -1021,6 +1021,7 @@ impl Encrypting {
         ];
         updates.extend(contact_update(snapshot, &contact, limits)?);
         let mut evicted = Vec::new();
+        let mut undelivered = Vec::new();
         if let Some((peer_sessions, started_evicted)) = started {
             let peer_address = peer_sessions_address(self.recipient);
             updates.push(
@@ -1030,7 +1031,13 @@ impl Encrypting {
                 )
                 .with_snapshot(snapshot),
             );
-            updates.extend(session_deletions(snapshot, &started_evicted));
+            let (deletions, stranded) = evict_sessions(snapshot, &started_evicted, limits)?;
+            updates.extend(deletions);
+            // A resend's new copy waits on the new Session instead.
+            undelivered = stranded
+                .into_iter()
+                .filter(|message_id| *message_id != self.message_id)
+                .collect();
             evicted = started_evicted;
         }
         // A Session this send evicts takes its copy with it.
@@ -1051,7 +1058,7 @@ impl Encrypting {
             sent_at_millis: self.sent_at_millis,
             payload_kind,
             message,
-            changes: changes(&self.reads, updates),
+            changes: changes(&self.reads, updates).with_undelivered(undelivered),
         })
     }
 }
@@ -1084,7 +1091,7 @@ struct Decrypting {
     engine: ProtocolStateEngine,
     store: KeyStore,
     local: LocalSenderKeys,
-    message: Message,
+    message: SealedFrame,
     encoded: Vec<u8>,
     transport_binding: TransportBinding,
     settings: ReceiveSettings,
@@ -1109,7 +1116,7 @@ enum DecryptionPhase {
 // A Message that passed deduplication and opened under the local Discovery Key.
 struct Opened {
     deduplication: LoadedDeduplicationSet,
-    digest: [u8; super::DEDUPLICATION_DIGEST_LEN],
+    digest: [u8; DIGEST_LEN],
     message: OpenedMessage,
 }
 
@@ -1133,7 +1140,7 @@ struct FirstMessage {
 // A first Message that authenticated and created a Session, waiting for its sender's records.
 struct AcceptedFirstMessage {
     deduplication: LoadedDeduplicationSet,
-    digest: [u8; super::DEDUPLICATION_DIGEST_LEN],
+    digest: [u8; DIGEST_LEN],
     session_id: SessionId,
     state: Box<RatchetState>,
     sender_identity_key: ContactIdentityKey,
@@ -1180,6 +1187,8 @@ struct Delivery {
     acknowledgment_carries_grant: bool,
     // Every update except the Session's, which sealing an acknowledgment advances.
     updates: Vec<ProtocolStateUpdate>,
+    // Sent Messages whose Session the new one evicted.
+    undelivered: Vec<MessageId>,
     one_time_prekey: Option<OneTimePreKeyUse>,
 }
 
@@ -1326,12 +1335,8 @@ impl Decrypting {
             self.settings,
             self.engine.limits,
         )?;
-        let digest = deduplication_digest(
-            &deduplication.digest_key,
-            self.transport_binding.as_bytes(),
-            &self.encoded,
-        );
-        if contains_digest(&deduplication.digests, &digest) {
+        let digest = deduplication.digest(self.transport_binding.as_bytes(), &self.encoded);
+        if deduplication.contains(&digest) {
             return Ok(MessageDecryptionStep::Ready(Box::new(
                 InboundMessageOutcome::Duplicate,
             )));
@@ -1383,7 +1388,7 @@ impl Decrypting {
         };
         let is_acknowledgment = opened.message.metadata.payload_kind.is_acknowledgment();
         if is_acknowledgment
-            && pending_acknowledgment_digest_seen(
+            && has_seen_acknowledgment(
                 snapshot,
                 &pending_acknowledgment_address(session_id),
                 acknowledgment_digest(self.transport_binding.as_bytes(), &self.encoded),
@@ -1494,12 +1499,10 @@ impl Decrypting {
         let decoded = message.decrypt(rng, &mut state, limits)?;
         let (sender, sender_discovery_key) =
             authenticate_first_message(&decoded, &handshake, &prekeys.signed_prekey)?;
-        let sender_identity_key = inbound_contact_identity_key(
+        let sender_identity_key = certified_sender_identity_key(
             &self.validation,
-            self.settings.certificate_grace(),
+            self.settings.certificate_grace,
             &decoded.sender_identity,
-            Some(decoded.sender_identity.contact_identity_key()),
-            limits,
         )?;
         // The sender started this Session, so it can't be accepting a request this side made.
         if payload_kind == PayloadKind::ContactAcceptance {
@@ -1524,9 +1527,9 @@ impl Decrypting {
                 public_key: reference.signed_prekey_public_key,
             },
             held_signed_prekeys: prekeys.held_signed_prekeys,
-            one_time_prekey: reference.one_time_prekey_id.map(|id| OneTimePreKeyUse {
+            one_time_prekey: reference.one_time_prekey.map(|prekey| OneTimePreKeyUse {
                 epoch: reference.discovery_epoch,
-                id,
+                id: prekey.id,
             }),
         };
         let addresses = vec![
@@ -1684,7 +1687,7 @@ impl Decrypting {
         };
         // The sender started the new Session.
         let acknowledges = self.should_acknowledge(&contact, Starter::Peer);
-        record_deduplication_digest(&mut deduplication, digest);
+        deduplication.record(digest);
         let peer_address = peer_sessions_address(sender_identity_key);
         let pending_address = pending_acknowledgment_address(session_id);
         let mut updates = vec![
@@ -1705,7 +1708,8 @@ impl Decrypting {
             deduplication_update(snapshot, &deduplication, limits)?,
         ];
         updates.extend(contact_update(snapshot, &contact, limits)?);
-        updates.extend(session_deletions(snapshot, &evicted));
+        let (deletions, undelivered) = evict_sessions(snapshot, &evicted, limits)?;
+        updates.extend(deletions);
         let Some(delivered) = delivered else {
             updates.insert(
                 0,
@@ -1718,7 +1722,13 @@ impl Decrypting {
                     limits,
                 )?,
             );
-            return self.withhold(session_id, message_id, updates, one_time_prekey);
+            return self.withhold(
+                session_id,
+                message_id,
+                updates,
+                undelivered,
+                one_time_prekey,
+            );
         };
         let route = acknowledges
             .then(|| Route::established(&contact))
@@ -1738,6 +1748,7 @@ impl Decrypting {
                 acknowledgment_carries_grant: contact
                     .receives_grant(Starter::Peer, self.local.grant().stamp()),
                 updates,
+                undelivered,
                 one_time_prekey,
             },
             route,
@@ -1772,12 +1783,10 @@ impl Decrypting {
             peer_identity_key,
             &self.local.identity.identity_verifying_key,
         )?;
-        inbound_contact_identity_key(
+        certified_sender_identity_key(
             &self.validation,
-            self.settings.certificate_grace(),
+            self.settings.certificate_grace,
             &decoded.sender_identity,
-            Some(peer_identity_key),
-            limits,
         )?;
         let snapshot = self.reads.snapshot();
         let contact_address = contact_address(peer_identity_key);
@@ -1800,11 +1809,10 @@ impl Decrypting {
             }
             let pending_address = pending_acknowledgment_address(session_id);
             let mut pending = load_pending_acknowledgments(snapshot, &pending_address, limits)?;
-            record_acknowledgment_digest(
-                &mut pending,
-                acknowledgment_digest(self.transport_binding.as_bytes(), &self.encoded),
-                limits,
-            );
+            pending.record_acknowledgment(acknowledgment_digest(
+                self.transport_binding.as_bytes(),
+                &self.encoded,
+            ));
             let matched = pending.pending.remove(acknowledged_message_id.as_bytes());
             if let Some(stamp) = matched.as_ref().and_then(|entry| entry.grant) {
                 contact.acknowledge_grant(stamp);
@@ -1873,7 +1881,7 @@ impl Decrypting {
             || contact.count_received(message.metadata.id) == ReceivedCount::WithinLimit;
         // The requester's Messages keep carrying the handshake until the peer accepts.
         let pending_handshake = pending_handshake.filter(|_| !contact.is_accepted());
-        record_deduplication_digest(&mut deduplication, digest);
+        deduplication.record(digest);
         updates.insert(0, deduplication_update(snapshot, &deduplication, limits)?);
         updates.extend(contact_update(snapshot, &contact, limits)?);
         if !within_limit {
@@ -1888,7 +1896,7 @@ impl Decrypting {
                     limits,
                 )?,
             );
-            return self.withhold(session_id, message.metadata.id, updates, None);
+            return self.withhold(session_id, message.metadata.id, updates, Vec::new(), None);
         }
         let delivered = if contact.blocked {
             Delivered::Blocked
@@ -1914,6 +1922,7 @@ impl Decrypting {
                 acknowledgment_carries_grant: contact
                     .receives_grant(starter, self.local.grant().stamp()),
                 updates,
+                undelivered: Vec::new(),
                 one_time_prekey: None,
             },
             route,
@@ -1926,7 +1935,7 @@ impl Decrypting {
     fn should_acknowledge(&self, contact: &ContactRecord, starter: Starter) -> bool {
         contact.should_acknowledge(starter)
             && (!contact.blocked
-                || self.settings.blocked_contact_acknowledgment_policy()
+                || self.settings.blocked_contact_acknowledgment_policy
                     == BlockedContactAcknowledgmentPolicy::SilentReceipt)
     }
 
@@ -1936,9 +1945,13 @@ impl Decrypting {
         session_id: SessionId,
         message_id: MessageId,
         updates: Vec<ProtocolStateUpdate>,
+        undelivered: Vec<MessageId>,
         one_time_prekey: Option<OneTimePreKeyUse>,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
-        let changes = self.with_one_time_prekey(changes(&self.reads, updates), one_time_prekey)?;
+        let changes = self.with_one_time_prekey(
+            changes(&self.reads, updates).with_undelivered(undelivered),
+            one_time_prekey,
+        )?;
         Ok(MessageDecryptionStep::Ready(Box::new(
             InboundMessageOutcome::Withheld(Box::new(WithheldInboundMessageResult {
                 session_id,
@@ -2017,8 +2030,7 @@ impl Decrypting {
                 discovery_key: route.discovery_key(),
                 identity_verifying_key: &delivery.sender_identity.identity_verifying_key,
             },
-            &self.local.identity,
-            &self.local.keys.signing_key,
+            &self.local.local_sender(),
             transport_binding,
             limits,
         )?;
@@ -2037,7 +2049,7 @@ impl Decrypting {
         &self,
         delivery: Delivery,
         session: ProtocolStateUpdate,
-        acknowledgment: Option<Message>,
+        acknowledgment: Option<SealedFrame>,
     ) -> Result<InboundMessageOutcome, MessageOperationError> {
         let Delivery {
             session_id,
@@ -2048,11 +2060,15 @@ impl Decrypting {
             sender_identity,
             delivered,
             mut updates,
+            undelivered,
             one_time_prekey,
             ..
         } = delivery;
         updates.insert(0, session);
-        let changes = self.with_one_time_prekey(changes(&self.reads, updates), one_time_prekey)?;
+        let changes = self.with_one_time_prekey(
+            changes(&self.reads, updates).with_undelivered(undelivered),
+            one_time_prekey,
+        )?;
         Ok(match delivered {
             Delivered::Blocked => {
                 InboundMessageOutcome::Blocked(Box::new(BlockedInboundMessageResult {
@@ -2255,6 +2271,7 @@ fn changes(reads: &StateReads, updates: Vec<ProtocolStateUpdate>) -> StateChange
         conditions: conditions.into_iter().collect(),
         updates,
         operation: None,
+        undelivered: Vec::new(),
     }
 }
 

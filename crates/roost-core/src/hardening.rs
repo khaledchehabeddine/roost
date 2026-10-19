@@ -1,14 +1,10 @@
 use crate::ProtocolStateError;
 use roost_crypto::SealedFrame;
 
-/// Default number of received-message digests retained per local Identity.
-pub const DEFAULT_DEDUPLICATION_CAPACITY: usize = 1024;
-/// Minimum supported received-message deduplication capacity.
-pub const MIN_DEDUPLICATION_CAPACITY: usize = 64;
-/// Maximum supported received-message deduplication capacity.
-pub const MAX_DEDUPLICATION_CAPACITY: usize = 2048;
+pub(crate) const DEFAULT_DEDUPLICATION_CAPACITY: usize = 1024;
+pub(crate) const MIN_DEDUPLICATION_CAPACITY: usize = 64;
+pub(crate) const MAX_DEDUPLICATION_CAPACITY: usize = 2048;
 
-const MAX_MESSAGE_PAYLOAD_LEN: usize = 128 * 1024;
 const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
 const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
@@ -51,7 +47,7 @@ impl Default for ProtocolHardeningLimits {
     fn default() -> Self {
         Self {
             max_encoded_message_len: SealedFrame::MAX_ENCODED_LEN,
-            max_message_payload_len: MAX_MESSAGE_PAYLOAD_LEN,
+            max_message_payload_len: SealedFrame::MAX_CIPHERTEXT_LEN,
             max_protocol_state_blob_len: MAX_PROTOCOL_STATE_BLOB_LEN,
             max_sender_certificate_len: MAX_SENDER_CERTIFICATE_LEN,
             max_sender_signature_len: MAX_SENDER_SIGNATURE_LEN,
@@ -65,8 +61,12 @@ impl Default for ProtocolHardeningLimits {
     }
 }
 
+pub(crate) fn is_supported_deduplication_capacity(capacity: usize) -> bool {
+    (MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity)
+}
+
 pub(crate) fn validate_deduplication_capacity(capacity: usize) -> Result<(), ProtocolStateError> {
-    if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
+    if !is_supported_deduplication_capacity(capacity) {
         return Err(ProtocolStateError::InvalidDeduplicationCapacity {
             capacity,
             minimum: MIN_DEDUPLICATION_CAPACITY,

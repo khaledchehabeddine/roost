@@ -10,13 +10,13 @@ use rand_chacha::ChaCha20Rng;
 use roost_core::{
     AdmissionRequest, ContactIdentityKey, ContactState, DeliveryCheckResult, DeliveryCheckStep,
     InboundMessageOutcome, InboundSenderCertificateValidation, IncomingMessage, KeyStore,
-    KeyStoreError, KeyStoreOperationError, KnownDomainSigningKey, Message, MessageDecryptionStep,
+    KeyStoreError, KeyStoreOperationError, KnownDomainSigningKey, MessageDecryptionStep,
     MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
     MessageRecoveryStep, MessageStartError, OutboundMessageResult, OutgoingGrantUpdate,
     OutgoingMessage, OutgoingRecovery, PeerPreKeyBundle, PreKeyBundle, PreparedKeyStoreOperation,
     ProtocolStateAddress, ProtocolStateKey, ProtocolStateKind, PublicIdentityKey,
-    PublicationBundle, ReceiveSettings, SessionId, SignedSenderCertificate, StateChanges,
-    TransportBinding,
+    PublicationBundle, ReceiveSettings, SealedFrame, SessionId, SignedSenderCertificate,
+    StateChanges, TransportBinding,
 };
 use roost_crypto::SigningKeyPair;
 use roost_protocol::{DomainSigningKeyStatus, MessageId, PayloadKind};
@@ -378,7 +378,7 @@ impl Device {
             session_id: result.session_id,
             message_id: result.message_id,
             payload_kind: result.payload_kind,
-            message: super::copy(&result.message),
+            message: result.message.clone(),
             destination,
         };
         self.host.commit_sent(result).unwrap();
@@ -414,9 +414,8 @@ impl Device {
     /// Checks the delivery of what this Device sent `peer` at `now_millis`, and commits the
     /// result.
     pub fn check_deliveries(&mut self, peer: &Device, now_millis: u64) -> DeliveryCheckResult {
-        let mut result = self.observe_deliveries(peer, now_millis).unwrap();
-        let changes = std::mem::replace(&mut result.changes, StateChanges::from(Vec::new()));
-        self.commit_changes(changes).unwrap();
+        let result = self.observe_deliveries(peer, now_millis).unwrap();
+        self.commit_changes(&result.changes).unwrap();
         result
     }
 
@@ -451,7 +450,7 @@ impl Device {
                     session_id: result.session_id,
                     message_id: result.message_id,
                     payload_kind: result.payload_kind,
-                    message: super::copy(&result.message),
+                    message: result.message.clone(),
                     destination,
                 };
                 self.host.commit_sent(result).unwrap();
@@ -506,9 +505,9 @@ impl Device {
     }
 
     /// Returns what the app passes to receive `message` with this Device's settings.
-    pub fn incoming(&self, message: &Message) -> IncomingMessage {
+    pub fn incoming(&self, message: &SealedFrame) -> IncomingMessage {
         IncomingMessage {
-            message: super::copy(message),
+            message: message.clone(),
             transport_binding: binding(),
             settings: self.settings,
             sender_certificate_validation: self.credential.validation(),
@@ -518,22 +517,21 @@ impl Device {
     }
 
     /// Receives `message` and commits whatever state it returns.
-    pub fn receive(&mut self, message: &Message) -> InboundMessageOutcome {
+    pub fn receive(&mut self, message: &SealedFrame) -> InboundMessageOutcome {
         let outcome = self.decrypt(message).unwrap();
-        let (outcome, changes) = super::split_changes(outcome);
-        if let Some(changes) = changes {
+        if let Some(changes) = super::changes_of(&outcome) {
             self.commit_changes(changes).unwrap();
         }
         outcome
     }
 
     /// Decrypts `message` without committing the result.
-    pub fn decrypt(&self, message: &Message) -> Result<InboundMessageOutcome, DeviceError> {
+    pub fn decrypt(&self, message: &SealedFrame) -> Result<InboundMessageOutcome, DeviceError> {
         Ok(self.observe(message)?.outcome)
     }
 
     /// Decrypts `message` without committing the result, and reports what the operation asked for.
-    pub fn observe(&self, message: &Message) -> Result<Decrypted, DeviceError> {
+    pub fn observe(&self, message: &SealedFrame) -> Result<Decrypted, DeviceError> {
         let mut decryption = self.store.start_decryption(self.incoming(message))?;
         // Each Message's ephemeral key varies the seed, so each ratchet step draws new keys.
         let mut seed = message.ephemeral_public_key;
@@ -570,7 +568,7 @@ impl Device {
 
     /// Commits `changes`, reserving and finalizing the operation they carry around the host
     /// transaction, and aborting it when a condition fails.
-    pub fn commit_changes(&mut self, changes: StateChanges) -> Result<(), HostCommitError> {
+    pub fn commit_changes(&mut self, changes: &StateChanges) -> Result<(), HostCommitError> {
         let Some(operation) = changes.operation() else {
             return self.host.commit_changes(changes);
         };
@@ -605,7 +603,7 @@ impl Device {
             .store
             .prepare_block_contact(peer, record.as_ref())
             .unwrap();
-        self.commit_changes(block.changes).unwrap();
+        self.commit_changes(&block.changes).unwrap();
         block.publication
     }
 
@@ -620,7 +618,7 @@ impl Device {
             .protocol_engine()
             .unblock_contact(peer, record.as_ref())
             .unwrap();
-        self.commit_changes(changes).unwrap();
+        self.commit_changes(&changes).unwrap();
     }
 
     /// Deletes the Deduplication Set, as if every recorded digest had aged out.
@@ -711,7 +709,7 @@ pub struct SentMessage {
     pub session_id: SessionId,
     pub message_id: MessageId,
     pub payload_kind: PayloadKind,
-    pub message: Message,
+    pub message: SealedFrame,
     pub destination: MessageDestination,
 }
 

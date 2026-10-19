@@ -27,10 +27,17 @@ pub struct SealedFramePreKeyReference {
     pub discovery_epoch: u32,
     /// Recipient signed pre-key X25519 public key.
     pub signed_prekey_public_key: [u8; 32],
-    /// Recipient one-time pre-key identifier, when used.
-    pub one_time_prekey_id: Option<u64>,
-    /// Recipient one-time pre-key X25519 public key, when used.
-    pub one_time_prekey_public_key: Option<[u8; 32]>,
+    /// Recipient one-time pre-key, when the handshake used one.
+    pub one_time_prekey: Option<OneTimePreKeyReference>,
+}
+
+/// The one-time prekey a handshake used.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OneTimePreKeyReference {
+    /// The prekey's ID within its Discovery Key epoch.
+    pub id: u64,
+    /// The prekey's X25519 public key.
+    pub public_key: [u8; 32],
 }
 
 /// Transport-visible sealed-sender frame.
@@ -51,6 +58,8 @@ pub struct SealedFrame {
 impl SealedFrame {
     /// Maximum encoded sealed-frame byte length accepted before Postcard parsing.
     pub const MAX_ENCODED_LEN: usize = MAX_SEALED_FRAME_ENCODED_LEN;
+    /// Maximum ciphertext byte length a frame carries.
+    pub const MAX_CIPHERTEXT_LEN: usize = MAX_SEALED_FRAME_CIPHERTEXT_LEN;
 
     /// Encodes the frame into canonical Postcard bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, SealedFrameError> {
@@ -88,7 +97,7 @@ impl SealedFrame {
                 len: trailing.len(),
             });
         }
-        let frame = SealedFrame::from(wire);
+        let frame = SealedFrame::try_from(wire)?;
         frame.validate()?;
         Ok(frame)
     }
@@ -105,13 +114,8 @@ impl SealedFrame {
         }
         let mut public_keys = vec![self.recipient_public_key, self.ephemeral_public_key];
         if let Some(reference) = self.prekey_reference {
-            if reference.one_time_prekey_id.is_some()
-                != reference.one_time_prekey_public_key.is_some()
-            {
-                return Err(SealedFrameError::IncompleteOneTimePreKey);
-            }
             public_keys.push(reference.signed_prekey_public_key);
-            public_keys.extend(reference.one_time_prekey_public_key);
+            public_keys.extend(reference.one_time_prekey.map(|prekey| prekey.public_key));
         }
         if !public_keys.iter().all(is_valid_x25519_public_key) {
             return Err(SealedFrameError::InvalidPublicKey);
@@ -265,6 +269,8 @@ struct SealedFrameWire {
     ciphertext: Vec<u8>,
 }
 
+// The one-time prekey's ID and key encode as two options, as they did before the domain type
+// held them together.
 #[derive(Deserialize, Serialize)]
 struct SealedFramePreKeyReferenceWire {
     discovery_epoch: u32,
@@ -285,15 +291,17 @@ impl From<&SealedFrame> for SealedFrameWire {
     }
 }
 
-impl From<SealedFrameWire> for SealedFrame {
-    fn from(value: SealedFrameWire) -> Self {
-        Self {
+impl TryFrom<SealedFrameWire> for SealedFrame {
+    type Error = SealedFrameError;
+
+    fn try_from(value: SealedFrameWire) -> Result<Self, Self::Error> {
+        Ok(Self {
             version: value.version,
             recipient_public_key: value.recipient_public_key,
-            prekey_reference: value.prekey_reference.map(Into::into),
+            prekey_reference: value.prekey_reference.map(TryInto::try_into).transpose()?,
             ephemeral_public_key: value.ephemeral_public_key,
             ciphertext: value.ciphertext,
-        }
+        })
     }
 }
 
@@ -302,20 +310,28 @@ impl From<SealedFramePreKeyReference> for SealedFramePreKeyReferenceWire {
         Self {
             discovery_epoch: value.discovery_epoch,
             signed_prekey_public_key: value.signed_prekey_public_key,
-            one_time_prekey_id: value.one_time_prekey_id,
-            one_time_prekey_public_key: value.one_time_prekey_public_key,
+            one_time_prekey_id: value.one_time_prekey.map(|prekey| prekey.id),
+            one_time_prekey_public_key: value.one_time_prekey.map(|prekey| prekey.public_key),
         }
     }
 }
 
-impl From<SealedFramePreKeyReferenceWire> for SealedFramePreKeyReference {
-    fn from(value: SealedFramePreKeyReferenceWire) -> Self {
-        Self {
+impl TryFrom<SealedFramePreKeyReferenceWire> for SealedFramePreKeyReference {
+    type Error = SealedFrameError;
+
+    fn try_from(value: SealedFramePreKeyReferenceWire) -> Result<Self, Self::Error> {
+        let one_time_prekey = match (value.one_time_prekey_id, value.one_time_prekey_public_key) {
+            (Some(id), Some(public_key)) => Some(OneTimePreKeyReference { id, public_key }),
+            (None, None) => None,
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(SealedFrameError::IncompleteOneTimePreKey);
+            }
+        };
+        Ok(Self {
             discovery_epoch: value.discovery_epoch,
             signed_prekey_public_key: value.signed_prekey_public_key,
-            one_time_prekey_id: value.one_time_prekey_id,
-            one_time_prekey_public_key: value.one_time_prekey_public_key,
-        }
+            one_time_prekey,
+        })
     }
 }
 

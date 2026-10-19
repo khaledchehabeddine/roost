@@ -225,6 +225,7 @@ pub enum MessageDecryptionStep {
 ///         throw CommitError.conflict // Start again from fresh reads.
 ///     }
 ///     try db.write(changes.updates)
+///     try db.markNotDelivered(changes.undelivered)
 ///     try db.queue(result!.message, messageId: result!.messageId)
 /// }
 /// ```
@@ -259,6 +260,7 @@ pub enum MessageDecryptionStep {
 ///         throw CommitConflict() // Start again from fresh reads.
 ///     }
 ///     db.write(changes.updates)
+///     db.markNotDelivered(changes.undelivered)
 ///     db.queue(result.message, result.messageId)
 /// }
 /// ```

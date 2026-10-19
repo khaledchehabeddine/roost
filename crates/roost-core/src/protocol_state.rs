@@ -1,9 +1,9 @@
-//! Public protocol-state blob addressing and stateless operation results.
-
 mod contact_record;
+mod deduplication;
 mod envelope;
 mod grant;
 mod message_operation;
+mod pending_acknowledgment;
 mod session;
 
 use crate::contact::{
@@ -11,22 +11,13 @@ use crate::contact::{
     ContactTrustState,
 };
 use crate::hardening::{
-    DEFAULT_DEDUPLICATION_CAPACITY, MAX_ACKNOWLEDGMENT_DIGESTS, MAX_DEDUPLICATION_CAPACITY,
-    MAX_PENDING_ACKNOWLEDGMENTS, MIN_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits,
-    validate_deduplication_capacity,
+    DEFAULT_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits, validate_deduplication_capacity,
 };
 use crate::key_store::KeyStoreOperationId;
 use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
-use crate::{Message, MessageError, MessageId, PayloadKind, TransportBinding};
+use crate::{MessageId, PayloadKind};
 use contact_record::{ContactRecord, contact_address};
 pub use envelope::SenderIdentityMaterial;
-use envelope::{
-    DecodedSealedSenderEnvelope, MessageMetadata, OpenedMessage, OutboundAuthentication,
-    SenderAuthentication, decode_acknowledgment_plaintext, encode_acknowledgment_plaintext,
-    encode_sealed_sender_envelope, open_message, seal_message, sign_message_transcript,
-    validate_sender_identity, verify_message_transcript,
-};
-use grant::DiscoveryKeyStamp;
 pub use message_operation::{
     AdmissionRequest, DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, IncomingMessage,
     MessageDecryption, MessageDecryptionStep, MessageDestination, MessageEncryption,
@@ -35,45 +26,31 @@ pub use message_operation::{
     SignedSenderCertificate,
 };
 pub(crate) use message_operation::{LocalIdentityKeys, SendIntent};
-use rand::{CryptoRng, RngCore};
-use roost_crypto::{
-    DiscoveryKey, Handshake, KeyPair, PublicDiscoveryKey, PublicIdentityKey, RatchetState,
-    SenderProofTranscript, Signature, SignedPreKey, SigningKeyPair, prove_sender,
-    verify_discovery_to_identity_binding, verify_public_discovery_key, verify_sender_proof,
-};
-use roost_protocol::SignatureError;
+pub use pending_acknowledgment::PendingAcknowledgment;
+use roost_crypto::SealedFrame;
 use roost_protocol::{
-    DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, RevocationState,
-    SenderCertificateIdentityKey, SenderCertificateValidationError,
-    SenderCertificateValidationInput, SessionId, ValidatedSenderCertificate,
-    validate_sender_certificate,
+    DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, MessageTranscriptError,
+    PUBLIC_KEY_LEN, RevocationState, SealedPayloadError, SenderCertificateIdentityKey,
+    SenderCertificateValidationError, SenderCertificateValidationInput, SessionId, SignatureError,
+    ValidatedSenderCertificate, validate_sender_certificate,
 };
-use roost_protocol::{
-    MessageTranscriptInput, pad_sealed_payload as pad_message_payload,
-    unpad_sealed_payload as unpad_message_payload,
-};
-use roost_protocol::{PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
 use serde::de::{Error as DeError, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use session::{
-    LoadedSession, encode_peer_sessions, load_peer_sessions, load_session, peer_sessions_address,
-    pending_acknowledgment_address, session_address,
+    encode_peer_sessions, load_peer_sessions, load_session, peer_sessions_address, session_address,
 };
 use std::collections::BTreeMap;
 use std::fmt;
+use std::marker::PhantomData;
 use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const PROTOCOL_STATE_BLOB_VERSION: u8 = 2;
+const PROTOCOL_STATE_BLOB_VERSION: u8 = 3;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 1;
-const DEDUPLICATION_DIGEST_LEN: usize = 16;
-const DEDUPLICATION_KEY_LEN: usize = 32;
-const DEDUPLICATION_SET_KEY: &[u8] = &[0];
-const ACKNOWLEDGMENT_DIGEST_LEN: usize = 16;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
-const PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP: usize = 64;
-const PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP: usize = 64;
+// Deduplication and acknowledgment digests keep this many bytes of their hash.
+const DIGEST_LEN: usize = 16;
 
 /// The key part of a protocol-state address: a SessionID, an Identity Key, or a host-chosen key.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -83,13 +60,12 @@ impl ProtocolStateKey {
     /// Creates a protocol-state key from bounded bytes.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, ProtocolStateError> {
         if bytes.is_empty() {
-            return Err(ProtocolStateError::InvalidStateKey {
-                reason: "protocol-state key is empty".into(),
-            });
+            return Err(ProtocolStateError::EmptyStateKey);
         }
         if bytes.len() > MAX_PROTOCOL_STATE_KEY_LEN {
-            return Err(ProtocolStateError::InvalidStateKey {
-                reason: format!("protocol-state key length exceeds limit: {}", bytes.len()),
+            return Err(ProtocolStateError::StateKeyTooLong {
+                len: bytes.len(),
+                max: MAX_PROTOCOL_STATE_KEY_LEN,
             });
         }
         Ok(Self(bytes))
@@ -109,19 +85,18 @@ impl From<ContactIdentityKey> for ProtocolStateKey {
 }
 
 /// The stable category for an opaque protocol-state blob.
-#[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ProtocolStateKind {
     /// SessionID-addressed Double Ratchet session state.
-    RatchetSession = 0,
+    RatchetSession,
     /// Deduplication-set state.
-    DeduplicationSet = 3,
+    DeduplicationSet,
     /// SessionID-addressed pending-acknowledgment state.
-    PendingAcknowledgments = 4,
+    PendingAcknowledgments,
     /// Identity-key-addressed contact state, including the peer's Delivery Capability.
-    ContactState = 5,
+    ContactState,
     /// Identity-key-addressed record of the Sessions kept with one peer and the one Roost sends on.
-    PeerSessions = 8,
+    PeerSessions,
 }
 
 impl fmt::Display for ProtocolStateKind {
@@ -211,9 +186,8 @@ pub enum ProtocolStateCommitCondition {
 }
 
 impl ProtocolStateCommitCondition {
-    /// Checks the condition against the blob read inside the host transaction.
-    #[must_use]
-    pub fn is_satisfied_by(&self, blob: Option<&ProtocolStateBlob>) -> bool {
+    // Checks the condition against the blob read inside the host transaction.
+    fn is_satisfied_by(&self, blob: Option<&ProtocolStateBlob>) -> bool {
         match (self, blob) {
             (Self::Absent, None) => true,
             (Self::Digest(expected), Some(blob)) => {
@@ -277,12 +251,6 @@ impl ProtocolStateUpdate {
         self
     }
 
-    /// Returns the condition the host must enforce before committing this update.
-    #[must_use]
-    pub fn commit_condition(&self) -> ProtocolStateCommitCondition {
-        self.condition
-    }
-
     /// Returns the addressed blob location.
     #[must_use]
     pub fn address(&self) -> &ProtocolStateAddress {
@@ -296,17 +264,19 @@ impl ProtocolStateUpdate {
     }
 }
 
-/// The records an operation's result relies on, the records it writes, and the Prepared KeyStore
-/// Operation that commits with them, if any.
+/// The records an operation's result relies on, the records it writes, the Prepared KeyStore
+/// Operation that commits with them, if any, and the sent Messages Roost stops waiting for.
 ///
 /// The host reads the record at each Commit Condition's address inside its transaction, and
-/// commits the updates with the result's effects only when [`Self::matches`] holds for them. When
+/// commits the updates with the result's effects only when [`commit_conditions_match`] holds for
+/// them. The host marks each of [`Self::undelivered`] not delivered in the same transaction. When
 /// [`Self::operation`] is present, the host reserves it before the transaction, commits its ID
 /// with the updates, and finalizes it before using the result.
 pub struct StateChanges {
     conditions: Vec<(ProtocolStateAddress, ProtocolStateCommitCondition)>,
     updates: Vec<ProtocolStateUpdate>,
     operation: Option<KeyStoreOperationId>,
+    undelivered: Vec<MessageId>,
 }
 
 impl StateChanges {
@@ -320,11 +290,17 @@ impl StateChanges {
             conditions: vec![(address, ProtocolStateCommitCondition::from_blob(current))],
             updates: update.into_iter().collect(),
             operation: None,
+            undelivered: Vec::new(),
         }
     }
 
     pub(crate) fn with_operation(mut self, operation: KeyStoreOperationId) -> Self {
         self.operation = Some(operation);
+        self
+    }
+
+    fn with_undelivered(mut self, undelivered: Vec<MessageId>) -> Self {
+        self.undelivered = undelivered;
         self
     }
 
@@ -346,33 +322,17 @@ impl StateChanges {
         &self.updates
     }
 
+    /// Returns the sent Messages Roost stops waiting for, oldest first, because the Relay would
+    /// have dropped them by now or their Session is deleted.
+    #[must_use]
+    pub fn undelivered(&self) -> &[MessageId] {
+        &self.undelivered
+    }
+
     /// Returns the updates to commit, consuming the changes.
     #[must_use]
     pub fn into_updates(self) -> Vec<ProtocolStateUpdate> {
         self.updates
-    }
-
-    /// Returns whether every Commit Condition holds for `current`, the host's record at each
-    /// condition's address, with `None` for an absent one.
-    pub fn matches(
-        &self,
-        current: &[(ProtocolStateAddress, Option<ProtocolStateBlob>)],
-    ) -> Result<bool, StateEntryError> {
-        commit_conditions_match(&self.conditions, current)
-    }
-}
-
-impl From<Vec<ProtocolStateUpdate>> for StateChanges {
-    /// Uses each update's own condition, for operations that read only what they write.
-    fn from(updates: Vec<ProtocolStateUpdate>) -> Self {
-        Self {
-            conditions: updates
-                .iter()
-                .map(|update| (update.address.clone(), update.condition))
-                .collect(),
-            updates,
-            operation: None,
-        }
     }
 }
 
@@ -474,57 +434,13 @@ impl ProtocolStateSnapshot {
         blob: ProtocolStateBlob,
     ) -> Result<(), ProtocolStateError> {
         if self.blobs.len() >= MAX_PROTOCOL_STATE_ENTRIES && !self.blobs.contains_key(&address) {
-            return Err(ProtocolStateError::SnapshotCapacityExceeded);
+            return Err(ProtocolStateError::SnapshotCapacityExceeded {
+                max: MAX_PROTOCOL_STATE_ENTRIES,
+            });
         }
         self.blobs.insert(address, blob);
         Ok(())
     }
-
-    /// Removes the blob stored at `address`.
-    pub fn remove(&mut self, address: &ProtocolStateAddress) -> Option<ProtocolStateBlob> {
-        self.blobs.remove(address)
-    }
-
-    /// Applies one update to this in-memory snapshot after host commit.
-    ///
-    /// The host must enforce the update's condition inside its own durable transaction first.
-    pub fn apply(&mut self, update: ProtocolStateUpdate) -> Result<(), ProtocolStateError> {
-        match update.blob {
-            Some(blob) => self.set(update.address, blob),
-            None => {
-                self.remove(&update.address);
-                Ok(())
-            }
-        }
-    }
-
-    /// Applies committed updates to this in-memory snapshot in order.
-    ///
-    /// This operation is not a durable transaction. Earlier snapshot updates remain if a later
-    /// update exceeds the entry cap.
-    pub fn apply_all<I>(&mut self, updates: I) -> Result<(), ProtocolStateError>
-    where
-        I: IntoIterator<Item = ProtocolStateUpdate>,
-    {
-        for update in updates {
-            self.apply(update)?;
-        }
-        Ok(())
-    }
-}
-
-// The local Identity's keys and credentials, which authenticate the Messages it sends.
-struct LocalSender<'a> {
-    // Public identity material and sender certificate sealed into each Message.
-    identity: &'a SenderIdentityMaterial,
-    // Identity Key signing half, which signs Messages sent after the peer replies.
-    signing_key: &'a SigningKeyPair,
-    // Identity Key agreement half, which proves Messages that carry a handshake.
-    agreement_key: &'a KeyPair,
-    // Current Discovery Key, sealed into Messages that carry a handshake so the peer can reply.
-    discovery_key: &'a PublicDiscoveryKey,
-    // The current Discovery Key's signature over the Identity Key.
-    discovery_to_identity: &'a Signature,
 }
 
 /// An outbound Message and the state changes from one Message Operation.
@@ -538,7 +454,7 @@ pub struct OutboundMessageResult {
     /// Payload kind sealed inside the produced Message.
     pub payload_kind: PayloadKind,
     /// Message to hand to the consumer transport after state commit.
-    pub message: Message,
+    pub message: SealedFrame,
     /// State changes to commit atomically with the outbound Message.
     pub changes: StateChanges,
 }
@@ -621,7 +537,7 @@ pub struct InboundMessageResult {
     pub sender_identity: SenderIdentityMaterial,
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
     /// the contact isn't accepted and this side doesn't acknowledge yet.
-    pub acknowledgment: Option<Message>,
+    pub acknowledgment: Option<SealedFrame>,
     /// State changes to commit before treating the inbound Message as processed.
     pub changes: StateChanges,
 }
@@ -646,7 +562,7 @@ pub struct GrantUpdateResult {
     pub message_id: MessageId,
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
     /// this side doesn't acknowledge the contact yet.
-    pub acknowledgment: Option<Message>,
+    pub acknowledgment: Option<SealedFrame>,
     /// State changes to commit before treating the Grant Update as processed.
     pub changes: StateChanges,
 }
@@ -655,7 +571,7 @@ pub struct GrantUpdateResult {
 pub struct BlockedInboundMessageResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, or `None` when
     /// the blocked-contact acknowledgment policy suppresses it.
-    pub acknowledgment: Option<Message>,
+    pub acknowledgment: Option<SealedFrame>,
     /// State changes to commit before treating the blocked inbound Message as processed.
     pub changes: StateChanges,
 }
@@ -700,16 +616,6 @@ pub enum InboundMessageOutcome {
     /// An authenticated acknowledgment named no Pending Acknowledgment, such as one already
     /// cleared.
     AcknowledgmentUnmatched(Box<AcknowledgmentResult>),
-}
-
-/// Pending acknowledgment state exposed to the consumer for durable flushing.
-pub struct PendingAcknowledgment {
-    /// Original outbound Message ID.
-    pub message_id: MessageId,
-    /// Original outbound Message waiting for an acknowledgment.
-    pub message: Message,
-    /// First-send Unix timestamp in milliseconds.
-    pub first_sent_at_millis: u64,
 }
 
 /// Whether a blocked sender receives an acknowledgment for an accepted-but-hidden Message.
@@ -760,24 +666,6 @@ impl ReceiveSettings {
             certificate_grace,
         })
     }
-
-    /// Returns how many received-message digests the Deduplication Set keeps.
-    #[must_use]
-    pub fn deduplication_capacity(&self) -> usize {
-        self.deduplication_capacity
-    }
-
-    /// Returns whether a blocked sender receives an acknowledgment.
-    #[must_use]
-    pub fn blocked_contact_acknowledgment_policy(&self) -> BlockedContactAcknowledgmentPolicy {
-        self.blocked_contact_acknowledgment_policy
-    }
-
-    /// Returns how long after expiry a sender certificate still validates.
-    #[must_use]
-    pub fn certificate_grace(&self) -> Duration {
-        self.certificate_grace
-    }
 }
 
 impl Default for ReceiveSettings {
@@ -808,19 +696,12 @@ pub struct ProtocolStateEngine {
 }
 
 impl ProtocolStateEngine {
-    /// Creates a stateless protocol-state engine.
-    #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             limits: ProtocolHardeningLimits::default(),
         }
     }
 
-    /// Returns the hardening limits used by this engine.
-    #[must_use]
-    pub fn hardening_limits(&self) -> ProtocolHardeningLimits {
-        self.limits
-    }
     /// Returns the contact a Contact State record holds.
     pub fn decode_contact(
         &self,
@@ -942,25 +823,6 @@ impl ProtocolStateEngine {
         ))
     }
 
-    /// Returns all pending acknowledgments stored for a Session.
-    pub fn pending_acknowledgments(
-        &self,
-        snapshot: &ProtocolStateSnapshot,
-        session_id: SessionId,
-    ) -> Result<Vec<PendingAcknowledgment>, ProtocolStateError> {
-        let address = pending_acknowledgment_address(session_id);
-        let pending = load_pending_acknowledgments(snapshot, &address, self.limits)?;
-        Ok(pending
-            .pending
-            .iter()
-            .map(|(message_id, entry)| PendingAcknowledgment {
-                message_id: MessageId::from_bytes(*message_id),
-                message: copy_message(&entry.message),
-                first_sent_at_millis: entry.first_sent_at_millis,
-            })
-            .collect())
-    }
-
     // Returns the update that makes `session_id` the Session Roost sends on, if it isn't already.
     fn delivery_update(
         &self,
@@ -1006,12 +868,6 @@ impl ProtocolStateEngine {
     }
 }
 
-impl Default for ProtocolStateEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Errors returned by protocol-state operations.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolStateError {
@@ -1045,9 +901,18 @@ pub enum ProtocolStateError {
     /// A Contact Acceptance arrived on a Session this side didn't start with a Contact Request.
     #[error("contact acceptance answers no request")]
     UnsolicitedAcceptance,
-    /// The operation snapshot exceeds its entry cap.
-    #[error("protocol-state snapshot capacity exceeded")]
-    SnapshotCapacityExceeded,
+    /// The operation snapshot would hold more entries than its cap.
+    #[error("protocol-state snapshot holds more than {max} entries")]
+    SnapshotCapacityExceeded {
+        /// Most entries one snapshot holds.
+        max: usize,
+    },
+    /// The most Messages allowed already wait for the contact's acknowledgment on the Session.
+    #[error("{limit} messages already wait for an acknowledgment on this session")]
+    PendingAcknowledgmentLimitReached {
+        /// Most Messages that wait for an acknowledgment on one Session.
+        limit: usize,
+    },
     /// A persisted blob failed structural decoding.
     #[error("protocol-state blob failed to decode at {address}: {reason}")]
     BlobDecode {
@@ -1079,6 +944,12 @@ pub enum ProtocolStateError {
     /// A Message transcript signature failed context framing or verification.
     #[error("protocol-state signature failed")]
     Signature(#[from] SignatureError),
+    /// A Message's fields are too long for its transcript.
+    #[error("message transcript failed")]
+    MessageTranscript(#[from] MessageTranscriptError),
+    /// A plaintext doesn't fit the padding, or a received Message's padding is malformed.
+    #[error("sealed payload padding failed")]
+    SealedPayload(#[from] SealedPayloadError),
     /// Sender-certificate validation failed during receive.
     #[error("sender certificate validation failed")]
     SenderCertificateValidation(#[source] SenderCertificateValidationError),
@@ -1104,9 +975,6 @@ pub enum ProtocolStateError {
     /// The random number generator failed.
     #[error("randomness failed")]
     Randomness(#[source] rand::Error),
-    /// A Message failed canonical encoding.
-    #[error("protocol-state message encoding failed")]
-    MessageEncode(#[source] MessageError),
     /// A state binding operation would violate an existing protocol-state invariant.
     #[error("invalid protocol-state binding at {address}: {reason}")]
     InvalidStateBinding {
@@ -1115,11 +983,16 @@ pub enum ProtocolStateError {
         /// Diagnostic failure context for logs only.
         reason: String,
     },
-    /// A protocol-state key is malformed.
-    #[error("invalid protocol-state key: {reason}")]
-    InvalidStateKey {
-        /// Diagnostic failure context for logs only.
-        reason: String,
+    /// A protocol-state key is empty.
+    #[error("protocol-state key is empty")]
+    EmptyStateKey,
+    /// A protocol-state key is longer than Roost accepts.
+    #[error("protocol-state key is {len} bytes, longer than {max}")]
+    StateKeyTooLong {
+        /// Length of the key.
+        len: usize,
+        /// Longest key Roost accepts.
+        max: usize,
     },
     /// A required protocol-state blob was absent from the consumer snapshot.
     #[error("missing required protocol-state blob at {address}")]
@@ -1141,16 +1014,10 @@ pub enum ProtocolStateError {
 fn protocol_state_blob_digest(blob: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"RoostProtocolStateCommit-v1:");
+    // A blob is far shorter than `u32::MAX` bytes.
+    hasher.update(&(blob.len() as u32).to_be_bytes());
     hasher.update(blob);
     *hasher.finalize().as_bytes()
-}
-
-// The Deduplication Set is the only record of its kind, so its key is fixed.
-fn deduplication_address() -> ProtocolStateAddress {
-    ProtocolStateAddress::new(
-        ProtocolStateKind::DeduplicationSet,
-        ProtocolStateKey(DEDUPLICATION_SET_KEY.to_vec()),
-    )
 }
 
 // Prefixes `body` with the version that covers the whole blob.
@@ -1219,19 +1086,6 @@ fn blob_body<'a>(
     Ok(body)
 }
 
-fn validate_persisted_deduplication_capacity(
-    address: &ProtocolStateAddress,
-    capacity: usize,
-) -> Result<(), ProtocolStateError> {
-    if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!("deduplication-set capacity is outside supported range: {capacity}"),
-        });
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy, Deserialize, Serialize)]
 struct ContactIdentityKeyWire {
     x25519_public_key: [u8; PUBLIC_KEY_LEN],
@@ -1256,683 +1110,17 @@ impl From<ContactIdentityKeyWire> for ContactIdentityKey {
     }
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
-struct LoadedDeduplicationSet {
-    capacity: usize,
-    digest_key: Zeroizing<[u8; DEDUPLICATION_KEY_LEN]>,
-    digests: Vec<[u8; DEDUPLICATION_DIGEST_LEN]>,
-}
-
-struct LoadedPendingAcknowledgments {
-    pending: BTreeMap<[u8; 16], LoadedPendingAcknowledgment>,
-    acknowledgment_digests: Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>,
-}
-
-impl LoadedPendingAcknowledgments {
-    // A new Session's list, with nothing waiting and no acknowledgment seen.
-    fn empty() -> Self {
-        Self {
-            pending: BTreeMap::new(),
-            acknowledgment_digests: Vec::new(),
-        }
-    }
-}
-
-struct LoadedPendingAcknowledgment {
-    message: Message,
-    encoded_message: Vec<u8>,
-    first_sent_at_millis: u64,
-    /// The payload kind sealed in the Message, which a recovery keeps when it resends it.
-    payload_kind: PayloadKind,
-    /// The local grant the Message carried, which its acknowledgment confirms the peer holds.
-    grant: Option<DiscoveryKeyStamp>,
-}
-
-impl LoadedPendingAcknowledgment {
-    fn new(
-        message: &Message,
-        first_sent_at_millis: u64,
-        payload_kind: PayloadKind,
-        grant: Option<DiscoveryKeyStamp>,
-    ) -> Result<Self, ProtocolStateError> {
-        Ok(Self {
-            message: copy_message(message),
-            encoded_message: message
-                .to_bytes()
-                .map_err(ProtocolStateError::MessageEncode)?,
-            first_sent_at_millis,
-            payload_kind,
-            grant,
-        })
-    }
-}
-
-#[derive(Serialize)]
-struct DeduplicationSetWire<'a> {
-    capacity: u16,
-    digest_key: &'a [u8; DEDUPLICATION_KEY_LEN],
-    digests: &'a [[u8; DEDUPLICATION_DIGEST_LEN]],
-}
-
-#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
-struct DecodedDeduplicationSetWire {
-    capacity: u16,
-    digest_key: [u8; DEDUPLICATION_KEY_LEN],
-    digests: Vec<[u8; DEDUPLICATION_DIGEST_LEN]>,
-}
-
-#[derive(Serialize)]
-struct PendingAcknowledgmentsWire<'a> {
-    pending: Vec<PendingAcknowledgmentWire<'a>>,
-    acknowledgment_digests: &'a [[u8; ACKNOWLEDGMENT_DIGEST_LEN]],
-}
-
-#[derive(Serialize)]
-struct PendingAcknowledgmentWire<'a> {
-    message_id: [u8; 16],
-    encoded_message: &'a [u8],
-    first_sent_at_millis: u64,
-    payload_kind: u8,
-    grant: Option<(u64, u32)>,
-}
-
-#[derive(Deserialize)]
-struct DecodedPendingAcknowledgmentsWire {
-    #[serde(deserialize_with = "deserialize_pending_acknowledgment_list")]
-    pending: Vec<DecodedPendingAcknowledgmentWire>,
-    #[serde(deserialize_with = "deserialize_acknowledgment_digest_list")]
-    acknowledgment_digests: Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>,
-}
-
-#[derive(Deserialize)]
-struct DecodedPendingAcknowledgmentWire {
-    message_id: [u8; 16],
-    encoded_message: Vec<u8>,
-    first_sent_at_millis: u64,
-    payload_kind: u8,
-    grant: Option<(u64, u32)>,
-}
-
-fn deserialize_pending_acknowledgment_list<'de, D>(
-    deserializer: D,
-) -> Result<Vec<DecodedPendingAcknowledgmentWire>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct PendingAcknowledgmentListVisitor;
-
-    impl<'de> Visitor<'de> for PendingAcknowledgmentListVisitor {
-        type Value = Vec<DecodedPendingAcknowledgmentWire>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "a bounded pending acknowledgment list")
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            if seq
-                .size_hint()
-                .is_some_and(|len| len > MAX_PENDING_ACKNOWLEDGMENTS)
-            {
-                return Err(A::Error::custom(
-                    "pending acknowledgment count exceeds limit",
-                ));
-            }
-            let capacity = seq
-                .size_hint()
-                .unwrap_or(0)
-                .min(MAX_PENDING_ACKNOWLEDGMENTS);
-            let mut pending = Vec::with_capacity(capacity);
-            while let Some(entry) = seq.next_element()? {
-                if pending.len() == MAX_PENDING_ACKNOWLEDGMENTS {
-                    return Err(A::Error::custom(
-                        "pending acknowledgment count exceeds limit",
-                    ));
-                }
-                pending.push(entry);
-            }
-            Ok(pending)
-        }
-    }
-
-    deserializer.deserialize_seq(PendingAcknowledgmentListVisitor)
-}
-
-fn deserialize_acknowledgment_digest_list<'de, D>(
-    deserializer: D,
-) -> Result<Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    struct AcknowledgmentDigestListVisitor;
-
-    impl<'de> Visitor<'de> for AcknowledgmentDigestListVisitor {
-        type Value = Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>;
-
-        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "a bounded acknowledgment digest list")
-        }
-
-        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-        where
-            A: SeqAccess<'de>,
-        {
-            if seq
-                .size_hint()
-                .is_some_and(|len| len > MAX_ACKNOWLEDGMENT_DIGESTS)
-            {
-                return Err(A::Error::custom(
-                    "acknowledgment digest count exceeds limit",
-                ));
-            }
-            let capacity = seq.size_hint().unwrap_or(0).min(MAX_ACKNOWLEDGMENT_DIGESTS);
-            let mut digests = Vec::with_capacity(capacity);
-            while let Some(digest) = seq.next_element()? {
-                if digests.len() == MAX_ACKNOWLEDGMENT_DIGESTS {
-                    return Err(A::Error::custom(
-                        "acknowledgment digest count exceeds limit",
-                    ));
-                }
-                digests.push(digest);
-            }
-            Ok(digests)
-        }
-    }
-
-    deserializer.deserialize_seq(AcknowledgmentDigestListVisitor)
-}
-
-fn encode_deduplication_set(
-    address: &ProtocolStateAddress,
-    state: &LoadedDeduplicationSet,
-    limits: ProtocolHardeningLimits,
-) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    validate_persisted_deduplication_capacity(address, state.capacity)?;
-    if state.digests.len() > state.capacity {
-        return Err(ProtocolStateError::BlobEncode {
-            address: address.clone(),
-            reason: format!(
-                "deduplication-set digest count exceeds capacity: {}",
-                state.digests.len()
-            ),
-        });
-    }
-    let body = encode_zeroizing(&DeduplicationSetWire {
-        capacity: state.capacity as u16,
-        digest_key: &state.digest_key,
-        digests: &state.digests,
-    })
-    .map_err(|_| ProtocolStateError::BlobEncode {
-        address: address.clone(),
-        reason: "deduplication set failed to encode".into(),
-    })?;
-    encode_blob(address, &body, limits.max_protocol_state_blob_len)
-}
-
-// Returns the Deduplication Set at the size `settings` names, creating it on the first receive and
-// evicting the oldest digests when the size shrinks.
-fn receiving_deduplication_set<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    snapshot: &ProtocolStateSnapshot,
-    settings: ReceiveSettings,
-    limits: ProtocolHardeningLimits,
-) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
-    let address = deduplication_address();
-    let mut set = match snapshot.get(&address) {
-        Some(blob) => decode_deduplication_set(&address, blob, limits)?,
-        None => {
-            let mut digest_key = Zeroizing::new([0u8; DEDUPLICATION_KEY_LEN]);
-            rng.try_fill_bytes(&mut digest_key[..])
-                .map_err(ProtocolStateError::Randomness)?;
-            LoadedDeduplicationSet {
-                capacity: settings.deduplication_capacity(),
-                digest_key,
-                digests: Vec::new(),
-            }
-        }
-    };
-    set.capacity = settings.deduplication_capacity();
-    let excess = set.digests.len().saturating_sub(set.capacity);
-    set.digests.drain(..excess);
-    Ok(set)
-}
-
-fn decode_deduplication_set(
-    address: &ProtocolStateAddress,
-    blob: &ProtocolStateBlob,
-    limits: ProtocolHardeningLimits,
-) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
-    let body = blob_body(address, blob, limits.max_protocol_state_blob_len)?;
-    let (mut wire, trailing): (DecodedDeduplicationSetWire, &[u8]) =
-        postcard::take_from_bytes(body).map_err(|e| ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: e.to_string(),
-        })?;
-    let digest_key = Zeroizing::new(wire.digest_key);
-    let capacity = usize::from(wire.capacity);
-    if !trailing.is_empty() {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "deduplication set has trailing bytes".into(),
-        });
-    }
-    validate_persisted_deduplication_capacity(address, capacity)?;
-    let digest_count = wire.digests.len();
-    if digest_count > capacity {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!(
-                "deduplication-set digest count exceeds capacity: {}",
-                digest_count
-            ),
-        });
-    }
-    let digests = std::mem::take(&mut wire.digests);
-    Ok(LoadedDeduplicationSet {
-        capacity,
-        digest_key,
-        digests,
-    })
-}
-
-fn encode_pending_acknowledgments(
-    address: &ProtocolStateAddress,
-    state: &LoadedPendingAcknowledgments,
-    limits: ProtocolHardeningLimits,
-) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    if state.pending.len() > limits.max_pending_acknowledgments {
-        return Err(ProtocolStateError::BlobEncode {
-            address: address.clone(),
-            reason: format!(
-                "pending-acknowledgment count exceeds limit: {}",
-                state.pending.len()
-            ),
-        });
-    }
-    if state.acknowledgment_digests.len() > limits.max_acknowledgment_digests {
-        return Err(ProtocolStateError::BlobEncode {
-            address: address.clone(),
-            reason: format!(
-                "acknowledgment digest count exceeds limit: {}",
-                state.acknowledgment_digests.len()
-            ),
-        });
-    }
-    let pending = state
-        .pending
-        .iter()
-        .map(|(message_id, entry)| PendingAcknowledgmentWire {
-            message_id: *message_id,
-            encoded_message: &entry.encoded_message,
-            first_sent_at_millis: entry.first_sent_at_millis,
-            payload_kind: entry.payload_kind.tag(),
-            grant: entry.grant.map(DiscoveryKeyStamp::to_wire),
-        })
-        .collect();
-    let body = Zeroizing::new(
-        postcard::to_stdvec(&PendingAcknowledgmentsWire {
-            pending,
-            acknowledgment_digests: &state.acknowledgment_digests,
-        })
-        .map_err(|_| ProtocolStateError::BlobEncode {
-            address: address.clone(),
-            reason: "pending acknowledgments failed to encode".into(),
-        })?,
-    );
-    encode_blob(address, &body, max_pending_acknowledgments_blob_len(limits))
-}
-
-fn load_pending_acknowledgments(
-    snapshot: &ProtocolStateSnapshot,
-    address: &ProtocolStateAddress,
-    limits: ProtocolHardeningLimits,
-) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
-    let blob = snapshot
-        .get(address)
-        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-            address: address.clone(),
-        })?;
-    decode_pending_acknowledgments(address, blob, limits)
-}
-
-fn pending_acknowledgment_digest_seen(
-    snapshot: &ProtocolStateSnapshot,
-    address: &ProtocolStateAddress,
-    digest: [u8; ACKNOWLEDGMENT_DIGEST_LEN],
-    limits: ProtocolHardeningLimits,
-) -> Result<bool, ProtocolStateError> {
-    let blob = snapshot
-        .get(address)
-        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-            address: address.clone(),
-        })?;
-    let digests = decode_pending_acknowledgment_digests(address, blob, limits)?;
-    Ok(contains_acknowledgment_digest(&digests, &digest))
-}
-
-fn decode_pending_acknowledgments(
-    address: &ProtocolStateAddress,
-    blob: &ProtocolStateBlob,
-    limits: ProtocolHardeningLimits,
-) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
-    let body = blob_body(address, blob, max_pending_acknowledgments_blob_len(limits))?;
-    decode_pending_acknowledgments_payload(address, body, limits)
-}
-
-fn decode_pending_acknowledgment_digests(
-    address: &ProtocolStateAddress,
-    blob: &ProtocolStateBlob,
-    limits: ProtocolHardeningLimits,
-) -> Result<Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>, ProtocolStateError> {
-    let body = blob_body(address, blob, max_pending_acknowledgments_blob_len(limits))?;
-    decode_pending_acknowledgment_digests_payload(address, body, limits)
-}
-
-fn decode_pending_acknowledgments_payload(
-    address: &ProtocolStateAddress,
-    payload: &[u8],
-    limits: ProtocolHardeningLimits,
-) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
-    let (wire, trailing): (DecodedPendingAcknowledgmentsWire, &[u8]) =
-        postcard::take_from_bytes(payload).map_err(|e| ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: e.to_string(),
-        })?;
-    if !trailing.is_empty() {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "pending acknowledgments have trailing bytes".into(),
-        });
-    }
-    if wire.pending.len() > limits.max_pending_acknowledgments {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!(
-                "pending-acknowledgment count exceeds limit: {}",
-                wire.pending.len()
-            ),
-        });
-    }
-    if wire.acknowledgment_digests.len() > limits.max_acknowledgment_digests {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!(
-                "acknowledgment digest count exceeds limit: {}",
-                wire.acknowledgment_digests.len()
-            ),
-        });
-    }
-
-    let mut pending = BTreeMap::new();
-    for entry in wire.pending {
-        let message = Message::from_bytes(&entry.encoded_message).map_err(|e| {
-            ProtocolStateError::BlobDecode {
-                address: address.clone(),
-                reason: format!("pending acknowledgment message failed to decode: {e}"),
-            }
-        })?;
-        let payload_kind = PayloadKind::from_tag(entry.payload_kind).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending payload kind is invalid")
-        })?;
-        let replaced = pending.insert(
-            entry.message_id,
-            LoadedPendingAcknowledgment {
-                message,
-                encoded_message: entry.encoded_message,
-                first_sent_at_millis: entry.first_sent_at_millis,
-                payload_kind,
-                grant: entry
-                    .grant
-                    .map(|(created_at_secs, epoch)| DiscoveryKeyStamp {
-                        created_at_secs,
-                        epoch,
-                    }),
-            },
-        );
-        if replaced.is_some() {
-            return Err(ProtocolStateError::BlobDecode {
-                address: address.clone(),
-                reason: "pending acknowledgment message ID is duplicated".into(),
-            });
-        }
-    }
-    Ok(LoadedPendingAcknowledgments {
-        pending,
-        acknowledgment_digests: wire.acknowledgment_digests,
-    })
-}
-
-fn decode_pending_acknowledgment_digests_payload(
-    address: &ProtocolStateAddress,
-    payload: &[u8],
-    limits: ProtocolHardeningLimits,
-) -> Result<Vec<[u8; ACKNOWLEDGMENT_DIGEST_LEN]>, ProtocolStateError> {
-    let mut offset = 0;
-    let pending_len = read_postcard_varint_usize(payload, &mut offset).ok_or_else(|| {
-        pending_acknowledgment_decode_error(address, "pending-acknowledgment count is malformed")
-    })?;
-    if pending_len > limits.max_pending_acknowledgments {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!(
-                "pending-acknowledgment count exceeds limit: {}",
-                pending_len
-            ),
-        });
-    }
-    for _ in 0..pending_len {
-        skip_postcard_bytes(payload, &mut offset, 16).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending message ID is malformed")
-        })?;
-        let encoded_len = read_postcard_varint_usize(payload, &mut offset).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending message length is malformed")
-        })?;
-        skip_postcard_bytes(payload, &mut offset, encoded_len).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending message bytes are malformed")
-        })?;
-        skip_postcard_varint_u64(payload, &mut offset).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending first-sent time is malformed")
-        })?;
-        read_postcard_u8(payload, &mut offset).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending payload kind is malformed")
-        })?;
-        match read_postcard_u8(payload, &mut offset).ok_or_else(|| {
-            pending_acknowledgment_decode_error(address, "pending grant option is malformed")
-        })? {
-            0 => {}
-            1 => {
-                skip_postcard_varint_u64(payload, &mut offset)
-                    .and_then(|()| skip_postcard_varint_u64(payload, &mut offset))
-                    .ok_or_else(|| {
-                        pending_acknowledgment_decode_error(address, "pending grant is malformed")
-                    })?;
-            }
-            _ => {
-                return Err(pending_acknowledgment_decode_error(
-                    address,
-                    "pending grant option is invalid",
-                ));
-            }
-        }
-    }
-    let digest_len = read_postcard_varint_usize(payload, &mut offset).ok_or_else(|| {
-        pending_acknowledgment_decode_error(address, "acknowledgment digest count is malformed")
-    })?;
-    if digest_len > limits.max_acknowledgment_digests {
-        return Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: format!("acknowledgment digest count exceeds limit: {digest_len}"),
-        });
-    }
-    let mut digests = Vec::with_capacity(digest_len);
-    for _ in 0..digest_len {
-        let bytes = read_postcard_array::<ACKNOWLEDGMENT_DIGEST_LEN>(payload, &mut offset)
-            .ok_or_else(|| {
-                pending_acknowledgment_decode_error(address, "acknowledgment digest is malformed")
-            })?;
-        digests.push(bytes);
-    }
-    if offset != payload.len() {
-        return Err(pending_acknowledgment_decode_error(
-            address,
-            "pending-acknowledgment payload has trailing bytes",
-        ));
-    }
-    Ok(digests)
-}
-
-fn read_postcard_u8(bytes: &[u8], offset: &mut usize) -> Option<u8> {
-    let byte = *bytes.get(*offset)?;
-    *offset += 1;
-    Some(byte)
-}
-
-fn read_postcard_array<const N: usize>(bytes: &[u8], offset: &mut usize) -> Option<[u8; N]> {
-    let range = *offset..(*offset).checked_add(N)?;
-    let slice = bytes.get(range)?;
-    *offset += N;
-    slice.try_into().ok()
-}
-
-fn read_postcard_varint_usize(bytes: &[u8], offset: &mut usize) -> Option<usize> {
-    let mut value = 0u128;
-    for shift in (0..64).step_by(7) {
-        let byte = read_postcard_u8(bytes, offset)?;
-        value |= u128::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return usize::try_from(value).ok();
-        }
-    }
-    None
-}
-
-fn skip_postcard_varint_u64(bytes: &[u8], offset: &mut usize) -> Option<()> {
-    for _ in 0..10 {
-        let byte = read_postcard_u8(bytes, offset)?;
-        if byte & 0x80 == 0 {
-            return Some(());
-        }
-    }
-    None
-}
-
-fn skip_postcard_bytes(bytes: &[u8], offset: &mut usize, len: usize) -> Option<()> {
-    bytes.get(*offset..offset.checked_add(len)?)?;
-    *offset += len;
-    Some(())
-}
-
-fn pending_acknowledgment_decode_error(
-    address: &ProtocolStateAddress,
-    reason: &str,
-) -> ProtocolStateError {
-    ProtocolStateError::BlobDecode {
-        address: address.clone(),
-        reason: reason.into(),
-    }
-}
-
-fn max_pending_acknowledgments_blob_len(limits: ProtocolHardeningLimits) -> usize {
-    PROTOCOL_STATE_BLOB_HEADER_LEN
-        + PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP
-        + limits.max_pending_acknowledgments
-            * (limits.max_encoded_message_len + PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP)
-        + limits.max_acknowledgment_digests * ACKNOWLEDGMENT_DIGEST_LEN
-}
-
 fn validate_contact_identity_key(
     address: &ProtocolStateAddress,
     identity_key: &ContactIdentityKey,
 ) -> Result<(), ProtocolStateError> {
-    if contact_identity_key_is_valid(identity_key) {
-        Ok(())
-    } else {
-        Err(ProtocolStateError::InvalidStateBinding {
+    if !identity_key_is_valid(identity_key) {
+        return Err(ProtocolStateError::InvalidStateBinding {
             address: address.clone(),
             reason: "contact identity key is invalid".into(),
-        })
-    }
-}
-
-fn validate_session_contact_identity_key(
-    address: &ProtocolStateAddress,
-    identity_key: ContactIdentityKey,
-) -> Result<ContactIdentityKey, ProtocolStateError> {
-    if contact_identity_key_is_valid(&identity_key) {
-        Ok(identity_key)
-    } else {
-        Err(ProtocolStateError::BlobDecode {
-            address: address.clone(),
-            reason: "session contact identity key is invalid".into(),
-        })
-    }
-}
-
-fn contact_identity_key_is_valid(identity_key: &ContactIdentityKey) -> bool {
-    identity_key_is_valid(identity_key)
-}
-
-fn inbound_contact_identity_key(
-    validation: &InboundSenderCertificateValidation,
-    certificate_grace: Duration,
-    sender_identity: &SenderIdentityMaterial,
-    session_contact_identity_key: Option<ContactIdentityKey>,
-    limits: ProtocolHardeningLimits,
-) -> Result<ContactIdentityKey, ProtocolStateError> {
-    if sender_identity.certificate.len() > limits.max_sender_certificate_len {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: format!(
-                "sender certificate length exceeds limit: {}",
-                sender_identity.certificate.len()
-            ),
         });
     }
-    if sender_identity.signature.len() > limits.max_sender_signature_len {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: format!(
-                "sender signature length exceeds limit: {}",
-                sender_identity.signature.len()
-            ),
-        });
-    }
-    let validated = validation
-        .validate(
-            &sender_identity.certificate,
-            &sender_identity.signature,
-            certificate_grace,
-        )
-        .map_err(ProtocolStateError::SenderCertificateValidation)?;
-    if validated
-        .identity_key
-        .x25519_public_key
-        .ct_eq(&sender_identity.identity_key)
-        .unwrap_u8()
-        != 1
-        || validated
-            .identity_key
-            .ed25519_verifying_key
-            .ct_eq(&sender_identity.identity_verifying_key)
-            .unwrap_u8()
-            != 1
-    {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "sender certificate identity key does not match sealed sender".into(),
-        });
-    }
-    let identity_key = ContactIdentityKey {
-        x25519_public_key: validated.identity_key.x25519_public_key,
-        ed25519_verifying_key: validated.identity_key.ed25519_verifying_key,
-    };
-    if let Some(bound_identity_key) = session_contact_identity_key
-        && !contact_identity_keys_match(&bound_identity_key, &identity_key)
-    {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "sender certificate identity key does not match session contact".into(),
-        });
-    }
-    Ok(identity_key)
+    Ok(())
 }
 
 fn contact_identity_keys_match(left: &ContactIdentityKey, right: &ContactIdentityKey) -> bool {
@@ -1947,365 +1135,80 @@ fn contact_identity_keys_match(left: &ContactIdentityKey, right: &ContactIdentit
             == 1
 }
 
-// What one outbound Message says, before Roost seals it.
-struct OutboundContent<'a> {
-    session_id: SessionId,
-    id: MessageId,
-    sent_at_millis: u64,
-    payload_kind: PayloadKind,
-    // The plaintext, after the Inbox Grant when the payload kind carries one.
-    payload: &'a [u8],
-}
-
-// Where a signed Message goes and whose Identity Key its transcript names.
-struct SignedRecipient<'a> {
-    discovery_key: [u8; PUBLIC_KEY_LEN],
-    identity_verifying_key: &'a [u8; PUBLIC_KEY_LEN],
-}
-
-// Seals a Message whose sender signs its transcript, as every Message after the handshake does.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "each argument is a separate input to one signed Message"
-)]
-fn seal_signed<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    state: &mut RatchetState,
-    content: OutboundContent<'_>,
-    recipient: SignedRecipient<'_>,
-    sender_identity: &SenderIdentityMaterial,
-    signing_key: &SigningKeyPair,
-    transport_binding: &TransportBinding,
-    limits: ProtocolHardeningLimits,
-) -> Result<Message, ProtocolStateError> {
-    let payload_kind = content.payload_kind;
-    let padded_plaintext = pad_sealed_payload(content.payload)?;
-    let signature = sign_message_transcript(
-        signing_key,
-        MessageTranscriptInput {
-            session_id: content.session_id,
-            recipient_identity_verifying_key: recipient.identity_verifying_key,
-            id: content.id,
-            sent_at_millis: content.sent_at_millis,
-            payload_kind,
-            payload: &padded_plaintext,
-            sender_certificate: &sender_identity.certificate,
-        },
-    )?;
-    let envelope = encode_sealed_sender_envelope(
-        sender_identity,
-        OutboundAuthentication::Signature(&signature),
-        &padded_plaintext,
-        limits,
-    )?;
-    seal_message(
-        rng,
-        state,
-        MessageMetadata {
-            session_id: content.session_id,
-            base_key: None,
-            id: content.id,
-            sent_at_millis: content.sent_at_millis,
-            payload_kind,
-        },
-        recipient.discovery_key,
-        None,
-        &envelope,
-        transport_binding,
-    )
-}
-
-// Seals a Message that carries the handshake and proves its sender instead of signing.
-fn seal_proved<R: RngCore + CryptoRng>(
-    rng: &mut R,
-    state: &mut RatchetState,
-    content: OutboundContent<'_>,
-    handshake: &Handshake,
-    sender: &LocalSender<'_>,
-    transport_binding: &TransportBinding,
-    limits: ProtocolHardeningLimits,
-) -> Result<Message, ProtocolStateError> {
-    let padded_plaintext = pad_sealed_payload(content.payload)?;
-    let proof = prove_sender(
-        sender.agreement_key,
-        &SenderProofTranscript {
-            handshake,
-            sender_identity_key: &sender.identity.public_identity_key()?,
-            sender_discovery_key: sender.discovery_key,
-            sender_certificate: &sender.identity.certificate,
-            sender_certificate_signature: &sender.identity.signature,
-        },
-    )?;
-    let envelope = encode_sealed_sender_envelope(
-        sender.identity,
-        OutboundAuthentication::Proof {
-            discovery_key: sender.discovery_key,
-            discovery_to_identity: sender.discovery_to_identity,
-            proof: &proof,
-        },
-        &padded_plaintext,
-        limits,
-    )?;
-    seal_message(
-        rng,
-        state,
-        MessageMetadata {
-            session_id: content.session_id,
-            base_key: Some(*handshake.base_key.as_bytes()),
-            id: content.id,
-            sent_at_millis: content.sent_at_millis,
-            payload_kind: content.payload_kind,
-        },
-        *handshake.responder_discovery_key.as_bytes(),
-        Some(handshake.prekey_reference),
-        &envelope,
-        transport_binding,
-    )
-}
-
-// Checks a first Message's proof and the Discovery Key it seals, and returns the sender's
-// Identity Key and that Discovery Key.
-fn authenticate_first_message(
-    decoded: &DecodedSealedSenderEnvelope,
-    handshake: &Handshake,
-    signed_prekey: &SignedPreKey,
-) -> Result<(PublicIdentityKey, ContactDiscoveryKey), ProtocolStateError> {
-    let SenderAuthentication::Proof {
-        discovery_key,
-        discovery_to_identity,
-        proof,
-    } = &decoded.authentication
-    else {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "first message carries no sender proof".into(),
-        });
-    };
-    let sender_identity_key = decoded.sender_identity.public_identity_key()?;
-    verify_public_discovery_key(discovery_key, &sender_identity_key.verifying_key).map_err(
-        |_| ProtocolStateError::InvalidMessage {
-            reason: "sender discovery key is not signed by its identity key".into(),
-        },
-    )?;
-    verify_discovery_to_identity_binding(
-        &sender_identity_key,
-        &discovery_key.verifying_key,
-        discovery_to_identity,
-    )
-    .map_err(|_| ProtocolStateError::InvalidMessage {
-        reason: "sender discovery key does not sign its identity key".into(),
-    })?;
-    verify_sender_proof(
-        signed_prekey,
-        &SenderProofTranscript {
-            handshake,
-            sender_identity_key: &sender_identity_key,
-            sender_discovery_key: discovery_key,
-            sender_certificate: &decoded.sender_identity.certificate,
-            sender_certificate_signature: &decoded.sender_identity.signature,
-        },
-        proof,
-    )?;
-    Ok((
-        sender_identity_key,
-        ContactDiscoveryKey::from(&**discovery_key),
-    ))
-}
-
-// Checks that a Message on a known Session comes from the Session's peer and, after the handshake,
-// that the peer signed it.
-//
-// A Message that still carries the handshake needs no further check: only the peer holds the
-// Session's keys, and the handshake was proved when the Session was created.
-fn authenticate_session_message(
-    decoded: &DecodedSealedSenderEnvelope,
-    opened: &OpenedMessage,
-    peer_identity_key: ContactIdentityKey,
-    recipient_identity_verifying_key: &[u8; PUBLIC_KEY_LEN],
-) -> Result<(), ProtocolStateError> {
-    if !contact_identity_keys_match(
-        &decoded.sender_identity.contact_identity_key(),
-        &peer_identity_key,
-    ) {
-        return Err(ProtocolStateError::InvalidMessage {
-            reason: "sealed sender identity key does not match session".into(),
-        });
+// Hashes `label`, then `transport_binding` and `encoded_message` each after its length, into a
+// Deduplication or acknowledgment digest. Both inputs are far shorter than `u32::MAX` bytes.
+fn digest_of(
+    mut hasher: blake3::Hasher,
+    label: &[u8],
+    transport_binding: &[u8],
+    encoded_message: &[u8],
+) -> [u8; DIGEST_LEN] {
+    hasher.update(label);
+    for field in [transport_binding, encoded_message] {
+        hasher.update(&(field.len() as u32).to_be_bytes());
+        hasher.update(field);
     }
-    match &decoded.authentication {
-        SenderAuthentication::Signature(signature) => verify_message_transcript(
-            &decoded.sender_identity,
-            MessageTranscriptInput {
-                session_id: opened.metadata.session_id,
-                recipient_identity_verifying_key,
-                id: opened.metadata.id,
-                sent_at_millis: opened.metadata.sent_at_millis,
-                payload_kind: opened.metadata.payload_kind,
-                payload: &decoded.padded_plaintext,
-                sender_certificate: &decoded.sender_identity.certificate,
-            },
-            signature,
-        ),
-        SenderAuthentication::Proof { .. } => Ok(()),
+    let mut digest = [0u8; DIGEST_LEN];
+    digest.copy_from_slice(&hasher.finalize().as_bytes()[..DIGEST_LEN]);
+    digest
+}
+
+// Returns whether `digests` holds `digest`, comparing every candidate in constant time.
+fn contains_digest(digests: &[[u8; DIGEST_LEN]], digest: &[u8; DIGEST_LEN]) -> bool {
+    let mut found = Choice::from(0);
+    for candidate in digests {
+        found |= candidate.ct_eq(digest);
     }
+    bool::from(found)
 }
 
-// Checks that the local Discovery Key belongs to the local Identity Key a transcript names.
-fn verify_recipient_keys(
-    recipient_discovery_key: &DiscoveryKey,
-    recipient_identity_verifying_key: &[u8; PUBLIC_KEY_LEN],
-) -> Result<(), ProtocolStateError> {
-    let recipient_identity_verifying_key =
-        parse_ed25519_verifying_key_bytes(recipient_identity_verifying_key).ok_or_else(|| {
-            ProtocolStateError::InvalidMessage {
-                reason: "recipient identity verifying key is not canonical".into(),
-            }
-        })?;
-    verify_public_discovery_key(
-        &recipient_discovery_key.public(),
-        &recipient_identity_verifying_key,
-    )
-    .map_err(|_| ProtocolStateError::InvalidMessage {
-        reason: "recipient discovery key does not match recipient identity key".into(),
-    })
+// Appends `digest`, dropping the oldest digests beyond `capacity`.
+fn push_bounded(digests: &mut Vec<[u8; DIGEST_LEN]>, digest: [u8; DIGEST_LEN], capacity: usize) {
+    digests.push(digest);
+    keep_newest(digests, capacity);
 }
 
-fn load_required_session(
-    snapshot: &ProtocolStateSnapshot,
-    address: &ProtocolStateAddress,
-    limits: ProtocolHardeningLimits,
-) -> Result<LoadedSession, ProtocolStateError> {
-    load_session(snapshot, address, limits)?.ok_or_else(|| {
-        ProtocolStateError::MissingRequiredState {
-            address: address.clone(),
+// Drops the oldest digests beyond `capacity`.
+fn keep_newest(digests: &mut Vec<[u8; DIGEST_LEN]>, capacity: usize) {
+    let excess = digests.len().saturating_sub(capacity);
+    digests.drain(..excess);
+}
+
+// Decodes a list, refusing one longer than `MAX` before it allocates for more.
+fn deserialize_bounded<'de, D, T, const MAX: usize>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct BoundedVisitor<T, const MAX: usize>(PhantomData<T>);
+
+    impl<'de, T: Deserialize<'de>, const MAX: usize> Visitor<'de> for BoundedVisitor<T, MAX> {
+        type Value = Vec<T>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "at most {MAX} entries")
         }
-    })
-}
 
-// Returns the deletions for each evicted Session's blobs, which the operation must have read.
-fn session_deletions(
-    snapshot: &ProtocolStateSnapshot,
-    evicted: &[SessionId],
-) -> Vec<ProtocolStateUpdate> {
-    evicted
-        .iter()
-        .flat_map(|session_id| session::session_record_addresses(*session_id))
-        .map(|address| ProtocolStateUpdate::delete(address).with_snapshot(snapshot))
-        .collect()
-}
-
-fn deduplication_digest(
-    digest_key: &[u8; DEDUPLICATION_KEY_LEN],
-    transport_binding_bytes: &[u8],
-    encoded_message: &[u8],
-) -> [u8; DEDUPLICATION_DIGEST_LEN] {
-    let mut hasher = blake3::Hasher::new_keyed(digest_key);
-    hasher.update(&(transport_binding_bytes.len() as u32).to_be_bytes());
-    hasher.update(transport_binding_bytes);
-    hasher.update(encoded_message);
-    let hash = hasher.finalize();
-    let mut digest = [0u8; DEDUPLICATION_DIGEST_LEN];
-    digest.copy_from_slice(&hash.as_bytes()[..DEDUPLICATION_DIGEST_LEN]);
-    digest
-}
-
-fn contains_digest(
-    digests: &[[u8; DEDUPLICATION_DIGEST_LEN]],
-    digest: &[u8; DEDUPLICATION_DIGEST_LEN],
-) -> bool {
-    let mut found = Choice::from(0);
-    for candidate in digests {
-        found |= candidate.ct_eq(digest);
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let too_many = || A::Error::custom(format_args!("more than {MAX} entries"));
+            if seq.size_hint().is_some_and(|len| len > MAX) {
+                return Err(too_many());
+            }
+            let mut entries = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX));
+            while let Some(entry) = seq.next_element()? {
+                if entries.len() == MAX {
+                    return Err(too_many());
+                }
+                entries.push(entry);
+            }
+            Ok(entries)
+        }
     }
-    bool::from(found)
-}
 
-fn record_deduplication_digest(
-    state: &mut LoadedDeduplicationSet,
-    digest: [u8; DEDUPLICATION_DIGEST_LEN],
-) {
-    if state.digests.len() == state.capacity {
-        state.digests.remove(0);
-    }
-    state.digests.push(digest);
-}
-
-fn record_pending_acknowledgment(
-    address: &ProtocolStateAddress,
-    state: &mut LoadedPendingAcknowledgments,
-    message_id: MessageId,
-    entry: LoadedPendingAcknowledgment,
-    limits: ProtocolHardeningLimits,
-) -> Result<(), ProtocolStateError> {
-    let message_id_bytes = *message_id.as_bytes();
-    if !state.pending.contains_key(&message_id_bytes)
-        && state.pending.len() == limits.max_pending_acknowledgments
-    {
-        return Err(ProtocolStateError::InvalidStateBinding {
-            address: address.clone(),
-            reason: "pending-acknowledgment count reached limit".into(),
-        });
-    }
-    state.pending.insert(message_id_bytes, entry);
-    Ok(())
-}
-
-fn acknowledgment_digest(
-    transport_binding_bytes: &[u8],
-    encoded_message: &[u8],
-) -> [u8; ACKNOWLEDGMENT_DIGEST_LEN] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(&(transport_binding_bytes.len() as u32).to_be_bytes());
-    hasher.update(transport_binding_bytes);
-    hasher.update(encoded_message);
-    let hash = hasher.finalize();
-    let mut digest = [0u8; ACKNOWLEDGMENT_DIGEST_LEN];
-    digest.copy_from_slice(&hash.as_bytes()[..ACKNOWLEDGMENT_DIGEST_LEN]);
-    digest
-}
-
-fn contains_acknowledgment_digest(
-    digests: &[[u8; ACKNOWLEDGMENT_DIGEST_LEN]],
-    digest: &[u8; ACKNOWLEDGMENT_DIGEST_LEN],
-) -> bool {
-    let mut found = Choice::from(0);
-    for candidate in digests {
-        found |= candidate.ct_eq(digest);
-    }
-    bool::from(found)
-}
-
-fn record_acknowledgment_digest(
-    state: &mut LoadedPendingAcknowledgments,
-    digest: [u8; ACKNOWLEDGMENT_DIGEST_LEN],
-    limits: ProtocolHardeningLimits,
-) {
-    if state.acknowledgment_digests.len() == limits.max_acknowledgment_digests {
-        state.acknowledgment_digests.remove(0);
-    }
-    state.acknowledgment_digests.push(digest);
-}
-
-fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    pad_message_payload(plaintext).map_err(|error| ProtocolStateError::InvalidMessage {
-        reason: error.to_string(),
-    })
-}
-
-pub(crate) fn unpad_sealed_payload(
-    padded: &[u8],
-) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    unpad_message_payload(padded).map_err(|error| ProtocolStateError::InvalidMessage {
-        reason: error.to_string(),
-    })
-}
-
-fn copy_message(message: &Message) -> Message {
-    Message {
-        version: message.version,
-        recipient_public_key: message.recipient_public_key,
-        prekey_reference: message.prekey_reference,
-        ephemeral_public_key: message.ephemeral_public_key,
-        ciphertext: message.ciphertext.clone(),
-    }
+    deserializer.deserialize_seq(BoundedVisitor::<T, MAX>(PhantomData))
 }
 
 fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
@@ -2317,126 +1220,7 @@ fn write_hex(f: &mut fmt::Formatter<'_>, bytes: &[u8]) -> fmt::Result {
 
 #[cfg(test)]
 mod tests {
-    use super::envelope::{DecodedSealedSenderEnvelope, SenderAuthentication};
-    use super::{
-        DEDUPLICATION_DIGEST_LEN, DEDUPLICATION_KEY_LEN, LoadedDeduplicationSet,
-        MIN_DEDUPLICATION_CAPACITY, PROTOCOL_STATE_BLOB_VERSION, ProtocolStateError,
-        acknowledgment_digest, blob_body, contains_digest, deduplication_digest,
-        protocol_state_blob_digest, record_deduplication_digest,
-    };
-    use super::{SenderIdentityMaterial, authenticate_first_message};
-    use crate::{ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind};
-    use rand::SeedableRng;
-    use rand_chacha::ChaCha20Rng;
-    use roost_crypto::{
-        DiscoveryKey, Handshake, KeyPair, PublicIdentityKey, SealedFramePreKeyReference,
-        SignedPreKey, SigningKeyPair, generate_discovery_key,
-        generate_signed_prekey_for_discovery_key, sign_identity_key_binding,
-    };
-    use zeroize::Zeroizing;
-
-    struct Sender {
-        identity: PublicIdentityKey,
-        signing_key: SigningKeyPair,
-        material: SenderIdentityMaterial,
-    }
-
-    fn sender(seed: u8) -> Sender {
-        let signing_key = SigningKeyPair::from_signing_bytes([seed; 32]);
-        let agreement_key = KeyPair::from_secret_bytes([seed.wrapping_add(1); 32]);
-        let identity = PublicIdentityKey {
-            public_key: agreement_key.public,
-            verifying_key: signing_key.verifying,
-            binding_signature: sign_identity_key_binding(&signing_key, &agreement_key.public)
-                .unwrap(),
-        };
-        Sender {
-            material: SenderIdentityMaterial {
-                identity_key: *identity.public_key.as_bytes(),
-                identity_verifying_key: identity.verifying_key.to_bytes(),
-                identity_binding_signature: identity.binding_signature.to_bytes().to_vec(),
-                certificate: Vec::new(),
-                signature: Vec::new(),
-            },
-            identity,
-            signing_key,
-        }
-    }
-
-    fn discovery_key(owner: &Sender, seed: u8) -> DiscoveryKey {
-        generate_discovery_key(
-            &mut ChaCha20Rng::from_seed([seed; 32]),
-            &owner.signing_key,
-            1,
-            1_700_000_000,
-        )
-        .unwrap()
-    }
-
-    // Authenticates a first Message from `claimed` that seals `sealed` and its binding over
-    // `bound`, with a proof the Discovery Key checks reject before anyone verifies it.
-    fn authenticate(
-        claimed: &Sender,
-        sealed: &DiscoveryKey,
-        bound: &PublicIdentityKey,
-    ) -> Result<(), ProtocolStateError> {
-        let responder = sender(0x50);
-        let responder_discovery_key = discovery_key(&responder, 0x51);
-        let signed_prekey: SignedPreKey = generate_signed_prekey_for_discovery_key(
-            &mut ChaCha20Rng::from_seed([0x52; 32]),
-            &responder_discovery_key,
-            0,
-            1_700_000_000,
-        )
-        .unwrap();
-        let decoded = DecodedSealedSenderEnvelope {
-            sender_identity: claimed.material.clone(),
-            authentication: SenderAuthentication::Proof {
-                discovery_key: Box::new(sealed.public()),
-                discovery_to_identity: sealed.sign_identity_binding(bound).unwrap(),
-                proof: [0; roost_crypto::SENDER_PROOF_LEN],
-            },
-            padded_plaintext: Zeroizing::new(Vec::new()),
-            plaintext: Zeroizing::new(Vec::new()),
-        };
-        let handshake = Handshake {
-            base_key: KeyPair::from_secret_bytes([0x53; 32]).public,
-            responder_discovery_key: *responder_discovery_key.public_key(),
-            prekey_reference: SealedFramePreKeyReference {
-                discovery_epoch: 1,
-                signed_prekey_public_key: *signed_prekey.public_key().as_bytes(),
-                one_time_prekey_id: None,
-                one_time_prekey_public_key: None,
-            },
-        };
-        authenticate_first_message(&decoded, &handshake, &signed_prekey).map(|_| ())
-    }
-
-    #[test]
-    fn a_first_message_sealing_another_identitys_discovery_key_is_rejected() {
-        let alice = sender(0x10);
-        let mallory = sender(0x20);
-        let mallorys_discovery_key = discovery_key(&mallory, 0x21);
-
-        assert!(matches!(
-            authenticate(&alice, &mallorys_discovery_key, &alice.identity),
-            Err(ProtocolStateError::InvalidMessage { reason })
-                if reason == "sender discovery key is not signed by its identity key"
-        ));
-    }
-
-    #[test]
-    fn a_first_message_whose_discovery_key_vouches_for_another_identity_is_rejected() {
-        let alice = sender(0x10);
-        let mallory = sender(0x20);
-        let alices_discovery_key = discovery_key(&alice, 0x11);
-
-        assert!(matches!(
-            authenticate(&alice, &alices_discovery_key, &mallory.identity),
-            Err(ProtocolStateError::InvalidMessage { reason })
-                if reason == "sender discovery key does not sign its identity key"
-        ));
-    }
+    use super::*;
 
     #[test]
     fn blob_versions_other_than_the_current_one_are_faults() {
@@ -2455,91 +1239,10 @@ mod tests {
     }
 
     #[test]
-    fn same_encrypted_bytes_under_different_deduplication_keys_have_different_digests() {
-        let encoded_message = b"encoded encrypted message";
-        let first_key = [1u8; DEDUPLICATION_KEY_LEN];
-        let second_key = [2u8; DEDUPLICATION_KEY_LEN];
-
-        let first = deduplication_digest(&first_key, &[], encoded_message);
-        let second = deduplication_digest(&second_key, &[], encoded_message);
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn same_encrypted_bytes_under_different_transport_bindings_have_different_digests() {
-        let encoded_message = b"encoded encrypted message";
-        let digest_key = [1u8; DEDUPLICATION_KEY_LEN];
-
-        let first = deduplication_digest(&digest_key, b"transport-binding:first", encoded_message);
-        let second =
-            deduplication_digest(&digest_key, b"transport-binding:second", encoded_message);
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn different_encrypted_bytes_under_the_same_key_and_binding_have_different_digests() {
-        let digest_key = [1u8; DEDUPLICATION_KEY_LEN];
-
-        let first = deduplication_digest(&digest_key, b"transport-binding", b"first message");
-        let second = deduplication_digest(&digest_key, b"transport-binding", b"second message");
-
-        assert_ne!(first, second);
-    }
-
-    #[test]
-    fn acknowledgment_digest_changes_with_each_input() {
-        let expected = acknowledgment_digest(b"transport-binding", b"encoded message");
-
-        assert_ne!(
-            acknowledgment_digest(b"other-binding", b"encoded message"),
-            expected
-        );
-        assert_ne!(
-            acknowledgment_digest(b"transport-binding", b"other message"),
-            expected
-        );
-    }
-
-    #[test]
     fn protocol_state_blob_digest_changes_with_the_blob() {
         assert_ne!(
             protocol_state_blob_digest(b"first blob"),
             protocol_state_blob_digest(b"second blob")
         );
-    }
-
-    #[test]
-    fn record_deduplication_digest_evicts_oldest_digest_first() {
-        let mut state = LoadedDeduplicationSet {
-            capacity: MIN_DEDUPLICATION_CAPACITY,
-            digest_key: Zeroizing::new([7u8; DEDUPLICATION_KEY_LEN]),
-            digests: Vec::new(),
-        };
-        let oldest = [0u8; DEDUPLICATION_DIGEST_LEN];
-        record_deduplication_digest(&mut state, oldest);
-        for tag in 1..MIN_DEDUPLICATION_CAPACITY {
-            record_deduplication_digest(&mut state, [tag as u8; DEDUPLICATION_DIGEST_LEN]);
-        }
-        let newest = [0xff; DEDUPLICATION_DIGEST_LEN];
-
-        record_deduplication_digest(&mut state, newest);
-
-        assert_eq!(state.digests.len(), MIN_DEDUPLICATION_CAPACITY);
-        assert!(!contains_digest(&state.digests, &oldest));
-        assert!(contains_digest(&state.digests, &newest));
-    }
-
-    #[test]
-    fn contains_digest_reports_membership_without_short_circuit_result_changes() {
-        let first = [1u8; DEDUPLICATION_DIGEST_LEN];
-        let second = [2u8; DEDUPLICATION_DIGEST_LEN];
-        let missing = [3u8; DEDUPLICATION_DIGEST_LEN];
-        let digests = vec![first, second];
-
-        assert!(contains_digest(&digests, &first));
-        assert!(contains_digest(&digests, &second));
-        assert!(!contains_digest(&digests, &missing));
     }
 }

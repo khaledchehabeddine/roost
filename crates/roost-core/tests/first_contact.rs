@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use roost_core::{
     BlockedContactAcknowledgmentPolicy, ContactTrustState, InboundMessageOutcome,
-    MessageDestination, ReceiveSettings,
+    MessageDestination, ProtocolHardeningLimits, ReceiveSettings,
 };
 use roost_protocol::PayloadKind;
 use support::accepted;
@@ -88,7 +88,7 @@ fn the_asked_side_gets_a_contact_request_and_acknowledges_nothing() {
     };
     assert_eq!(result.plaintext.as_slice(), b"hi bob");
     assert!(result.acknowledgment.is_none());
-    bob.commit_changes(result.changes).unwrap();
+    bob.commit_changes(&result.changes).unwrap();
     let contact = bob.contact(&alice).unwrap();
     assert_eq!(contact.trust_state, ContactTrustState::Pending);
     assert!(!contact.blocked);
@@ -184,7 +184,7 @@ fn an_acceptance_shares_the_asked_sides_grant_and_accepts_both_sides() {
     );
     let received = accepted(received.outcome);
     assert_eq!(received.plaintext.as_slice(), b"welcome");
-    alice.commit_changes(received.changes).unwrap();
+    alice.commit_changes(&received.changes).unwrap();
     assert_eq!(
         alice.contact(&bob).unwrap().trust_state,
         ContactTrustState::Unverified
@@ -431,7 +431,7 @@ fn a_first_message_on_a_one_time_prekey_commits_its_use_with_the_session() {
             .iter()
             .any(|unfinished| unfinished.operation.id == operation)
     );
-    bob.commit_changes(result.changes).unwrap();
+    bob.commit_changes(&result.changes).unwrap();
 
     assert_eq!(
         bob.store.operation_status(operation).unwrap(),
@@ -515,7 +515,7 @@ fn a_conflicting_commit_aborts_and_a_rerun_uses_the_one_time_prekey_once() {
     bob.receive(&other_request.message);
 
     assert_eq!(
-        bob.commit_changes(stale.changes),
+        bob.commit_changes(&stale.changes),
         Err(support::HostCommitError::StaleCondition)
     );
     assert_eq!(
@@ -542,7 +542,7 @@ fn an_unknown_commit_outcome_is_reconciled_at_startup_without_losing_the_one_tim
     let operation = result.changes.operation().unwrap();
     bob.store.reserve_operation(operation).unwrap();
     // The transaction commits, but a lost reply hides that it did, and the app restarts.
-    bob.host.commit_changes(result.changes).unwrap();
+    bob.host.commit_changes(&result.changes).unwrap();
     bob.restart();
 
     let unfinished = bob.store.unfinished_operations().unwrap();
@@ -696,7 +696,7 @@ fn a_blocked_stranger_learns_nothing_even_under_silent_receipt() {
     let relay = Relay::new();
     let (mut alice, mut bob) = requested(&relay);
     bob.settings = ReceiveSettings::new(
-        ReceiveSettings::default().deduplication_capacity(),
+        ProtocolHardeningLimits::default().default_deduplication_capacity,
         BlockedContactAcknowledgmentPolicy::SilentReceipt,
         Duration::ZERO,
     )
@@ -721,7 +721,7 @@ fn a_blocked_contacts_new_session_is_authenticated_and_kept_with_its_plaintext_w
         let relay = Relay::new();
         let (mut alice, mut bob) = befriended(&relay);
         bob.settings = ReceiveSettings::new(
-            ReceiveSettings::default().deduplication_capacity(),
+            ProtocolHardeningLimits::default().default_deduplication_capacity,
             policy,
             Duration::ZERO,
         )

@@ -2,8 +2,7 @@
 
 use crate::error::RoostError;
 use crate::records::{fixed_32, hex_identifier, hex_text};
-use roost_core::Message as CoreMessage;
-use roost_core::SealedFramePreKeyReference as CorePreKeyReference;
+use roost_core::{OneTimePreKeyReference, SealedFrame, SealedFramePreKeyReference};
 
 /// The identifier of one Message within a Session.
 ///
@@ -36,10 +35,17 @@ pub struct FramePreKeyReference {
     pub discovery_epoch: u32,
     /// Recipient signed-prekey X25519 public key. Always 32 bytes.
     pub signed_prekey_public_key: Vec<u8>,
-    /// Optional one-time-prekey identifier.
-    pub one_time_prekey_id: Option<u64>,
-    /// Optional one-time-prekey X25519 public key. Always 32 bytes when present.
-    pub one_time_prekey_public_key: Option<Vec<u8>>,
+    /// The recipient one-time prekey the handshake used, if one was left.
+    pub one_time_prekey: Option<FrameOneTimePreKeyReference>,
+}
+
+/// The one-time prekey a sealed-sender frame's handshake used.
+#[derive(Clone, uniffi::Record)]
+pub struct FrameOneTimePreKeyReference {
+    /// The prekey's identifier.
+    pub id: u64,
+    /// The prekey's X25519 public key. Always 32 bytes.
+    pub public_key: Vec<u8>,
 }
 
 /// Transport-visible sealed-sender frame exchanged as a Message.
@@ -102,7 +108,7 @@ impl SenderIdentityMaterial {
 }
 
 impl Message {
-    pub(crate) fn from_core(message: CoreMessage) -> Self {
+    pub(crate) fn from_core(message: SealedFrame) -> Self {
         Self {
             version: message.version,
             recipient_public_key: message.recipient_public_key.to_vec(),
@@ -114,8 +120,8 @@ impl Message {
         }
     }
 
-    pub(crate) fn to_core(&self) -> Result<CoreMessage, RoostError> {
-        Ok(CoreMessage {
+    pub(crate) fn to_core(&self) -> Result<SealedFrame, RoostError> {
+        Ok(SealedFrame {
             version: self.version,
             recipient_public_key: fixed_32(&self.recipient_public_key, "recipient public key")?,
             prekey_reference: self
@@ -130,30 +136,44 @@ impl Message {
 }
 
 impl FramePreKeyReference {
-    fn from_core(reference: CorePreKeyReference) -> Self {
+    fn from_core(reference: SealedFramePreKeyReference) -> Self {
         Self {
             discovery_epoch: reference.discovery_epoch,
             signed_prekey_public_key: reference.signed_prekey_public_key.to_vec(),
-            one_time_prekey_id: reference.one_time_prekey_id,
-            one_time_prekey_public_key: reference
-                .one_time_prekey_public_key
-                .map(|public_key| public_key.to_vec()),
+            one_time_prekey: reference
+                .one_time_prekey
+                .map(FrameOneTimePreKeyReference::from_core),
         }
     }
 
-    fn to_core(&self) -> Result<CorePreKeyReference, RoostError> {
-        Ok(CorePreKeyReference {
+    fn to_core(&self) -> Result<SealedFramePreKeyReference, RoostError> {
+        Ok(SealedFramePreKeyReference {
             discovery_epoch: self.discovery_epoch,
             signed_prekey_public_key: fixed_32(
                 &self.signed_prekey_public_key,
                 "signed pre-key public key",
             )?,
-            one_time_prekey_id: self.one_time_prekey_id,
-            one_time_prekey_public_key: self
-                .one_time_prekey_public_key
-                .as_deref()
-                .map(|public_key| fixed_32(public_key, "one-time pre-key public key"))
+            one_time_prekey: self
+                .one_time_prekey
+                .as_ref()
+                .map(FrameOneTimePreKeyReference::to_core)
                 .transpose()?,
+        })
+    }
+}
+
+impl FrameOneTimePreKeyReference {
+    fn from_core(reference: OneTimePreKeyReference) -> Self {
+        Self {
+            id: reference.id,
+            public_key: reference.public_key.to_vec(),
+        }
+    }
+
+    fn to_core(&self) -> Result<OneTimePreKeyReference, RoostError> {
+        Ok(OneTimePreKeyReference {
+            id: self.id,
+            public_key: fixed_32(&self.public_key, "one-time prekey public key")?,
         })
     }
 }
@@ -180,5 +200,18 @@ pub fn encode_message(message: Message) -> Result<Vec<u8>, RoostError> {
 /// Decodes canonical sealed-frame bytes into transport-visible fields.
 #[uniffi::export]
 pub fn decode_message(bytes: Vec<u8>) -> Result<Message, RoostError> {
-    Ok(Message::from_core(CoreMessage::from_bytes(&bytes)?))
+    Ok(Message::from_core(SealedFrame::from_bytes(&bytes)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_message_reports_an_unknown_frame_version_as_unsupported() {
+        assert!(matches!(
+            decode_message(vec![u8::MAX]),
+            Err(RoostError::UnsupportedVersion { .. })
+        ));
+    }
 }

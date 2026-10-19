@@ -2,7 +2,7 @@
 
 use roost_core::{
     DiscoveryKeyError, HandshakeError, IdentityError, KeyStoreError, KeyStoreOperationError,
-    MessageError, MessageOperationError, MessageStartError, OneTimePreKeyError, ProtocolStateError,
+    MessageOperationError, MessageStartError, OneTimePreKeyError, ProtocolStateError,
     PublicKeyError, RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
     SignedPreKeyError, StateEntryError, StorageError, TransportBindingError,
 };
@@ -435,23 +435,6 @@ impl From<SignatureError> for RoostError {
     }
 }
 
-impl From<MessageError> for RoostError {
-    fn from(e: MessageError) -> Self {
-        let reason = reason_from_chain(&e);
-        match e {
-            MessageError::UnsupportedPayloadKind(_) | MessageError::UnsupportedVersion(_) => {
-                RoostError::UnsupportedVersion { reason }
-            }
-            // Encoding also validates caller-supplied public keys.
-            MessageError::Encode
-            | MessageError::Decode
-            | MessageError::EncodedTooLarge
-            | MessageError::InvalidPublicKey
-            | MessageError::PayloadTooLarge => RoostError::InvalidData { reason },
-        }
-    }
-}
-
 impl From<ProtocolStateError> for RoostError {
     fn from(e: ProtocolStateError) -> Self {
         let reason = reason_from_chain(&e);
@@ -464,9 +447,13 @@ impl From<ProtocolStateError> for RoostError {
             }
             ProtocolStateError::InvalidDeduplicationCapacity { .. }
             | ProtocolStateError::InvalidMessage { .. }
-            | ProtocolStateError::InvalidStateKey { .. }
+            | ProtocolStateError::EmptyStateKey
+            | ProtocolStateError::MessageTranscript(_)
             | ProtocolStateError::NoContactRequest
-            | ProtocolStateError::SnapshotCapacityExceeded
+            | ProtocolStateError::PendingAcknowledgmentLimitReached { .. }
+            | ProtocolStateError::SealedPayload(_)
+            | ProtocolStateError::SnapshotCapacityExceeded { .. }
+            | ProtocolStateError::StateKeyTooLong { .. }
             | ProtocolStateError::StateEntry(_)
             | ProtocolStateError::TimeOutOfRange
             | ProtocolStateError::UnsolicitedAcceptance => RoostError::InvalidData { reason },
@@ -481,7 +468,6 @@ impl From<ProtocolStateError> for RoostError {
             ProtocolStateError::BlobEncode { .. } | ProtocolStateError::Randomness(_) => {
                 RoostError::InternalError { reason }
             }
-            ProtocolStateError::MessageEncode(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::Ratchet(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::RatchetState(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::SealedFrame(e) => RoostError::from(e).with_reason(reason),
@@ -578,12 +564,12 @@ mod tests {
     #[test]
     fn message_input_rejections_remain_invalid_data_across_protocol_error_boundary() {
         for error in [
-            MessageError::PayloadTooLarge,
-            MessageError::EncodedTooLarge,
-            MessageError::Encode,
+            SealedFrameError::CiphertextTooLong { len: 2, max: 1 },
+            SealedFrameError::FrameTooLong { len: 2, max: 1 },
+            SealedFrameError::InvalidPublicKey,
         ] {
             assert!(matches!(
-                RoostError::from(ProtocolStateError::MessageEncode(error)),
+                RoostError::from(ProtocolStateError::SealedFrame(error)),
                 RoostError::InvalidData { .. }
             ));
         }

@@ -25,7 +25,7 @@ fn app_queries_observe_extension_changes_only_after_host_commit() {
 
     let operation = block.changes.operation().unwrap();
     extension.reserve_operation(operation).unwrap();
-    bob.host.commit_changes(block.changes).unwrap();
+    bob.host.commit_changes(&block.changes).unwrap();
     extension.finalize_operation(operation).unwrap();
     bob.restart();
     assert!(bob.contact(&alice).unwrap().blocked);

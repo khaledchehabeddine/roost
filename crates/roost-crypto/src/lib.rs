@@ -79,7 +79,7 @@ pub use keys::{
 };
 pub use one_time_prekey::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 pub use sealed_frame::{
-    SealedFrame, SealedFrameError, SealedFramePreKeyReference,
+    OneTimePreKeyReference, SealedFrame, SealedFrameError, SealedFramePreKeyReference,
     open_frame_for_discovery_key_with_associated_data, seal_frame_with_associated_data,
 };
 pub use signed_prekey::{PublicSignedPreKey, SignedPreKey, verify_public_signed_prekey};

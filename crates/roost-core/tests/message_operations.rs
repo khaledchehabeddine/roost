@@ -5,12 +5,12 @@ mod support;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    BlockedContactAcknowledgmentPolicy, DEFAULT_DEDUPLICATION_CAPACITY, InboundMessageOutcome,
-    MAX_DEDUPLICATION_CAPACITY, MIN_DEDUPLICATION_CAPACITY, MessageDecryption,
+    BlockedContactAcknowledgmentPolicy, InboundMessageOutcome, MessageDecryption,
     MessageDecryptionStep, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    OutboundMessageResult, OutgoingMessage, ProtocolStateAddress, ProtocolStateBlob,
-    ProtocolStateCommitCondition, ProtocolStateError, ProtocolStateKey, ProtocolStateKind,
-    ReceiveSettings, SignedSenderCertificate, StateEntryError,
+    OutboundMessageResult, OutgoingMessage, ProtocolHardeningLimits, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ReceiveSettings, SignedSenderCertificate, StateEntryError,
+    commit_conditions_match,
 };
 use roost_protocol::{MAX_CERTIFICATE_GRACE_WINDOW, SenderCertificateValidationError};
 use std::time::Duration;
@@ -84,8 +84,8 @@ fn encryption_reads_the_contact_then_its_session_then_asks_for_a_transport() {
         panic!("expected the sealed Message")
     };
     assert_eq!(sent.session_id, session_id);
-    let message = support::copy(&sent.message);
-    alice.host.commit_changes(sent.changes).unwrap();
+    let message = sent.message.clone();
+    alice.host.commit_changes(&sent.changes).unwrap();
 
     let InboundMessageOutcome::Accepted(received) = bob.receive(&message) else {
         panic!("expected Bob to accept the Message")
@@ -463,31 +463,31 @@ fn matching_checks_each_condition_and_rejects_malformed_records() {
         .map(|(address, _)| address.clone())
         .collect();
     let current = alice.host.read(&addresses);
-    assert!(sent.changes.matches(&current).unwrap());
+    assert!(commit_conditions_match(sent.changes.conditions(), &current).unwrap());
 
     let mut changed = alice.host.read(&addresses);
     changed[0].1 = Some(ProtocolStateBlob::from_bytes(vec![1, 2, 3]));
-    assert!(!sent.changes.matches(&changed).unwrap());
+    assert!(!commit_conditions_match(sent.changes.conditions(), &changed).unwrap());
     let mut removed = alice.host.read(&addresses);
     removed[0].1 = None;
-    assert!(!sent.changes.matches(&removed).unwrap());
+    assert!(!commit_conditions_match(sent.changes.conditions(), &removed).unwrap());
 
     let mut missing = alice.host.read(&addresses);
     missing.pop();
     assert!(matches!(
-        sent.changes.matches(&missing),
+        commit_conditions_match(sent.changes.conditions(), &missing),
         Err(StateEntryError::Missing { .. })
     ));
     let mut repeated = alice.host.read(&addresses);
     repeated.push(alice.host.read(&addresses[..1]).remove(0));
     assert!(matches!(
-        sent.changes.matches(&repeated),
+        commit_conditions_match(sent.changes.conditions(), &repeated),
         Err(StateEntryError::Repeated { .. })
     ));
     let mut extra = alice.host.read(&addresses);
     extra.push((address(ProtocolStateKind::ContactState, &[0x77; 64]), None));
     assert!(matches!(
-        sent.changes.matches(&extra),
+        commit_conditions_match(sent.changes.conditions(), &extra),
         Err(StateEntryError::Unexpected { .. })
     ));
 }
@@ -537,10 +537,10 @@ fn shrinking_the_deduplication_set_evicts_its_oldest_digests() {
         )
         .unwrap()
     };
-    bob.settings = settings(2 * MIN_DEDUPLICATION_CAPACITY);
+    bob.settings = settings(2 * ProtocolHardeningLimits::default().min_deduplication_capacity);
     let oldest = alice.send(&bob, b"oldest");
     bob.receive(&oldest.message);
-    for _ in 0..MIN_DEDUPLICATION_CAPACITY {
+    for _ in 0..ProtocolHardeningLimits::default().min_deduplication_capacity {
         let newer = alice.send(&bob, b"newer");
         bob.receive(&newer.message);
     }
@@ -549,7 +549,7 @@ fn shrinking_the_deduplication_set_evicts_its_oldest_digests() {
         InboundMessageOutcome::Duplicate
     ));
 
-    bob.settings = settings(MIN_DEDUPLICATION_CAPACITY);
+    bob.settings = settings(ProtocolHardeningLimits::default().min_deduplication_capacity);
     let latest = alice.send(&bob, b"latest");
     assert!(matches!(
         bob.receive(&latest.message),
@@ -569,8 +569,8 @@ fn shrinking_the_deduplication_set_evicts_its_oldest_digests() {
 fn receive_settings_refuse_values_outside_roosts_limits() {
     let policy = BlockedContactAcknowledgmentPolicy::Unreachable;
     for capacity in [
-        MIN_DEDUPLICATION_CAPACITY - 1,
-        MAX_DEDUPLICATION_CAPACITY + 1,
+        ProtocolHardeningLimits::default().min_deduplication_capacity - 1,
+        ProtocolHardeningLimits::default().max_deduplication_capacity + 1,
     ] {
         assert!(matches!(
             ReceiveSettings::new(capacity, policy, Duration::ZERO),
@@ -580,7 +580,7 @@ fn receive_settings_refuse_values_outside_roosts_limits() {
     }
     assert!(matches!(
         ReceiveSettings::new(
-            DEFAULT_DEDUPLICATION_CAPACITY,
+            ProtocolHardeningLimits::default().default_deduplication_capacity,
             policy,
             MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_millis(1)
         ),
@@ -590,7 +590,7 @@ fn receive_settings_refuse_values_outside_roosts_limits() {
     ));
     assert!(
         ReceiveSettings::new(
-            MAX_DEDUPLICATION_CAPACITY,
+            ProtocolHardeningLimits::default().max_deduplication_capacity,
             policy,
             MAX_CERTIFICATE_GRACE_WINDOW
         )
@@ -653,7 +653,7 @@ fn an_acknowledgment_decrypts_like_any_message_and_never_asks_for_a_reply_transp
         panic!("expected a matched acknowledgment")
     };
     assert_eq!(matched.acknowledged_message_id, sent.message_id);
-    alice.host.commit_changes(matched.changes).unwrap();
+    alice.host.commit_changes(&matched.changes).unwrap();
     assert!(
         engine
             .pending_acknowledgments(&alice.host.snapshot(), session_id)
@@ -675,15 +675,15 @@ fn an_unmatched_acknowledgment_still_commits_its_advanced_state() {
     let mut bob = Device::new(&relay, 0xb0);
     establish(&mut alice, &mut bob);
     let sent = alice.encrypt_to(&bob, b"forgotten").unwrap();
-    let message = support::copy(&sent.message);
+    let message = sent.message.clone();
     // The host keeps the ratchet's advance but loses the Pending Acknowledgment.
-    let session_only = sent
+    let session_only: Vec<_> = sent
         .changes
         .into_updates()
         .into_iter()
         .filter(|update| update.address().kind() == ProtocolStateKind::RatchetSession)
         .collect();
-    alice.host.commit(session_only).unwrap();
+    alice.host.apply_all(&session_only);
     let InboundMessageOutcome::Accepted(received) = bob.receive(&message) else {
         panic!("expected Bob to accept the Message")
     };
@@ -761,7 +761,7 @@ fn a_blocked_sender_gets_an_acknowledgment_only_under_the_silent_receipt_choice(
     assert!(hidden.acknowledgment.is_none());
 
     bob.settings = ReceiveSettings::new(
-        DEFAULT_DEDUPLICATION_CAPACITY,
+        ProtocolHardeningLimits::default().default_deduplication_capacity,
         BlockedContactAcknowledgmentPolicy::SilentReceipt,
         Duration::ZERO,
     )
@@ -827,7 +827,7 @@ fn a_second_instance_that_loses_the_commit_retries_from_fresh_reads() {
         &alice.host,
         false,
     );
-    let app_message = support::copy(&from_app.message);
+    let app_message = from_app.message.clone();
     alice.host.commit_sent(from_app).unwrap();
     assert_eq!(
         alice.host.commit_sent(stale),
@@ -838,7 +838,7 @@ fn a_second_instance_that_loses_the_commit_retries_from_fresh_reads() {
         &alice.host,
         false,
     );
-    let extension_message = support::copy(&retried.message);
+    let extension_message = retried.message.clone();
     alice.host.commit_sent(retried).unwrap();
 
     for (message, plaintext) in [
@@ -886,7 +886,7 @@ fn dropping_an_unfinished_operation_changes_nothing_and_a_restart_sends_the_draf
         false,
     );
     let message_id = sent.message_id;
-    let message = support::copy(&sent.message);
+    let message = sent.message.clone();
     alice.host.commit_sent(sent).unwrap();
 
     let InboundMessageOutcome::Accepted(received) = bob.receive(&message) else {
@@ -923,11 +923,11 @@ fn a_receive_that_found_no_deduplication_set_cannot_commit_after_another_creates
             })
     );
 
-    bob.host.commit_changes(first.changes).unwrap();
+    bob.host.commit_changes(&first.changes).unwrap();
     let before = bob.host.snapshot_bytes();
 
     assert_eq!(
-        bob.host.commit_changes(second.changes),
+        bob.host.commit_changes(&second.changes),
         Err(support::HostCommitError::StaleCondition)
     );
     assert_eq!(bob.host.snapshot_bytes(), before);
