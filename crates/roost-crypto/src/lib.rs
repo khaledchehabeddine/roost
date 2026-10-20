@@ -1,15 +1,15 @@
 //! Cryptographic primitives for private end-to-end encrypted messaging.
 //!
 //! Handles key generation, Identity Key and Discovery Key binding signatures, signed and one-time
-//! pre-keys, Delivery Capabilities, X3DH handshakes and sender proofs, Double Ratchet encryption,
+//! prekeys, Delivery Capabilities, X3DH handshakes and sender proofs, Double Ratchet encryption,
 //! and Sealed Sender Frames. Higher layers handle persistence, replay tracking, and transport.
 //!
 //! The identity key signs the public discovery key. The discovery key signs the public signed
-//! pre-key. Initiators verify both responder signatures, use [`initiate_handshake`] to create the
+//! prekey. Initiators verify both responder signatures, use [`initiate_handshake`] to create the
 //! first [`RatchetState`] and the [`SessionId`](roost_protocol::SessionId) both peers derive, then
 //! use the ratchet to encrypt messages. Responders run [`accept_handshake`] and check the
 //! initiator's [`prove_sender`] proof with [`verify_sender_proof`]. X3DH includes a one-time
-//! pre-key when one is available.
+//! prekey when one is available.
 //!
 //! # Secret handling
 //!
@@ -47,7 +47,7 @@
 //!
 //! - Handshakes carry no replay marker. Replay detection belongs above this crate.
 //! - Re-handshake policy belongs above this crate. A new handshake starts a new session.
-//! - This crate has no signed-pre-key storage. Delayed handshakes require the caller to retain and
+//! - This crate has no signed prekey storage. Delayed handshakes require the caller to retain and
 //!   pass the matching key to [`accept_handshake`].
 
 mod delivery_capability;

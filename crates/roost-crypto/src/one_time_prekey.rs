@@ -3,7 +3,7 @@ use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-/// A single-use X25519 pre-key bound to a discovery-key epoch.
+/// A single-use X25519 prekey bound to a discovery-key epoch.
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct OneTimePreKey {
     #[zeroize(skip)]
@@ -18,7 +18,7 @@ pub struct OneTimePreKey {
 }
 
 impl OneTimePreKey {
-    /// Restores a one-time pre-key from secret bytes and stored metadata.
+    /// Restores a one-time prekey from secret bytes and stored metadata.
     pub fn from_secret_bytes(id: u64, secret: [u8; 32], epoch: u32, created_at_secs: u64) -> Self {
         let secret_key = StaticSecret::from(secret);
         let public_key = PublicKey::from(&secret_key);
@@ -31,7 +31,7 @@ impl OneTimePreKey {
         }
     }
 
-    /// Returns the caller-assigned pre-key identifier.
+    /// Returns the caller-assigned prekey identifier.
     pub(crate) fn id(&self) -> u64 {
         self.id
     }
@@ -41,7 +41,7 @@ impl OneTimePreKey {
         &self.public_key
     }
 
-    /// Returns the discovery-key epoch this pre-key was produced under.
+    /// Returns the discovery-key epoch this prekey was produced under.
     pub(crate) fn epoch(&self) -> u32 {
         self.epoch
     }
@@ -51,12 +51,12 @@ impl OneTimePreKey {
         contributory_diffie_hellman(&self.secret_key, peer)
     }
 
-    /// Exports the one-time pre-key's secret bytes for secure persistence.
+    /// Exports the one-time prekey's secret bytes for secure persistence.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret_key.to_bytes())
     }
 
-    /// Returns the public form of this one-time pre-key for distribution to peers.
+    /// Returns the public form of this one-time prekey for distribution to peers.
     pub fn public(&self) -> PublicOneTimePreKey {
         PublicOneTimePreKey {
             id: self.id,
@@ -67,24 +67,24 @@ impl OneTimePreKey {
     }
 }
 
-/// Public one-time pre-key material distributed to peers.
+/// Public one-time prekey material distributed to peers.
 #[derive(Clone, Debug)]
 pub struct PublicOneTimePreKey {
     /// Caller-assigned identifier used by the responder to consume the matching secret key.
     pub id: u64,
     /// X25519 public key used during X3DH root-key derivation.
     pub public_key: PublicKey,
-    /// Discovery-key epoch this pre-key was produced under.
+    /// Discovery-key epoch this prekey was produced under.
     pub epoch: u32,
-    /// Unix timestamp in seconds when this pre-key was generated.
+    /// Unix timestamp in seconds when this prekey was generated.
     pub created_at_secs: u64,
 }
 
 impl PublicOneTimePreKey {
-    /// Builds a public one-time pre-key from received wire bytes.
+    /// Builds a public one-time prekey from received wire bytes.
     ///
     /// This checks only the key's encoding. [`initiate_handshake`](crate::initiate_handshake)
-    /// rejects a pre-key from another epoch than the bundle's discovery key.
+    /// rejects a prekey from another epoch than the bundle's discovery key.
     pub fn from_bytes(
         id: u64,
         public_key: &[u8],
@@ -100,7 +100,7 @@ impl PublicOneTimePreKey {
     }
 }
 
-/// Generates a one-time pre-key using `rng`.
+/// Generates a one-time prekey using `rng`.
 #[must_use]
 pub fn generate_one_time_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,

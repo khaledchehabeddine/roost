@@ -4,16 +4,18 @@
   - Avoid: receipt, network ack
 - **Admission**: The Relay's acceptance of a Message into an inbox, either by Delivery Capability or by the recipient's current prekeys.
   - Avoid: delivery, queueing
-- **Blocking**: A local choice to hide a contact's Messages, separate from Trust State and certificate revocation.
+- **Asked Side**: The peer a Contact Request goes to, which decides whether to accept it.
+  - Avoid: requestee, invitee
+- **Blocking**: A local choice to stop sending to a contact and hide their Messages, which rotates the inbox so the block holds at the Relay. It is separate from Trust State and certificate revocation.
   - Avoid: revocation, distrust, blocklist
 - **Caller-Owned Transport**: The app's own networking, authentication, and retries, which carry the Messages Roost produces.
 - **Commit Condition**: The state a record must still be in when the app commits an operation's result, either unchanged since Roost read it or still absent.
   - Avoid: precondition, version check, lock
+- **Contact**: A peer Roost keeps a record for, identified by their Identity Key, once someone sends a Contact Request or the app blocks a stranger.
+  - Avoid: contact identity, friend
 - **Contact Acceptance**: The Message that accepts a Contact Request and carries the accepter's Inbox Grant.
   - Avoid: reply
-- **Contact Identity**: The Identity Key and current Discovery Key that identify a peer.
-  - Avoid: account, profile
-- **Contact Request**: The first Message to a new contact, which carries the sender's Inbox Grant.
+- **Contact Request**: The Message that asks a peer to accept a contact, which starts a new Session and carries the sender's Inbox Grant.
   - Avoid: introduction, invite
 - **Deduplication Digest**: A keyed hash of a received frame and its Transport Binding that catches a repeated delivery before decryption.
   - Avoid: message hash, replay token
@@ -21,32 +23,42 @@
   - Avoid: cache
 - **Delivery Capability**: The secret, one per Epoch, that the Relay checks before it admits an established Message to an inbox.
   - Avoid: inbox token
-- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which returns Retry Instructions, signals Recovery, and gives up on Messages the Relay has dropped.
+- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which returns Retry Instructions, signals Recovery, and gives up on Messages the Relay would have dropped.
   - Avoid: retry check, retry timer
 - **Device**: The app install that holds one Identity's private keys.
   - Avoid: client, installation, instance
-- **Discovery Key (DK)**: A rotatable key pair, signed by the Identity Key, that peers use to start Sessions with an Identity.
+- **Discovery Key (DK)**: A rotatable key pair, signed by the Identity Key, that peers seal Messages to and start Sessions against.
   - Avoid: prekey, ephemeral key
 - **Epoch**: The number of a Discovery Key and the inbox it serves, which goes up each time the inbox rotates.
   - Avoid: inbox generation, inbox counter
+- **Established Message**: A Message on a Session past its handshake, which the Relay admits by the recipient's Delivery Capability.
+- **First Message**: A Message that carries the X3DH handshake, which the Relay admits against the recipient's current prekeys.
+  - Avoid: prekey message, initial message
 - **Grant Update**: A Message that carries only the sender's current Inbox Grant, which the app sends so a contact can keep delivering after an inbox rotation.
   - Avoid: control message, authorization update
 - **Identity**: A participant on one Device, identified by a permanent Identity Key and a rotatable Discovery Key.
   - Avoid: user, account, profile
 - **Identity Backup**: A passphrase-encrypted copy of an Identity's keys that restores the Identity onto a new Device.
   - Avoid: account backup
-- **Identity Context**: Roost's handle on one local identity namespace, which shares its SecureStorage and keeps no protocol state or settings.
-  - Avoid: client, keystore
+- **Identity Context**: Roost's handle on one local identity namespace, its keys and the operations that use them, which keeps no protocol state or settings.
+  - Avoid: client
 - **Identity Key (IK)**: The permanent key pair that anchors an Identity and signs its Discovery Key.
   - Avoid: master key, root key
 - **Identity Secret Blob**: The SecureStorage entry that holds an Identity Key's secret halves.
   - Avoid: backup blob
+- **Inbox**: Where the Relay queues an Identity's Messages, which contacts reach through its current Discovery Key and Delivery Capability.
+  - Avoid: mailbox, queue
 - **Inbox Grant**: The Discovery Key, its binding signatures, and the Delivery Capability that an Identity sends a contact so the contact can deliver to its inbox.
   - Avoid: inbox authorization, introduction
+- **Inbox Rotation**: Replacing an Identity's Discovery Key, Delivery Capability, and prekeys together, which advances the Epoch. Every contact then needs the new Inbox Grant to deliver again.
+  - Avoid: key reset
+- **KeyStore**: The part of Roost that keeps an Identity's keys and prekeys in SecureStorage and stages every change to them.
 - **Library Instance**: One running copy of Roost in a process, which owns no durable state.
   - Avoid: Device, client
-- **Message**: One Sealed Sender Frame sent within a Session.
+- **Message**: What one Identity sends another within a Session, sealed in a Sealed Sender Frame and named by its MessageID. A resend after Recovery seals the same Message in a new frame.
   - Avoid: payload, packet
+- **Message Destination**: Where a Message Roost seals is going and how the Relay admits it there, so the app can pick a route that reaches it.
+  - Avoid: route, address
 - **MessageID**: The identifier a sender gives a Message, which a resend after Recovery keeps so the recipient shows it once.
   - Avoid: uuid, packet id
 - **Message Operation**: One attempt to encrypt or decrypt a Message, which asks the app for the state it needs and returns its result once.
@@ -55,37 +67,43 @@
   - Avoid: associated data
 - **Pending Acknowledgment**: The stored record of a sent Message still waiting for its Acknowledgment Artifact.
   - Avoid: outbox, retry cache
-- **PreKey ID**: The number that identifies a prekey within one Epoch, counted separately for signed and one-time prekeys.
+- **Prekey ID**: The number that identifies a prekey within one Epoch, counted separately for signed and one-time prekeys.
   - Avoid: key fingerprint, database row ID
-- **PreKey State**: The stored secrets for an Identity's current Discovery Key and its prekeys.
-  - Avoid: protocol state blob, prekey cache
 - **Prepared KeyStore Operation**: A staged, recoverable change to the keys in SecureStorage, which the app reserves before committing its own state, then finalizes or aborts.
   - Avoid: database transaction, deferred write
+- **Previous Discovery Key**: A Discovery Key an Inbox Rotation replaced, which Roost keeps only to open Messages the Relay still holds for it.
+  - Avoid: old prekey
 - **Probe**: The oldest unacknowledged Message, which a Recovery that starts a new Session resends first, while the rest wait for its acknowledgment.
   - Avoid: ping, test message
 - **Protocol State Blob**: Opaque state, including secrets, that Roost produces and the app stores between operations.
   - Avoid: cache
 - **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a contact.
   - Avoid: table, bucket, namespace
-- **Recovery**: Resending a contact's unacknowledged Messages, encrypted again, on a newer Session after the contact stops acknowledging them or starts a new Session.
+- **Recovery**: Resending a contact's unacknowledged Messages, encrypted again, on a newer Session, after the contact stops acknowledging them or starts delivering on another Session.
   - Avoid: session reset, retry
+- **Relay**: The server that admits Messages into inboxes, holds them until the recipient saves them, and serves prekey bundles. Roost relies on it for admission and availability, never for confidentiality or authenticity.
+  - Avoid: server, backend
 - **Relay Domain**: The domain name of a Relay. A Sender Certificate names one, and a recipient refuses a certificate that names a different Relay than it expects.
-- **Retry Instruction**: A notice telling the app to resend an unacknowledged Message, unchanged, with a contact's newer Delivery Capability.
+- **Requester**: The peer that sent a Contact Request, until the Asked Side accepts it.
+  - Avoid: initiator, inviter
+- **Retry Instruction**: A notice telling the app to resend an unacknowledged Message, unchanged, to a contact's newer inbox.
   - Avoid: resend job
 - **Safety Number**: A number derived from two Identity Keys that two people compare outside the app to verify each other.
   - Avoid: fingerprint, verification code
-- **Sealed Payload Padding**: The padding that rounds a sealed plaintext up to a fixed size, so its length stays hidden.
+- **Sealed Payload Padding**: The padding that rounds a sealed plaintext up to the next of a few fixed sizes, so only a coarse length shows.
   - Avoid: random padding
 - **Sealed Sender Envelope**: The encrypted inner envelope that carries the sender's identity alongside the plaintext.
   - Avoid: sender header
-- **Sealed Sender Frame**: The visible outer layer of a Message, which shows only what routing needs.
+- **Sealed Sender Frame**: The format every Message travels in, which shows only what routing needs and encrypts the rest.
   - Avoid: transport envelope
 - **SecureStorage**: The secret storage the app provides, such as Keychain or Keystore, where Roost keeps keys.
   - Avoid: keychain, protocol database
 - **Sender Certificate**: A domain-signed statement that binds a sender's Identity Key to a Relay until it expires.
   - Avoid: trust state, sender profile, discovery key signature
-- **Sender Identity Material**: The sender's key, certificate, and signature recovered from a Sealed Sender Envelope.
+- **Sender Identity Material**: The sender's Identity and signed Sender Certificate, which Roost reveals once a Message authenticates.
   - Avoid: sender IK, sender metadata
+- **Sender Proof**: The proof in a First Message that its sender holds their Identity Key, which only the recipient can check.
+  - Avoid: sender signature
 - **Session**: An encrypted channel between two Identities, advanced by the Double Ratchet.
   - Avoid: connection, conversation, chat, login
 - **SessionID**: The identifier both peers derive from a Session's X3DH handshake, which each Message carries sealed to the recipient's Discovery Key so the recipient can find the Session.
@@ -94,5 +112,5 @@
   - Avoid: transport envelope, route record, delivery capability
 - **Trust State**: The trust level the app records for a peer: pending while a Contact Request is open in either direction, accepted but unverified, or verified by Safety Number.
   - Avoid: certificate validity, blocking
-- **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys, whose Messages prove the sender holds its Identity Key until the peer replies.
+- **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys. Its Messages prove the sender holds its Identity Key until the peer replies, or for a Contact Request until the peer accepts.
   - Avoid: login, certificate validation

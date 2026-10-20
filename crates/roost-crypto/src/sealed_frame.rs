@@ -25,9 +25,9 @@ const MAX_EXTERNAL_ASSOCIATED_DATA_LEN: usize = 1024;
 pub struct SealedFramePreKeyReference {
     /// Recipient Discovery Key epoch targeted by the frame.
     pub discovery_epoch: u32,
-    /// Recipient signed pre-key X25519 public key.
+    /// Recipient signed prekey X25519 public key.
     pub signed_prekey_public_key: [u8; 32],
-    /// Recipient one-time pre-key, when the handshake used one.
+    /// Recipient one-time prekey, when the handshake used one.
     pub one_time_prekey: Option<OneTimePreKeyReference>,
 }
 
@@ -237,8 +237,8 @@ pub enum SealedFrameError {
     /// HKDF-SHA256 rejected the requested output length.
     #[error("hkdf-sha256 expand exceeded output limit")]
     HkdfExpand,
-    /// The frame's pre-key reference names a one-time pre-key by only its identifier or its key.
-    #[error("sealed-sender frame names half of a one-time pre-key")]
+    /// The frame's prekey reference names a one-time prekey by only its identifier or its key.
+    #[error("sealed-sender frame names half of a one-time prekey")]
     IncompleteOneTimePreKey,
     /// A frame or prekey-reference key isn't a valid X25519 public key.
     #[error("sealed-sender frame public key is invalid")]

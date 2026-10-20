@@ -153,7 +153,7 @@ pub fn verify_discovery_to_identity_binding(
 pub struct PublicDiscoveryKey {
     /// X25519 key-agreement public key.
     pub public_key: PublicKey,
-    /// Ed25519 verifying key that validates this discovery key's signed pre-keys.
+    /// Ed25519 verifying key that validates this discovery key's signed prekeys.
     pub verifying_key: VerifyingKey,
     /// Rotation epoch, monotonic within a storage lineage.
     pub epoch: u32,
@@ -248,9 +248,9 @@ fn discovery_key_payload(
     payload
 }
 
-/// Generates a signed pre-key signed by `discovery_key`.
+/// Generates a signed prekey signed by `discovery_key`.
 ///
-/// This keeps the discovery signing key private while producing a signed pre-key that verifies
+/// This keeps the discovery signing key private while producing a signed prekey that verifies
 /// with [`PublicDiscoveryKey::verifying_key`]. The caller allocates `id` uniquely within this
 /// discovery key's epoch.
 pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(

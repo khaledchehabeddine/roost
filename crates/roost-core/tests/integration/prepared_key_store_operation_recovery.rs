@@ -263,7 +263,9 @@ fn finalized_journal_transition_recovers_from_before_and_after_apply_failures() 
         let initial_signed_prekey = store.prepare_signed_prekey_rotation().unwrap();
         store.reserve_operation(initial_signed_prekey.id).unwrap();
         store.finalize_operation(initial_signed_prekey.id).unwrap();
-        let prepared = store.prepare_signed_prekey_rotation_if_stale().unwrap();
+        let prepared = store
+            .prepare_signed_prekey_rotation_and_discovery_key_cleanup()
+            .unwrap();
         assert!(prepared.output.is_none());
         store.reserve_operation(prepared.id).unwrap();
         // A no-op has only Finalizing and Finalized journal writes.

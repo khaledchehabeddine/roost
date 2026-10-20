@@ -5,10 +5,10 @@ use roost_protocol::{SignatureError, verify_with_context};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-// Domain separator for signatures over signed pre-key public keys and epoch metadata.
+// Domain separator for signatures over signed prekey public keys and epoch metadata.
 const SIGNED_PREKEY_CONTEXT: &[u8] = b"RoostSPK-v1:";
 
-/// An X25519 pre-key signed by an Ed25519 signing key.
+/// An X25519 prekey signed by an Ed25519 signing key.
 ///
 /// The secret key is zeroed on drop. The public key, signature, epoch, and creation timestamp
 /// remain available through accessors and [`Self::public`].
@@ -40,17 +40,17 @@ impl SignedPreKey {
 
     /// Returns the Ed25519 signature over
     /// `public_key[32] || epoch.to_be_bytes() || created_at_secs.to_be_bytes()` under the signed
-    /// pre-key signature context.
+    /// prekey signature context.
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
 
-    /// Returns the discovery-key epoch this signed pre-key was produced under.
+    /// Returns the discovery-key epoch this signed prekey was produced under.
     pub fn epoch(&self) -> u32 {
         self.epoch
     }
 
-    /// Returns the Unix timestamp (seconds) when this signed pre-key was generated.
+    /// Returns the Unix timestamp (seconds) when this signed prekey was generated.
     pub fn created_at_secs(&self) -> u64 {
         self.created_at_secs
     }
@@ -60,12 +60,12 @@ impl SignedPreKey {
         contributory_diffie_hellman(&self.secret_key, peer)
     }
 
-    /// Exports the signed pre-key's secret bytes for secure persistence.
+    /// Exports the signed prekey's secret bytes for secure persistence.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
         Zeroizing::new(self.secret_key.to_bytes())
     }
 
-    /// Restores a signed pre-key from secret bytes and stored metadata.
+    /// Restores a signed prekey from secret bytes and stored metadata.
     ///
     /// The public key is derived from `secret`. The stored signature is not verified here.
     pub fn from_secret_bytes(
@@ -88,7 +88,7 @@ impl SignedPreKey {
         }
     }
 
-    /// Returns the public form of this signed pre-key for distribution to peers.
+    /// Returns the public form of this signed prekey for distribution to peers.
     pub fn public(&self) -> PublicSignedPreKey {
         PublicSignedPreKey {
             public_key: self.public_key,
@@ -100,7 +100,7 @@ impl SignedPreKey {
     }
 }
 
-/// Public signed pre-key material distributed to peers.
+/// Public signed prekey material distributed to peers.
 ///
 /// The signer's verifying key is not embedded. Pass the verifying key to
 /// [`verify_public_signed_prekey`].
@@ -110,20 +110,20 @@ pub struct PublicSignedPreKey {
     pub public_key: PublicKey,
     /// Ed25519 signature over
     /// `public_key[32] || epoch.to_be_bytes() || created_at_secs.to_be_bytes()` under the signed
-    /// pre-key signature context.
+    /// prekey signature context.
     pub signature: Signature,
     /// Stable unsigned identifier allocated within [`Self::epoch`].
     ///
     /// The identifier is lookup metadata and is not covered by [`Self::signature`]. A host that
     /// needs it authenticated as transport metadata must include it in its Transport Binding.
     pub id: u64,
-    /// Discovery-key epoch this signed pre-key was produced under.
+    /// Discovery-key epoch this signed prekey was produced under.
     pub epoch: u32,
     /// Unix timestamp in seconds covered by [`Self::signature`].
     pub created_at_secs: u64,
 }
 
-/// Generates a signed pre-key with the supplied Ed25519 signing key and caller-allocated
+/// Generates a signed prekey with the supplied Ed25519 signing key and caller-allocated
 /// identifier.
 ///
 /// `id` is stable lookup metadata within one discovery-key epoch. It is not part of the signature
@@ -149,7 +149,7 @@ pub(crate) fn generate_signed_prekey<R: RngCore + CryptoRng>(
     })
 }
 
-/// Verifies a public signed pre-key against the verifying key that signed it.
+/// Verifies a public signed prekey against the verifying key that signed it.
 pub fn verify_public_signed_prekey(
     bundle: &PublicSignedPreKey,
     signer_verifying_key: &VerifyingKey,

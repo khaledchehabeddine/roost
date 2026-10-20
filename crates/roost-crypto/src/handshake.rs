@@ -22,21 +22,21 @@ const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:with-opk";
 const SESSION_ID_INFO: &[u8] = b"RoostSessionId-v1:";
 const SENDER_PROOF_CONTEXT: &[u8] = b"RoostX3DH-v1:sender-proof:";
-/// Current public pre-key bundle format version.
+/// Current public prekey bundle format version.
 pub const PREKEY_BUNDLE_VERSION: u8 = 1;
 /// Length of the proof a first Message carries.
 pub const SENDER_PROOF_LEN: usize = 32;
 
-/// Public pre-key material used by the initiator to start an X3DH session.
+/// Public prekey material used by the initiator to start an X3DH session.
 #[derive(Clone, Debug)]
 pub struct PreKeyBundle {
-    /// Version of the public pre-key bundle format.
+    /// Version of the public prekey bundle format.
     pub version: u8,
     /// Responder discovery key verified by the responder's identity key.
     pub discovery_key: PublicDiscoveryKey,
-    /// Responder signed pre-key verified by the discovery key.
+    /// Responder signed prekey verified by the discovery key.
     pub signed_prekey: PublicSignedPreKey,
-    /// Optional one-time pre-key bound to the same discovery-key epoch.
+    /// Optional one-time prekey bound to the same discovery-key epoch.
     pub one_time_prekey: Option<PublicOneTimePreKey>,
 }
 
@@ -234,17 +234,17 @@ pub enum HandshakeError {
     /// HKDF-SHA256 rejected the requested output length.
     #[error("hkdf-sha256 expand exceeded output limit")]
     HkdfExpand,
-    /// An Identity Key, Discovery Key, or public signed pre-key failed validation.
+    /// An Identity Key, Discovery Key, or public signed prekey failed validation.
     #[error("handshake public key validation failed")]
     PublicKey(#[from] PublicKeyError),
-    /// Handshake names a one-time pre-key that was not supplied.
-    #[error("handshake one-time pre-key is missing")]
+    /// Handshake names a one-time prekey that was not supplied.
+    #[error("handshake one-time prekey is missing")]
     MissingOneTimePreKey,
     /// An X25519 exchange produced a non-contributory shared secret.
     #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
-    /// Handshake one-time pre-key reference does not match the local one.
-    #[error("handshake one-time pre-key reference does not match local one-time pre-key")]
+    /// Handshake one-time prekey reference does not match the local one.
+    #[error("handshake one-time prekey reference does not match local one-time prekey")]
     OneTimePreKeyMismatch,
     /// Seeding the ratchet failed.
     #[error("handshake ratchet operation failed")]
@@ -260,19 +260,19 @@ pub enum HandshakeError {
     /// The sender key-possession proof does not validate.
     #[error("sender proof verification failed")]
     SenderProofInvalid,
-    /// Handshake targets a different signed pre-key than the local one.
-    #[error("handshake signed pre-key reference does not match local signed pre-key")]
+    /// Handshake targets a different signed prekey than the local one.
+    #[error("handshake signed prekey reference does not match local signed prekey")]
     SignedPreKeyMismatch,
-    /// Pre-key material belongs to another epoch than the discovery key.
-    #[error("pre-key epoch {epoch} doesn't match discovery key epoch {discovery_epoch}")]
+    /// Prekey material belongs to another epoch than the discovery key.
+    #[error("prekey epoch {epoch} doesn't match discovery key epoch {discovery_epoch}")]
     StalePreKey {
-        /// The epoch of the pre-key, or of the pre-keys the handshake names.
+        /// The epoch of the prekey, or of the prekeys the handshake names.
         epoch: u32,
         /// The discovery key's epoch.
         discovery_epoch: u32,
     },
-    /// Pre-key bundle uses a format version this build does not understand.
-    #[error("unsupported pre-key bundle format version: {0}")]
+    /// Prekey bundle uses a format version this build does not understand.
+    #[error("unsupported prekey bundle format version: {0}")]
     UnsupportedPreKeyBundleVersion(u8),
 }
 

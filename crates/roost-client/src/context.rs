@@ -374,12 +374,13 @@ impl IdentityContext {
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
-    pub fn prepare_signed_prekey_rotation_if_stale(
+    pub fn prepare_signed_prekey_rotation_and_discovery_key_cleanup(
         &self,
     ) -> Result<PreparedSignedPreKeyRotation, RoostError> {
         let (operation_id, signed_prekey) = convert_prepared(
             &self.inner,
-            self.inner.prepare_signed_prekey_rotation_if_stale()?,
+            self.inner
+                .prepare_signed_prekey_rotation_and_discovery_key_cleanup()?,
             |signed_prekey| signed_prekey.map(PublicSignedPreKey::from_core).transpose(),
         )?;
         Ok(PreparedSignedPreKeyRotation {
