@@ -45,9 +45,9 @@ const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 /// The host owns the [`SecureStorage`] adapter, the database that stores Protocol State Blobs and
 /// operation IDs, and its transactions. It stores the blobs without decoding them or keeping a
 /// copy of its own, and calls Roost outside its database transactions, off the main thread. It
-/// holds one lock that covers every process sharing the identity: from the first call of any
-/// operation, such as a send or a key change, until its commit is resolved, and while it recovers
-/// unfinished operations.
+/// holds the Identity Lock, one lock that covers every process sharing the identity, from the
+/// first call of any operation, such as a send or a key change, until its commit is resolved, and
+/// while it recovers unfinished operations.
 ///
 /// The host protects stored blobs like identity keys, and keeps blobs, keys, passphrases, and
 /// plaintext out of logs. Roost's tests don't cover the host's adapter or transactions, so the

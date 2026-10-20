@@ -174,8 +174,8 @@ impl ProtocolStateBlob {
 
 /// A Core-computed condition the host must enforce inside its state transaction.
 ///
-/// All updates and associated effects must commit atomically under the host's per-identity
-/// serializer. A failed condition requires reloading state and processing the operation again.
+/// All updates and associated effects must commit atomically under the host's Identity Lock. A
+/// failed condition requires reloading state and processing the operation again.
 #[derive(Clone, Copy, Debug)]
 pub enum ProtocolStateCommitCondition {
     /// No blob may exist at this address.
@@ -682,7 +682,7 @@ impl Default for ReceiveSettings {
 /// Consumers must read required blobs from an atomic, durable, crash-consistent, and
 /// integrity-preserving store before each operation, then commit returned updates atomically with
 /// any produced Message. Library Instances for one Identity take turns under the host's
-/// per-identity lock, from an operation's first call until its commit is resolved. Consumers still
+/// Identity Lock, from an operation's first call until its commit is resolved. Consumers still
 /// commit a result only while every Commit Condition in its [`StateChanges`] holds.
 ///
 /// Received-message deduplication is scoped to one local Identity through the

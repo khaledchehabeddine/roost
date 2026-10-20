@@ -7,9 +7,10 @@
 //! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys and the
 //! [`ProtocolStateEngine`], and starts each [`MessageEncryption`] and [`MessageDecryption`]. A
 //! Message Operation asks the host for exact records and returns [`StateChanges`] the host commits
-//! only while every Commit Condition holds. The host serializes each identity's complete operation
-//! and commit, including prepared-operation recovery across instances and processes. See
-//! [`KeyStore`] and [`StateChanges`] for the storage and commit contracts.
+//! only while every Commit Condition holds. The host holds one Identity Lock across every instance
+//! and process sharing an identity, from an operation's first call until its commit is resolved,
+//! and during prepared-operation recovery. See [`KeyStore`] and [`StateChanges`] for the storage
+//! and commit contracts.
 //!
 //! # Secret handling
 //!

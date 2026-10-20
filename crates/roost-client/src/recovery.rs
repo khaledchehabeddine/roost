@@ -95,7 +95,7 @@ pub enum MessageRecoveryStep {
         destination: MessageDestination,
     },
     /// A new Session needs the contact's prekey bundle. The recovery has ended: release the
-    /// identity's lock, fetch the bundle by the contact's stored Discovery Key, keep it with the
+    /// Identity Lock, fetch the bundle by the contact's stored Discovery Key, keep it with the
     /// job, and start again. When the Relay answers that it doesn't know that key, the contact
     /// rotated: end the job, and a later check signals again once the contact's newer grant or
     /// Session arrives.
@@ -151,7 +151,7 @@ pub enum MessageRecoveryStep {
 ///             case .needsTransport(let destination):
 ///                 try recovery.supplyTransportBinding(transportBinding: router.binding(to: destination))
 ///             case .needsPreKeyBundle(let identityKey):
-///                 // Fetch outside the identity's lock. An unknown Discovery Key ends the job.
+///                 // Fetch outside the Identity Lock. An unknown Discovery Key ends the job.
 ///                 job.outgoing.prekeyBundle = try await relay.prekeyBundle(for: identityKey)
 ///                 try jobs.save(job)
 ///                 break steps
@@ -180,7 +180,7 @@ pub enum MessageRecoveryStep {
 ///                 is MessageRecoveryStep.NeedsTransport ->
 ///                     recovery.supplyTransportBinding(router.bindingTo(step.destination))
 ///                 is MessageRecoveryStep.NeedsPreKeyBundle -> {
-///                     // Fetch outside the identity's lock. An unknown Discovery Key ends the job.
+///                     // Fetch outside the Identity Lock. An unknown Discovery Key ends the job.
 ///                     job.outgoing = job.outgoing.copy(prekeyBundle = relay.prekeyBundle(step.identityKey))
 ///                     jobs.save(job)
 ///                     break@steps
