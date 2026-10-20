@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// A peer Identity Key that owns contact, trust, and blocking state.
 pub type ContactIdentityKey = IdentityKey;
 
-/// Current Discovery Key material for a Contact Identity.
+/// Current Discovery Key material for a contact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContactDiscoveryKey {
     /// Canonical X25519 public key bytes used to look up the contact prekey bundle.
@@ -57,7 +57,7 @@ pub struct ContactState {
     pub discovery_key: Option<ContactDiscoveryKey>,
     /// Identity-key-bound trust state.
     pub trust_state: ContactTrustState,
-    /// Local-only block flag for this Contact Identity Key.
+    /// Local-only block flag for this contact.
     pub blocked: bool,
 }
 
