@@ -101,8 +101,8 @@ struct KeyStoreInner {
 ///
 /// Clones share the same underlying storage and synchronization. Separately constructed instances
 /// do not. A host that uses multiple instances or processes for one identity namespace must hold
-/// one shared per-identity actor or lock from before preparing an operation until it is finalized,
-/// aborted, or reconciled after an ambiguous host commit.
+/// one Identity Lock across them, from the first call of any operation, including a Message
+/// Operation, until its commit is resolved, and while it recovers unfinished operations.
 ///
 /// Methods named `prepare_*` stage a secure-storage change and return it with an operation id.
 /// Reserve the operation, persist its output and id in the host transaction, then finalize:

@@ -44,6 +44,8 @@
   - Avoid: client
 - **Identity Key (IK)**: The permanent key pair that anchors an Identity and signs its Discovery Key.
   - Avoid: master key, root key
+- **Identity Lock**: The one lock an app and its extensions share for an Identity, held from an operation's first call until its commit is resolved.
+  - Avoid: per-identity lock, serializer, actor
 - **Identity Secret Blob**: The SecureStorage entry that holds an Identity Key's secret halves.
   - Avoid: backup blob
 - **Inbox**: Where the Relay queues an Identity's Messages, which contacts reach through its current Discovery Key and Delivery Capability.

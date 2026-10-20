@@ -160,7 +160,7 @@ pub enum MessageEncryptionStep {
     /// A new Session, or the first send after an unblock, needs the contact's prekey bundle, and
     /// the draft has none or one older than the contact's Discovery Key. A send to an accepted
     /// contact whose Session records are missing starts a new Session too. The operation has
-    /// ended: release the identity's lock, fetch the bundle, save it with the draft, and start
+    /// ended: release the Identity Lock, fetch the bundle, save it with the draft, and start
     /// again with the same draft.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
@@ -395,7 +395,7 @@ pub struct AcknowledgmentResult {
 ///         case .needsTransport(let destination):
 ///             try encryption.supplyTransportBinding(transportBinding: router.binding(to: destination))
 ///         case .needsPreKeyBundle(let identityKey):
-///             // Fetch outside the identity's lock, keep the bundle with the draft, and restart.
+///             // Fetch outside the Identity Lock, keep the bundle with the draft, and restart.
 ///             draft.prekeyBundle = try await relay.prekeyBundle(for: identityKey)
 ///             try drafts.save(draft)
 ///             break steps
@@ -429,7 +429,7 @@ pub struct AcknowledgmentResult {
 ///             is MessageEncryptionStep.NeedsTransport ->
 ///                 encryption.supplyTransportBinding(router.bindingTo(step.destination))
 ///             is MessageEncryptionStep.NeedsPreKeyBundle -> {
-///                 // Fetch outside the identity's lock, keep the bundle with the draft, and restart.
+///                 // Fetch outside the Identity Lock, keep the bundle with the draft, and restart.
 ///                 draft = draft.copy(prekeyBundle = relay.prekeyBundle(step.identityKey))
 ///                 drafts.save(draft)
 ///                 break@steps
