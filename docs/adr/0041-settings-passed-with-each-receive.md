@@ -1,6 +1,6 @@
 # Settings Passed With Each Receive
 
-The app and its extensions each create their own Identity Context, so a setting held in a context goes stale when the app changes it, and an extension could send a receipt to a blocked contact after the user turned receipts off. So Roost holds no settings, and the app passes the Deduplication Set's size, the blocked-contact receipt choice, and the certificate grace window with each receive, while Roost enforces their limits. The app decides where each value comes from, such as its own settings or its Relay.
+The app and its extensions each create their own Identity Context, so a setting held in a context goes stale when the app changes it. An extension could then send a receipt to a blocked contact after the user turned receipts off. So Roost holds no settings, and the app passes the Deduplication Set's size, the blocked-contact receipt choice, and the certificate grace window with each receive, within limits Roost enforces.
 
 ## Alternatives
 
