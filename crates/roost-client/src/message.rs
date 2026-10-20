@@ -3,7 +3,7 @@ use crate::error::RoostError;
 use crate::identity::{Identity, IdentityKey};
 use roost_core::{OneTimePreKeyReference, SealedFrame, SealedFramePreKeyReference};
 
-/// The identifier of one Message within a Session.
+/// The identifier a sender gives a Message, which a resend after recovery keeps.
 ///
 /// The value is 32 lowercase hexadecimal digits, so it compares and hashes as a plain string.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
