@@ -288,10 +288,10 @@ impl KeyStore {
     ///
     /// Returns the new public signed prekey when callers need to upload it, or `None` when no
     /// rotation was needed. The returned operation must be finalized or aborted either way.
-    pub fn prepare_signed_prekey_rotation_if_stale(
+    pub fn prepare_signed_prekey_rotation_and_discovery_key_cleanup(
         &self,
     ) -> Result<PreparedKeyStoreOperation<Option<PublicSignedPreKey>>, KeyStoreError> {
-        self.prepare_operation(|staged| staged.rotate_signed_prekey_if_stale())
+        self.prepare_operation(|staged| staged.rotate_signed_prekey_and_clean_up_discovery_keys())
     }
 
     /// Prepares an immediate signed prekey rotation and returns the provisional public key.
@@ -411,7 +411,9 @@ impl KeyStore {
         })
     }
 
-    fn rotate_signed_prekey_if_stale(&self) -> Result<Option<PublicSignedPreKey>, KeyStoreError> {
+    fn rotate_signed_prekey_and_clean_up_discovery_keys(
+        &self,
+    ) -> Result<Option<PublicSignedPreKey>, KeyStoreError> {
         let now = SystemTime::now();
         let signed_prekey = self
             .0
@@ -747,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn the_signed_prekey_check_deletes_expired_previous_discovery_keys() {
+    fn cleanup_deletes_expired_previous_discovery_keys_without_rotating() {
         let mut rng = ChaCha20Rng::from_seed([0xe1; 32]);
         let (key_store, storage) = store_with_storage();
         commit_identity_creation(&key_store);
@@ -768,7 +770,9 @@ mod tests {
 
         let rotated = commit(
             &key_store,
-            key_store.prepare_signed_prekey_rotation_if_stale().unwrap(),
+            key_store
+                .prepare_signed_prekey_rotation_and_discovery_key_cleanup()
+                .unwrap(),
         );
 
         assert!(rotated.is_none());
@@ -971,7 +975,7 @@ mod tests {
             Err(SignedPreKeyError::InboxRotationRequired)
         ));
         assert!(matches!(
-            destination_store.prepare_signed_prekey_rotation_if_stale(),
+            destination_store.prepare_signed_prekey_rotation_and_discovery_key_cleanup(),
             Err(KeyStoreError::SignedPreKey(
                 SignedPreKeyError::InboxRotationRequired
             ))

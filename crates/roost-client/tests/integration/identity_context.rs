@@ -58,7 +58,9 @@ fn restored_backup_publishes_only_after_inbox_rotation() {
     let source = IdentityContext::new(Arc::new(MemoryStorage::default()));
     let created = source.prepare_identity_creation().unwrap();
     complete(&source, created.operation_id);
-    let signed_prekey = source.prepare_signed_prekey_rotation_if_stale().unwrap();
+    let signed_prekey = source
+        .prepare_signed_prekey_rotation_and_discovery_key_cleanup()
+        .unwrap();
     complete(&source, signed_prekey.operation_id);
     let source_epoch = source.current_publication().unwrap().discovery_key.epoch;
     let backup = source.export_encrypted_backup(PASSPHRASE.into()).unwrap();
