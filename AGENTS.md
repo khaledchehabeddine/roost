@@ -5,6 +5,7 @@
 - @README.md
 - Before a branch or commit: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Before naming a domain concept: [GLOSSARY.md](GLOSSARY.md)
+- Before changing what Roost does: [FEATURES.md](FEATURES.md), updated in the same commit
 - Before changing a design: the [ADRs](docs/adr/) that cover it
 
 ## Workflow
