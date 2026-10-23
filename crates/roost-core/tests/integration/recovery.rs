@@ -1,10 +1,8 @@
-//! The sender finds Messages its contact hasn't acknowledged, resends them once to a newer inbox,
-//! and recovers them on a newer Session, and the contact shows each one once.
+//! The sender finds Messages its contact hasn't acknowledged and recovers them on a newer Session,
+//! and the contact shows each one once.
 
 use crate::support::HostCommitError;
-use crate::support::device::{
-    Device, Encrypted, Intent, Recovered, Relay, Route, SentMessage, befriended, redraft,
-};
+use crate::support::device::{Device, Intent, Recovered, Relay, Route, SentMessage, befriended};
 use crate::support::{CREATED_AT_SECS, accepted};
 use roost_core::{InboundMessageOutcome, ProtocolStateKind};
 use roost_protocol::PayloadKind;
@@ -26,7 +24,6 @@ fn a_message_unacknowledged_for_less_than_a_day_signals_nothing() {
     let checked = alice.check_deliveries(&bob, sent_at_millis() + DAY_MILLIS - HOUR_MILLIS);
 
     assert!(!checked.starts_recovery);
-    assert!(checked.retries.is_empty());
     assert!(alice.host.undelivered().is_empty());
 }
 
@@ -105,7 +102,7 @@ fn messages_unacknowledged_for_thirty_days_show_as_not_delivered_once() {
 }
 
 #[test]
-fn a_newer_grant_resends_each_unacknowledged_message_once_to_the_new_inbox() {
+fn a_newer_grant_recovers_each_unacknowledged_message_on_a_new_session_to_the_new_inbox() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
     let waiting = alice.send(&bob, b"sent to the old inbox");
@@ -114,61 +111,22 @@ fn a_newer_grant_resends_each_unacknowledged_message_once_to_the_new_inbox() {
     alice.receive(&update.message);
 
     let checked = alice.check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS);
+    assert!(checked.starts_recovery);
     let again = alice.check_deliveries(&bob, sent_at_millis() + 2 * HOUR_MILLIS);
+    let probe = alice.recover(&bob, Some(bob.bundle())).committed();
 
-    let [retry] = &checked.retries[..] else {
-        panic!("expected one retry");
-    };
-    assert_eq!(retry.message_id, waiting.message_id);
+    assert!(!again.starts_recovery);
+    assert_eq!(probe.message_id, waiting.message_id);
+    assert_ne!(probe.session_id, waiting.session_id);
+    assert!(matches!(
+        Route::of(&probe.destination),
+        Route::FirstMessage { discovery_key, .. }
+            if discovery_key == *rotation.discovery_key.public_key.as_bytes()
+    ));
     assert_eq!(
-        retry.message.to_bytes().unwrap(),
-        waiting.message.to_bytes().unwrap()
-    );
-    assert_eq!(Route::of(&retry.destination), bob.established_route());
-    assert_eq!(
-        crate::support::device::established_verifier(&retry.destination),
-        rotation.recipient_delivery_verifier
-    );
-    assert!(again.retries.is_empty());
-    assert_eq!(
-        accepted(bob.receive(&retry.message)).plaintext.as_slice(),
+        accepted(bob.receive(&probe.message)).plaintext.as_slice(),
         b"sent to the old inbox"
     );
-}
-
-#[test]
-fn a_resend_to_a_newer_inbox_restarts_the_wait_before_a_recovery() {
-    let relay = Relay::new();
-    let (mut alice, mut bob) = befriended(&relay);
-    alice.send(&bob, b"sent to the old inbox");
-    bob.rotate_inbox();
-    let update = bob.send_grant_update(&alice);
-    assert!(matches!(
-        alice.receive(&update.message),
-        InboundMessageOutcome::GrantUpdate(_)
-    ));
-
-    let retried = alice.check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS);
-    let a_day_later = alice.check_deliveries(&bob, sent_at_millis() + 3 * DAY_MILLIS);
-
-    assert_eq!(retried.retries.len(), 1);
-    assert!(!retried.starts_recovery);
-    assert!(a_day_later.starts_recovery);
-}
-
-// Sends `plaintext` from `sender` to `recipient`, fetching `recipient`'s bundle when asked.
-fn send_fetching_a_bundle(
-    sender: &mut Device,
-    recipient: &Device,
-    plaintext: &[u8],
-) -> SentMessage {
-    let mut outgoing = sender.outgoing(recipient, plaintext);
-    if let Encrypted::NeedsPreKeyBundle(_) =
-        sender.encrypt(redraft(&outgoing), Intent::Message).unwrap()
-    {
-        outgoing.prekey_bundle = Some(recipient.bundle());
-    }
-    sender.send_with(outgoing, Intent::Message)
 }
 
 // Returns the MessageIDs `device` still waits to have acknowledged on `session_id`.
@@ -193,7 +151,7 @@ fn a_contact_that_starts_a_new_session_gets_each_unacknowledged_message_again_on
     // Bob loses his Session with Alice before either arrives, and writes on a new one.
     bob.host.forget_session();
     bob.forget_sessions_with(&alice);
-    let restart = send_fetching_a_bundle(&mut bob, &alice, b"I lost our chat");
+    let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
 
     let checked = alice.check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS);
@@ -377,7 +335,7 @@ fn a_newer_session_from_the_contact_during_the_fetch_wins_over_the_bundle() {
     // While Alice fetches, Bob, who lost the Session, writes on a new one.
     bob.host.forget_session();
     bob.forget_sessions_with(&alice);
-    let restart = send_fetching_a_bundle(&mut bob, &alice, b"I lost our chat");
+    let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
 
     let resent = alice.recover(&bob, Some(bundle)).committed();
@@ -499,7 +457,7 @@ fn after_the_relay_refuses_the_fetch_only_the_contacts_new_session_signals_again
     bob.host.forget_session();
     bob.forget_sessions_with(&alice);
     bob.rotate_inbox();
-    let restart = send_fetching_a_bundle(&mut bob, &alice, b"new inbox, new chat");
+    let restart = bob.send_fetching_a_bundle(&alice, b"new inbox, new chat", Intent::Message);
     alice.receive(&restart.message);
 
     assert!(
@@ -516,27 +474,28 @@ fn after_the_relay_refuses_the_fetch_only_the_contacts_new_session_signals_again
 }
 
 #[test]
-fn a_probe_lost_to_the_contacts_rotation_is_recovered_once_its_newer_grant_arrives() {
+fn a_probe_lost_to_a_rotation_goes_out_again_on_a_new_session_once_the_newer_grant_arrives() {
     let relay = Relay::new();
     let (mut alice, mut bob, sent) = unanswered(&relay);
     let probe = alice.recover(&bob, Some(bob.bundle())).committed();
     // Bob rotates before the probe arrives, which deletes the prekeys it used, and then gives
-    // Alice his new grant on the Session he still has.
+    // Alice his new grant on the older Session he still has.
     let rotation = bob.rotate_inbox();
     let update = bob.send_grant_update(&alice);
     alice.receive(&update.message);
 
     let checked = alice.check_deliveries(&bob, sent_at_millis() + 3 * DAY_MILLIS);
-    let resent = alice.recover(&bob, None).committed();
-
-    assert!(checked.retries.is_empty());
     assert!(checked.starts_recovery);
+    let resent = alice.recover(&bob, Some(bob.bundle())).committed();
+
     assert_eq!(resent.message_id, probe.message_id);
-    assert_eq!(resent.session_id, sent.session_id);
-    assert_eq!(
-        crate::support::device::established_verifier(&resent.destination),
-        rotation.recipient_delivery_verifier
-    );
+    assert_ne!(resent.session_id, sent.session_id);
+    assert_ne!(resent.session_id, probe.session_id);
+    assert!(matches!(
+        Route::of(&resent.destination),
+        Route::FirstMessage { discovery_key, .. }
+            if discovery_key == *rotation.discovery_key.public_key.as_bytes()
+    ));
     assert_eq!(
         accepted(bob.receive(&resent.message)).message_id,
         sent.message_id

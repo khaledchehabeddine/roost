@@ -1,6 +1,6 @@
 # Sender-Triggered Recovery
 
-Roost can't authenticate a Message it fails to decrypt, because the sender is sealed inside the ratchet ciphertext (ADR 0009), so nothing on receive marks a Session dead. Only the sender, whose acknowledgments stop, can tell that a contact lost its Session, so Roost signals a recovery once the contact delivers on a newer Session or a quiet period passes. A contact who is only offline looks the same, so the quiet period is long, and an unneeded recovery costs the contact one extra Message (ADR 0051).
+Roost can't authenticate a Message it fails to decrypt, because the sender is sealed inside the ratchet ciphertext (ADR 0009), so nothing on receive marks a Session dead. Only the sender, whose acknowledgments stop, can tell that a contact lost its Session, so Roost signals a recovery once the contact delivers on a newer Session, sends a newer Inbox Grant, or a quiet period passes. A contact who is only offline looks the same, so the quiet period is long, and an unneeded recovery costs the contact one extra Message (ADR 0051).
 
 ## Alternatives
 

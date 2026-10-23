@@ -324,10 +324,13 @@ impl KeyStore {
     ///
     /// Authenticates the backup and validates the restored Discovery Key against the restored
     /// identity before staging changes, so a wrong passphrase or malformed backup leaves existing
-    /// material untouched. Reserve this operation, atomically wipe or replace host-owned Session,
-    /// deduplication, and pending-acknowledgment state, then finalize. The restored identity keeps
-    /// the Discovery Key's epoch lineage from the backup, but prekey generation and publication
-    /// stay blocked until [`Self::prepare_inbox_rotation`] advances to the next epoch. This avoids
+    /// material untouched. Reserve this operation, then in the transaction that commits its ID,
+    /// keep the [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState)
+    /// records restored with the host's database and delete every other protocol-state record, then
+    /// finalize. A restored Session would reuse message keys its copy already used, so each
+    /// contact's next Message starts a new Session instead. The restored identity keeps the
+    /// Discovery Key's epoch lineage from the backup, but prekey generation and publication stay
+    /// blocked until [`Self::prepare_inbox_rotation`] advances to the next epoch. This avoids
     /// reusing prekey identifiers already published under the backed-up epoch.
     pub fn prepare_backup_import(
         &self,

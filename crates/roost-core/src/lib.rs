@@ -81,8 +81,8 @@ pub use protocol_state::{
     OutgoingRecovery, PeerPreKeyBundle, PendingAcknowledgment, ProtocolStateAddress,
     ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
-    ReceiveSettings, RetryInstruction, SenderIdentityMaterial, SignedSenderCertificate,
-    StateChanges, StateEntryError, WithheldInboundMessageResult, commit_conditions_match,
+    ReceiveSettings, SenderIdentityMaterial, SignedSenderCertificate, StateChanges,
+    StateEntryError, WithheldInboundMessageResult, commit_conditions_match,
 };
 pub use roost_crypto::{
     HandshakeError, OneTimePreKeyReference, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,

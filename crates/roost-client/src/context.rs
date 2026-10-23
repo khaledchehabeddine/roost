@@ -136,9 +136,9 @@ pub struct IdentityContext {
 /// so the host never chooses one.
 ///
 /// Send each Message until the Relay accepts it, then stop: the Relay redelivers it until the
-/// contact saves it. A [`DeliveryCheck`](crate::DeliveryCheck) says when to send Messages again or
-/// recover them on a newer Session, which only the sender can tell is needed, since the contact
-/// can't tell who sent a Message it can't decrypt.
+/// contact saves it. A [`DeliveryCheck`](crate::DeliveryCheck) says when to recover Messages on a
+/// newer Session, which only the sender can tell is needed, since the contact can't tell who sent a
+/// Message it can't decrypt.
 ///
 /// The SessionID is sealed to the recipient's Discovery Key, so anyone who gets that Discovery Key
 /// can read it from recorded Messages and tell which of them belong to the same Session. Until the
@@ -289,12 +289,16 @@ impl IdentityContext {
     /// Prepares replacing this context's identity with the one in `backup`.
     ///
     /// A wrong passphrase or a damaged backup fails here and changes nothing. In the transaction
-    /// that saves the operation ID, the host deletes or replaces all of its protocol state for the
-    /// identity, since Sessions, acknowledgments, and deduplication from before the restore no
-    /// longer apply. After finalization, prekeys and publication stay blocked until
+    /// that saves the operation ID, the host keeps the
+    /// [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState) records it
+    /// restored with its own database and deletes every other protocol-state record for the
+    /// identity. Reusing a restored Session would reuse its encryption keys, so each contact's
+    /// next Message starts a new Session, and the contact encrypts its unacknowledged Messages
+    /// again on it. After finalization, prekeys and publication stay blocked until
     /// [`Self::prepare_inbox_rotation`] moves to the next Discovery Key epoch, so the restored
-    /// identity never reuses prekey IDs already published under the backed-up one. Each call runs
-    /// Argon2id with 64 MiB of memory.
+    /// identity never reuses prekey IDs already published under the backed-up one. Then send each
+    /// contact a Grant Update through [`Contacts::start_grant_update`], so every contact can reach
+    /// this identity again without a new link. Each call runs Argon2id with 64 MiB of memory.
     ///
     /// # Errors
     /// - [`RoostError::DecryptionFailed`] if the passphrase is wrong or the backup was altered.

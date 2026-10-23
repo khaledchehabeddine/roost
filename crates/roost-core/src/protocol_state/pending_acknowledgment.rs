@@ -8,22 +8,21 @@ use super::{
 use crate::hardening::{
     MAX_ACKNOWLEDGMENT_DIGESTS, MAX_PENDING_ACKNOWLEDGMENTS, ProtocolHardeningLimits,
 };
-use roost_crypto::SealedFrame;
 use roost_protocol::{MessageId, PayloadKind, SessionId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 const ACKNOWLEDGMENT_DIGEST_LABEL: &[u8] = b"RoostAcknowledgmentDigest-v1:";
-const PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP: usize = 64;
+const PENDING_ACKNOWLEDGMENT_ENTRY_CAP: usize = 64;
 const PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP: usize = 64;
 
-/// Pending acknowledgment state exposed to the consumer for durable flushing.
+/// A sent Message still waiting for its acknowledgment.
+///
+/// Roost keeps no copy of the Message, so a recovery encrypts the app's copy of its content again.
 pub struct PendingAcknowledgment {
     /// Original outbound Message ID.
     pub message_id: MessageId,
-    /// Original outbound Message waiting for an acknowledgment.
-    pub message: SealedFrame,
     /// First-send Unix timestamp in milliseconds.
     pub first_sent_at_millis: u64,
 }
@@ -42,7 +41,6 @@ impl ProtocolStateEngine {
             .iter()
             .map(|(message_id, entry)| PendingAcknowledgment {
                 message_id: MessageId::from_bytes(*message_id),
-                message: entry.message.clone(),
                 first_sent_at_millis: entry.first_sent_at_millis,
             })
             .collect())
@@ -93,8 +91,6 @@ impl LoadedPendingAcknowledgments {
 }
 
 pub(super) struct LoadedPendingAcknowledgment {
-    pub(super) message: SealedFrame,
-    encoded_message: Vec<u8>,
     pub(super) first_sent_at_millis: u64,
     /// The payload kind sealed in the Message, which a recovery keeps when it resends it.
     pub(super) payload_kind: PayloadKind,
@@ -102,39 +98,17 @@ pub(super) struct LoadedPendingAcknowledgment {
     pub(super) grant: Option<DiscoveryKeyStamp>,
 }
 
-impl LoadedPendingAcknowledgment {
-    pub(super) fn new(
-        message: &SealedFrame,
-        first_sent_at_millis: u64,
-        payload_kind: PayloadKind,
-        grant: Option<DiscoveryKeyStamp>,
-    ) -> Result<Self, ProtocolStateError> {
-        Ok(Self {
-            message: message.clone(),
-            encoded_message: message.to_bytes()?,
-            first_sent_at_millis,
-            payload_kind,
-            grant,
-        })
-    }
-}
-
-// Borrows each Message's bytes, so checking for a repeated acknowledgment parses no Message.
 #[derive(Deserialize, Serialize)]
-struct PendingAcknowledgmentsWire<'a> {
-    #[serde(
-        borrow,
-        deserialize_with = "deserialize_bounded::<_, _, MAX_PENDING_ACKNOWLEDGMENTS>"
-    )]
-    pending: Vec<PendingAcknowledgmentWire<'a>>,
+struct PendingAcknowledgmentsWire {
+    #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_PENDING_ACKNOWLEDGMENTS>")]
+    pending: Vec<PendingAcknowledgmentWire>,
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_ACKNOWLEDGMENT_DIGESTS>")]
     acknowledgment_digests: Vec<[u8; DIGEST_LEN]>,
 }
 
 #[derive(Deserialize, Serialize)]
-struct PendingAcknowledgmentWire<'a> {
+struct PendingAcknowledgmentWire {
     message_id: [u8; 16],
-    encoded_message: &'a [u8],
     first_sent_at_millis: u64,
     payload_kind: u8,
     grant: Option<(u64, u32)>,
@@ -150,7 +124,6 @@ pub(super) fn encode_pending_acknowledgments(
         .iter()
         .map(|(message_id, entry)| PendingAcknowledgmentWire {
             message_id: *message_id,
-            encoded_message: &entry.encoded_message,
             first_sent_at_millis: entry.first_sent_at_millis,
             payload_kind: entry.payload_kind.tag(),
             grant: entry.grant.map(DiscoveryKeyStamp::to_wire),
@@ -206,19 +179,11 @@ pub(super) fn decode_pending_acknowledgments(
     let wire = decode_wire(address, blob, limits)?;
     let mut pending = BTreeMap::new();
     for entry in wire.pending {
-        let message = SealedFrame::from_bytes(entry.encoded_message).map_err(|e| {
-            decode_error(
-                address,
-                format!("pending acknowledgment message failed to decode: {e}"),
-            )
-        })?;
         let payload_kind = PayloadKind::from_tag(entry.payload_kind)
             .ok_or_else(|| decode_error(address, "pending payload kind is invalid".into()))?;
         let replaced = pending.insert(
             entry.message_id,
             LoadedPendingAcknowledgment {
-                message,
-                encoded_message: entry.encoded_message.to_vec(),
                 first_sent_at_millis: entry.first_sent_at_millis,
                 payload_kind,
                 grant: entry.grant.map(DiscoveryKeyStamp::from_wire),
@@ -237,13 +202,13 @@ pub(super) fn decode_pending_acknowledgments(
     })
 }
 
-fn decode_wire<'a>(
+fn decode_wire(
     address: &ProtocolStateAddress,
-    blob: &'a ProtocolStateBlob,
+    blob: &ProtocolStateBlob,
     limits: ProtocolHardeningLimits,
-) -> Result<PendingAcknowledgmentsWire<'a>, ProtocolStateError> {
+) -> Result<PendingAcknowledgmentsWire, ProtocolStateError> {
     let body = blob_body(address, blob, max_pending_acknowledgments_blob_len(limits))?;
-    let (wire, trailing): (PendingAcknowledgmentsWire<'_>, &[u8]) =
+    let (wire, trailing): (PendingAcknowledgmentsWire, &[u8]) =
         postcard::take_from_bytes(body).map_err(|e| decode_error(address, e.to_string()))?;
     if !trailing.is_empty() {
         return Err(decode_error(
@@ -264,8 +229,7 @@ fn decode_error(address: &ProtocolStateAddress, reason: String) -> ProtocolState
 fn max_pending_acknowledgments_blob_len(limits: ProtocolHardeningLimits) -> usize {
     PROTOCOL_STATE_BLOB_HEADER_LEN
         + PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP
-        + limits.max_pending_acknowledgments
-            * (limits.max_encoded_message_len + PENDING_ACKNOWLEDGMENT_ENTRY_OVERHEAD_CAP)
+        + limits.max_pending_acknowledgments * PENDING_ACKNOWLEDGMENT_ENTRY_CAP
         + limits.max_acknowledgment_digests * DIGEST_LEN
 }
 
@@ -336,37 +300,6 @@ mod tests {
 
     fn address() -> ProtocolStateAddress {
         pending_acknowledgment_address(SessionId::from_bytes([9; 16]))
-    }
-
-    #[test]
-    fn a_repeated_acknowledgment_is_found_without_decoding_any_waiting_message() {
-        let address = address();
-        let limits = ProtocolHardeningLimits::default();
-        let digest = acknowledgment_digest(b"transport-binding", b"encoded acknowledgment");
-        let body = postcard::to_stdvec(&PendingAcknowledgmentsWire {
-            pending: vec![PendingAcknowledgmentWire {
-                message_id: [0x44; 16],
-                encoded_message: &[0xaa],
-                first_sent_at_millis: 1_700_000_100_123,
-                payload_kind: 0,
-                grant: None,
-            }],
-            acknowledgment_digests: vec![digest],
-        })
-        .unwrap();
-        let mut snapshot = ProtocolStateSnapshot::new();
-        snapshot
-            .set(
-                address.clone(),
-                encode_blob(&address, &body, usize::MAX).unwrap(),
-            )
-            .unwrap();
-
-        assert!(has_seen_acknowledgment(&snapshot, &address, digest, limits).unwrap());
-        assert!(matches!(
-            load_pending_acknowledgments(&snapshot, &address, limits),
-            Err(ProtocolStateError::BlobDecode { .. })
-        ));
     }
 
     #[test]

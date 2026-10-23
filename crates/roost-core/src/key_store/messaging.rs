@@ -61,7 +61,10 @@ impl KeyStore {
 
     /// Starts encrypting a Contact Acceptance, whose commit accepts the contact.
     ///
-    /// An acceptance to a contact already accepted sends an ordinary Message instead.
+    /// An acceptance to a contact already accepted sends an ordinary Message instead. When the
+    /// request's Session records are missing, such as after a backup restore, the acceptance starts
+    /// a new Session with a Contact Request, which accepts both sides when it arrives. Roost then
+    /// refuses only a contact that never wrote, so the app accepts only a request the contact sent.
     pub fn accept_contact(
         &self,
         message: OutgoingMessage,

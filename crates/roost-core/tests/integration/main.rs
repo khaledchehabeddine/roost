@@ -1,6 +1,7 @@
 //! Flows between Devices through roost-core's public API, committed through a test host.
 
 mod authenticated_sessions;
+mod backup_restore;
 mod blocking_rotates_inbox;
 mod contact_state;
 mod first_contact;

@@ -786,23 +786,6 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
 }
 
 #[test]
-fn large_valid_outbound_message_persists_pending_acknowledgment() {
-    let mut fixture = ProtocolFixture::new();
-    let engine = *fixture.alice.store.protocol_engine();
-    let large_plaintext = vec![0u8; 65_180];
-
-    let sent = alice_sends(&fixture, 1, &large_plaintext);
-    assert!(sent.result.message.to_bytes().unwrap().len() > 64 * 1024);
-    fixture.alice.host.commit(sent.changes).unwrap();
-
-    let pending = engine
-        .pending_acknowledgments(&fixture.alice.host.snapshot(), fixture.session_id)
-        .unwrap();
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].message_id, sent.result.message_id);
-}
-
-#[test]
 fn oversized_outbound_message_does_not_return_advanced_state() {
     let fixture = ProtocolFixture::new();
     let before = fixture.alice.host.snapshot_bytes();

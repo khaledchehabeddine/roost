@@ -159,9 +159,9 @@ pub enum MessageEncryptionStep {
     },
     /// A new Session, or the first send after an unblock, needs the contact's prekey bundle, and
     /// the draft has none or one older than the contact's Discovery Key. A send to an accepted
-    /// contact whose Session records are missing starts a new Session too. The operation has
-    /// ended: release the Identity Lock, fetch the bundle, save it with the draft, and start
-    /// again with the same draft.
+    /// contact, or an acceptance of a request, whose Session records are missing starts a new
+    /// Session too. The operation has ended: release the Identity Lock, fetch the bundle, save it
+    /// with the draft, and start again with the same draft.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
         identity_key: IdentityKey,
@@ -600,7 +600,10 @@ impl Contacts {
     /// whose commit accepts the contact.
     ///
     /// Only the side a contact asked accepts. When the contact is already accepted, the
-    /// acceptance becomes an ordinary Message.
+    /// acceptance becomes an ordinary Message. When the request's Session is gone, such as after a
+    /// backup restore, the acceptance starts a new Session from the contact's bundle, and its
+    /// first Message is a Contact Request that accepts both sides when it arrives. Roost then
+    /// refuses only a contact that never wrote, so accept only a request the contact sent.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if a key, MessageID, or certificate is malformed, or when

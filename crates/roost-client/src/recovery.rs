@@ -1,7 +1,7 @@
 use crate::context::Messaging;
 use crate::error::RoostError;
 use crate::identity::IdentityKey;
-use crate::message::{Message, MessageId};
+use crate::message::MessageId;
 use crate::message_operation::{
     MessageDestination, OutboundMessageResult, SignedSenderCertificate, with_operation,
 };
@@ -13,23 +13,9 @@ use rand::rngs::OsRng;
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
-/// A Message to send again, unchanged, because the contact sent a newer Inbox Grant.
-#[derive(uniffi::Record)]
-pub struct RetryInstruction {
-    /// The Message's ID.
-    pub message_id: MessageId,
-    /// The Message as first sent, which the contact can still open.
-    pub message: Message,
-    /// The contact's current inbox.
-    pub destination: MessageDestination,
-}
-
 /// What a delivery check found.
 #[derive(uniffi::Record)]
 pub struct DeliveryCheckResult {
-    /// Messages to send again, unchanged, to the contact's newer inbox. Send each with the
-    /// Transport Binding it was first sent with.
-    pub retries: Vec<RetryInstruction>,
     /// Whether a recovery starts. Create a recovery job for the contact in the same transaction
     /// as the check's changes, and run it with [`Messaging::start_recovery`].
     pub starts_recovery: bool,
@@ -46,10 +32,10 @@ pub enum DeliveryCheckStep {
     /// What the check found, and the state changes to commit with the app's work for it. The
     /// check has ended.
     Ready {
-        /// The retries and the recovery signal.
+        /// The recovery signal.
         result: DeliveryCheckResult,
-        /// The state changes to commit with the retries and the recovery job. They list the
-        /// Messages the Relay would have dropped by now as undelivered.
+        /// The state changes to commit with the recovery job. They list the Messages the Relay
+        /// would have dropped by now as undelivered.
         changes: StateChanges,
     },
 }
@@ -126,13 +112,14 @@ pub enum MessageRecoveryStep {
 /// One step of a recovery job, which encrypts one Message the contact hasn't acknowledged again
 /// on a newer Session.
 ///
-/// Roost keeps only the encrypted copy of a sent Message, so the app supplies its content, and
-/// the copy keeps its MessageID, send time, and kind, so the contact shows it once. Roost picks
-/// the Message and the Session: one the contact delivered on since, or else a new Session from
-/// the contact's bundle, where the oldest Message goes first as a probe and the rest wait for a
-/// delivery check after the contact acknowledges it. Each [`MessageRecoveryStep::Ready`] result
-/// replaces the Message's earlier copy, so commit it in one transaction with replacing the app's
-/// send work for that MessageID, and never send the old copy again.
+/// Roost keeps no copy of a sent Message, so the app supplies its content, and the new copy keeps
+/// its MessageID, send time, and kind, so the contact shows it once. Roost picks the Message and a
+/// Session newer than the one it was sent on, so the contact never misses a Message on it: a
+/// Session the contact delivered on since, or else a new Session from the contact's bundle, where
+/// the oldest Message goes first as a probe and the rest wait for a delivery check after the
+/// contact acknowledges it. Each [`MessageRecoveryStep::Ready`] result replaces the Message's
+/// earlier copy, so commit it in one transaction with replacing the app's send work for that
+/// MessageID, and never send the old copy again.
 ///
 /// Track each recovery as its own job, apart from the Message's original send, whose record
 /// already says it's done. Drive each step as [`MessageEncryption`](crate::MessageEncryption)
@@ -207,12 +194,13 @@ impl Messaging {
     ///
     /// Run a check for each contact with unacknowledged Messages after committing anything
     /// received from them, and at least once a day. The app never resends a Message the Relay
-    /// accepted on a timer, since the Relay redelivers it until the contact saves it. The check
-    /// says instead when to send Messages again to the contact's newer inbox, when a recovery
-    /// starts, and which Messages the Relay would have dropped by now. Roost sets the waits: a
-    /// recovery starts after a day without an acknowledgment, or as soon as the contact delivers
-    /// on a newer Session or acknowledges a recovery's probe, and once started, comes back only
-    /// after a week or once the contact sends a newer Inbox Grant or starts a new Session.
+    /// accepted, since the Relay redelivers it until the contact saves it. The check says instead
+    /// when a recovery starts, which encrypts the Messages again on a newer Session, and which
+    /// Messages the Relay would have dropped by now. Roost sets the waits: a recovery starts after
+    /// a day without an acknowledgment, or as soon as the contact sends a newer Inbox Grant,
+    /// delivers on a newer Session, or acknowledges a recovery's probe, and once started, comes
+    /// back only after a week or once the contact sends a newer Inbox Grant or starts a new
+    /// Session.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `contact` or `now_millis` is out of range.
@@ -368,15 +356,6 @@ impl DeliveryCheckStep {
 impl DeliveryCheckResult {
     fn from_core(result: roost_core::DeliveryCheckResult) -> Self {
         Self {
-            retries: result
-                .retries
-                .into_iter()
-                .map(|retry| RetryInstruction {
-                    message_id: MessageId::from_core(retry.message_id),
-                    message: Message::from_core(retry.message),
-                    destination: MessageDestination::from_core(retry.destination),
-                })
-                .collect(),
             starts_recovery: result.starts_recovery,
         }
     }
