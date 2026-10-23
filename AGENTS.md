@@ -6,7 +6,6 @@
 - Before a branch or commit: [CONTRIBUTING.md](CONTRIBUTING.md)
 - Before naming a domain concept: [GLOSSARY.md](GLOSSARY.md)
 - Before changing a design: the [ADRs](docs/adr/) that cover it
-- Before writing any text, including replies: [writing skill](.agents/instructions/skills/writing/SKILL.md)
 
 ## Workflow
 

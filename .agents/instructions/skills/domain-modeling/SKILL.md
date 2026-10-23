@@ -2,8 +2,6 @@
 
 The glossary sets one name per concept and ADRs record why a decision was made.
 
-Write the glossary and ADRs by the [writing skill](../writing/SKILL.md).
-
 ## Glossary
 
 Follow the [template](templates/glossary.md) when editing `GLOSSARY.md`.

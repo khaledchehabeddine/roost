@@ -1,6 +1,6 @@
 ---
 name: writing
-description: Use for any task that writes text a person reads, such as docs, comments, commit messages, PR descriptions, and replies.
+description: Use for writing any text a person reads, such as docs, code comments, commit messages, PR descriptions, and replies.
 ---
 
 Read [SKILL.md](../../instructions/skills/writing/SKILL.md).

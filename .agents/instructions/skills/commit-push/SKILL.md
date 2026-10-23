@@ -1,6 +1,6 @@
 # Commit Push
 
-Follow [CONTRIBUTING.md](../../../../CONTRIBUTING.md) for Git conventions and the [writing skill](../writing/SKILL.md) for commit messages and PR text.
+Follow [CONTRIBUTING.md](../../../../CONTRIBUTING.md) for Git conventions.
 
 1. Identify this task's changes, including untracked files.
 2. Plan the branch name, each commit's files and message, and any amend or force push.
