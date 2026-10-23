@@ -4,6 +4,6 @@ The Relay keeps queued Messages through a rotation, so Roost keeps a few previou
 
 ## Alternatives
 
-- Delete the old key and rely on retries: a retry resends the same bytes, still sealed to the old key.
+- Delete the old key and rely on recovery: every contact with Messages queued for the old key would need a new Session to resend them.
 - Keep only the latest previous key: blocks close together would lose the Messages queued for the earlier keys.
 - Also keep the old prekeys, so queued Contact Requests survive: the Relay deletes queued first Messages when it replaces the prekeys.

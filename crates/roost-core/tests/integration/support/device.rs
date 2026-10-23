@@ -182,6 +182,17 @@ pub(crate) struct Device {
     tag: u8,
 }
 
+const BACKUP_PASSPHRASE: &str = "correct horse battery staple";
+
+/// One backup file: the app's database, its copy of what each send carried, and the Identity
+/// Backup.
+pub(crate) struct Backup {
+    identity: Vec<u8>,
+    host: HostStore,
+    contents: BTreeMap<[u8; 16], Vec<u8>>,
+    next_message: u16,
+}
+
 pub(crate) fn binding() -> TransportBinding {
     TransportBinding::new(b"test-route".to_vec()).unwrap()
 }
@@ -238,6 +249,39 @@ impl Device {
     /// Replaces the KeyStore with a new one over the same SecureStorage, as an app restart does.
     pub(crate) fn restart(&mut self) {
         self.store = self.storage.open();
+    }
+
+    /// Returns what the app writes to one backup file: its database and the Identity Backup.
+    pub(crate) fn back_up(&self) -> Backup {
+        Backup {
+            identity: self
+                .store
+                .export_encrypted_backup(BACKUP_PASSPHRASE)
+                .unwrap(),
+            host: self.host.clone(),
+            contents: self.contents.clone(),
+            next_message: self.next_message,
+        }
+    }
+
+    /// Restores `backup` onto a new phone and rotates the inbox, as the app does before sending
+    /// anything.
+    ///
+    /// The transaction that commits the import keeps the backed-up contact records and deletes the
+    /// rest of the protocol state.
+    pub(crate) fn restore(&mut self, backup: &Backup) -> PublicationBundle {
+        self.storage = DeviceStorage::default();
+        self.store = self.storage.open();
+        let import = self
+            .store
+            .prepare_backup_import(&backup.identity, BACKUP_PASSPHRASE)
+            .unwrap();
+        self.store.reserve_operation(import.id).unwrap();
+        self.host = backup.host.restored();
+        self.store.finalize_operation(import.id).unwrap();
+        self.contents = backup.contents.clone();
+        self.next_message = backup.next_message;
+        self.rotate_inbox()
     }
 
     /// Forgets the Sessions kept with `peer`, as a host that lost that record does, so the next
@@ -396,6 +440,21 @@ impl Device {
     pub(crate) fn send_grant_update(&mut self, peer: &Device) -> SentMessage {
         let outgoing = self.outgoing(peer, b"");
         self.send_with(outgoing, Intent::GrantUpdate)
+    }
+
+    /// Sends `plaintext` to `peer` as `intent`, restarting with `peer`'s bundle when Roost asks for
+    /// it, and commits it.
+    pub(crate) fn send_fetching_a_bundle(
+        &mut self,
+        peer: &Device,
+        plaintext: &[u8],
+        intent: Intent,
+    ) -> SentMessage {
+        let mut outgoing = self.outgoing(peer, plaintext);
+        if let Encrypted::NeedsPreKeyBundle(_) = self.encrypt(redraft(&outgoing), intent).unwrap() {
+            outgoing.prekey_bundle = Some(peer.bundle());
+        }
+        self.send_with(outgoing, intent)
     }
 
     /// Encrypts `outgoing` as `intent` and commits the sealed Message.

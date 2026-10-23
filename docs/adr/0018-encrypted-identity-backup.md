@@ -5,4 +5,4 @@ An Identity Backup holds the Identity Key and the current Discovery Key, so a re
 ## Alternatives
 
 - Accept weak Argon2id settings for compatibility: anyone holding the file could guess the passphrase offline.
-- Restore Sessions too: Sessions are live state that the app stores, with their own recovery.
+- Put contacts and Sessions in the backup too: the app already backs up its database, which holds them (ADR 0084).

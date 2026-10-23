@@ -22,7 +22,7 @@ pub use message_operation::{
     AdmissionRequest, DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, IncomingMessage,
     MessageDecryption, MessageDecryptionStep, MessageDestination, MessageEncryption,
     MessageEncryptionStep, MessageOperationError, MessageRecovery, MessageRecoveryStep,
-    OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery, PeerPreKeyBundle, RetryInstruction,
+    OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery, PeerPreKeyBundle,
     SignedSenderCertificate,
 };
 pub(crate) use message_operation::{LocalIdentityKeys, SendIntent};
@@ -45,7 +45,7 @@ use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const PROTOCOL_STATE_BLOB_VERSION: u8 = 3;
+const PROTOCOL_STATE_BLOB_VERSION: u8 = 4;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 1;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
 // Deduplication and acknowledgment digests keep this many bytes of their hash.

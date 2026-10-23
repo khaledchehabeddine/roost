@@ -161,6 +161,8 @@ pub(super) struct SessionEntry {
     pub(super) session_id: SessionId,
     /// The signed prekey this side accepted the Session with, or `None` if this side started it.
     accepted_with: Option<SignedPreKeyUse>,
+    /// Where the Session falls in the order this side started or accepted the peer's Sessions.
+    position: u64,
 }
 
 impl SessionEntry {
@@ -196,6 +198,7 @@ impl PeerSessions {
             current: SessionEntry {
                 session_id,
                 accepted_with,
+                position: 0,
             },
             older: Vec::new(),
             deleted: Vec::new(),
@@ -215,17 +218,21 @@ impl PeerSessions {
     /// Returns which side started `session_id`, or `None` when it isn't one of this peer's
     /// Sessions.
     pub(super) fn starter(&self, session_id: SessionId) -> Option<Starter> {
-        std::iter::once(&self.current)
-            .chain(&self.older)
-            .find(|entry| entry.session_id == session_id)
-            .map(SessionEntry::starter)
+        self.entry(session_id).map(SessionEntry::starter)
     }
 
     /// Returns every Session kept with this peer, the one Roost sends on first.
     pub(super) fn session_ids(&self) -> impl Iterator<Item = SessionId> + '_ {
-        std::iter::once(&self.current)
-            .chain(&self.older)
-            .map(|entry| entry.session_id)
+        self.entries().map(|entry| entry.session_id)
+    }
+
+    /// Returns whether this side started or accepted `session_id` before `later`, both of them
+    /// kept with this peer.
+    pub(super) fn started_before(&self, session_id: SessionId, later: SessionId) -> bool {
+        let position = |session_id| self.entry(session_id).map(|entry| entry.position);
+        position(session_id)
+            .zip(position(later))
+            .is_some_and(|(earlier, later)| earlier < later)
     }
 
     /// Returns whether `session_id` is one of this peer's Sessions.
@@ -262,13 +269,8 @@ impl PeerSessions {
         session_id: SessionId,
         accepted_with: Option<SignedPreKeyUse>,
     ) -> Vec<SessionId> {
-        let previous = std::mem::replace(
-            &mut self.current,
-            SessionEntry {
-                session_id,
-                accepted_with,
-            },
-        );
+        let entry = self.next_entry(session_id, accepted_with);
+        let previous = std::mem::replace(&mut self.current, entry);
         self.older.push(previous);
         self.evict()
     }
@@ -285,11 +287,38 @@ impl PeerSessions {
         if session_id < self.current.session_id {
             return self.start(session_id, accepted_with);
         }
-        self.older.push(SessionEntry {
+        let entry = self.next_entry(session_id, accepted_with);
+        self.older.push(entry);
+        self.evict()
+    }
+
+    // Returns the entry for a Session that starts after every one kept. A peer can't start
+    // `u64::MAX` Sessions, so the position never saturates.
+    fn next_entry(
+        &self,
+        session_id: SessionId,
+        accepted_with: Option<SignedPreKeyUse>,
+    ) -> SessionEntry {
+        let last = self
+            .entries()
+            .map(|entry| entry.position)
+            .max()
+            .unwrap_or_default();
+        SessionEntry {
             session_id,
             accepted_with,
-        });
-        self.evict()
+            position: last.saturating_add(1),
+        }
+    }
+
+    // Returns every Session kept with this peer, the one Roost sends on first.
+    fn entries(&self) -> impl Iterator<Item = &SessionEntry> {
+        std::iter::once(&self.current).chain(&self.older)
+    }
+
+    // Returns the kept Session `session_id`, if any.
+    fn entry(&self, session_id: SessionId) -> Option<&SessionEntry> {
+        self.entries().find(|entry| entry.session_id == session_id)
     }
 
     /// Makes `session_id` the one Roost sends on because it just delivered a Message, and returns
@@ -470,6 +499,7 @@ struct PeerSessionsWire {
 struct SessionEntryWire {
     session_id: [u8; 16],
     accepted_with: Option<SignedPreKeyUseWire>,
+    position: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -489,6 +519,7 @@ impl From<SessionEntry> for SessionEntryWire {
         Self {
             session_id: *value.session_id.as_bytes(),
             accepted_with: value.accepted_with.map(Into::into),
+            position: value.position,
         }
     }
 }
@@ -498,6 +529,7 @@ impl From<SessionEntryWire> for SessionEntry {
         Self {
             session_id: SessionId::from_bytes(value.session_id),
             accepted_with: value.accepted_with.map(Into::into),
+            position: value.position,
         }
     }
 }

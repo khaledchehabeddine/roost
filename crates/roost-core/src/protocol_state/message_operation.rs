@@ -2,7 +2,7 @@ mod recovery;
 
 pub use recovery::{
     DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, MessageRecovery, MessageRecoveryStep,
-    OutgoingRecovery, RetryInstruction,
+    OutgoingRecovery,
 };
 
 use super::contact_record::{ContactRecord, ReceivedCount, contact_address, load_contact};
@@ -200,8 +200,8 @@ pub enum MessageEncryptionStep {
     NeedsTransport(MessageDestination),
     /// A new Session, or the first send after an unblock, needs this contact's prekey bundle, and
     /// the given one is missing or older than the contact's Discovery Key. A send to an accepted
-    /// contact whose Session records are missing starts a new Session too. The operation has
-    /// ended: fetch the bundle and start again with the same draft.
+    /// contact, or an acceptance of a request, whose Session records are missing starts a new
+    /// Session too. The operation has ended: fetch the bundle and start again with the same draft.
     NeedsPreKeyBundle(ContactIdentityKey),
     /// The contact already acknowledged a Message carrying the current Inbox Grant, so a Grant
     /// Update has nothing to carry. The operation has ended and nothing changed.
@@ -644,6 +644,16 @@ impl Encrypting {
             (Some(contact), None) if contact.is_accepted() => {
                 return self.start_session(rng, Some(contact));
             }
+            // The requester's Session is gone, such as after a restore, so the acceptance starts
+            // a new one, and its Contact Request crosses the requester's, which accepts both sides.
+            // A contact that never wrote never asked.
+            (Some(mut contact), None)
+                if self.intent == SendIntent::Acceptance
+                    && contact.has_written_before_acceptance() =>
+            {
+                contact.accept();
+                return self.start_session(rng, Some(contact));
+            }
             (Some(contact), Some(sessions)) if contact.is_accepted() => {
                 let session_id = sessions.current();
                 let carries_grant = contact.receives_grant(Starter::Local, local_grant);
@@ -1007,12 +1017,11 @@ impl Encrypting {
         if contact.is_accepted() {
             pending.record(
                 self.message_id,
-                LoadedPendingAcknowledgment::new(
-                    &message,
-                    self.sent_at_millis,
+                LoadedPendingAcknowledgment {
+                    first_sent_at_millis: self.sent_at_millis,
                     payload_kind,
-                    payload_kind.carries_grant().then(|| grant.stamp()),
-                )?,
+                    grant: payload_kind.carries_grant().then(|| grant.stamp()),
+                },
             )?;
         }
         let snapshot = self.reads.snapshot();

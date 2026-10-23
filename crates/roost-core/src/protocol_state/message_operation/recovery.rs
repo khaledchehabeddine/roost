@@ -1,5 +1,5 @@
-//! Recovery: finding the Messages a contact hasn't acknowledged, resending them unchanged to a
-//! newer inbox, and encrypting them again on a newer Session after a delivery check signals it.
+//! Recovery: finding the Messages a contact hasn't acknowledged, and encrypting them again on a
+//! newer Session after a delivery check signals it.
 
 use super::super::contact_record::{
     ContactRecord, RecoveryProgress, contact_address, load_contact,
@@ -20,13 +20,12 @@ use super::super::{
 use super::{
     Encrypting, LocalIdentityKeys, MessageDestination, MessageEncryptionStep,
     MessageOperationError, OutboundMessageResult, OutgoingMessage, PeerPreKeyBundle, Planned,
-    Route, SendIntent, SignedSenderCertificate, StateReads, changes, contact_update, supply_state,
+    SendIntent, SignedSenderCertificate, StateReads, changes, contact_update, supply_state,
     text_kind,
 };
 use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
 use rand::{CryptoRng, RngCore};
-use roost_crypto::SealedFrame;
 use roost_protocol::{MessageId, PayloadKind, SessionId, to_unix_millis};
 use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
@@ -39,20 +38,8 @@ const RECHECK_PERIOD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// How long the Relay holds a Message, after which an unacknowledged one shows as not delivered.
 const UNDELIVERED_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// A Message to send again, unchanged, to a contact's newer inbox.
-pub struct RetryInstruction {
-    /// The Message's ID.
-    pub message_id: MessageId,
-    /// The Message as first sent, which the contact can still open.
-    pub message: SealedFrame,
-    /// The contact's current inbox.
-    pub destination: MessageDestination,
-}
-
 /// What a delivery check found.
 pub struct DeliveryCheckResult {
-    /// Messages to send again, unchanged, because the contact sent a newer Inbox Grant.
-    pub retries: Vec<RetryInstruction>,
     /// Whether a recovery starts. The app commits its recovery job with the check's changes.
     pub starts_recovery: bool,
 }
@@ -66,8 +53,8 @@ pub enum DeliveryCheckStep {
     Ready {
         /// What the check found.
         result: DeliveryCheckResult,
-        /// The state changes to commit with the retries and the recovery job. They list the
-        /// Messages the Relay would have dropped by now as undelivered.
+        /// The state changes to commit with the recovery job. They list the Messages the Relay
+        /// would have dropped by now as undelivered.
         changes: StateChanges,
     },
 }
@@ -75,12 +62,12 @@ pub enum DeliveryCheckStep {
 /// A check, at a time the app passes, of the Messages this identity sent one contact that the
 /// contact hasn't acknowledged.
 ///
-/// The check resends Messages once to a newer inbox, and gives up on them after 30 days. It
-/// signals a recovery after a day without an acknowledgment, or as soon as the contact delivers on
-/// a newer Session or acknowledges a recovery's probe, and once signaled, a recovery comes back
-/// only after a week or when the contact proves a newer grant or Session. Call [`Self::step`]
-/// until it returns [`DeliveryCheckStep::Ready`], supplying the records each other step asks for.
-/// Dropping the check commits nothing.
+/// The check gives up on Messages after 30 days. It signals a recovery after a day without an
+/// acknowledgment, or as soon as the contact sends a newer Inbox Grant, delivers on a newer
+/// Session, or acknowledges a recovery's probe, and once signaled, a recovery comes back only after
+/// a week or when the contact proves a newer grant or Session. Call [`Self::step`] until it returns
+/// [`DeliveryCheckStep::Ready`], supplying the records each other step asks for. Dropping the check
+/// commits nothing.
 pub struct DeliveryCheck(Option<Box<Checking>>);
 
 struct Checking {
@@ -193,16 +180,15 @@ impl Checking {
     fn ready(&self, checked: Checked) -> DeliveryCheckStep {
         DeliveryCheckStep::Ready {
             result: DeliveryCheckResult {
-                retries: checked.retries,
                 starts_recovery: checked.starts_recovery,
             },
             changes: changes(&self.reads, checked.updates).with_undelivered(checked.undelivered),
         }
     }
 
-    // Gives up on Messages the Relay has dropped, resends the rest to a newer inbox, and signals
-    // a recovery when the contact has been quiet too long or delivered on a newer Session. A
-    // blocked contact gets neither.
+    // Gives up on Messages the Relay has dropped, and signals a recovery of the rest when the
+    // contact has been quiet too long, sent a newer grant, or delivered on a newer Session. A
+    // blocked contact gets none.
     fn check(&self, accepted: AcceptedContact) -> Result<Checked, ProtocolStateError> {
         let AcceptedContact {
             mut contact,
@@ -234,11 +220,8 @@ impl Checking {
             (*first_sent_at_millis, *message_id.as_bytes())
         });
         let waiting = unacknowledged(&records);
-        let retries = if contact.blocked {
-            Vec::new()
-        } else {
-            take_retries(&mut contact, &waiting, now_millis)?
-        };
+        // Messages sent with the old capability may be gone, since the Relay drops them silently.
+        let received_newer_grant = !contact.blocked && contact.take_received_newer_grant();
         let outstanding = Outstanding::new(&waiting, &sessions, snapshot, limits)?;
         let starts_recovery = match outstanding.oldest() {
             None => {
@@ -253,11 +236,8 @@ impl Checking {
                         // The contact acknowledged the probe, so the rest go out on its Session.
                         || (matches!(recovery.progress, RecoveryProgress::Probed(_)) && left_behind)
                 });
-                let quiet = waited(oldest.entry.first_sent_at_millis, now_millis) >= QUIET_PERIOD
-                    && contact
-                        .retried_at_millis()
-                        .is_none_or(|retried| waited(retried, now_millis) >= QUIET_PERIOD);
-                may_signal && (quiet || left_behind)
+                let quiet = waited(oldest.entry.first_sent_at_millis, now_millis) >= QUIET_PERIOD;
+                may_signal && (quiet || received_newer_grant || left_behind)
             }
         };
         if starts_recovery {
@@ -265,7 +245,6 @@ impl Checking {
         }
         updates.extend(contact_update(snapshot, &contact, limits)?);
         Ok(Checked {
-            retries,
             starts_recovery,
             undelivered: undelivered.into_iter().map(|(_, id)| id).collect(),
             updates,
@@ -276,7 +255,6 @@ impl Checking {
 // What a check found, before its updates become state changes.
 #[derive(Default)]
 struct Checked {
-    retries: Vec<RetryInstruction>,
     starts_recovery: bool,
     undelivered: Vec<MessageId>,
     updates: Vec<ProtocolStateUpdate>,
@@ -299,6 +277,8 @@ struct Outstanding<'a, 'b> {
     current_is_kept: bool,
     // Whether the contact delivered on the current Session, so it awaits no reply.
     current_is_replied: bool,
+    // The Sessions kept with the contact that started before the current one.
+    before_current: Vec<SessionId>,
 }
 
 impl<'a, 'b> Outstanding<'a, 'b> {
@@ -319,6 +299,10 @@ impl<'a, 'b> Outstanding<'a, 'b> {
             current_is_kept: current_session.is_some(),
             current_is_replied: current_session
                 .is_some_and(|session| session.pending_handshake.is_none()),
+            before_current: sessions
+                .session_ids()
+                .filter(|session_id| sessions.started_before(*session_id, current))
+                .collect(),
         })
     }
 
@@ -326,15 +310,16 @@ impl<'a, 'b> Outstanding<'a, 'b> {
         self.recoverable.first().copied()
     }
 
-    // Returns the oldest Message waiting on a Session other than the one the contact delivered
-    // on since, which may have lost it.
+    // Returns the oldest Message waiting on a Session older than the one the contact delivered on
+    // since, which may have lost it. The newer Session holds nothing sent before the Message, so
+    // the contact misses no Message on it.
     fn left_behind(&self) -> Option<&'b Unacknowledged<'a>> {
         if !self.current_is_replied {
             return None;
         }
         self.recoverable
             .iter()
-            .find(|message| message.session_id != self.current)
+            .find(|message| self.before_current.contains(&message.session_id))
             .copied()
     }
 }
@@ -427,36 +412,6 @@ fn unacknowledged(
     waiting
 }
 
-// Takes the Messages to resend once to the contact's newer inbox, after a grant changed its
-// capability. A Message that carries the handshake can't go: its prekeys went with the old inbox.
-// A bundle with a newer Discovery Key may have dropped the capability since, and then nothing can.
-fn take_retries(
-    contact: &mut ContactRecord,
-    waiting: &[Unacknowledged<'_>],
-    now_millis: u64,
-) -> Result<Vec<RetryInstruction>, ProtocolStateError> {
-    if !contact.take_retries_due() || !contact.has_delivery_capability() {
-        return Ok(Vec::new());
-    }
-    let route = Route::established(contact)?;
-    let retries: Vec<RetryInstruction> = waiting
-        .iter()
-        .filter(|message| {
-            message.entry.message.prekey_reference.is_none()
-                && message.entry.message.recipient_public_key != route.discovery_key()
-        })
-        .map(|message| RetryInstruction {
-            message_id: message.message_id,
-            message: message.entry.message.clone(),
-            destination: route.destination(contact.identity_key),
-        })
-        .collect();
-    if !retries.is_empty() {
-        contact.record_retries(now_millis);
-    }
-    Ok(retries)
-}
-
 // Returns how long has passed from `since_millis` to `now_millis`, or nothing for a time ahead.
 fn waited(since_millis: u64, now_millis: u64) -> Duration {
     Duration::from_millis(now_millis.saturating_sub(since_millis))
@@ -505,8 +460,8 @@ pub enum MessageRecoveryStep {
 /// One step of a recovery, which encrypts one unacknowledged Message again on a newer Session and
 /// returns its result once.
 ///
-/// Roost picks the Message and the Session. When the contact delivered on a Session other than
-/// the one holding the Message, the Message goes there. Otherwise, under a signaled recovery, the
+/// Roost picks the Message and the Session. When the contact delivered on a Session newer than the
+/// one holding the Message, the Message goes there, so the contact misses no Message on it. Otherwise, under a signaled recovery, the
 /// oldest Message starts a new Session from the contact's prekey bundle, and the rest wait until
 /// the contact acknowledges it. Call [`Self::step`] until it returns
 /// [`MessageRecoveryStep::Ready`], [`MessageRecoveryStep::NeedsPreKeyBundle`],

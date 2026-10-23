@@ -59,7 +59,7 @@ pub use publication::{
 };
 pub use recovery::{
     DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, MessageRecovery, MessageRecoveryStep,
-    OutgoingRecovery, RetryInstruction,
+    OutgoingRecovery,
 };
 pub use state::{
     CommitCondition, ProtocolStateKind, StateChanges, StateEntry, StateKey, StateUpdate,

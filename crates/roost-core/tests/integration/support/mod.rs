@@ -129,6 +129,21 @@ impl HostStore {
         self.blobs.remove(address);
     }
 
+    /// Returns this database as restoring it from a backup leaves it: the contact records kept,
+    /// and every other record and queued Message gone.
+    pub(crate) fn restored(&self) -> Self {
+        Self {
+            blobs: self
+                .blobs
+                .iter()
+                .filter(|(address, _)| address.kind() == ProtocolStateKind::ContactState)
+                .map(|(address, blob)| (address.clone(), blob.clone()))
+                .collect(),
+            outbox: Vec::new(),
+            undelivered: self.undelivered.clone(),
+        }
+    }
+
     /// Returns the address of every record of `kind` the host holds.
     pub(crate) fn addresses(&self, kind: ProtocolStateKind) -> Vec<ProtocolStateAddress> {
         self.blobs

@@ -71,12 +71,9 @@ pub(super) struct ContactRecord {
     /// Whether the next send first checks the contact's current prekey bundle, since the contact
     /// may have rotated its inbox while blocked.
     pub(super) needs_discovery_key_check: bool,
-    /// Whether the contact's capability changed since the last delivery check, so the Messages it
-    /// hasn't acknowledged go out again to its current inbox.
-    retries_due: bool,
-    /// When a delivery check last resent Messages to a newer inbox, in Unix milliseconds, which
-    /// restarts the wait before a recovery.
-    retried_at_millis: Option<u64>,
+    /// Whether a grant for a newer Discovery Key arrived since the last delivery check, so the
+    /// Messages the contact hasn't acknowledged may have gone to a dead inbox.
+    received_newer_grant: bool,
     /// The recovery signaled for the contact's unacknowledged Messages, until none is left or the
     /// contact proves a newer grant or Session.
     recovery: Option<RecoverySignal>,
@@ -98,8 +95,7 @@ impl ContactRecord {
             sent_before_acceptance: Vec::new(),
             received_before_acceptance: Vec::new(),
             needs_discovery_key_check: false,
-            retries_due: false,
-            retried_at_millis: None,
+            received_newer_grant: false,
             recovery: None,
         }
     }
@@ -174,6 +170,12 @@ impl ContactRecord {
         ReceivedCount::WithinLimit
     }
 
+    /// Returns whether the contact sent this side a Message before acceptance, as every requester
+    /// did with its request.
+    pub(super) fn has_written_before_acceptance(&self) -> bool {
+        !self.received_before_acceptance.is_empty()
+    }
+
     /// Lifts the block, and makes the next send check whether the contact rotated meanwhile.
     pub(super) fn unblock(&mut self) {
         self.blocked = false;
@@ -213,7 +215,8 @@ impl ContactRecord {
         if is_newer || completes_current {
             self.discovery_key = Some(grant.discovery_key);
             self.delivery_capability = Some(grant.delivery_capability);
-            self.retries_due = true;
+            // Only a newer Discovery Key replaces a capability Messages may have gone out with.
+            self.received_newer_grant |= is_newer;
             self.recovery = None;
         }
     }
@@ -253,26 +256,10 @@ impl ContactRecord {
         }
     }
 
-    /// Returns whether the contact's capability changed since the last call, so its
-    /// unacknowledged Messages go out again to its current inbox.
-    pub(super) fn take_retries_due(&mut self) -> bool {
-        std::mem::take(&mut self.retries_due)
-    }
-
-    /// Records that Messages went out again to the contact's newer inbox at `now_millis`.
-    pub(super) fn record_retries(&mut self, now_millis: u64) {
-        self.retried_at_millis = Some(now_millis);
-    }
-
-    /// Returns when Messages last went out again to the contact's newer inbox, in Unix
-    /// milliseconds.
-    pub(super) fn retried_at_millis(&self) -> Option<u64> {
-        self.retried_at_millis
-    }
-
-    /// Returns whether the contact holds a capability for its current Discovery Key.
-    pub(super) fn has_delivery_capability(&self) -> bool {
-        self.delivery_capability.is_some()
+    /// Returns whether a grant for a newer Discovery Key arrived since the last call, so the
+    /// contact's unacknowledged Messages may have gone to a dead inbox.
+    pub(super) fn take_received_newer_grant(&mut self) -> bool {
+        std::mem::take(&mut self.received_newer_grant)
     }
 
     /// Returns the peer's Discovery Key and capability, which an established Message needs.
@@ -369,8 +356,7 @@ impl ContactRecord {
             sent_before_acceptance: &sent,
             received_before_acceptance: &received,
             needs_discovery_key_check: self.needs_discovery_key_check,
-            retries_due: self.retries_due,
-            retried_at_millis: self.retried_at_millis,
+            received_newer_grant: self.received_newer_grant,
             recovery: self.recovery.map(|recovery| {
                 (
                     recovery.signaled_at_millis,
@@ -441,8 +427,7 @@ impl ContactRecord {
             trust_state: wire.trust_state,
             blocked: wire.blocked,
             needs_discovery_key_check: wire.needs_discovery_key_check,
-            retries_due: wire.retries_due,
-            retried_at_millis: wire.retried_at_millis,
+            received_newer_grant: wire.received_newer_grant,
             recovery: wire
                 .recovery
                 .map(|(signaled_at_millis, progress)| RecoverySignal {
@@ -539,8 +524,7 @@ struct ContactRecordWire<'a> {
     sent_before_acceptance: &'a [SentBeforeAcceptanceWire],
     received_before_acceptance: &'a [[u8; MESSAGE_ID_LEN]],
     needs_discovery_key_check: bool,
-    retries_due: bool,
-    retried_at_millis: Option<u64>,
+    received_newer_grant: bool,
     recovery: Option<RecoverySignalWire>,
 }
 
@@ -577,9 +561,7 @@ struct DecodedContactRecordWire {
     #[zeroize(skip)]
     needs_discovery_key_check: bool,
     #[zeroize(skip)]
-    retries_due: bool,
-    #[zeroize(skip)]
-    retried_at_millis: Option<u64>,
+    received_newer_grant: bool,
     #[zeroize(skip)]
     recovery: Option<RecoverySignalWire>,
 }

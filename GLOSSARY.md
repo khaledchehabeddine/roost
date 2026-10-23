@@ -23,7 +23,7 @@
   - Avoid: cache
 - **Delivery Capability**: The secret, one per Epoch, that the Relay checks before it admits an established Message to an inbox.
   - Avoid: inbox token
-- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which returns Retry Instructions, signals Recovery, and gives up on Messages the Relay would have dropped.
+- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which signals Recovery and gives up on Messages the Relay would have dropped.
   - Avoid: retry check, retry timer
 - **Device**: The app install that holds one Identity's private keys.
   - Avoid: client, installation, instance
@@ -81,15 +81,13 @@
   - Avoid: cache
 - **Protocol State Kind**: The category of a Protocol State Blob, such as a Session or a contact.
   - Avoid: table, bucket, namespace
-- **Recovery**: Resending a contact's unacknowledged Messages, encrypted again, on a newer Session, after the contact stops acknowledging them or starts delivering on another Session.
+- **Recovery**: Resending a contact's unacknowledged Messages, encrypted again, on a newer Session, after the contact stops acknowledging them, sends a newer Inbox Grant, or starts delivering on a newer Session.
   - Avoid: session reset, retry
 - **Relay**: The server that admits Messages into inboxes, holds them until the recipient saves them, and serves prekey bundles. Roost relies on it for admission and availability, never for confidentiality or authenticity.
   - Avoid: server, backend
 - **Relay Domain**: The domain name of a Relay. A Sender Certificate names one, and a recipient refuses a certificate that names a different Relay than it expects.
 - **Requester**: The peer that sent a Contact Request, until the Asked Side accepts it.
   - Avoid: initiator, inviter
-- **Retry Instruction**: A notice telling the app to resend an unacknowledged Message, unchanged, to a contact's newer inbox.
-  - Avoid: resend job
 - **Safety Number**: A number derived from two Identity Keys that two people compare outside the app to verify each other.
   - Avoid: fingerprint, verification code
 - **Sealed Payload Padding**: The padding that rounds a sealed plaintext up to the next of a few fixed sizes, so only a coarse length shows.
