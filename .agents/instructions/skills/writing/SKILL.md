@@ -24,5 +24,6 @@ Make each sentence clear on the first read. These rules don't apply to names or 
 - Separate thoughts with a period or a comma, not a dash or a semicolon.
 - Use parentheses only for a citation, such as "(ADR 0050)", or to define an abbreviation, such as "Identity Key (IK)".
 - Use a colon to introduce a list or an example, not to join two clauses.
+- Write headings in Title Case, such as "Punctuation and Formatting".
 - Bold only what a skimming reader must not miss.
 - Align each table's columns so that every cell in a column, including the dashes, is the same width.
