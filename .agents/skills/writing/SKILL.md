@@ -1,6 +1,6 @@
 ---
 name: writing
-description: Use for writing docs, code comments, commit messages, or PR text.
+description: Use when writing documentation, code comments, commit messages, or pull request text.
 ---
 
 Read [SKILL.md](../../instructions/skills/writing/SKILL.md).
