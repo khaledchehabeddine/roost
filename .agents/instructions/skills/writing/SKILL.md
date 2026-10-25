@@ -1,6 +1,6 @@
 # Writing
 
-Make each sentence clear on the first read. These rules don't apply to names or string literals in code. Where another skill or doc sets a format, follow that format.
+Make each sentence clear on the first read. These rules don't apply to names or string literals in code. Where another skill or document sets a format, follow that format.
 
 ## Content
 
