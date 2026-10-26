@@ -3,14 +3,14 @@
 ## Context
 
 - @README.md
-- Before a branch or commit: [CONTRIBUTING.md](CONTRIBUTING.md)
-- Before naming a domain concept: [GLOSSARY.md](GLOSSARY.md)
-- Before changing what Roost does: [FEATURES.md](FEATURES.md), updated in the same commit
-- Before changing a design: the [ADRs](docs/adr/) that cover it
+- Before creating a branch or commit, read [CONTRIBUTING.md](CONTRIBUTING.md).
+- Before naming a domain concept, read [GLOSSARY.md](GLOSSARY.md).
+- Before changing what Roost does, read [FEATURES.md](FEATURES.md).
+- Before changing a design, read the [ADRs](docs/adr/) that cover it.
 
 ## Workflow
 
 - Make the smallest complete change for the task.
 - Update any document the change makes outdated.
-- Keep a skill's working files, such as plans and notes, out of commits.
-- After the user corrects a mistake that would repeat, propose the smallest fix to the skill or doc that should have prevented it.
+- Keep working files, such as plans and notes, out of commits.
+- When the user corrects a mistake that could happen again, propose a skill or document change that prevents it.
