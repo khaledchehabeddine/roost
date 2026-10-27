@@ -52,7 +52,10 @@ unreachable_pub = "warn"
 unsafe_code = "deny"
 
 [workspace.lints.clippy]
+expect_used = "warn"
 new_without_default = "allow"
+panic = "warn"
+unwrap_used = "warn"
 wildcard_enum_match_arm = "warn"
 
 [workspace.lints.rustdoc]
