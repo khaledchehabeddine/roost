@@ -10,6 +10,7 @@
 ## Workflow
 
 - Make the smallest complete change for the task.
+- Verify each change with the verify skill before reporting it done.
 - Update any document the change makes outdated.
 - Keep a skill's working files, such as plans and notes, out of commits.
 - After the user corrects a mistake that would repeat, propose the smallest fix to the skill or doc that should have prevented it.
