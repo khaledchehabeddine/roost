@@ -122,6 +122,18 @@ impl ContactRecord {
         self.received_before_acceptance.clear();
     }
 
+    /// Records that the contact's Inbox Grant arrived on a Session `starter` started, which accepts
+    /// the contact when this side started it.
+    ///
+    /// The asked side shares its grant only once it accepts, so its grant on the requester's
+    /// Session accepts as a Contact Acceptance does. A restore can lose that acceptance, and the
+    /// grant then arrives again on the next Session the requester starts.
+    pub(super) fn accept_by_grant(&mut self, starter: Starter) {
+        if starter == Starter::Local {
+            self.accept();
+        }
+    }
+
     /// Returns whether this side acknowledges the contact's Messages on a Session `starter`
     /// started.
     ///
@@ -291,6 +303,12 @@ impl ContactRecord {
         !self.blocked
             && (self.is_accepted() || starter == Starter::Local)
             && self.needs_grant(current)
+    }
+
+    /// Forgets which local grant the contact acknowledged, so the next acknowledgment and Messages
+    /// carry the grant again.
+    pub(super) fn forget_acknowledged_grant(&mut self) {
+        self.acknowledged_grant = None;
     }
 
     /// Records that the contact acknowledged a Message carrying the grant stamped `stamp`.

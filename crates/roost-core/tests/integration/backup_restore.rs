@@ -1,6 +1,7 @@
 //! Restoring a backup brings back every contact, and each contact can send and receive again right
 //! away on new Sessions. The exception is an Asked Side that hasn't accepted yet. This side drops
-//! its acceptance on the old Session and can only send it a new Contact Request.
+//! its acceptance on the old Session and can only send it a new Contact Request. Both sides end up
+//! accepted whether the Asked Side accepts before or after that request.
 
 use crate::support::device::{
     DeviceError, Intent, Recovered, Relay, Route, befriended, redraft, requested,
@@ -217,4 +218,58 @@ fn a_restored_requester_that_asks_again_is_accepted_on_the_new_session() {
         accepted(bob.receive(&reply.message)).plaintext.as_slice(),
         b"thanks"
     );
+}
+
+#[test]
+fn asking_again_accepts_a_restored_requester_whose_acceptance_was_lost() {
+    // Bob's acceptance reaches Alice after her restore, or before it, which a backup from before
+    // the acceptance undoes.
+    for acknowledged_before_the_restore in [false, true] {
+        let relay = Relay::new();
+        let (mut alice, mut bob) = requested(&relay);
+        let backup = alice.back_up();
+        if acknowledged_before_the_restore {
+            let acceptance = bob.accept_request(&alice, b"welcome");
+            let acknowledgment = accepted(alice.receive(&acceptance.message))
+                .acknowledgment
+                .unwrap();
+            assert!(matches!(
+                bob.receive(&acknowledgment),
+                InboundMessageOutcome::AcknowledgmentMatched(_)
+            ));
+            alice.restore(&backup);
+        } else {
+            alice.restore(&backup);
+            let acceptance = bob.accept_request(&alice, b"welcome");
+            assert!(matches!(
+                alice.receive(&acceptance.message),
+                InboundMessageOutcome::UnknownSession
+            ));
+        }
+
+        let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
+        let received = accepted(bob.receive(&request.message));
+        alice.receive(&received.acknowledgment.unwrap());
+
+        for (device, peer) in [(&alice, &bob), (&bob, &alice)] {
+            assert_eq!(
+                device.contact(peer).unwrap().trust_state,
+                ContactTrustState::Unverified
+            );
+        }
+        // Both sides write past the limit on Messages before acceptance.
+        for _ in 0..4 {
+            let reply = bob.send(&alice, b"glad you're back");
+            assert_eq!(reply.session_id, request.session_id);
+            assert_eq!(
+                accepted(alice.receive(&reply.message)).plaintext.as_slice(),
+                b"glad you're back"
+            );
+            let answer = alice.send(&bob, b"me too");
+            assert_eq!(
+                accepted(bob.receive(&answer.message)).plaintext.as_slice(),
+                b"me too"
+            );
+        }
+    }
 }
