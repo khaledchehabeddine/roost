@@ -541,7 +541,8 @@ pub struct InboundMessageResult {
     /// Sender identity material decoded from the sealed-sender envelope.
     pub sender_identity: SenderIdentityMaterial,
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
-    /// the contact isn't accepted and this side doesn't acknowledge yet.
+    /// the contact isn't accepted and this side doesn't acknowledge yet, or while no Inbox Grant
+    /// has supplied the contact's current Delivery Capability.
     pub acknowledgment: Option<SealedFrame>,
 }
 
@@ -569,7 +570,8 @@ pub struct GrantUpdateResult {
 /// Accepted blocked inbound Message result without consumer-visible plaintext.
 pub struct BlockedInboundMessageResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, or `None` when
-    /// the blocked-contact acknowledgment policy suppresses it.
+    /// the blocked-contact acknowledgment policy suppresses it or no Inbox Grant has supplied the
+    /// contact's current Delivery Capability.
     pub acknowledgment: Option<SealedFrame>,
 }
 
