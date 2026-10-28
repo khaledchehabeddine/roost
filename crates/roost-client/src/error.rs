@@ -448,6 +448,7 @@ impl From<ProtocolStateError> for RoostError {
             }
             ProtocolStateError::InvalidDeduplicationCapacity { .. }
             | ProtocolStateError::InvalidMessage { .. }
+            | ProtocolStateError::ContentTooLong { .. }
             | ProtocolStateError::EmptyStateKey
             | ProtocolStateError::MessageTranscript(_)
             | ProtocolStateError::NoContactRequest
