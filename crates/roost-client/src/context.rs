@@ -298,7 +298,11 @@ impl IdentityContext {
     /// [`Self::prepare_inbox_rotation`] moves to the next Discovery Key epoch, so the restored
     /// identity never reuses prekey IDs already published under the backed-up one. Then send each
     /// contact a Grant Update through [`Contacts::start_grant_update`], so every contact can reach
-    /// this identity again without a new link. Each call runs Argon2id with 64 MiB of memory.
+    /// this identity again without a new link. A Grant Update to a contact this identity asked,
+    /// and that hasn't accepted, fails with [`RoostError::ContactNotAccepted`], since the restore
+    /// dropped the Session its acceptance would arrive on. Send that contact a new request through
+    /// [`Contacts::request_contact`] instead. If it accepted meanwhile, its acknowledgment of the
+    /// request accepts it on this side too. Each call runs Argon2id with 64 MiB of memory.
     ///
     /// # Errors
     /// - [`RoostError::DecryptionFailed`] if the passphrase is wrong or the backup was altered.

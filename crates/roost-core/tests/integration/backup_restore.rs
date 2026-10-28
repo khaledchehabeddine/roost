@@ -1,5 +1,7 @@
 //! Restoring a backup brings back every contact, and each contact can send and receive again right
-//! away on new Sessions.
+//! away on new Sessions. The exception is an Asked Side that hasn't accepted yet. This side drops
+//! its acceptance on the old Session and can only send it a new Contact Request. Both sides end up
+//! accepted whether the Asked Side accepts before or after that request.
 
 use crate::support::device::{
     DeviceError, Intent, Recovered, Relay, Route, befriended, redraft, requested,
@@ -8,6 +10,7 @@ use crate::support::{CREATED_AT_SECS, accepted};
 use roost_core::{
     ContactTrustState, InboundMessageOutcome, MessageOperationError, ProtocolStateError,
 };
+use roost_protocol::PayloadKind;
 
 const HOUR_MILLIS: u64 = 60 * 60 * 1000;
 
@@ -128,4 +131,107 @@ fn a_restored_requester_cant_accept_a_contact_that_never_wrote() {
         ))
     ));
     assert_eq!(alice.host.snapshot_bytes(), before);
+}
+
+#[test]
+fn a_restored_requester_cant_send_a_grant_update_or_message_before_acceptance() {
+    let relay = Relay::new();
+    let (mut alice, bob) = requested(&relay);
+    let backup = alice.back_up();
+    alice.restore(&backup);
+    let outgoing = alice.outgoing(&bob, b"still there?");
+    let before = alice.host.snapshot_bytes();
+
+    for intent in [Intent::GrantUpdate, Intent::Message] {
+        let mut fetched = redraft(&outgoing);
+        fetched.prekey_bundle = Some(bob.bundle());
+        for draft in [redraft(&outgoing), fetched] {
+            assert!(matches!(
+                alice.encrypt(draft, intent),
+                Err(DeviceError::Operation(
+                    MessageOperationError::ProtocolState(ProtocolStateError::ContactNotAccepted)
+                ))
+            ));
+        }
+    }
+    assert_eq!(alice.host.snapshot_bytes(), before);
+}
+
+#[test]
+fn a_restored_requester_that_asks_again_is_accepted_on_the_new_session() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    let backup = alice.back_up();
+    alice.restore(&backup);
+
+    let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
+
+    assert!(matches!(
+        Route::of(&request.destination),
+        Route::FirstMessage { .. }
+    ));
+    assert_eq!(
+        accepted(bob.receive(&request.message)).plaintext.as_slice(),
+        b"asking again"
+    );
+    let acceptance = bob.accept_request(&alice, b"welcome");
+    assert_eq!(acceptance.session_id, request.session_id);
+    assert_eq!(acceptance.payload_kind, PayloadKind::ContactAcceptance);
+    let received = accepted(alice.receive(&acceptance.message));
+    assert_eq!(received.plaintext.as_slice(), b"welcome");
+    for (device, peer) in [(&alice, &bob), (&bob, &alice)] {
+        assert_eq!(
+            device.contact(peer).unwrap().trust_state,
+            ContactTrustState::Unverified
+        );
+    }
+    assert!(matches!(
+        bob.receive(&received.acknowledgment.unwrap()),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    let reply = alice.send(&bob, b"thanks");
+    assert_eq!(reply.session_id, request.session_id);
+    assert_eq!(
+        accepted(bob.receive(&reply.message)).plaintext.as_slice(),
+        b"thanks"
+    );
+}
+
+#[test]
+fn asking_again_accepts_a_restored_requester_whose_acceptance_was_lost() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    let backup = alice.back_up();
+    let acceptance = bob.accept_request(&alice, b"welcome");
+    let acknowledgment = accepted(alice.receive(&acceptance.message))
+        .acknowledgment
+        .unwrap();
+    assert!(matches!(
+        bob.receive(&acknowledgment),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    // The backup is from before the acceptance, so Bob has nothing left to resend.
+    alice.restore(&backup);
+
+    let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
+    let received = accepted(bob.receive(&request.message));
+    alice.receive(&received.acknowledgment.unwrap());
+
+    for (device, peer) in [(&alice, &bob), (&bob, &alice)] {
+        assert_eq!(
+            device.contact(peer).unwrap().trust_state,
+            ContactTrustState::Unverified
+        );
+    }
+    let reply = bob.send(&alice, b"glad you're back");
+    assert_eq!(reply.session_id, request.session_id);
+    assert_eq!(
+        accepted(alice.receive(&reply.message)).plaintext.as_slice(),
+        b"glad you're back"
+    );
+    let answer = alice.send(&bob, b"me too");
+    assert_eq!(
+        accepted(bob.receive(&answer.message)).plaintext.as_slice(),
+        b"me too"
+    );
 }

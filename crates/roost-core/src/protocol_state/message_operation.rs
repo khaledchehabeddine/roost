@@ -1672,9 +1672,11 @@ impl Decrypting {
         };
         let created = previous.is_none();
         let mut contact = match previous {
-            // A new Session proves the contact may have lost the old ones.
+            // A new Session proves the contact may have lost the old ones, and with them the local
+            // grant, as a restore does.
             Some(mut contact) => {
                 contact.forget_recovery();
+                contact.forget_acknowledged_grant();
                 contact
             }
             // Only a Contact Request creates a record, so a stranger can't skip showing one.
@@ -1830,13 +1832,20 @@ impl Decrypting {
             .delivery_update(snapshot, session_id, peer_identity_key)?
             .into_iter()
             .collect();
+        let peer_address = peer_sessions_address(peer_identity_key);
+        // The delivery update already refused a Session the peer's list doesn't keep.
+        let starter = load_peer_sessions(snapshot, &peer_address, limits)?
+            .and_then(|sessions| sessions.starter(session_id))
+            .ok_or_else(|| ProtocolStateError::MissingRequiredState {
+                address: peer_address,
+            })?;
+        let sender = decoded.sender_identity.public_identity_key()?;
+        let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
+        if let Some(grant) = grant {
+            contact.record_grant(grant);
+        }
         if payload_kind.is_acknowledgment() {
-            let sender = decoded.sender_identity.public_identity_key()?;
-            let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
             let acknowledged_message_id = decode_acknowledgment_plaintext(&plaintext)?;
-            if let Some(grant) = grant {
-                contact.record_grant(grant);
-            }
             let pending_address = pending_acknowledgment_address(session_id);
             let mut pending = load_pending_acknowledgments(snapshot, &pending_address, limits)?;
             pending.record_acknowledgment(acknowledgment_digest(
@@ -1847,8 +1856,12 @@ impl Decrypting {
             if let Some(stamp) = matched.as_ref().and_then(|entry| entry.grant) {
                 contact.acknowledge_grant(stamp);
             }
-            // Messages sent before acceptance wait in the contact record instead.
+            // Messages sent before acceptance wait in the contact record instead, which acceptance
+            // clears.
             contact.acknowledge_sent_before_acceptance(acknowledged_message_id);
+            if payload_kind.carries_grant() {
+                contact.accept_by_grant(starter);
+            }
             updates.extend(contact_update(snapshot, &contact, limits)?);
             let pending_handshake = pending_handshake.filter(|_| !contact.is_accepted());
             updates.insert(
@@ -1886,24 +1899,15 @@ impl Decrypting {
                 changes: changes(&self.reads, updates),
             });
         }
-        let sender = decoded.sender_identity.public_identity_key()?;
-        let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
-        if let Some(grant) = grant {
-            contact.record_grant(grant);
+        // Only the asked side accepts, on the Session the requester started.
+        if payload_kind == PayloadKind::ContactAcceptance
+            && starter != Starter::Local
+            && !contact.is_accepted()
+        {
+            return Err(ProtocolStateError::UnsolicitedAcceptance.into());
         }
-        let peer_address = peer_sessions_address(peer_identity_key);
-        // The delivery update already refused a Session the peer's list doesn't keep.
-        let starter = load_peer_sessions(snapshot, &peer_address, limits)?
-            .and_then(|sessions| sessions.starter(session_id))
-            .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-                address: peer_address,
-            })?;
-        if payload_kind == PayloadKind::ContactAcceptance && !contact.is_accepted() {
-            // Only the asked side accepts, on the Session the requester started.
-            if starter != Starter::Local {
-                return Err(ProtocolStateError::UnsolicitedAcceptance.into());
-            }
-            contact.accept();
+        if payload_kind.carries_grant() {
+            contact.accept_by_grant(starter);
         }
         let within_limit = contact.is_accepted()
             || contact.blocked
