@@ -322,4 +322,67 @@ mod tests {
                 if actual == address && version == super::super::PROTOCOL_STATE_BLOB_VERSION + 1
         ));
     }
+
+    #[test]
+    fn full_pending_acknowledgments_fit_their_blob_limit() {
+        let address = address();
+        let limits = ProtocolHardeningLimits::default();
+        let mut state = LoadedPendingAcknowledgments::empty();
+        for index in (0u128..).take(MAX_PENDING_ACKNOWLEDGMENTS) {
+            // The largest values give each field its longest encoding.
+            let entry = LoadedPendingAcknowledgment {
+                first_sent_at_millis: u64::MAX,
+                payload_kind: PayloadKind::EncryptedTextWithGrant,
+                grant: Some(DiscoveryKeyStamp {
+                    created_at_secs: u64::MAX,
+                    epoch: u32::MAX,
+                }),
+            };
+            state
+                .record(MessageId::from_bytes(index.to_be_bytes()), entry)
+                .unwrap();
+        }
+        for index in (0u128..).take(MAX_ACKNOWLEDGMENT_DIGESTS) {
+            state.record_acknowledgment(index.to_be_bytes());
+        }
+
+        let blob = encode_pending_acknowledgments(&address, &state, limits).unwrap();
+        let decoded = decode_pending_acknowledgments(&address, &blob, limits).unwrap();
+
+        assert_eq!(decoded.pending.len(), MAX_PENDING_ACKNOWLEDGMENTS);
+        assert_eq!(
+            decoded.acknowledgment_digests.len(),
+            MAX_ACKNOWLEDGMENT_DIGESTS
+        );
+    }
+
+    #[test]
+    fn pending_acknowledgments_longer_than_their_limit_are_rejected_before_decoding() {
+        let address = address();
+        let limits = ProtocolHardeningLimits::default();
+        let mut bytes = encode_pending_acknowledgments(
+            &address,
+            &LoadedPendingAcknowledgments::empty(),
+            limits,
+        )
+        .unwrap()
+        .as_bytes()
+        .to_vec();
+        bytes.resize(81_985, 0);
+        let at_limit = ProtocolStateBlob::from_bytes(bytes.clone());
+        bytes.push(0);
+        let past_limit = ProtocolStateBlob::from_bytes(bytes);
+
+        assert!(matches!(
+            decode_pending_acknowledgments(&address, &at_limit, limits),
+            Err(ProtocolStateError::BlobDecode { address: actual, reason })
+                if actual == address && reason == "pending acknowledgments have trailing bytes"
+        ));
+        assert!(matches!(
+            decode_pending_acknowledgments(&address, &past_limit, limits),
+            Err(ProtocolStateError::BlobDecode { address: actual, reason })
+                if actual == address
+                    && reason == "pending-acknowledgment state blob length 81986 exceeds limit 81985"
+        ));
+    }
 }
