@@ -15,7 +15,9 @@ const SEALED_PAYLOAD_BUCKETS: [usize; 12] = [
 ];
 // The transcript authenticates the padded payload, so its limit is the largest bucket.
 const MAX_TRANSCRIPT_PAYLOAD_LEN: usize = SEALED_PAYLOAD_BUCKETS[SEALED_PAYLOAD_BUCKETS.len() - 1];
-const MAX_SEALED_PLAINTEXT_LEN: usize = MAX_TRANSCRIPT_PAYLOAD_LEN - SEALED_PAYLOAD_LEN_PREFIX_LEN;
+/// Longest plaintext the largest padding bucket holds.
+pub const MAX_SEALED_PLAINTEXT_LEN: usize =
+    MAX_TRANSCRIPT_PAYLOAD_LEN - SEALED_PAYLOAD_LEN_PREFIX_LEN;
 // Longest sender certificate a Message transcript accepts.
 const MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 // The fixed-width transcript fields, plus the length prefixes of its payload and certificate.

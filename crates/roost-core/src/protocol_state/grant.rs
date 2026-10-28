@@ -15,6 +15,18 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub(super) const SIGNATURE_LEN: usize = 64;
 pub(super) const CAPABILITY_LEN: usize = 32;
+// Longest varint postcard writes for a `u32` and a `u64`, and the one byte it writes for each
+// signature's length.
+const MAX_EPOCH_LEN: usize = 5;
+const MAX_CREATED_AT_LEN: usize = 10;
+const SIGNATURE_LEN_PREFIX_LEN: usize = 1;
+/// Length of the longest grant [`encode_granted_payload`] puts before a plaintext, which every
+/// Message's content leaves room for.
+pub(super) const MAX_ENCODED_GRANT_LEN: usize = 2 * PUBLIC_KEY_LEN
+    + MAX_EPOCH_LEN
+    + MAX_CREATED_AT_LEN
+    + 2 * (SIGNATURE_LEN_PREFIX_LEN + SIGNATURE_LEN)
+    + CAPABILITY_LEN;
 
 /// Where a Discovery Key falls in the order contacts keep the newest by: its signed creation
 /// time, then its Epoch, since a restored backup can repeat an Epoch.
@@ -295,6 +307,26 @@ mod tests {
             open_granted_payload(&payload(&owner, &wrong_binding), &owner.identity),
             Err(ProtocolStateError::InvalidInboxGrant)
         ));
+    }
+
+    #[test]
+    fn the_longest_grant_takes_the_length_messages_leave_room_for() {
+        let owner = owner(7);
+        let mut discovery_key = owner.discovery_key.public();
+        discovery_key.epoch = u32::MAX;
+        discovery_key.created_at_secs = u64::MAX;
+
+        let payload = encode_granted_payload(
+            &LocalGrant {
+                discovery_key: &discovery_key,
+                discovery_to_identity: &owner.discovery_to_identity,
+                delivery_capability: &owner.capability,
+            },
+            b"hello",
+        )
+        .unwrap();
+
+        assert_eq!(payload.len() - b"hello".len(), MAX_ENCODED_GRANT_LEN);
     }
 
     #[test]

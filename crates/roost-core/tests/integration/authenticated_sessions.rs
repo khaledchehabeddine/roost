@@ -7,7 +7,7 @@ use roost_core::{
     ProtocolStateKind, PublicKeyError, SessionId,
 };
 use roost_crypto::SealedFrameError;
-use roost_protocol::{SealedPayloadError, SenderCertificateValidationError, SignatureError};
+use roost_protocol::{SenderCertificateValidationError, SignatureError};
 
 fn accepted_message(outcome: InboundMessageOutcome) -> roost_core::InboundMessageResult {
     let (InboundMessageOutcome::Accepted(result) | InboundMessageOutcome::ContactRequest(result)) =
@@ -476,17 +476,20 @@ fn a_first_message_keeps_the_padding_and_size_limits() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    // The request's Inbox Grant shares the largest padding bucket with the plaintext.
-    let mut too_large = alice.outgoing(&bob, &[0; 65_533]);
+    let mut too_large = alice.outgoing(&bob, &[0; 65_292]);
     too_large.prekey_bundle = Some(bob.bundle());
     assert!(matches!(
         alice.encrypt(too_large, Intent::Request),
-        Err(DeviceError::Operation(MessageOperationError::ProtocolState(
-            ProtocolStateError::SealedPayload(SealedPayloadError::PlaintextTooLong { len, max }),
-        ))) if len > max
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::ContentTooLong {
+                len: 65_292,
+                max: 65_291,
+            })
+        ))
     ));
 
-    let largest = vec![0x2a; 65_200];
+    // The request's Inbox Grant shares the largest padding bucket with the longest content.
+    let largest = vec![0x2a; 65_291];
     let request = alice.request(&bob, &largest);
     assert!(request.message.to_bytes().unwrap().len() > 64 * 1024);
     let received = accepted_message(bob.receive(&request.message));

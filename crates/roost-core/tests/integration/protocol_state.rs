@@ -15,7 +15,7 @@ use roost_core::{
 };
 use roost_crypto::{KeyPair, RatchetError, SealedFrameError};
 use roost_protocol::{
-    DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, PayloadKind, SealedPayloadError,
+    DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, PayloadKind,
     SenderCertificateIdentityKey, SenderCertificateValidationError,
 };
 use std::time::Duration;
@@ -798,8 +798,7 @@ fn oversized_outbound_message_does_not_return_advanced_state() {
 
     assert!(matches!(
         failure(result),
-        ProtocolStateError::SealedPayload(SealedPayloadError::PlaintextTooLong { len, max })
-            if len > max
+        ProtocolStateError::ContentTooLong { len, max } if len > max
     ));
     assert_eq!(fixture.alice.host.snapshot_bytes(), before);
 }

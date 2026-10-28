@@ -33,7 +33,7 @@ pub struct OutgoingMessage {
     pub sent_at_millis: u64,
     /// The local identity's certificate, sealed into the Message.
     pub sender_certificate: SignedSenderCertificate,
-    /// The plaintext to encrypt.
+    /// The plaintext to encrypt, at most 65,291 bytes.
     pub plaintext: Vec<u8>,
     /// The contact's bundle, fetched after a [`MessageEncryptionStep::NeedsPreKeyBundle`] step or
     /// taken from a fresh contact link, and saved with the draft until a Session uses it. A bundle
@@ -503,7 +503,8 @@ impl Messaging {
     /// contact gets this identity's Inbox Grant attached until it acknowledges one.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key, MessageID, or certificate is malformed or too long.
+    /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or the plaintext is
+    ///   malformed or too long.
     /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
@@ -558,7 +559,8 @@ impl Contacts {
     /// request counts toward the limit on Messages before acceptance.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or bundle is malformed.
+    /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or bundle is malformed, or
+    ///   the plaintext is too long.
     /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
@@ -606,8 +608,8 @@ impl Contacts {
     /// refuses only a contact that never wrote, so accept only a request the contact sent.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key, MessageID, or certificate is malformed, or when
-    ///   stepping, if no Contact Request from the contact is open.
+    /// - [`RoostError::InvalidData`] if a key, MessageID, or certificate is malformed, the
+    ///   plaintext is too long, or when stepping, if no Contact Request from the contact is open.
     /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.

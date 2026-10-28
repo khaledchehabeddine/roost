@@ -949,6 +949,14 @@ pub enum ProtocolStateError {
     /// A plaintext doesn't fit the padding, or a received Message's padding is malformed.
     #[error("sealed payload padding failed")]
     SealedPayload(#[from] SealedPayloadError),
+    /// A Message's content is longer than Roost accepts.
+    #[error("message content is {len} bytes, longer than {max}")]
+    ContentTooLong {
+        /// Length of the content.
+        len: usize,
+        /// Longest content Roost accepts.
+        max: usize,
+    },
     /// Sender-certificate validation failed during receive.
     #[error("sender certificate validation failed")]
     SenderCertificateValidation(#[source] SenderCertificateValidationError),

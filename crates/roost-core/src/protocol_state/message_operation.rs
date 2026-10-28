@@ -16,7 +16,9 @@ use super::envelope::{
     encode_acknowledgment_plaintext, open_message, seal_proved, seal_signed,
     validate_sender_identity, verify_recipient_keys,
 };
-use super::grant::{InboxGrant, LocalGrant, encode_granted_payload, open_granted_payload};
+use super::grant::{
+    InboxGrant, LocalGrant, MAX_ENCODED_GRANT_LEN, encode_granted_payload, open_granted_payload,
+};
 use super::pending_acknowledgment::{
     LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, acknowledgment_digest,
     encode_pending_acknowledgments, evict_sessions, has_seen_acknowledgment,
@@ -46,11 +48,15 @@ use roost_crypto::{
     SealedFramePreKeyReference, Signature, SigningKeyPair, accept_handshake, initiate_handshake,
     sign_identity_key_binding, verify_discovery_to_identity_binding,
 };
-use roost_protocol::{MessageId, PUBLIC_KEY_LEN, PayloadKind, SessionId};
+use roost_protocol::{MAX_SEALED_PLAINTEXT_LEN, MessageId, PUBLIC_KEY_LEN, PayloadKind, SessionId};
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
+
+// Longest content a Message holds. A resend after a Recovery carries the Inbox Grant even when the
+// original didn't, so every Message leaves room for it.
+const MAX_CONTENT_LEN: usize = MAX_SEALED_PLAINTEXT_LEN - MAX_ENCODED_GRANT_LEN;
 
 /// The local Identity's secret keys a Message Operation uses.
 pub(crate) struct LocalIdentityKeys {
@@ -105,7 +111,7 @@ pub struct OutgoingMessage {
     pub sent_at_millis: u64,
     /// The local Identity's certificate sealed into the Message.
     pub sender_certificate: SignedSenderCertificate,
-    /// Plaintext bytes to encrypt.
+    /// Plaintext bytes to encrypt, at most 65,291.
     pub plaintext: Zeroizing<Vec<u8>>,
     /// The bundle the app fetched after [`MessageEncryptionStep::NeedsPreKeyBundle`], kept with
     /// the draft until a send uses it.
@@ -433,6 +439,12 @@ impl ProtocolStateEngine {
         intent: SendIntent,
     ) -> Result<Encrypting, ProtocolStateError> {
         validate_contact_identity_key(&contact_address(message.recipient), &message.recipient)?;
+        if message.plaintext.len() > MAX_CONTENT_LEN {
+            return Err(ProtocolStateError::ContentTooLong {
+                len: message.plaintext.len(),
+                max: MAX_CONTENT_LEN,
+            });
+        }
         let sender = LocalSenderKeys::new(keys, message.sender_certificate)?;
         validate_sender_identity(&sender.identity, self.limits)?;
         Ok(Encrypting {

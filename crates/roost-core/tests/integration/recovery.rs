@@ -2,9 +2,13 @@
 //! and the contact shows each one once.
 
 use crate::support::HostCommitError;
-use crate::support::device::{Device, Intent, Recovered, Relay, Route, SentMessage, befriended};
+use crate::support::device::{
+    Device, DeviceError, Intent, Recovered, Relay, Route, SentMessage, befriended,
+};
 use crate::support::{CREATED_AT_SECS, accepted};
-use roost_core::{InboundMessageOutcome, ProtocolStateKind};
+use roost_core::{
+    InboundMessageOutcome, MessageOperationError, ProtocolStateError, ProtocolStateKind,
+};
 use roost_protocol::PayloadKind;
 
 const HOUR_MILLIS: u64 = 60 * 60 * 1000;
@@ -248,6 +252,48 @@ fn a_silent_contact_gets_one_probe_on_a_new_session_and_the_rest_once_it_acknowl
         accepted(bob.receive(&rest.message)).plaintext.as_slice(),
         b"second"
     );
+}
+
+#[test]
+fn a_recovery_resends_the_longest_message_and_every_message_after_it() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    // Bob acknowledges a Message carrying Alice's grant, so her next Messages leave it off.
+    let ready = alice.send(&bob, b"ready");
+    alice.receive(
+        &accepted(bob.receive(&ready.message))
+            .acknowledgment
+            .unwrap(),
+    );
+    let Err(DeviceError::Operation(MessageOperationError::ProtocolState(
+        ProtocolStateError::ContentTooLong { max, .. },
+    ))) = alice.encrypt_to(&bob, &[0; 64 * 1024])
+    else {
+        panic!("expected 64 KiB of content to be refused");
+    };
+    let longest = alice.send(&bob, &vec![0x2a; max]);
+    let after = alice.send(&bob, b"sent after it");
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+
+    let probe = alice.recover(&bob, Some(bob.bundle())).committed();
+    let received = accepted(bob.receive(&probe.message));
+    alice.receive(&received.acknowledgment.unwrap());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let rest = alice.recover(&bob, None).committed();
+
+    assert_eq!(longest.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(probe.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(probe.message_id, longest.message_id);
+    assert_eq!(received.plaintext.len(), max);
+    assert_eq!(rest.message_id, after.message_id);
 }
 
 // Alice sends Bob a Message he never acknowledges, and a day later starts a recovery.
