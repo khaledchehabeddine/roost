@@ -6,18 +6,12 @@ cd "$(dirname "$0")/.."
 
 logs=target/check
 mutants=true
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --no-mutants)
-            mutants=false
-            shift
-            ;;
-        *)
-            echo "Usage: scripts/check.sh [--no-mutants]" >&2
-            exit 2
-            ;;
-    esac
-done
+if [[ $# -eq 1 && $1 == --no-mutants ]]; then
+    mutants=false
+elif [[ $# -gt 0 ]]; then
+    echo "Usage: scripts/check.sh [--no-mutants]" >&2
+    exit 2
+fi
 
 # The newest commit this branch shares with main or origin/main, so a stale copy of
 # either doesn't add unrelated changes.
@@ -37,12 +31,11 @@ failures=0
 # Prints the lines of a failed check's log that name each problem, or the log's end
 # when none match.
 details() {
-    local log=$logs/$1.log lines
+    local log=$logs/$1.log lines=
     case $1 in
         fmt) lines=$(grep -E '^Diff in' "$log") ;;
         clippy | doc) lines=$(grep -E '^[^ ]+:[0-9]+:[0-9]+: (error|warning)' "$log") ;;
         test) lines=$(sed -n '/^failures:$/,/^test result: FAILED/p' "$log") ;;
-        deny) lines=$(grep -E '^error|┌─|^ *[0-9]+ │ |├ ID:' "$log") ;;
         mutants) lines=$(cat "$logs/mutants.out/missed.txt" 2> /dev/null) ;;
     esac
     if [[ -z $lines ]]; then

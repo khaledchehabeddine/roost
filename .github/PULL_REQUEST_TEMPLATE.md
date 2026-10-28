@@ -4,11 +4,11 @@
 
 ## Changes
 
-<!-- Bullet points only -->
+<!-- Each change and the reason for it. Bullet points only. -->
 
 ## Verification
 
-<!-- Check results, review findings and how you resolved each, and what stayed unverified. Bullet points only. -->
+<!-- The report from the verify skill (.agents/instructions/skills/verify/SKILL.md). -->
 
 ## Decision Record
 

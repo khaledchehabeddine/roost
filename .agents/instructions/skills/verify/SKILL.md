@@ -14,7 +14,6 @@ When a check or finding still fails after three attempts, stop and report it as 
 
 ### Fast Loop
 
-- Run a failing test by name, such as `cargo test -p roost-core decode_example_rejects_unknown_version`, and run the script once it passes.
 - Run `scripts/check.sh --no-mutants` while iterating, since mutation testing takes minutes. Run it without the flag before you report.
 - Open a check's log in `target/check/` only when its printed lines don't explain the failure.
 
