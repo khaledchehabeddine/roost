@@ -52,15 +52,15 @@ This list describes what Roost does today. Each feature gets one to three senten
 
 ## Delivery
 
-- **Acknowledge Messages.** Receiving a Message can return an encrypted Acknowledgment Artifact, which the app sends back to the sender. Before acceptance, only the Asked Side acknowledges, and only after it has replied.
+- **Acknowledge Messages.** Receiving a Message can return an encrypted Acknowledgment Artifact, which the app sends back to the sender. Before acceptance, only the Asked Side acknowledges, and only after it has replied. Without the sender's Delivery Capability, Roost returns the Message with no acknowledgment.
 - **Check delivery.** Roost tracks each Message sent to an accepted contact until the contact acknowledges it. The app runs a Delivery Check for each contact instead of resending on a timer. The check signals a Recovery when a Message other than a Grant Update goes a day without an acknowledgment, or when the contact sends a newer Inbox Grant or delivers on a newer Session.
 - **Resend unacknowledged Messages.** A Recovery encrypts the app's copy of each unacknowledged Message again, except Grant Updates, on a newer Session. The app sends the new copy in place of the old one. When the Recovery has to start that Session, it returns the oldest Message first as the Probe and holds the rest until the contact acknowledges the Probe.
-- **Report undelivered Messages.** Roost reports a Message as not delivered once 30 days pass without an acknowledgment, or once Roost deletes the Session it waits on.
+- **Report undelivered Messages.** Roost reports a Message as not delivered once 30 days pass without an acknowledgment, or once Roost deletes the Session it waits on. A restore makes Roost forget the Messages it tracks, so the app marks its own unacknowledged Messages as not delivered when it imports a backup.
 
 ## Backup and Restore
 
 - **Back up and restore an Identity.** A passphrase-encrypted Identity Backup moves the Identity Key and current Discovery Key to a new Device. Contacts see the restored Identity as the same one. The app restores only the contact records from its own database backup, with their Trust State and blocks.
-- **Reconnect contacts after a restore.** The restored Identity publishes no prekeys until its next Inbox Rotation. After that rotation, the app sends each accepted contact a Grant Update, which starts a new Session with them.
+- **Reconnect contacts after a restore.** The restored Identity publishes no prekeys until its next Inbox Rotation. After that rotation, the app sends each accepted contact a Grant Update, which starts a new Session with them. To a contact this side asked that hasn't accepted, it sends a new Contact Request instead.
 - **Accept requests after a restore.** Accepting a request the backup kept sends a new Contact Request, which accepts both sides. Roost refuses it for a blocked contact or one that never wrote. The app accepts only a request it knows the contact sent.
 
 ## Algorithms and Packages
