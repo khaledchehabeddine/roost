@@ -310,7 +310,8 @@ pub struct InboundMessageResult {
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
     /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it,
-    /// absent while the contact isn't accepted and this side doesn't acknowledge yet.
+    /// absent while the contact isn't accepted and this side doesn't acknowledge yet, or while no
+    /// Inbox Grant has supplied the contact's current Delivery Capability.
     pub acknowledgment: Option<Message>,
 }
 
@@ -691,8 +692,6 @@ impl MessageDecryption {
     /// - [`RoostError::CertificateRejected`] if the sender's certificate fails validation.
     /// - [`RoostError::OneTimePreKeyUsed`] if a different first Message already used the one-time
     ///   prekey this one names. A repeat of the same Message is a duplicate instead.
-    /// - [`RoostError::NoDeliveryCapability`] if the acknowledgment needs the sender's Delivery
-    ///   Capability and no Inbox Grant has supplied one.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed, including the
     ///   sender's contact record.
     /// - [`RoostError::UnsupportedVersion`] if the Message or a record uses an unknown version.

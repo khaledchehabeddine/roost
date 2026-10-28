@@ -74,6 +74,45 @@ fn a_restored_side_talks_both_ways_and_gets_messages_sent_after_the_backup_once(
 }
 
 #[test]
+fn a_restored_side_talks_both_ways_with_a_contact_that_rotated_after_the_backup() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let backup = bob.back_up();
+    alice.rotate_inbox();
+    let update = alice.send_grant_update(&bob);
+    let InboundMessageOutcome::GrantUpdate(received) = bob.receive(&update.message) else {
+        panic!("expected a Grant Update");
+    };
+    // Bob's old phone acknowledges Alice's new grant before it breaks.
+    alice.receive(&received.acknowledgment.unwrap());
+    // Bob's restored record holds Alice's old Discovery Key, and her bundle shows the new one.
+    bob.restore(&backup);
+
+    let reconnect = bob.send_fetching_a_bundle(&alice, b"", Intent::GrantUpdate);
+    let InboundMessageOutcome::GrantUpdate(received) = alice.receive(&reconnect.message) else {
+        panic!("expected a Grant Update");
+    };
+    bob.receive(&received.acknowledgment.unwrap());
+
+    let from_alice = alice.send(&bob, b"found you");
+    assert_eq!(from_alice.session_id, reconnect.session_id);
+    let received = accepted(bob.receive(&from_alice.message));
+    assert_eq!(received.plaintext.as_slice(), b"found you");
+    assert!(matches!(
+        alice.receive(&received.acknowledgment.unwrap()),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    let from_bob = bob.send(&alice, b"found you too");
+    assert_eq!(from_bob.session_id, reconnect.session_id);
+    assert_eq!(
+        accepted(alice.receive(&from_bob.message))
+            .plaintext
+            .as_slice(),
+        b"found you too"
+    );
+}
+
+#[test]
 fn accepting_a_request_open_in_the_backup_accepts_both_sides() {
     let relay = Relay::new();
     let (mut alice, mut bob) = requested(&relay);

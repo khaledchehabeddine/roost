@@ -268,6 +268,43 @@ fn requests_that_cross_accept_both_sides() {
 }
 
 #[test]
+fn a_request_that_crosses_one_sent_from_a_newer_bundle_accepts_both_sides() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let mut bob = Device::new(&relay, 0xb0);
+    let from_alice = alice.request(&bob, b"hi bob");
+    // Alice rotates, such as by blocking someone else, and Bob asks her from her new bundle
+    // before her request reaches him.
+    alice.rotate_inbox();
+    let from_bob = bob.request(&alice, b"hi alice");
+
+    // Bob holds no capability for Alice's new inbox yet, so her request arrives unacknowledged.
+    let bob_received = accepted(bob.receive(&from_alice.message));
+    assert_eq!(bob_received.plaintext.as_slice(), b"hi bob");
+    assert!(bob_received.acknowledgment.is_none());
+    // Alice's acknowledgment of Bob's request carries her new grant.
+    let alice_received = accepted(alice.receive(&from_bob.message));
+    bob.receive(&alice_received.acknowledgment.unwrap());
+
+    for (device, peer) in [(&alice, &bob), (&bob, &alice)] {
+        assert_eq!(
+            device.contact(peer).unwrap().trust_state,
+            ContactTrustState::Unverified
+        );
+    }
+    let reply = bob.send(&alice, b"glad we both asked");
+    assert_eq!(
+        accepted(alice.receive(&reply.message)).plaintext.as_slice(),
+        b"glad we both asked"
+    );
+    let answer = alice.send(&bob, b"me too");
+    assert_eq!(
+        accepted(bob.receive(&answer.message)).plaintext.as_slice(),
+        b"me too"
+    );
+}
+
+#[test]
 fn a_request_restarted_after_the_peer_asked_becomes_an_acceptance() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);

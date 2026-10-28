@@ -139,8 +139,14 @@ impl ContactRecord {
     ///
     /// An accepted contact gets acknowledgments. Before acceptance only the asked side
     /// acknowledges, once it has replied, so a stranger can't tell whether a request arrived.
+    ///
+    /// Either way it waits for the contact's capability, which a bundle naming a newer Discovery
+    /// Key drops. The Message still arrives. The contact's grant then comes with its next Message,
+    /// or with the resends of the recovery that the missing acknowledgment starts.
     pub(super) fn should_acknowledge(&self, starter: Starter) -> bool {
-        self.is_accepted() || (starter == Starter::Peer && !self.sent_before_acceptance.is_empty())
+        self.delivery_capability.is_some()
+            && (self.is_accepted()
+                || (starter == Starter::Peer && !self.sent_before_acceptance.is_empty()))
     }
 
     /// Counts a Message this side sends before acceptance with the local grant stamped `grant`,
