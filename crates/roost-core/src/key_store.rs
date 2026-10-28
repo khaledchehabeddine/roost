@@ -328,10 +328,12 @@ impl KeyStore {
     /// keep the [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState)
     /// records restored with the host's database and delete every other protocol-state record, then
     /// finalize. A restored Session would reuse message keys its copy already used, so each
-    /// contact's next Message starts a new Session instead. The restored identity keeps the
-    /// Discovery Key's epoch lineage from the backup, but prekey generation and publication stay
-    /// blocked until [`Self::prepare_inbox_rotation`] advances to the next epoch. This avoids
-    /// reusing prekey identifiers already published under the backed-up epoch.
+    /// contact's next Message starts a new Session instead. Roost stops tracking a Message once its
+    /// Session is deleted, so in the same transaction, also mark each sent Message that has no
+    /// acknowledgment yet not delivered. The restored identity keeps the Discovery Key's epoch
+    /// lineage from the backup, but prekey generation and publication stay blocked until
+    /// [`Self::prepare_inbox_rotation`] advances to the next epoch. This avoids reusing prekey
+    /// identifiers already published under the backed-up epoch.
     pub fn prepare_backup_import(
         &self,
         data: &[u8],

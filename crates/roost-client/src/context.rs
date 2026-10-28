@@ -294,7 +294,9 @@ impl IdentityContext {
     /// restored with its own database and deletes every other protocol-state record for the
     /// identity. Reusing a restored Session would reuse its encryption keys, so each contact's
     /// next Message starts a new Session, and the contact encrypts its unacknowledged Messages
-    /// again on it. After finalization, prekeys and publication stay blocked until
+    /// again on it. In the same transaction, show each sent Message that has content and no
+    /// acknowledgment yet as not delivered, since Roost stops tracking a Message once its Session
+    /// is deleted. After finalization, prekeys and publication stay blocked until
     /// [`Self::prepare_inbox_rotation`] moves to the next Discovery Key epoch, so the restored
     /// identity never reuses prekey IDs already published under the backed-up one. Then send each
     /// contact a Grant Update through [`Contacts::start_grant_update`], so every contact can reach
