@@ -67,6 +67,9 @@ pub(super) struct ContactRecord {
     pub(super) trust_state: ContactTrustState,
     pub(super) blocked: bool,
     sent_before_acceptance: Vec<SentBeforeAcceptance>,
+    /// The last Grant Update this side sent before acceptance, which doesn't count toward the
+    /// limit.
+    grant_update_before_acceptance: Option<SentBeforeAcceptance>,
     received_before_acceptance: Vec<MessageId>,
     /// Whether the next send first checks the contact's current prekey bundle, since the contact
     /// may have rotated its inbox while blocked.
@@ -90,6 +93,7 @@ impl ContactRecord {
             trust_state: ContactTrustState::Pending,
             blocked: false,
             sent_before_acceptance: Vec::new(),
+            grant_update_before_acceptance: None,
             received_before_acceptance: Vec::new(),
             needs_discovery_key_check: false,
             recovery: None,
@@ -115,6 +119,7 @@ impl ContactRecord {
             self.trust_state = ContactTrustState::Unverified;
         }
         self.sent_before_acceptance.clear();
+        self.grant_update_before_acceptance = None;
         self.received_before_acceptance.clear();
     }
 
@@ -170,6 +175,18 @@ impl ContactRecord {
         self.sent_before_acceptance
             .push(SentBeforeAcceptance { message_id, grant });
         Ok(())
+    }
+
+    /// Records a Grant Update this side sends before acceptance with the local grant stamped
+    /// `grant`, so its acknowledgment shows the contact holds that grant.
+    ///
+    /// It doesn't count toward the limit, and only the latest one is kept, since an older one
+    /// carries an older grant.
+    pub(super) fn record_grant_update(&mut self, message_id: MessageId, grant: DiscoveryKeyStamp) {
+        self.grant_update_before_acceptance = Some(SentBeforeAcceptance {
+            message_id,
+            grant: Some(grant),
+        });
     }
 
     /// Counts a Message received before acceptance. A MessageID already counted counts once.
@@ -333,6 +350,7 @@ impl ContactRecord {
         let grant = self
             .sent_before_acceptance
             .iter()
+            .chain(&self.grant_update_before_acceptance)
             .find(|sent| sent.message_id == message_id)
             .and_then(|sent| sent.grant);
         if let Some(stamp) = grant {
@@ -355,6 +373,12 @@ impl ContactRecord {
                 )
             })
             .collect();
+        let grant_update = self.grant_update_before_acceptance.map(|sent| {
+            (
+                *sent.message_id.as_bytes(),
+                sent.grant.map(DiscoveryKeyStamp::to_wire),
+            )
+        });
         let received: Vec<[u8; MESSAGE_ID_LEN]> = self
             .received_before_acceptance
             .iter()
@@ -378,6 +402,7 @@ impl ContactRecord {
             trust_state: self.trust_state,
             blocked: self.blocked,
             sent_before_acceptance: &sent,
+            grant_update_before_acceptance: grant_update,
             received_before_acceptance: &received,
             needs_discovery_key_check: self.needs_discovery_key_check,
             recovery: self.recovery.map(|recovery| {
@@ -470,6 +495,12 @@ impl ContactRecord {
                     grant: grant.map(DiscoveryKeyStamp::from_wire),
                 })
                 .collect(),
+            grant_update_before_acceptance: wire.grant_update_before_acceptance.map(
+                |(message_id, grant)| SentBeforeAcceptance {
+                    message_id: MessageId::from_bytes(message_id),
+                    grant: grant.map(DiscoveryKeyStamp::from_wire),
+                },
+            ),
             received_before_acceptance: wire
                 .received_before_acceptance
                 .iter()
@@ -544,6 +575,7 @@ struct ContactRecordWire<'a> {
     trust_state: ContactTrustState,
     blocked: bool,
     sent_before_acceptance: &'a [SentBeforeAcceptanceWire],
+    grant_update_before_acceptance: Option<SentBeforeAcceptanceWire>,
     received_before_acceptance: &'a [[u8; MESSAGE_ID_LEN]],
     needs_discovery_key_check: bool,
     recovery: Option<RecoverySignalWire>,
@@ -576,6 +608,8 @@ struct DecodedContactRecordWire {
     #[zeroize(skip)]
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_MESSAGES_BEFORE_ACCEPTANCE>")]
     sent_before_acceptance: Vec<SentBeforeAcceptanceWire>,
+    #[zeroize(skip)]
+    grant_update_before_acceptance: Option<SentBeforeAcceptanceWire>,
     #[zeroize(skip)]
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_MESSAGES_BEFORE_ACCEPTANCE>")]
     received_before_acceptance: Vec<[u8; MESSAGE_ID_LEN]>,

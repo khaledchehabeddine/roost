@@ -706,7 +706,10 @@ impl Encrypting {
             // A Grant Update carries no content, so it doesn't count toward the limit.
             (SendIntent::GrantUpdate, Starter::Local) => {
                 match self.payload_kind(contact.receives_grant(starter, local_grant)) {
-                    Some(payload_kind) => payload_kind,
+                    Some(payload_kind) => {
+                        contact.record_grant_update(self.message_id, local_grant);
+                        payload_kind
+                    }
                     None => return Ok(MessageEncryptionStep::NothingToSend),
                 }
             }
@@ -863,8 +866,12 @@ impl Encrypting {
         let Some(payload_kind) = self.payload_kind(carries_grant) else {
             return Ok(MessageEncryptionStep::NothingToSend);
         };
-        if !contact.is_accepted() && counts_toward_limit(payload_kind) {
-            contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
+        if !contact.is_accepted() {
+            if counts_toward_limit(payload_kind) {
+                contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
+            } else {
+                contact.record_grant_update(self.message_id, local_grant);
+            }
         }
         let (state, session_id, handshake) =
             initiate_handshake(rng, &bundle.identity_key, &bundle.bundle)
