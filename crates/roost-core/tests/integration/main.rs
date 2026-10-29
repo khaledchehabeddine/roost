@@ -1,10 +1,4 @@
 //! Flows between Devices through roost-core's public API, committed through a test host.
-#![allow(
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unwrap_used,
-    reason = "a test panics on an unexpected result so the failure reports its line"
-)]
 
 mod authenticated_sessions;
 mod backup_restore;
