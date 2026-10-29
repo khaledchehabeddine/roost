@@ -71,9 +71,6 @@ pub(super) struct ContactRecord {
     /// Whether the next send first checks the contact's current prekey bundle, since the contact
     /// may have rotated its inbox while blocked.
     pub(super) needs_discovery_key_check: bool,
-    /// Whether a grant for a newer Discovery Key arrived since the last delivery check, so the
-    /// Messages the contact hasn't acknowledged may have gone to a dead inbox.
-    received_newer_grant: bool,
     /// The recovery signaled for the contact's unacknowledged Messages, until none is left or the
     /// contact proves a newer grant or Session.
     recovery: Option<RecoverySignal>,
@@ -95,7 +92,6 @@ impl ContactRecord {
             sent_before_acceptance: Vec::new(),
             received_before_acceptance: Vec::new(),
             needs_discovery_key_check: false,
-            received_newer_grant: false,
             recovery: None,
         }
     }
@@ -233,8 +229,6 @@ impl ContactRecord {
         if is_newer || completes_current {
             self.discovery_key = Some(grant.discovery_key);
             self.delivery_capability = Some(grant.delivery_capability);
-            // Only a newer Discovery Key replaces a capability Messages may have gone out with.
-            self.received_newer_grant |= is_newer;
             self.recovery = None;
         }
     }
@@ -274,10 +268,16 @@ impl ContactRecord {
         }
     }
 
-    /// Returns whether a grant for a newer Discovery Key arrived since the last call, so the
-    /// contact's unacknowledged Messages may have gone to a dead inbox.
-    pub(super) fn take_received_newer_grant(&mut self) -> bool {
-        std::mem::take(&mut self.received_newer_grant)
+    /// Returns whether the contact granted a Discovery Key newer than the one stamped `sent_to`,
+    /// so a Message sent to that one may have gone to a dead inbox, which the Relay doesn't report.
+    ///
+    /// A newer key known without its grant came with a new Session, and the Messages left behind
+    /// go out on it once the contact replies there.
+    pub(super) fn has_newer_grant_than(&self, sent_to: Option<DiscoveryKeyStamp>) -> bool {
+        self.delivery_capability.is_some()
+            && self.discovery_key.is_some_and(|current| {
+                sent_to.is_some_and(|sent_to| DiscoveryKeyStamp::of(&current) > sent_to)
+            })
     }
 
     /// Returns the peer's Discovery Key and capability, which an established Message needs.
@@ -380,7 +380,6 @@ impl ContactRecord {
             sent_before_acceptance: &sent,
             received_before_acceptance: &received,
             needs_discovery_key_check: self.needs_discovery_key_check,
-            received_newer_grant: self.received_newer_grant,
             recovery: self.recovery.map(|recovery| {
                 (
                     recovery.signaled_at_millis,
@@ -451,7 +450,6 @@ impl ContactRecord {
             trust_state: wire.trust_state,
             blocked: wire.blocked,
             needs_discovery_key_check: wire.needs_discovery_key_check,
-            received_newer_grant: wire.received_newer_grant,
             recovery: wire
                 .recovery
                 .map(|(signaled_at_millis, progress)| RecoverySignal {
@@ -548,7 +546,6 @@ struct ContactRecordWire<'a> {
     sent_before_acceptance: &'a [SentBeforeAcceptanceWire],
     received_before_acceptance: &'a [[u8; MESSAGE_ID_LEN]],
     needs_discovery_key_check: bool,
-    received_newer_grant: bool,
     recovery: Option<RecoverySignalWire>,
 }
 
@@ -584,8 +581,6 @@ struct DecodedContactRecordWire {
     received_before_acceptance: Vec<[u8; MESSAGE_ID_LEN]>,
     #[zeroize(skip)]
     needs_discovery_key_check: bool,
-    #[zeroize(skip)]
-    received_newer_grant: bool,
     #[zeroize(skip)]
     recovery: Option<RecoverySignalWire>,
 }

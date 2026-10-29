@@ -4,6 +4,7 @@
 use crate::support::HostCommitError;
 use crate::support::device::{
     Device, DeviceError, Intent, Recovered, Relay, Route, SentMessage, befriended,
+    established_verifier,
 };
 use crate::support::{CREATED_AT_SECS, accepted};
 use roost_core::{
@@ -131,6 +132,27 @@ fn a_newer_grant_recovers_each_unacknowledged_message_on_a_new_session_to_the_ne
         accepted(bob.receive(&probe.message)).plaintext.as_slice(),
         b"sent to the old inbox"
     );
+}
+
+#[test]
+fn a_message_sent_to_the_new_inbox_after_a_newer_grant_signals_nothing_within_a_day() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let rotation = bob.rotate_inbox();
+    let update = bob.send_grant_update(&alice);
+    let hello = bob.send(&alice, b"hello");
+    // Alice has nothing unacknowledged, so the app runs no check after the update.
+    alice.receive(&update.message);
+    let sent = alice.send(&bob, b"to your new inbox");
+    assert_eq!(
+        established_verifier(&sent.destination),
+        rotation.recipient_delivery_verifier
+    );
+    accepted(alice.receive(&hello.message));
+
+    let checked = alice.check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS);
+
+    assert!(!checked.starts_recovery);
 }
 
 // Returns the MessageIDs `device` still waits to have acknowledged on `session_id`.

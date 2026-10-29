@@ -17,7 +17,8 @@ use super::envelope::{
     validate_sender_identity, verify_recipient_keys,
 };
 use super::grant::{
-    InboxGrant, LocalGrant, MAX_ENCODED_GRANT_LEN, encode_granted_payload, open_granted_payload,
+    DiscoveryKeyStamp, InboxGrant, LocalGrant, MAX_ENCODED_GRANT_LEN, encode_granted_payload,
+    open_granted_payload,
 };
 use super::pending_acknowledgment::{
     LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, acknowledgment_digest,
@@ -1033,6 +1034,7 @@ impl Encrypting {
                     first_sent_at_millis: self.sent_at_millis,
                     payload_kind,
                     grant: payload_kind.carries_grant().then(|| grant.stamp()),
+                    sent_to: contact.discovery_key.as_ref().map(DiscoveryKeyStamp::of),
                 },
             )?;
         }

@@ -96,6 +96,8 @@ pub(super) struct LoadedPendingAcknowledgment {
     pub(super) payload_kind: PayloadKind,
     /// The local grant the Message carried, which its acknowledgment confirms the peer holds.
     pub(super) grant: Option<DiscoveryKeyStamp>,
+    /// The peer's Discovery Key the Message went to, whose inbox a newer grant shows may be gone.
+    pub(super) sent_to: Option<DiscoveryKeyStamp>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -112,6 +114,7 @@ struct PendingAcknowledgmentWire {
     first_sent_at_millis: u64,
     payload_kind: u8,
     grant: Option<(u64, u32)>,
+    sent_to: Option<(u64, u32)>,
 }
 
 pub(super) fn encode_pending_acknowledgments(
@@ -127,6 +130,7 @@ pub(super) fn encode_pending_acknowledgments(
             first_sent_at_millis: entry.first_sent_at_millis,
             payload_kind: entry.payload_kind.tag(),
             grant: entry.grant.map(DiscoveryKeyStamp::to_wire),
+            sent_to: entry.sent_to.map(DiscoveryKeyStamp::to_wire),
         })
         .collect();
     let body = Zeroizing::new(
@@ -187,6 +191,7 @@ pub(super) fn decode_pending_acknowledgments(
                 first_sent_at_millis: entry.first_sent_at_millis,
                 payload_kind,
                 grant: entry.grant.map(DiscoveryKeyStamp::from_wire),
+                sent_to: entry.sent_to.map(DiscoveryKeyStamp::from_wire),
             },
         );
         if replaced.is_some() {
@@ -334,6 +339,10 @@ mod tests {
                 first_sent_at_millis: u64::MAX,
                 payload_kind: PayloadKind::EncryptedTextWithGrant,
                 grant: Some(DiscoveryKeyStamp {
+                    created_at_secs: u64::MAX,
+                    epoch: u32::MAX,
+                }),
+                sent_to: Some(DiscoveryKeyStamp {
                     created_at_secs: u64::MAX,
                     epoch: u32::MAX,
                 }),

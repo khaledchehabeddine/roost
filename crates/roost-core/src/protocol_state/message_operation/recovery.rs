@@ -63,9 +63,10 @@ pub enum DeliveryCheckStep {
 /// contact hasn't acknowledged.
 ///
 /// The check gives up on Messages after 30 days. It signals a recovery after a day without an
-/// acknowledgment, or as soon as the contact sends a newer Inbox Grant, delivers on a newer
-/// Session, or acknowledges a recovery's probe, and once signaled, a recovery comes back only after
-/// a week or when the contact proves a newer grant or Session. Call [`Self::step`] until it returns
+/// acknowledgment, or as soon as the contact sends an Inbox Grant newer than the one a waiting
+/// Message went to, delivers on a newer Session, or acknowledges a recovery's probe, and once
+/// signaled, a recovery comes back only after a week or when the contact proves a newer grant or
+/// Session. Call [`Self::step`] until it returns
 /// [`DeliveryCheckStep::Ready`], supplying the records each other step asks for. Dropping the check
 /// commits nothing.
 pub struct DeliveryCheck(Option<Box<Checking>>);
@@ -187,8 +188,8 @@ impl Checking {
     }
 
     // Gives up on Messages the Relay has dropped, and signals a recovery of the rest when the
-    // contact has been quiet too long, sent a newer grant, or delivered on a newer Session. A
-    // blocked contact gets none.
+    // contact has been quiet too long, granted a newer inbox than one a Message went to, or
+    // delivered on a newer Session. A blocked contact gets none.
     fn check(&self, accepted: AcceptedContact) -> Result<Checked, ProtocolStateError> {
         let AcceptedContact {
             mut contact,
@@ -220,9 +221,11 @@ impl Checking {
             (*first_sent_at_millis, *message_id.as_bytes())
         });
         let waiting = unacknowledged(&records);
-        // Messages sent with the old capability may be gone, since the Relay drops them silently.
-        let received_newer_grant = !contact.blocked && contact.take_received_newer_grant();
         let outstanding = Outstanding::new(&waiting, &sessions, snapshot, limits)?;
+        let sent_to_dead_inbox = outstanding
+            .recoverable
+            .iter()
+            .any(|message| contact.has_newer_grant_than(message.entry.sent_to));
         let starts_recovery = match outstanding.oldest() {
             None => {
                 contact.forget_recovery();
@@ -237,7 +240,7 @@ impl Checking {
                         || (matches!(recovery.progress, RecoveryProgress::Probed(_)) && left_behind)
                 });
                 let quiet = waited(oldest.entry.first_sent_at_millis, now_millis) >= QUIET_PERIOD;
-                may_signal && (quiet || received_newer_grant || left_behind)
+                may_signal && (quiet || sent_to_dead_inbox || left_behind)
             }
         };
         if starts_recovery {
