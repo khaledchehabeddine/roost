@@ -1739,18 +1739,17 @@ impl Decrypting {
         if let Some(grant) = grant {
             contact.record_grant(grant);
         }
+        // Requests that cross count as both consents, even during a block, which only hides them.
+        if !created && local_asked {
+            contact.accept();
+        }
         let delivered = if contact.blocked {
             Some(Delivered::Blocked)
         } else if created {
             contact.count_received(message_id);
             Some(Delivered::ContactRequest)
-        } else if contact.is_accepted() {
-            Some(Delivered::Accepted)
-        } else if local_asked {
-            // Requests that cross count as both consents.
-            contact.accept();
-            Some(Delivered::Accepted)
-        } else if !counts_toward_limit(payload_kind)
+        } else if contact.is_accepted()
+            || !counts_toward_limit(payload_kind)
             || contact.count_received(message_id) == ReceivedCount::WithinLimit
         {
             Some(Delivered::Accepted)
