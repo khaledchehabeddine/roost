@@ -8,7 +8,7 @@
 
 ## Verification
 
-<!-- The report from the verify skill (.agents/instructions/skills/verify/SKILL.md). -->
+<!-- Evidence from the verify skill in .agents/instructions/skills/verify/SKILL.md, covering every change on the branch. -->
 
 ## Decision Record
 
