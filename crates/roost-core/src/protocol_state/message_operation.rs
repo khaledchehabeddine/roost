@@ -1851,6 +1851,19 @@ impl Decrypting {
             pending_handshake,
         } = known;
         let payload_kind = message.metadata.payload_kind;
+        // A Session the peer's list doesn't keep, such as after the host lost the list, is as
+        // unknown as one whose record is gone.
+        let Some((sessions, starter)) = load_peer_sessions(
+            self.reads.snapshot(),
+            &peer_sessions_address(peer_identity_key),
+            limits,
+        )?
+        .and_then(|sessions| {
+            let starter = sessions.starter(session_id)?;
+            Some((sessions, starter))
+        }) else {
+            return Ok(unchanged(InboundMessageOutcome::UnknownSession));
+        };
         let decoded = message.decrypt(rng, &mut state, limits)?;
         authenticate_session_message(
             &decoded,
@@ -1875,15 +1888,6 @@ impl Decrypting {
             .delivery_update(snapshot, session_id, peer_identity_key)?
             .into_iter()
             .collect();
-        let peer_address = peer_sessions_address(peer_identity_key);
-        // The delivery update already refused a Session the peer's list doesn't keep.
-        let sessions = load_peer_sessions(snapshot, &peer_address, limits)?;
-        let starter = sessions
-            .as_ref()
-            .and_then(|sessions| sessions.starter(session_id))
-            .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-                address: peer_address,
-            })?;
         let sender = decoded.sender_identity.public_identity_key()?;
         let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
         if let Some(grant) = grant {
@@ -1938,8 +1942,7 @@ impl Decrypting {
             // A recovery moves a Message's wait to the Session of its new copy, while the contact
             // may still acknowledge the original.
             let others: Vec<SessionId> = sessions
-                .iter()
-                .flat_map(PeerSessions::session_ids)
+                .session_ids()
                 .filter(|other| *other != session_id)
                 .collect();
             if matched.is_some() || others.is_empty() {

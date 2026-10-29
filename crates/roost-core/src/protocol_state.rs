@@ -606,8 +606,8 @@ pub enum InboundMessageOutcome {
     GrantUpdate(Box<GrantUpdateResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
     Duplicate,
-    /// The Message names a Session this identity doesn't have and carries no handshake, such as
-    /// one it lost, and nothing changed.
+    /// The Message names a Session this identity doesn't keep and carries no handshake, such as
+    /// one whose records it lost, and nothing changed.
     UnknownSession,
     /// The first Message names a Session this identity deleted, so nothing was created.
     DeletedSession,
