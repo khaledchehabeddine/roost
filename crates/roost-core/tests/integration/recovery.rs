@@ -392,6 +392,55 @@ fn a_probe_that_evicts_its_own_session_isnt_listed_as_undelivered() {
 }
 
 #[test]
+fn messages_held_behind_a_probe_whose_session_evicts_theirs_go_out_once_it_is_acknowledged() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    let second = alice.send(&bob, b"second");
+    // Each rotation makes Alice's next send start a Session, until hers with both Messages is the
+    // oldest one kept.
+    for _ in 0..5 {
+        bob.rotate_inbox();
+        let mut outgoing = alice.outgoing(&bob, b"to the newer inbox");
+        outgoing.prekey_bundle = Some(bob.bundle());
+        alice.send_with(outgoing, Intent::Message);
+    }
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let Recovered::Resent(probe) = alice.observe_recovery(&bob, Some(bob.bundle())).unwrap() else {
+        panic!("expected the probe");
+    };
+    assert_eq!(probe.result.message_id, first.message_id);
+    assert!(probe.changes.undelivered().is_empty());
+    alice
+        .host
+        .commit_sent(&probe.result, probe.changes)
+        .unwrap();
+    let received = accepted(bob.receive(&probe.result.message));
+    alice.receive(&received.acknowledgment.unwrap());
+
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let resent = alice.recover(&bob, None).committed();
+
+    assert_eq!(resent.message_id, second.message_id);
+    assert_eq!(resent.session_id, probe.result.session_id);
+    let received = accepted(bob.receive(&resent.message));
+    assert_eq!(received.plaintext.as_slice(), b"second");
+    assert!(matches!(
+        alice.receive(&received.acknowledgment.unwrap()),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    assert!(waiting_on(&alice, resent.session_id).is_empty());
+}
+
+#[test]
 fn a_newer_session_from_the_contact_during_the_fetch_wins_over_the_bundle() {
     let relay = Relay::new();
     let (mut alice, mut bob, _) = unanswered(&relay);

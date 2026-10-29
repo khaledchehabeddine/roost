@@ -314,15 +314,15 @@ impl<'a, 'b> Outstanding<'a, 'b> {
     }
 
     // Returns the oldest Message waiting on a Session older than the one the contact delivered on
-    // since, which may have lost it. The newer Session holds nothing sent before the Message, so
-    // the contact misses no Message on it.
+    // since, which may have lost it, or held behind a probe with no copy on its way. The newer
+    // Session holds nothing sent before the Message, so the contact misses no Message on it.
     fn left_behind(&self) -> Option<&'b Unacknowledged<'a>> {
         if !self.current_is_replied {
             return None;
         }
         self.recoverable
             .iter()
-            .find(|message| self.before_current.contains(&message.session_id))
+            .find(|message| message.entry.held || self.before_current.contains(&message.session_id))
             .copied()
     }
 }

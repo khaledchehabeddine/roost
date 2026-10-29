@@ -21,8 +21,8 @@ use super::grant::{
     open_granted_payload,
 };
 use super::pending_acknowledgment::{
-    LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, acknowledgment_digest,
-    encode_pending_acknowledgments, evict_sessions, has_seen_acknowledgment,
+    LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, StrandedMessage,
+    acknowledgment_digest, encode_pending_acknowledgments, evict_sessions, has_seen_acknowledgment,
     load_pending_acknowledgments,
 };
 use super::session::{
@@ -1035,10 +1035,34 @@ impl Encrypting {
                     payload_kind,
                     grant: payload_kind.carries_grant().then(|| grant.stamp()),
                     sent_to: contact.discovery_key.as_ref().map(DiscoveryKeyStamp::of),
+                    held: false,
                 },
             )?;
         }
         let snapshot = self.reads.snapshot();
+        let (deletions, stranded) = match &started {
+            Some((_, evicted)) => evict_sessions(snapshot, evicted, limits)?,
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut undelivered = Vec::new();
+        for StrandedMessage {
+            message_id,
+            mut entry,
+        } in stranded
+        {
+            // A resend's new copy waits on the new Session instead.
+            if message_id == self.message_id {
+                continue;
+            }
+            // The rest of a recovery wait behind its probe on the probe's Session, except Grant
+            // Updates, which recovered Messages replace.
+            if self.replaces.is_some() && entry.payload_kind != PayloadKind::GrantUpdate {
+                entry.held = true;
+                pending.record(message_id, entry)?;
+            } else {
+                undelivered.push(message_id);
+            }
+        }
         let mut updates = vec![
             session_update(
                 snapshot,
@@ -1056,7 +1080,6 @@ impl Encrypting {
         ];
         updates.extend(contact_update(snapshot, &contact, limits)?);
         let mut evicted = Vec::new();
-        let mut undelivered = Vec::new();
         if let Some((peer_sessions, started_evicted)) = started {
             let peer_address = peer_sessions_address(self.recipient);
             updates.push(
@@ -1066,17 +1089,15 @@ impl Encrypting {
                 )
                 .with_snapshot(snapshot),
             );
-            let (deletions, stranded) = evict_sessions(snapshot, &started_evicted, limits)?;
             updates.extend(deletions);
-            // A resend's new copy waits on the new Session instead.
-            undelivered = stranded
-                .into_iter()
-                .filter(|message_id| *message_id != self.message_id)
-                .collect();
             evicted = started_evicted;
         }
-        // A Session this send evicts takes its copy with it.
-        if let Some(replaced) = self.replaces.filter(|replaced| !evicted.contains(replaced)) {
+        // A Session this send evicts takes its copy with it, and a held copy on this Session was
+        // replaced above.
+        if let Some(replaced) = self
+            .replaces
+            .filter(|replaced| *replaced != session_id && !evicted.contains(replaced))
+        {
             let address = pending_acknowledgment_address(replaced);
             let mut replaced_pending = load_pending_acknowledgments(snapshot, &address, limits)?;
             replaced_pending.pending.remove(self.message_id.as_bytes());
@@ -1742,8 +1763,12 @@ impl Decrypting {
             deduplication_update(snapshot, &deduplication, limits)?,
         ];
         updates.extend(contact_update(snapshot, &contact, limits)?);
-        let (deletions, undelivered) = evict_sessions(snapshot, &evicted, limits)?;
+        let (deletions, stranded) = evict_sessions(snapshot, &evicted, limits)?;
         updates.extend(deletions);
+        let undelivered = stranded
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect();
         let Some(delivered) = delivered else {
             updates.insert(
                 0,

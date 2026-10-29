@@ -98,6 +98,9 @@ pub(super) struct LoadedPendingAcknowledgment {
     pub(super) grant: Option<DiscoveryKeyStamp>,
     /// The peer's Discovery Key the Message went to, whose inbox a newer grant shows may be gone.
     pub(super) sent_to: Option<DiscoveryKeyStamp>,
+    /// Whether the Message waits here behind a recovery's probe with no copy on this Session yet,
+    /// since the probe's new Session deleted the one it went out on.
+    pub(super) held: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -115,6 +118,7 @@ struct PendingAcknowledgmentWire {
     payload_kind: u8,
     grant: Option<(u64, u32)>,
     sent_to: Option<(u64, u32)>,
+    held: bool,
 }
 
 pub(super) fn encode_pending_acknowledgments(
@@ -131,6 +135,7 @@ pub(super) fn encode_pending_acknowledgments(
             payload_kind: entry.payload_kind.tag(),
             grant: entry.grant.map(DiscoveryKeyStamp::to_wire),
             sent_to: entry.sent_to.map(DiscoveryKeyStamp::to_wire),
+            held: entry.held,
         })
         .collect();
     let body = Zeroizing::new(
@@ -192,6 +197,7 @@ pub(super) fn decode_pending_acknowledgments(
                 payload_kind,
                 grant: entry.grant.map(DiscoveryKeyStamp::from_wire),
                 sent_to: entry.sent_to.map(DiscoveryKeyStamp::from_wire),
+                held: entry.held,
             },
         );
         if replaced.is_some() {
@@ -245,31 +251,38 @@ pub(super) fn evict_sessions(
     snapshot: &ProtocolStateSnapshot,
     evicted: &[SessionId],
     limits: ProtocolHardeningLimits,
-) -> Result<(Vec<ProtocolStateUpdate>, Vec<MessageId>), ProtocolStateError> {
+) -> Result<(Vec<ProtocolStateUpdate>, Vec<StrandedMessage>), ProtocolStateError> {
     let mut stranded = Vec::new();
     for session_id in evicted {
         let address = pending_acknowledgment_address(*session_id);
         if let Some(blob) = snapshot.get(&address) {
             let pending = decode_pending_acknowledgments(&address, blob, limits)?;
-            stranded.extend(
-                pending
-                    .pending
-                    .iter()
-                    .map(|(message_id, entry)| (entry.first_sent_at_millis, *message_id)),
-            );
+            stranded.extend(pending.pending.into_iter().map(|(message_id, entry)| {
+                StrandedMessage {
+                    message_id: MessageId::from_bytes(message_id),
+                    entry,
+                }
+            }));
         }
     }
-    stranded.sort_unstable();
+    stranded.sort_unstable_by_key(|message| {
+        (
+            message.entry.first_sent_at_millis,
+            *message.message_id.as_bytes(),
+        )
+    });
     let deletions = evicted
         .iter()
         .flat_map(|session_id| session_record_addresses(*session_id))
         .map(|address| ProtocolStateUpdate::delete(address).with_snapshot(snapshot))
         .collect();
-    let undelivered = stranded
-        .into_iter()
-        .map(|(_, message_id)| MessageId::from_bytes(message_id))
-        .collect();
-    Ok((deletions, undelivered))
+    Ok((deletions, stranded))
+}
+
+// A Message that waited on a Session an operation evicts.
+pub(super) struct StrandedMessage {
+    pub(super) message_id: MessageId,
+    pub(super) entry: LoadedPendingAcknowledgment,
 }
 
 // Returns the digest that catches a repeated delivery of one acknowledgment's bytes.
@@ -346,6 +359,7 @@ mod tests {
                     created_at_secs: u64::MAX,
                     epoch: u32::MAX,
                 }),
+                held: true,
             };
             state
                 .record(MessageId::from_bytes(index.to_be_bytes()), entry)
