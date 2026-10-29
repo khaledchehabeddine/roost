@@ -67,13 +67,13 @@ pub(super) struct ContactRecord {
     pub(super) trust_state: ContactTrustState,
     pub(super) blocked: bool,
     sent_before_acceptance: Vec<SentBeforeAcceptance>,
+    /// The last Grant Update this side sent before acceptance, which doesn't count toward the
+    /// limit.
+    grant_update_before_acceptance: Option<SentBeforeAcceptance>,
     received_before_acceptance: Vec<MessageId>,
     /// Whether the next send first checks the contact's current prekey bundle, since the contact
     /// may have rotated its inbox while blocked.
     pub(super) needs_discovery_key_check: bool,
-    /// Whether a grant for a newer Discovery Key arrived since the last delivery check, so the
-    /// Messages the contact hasn't acknowledged may have gone to a dead inbox.
-    received_newer_grant: bool,
     /// The recovery signaled for the contact's unacknowledged Messages, until none is left or the
     /// contact proves a newer grant or Session.
     recovery: Option<RecoverySignal>,
@@ -93,9 +93,9 @@ impl ContactRecord {
             trust_state: ContactTrustState::Pending,
             blocked: false,
             sent_before_acceptance: Vec::new(),
+            grant_update_before_acceptance: None,
             received_before_acceptance: Vec::new(),
             needs_discovery_key_check: false,
-            received_newer_grant: false,
             recovery: None,
         }
     }
@@ -119,6 +119,7 @@ impl ContactRecord {
             self.trust_state = ContactTrustState::Unverified;
         }
         self.sent_before_acceptance.clear();
+        self.grant_update_before_acceptance = None;
         self.received_before_acceptance.clear();
     }
 
@@ -174,6 +175,18 @@ impl ContactRecord {
         self.sent_before_acceptance
             .push(SentBeforeAcceptance { message_id, grant });
         Ok(())
+    }
+
+    /// Records a Grant Update this side sends before acceptance with the local grant stamped
+    /// `grant`, so its acknowledgment shows the contact holds that grant.
+    ///
+    /// It doesn't count toward the limit, and only the latest one is kept, since an older one
+    /// carries an older grant.
+    pub(super) fn record_grant_update(&mut self, message_id: MessageId, grant: DiscoveryKeyStamp) {
+        self.grant_update_before_acceptance = Some(SentBeforeAcceptance {
+            message_id,
+            grant: Some(grant),
+        });
     }
 
     /// Counts a Message received before acceptance. A MessageID already counted counts once.
@@ -233,8 +246,6 @@ impl ContactRecord {
         if is_newer || completes_current {
             self.discovery_key = Some(grant.discovery_key);
             self.delivery_capability = Some(grant.delivery_capability);
-            // Only a newer Discovery Key replaces a capability Messages may have gone out with.
-            self.received_newer_grant |= is_newer;
             self.recovery = None;
         }
     }
@@ -274,10 +285,16 @@ impl ContactRecord {
         }
     }
 
-    /// Returns whether a grant for a newer Discovery Key arrived since the last call, so the
-    /// contact's unacknowledged Messages may have gone to a dead inbox.
-    pub(super) fn take_received_newer_grant(&mut self) -> bool {
-        std::mem::take(&mut self.received_newer_grant)
+    /// Returns whether the contact granted a Discovery Key newer than the one stamped `sent_to`,
+    /// so a Message sent to that one may have gone to a dead inbox, which the Relay doesn't report.
+    ///
+    /// A newer key known without its grant came with a new Session, and the Messages left behind
+    /// go out on it once the contact replies there.
+    pub(super) fn has_newer_grant_than(&self, sent_to: Option<DiscoveryKeyStamp>) -> bool {
+        self.delivery_capability.is_some()
+            && self.discovery_key.is_some_and(|current| {
+                sent_to.is_some_and(|sent_to| DiscoveryKeyStamp::of(&current) > sent_to)
+            })
     }
 
     /// Returns the peer's Discovery Key and capability, which an established Message needs.
@@ -333,6 +350,7 @@ impl ContactRecord {
         let grant = self
             .sent_before_acceptance
             .iter()
+            .chain(&self.grant_update_before_acceptance)
             .find(|sent| sent.message_id == message_id)
             .and_then(|sent| sent.grant);
         if let Some(stamp) = grant {
@@ -355,6 +373,12 @@ impl ContactRecord {
                 )
             })
             .collect();
+        let grant_update = self.grant_update_before_acceptance.map(|sent| {
+            (
+                *sent.message_id.as_bytes(),
+                sent.grant.map(DiscoveryKeyStamp::to_wire),
+            )
+        });
         let received: Vec<[u8; MESSAGE_ID_LEN]> = self
             .received_before_acceptance
             .iter()
@@ -378,9 +402,9 @@ impl ContactRecord {
             trust_state: self.trust_state,
             blocked: self.blocked,
             sent_before_acceptance: &sent,
+            grant_update_before_acceptance: grant_update,
             received_before_acceptance: &received,
             needs_discovery_key_check: self.needs_discovery_key_check,
-            received_newer_grant: self.received_newer_grant,
             recovery: self.recovery.map(|recovery| {
                 (
                     recovery.signaled_at_millis,
@@ -451,7 +475,6 @@ impl ContactRecord {
             trust_state: wire.trust_state,
             blocked: wire.blocked,
             needs_discovery_key_check: wire.needs_discovery_key_check,
-            received_newer_grant: wire.received_newer_grant,
             recovery: wire
                 .recovery
                 .map(|(signaled_at_millis, progress)| RecoverySignal {
@@ -472,6 +495,12 @@ impl ContactRecord {
                     grant: grant.map(DiscoveryKeyStamp::from_wire),
                 })
                 .collect(),
+            grant_update_before_acceptance: wire.grant_update_before_acceptance.map(
+                |(message_id, grant)| SentBeforeAcceptance {
+                    message_id: MessageId::from_bytes(message_id),
+                    grant: grant.map(DiscoveryKeyStamp::from_wire),
+                },
+            ),
             received_before_acceptance: wire
                 .received_before_acceptance
                 .iter()
@@ -546,9 +575,9 @@ struct ContactRecordWire<'a> {
     trust_state: ContactTrustState,
     blocked: bool,
     sent_before_acceptance: &'a [SentBeforeAcceptanceWire],
+    grant_update_before_acceptance: Option<SentBeforeAcceptanceWire>,
     received_before_acceptance: &'a [[u8; MESSAGE_ID_LEN]],
     needs_discovery_key_check: bool,
-    received_newer_grant: bool,
     recovery: Option<RecoverySignalWire>,
 }
 
@@ -580,12 +609,12 @@ struct DecodedContactRecordWire {
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_MESSAGES_BEFORE_ACCEPTANCE>")]
     sent_before_acceptance: Vec<SentBeforeAcceptanceWire>,
     #[zeroize(skip)]
+    grant_update_before_acceptance: Option<SentBeforeAcceptanceWire>,
+    #[zeroize(skip)]
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_MESSAGES_BEFORE_ACCEPTANCE>")]
     received_before_acceptance: Vec<[u8; MESSAGE_ID_LEN]>,
     #[zeroize(skip)]
     needs_discovery_key_check: bool,
-    #[zeroize(skip)]
-    received_newer_grant: bool,
     #[zeroize(skip)]
     recovery: Option<RecoverySignalWire>,
 }

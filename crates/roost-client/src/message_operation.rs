@@ -266,8 +266,8 @@ pub enum InboundMessageOutcome {
     },
     /// An already accepted encrypted Message. No effects are produced, and its changes are empty.
     Duplicate,
-    /// The Message names a Session this identity doesn't have and carries no handshake, such as
-    /// one it lost. No effects are produced, and its changes are empty.
+    /// The Message names a Session this identity doesn't keep and carries no handshake, such as
+    /// one whose records it lost. No effects are produced, and its changes are empty.
     UnknownSession,
     /// The first Message names a Session this identity deleted, so nothing was created. No
     /// effects are produced, and its changes are empty.

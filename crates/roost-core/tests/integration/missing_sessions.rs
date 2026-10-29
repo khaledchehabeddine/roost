@@ -1,5 +1,6 @@
 //! A send to a contact whose Session records the host lost starts a new Session from a fetched
-//! bundle, and refuses to when the contact isn't accepted.
+//! bundle, and refuses to when the contact isn't accepted. A Message on a Session the records no
+//! longer keep names an unknown Session.
 
 use crate::support::HostCommitError;
 use crate::support::device::{
@@ -97,4 +98,21 @@ fn a_message_to_a_requester_whose_sessions_are_missing_is_refused() {
             MessageOperationError::ProtocolState(ProtocolStateError::ContactNotAccepted)
         ))
     ));
+}
+
+#[test]
+fn a_late_message_on_a_session_the_lost_list_no_longer_keeps_names_an_unknown_session() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let on_its_way = bob.send(&alice, b"sent before alice's new session");
+    // The host keeps the Session's own record but loses the list that keeps it.
+    alice.forget_sessions_with(&bob);
+    send_fetching_a_bundle(&mut alice, &bob, b"after the loss");
+    let before = alice.host.snapshot_bytes();
+
+    assert!(matches!(
+        alice.receive(&on_its_way.message),
+        InboundMessageOutcome::UnknownSession
+    ));
+    assert_eq!(alice.host.snapshot_bytes(), before);
 }

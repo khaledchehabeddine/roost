@@ -197,10 +197,10 @@ impl Messaging {
     /// accepted, since the Relay redelivers it until the contact saves it. The check says instead
     /// when a recovery starts, which encrypts the Messages again on a newer Session, and which
     /// Messages the Relay would have dropped by now. Roost sets the waits: a recovery starts after
-    /// a day without an acknowledgment, or as soon as the contact sends a newer Inbox Grant,
-    /// delivers on a newer Session, or acknowledges a recovery's probe, and once started, comes
-    /// back only after a week or once the contact sends a newer Inbox Grant or starts a new
-    /// Session.
+    /// a day without an acknowledgment, or as soon as the contact sends an Inbox Grant newer than
+    /// the one a waiting Message went to, delivers on a newer Session, or acknowledges a
+    /// recovery's probe, and once started, comes back only after a week or once the contact sends
+    /// a newer Inbox Grant or starts a new Session.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `contact` or `now_millis` is out of range.

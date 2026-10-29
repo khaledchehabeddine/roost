@@ -17,12 +17,13 @@ use super::envelope::{
     validate_sender_identity, verify_recipient_keys,
 };
 use super::grant::{
-    InboxGrant, LocalGrant, MAX_ENCODED_GRANT_LEN, encode_granted_payload, open_granted_payload,
+    DiscoveryKeyStamp, InboxGrant, LocalGrant, MAX_ENCODED_GRANT_LEN, encode_granted_payload,
+    open_granted_payload,
 };
 use super::pending_acknowledgment::{
-    LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, acknowledgment_digest,
-    encode_pending_acknowledgments, evict_sessions, has_seen_acknowledgment,
-    load_pending_acknowledgments,
+    LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, StrandedMessage,
+    acknowledgment_digest, decode_pending_acknowledgments, encode_pending_acknowledgments,
+    evict_sessions, has_seen_acknowledgment, load_pending_acknowledgments,
 };
 use super::session::{
     LoadedSession, PeerSessions, PendingHandshake, SignedPreKeyUse, Starter, encode_peer_sessions,
@@ -705,7 +706,10 @@ impl Encrypting {
             // A Grant Update carries no content, so it doesn't count toward the limit.
             (SendIntent::GrantUpdate, Starter::Local) => {
                 match self.payload_kind(contact.receives_grant(starter, local_grant)) {
-                    Some(payload_kind) => payload_kind,
+                    Some(payload_kind) => {
+                        contact.record_grant_update(self.message_id, local_grant);
+                        payload_kind
+                    }
                     None => return Ok(MessageEncryptionStep::NothingToSend),
                 }
             }
@@ -862,8 +866,12 @@ impl Encrypting {
         let Some(payload_kind) = self.payload_kind(carries_grant) else {
             return Ok(MessageEncryptionStep::NothingToSend);
         };
-        if !contact.is_accepted() && counts_toward_limit(payload_kind) {
-            contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
+        if !contact.is_accepted() {
+            if counts_toward_limit(payload_kind) {
+                contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
+            } else {
+                contact.record_grant_update(self.message_id, local_grant);
+            }
         }
         let (state, session_id, handshake) =
             initiate_handshake(rng, &bundle.identity_key, &bundle.bundle)
@@ -1033,10 +1041,35 @@ impl Encrypting {
                     first_sent_at_millis: self.sent_at_millis,
                     payload_kind,
                     grant: payload_kind.carries_grant().then(|| grant.stamp()),
+                    sent_to: contact.discovery_key.as_ref().map(DiscoveryKeyStamp::of),
+                    held: false,
                 },
             )?;
         }
         let snapshot = self.reads.snapshot();
+        let (deletions, stranded) = match &started {
+            Some((_, evicted)) => evict_sessions(snapshot, evicted, limits)?,
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut undelivered = Vec::new();
+        for StrandedMessage {
+            message_id,
+            mut entry,
+        } in stranded
+        {
+            // A resend's new copy waits on the new Session instead.
+            if message_id == self.message_id {
+                continue;
+            }
+            // The rest of a recovery wait behind its probe on the probe's Session, except Grant
+            // Updates, which recovered Messages replace.
+            if self.replaces.is_some() && entry.payload_kind != PayloadKind::GrantUpdate {
+                entry.held = true;
+                pending.record(message_id, entry)?;
+            } else {
+                undelivered.push(message_id);
+            }
+        }
         let mut updates = vec![
             session_update(
                 snapshot,
@@ -1054,7 +1087,6 @@ impl Encrypting {
         ];
         updates.extend(contact_update(snapshot, &contact, limits)?);
         let mut evicted = Vec::new();
-        let mut undelivered = Vec::new();
         if let Some((peer_sessions, started_evicted)) = started {
             let peer_address = peer_sessions_address(self.recipient);
             updates.push(
@@ -1064,17 +1096,15 @@ impl Encrypting {
                 )
                 .with_snapshot(snapshot),
             );
-            let (deletions, stranded) = evict_sessions(snapshot, &started_evicted, limits)?;
             updates.extend(deletions);
-            // A resend's new copy waits on the new Session instead.
-            undelivered = stranded
-                .into_iter()
-                .filter(|message_id| *message_id != self.message_id)
-                .collect();
             evicted = started_evicted;
         }
-        // A Session this send evicts takes its copy with it.
-        if let Some(replaced) = self.replaces.filter(|replaced| !evicted.contains(replaced)) {
+        // A Session this send evicts takes its copy with it, and a held copy on this Session was
+        // replaced above.
+        if let Some(replaced) = self
+            .replaces
+            .filter(|replaced| *replaced != session_id && !evicted.contains(replaced))
+        {
             let address = pending_acknowledgment_address(replaced);
             let mut replaced_pending = load_pending_acknowledgments(snapshot, &address, limits)?;
             replaced_pending.pending.remove(self.message_id.as_bytes());
@@ -1143,6 +1173,7 @@ enum DecryptionPhase {
     DeduplicationRequested,
     SessionRequested(Box<Opened>),
     PeerRequested(Box<KnownSession>),
+    OtherSessionsRequested(Box<UnmatchedAcknowledgment>),
     AdmissionRequested(Box<FirstMessage>),
     FirstMessagePeerRequested(Box<AcceptedFirstMessage>),
     FirstMessageCurrentRequested(Box<AcceptedFirstMessage>, PeerSessions),
@@ -1164,6 +1195,14 @@ struct KnownSession {
     peer_identity_key: ContactIdentityKey,
     state: Box<RatchetState>,
     pending_handshake: Option<PendingHandshake>,
+}
+
+// An authenticated acknowledgment that matched nothing on its own Session, waiting for the
+// Pending Acknowledgments of the peer's other Sessions.
+struct UnmatchedAcknowledgment {
+    result: Box<AcknowledgmentResult>,
+    updates: Vec<ProtocolStateUpdate>,
+    others: Vec<SessionId>,
 }
 
 // A first Message whose signed prekey needs proof of admission.
@@ -1323,6 +1362,7 @@ impl Decrypting {
             DecryptionPhase::DeduplicationRequested => self.open(rng),
             DecryptionPhase::SessionRequested(opened) => self.load_session(rng, *opened),
             DecryptionPhase::PeerRequested(known) => self.authenticate(rng, *known),
+            DecryptionPhase::OtherSessionsRequested(unmatched) => self.match_elsewhere(*unmatched),
             DecryptionPhase::AdmissionRequested(first) => {
                 if first.admitted {
                     let FirstMessage {
@@ -1699,18 +1739,17 @@ impl Decrypting {
         if let Some(grant) = grant {
             contact.record_grant(grant);
         }
+        // Requests that cross count as both consents, even during a block, which only hides them.
+        if !created && local_asked {
+            contact.accept();
+        }
         let delivered = if contact.blocked {
             Some(Delivered::Blocked)
         } else if created {
             contact.count_received(message_id);
             Some(Delivered::ContactRequest)
-        } else if contact.is_accepted() {
-            Some(Delivered::Accepted)
-        } else if local_asked {
-            // Requests that cross count as both consents.
-            contact.accept();
-            Some(Delivered::Accepted)
-        } else if !counts_toward_limit(payload_kind)
+        } else if contact.is_accepted()
+            || !counts_toward_limit(payload_kind)
             || contact.count_received(message_id) == ReceivedCount::WithinLimit
         {
             Some(Delivered::Accepted)
@@ -1740,8 +1779,12 @@ impl Decrypting {
             deduplication_update(snapshot, &deduplication, limits)?,
         ];
         updates.extend(contact_update(snapshot, &contact, limits)?);
-        let (deletions, undelivered) = evict_sessions(snapshot, &evicted, limits)?;
+        let (deletions, stranded) = evict_sessions(snapshot, &evicted, limits)?;
         updates.extend(deletions);
+        let undelivered = stranded
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect();
         let Some(delivered) = delivered else {
             updates.insert(
                 0,
@@ -1808,6 +1851,19 @@ impl Decrypting {
             pending_handshake,
         } = known;
         let payload_kind = message.metadata.payload_kind;
+        // A Session the peer's list doesn't keep, such as after the host lost the list, is as
+        // unknown as one whose record is gone.
+        let Some((sessions, starter)) = load_peer_sessions(
+            self.reads.snapshot(),
+            &peer_sessions_address(peer_identity_key),
+            limits,
+        )?
+        .and_then(|sessions| {
+            let starter = sessions.starter(session_id)?;
+            Some((sessions, starter))
+        }) else {
+            return Ok(unchanged(InboundMessageOutcome::UnknownSession));
+        };
         let decoded = message.decrypt(rng, &mut state, limits)?;
         authenticate_session_message(
             &decoded,
@@ -1832,13 +1888,6 @@ impl Decrypting {
             .delivery_update(snapshot, session_id, peer_identity_key)?
             .into_iter()
             .collect();
-        let peer_address = peer_sessions_address(peer_identity_key);
-        // The delivery update already refused a Session the peer's list doesn't keep.
-        let starter = load_peer_sessions(snapshot, &peer_address, limits)?
-            .and_then(|sessions| sessions.starter(session_id))
-            .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-                address: peer_address,
-            })?;
         let sender = decoded.sender_identity.public_identity_key()?;
         let (grant, plaintext) = open_payload(payload_kind, decoded.plaintext, &sender)?;
         if let Some(grant) = grant {
@@ -1890,14 +1939,36 @@ impl Decrypting {
                 acknowledged_message_id,
                 sender_identity: decoded.sender_identity,
             });
-            return Ok(MessageDecryptionStep::Ready {
-                outcome: if matched.is_some() {
-                    InboundMessageOutcome::AcknowledgmentMatched(result)
-                } else {
-                    InboundMessageOutcome::AcknowledgmentUnmatched(result)
-                },
-                changes: changes(&self.reads, updates),
-            });
+            // A recovery moves a Message's wait to the Session of its new copy, while the contact
+            // may still acknowledge the original.
+            let others: Vec<SessionId> = sessions
+                .session_ids()
+                .filter(|other| *other != session_id)
+                .collect();
+            if matched.is_some() || others.is_empty() {
+                return Ok(MessageDecryptionStep::Ready {
+                    outcome: if matched.is_some() {
+                        InboundMessageOutcome::AcknowledgmentMatched(result)
+                    } else {
+                        InboundMessageOutcome::AcknowledgmentUnmatched(result)
+                    },
+                    changes: changes(&self.reads, updates),
+                });
+            }
+            let addresses = others
+                .iter()
+                .copied()
+                .map(pending_acknowledgment_address)
+                .collect();
+            self.phase =
+                DecryptionPhase::OtherSessionsRequested(Box::new(UnmatchedAcknowledgment {
+                    result,
+                    updates,
+                    others,
+                }));
+            return Ok(MessageDecryptionStep::NeedsState(
+                self.reads.request(addresses),
+            ));
         }
         // Only the asked side accepts, on the Session the requester started.
         if payload_kind == PayloadKind::ContactAcceptance
@@ -1961,6 +2032,45 @@ impl Decrypting {
             },
             route,
         )
+    }
+
+    // Clears the acknowledged Message from whichever of the peer's other Sessions it waits on. That
+    // copy isn't the one acknowledged, so the grant it carried still counts as unconfirmed.
+    fn match_elsewhere(
+        &mut self,
+        unmatched: UnmatchedAcknowledgment,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let limits = self.engine.limits;
+        let snapshot = self.reads.snapshot();
+        let UnmatchedAcknowledgment {
+            result,
+            mut updates,
+            others,
+        } = unmatched;
+        for session_id in others {
+            let address = pending_acknowledgment_address(session_id);
+            let Some(blob) = snapshot.get(&address) else {
+                continue;
+            };
+            let mut pending = decode_pending_acknowledgments(&address, blob, limits)?;
+            if pending
+                .pending
+                .remove(result.acknowledged_message_id.as_bytes())
+                .is_some()
+            {
+                updates.push(recovery::pending_update(
+                    snapshot, session_id, &pending, limits,
+                )?);
+                return Ok(MessageDecryptionStep::Ready {
+                    outcome: InboundMessageOutcome::AcknowledgmentMatched(result),
+                    changes: changes(&self.reads, updates),
+                });
+            }
+        }
+        Ok(MessageDecryptionStep::Ready {
+            outcome: InboundMessageOutcome::AcknowledgmentUnmatched(result),
+            changes: changes(&self.reads, updates),
+        })
     }
 
     // Returns whether a Message from `contact` on a Session `starter` started gets an

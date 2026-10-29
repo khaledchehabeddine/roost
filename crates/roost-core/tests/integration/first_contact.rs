@@ -305,6 +305,41 @@ fn a_request_that_crosses_one_sent_from_a_newer_bundle_accepts_both_sides() {
 }
 
 #[test]
+fn a_request_that_crosses_during_a_block_accepts_both_sides_after_the_unblock() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let mut bob = Device::new(&relay, 0xb0);
+    alice.request(&bob, b"hi bob");
+    alice.block(bob.identity_key());
+    // Bob hasn't seen Alice's request, and asks her through her new link.
+    let from_bob = bob.request(&alice, b"hi alice");
+
+    // The block hides Bob's request but keeps his consent.
+    assert!(matches!(
+        alice.receive(&from_bob.message),
+        InboundMessageOutcome::Blocked(_)
+    ));
+    assert_eq!(
+        alice.contact(&bob).unwrap().trust_state,
+        ContactTrustState::Unverified
+    );
+    alice.unblock(bob.identity_key());
+    let after = alice.send_fetching_a_bundle(&bob, b"after the unblock", Intent::Message);
+    accepted(bob.receive(&after.message));
+
+    assert_eq!(
+        bob.contact(&alice).unwrap().trust_state,
+        ContactTrustState::Unverified
+    );
+    // Bob's Messages past the limit before acceptance still reach Alice.
+    for plaintext in [&b"one"[..], b"two", b"three", b"four"] {
+        let message = bob.send(&alice, plaintext);
+        let received = accepted(alice.receive(&message.message));
+        assert_eq!(received.plaintext.as_slice(), plaintext);
+    }
+}
+
+#[test]
 fn a_request_restarted_after_the_peer_asked_becomes_an_acceptance() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);

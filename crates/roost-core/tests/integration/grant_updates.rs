@@ -124,6 +124,30 @@ fn a_requester_sends_grant_updates_outside_the_limit_so_the_acceptance_reaches_i
 }
 
 #[test]
+fn a_requesters_grant_update_the_asked_side_acknowledged_stops_the_grant() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    // Bob replies, so he acknowledges what Alice sends before he accepts.
+    alice.receive(&bob.send(&alice, b"who is this?").message);
+    alice.rotate_inbox();
+    let update = alice.send_grant_update(&bob);
+    let acknowledgment = grant_update(bob.receive(&update.message))
+        .acknowledgment
+        .unwrap();
+    alice.receive(&acknowledgment);
+    let before = alice.host.snapshot_bytes();
+
+    let again = encrypt_grant_update(&mut alice, &bob).unwrap();
+
+    assert!(matches!(again, Encrypted::NothingToSend));
+    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(
+        alice.send(&bob, b"after the update").payload_kind,
+        PayloadKind::EncryptedText
+    );
+}
+
+#[test]
 fn a_grant_update_cannot_start_a_contact() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);

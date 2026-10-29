@@ -45,7 +45,7 @@ use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-const PROTOCOL_STATE_BLOB_VERSION: u8 = 4;
+const PROTOCOL_STATE_BLOB_VERSION: u8 = 5;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 1;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
 // Deduplication and acknowledgment digests keep this many bytes of their hash.
@@ -606,8 +606,8 @@ pub enum InboundMessageOutcome {
     GrantUpdate(Box<GrantUpdateResult>),
     /// The Message matched an already-accepted encrypted byte sequence.
     Duplicate,
-    /// The Message names a Session this identity doesn't have and carries no handshake, such as
-    /// one it lost, and nothing changed.
+    /// The Message names a Session this identity doesn't keep and carries no handshake, such as
+    /// one whose records it lost, and nothing changed.
     UnknownSession,
     /// The first Message names a Session this identity deleted, so nothing was created.
     DeletedSession,

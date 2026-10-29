@@ -4,6 +4,7 @@
 use crate::support::HostCommitError;
 use crate::support::device::{
     Device, DeviceError, Intent, Recovered, Relay, Route, SentMessage, befriended,
+    established_verifier,
 };
 use crate::support::{CREATED_AT_SECS, accepted};
 use roost_core::{
@@ -131,6 +132,27 @@ fn a_newer_grant_recovers_each_unacknowledged_message_on_a_new_session_to_the_ne
         accepted(bob.receive(&probe.message)).plaintext.as_slice(),
         b"sent to the old inbox"
     );
+}
+
+#[test]
+fn a_message_sent_to_the_new_inbox_after_a_newer_grant_signals_nothing_within_a_day() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let rotation = bob.rotate_inbox();
+    let update = bob.send_grant_update(&alice);
+    let hello = bob.send(&alice, b"hello");
+    // Alice has nothing unacknowledged, so the app runs no check after the update.
+    alice.receive(&update.message);
+    let sent = alice.send(&bob, b"to your new inbox");
+    assert_eq!(
+        established_verifier(&sent.destination),
+        rotation.recipient_delivery_verifier
+    );
+    accepted(alice.receive(&hello.message));
+
+    let checked = alice.check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS);
+
+    assert!(!checked.starts_recovery);
 }
 
 // Returns the MessageIDs `device` still waits to have acknowledged on `session_id`.
@@ -370,6 +392,55 @@ fn a_probe_that_evicts_its_own_session_isnt_listed_as_undelivered() {
 }
 
 #[test]
+fn messages_held_behind_a_probe_whose_session_evicts_theirs_go_out_once_it_is_acknowledged() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    let second = alice.send(&bob, b"second");
+    // Each rotation makes Alice's next send start a Session, until hers with both Messages is the
+    // oldest one kept.
+    for _ in 0..5 {
+        bob.rotate_inbox();
+        let mut outgoing = alice.outgoing(&bob, b"to the newer inbox");
+        outgoing.prekey_bundle = Some(bob.bundle());
+        alice.send_with(outgoing, Intent::Message);
+    }
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let Recovered::Resent(probe) = alice.observe_recovery(&bob, Some(bob.bundle())).unwrap() else {
+        panic!("expected the probe");
+    };
+    assert_eq!(probe.result.message_id, first.message_id);
+    assert!(probe.changes.undelivered().is_empty());
+    alice
+        .host
+        .commit_sent(&probe.result, probe.changes)
+        .unwrap();
+    let received = accepted(bob.receive(&probe.result.message));
+    alice.receive(&received.acknowledgment.unwrap());
+
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let resent = alice.recover(&bob, None).committed();
+
+    assert_eq!(resent.message_id, second.message_id);
+    assert_eq!(resent.session_id, probe.result.session_id);
+    let received = accepted(bob.receive(&resent.message));
+    assert_eq!(received.plaintext.as_slice(), b"second");
+    assert!(matches!(
+        alice.receive(&received.acknowledgment.unwrap()),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    assert!(waiting_on(&alice, resent.session_id).is_empty());
+}
+
+#[test]
 fn a_newer_session_from_the_contact_during_the_fetch_wins_over_the_bundle() {
     let relay = Relay::new();
     let (mut alice, mut bob, _) = unanswered(&relay);
@@ -461,15 +532,32 @@ fn an_unneeded_recovery_reaches_the_contact_twice_under_one_message_id() {
     assert_eq!(original.message_id, sent.message_id);
     assert_eq!(copy.message_id, sent.message_id);
     assert_eq!(original.plaintext, copy.plaintext);
+    // Either copy's acknowledgment ends the wait, so the later one matches nothing.
     assert!(matches!(
         alice.receive(&original.acknowledgment.unwrap()),
-        InboundMessageOutcome::AcknowledgmentUnmatched(_)
+        InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
     assert!(matches!(
         alice.receive(&copy.acknowledgment.unwrap()),
-        InboundMessageOutcome::AcknowledgmentMatched(_)
+        InboundMessageOutcome::AcknowledgmentUnmatched(_)
     ));
     assert!(matches!(alice.recover(&bob, None), Recovered::Finished));
+}
+
+#[test]
+fn an_acknowledgment_of_the_original_copy_ends_the_wait_after_a_lost_probe() {
+    let relay = Relay::new();
+    let (mut alice, mut bob, sent) = unanswered(&relay);
+    // The probe is lost, but Bob was only offline and gets the original.
+    alice.recover(&bob, Some(bob.bundle())).committed();
+    let acknowledgment = accepted(bob.receive(&sent.message)).acknowledgment.unwrap();
+    alice.receive(&acknowledgment);
+
+    let recheck = alice.check_deliveries(&bob, sent_at_millis() + 9 * DAY_MILLIS);
+    alice.check_deliveries(&bob, sent_at_millis() + 31 * DAY_MILLIS);
+
+    assert!(!recheck.starts_recovery);
+    assert!(alice.host.undelivered().is_empty());
 }
 
 #[test]
