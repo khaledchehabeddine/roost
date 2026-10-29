@@ -1,4 +1,10 @@
 //! Flows between Devices through roost-core's public API, committed through a test host.
+#![allow(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unwrap_used,
+    reason = "clippy.toml's test allowance misses these tests' helper functions, which panic on an unexpected result too"
+)]
 
 mod authenticated_sessions;
 mod backup_restore;
