@@ -22,8 +22,8 @@ use super::grant::{
 };
 use super::pending_acknowledgment::{
     LoadedPendingAcknowledgment, LoadedPendingAcknowledgments, StrandedMessage,
-    acknowledgment_digest, encode_pending_acknowledgments, evict_sessions, has_seen_acknowledgment,
-    load_pending_acknowledgments,
+    acknowledgment_digest, decode_pending_acknowledgments, encode_pending_acknowledgments,
+    evict_sessions, has_seen_acknowledgment, load_pending_acknowledgments,
 };
 use super::session::{
     LoadedSession, PeerSessions, PendingHandshake, SignedPreKeyUse, Starter, encode_peer_sessions,
@@ -1173,6 +1173,7 @@ enum DecryptionPhase {
     DeduplicationRequested,
     SessionRequested(Box<Opened>),
     PeerRequested(Box<KnownSession>),
+    OtherSessionsRequested(Box<UnmatchedAcknowledgment>),
     AdmissionRequested(Box<FirstMessage>),
     FirstMessagePeerRequested(Box<AcceptedFirstMessage>),
     FirstMessageCurrentRequested(Box<AcceptedFirstMessage>, PeerSessions),
@@ -1194,6 +1195,14 @@ struct KnownSession {
     peer_identity_key: ContactIdentityKey,
     state: Box<RatchetState>,
     pending_handshake: Option<PendingHandshake>,
+}
+
+// An authenticated acknowledgment that matched nothing on its own Session, waiting for the
+// Pending Acknowledgments of the peer's other Sessions.
+struct UnmatchedAcknowledgment {
+    result: Box<AcknowledgmentResult>,
+    updates: Vec<ProtocolStateUpdate>,
+    others: Vec<SessionId>,
 }
 
 // A first Message whose signed prekey needs proof of admission.
@@ -1353,6 +1362,7 @@ impl Decrypting {
             DecryptionPhase::DeduplicationRequested => self.open(rng),
             DecryptionPhase::SessionRequested(opened) => self.load_session(rng, *opened),
             DecryptionPhase::PeerRequested(known) => self.authenticate(rng, *known),
+            DecryptionPhase::OtherSessionsRequested(unmatched) => self.match_elsewhere(*unmatched),
             DecryptionPhase::AdmissionRequested(first) => {
                 if first.admitted {
                     let FirstMessage {
@@ -1868,7 +1878,9 @@ impl Decrypting {
             .collect();
         let peer_address = peer_sessions_address(peer_identity_key);
         // The delivery update already refused a Session the peer's list doesn't keep.
-        let starter = load_peer_sessions(snapshot, &peer_address, limits)?
+        let sessions = load_peer_sessions(snapshot, &peer_address, limits)?;
+        let starter = sessions
+            .as_ref()
             .and_then(|sessions| sessions.starter(session_id))
             .ok_or_else(|| ProtocolStateError::MissingRequiredState {
                 address: peer_address,
@@ -1924,14 +1936,37 @@ impl Decrypting {
                 acknowledged_message_id,
                 sender_identity: decoded.sender_identity,
             });
-            return Ok(MessageDecryptionStep::Ready {
-                outcome: if matched.is_some() {
-                    InboundMessageOutcome::AcknowledgmentMatched(result)
-                } else {
-                    InboundMessageOutcome::AcknowledgmentUnmatched(result)
-                },
-                changes: changes(&self.reads, updates),
-            });
+            // A recovery moves a Message's wait to the Session of its new copy, while the contact
+            // may still acknowledge the original.
+            let others: Vec<SessionId> = sessions
+                .iter()
+                .flat_map(PeerSessions::session_ids)
+                .filter(|other| *other != session_id)
+                .collect();
+            if matched.is_some() || others.is_empty() {
+                return Ok(MessageDecryptionStep::Ready {
+                    outcome: if matched.is_some() {
+                        InboundMessageOutcome::AcknowledgmentMatched(result)
+                    } else {
+                        InboundMessageOutcome::AcknowledgmentUnmatched(result)
+                    },
+                    changes: changes(&self.reads, updates),
+                });
+            }
+            let addresses = others
+                .iter()
+                .copied()
+                .map(pending_acknowledgment_address)
+                .collect();
+            self.phase =
+                DecryptionPhase::OtherSessionsRequested(Box::new(UnmatchedAcknowledgment {
+                    result,
+                    updates,
+                    others,
+                }));
+            return Ok(MessageDecryptionStep::NeedsState(
+                self.reads.request(addresses),
+            ));
         }
         // Only the asked side accepts, on the Session the requester started.
         if payload_kind == PayloadKind::ContactAcceptance
@@ -1995,6 +2030,45 @@ impl Decrypting {
             },
             route,
         )
+    }
+
+    // Clears the acknowledged Message from whichever of the peer's other Sessions it waits on. That
+    // copy isn't the one acknowledged, so the grant it carried still counts as unconfirmed.
+    fn match_elsewhere(
+        &mut self,
+        unmatched: UnmatchedAcknowledgment,
+    ) -> Result<MessageDecryptionStep, MessageOperationError> {
+        let limits = self.engine.limits;
+        let snapshot = self.reads.snapshot();
+        let UnmatchedAcknowledgment {
+            result,
+            mut updates,
+            others,
+        } = unmatched;
+        for session_id in others {
+            let address = pending_acknowledgment_address(session_id);
+            let Some(blob) = snapshot.get(&address) else {
+                continue;
+            };
+            let mut pending = decode_pending_acknowledgments(&address, blob, limits)?;
+            if pending
+                .pending
+                .remove(result.acknowledged_message_id.as_bytes())
+                .is_some()
+            {
+                updates.push(recovery::pending_update(
+                    snapshot, session_id, &pending, limits,
+                )?);
+                return Ok(MessageDecryptionStep::Ready {
+                    outcome: InboundMessageOutcome::AcknowledgmentMatched(result),
+                    changes: changes(&self.reads, updates),
+                });
+            }
+        }
+        Ok(MessageDecryptionStep::Ready {
+            outcome: InboundMessageOutcome::AcknowledgmentUnmatched(result),
+            changes: changes(&self.reads, updates),
+        })
     }
 
     // Returns whether a Message from `contact` on a Session `starter` started gets an

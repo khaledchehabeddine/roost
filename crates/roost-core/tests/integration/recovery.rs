@@ -532,15 +532,32 @@ fn an_unneeded_recovery_reaches_the_contact_twice_under_one_message_id() {
     assert_eq!(original.message_id, sent.message_id);
     assert_eq!(copy.message_id, sent.message_id);
     assert_eq!(original.plaintext, copy.plaintext);
+    // Either copy's acknowledgment ends the wait, so the later one matches nothing.
     assert!(matches!(
         alice.receive(&original.acknowledgment.unwrap()),
-        InboundMessageOutcome::AcknowledgmentUnmatched(_)
+        InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
     assert!(matches!(
         alice.receive(&copy.acknowledgment.unwrap()),
-        InboundMessageOutcome::AcknowledgmentMatched(_)
+        InboundMessageOutcome::AcknowledgmentUnmatched(_)
     ));
     assert!(matches!(alice.recover(&bob, None), Recovered::Finished));
+}
+
+#[test]
+fn an_acknowledgment_of_the_original_copy_ends_the_wait_after_a_lost_probe() {
+    let relay = Relay::new();
+    let (mut alice, mut bob, sent) = unanswered(&relay);
+    // The probe is lost, but Bob was only offline and gets the original.
+    alice.recover(&bob, Some(bob.bundle())).committed();
+    let acknowledgment = accepted(bob.receive(&sent.message)).acknowledgment.unwrap();
+    alice.receive(&acknowledgment);
+
+    let recheck = alice.check_deliveries(&bob, sent_at_millis() + 9 * DAY_MILLIS);
+    alice.check_deliveries(&bob, sent_at_millis() + 31 * DAY_MILLIS);
+
+    assert!(!recheck.starts_recovery);
+    assert!(alice.host.undelivered().is_empty());
 }
 
 #[test]
