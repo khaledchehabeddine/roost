@@ -1,4 +1,5 @@
 //! Flows between Devices through roost-core's public API, committed through a test host.
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 mod authenticated_sessions;
 mod backup_restore;
