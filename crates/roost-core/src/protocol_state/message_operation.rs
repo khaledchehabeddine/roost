@@ -651,7 +651,7 @@ impl Encrypting {
         let local_grant = self.sender.grant().stamp();
         let (mut contact, sessions) = match (contact, sessions) {
             // With no Session left, such as after a restore, nothing shows which earlier Messages
-            // the contact received, so the request counts from zero (ADR 0089).
+            // the contact received, so the request counts from zero.
             (Some(mut contact), None) if self.intent == SendIntent::Request => {
                 contact.forget_sent_before_acceptance();
                 return self.start_session(rng, Some(contact));
