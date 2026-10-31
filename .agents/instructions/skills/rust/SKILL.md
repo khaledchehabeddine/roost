@@ -5,7 +5,7 @@ Read every reference before writing or reviewing Rust.
 ## References
 
 - [API](references/api.md): types, visibility, error types, and stored data.
-- [Cargo](references/cargo.md): dependencies and crate settings.
+- [Cargo](references/cargo.md): dependencies, crate settings, and builds.
 - [Cryptography](references/cryptography.md): primitives, labels, secrets, untrusted input, and protocol state.
 - [Documentation](references/documentation.md): comments, host API documentation, and crate and module documentation.
 - [Implementation](references/implementation.md): how function bodies check input, change state, and return errors.
