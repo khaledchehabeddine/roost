@@ -177,6 +177,11 @@ impl ContactRecord {
         Ok(())
     }
 
+    /// Forgets the Messages this side sent before acceptance, so the limit counts from zero.
+    pub(super) fn forget_sent_before_acceptance(&mut self) {
+        self.sent_before_acceptance.clear();
+    }
+
     /// Records a Grant Update this side sends before acceptance with the local grant stamped
     /// `grant`, so its acknowledgment shows the contact holds that grant.
     ///
