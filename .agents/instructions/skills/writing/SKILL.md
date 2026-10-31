@@ -8,6 +8,7 @@ Make each sentence clear on the first read. These rules don't apply to names or 
 - Say exactly what happens, such as "a failed update leaves the earlier updates applied", not "updates are handled safely".
 - Cut a closing phrase that names a vague benefit, such as "ensuring security".
 - State a point directly, such as "it also authenticates messages", not "it doesn't just encrypt messages, it authenticates them".
+- Give a reason in agent instructions only when it changes what the agent does.
 
 ## Sentences
 
