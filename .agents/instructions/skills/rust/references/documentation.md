@@ -2,13 +2,13 @@
 
 UniFFI copies exported items' comments into the Swift and Kotlin bindings, so host developers read them without the Rust code.
 
-## Doc Comments
+## Comments
 
-- Start each doc with a one-sentence summary in its own paragraph, opening with a third-person verb for a function, such as "Returns", or a noun phrase for a type.
-- Refer to other items with rustdoc links, such as ``[`ExampleError::NotFound`]``.
-- Make each doc stand on its own, without citing requirement IDs, ADRs, or other project documents.
-- Add an example only for a flow of several calls, and put it on their type, not on each method.
+- Make each comment stand on its own, without citing requirement IDs, ADRs, or other project documents.
+- Start each documentation comment with a one-sentence summary in its own paragraph, opening with a third-person verb for a function, such as "Returns", or a noun phrase for a type.
 - After the summary, add only what the signature can't show, such as a required order, changes that remain after a failure, or the reason for a surprising choice.
+- Refer to other items with rustdoc links, such as ``[`ExampleError::NotFound`]``.
+- Add an example only for a flow of several calls, and put it on their type, not on each method.
 
 ### ❌ Bad
 
@@ -46,7 +46,7 @@ impl ExampleState {
 
 - Leave out what a Swift or Kotlin developer wouldn't know, such as Rust types, internal crate names, protocol shorthand, and wire formats.
 - On each method, say what the host must persist and what it must check itself.
-- Explain what Roost and the host each own on the type hosts create first, since crate docs don't reach the bindings.
+- Explain what Roost and the host each own on the type hosts create first, since crate documentation doesn't reach the bindings.
 - Write examples as one `swift` block and one `kotlin` block, never Rust.
 - Write `# Errors` only on host API methods, with a bullet for each error the host can act on, starting with its link.
 
@@ -84,5 +84,5 @@ impl ExampleClient {
 
 ## Crates and Modules
 
-- Give a module `//!` docs only when its file name doesn't explain its purpose.
+- Give a module `//!` documentation only when its file name doesn't explain its purpose.
 - In each `lib.rs`, follow the summary with what the crate handles, then its feature flags.
