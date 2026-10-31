@@ -18,3 +18,7 @@ Every dependency ships inside the app, so each new one is more code to trust and
 
 - Put a crate setting, such as the edition, in the workspace `Cargo.toml` only when every crate uses the same value, and inherit it in each crate.
 - Make every crate inherit the workspace lints.
+
+## Builds
+
+- Leave `CARGO_TARGET_DIR` unset.
