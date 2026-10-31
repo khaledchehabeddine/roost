@@ -38,11 +38,14 @@ This list describes what Roost does today. Each feature gets one to three senten
 - **Ask for prekey bundles.** If Roost needs a peer's prekey bundle to send a Message, it ends the attempt and asks the app for one. Roost uses the bundle on the next attempt with the same draft.
 - **Bind Messages to their route.** Before sealing a Message, Roost returns its Message Destination and asks for a Transport Binding that reaches it. Roost authenticates the binding with the Message but never stores or sends it. Opening the Message needs the same binding.
 - **Identify Messages.** Roost creates a random MessageID for each draft. A Recovery resends a Message under its original MessageID. On receive, Roost returns a resent copy like any other Message, with the original MessageID.
+- **Drop repeated deliveries.** Roost drops a recent repeat of a received Message before it reaches the Session.
+- **Limit resource use.** A Message holds up to about 64 KiB of content. Roost refuses oversized Messages, Protocol State Blobs, and Sender Certificates, and refuses to keep more keys for out-of-order Messages or more Pending Acknowledgments than its limits allow. Lists of recent items, such as the Deduplication Set and older Sessions, drop their oldest entry instead.
+
+## Sealed Sender
+
 - **Hide the sender.** Every Message, including acknowledgments, travels in the Sealed Sender Frame, which shows only what routing needs. Roost pads the content to the next power-of-two size.
 - **Authenticate the sender.** A First Message proves its sender holds their Identity Key, with a proof only the recipient can check. Each Established Message carries the sender's signature over its Message Transcript.
 - **Check Sender Certificates.** Roost checks the Sender Certificate of every Message it opens against the trusted domain keys, Relay Domain, revoked Identity Keys, and time the app passes. It refuses the certificate when the app reports its revocation data as unavailable. Roost also runs this check on any Sender Certificate the app passes.
-- **Drop repeated deliveries.** Roost drops a recent repeat of a received Message before it reaches the Session.
-- **Limit resource use.** A Message holds up to about 64 KiB of content. Roost refuses oversized Messages, Protocol State Blobs, and Sender Certificates, and refuses to keep more keys for out-of-order Messages or more Pending Acknowledgments than its limits allow. Lists of recent items, such as the Deduplication Set and older Sessions, drop their oldest entry instead.
 
 ## Delivery
 
@@ -55,7 +58,7 @@ This list describes what Roost does today. Each feature gets one to three senten
 
 - **Back up and restore an Identity.** A passphrase-encrypted Identity Backup moves the Identity Key and current Discovery Key to a new Device. Contacts see the restored Identity as the same one. After a restore, Roost works from the contact records alone, with their Trust State and blocks.
 - **Reconnect contacts after a restore.** Roost returns no publication and creates no prekeys for the restored Identity until its next Inbox Rotation. After that rotation, a Grant Update or Message to an accepted contact starts a new Session. A contact this side asked that hasn't accepted needs a new Contact Request, which restarts the count of Messages before acceptance.
-- **Accept requests after a restore.** Accepting a request the backup kept sends a new Contact Request, which accepts both sides. Roost refuses it for a blocked contact or one that never wrote. Because a record doesn't show which side asked, Roost allows it for any other contact that wrote.
+- **Accept Contact Requests after a restore.** Accepting a request the backup kept sends a new Contact Request, which accepts both sides. Roost refuses it for a blocked contact or one that never wrote. Because a record doesn't show which side asked, Roost allows it for any other contact that wrote.
 
 ## Algorithms and Packages
 
