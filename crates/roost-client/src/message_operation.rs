@@ -556,8 +556,9 @@ impl Contacts {
     /// A new contact needs a Session, so without a usable bundle in the draft the operation ends
     /// with [`MessageEncryptionStep::NeedsPreKeyBundle`]. Each restart reads fresh state: when the
     /// contact asked meanwhile, the request becomes a Contact Acceptance, and when the contact
-    /// already accepted, an ordinary Message. The draft keeps one MessageID across restarts, and a
-    /// request counts toward the limit on Messages before acceptance.
+    /// already accepted, an ordinary Message. The draft keeps one MessageID across restarts. A
+    /// request counts toward the limit on Messages before acceptance, and once a restore drops the
+    /// contact's Sessions, the count starts over with the next request.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or bundle is malformed, or

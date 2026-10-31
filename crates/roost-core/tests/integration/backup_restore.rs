@@ -274,3 +274,69 @@ fn asking_again_accepts_a_restored_requester_whose_acceptance_was_lost() {
         b"me too"
     );
 }
+
+#[test]
+fn asking_again_accepts_a_restored_requester_that_used_up_the_limit() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    for follow_up in [b"hello?".as_slice(), b"still there?"] {
+        let sent = alice.send(&bob, follow_up);
+        accepted(bob.receive(&sent.message));
+    }
+    let backup = alice.back_up();
+    let acceptance = bob.accept_request(&alice, b"welcome");
+    let acknowledgment = accepted(alice.receive(&acceptance.message))
+        .acknowledgment
+        .unwrap();
+    assert!(matches!(
+        bob.receive(&acknowledgment),
+        InboundMessageOutcome::AcknowledgmentMatched(_)
+    ));
+    // The backup counts all the Messages Alice may send before acceptance.
+    alice.restore(&backup);
+
+    let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
+    let received = accepted(bob.receive(&request.message));
+    alice.receive(&received.acknowledgment.unwrap());
+
+    for (device, peer) in [(&alice, &bob), (&bob, &alice)] {
+        assert_eq!(
+            device.contact(peer).unwrap().trust_state,
+            ContactTrustState::Unverified
+        );
+    }
+    let answer = alice.send(&bob, b"me too");
+    assert_eq!(
+        accepted(bob.receive(&answer.message)).plaintext.as_slice(),
+        b"me too"
+    );
+}
+
+#[test]
+fn a_restored_requester_that_used_up_the_limit_asks_again_within_the_asked_sides_limit() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    for follow_up in [b"hello?".as_slice(), b"still there?"] {
+        let sent = alice.send(&bob, follow_up);
+        accepted(bob.receive(&sent.message));
+    }
+    let backup = alice.back_up();
+    alice.restore(&backup);
+
+    let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
+
+    // Bob already received all the Messages Alice may send him before he accepts.
+    let InboundMessageOutcome::Withheld(withheld) = bob.receive(&request.message) else {
+        panic!("expected the new request withheld");
+    };
+    assert_eq!(withheld.message_id, request.message_id);
+    let acceptance = bob.accept_request(&alice, b"welcome");
+    assert_eq!(acceptance.session_id, request.session_id);
+    accepted(alice.receive(&acceptance.message));
+    for (device, peer) in [(&alice, &bob), (&bob, &alice)] {
+        assert_eq!(
+            device.contact(peer).unwrap().trust_state,
+            ContactTrustState::Unverified
+        );
+    }
+}
