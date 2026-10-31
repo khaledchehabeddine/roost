@@ -3,9 +3,13 @@
 
 use crate::support::accepted;
 use crate::support::device::{
-    Device, Encrypted, Intent, Relay, Route, befriended, established_verifier,
+    Device, DeviceError, Encrypted, Intent, Relay, Route, befriended, established_verifier,
+    requested,
 };
-use roost_core::{ContactTrustState, InboundMessageOutcome};
+use roost_core::{
+    ContactTrustState, InboundMessageOutcome, MessageOperationError, ProtocolStateError,
+};
+use roost_crypto::SealedFrameError;
 use roost_protocol::PayloadKind;
 
 // Alice blocks Bob and later unblocks him.
@@ -92,7 +96,7 @@ fn a_contact_that_rotated_during_the_block_gets_a_new_session() {
 
 // Alice asks Bob, Bob blocks her before answering, and Alice rotates her inbox during the block.
 fn requester_rotated_during_the_block(relay: &Relay) -> (Device, Device) {
-    let (alice, mut bob) = crate::support::device::requested(relay);
+    let (alice, mut bob) = requested(relay);
     bob.block(alice.identity_key());
     alice.rotate_inbox();
     bob.unblock(alice.identity_key());
@@ -154,5 +158,38 @@ fn a_message_to_a_requester_that_rotated_during_the_block_accepts_it() {
         accepted(alice.receive(&sent.message))
             .acknowledgment
             .is_some()
+    );
+}
+
+#[test]
+fn a_requester_reaches_this_side_after_an_unblock_only_from_the_new_bundle() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    bob.block(alice.identity_key());
+    bob.unblock(alice.identity_key());
+
+    // The block rotated Bob's inbox, so Alice's first Session names prekeys Bob deleted.
+    let stale = alice.send(&bob, b"still there?");
+    assert!(matches!(
+        bob.decrypt(&stale.message),
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::SealedFrame(
+                SealedFrameError::RecipientMismatch
+            ))
+        ))
+    ));
+
+    let mut outgoing = alice.outgoing(&bob, b"asking again");
+    outgoing.prekey_bundle = Some(bob.bundle());
+    let sent = alice.send_with(outgoing, Intent::Message);
+
+    assert_ne!(sent.session_id, stale.session_id);
+    assert_eq!(
+        accepted(bob.receive(&sent.message)).plaintext.as_slice(),
+        b"asking again"
+    );
+    assert_eq!(
+        bob.contact(&alice).unwrap().trust_state,
+        ContactTrustState::Pending
     );
 }
