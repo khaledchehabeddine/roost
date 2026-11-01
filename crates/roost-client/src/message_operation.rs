@@ -36,9 +36,9 @@ pub struct OutgoingMessage {
     /// The plaintext to encrypt, at most 65,291 bytes.
     pub plaintext: Vec<u8>,
     /// The contact's bundle, fetched after a [`MessageEncryptionStep::NeedsPreKeyBundle`] step or
-    /// taken from a fresh contact link, and saved with the draft until a Session uses it. A bundle
-    /// whose Discovery Key is newer than the contact's starts a new Session, and Roost ignores any
-    /// other bundle when no new Session is needed.
+    /// for the Discovery Key in a fresh contact link, and saved with the draft until a Session uses
+    /// it. A bundle whose Discovery Key is newer than the contact's starts a new Session, and Roost
+    /// ignores any other bundle when no new Session is needed.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 

@@ -1,10 +1,10 @@
 //! The Swift and Kotlin API, exported through UniFFI.
 //!
-//! It handles identities and their backups, prekeys and inbox rotation, contacts, blocking and
-//! Safety Numbers, Message Operations, delivery checks and recovery, sender certificate and
-//! binding checks, and the one error type every call shares. Hosts create one [`IdentityContext`]
-//! per identity namespace over their own [`SecureStorage`]. Its documentation says what Roost and
-//! the host each own.
+//! It handles identities and their backups, prekeys and inbox rotation, contacts and contact
+//! links, blocking and Safety Numbers, Message Operations, delivery checks and recovery, sender
+//! certificate and binding checks, and the one error type every call shares. Hosts create one
+//! [`IdentityContext`] per identity namespace over their own [`SecureStorage`]. Its documentation
+//! says what Roost and the host each own.
 
 uniffi::setup_scaffolding!("roost_client");
 
@@ -55,7 +55,8 @@ pub use operation::{
     PreparedSignedPreKeyRotation, UnfinishedOperation,
 };
 pub use publication::{
-    PreKeyBundle, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle,
+    ContactPublication, PreKeyBundle, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
+    PublicationBundle, decode_contact_publication, is_newer_discovery_key,
 };
 pub use recovery::{
     DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, MessageRecovery, MessageRecoveryStep,

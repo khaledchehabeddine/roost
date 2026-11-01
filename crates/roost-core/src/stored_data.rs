@@ -8,7 +8,8 @@ use zeroize::Zeroizing;
 const SIGNATURE_LEN: usize = Signature::BYTE_SIZE;
 const SIGNATURE_HALF_LEN: usize = SIGNATURE_LEN / 2;
 
-/// A reason a value Roost keeps in SecureStorage or an Identity Backup can't be encoded or decoded.
+/// A reason a value Roost writes to SecureStorage, an Identity Backup, or a Contact Publication
+/// can't be encoded or decoded.
 #[derive(Debug, thiserror::Error)]
 pub enum StoredDataError {
     /// The stored bytes don't decode as the expected value.

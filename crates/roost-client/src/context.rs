@@ -342,6 +342,25 @@ impl IdentityContext {
         PublicationBundle::from_core(self.inner.current_publication()?)
     }
 
+    /// Returns this identity's Contact Publication, the bytes a contact link carries.
+    ///
+    /// The publication holds the identity and its current Discovery Key with the signatures that
+    /// bind them, and nothing secret. The app owns the rest of the link, including how it writes
+    /// these bytes into it. Make a new link after each inbox rotation, since an older one leads to
+    /// an inbox the Relay no longer serves.
+    ///
+    /// # Errors
+    /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain.
+    /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
+    /// - [`RoostError::InvalidData`] if the stored identity is malformed.
+    /// - [`RoostError::NotFound`] if no identity, Discovery Key, or signed prekey is stored.
+    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::Storage`] if SecureStorage fails.
+    /// - [`RoostError::UnsupportedVersion`] if the stored identity uses an unknown format version.
+    pub fn encode_contact_publication(&self) -> Result<Vec<u8>, RoostError> {
+        Ok(self.inner.contact_publication()?.encode()?)
+    }
+
     /// Prepares an inbox rotation: a Discovery Key at the next epoch, a signed prekey, and a
     /// Delivery Capability.
     ///

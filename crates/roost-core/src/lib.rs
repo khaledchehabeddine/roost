@@ -45,6 +45,7 @@
 //! ```
 
 mod contact;
+mod contact_publication;
 mod discovery_key;
 mod hardening;
 mod identity;
@@ -61,6 +62,7 @@ pub use contact::{
     ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
     ContactTrustState,
 };
+pub use contact_publication::{ContactPublication, ContactPublicationError};
 pub use discovery_key::DiscoveryKeyError;
 pub use hardening::ProtocolHardeningLimits;
 pub use identity::{Identity, IdentityError};
@@ -82,7 +84,7 @@ pub use protocol_state::{
     ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
     ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
     ReceiveSettings, SenderIdentityMaterial, SignedSenderCertificate, StateChanges,
-    StateEntryError, WithheldInboundMessageResult, commit_conditions_match,
+    StateEntryError, WithheldInboundMessageResult, commit_conditions_match, is_newer_discovery_key,
 };
 pub use roost_crypto::{
     HandshakeError, OneTimePreKeyReference, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,

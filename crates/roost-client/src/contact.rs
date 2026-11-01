@@ -231,10 +231,12 @@ impl Contacts {
     /// rotated its own inbox during the block, so the first send after an unblock ends with
     /// [`NeedsPreKeyBundle`](crate::MessageEncryptionStep::NeedsPreKeyBundle): fetch the contact's
     /// bundle by its stored Discovery Key. When the Relay answers that it doesn't know that key,
-    /// the contact rotated: keep the draft and ask for a fresh contact link, whose bundle starts a
-    /// new Session. When the contact's own request is still open, that Session's first Message is a
-    /// Contact Request, which accepts the contact on both sides. Unblocking a stranger blocked
-    /// before they sent anything deletes their record, since nobody asked.
+    /// the contact rotated: keep the draft and ask for a fresh contact link. If
+    /// [`is_newer_discovery_key`](crate::is_newer_discovery_key) says its Discovery Key is newer,
+    /// fetch its bundle, which starts a new Session. When the contact's own request is still open,
+    /// that Session's first Message is a Contact Request, which accepts the contact on both sides.
+    /// Unblocking a stranger blocked before they sent anything deletes their record, since nobody
+    /// asked.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.

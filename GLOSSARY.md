@@ -15,6 +15,8 @@
   - Avoid: contact identity, friend
 - **Contact Acceptance**: The Message that accepts a Contact Request and carries the accepter's Inbox Grant.
   - Avoid: reply
+- **Contact Publication**: The Identity Key, current Discovery Key, and binding signatures that an Identity shares in a contact link, so a peer can find its inbox and ask it.
+  - Avoid: link, bundle
 - **Contact Request**: The Message that asks a peer to accept a contact, which starts a new Session and carries the sender's Inbox Grant.
   - Avoid: introduction, invite
 - **Deduplication Digest**: A keyed hash of a received frame and its Transport Binding that catches a repeated delivery before decryption.
