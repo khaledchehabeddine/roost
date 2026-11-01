@@ -59,7 +59,7 @@ impl DiscoveryKeyStamp {
 }
 
 /// Returns whether `candidate` is newer than `current` in the order contacts keep the newest by.
-pub(super) fn is_newer_discovery_key(
+pub fn is_newer_discovery_key(
     candidate: &ContactDiscoveryKey,
     current: &ContactDiscoveryKey,
 ) -> bool {

@@ -1,7 +1,10 @@
 //! A host puts its Contact Publication in a contact link, and another host checks the link.
 
 use crate::support::{MemoryStorage, complete};
-use roost_client::{IdentityContext, RoostError, decode_contact_publication};
+use roost_client::{
+    IdentityContext, PublicDiscoveryKey, RoostError, decode_contact_publication,
+    is_newer_discovery_key,
+};
 use std::sync::Arc;
 
 // Returns a context whose identity has a publication, as a host has before it shares a link.
@@ -14,6 +17,13 @@ fn published_identity() -> Arc<IdentityContext> {
         .unwrap();
     complete(&context, signed_prekey.operation_id);
     context
+}
+
+// Returns the Discovery Key in the context's current contact link.
+fn linked_discovery_key(context: &IdentityContext) -> PublicDiscoveryKey {
+    decode_contact_publication(context.encode_contact_publication().unwrap())
+        .unwrap()
+        .discovery_key
 }
 
 #[test]
@@ -106,4 +116,25 @@ fn a_discovery_key_under_another_identity_fails_authentication() {
         decode_contact_publication(forged),
         Err(RoostError::AuthenticationFailed { .. })
     ));
+}
+
+#[test]
+fn a_link_made_after_an_inbox_rotation_has_a_newer_discovery_key() {
+    let alice = published_identity();
+    let older = linked_discovery_key(&alice);
+    let rotation = alice.prepare_inbox_rotation().unwrap();
+    complete(&alice, rotation.operation_id);
+
+    let newer = linked_discovery_key(&alice);
+
+    assert!(is_newer_discovery_key(newer.clone(), Some(older.clone())).unwrap());
+    assert!(!is_newer_discovery_key(older.clone(), Some(newer)).unwrap());
+    assert!(!is_newer_discovery_key(older.clone(), Some(older)).unwrap());
+}
+
+#[test]
+fn any_discovery_key_is_newer_than_none_stored() {
+    let key = linked_discovery_key(&published_identity());
+
+    assert!(is_newer_discovery_key(key, None).unwrap());
 }

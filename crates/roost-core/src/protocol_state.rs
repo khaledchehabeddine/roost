@@ -18,6 +18,7 @@ use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_va
 use crate::stored_data::{deserialize_bounded, encode_zeroizing};
 use contact_record::{ContactRecord, contact_address};
 pub use envelope::SenderIdentityMaterial;
+pub use grant::is_newer_discovery_key;
 pub use message_operation::{
     AdmissionRequest, DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, IncomingMessage,
     MessageDecryption, MessageDecryptionStep, MessageDestination, MessageEncryption,

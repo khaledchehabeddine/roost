@@ -25,7 +25,7 @@ This list describes what Roost does today. Each feature gets one to three senten
 
 ## Contacts
 
-- **Share contact links.** Roost encodes the Contact Publication a contact link carries, which holds no Inbox Grant. Decoding checks every signature and records nothing, so the app can check a link for someone who is already a contact. It reports a newer format apart from damaged bytes, so the app can ask the user to update.
+- **Share contact links.** Roost encodes the Contact Publication a contact link carries, which holds no Inbox Grant, and decodes it with every signature checked and nothing recorded. It reports a newer format apart from damaged bytes, so the app can ask the user to update. It also tells whether a link's Discovery Key is newer than a contact's, so the app fetches a bundle only for a newer one.
 - **Request and accept contacts.** Roost treats a contact as accepted only when both sides consent, either when one side accepts the other's Contact Request or when two requests cross. Before acceptance, Roost refuses to send a contact more than a few Messages. It withholds the plaintext of any Message it receives past that limit.
 - **Read contacts.** Roost decodes a contact record into the contact's Identity Key, Discovery Key, Trust State, and whether this side blocked them. A decoded record doesn't show which side sent the Contact Request.
 - **Verify contacts.** A contact's Trust State is pending, accepted but unverified, or verified. It stays the same through the contact's Inbox Rotations. Roost marks an accepted contact verified only when the Safety Number the app passes matches the one Roost derives from both Identity Keys.

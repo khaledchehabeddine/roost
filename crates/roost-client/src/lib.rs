@@ -56,7 +56,7 @@ pub use operation::{
 };
 pub use publication::{
     ContactPublication, PreKeyBundle, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
-    PublicationBundle, decode_contact_publication,
+    PublicationBundle, decode_contact_publication, is_newer_discovery_key,
 };
 pub use recovery::{
     DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep, MessageRecovery, MessageRecoveryStep,
