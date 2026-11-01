@@ -5,4 +5,6 @@ description: Use when committing changes or amending a commit, pushing a branch,
 
 Read [SKILL.md](../../../.agents/instructions/skills/commit-push/SKILL.md).
 
+Review Skills: `code-review xhigh`.
+
 PR Footer: `Created with [Claude Code](https://claude.com/claude-code).`
