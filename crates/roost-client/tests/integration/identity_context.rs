@@ -77,6 +77,10 @@ fn restored_backup_publishes_only_after_inbox_rotation() {
         Err(RoostError::InboxRotationRequired)
     ));
     assert!(matches!(
+        restored.encode_contact_publication(),
+        Err(RoostError::InboxRotationRequired)
+    ));
+    assert!(matches!(
         restored.prepare_one_time_prekeys(4),
         Err(RoostError::InboxRotationRequired)
     ));

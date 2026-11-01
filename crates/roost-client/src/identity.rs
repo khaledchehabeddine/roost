@@ -25,14 +25,17 @@ pub struct IdentityKey {
 
 impl Identity {
     pub(crate) fn from_core(identity: CoreIdentity) -> Result<Self, IdentityError> {
-        let public = identity.public()?;
-        Ok(Self {
+        Ok(Self::from_public(identity.public()?))
+    }
+
+    pub(crate) fn from_public(public: CorePublicIdentityKey) -> Self {
+        Self {
             key: IdentityKey {
                 agreement_key: public.public_key.as_bytes().to_vec(),
                 signing_key: public.verifying_key.as_bytes().to_vec(),
             },
             binding_signature: public.binding_signature.to_bytes().to_vec(),
-        })
+        }
     }
 
     pub(crate) fn to_core(&self) -> Result<CorePublicIdentityKey, RoostError> {

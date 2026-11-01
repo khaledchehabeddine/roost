@@ -1,8 +1,9 @@
 use roost_core::{
-    DiscoveryKeyError, HandshakeError, IdentityError, KeyStoreError, KeyStoreOperationError,
-    MessageOperationError, MessageStartError, OneTimePreKeyError, ProtocolStateError,
-    PublicKeyError, RatchetError, RatchetStateError, SafetyNumberError, SealedFrameError,
-    SignedPreKeyError, StateEntryError, StorageError, StoredDataError, TransportBindingError,
+    ContactPublicationError, DiscoveryKeyError, HandshakeError, IdentityError, KeyStoreError,
+    KeyStoreOperationError, MessageOperationError, MessageStartError, OneTimePreKeyError,
+    ProtocolStateError, PublicKeyError, RatchetError, RatchetStateError, SafetyNumberError,
+    SealedFrameError, SignedPreKeyError, StateEntryError, StorageError, StoredDataError,
+    TransportBindingError,
 };
 use roost_protocol::{SenderCertificateValidationError, SignatureError};
 
@@ -170,7 +171,7 @@ impl RoostError {
         self
     }
 
-    // Stored data this build has no reader for is an unsupported version, data that fails to
+    // Encoded data this build has no reader for is an unsupported version, data that fails to
     // decode is invalid, and a value that fails to encode is a bug.
     fn from_stored_data(error: &StoredDataError, reason: String) -> Self {
         match error {
@@ -284,6 +285,18 @@ impl From<DiscoveryKeyError> for RoostError {
             DiscoveryKeyError::IdentityBindingSignature(_) => RoostError::InvalidData { reason },
             DiscoveryKeyError::NotFound => RoostError::NotFound,
             DiscoveryKeyError::Storage(_) => RoostError::Storage { reason },
+        }
+    }
+}
+
+impl From<ContactPublicationError> for RoostError {
+    fn from(e: ContactPublicationError) -> Self {
+        let reason = reason_from_chain(&e);
+        match e {
+            ContactPublicationError::Format(error) => RoostError::from_stored_data(&error, reason),
+            ContactPublicationError::Key(e) => RoostError::from(e).with_reason(reason),
+            ContactPublicationError::NotCanonical
+            | ContactPublicationError::VersionBeforeFirst(_) => RoostError::InvalidData { reason },
         }
     }
 }

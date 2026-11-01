@@ -8,6 +8,7 @@ pub use operation::{
 };
 
 use crate::contact::ContactIdentityKey;
+use crate::contact_publication::ContactPublication;
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
 use crate::identity::{Identity, IdentityError, IdentityManager, decrypt_backup};
 use crate::one_time_prekey::{OneTimePreKeyError, OneTimePreKeyManager};
@@ -193,6 +194,26 @@ impl KeyStore {
     pub fn current_publication(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         self.ensure_no_recovery_required()?;
+        self.publication()
+    }
+
+    /// Returns the stored Identity Key and the current Discovery Key, which a contact link carries.
+    ///
+    /// It fails whenever [`Self::current_publication`] does, so a link never points peers at an
+    /// inbox that has no publication.
+    pub fn contact_publication(&self) -> Result<ContactPublication, KeyStoreError> {
+        let _lifecycle = self.lifecycle_guard();
+        self.ensure_no_recovery_required()?;
+        let identity = self.0.identity.load_identity()?.public()?;
+        let publication = self.publication()?;
+        Ok(ContactPublication {
+            identity,
+            discovery_key: publication.discovery_key,
+            discovery_to_identity: publication.discovery_to_identity,
+        })
+    }
+
+    fn publication(&self) -> Result<PublicationBundle, KeyStoreError> {
         let discovery_key = self.0.discovery.current()?;
         let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
         let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();

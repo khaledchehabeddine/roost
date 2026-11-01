@@ -193,6 +193,44 @@ impl PublicationBundle {
     }
 }
 
+/// A contact's identity and Discovery Key, decoded from a contact link with their binding
+/// signatures verified.
+#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+pub struct ContactPublication {
+    /// The contact's identity.
+    pub identity: Identity,
+    /// The Discovery Key the contact had when they made the link.
+    pub discovery_key: PublicDiscoveryKey,
+}
+
+/// Decodes the Contact Publication from a contact link and verifies the signatures that bind its
+/// identity and Discovery Key.
+///
+/// It reads and writes no state, so the app can check a link before the user decides anything,
+/// even for someone who is already a contact. A newer Discovery Key than the contact's stored one
+/// has a later creation time, or the same creation time and a higher epoch, since a restored
+/// backup can repeat an epoch. To ask the link's owner to be a contact, fetch the prekey bundle
+/// for [`ContactPublication::discovery_key`] from the Relay, and pass it in a [`PreKeyBundle`]
+/// with [`ContactPublication::identity`].
+///
+/// A valid publication shows only that whoever holds the identity made it. Compare Safety Numbers
+/// to learn who that is.
+///
+/// # Errors
+/// - [`RoostError::UnsupportedVersion`] if the link uses a format this version of Roost doesn't
+///   read, such as one from a newer app.
+/// - [`RoostError::AuthenticationFailed`] if a signature doesn't verify, so the link was forged
+///   or altered.
+/// - [`RoostError::InvalidData`] if the bytes are malformed.
+#[uniffi::export]
+pub fn decode_contact_publication(bytes: Vec<u8>) -> Result<ContactPublication, RoostError> {
+    let publication = roost_core::ContactPublication::decode(&bytes)?;
+    Ok(ContactPublication {
+        identity: Identity::from_public(publication.identity),
+        discovery_key: PublicDiscoveryKey::from_core(publication.discovery_key)?,
+    })
+}
+
 /// A contact's published keys as the app fetched them from the Relay, to start a Session with.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PreKeyBundle {

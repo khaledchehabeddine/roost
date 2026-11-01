@@ -5,7 +5,7 @@ This list describes what Roost does today. Each feature gets one to three senten
 ## Identity
 
 - **Create and delete an Identity.** An Identity has a permanent Identity Key and a Discovery Key that changes with each Inbox Rotation. Roost keeps their private keys and the prekeys in the app's SecureStorage, such as Keychain or Keystore. Deleting an Identity removes its keys and prekeys from SecureStorage.
-- **Check key signatures.** Roost checks the key signatures in every prekey bundle and Inbox Grant it receives. It also provides two standalone checks: that an Identity Key's signature ties its agreement key to its signing key, and that a Discovery Key signed an Identity Key.
+- **Check key signatures.** Roost checks the key signatures in every prekey bundle, Inbox Grant, and Contact Publication it receives. It also provides two standalone checks: that an Identity Key's signature ties its agreement key to its signing key, and that a Discovery Key signed an Identity Key.
 - **Sign authentication transcripts.** Roost signs an authentication transcript with the Identity Key, so the app can prove it holds the key. It refuses any transcript that starts with the prefix Roost reserves for its own signatures.
 
 ## State and Commits
@@ -25,6 +25,7 @@ This list describes what Roost does today. Each feature gets one to three senten
 
 ## Contacts
 
+- **Share contact links.** Roost encodes the Contact Publication a contact link carries, which holds no Inbox Grant. Decoding checks every signature and records nothing, so the app can check a link for someone who is already a contact. It reports a newer format apart from damaged bytes, so the app can ask the user to update.
 - **Request and accept contacts.** Roost treats a contact as accepted only when both sides consent, either when one side accepts the other's Contact Request or when two requests cross. Before acceptance, Roost refuses to send a contact more than a few Messages. It withholds the plaintext of any Message it receives past that limit.
 - **Read contacts.** Roost decodes a contact record into the contact's Identity Key, Discovery Key, Trust State, and whether this side blocked them. A decoded record doesn't show which side sent the Contact Request.
 - **Verify contacts.** A contact's Trust State is pending, accepted but unverified, or verified. It stays the same through the contact's Inbox Rotations. Roost marks an accepted contact verified only when the Safety Number the app passes matches the one Roost derives from both Identity Keys.

@@ -45,6 +45,7 @@
 //! ```
 
 mod contact;
+mod contact_publication;
 mod discovery_key;
 mod hardening;
 mod identity;
@@ -61,6 +62,7 @@ pub use contact::{
     ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
     ContactTrustState,
 };
+pub use contact_publication::{ContactPublication, ContactPublicationError};
 pub use discovery_key::DiscoveryKeyError;
 pub use hardening::ProtocolHardeningLimits;
 pub use identity::{Identity, IdentityError};
