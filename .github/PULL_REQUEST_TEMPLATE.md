@@ -1,22 +1,40 @@
 ## Summary
 
-<!-- One or two sentences describing what this PR does and why -->
+<!-- Say what this PR does and why, in one or two sentences. -->
 
 ## Changes
 
-<!-- Each change and the reason for it. Bullet points only. -->
+<!-- List each change as a bullet, with the reason when it isn't obvious. -->
 
 ## Verification
 
-<!-- Evidence from the verify skill in .agents/instructions/skills/verify/SKILL.md, covering every change on the branch. -->
+<!-- If no check ran, replace this section with one sentence saying why. -->
+
+### Checks
+
+<!-- Under each Failed or missed result, add a sub-bullet for each error or mutant. -->
+
+- Format: <Passed, Failed, or Skipped>
+- Lint: <Passed, Failed, or Skipped>
+- Docs: <Passed, Failed, or Skipped>
+- Tests: <Passed, Failed, or Skipped>
+- Mutation: <Passed, Failed, Skipped, or N missed>
+
+```sh
+<each command you ran>
+```
+
+### Unchecked
+
+<!-- List each part the checks didn't cover as a bullet, with the reason. Omit this section if it's empty. -->
 
 ## Decision Record
 
-<!-- ADRs added or modified, listed as: NNNN: Title (path). Bullet points only. Omit section if empty. -->
+<!-- List each ADR added or changed as a bullet, in the form `NNNN: Title (path)`. Omit this section if it's empty. -->
 
-## Known Constraints
+## Limitations
 
-<!-- Known limitations or deferred follow-ups. Bullet points only. Omit section if empty. -->
+<!-- List each part this PR leaves out on purpose as a bullet, with the reason. Omit this section if it's empty. -->
 
 ---
 Created with [<agent name>](<url>).

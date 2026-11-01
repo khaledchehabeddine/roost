@@ -18,6 +18,9 @@ ios/.swiftpm/
 # Codex
 .codex/config.local.toml
 
+# Agents
+.scratch/
+
 # JetBrains
 .idea/
 
