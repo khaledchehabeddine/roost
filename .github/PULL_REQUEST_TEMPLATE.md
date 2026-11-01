@@ -1,18 +1,40 @@
 ## Summary
 
-<!-- One or two sentences describing what this PR does and why -->
+<!-- Say what this PR does and why, in one or two sentences. -->
 
 ## Changes
 
-<!-- Bullet points only -->
+<!-- List each change as a bullet, with the reason when it isn't obvious. -->
+
+## Verification
+
+<!-- If no check ran, replace this section with one sentence saying why. -->
+
+### Checks
+
+<!-- Under each Failed or missed result, add a sub-bullet for each error or mutant. -->
+
+- Format: <Passed, Failed, or Skipped>
+- Lint: <Passed, Failed, or Skipped>
+- Docs: <Passed, Failed, or Skipped>
+- Tests: <Passed, Failed, or Skipped>
+- Mutation: <Passed, Failed, Skipped, or N missed>
+
+```sh
+<each command you ran>
+```
+
+### Unchecked
+
+<!-- List each requirement no check covered as a bullet, with the reason. Omit this section if it's empty. -->
 
 ## Decision Record
 
-<!-- ADRs added or modified, listed as: NNNN: Title (path). Bullet points only. Omit section if empty. -->
+<!-- List each ADR added or changed as a bullet, in the form `NNNN: Title (path)`. Omit this section if it's empty. -->
 
-## Known Constraints
+## Limitations
 
-<!-- Known limitations or deferred follow-ups. Bullet points only. Omit section if empty. -->
+<!-- List each known limitation or follow-up as a bullet, with the reason. Omit this section if it's empty. -->
 
 ---
 Created with [<agent name>](<url>).
