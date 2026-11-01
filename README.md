@@ -13,8 +13,6 @@ source ~/.zshrc
 cargo install cargo-ndk --locked
 ```
 
-Building for Android also needs Android NDK 29.0.14206865, which Android Studio's SDK Manager installs.
-
 Build the project:
 
 ```bash
