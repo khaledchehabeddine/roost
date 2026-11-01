@@ -10,7 +10,9 @@
 ## Workflow
 
 - Make the smallest complete change for the task.
-- Verify each change with the verify skill before reporting it done.
-- Update any document the change makes outdated.
-- Keep a skill's working files, such as plans and notes, out of commits.
-- After the user corrects a mistake that would repeat, propose the smallest fix to the skill or doc that should have prevented it.
+- Choose the simplest design that keeps the next likely change easy.
+- Update any document or comment the change makes outdated.
+- When you review a change, apply the skills that cover the files it touches.
+- Keep working files, such as plans and notes, out of commits.
+- When you learn a preference or workaround worth keeping, suggest which instruction file to add it to.
+- When the user corrects a mistake that could happen again, propose the smallest change to a skill or document that prevents it.
