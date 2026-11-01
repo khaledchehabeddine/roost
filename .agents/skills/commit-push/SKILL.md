@@ -5,4 +5,6 @@ description: Use when committing changes or amending a commit, pushing a branch,
 
 Read [SKILL.md](../../instructions/skills/commit-push/SKILL.md).
 
+Review Skills: `review-agent`.
+
 PR Footer: `Created with [Codex](https://openai.com/codex).`

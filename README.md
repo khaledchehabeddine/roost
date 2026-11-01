@@ -7,7 +7,7 @@ The cryptographic core for private, end-to-end encrypted messaging apps.
 Install the tools:
 
 ```bash
-brew install rustup cargo-edit
+brew install rustup cargo-edit cargo-mutants
 echo 'export PATH="$(brew --prefix)/opt/rustup/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```

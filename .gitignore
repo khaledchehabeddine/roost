@@ -10,13 +10,12 @@ android/build/
 ios/.build/
 ios/.swiftpm/
 
-# Claude
+# Agents
 .claude/agent-memory-local/
 .claude/settings.local.json
 .claude/worktrees/
-
-# Codex
 .codex/config.local.toml
+.scratch/
 
 # JetBrains
 .idea/

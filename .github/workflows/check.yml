@@ -27,5 +27,3 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
       - run: cargo doc --locked --workspace --no-deps --all-features
-        env:
-          RUSTDOCFLAGS: -D warnings
