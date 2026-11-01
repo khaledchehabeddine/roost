@@ -12,7 +12,7 @@
 
    ```sh
    git add -N <new files>
-   git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ $(git merge-base HEAD origin/main) | cargo mutants --in-diff /dev/stdin --workspace --output .scratch
+   git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ $(git merge-base HEAD origin/main) | cargo mutants --in-diff /dev/stdin --workspace --test-workspace=true --output .scratch
    git reset -- <new files>
    ```
 
