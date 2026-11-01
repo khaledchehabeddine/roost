@@ -1,28 +1,18 @@
 # Verify
 
-A change is done when evidence shows it works, not when it looks right. Evidence is a command's output or a reviewer's finding, never your own reading of the diff.
+1. List each requirement of the task and how to prove it's correct.
+2. Run these checks:
+   - Format: `cargo fmt --all -- --check`
+   - Lint: `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
+   - Docs: `cargo doc --locked --workspace --no-deps --all-features`
+   - Tests: `cargo test --locked --workspace --all-features --quiet`
 
-## Method
+   Skip them when the change can't affect the build, such as a documentation-only change outside `crates/`. Fix each failure and rerun, up to three attempts per check, then stop and report what still fails.
+3. Run mutation testing on the logic the change touches:
+   - `mkdir -p .scratch`
+   - `git add -N <file>` for each new file.
+   - `git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ $(git merge-base HEAD origin/main) > .scratch/mutants.diff`
+   - `cargo mutants --in-diff .scratch/mutants.diff --workspace --output .scratch`
 
-1. List what the task asked for and what would show each part is done.
-2. Run each `cargo` step in the [CI workflow](../../../../.github/workflows/check.yml), with the `env` that step sets, and fix each problem until they all pass. Skip them when the change touches only Markdown outside `crates/`.
-3. Have a subagent that didn't write the change review it against the list from step 1, and against the `FEATURES.md` entries and ADRs the change touches. Give it that list, the commit this task started from, which on a new branch is `git merge-base HEAD origin/main`, the untracked files the change adds, the skills that cover the changed files, such as `rust` and `writing`, and the [Known Gaps](#known-gaps) the change touches. Ask for each finding with its file, line, and a concrete way it fails. Fix or decline each finding, then have a reviewer check only those fixes.
-4. Report the evidence in the [Report](#report) format.
-
-When a check or finding still fails after three attempts, stop and report it as unverified, with what you tried.
-
-### Report
-
-```markdown
-- Checks: <each command and whether it passed, or why you skipped them>
-- Review: <each finding and how you resolved it, or "no findings">
-- Unverified: <each part no check or review covered, or "none">
-```
-
-## Known Gaps
-
-No check covers these, so the reviewer checks them by reading:
-
-- Passing tests don't show that a test would fail if the new code broke. Check that each changed behavior has the test the [testing reference](../rust/references/testing.md) asks for.
-- Roost has no fuzz targets. Check each decoder of untrusted input against the Untrusted Input rules in the [cryptography reference](../rust/references/cryptography.md).
-- No check compares the generated Swift and Kotlin bindings. When `roost-client`'s exports change, check them against the [UniFFI reference](../rust/references/uniffi.md) and the Host API rules in the [documentation reference](../rust/references/documentation.md).
+   When only tests changed, pass `--file <path>` for the files they test in place of `--in-diff`. Treat a timeout as caught. Resolve each missed mutant with a new or stronger test, or report it with the reason.
+4. Write the results to `.scratch/verify.md` with the [report template](templates/report.md).
