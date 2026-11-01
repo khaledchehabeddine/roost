@@ -795,9 +795,9 @@ impl Encrypting {
     }
 
     // Checks the bundle the app passed against the contact. A bundle naming a newer Discovery Key,
-    // such as one from a fresh contact link, starts a new Session, since the Relay silently drops
-    // Messages sent with the old capability. The first send after an unblock needs a bundle, since
-    // the contact may have rotated during the block.
+    // such as one fetched for a fresh contact link, starts a new Session, since the Relay silently
+    // drops Messages sent with the old capability. The first send after an unblock needs a bundle,
+    // since the contact may have rotated during the block.
     fn check_discovery_key(
         &mut self,
         mut contact: ContactRecord,
