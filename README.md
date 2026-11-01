@@ -7,10 +7,13 @@ The cryptographic core for private, end-to-end encrypted messaging apps.
 Install the tools:
 
 ```bash
-brew install rustup cargo-edit cargo-mutants
+brew install rustup cargo-edit cargo-mutants gradle
 echo 'export PATH="$(brew --prefix)/opt/rustup/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
+cargo install cargo-ndk --locked
 ```
+
+Building for Android also needs Android NDK 29.0.14206865, which Android Studio's SDK Manager installs.
 
 Build the project:
 
