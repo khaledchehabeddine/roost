@@ -21,9 +21,8 @@ xcodebuild -create-xcframework \
     -output target/ios/RoostFFI.xcframework
 (cd target/ios && zip -qr RoostFFI.xcframework.zip RoostFFI.xcframework)
 
-# Nothing else compiles the Swift bindings before an app does, so build the release manifest
-# against the local XCFramework.
-sed -e 's|url: "{URL}",|path: "RoostFFI.xcframework"|' -e '/checksum:/d' \
+# Nothing else compiles the Swift bindings before an app does.
+sed 's|url: "{URL}",|path: "RoostFFI.xcframework.zip"|; /checksum:/d' \
     ios/Package.swift > target/ios/Package.swift
 mkdir -p target/ios/Sources/Roost
 cp target/ios/generated/Roost.swift target/ios/Sources/Roost/
