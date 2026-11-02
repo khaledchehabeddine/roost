@@ -5,4 +5,4 @@ Pushing a version tag on main runs one workflow that generates the bindings, the
 ## Alternatives
 
 - Commit generated bindings and native libraries to the package repositories' main branches: they add review noise and duplicate the Rust code.
-- Run the package checks in the release workflow: simulator and emulator runs make every release slower and flakier.
+- Test the packages on a simulator and an emulator before each release: the release build already compiles both packages' bindings, and a package that still breaks costs one version to replace.
