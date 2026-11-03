@@ -59,3 +59,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
         run: gh release edit "$TAG" --draft=false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: chirp-org/roost-kotlin
+          token: ${{ secrets.KOTLIN_README_TOKEN }}
+          path: roost-kotlin
+      - name: Update the roost-kotlin README
+        working-directory: roost-kotlin
+        run: |
+          sed -i '' "s|com.chirp:roost:[0-9][0-9A-Za-z.-]*|com.chirp:roost:${TAG#v}|" README.md
+          # sed exits 0 when nothing matches.
+          grep -q "com.chirp:roost:${TAG#v}" README.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md
+          # A release of the version the README already shows has nothing to commit.
+          git diff --cached --quiet || git commit -m "docs: show Roost $TAG in the README"
+          git push origin HEAD:main
