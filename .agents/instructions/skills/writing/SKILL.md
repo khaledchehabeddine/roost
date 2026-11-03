@@ -9,7 +9,7 @@ Make each sentence clear on the first read. These rules don't apply to names or 
 - Cut a closing phrase that names a vague benefit, such as "ensuring security".
 - State a point directly, such as "it also authenticates messages", not "it doesn't just encrypt messages, it authenticates them".
 - Give a reason in agent instructions only when it changes what the agent does.
-- Outside documentation comments, comment code only where a reader would otherwise misunderstand or break it.
+- Comment only to prevent a reader's mistake. Documentation comments are exempt.
 
 ## Sentences
 
