@@ -59,3 +59,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
         run: gh release edit "$TAG" --draft=false
+      - name: Update the roost-swift README
+        working-directory: roost-swift
+        run: |
+          git switch --detach origin/main
+          sed -i '' -E "s/exact: \"[^\"]+\"/exact: \"${TAG#v}\"/" README.md
+          # sed exits 0 when nothing matches.
+          grep -q "exact: \"${TAG#v}\"" README.md
+          git add README.md
+          # A release of the version the README already shows has nothing to commit.
+          git diff --cached --quiet || git commit -m "docs: show Roost $TAG in the README"
+          git push origin HEAD:main
