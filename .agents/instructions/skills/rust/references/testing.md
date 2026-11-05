@@ -4,7 +4,7 @@ Broken code can still round-trip data and reject bad input, so a round trip or a
 
 ## Scope
 
-- Add a test only when no existing test covers an important app flow, a costly failure, or a likely regression.
+- Add or keep a test only when it catches a costly failure or likely regression that nothing else would.
 - Test what a caller can observe, such as outputs, errors, and stored state.
 
 ## Placement
