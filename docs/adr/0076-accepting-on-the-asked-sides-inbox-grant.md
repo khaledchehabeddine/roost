@@ -1,6 +1,6 @@
 # Accepting on the Asked Side's Inbox Grant
 
-A restore can lose a Contact Acceptance the Requester received after its backup, and the Asked Side, already accepted, takes the Requester's next request as an ordinary Message. The Asked Side shares its Inbox Grant only when it accepts (ADR 0071), so its grant on the Requester's Session accepts as a Contact Acceptance does. A contact that starts a new Session may have lost the grant along with its Sessions, so it gets the grant again until it acknowledges one.
+A restore can lose a Contact Acceptance the Requester received after its backup, and the Asked Side, already accepted, takes the Requester's next request as an ordinary Message. The Asked Side shares its Inbox Grant only when it accepts (ADR 0062), so its grant on the Requester's Session accepts as a Contact Acceptance does. A contact that starts a new Session may have lost the grant along with its Sessions, so it gets the grant again until it acknowledges one.
 
 ## Alternatives
 

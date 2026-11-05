@@ -1,6 +1,6 @@
 # Leaving Identity Keys Out of the Root Key
 
-X3DH leaves both Identity Keys out of the root key, because their public bytes prove nothing. The Sender Proof and the sender's signatures prove who wrote a Message instead (ADR 0008, ADR 0031).
+X3DH leaves both Identity Keys out of the root key, because their public bytes prove nothing. The Sender Proof and the sender's signatures prove who wrote a Message instead (ADR 0007, ADR 0024).
 
 ## Alternatives
 

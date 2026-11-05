@@ -7,5 +7,5 @@ Roost keeps no copy of a sent Message, so Recovery encrypts each Message again f
 - Keep the content in Roost until it's acknowledged: stored state would hold plaintext for as long as a contact stays silent.
 - Keep the encrypted copy and resend it: a contact that lost its Session, such as by restoring a backup, couldn't open it.
 - Give the resent copy a new MessageID: the contact couldn't tell it from the original and would show it twice.
-- Resend Grant Updates too: recovered Messages carry the Inbox Grant (ADR 0068).
+- Resend Grant Updates too: recovered Messages carry the Inbox Grant (ADR 0059).
 - Match an acknowledgment only on its own Session: an acknowledgment of the old copy would match nothing, and the Message would be resent and shown as not delivered.

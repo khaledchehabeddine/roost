@@ -1,6 +1,6 @@
 # Where a Recovery Resends
 
-A Recovery never repairs a Session. It resends on a Session newer than the one the Message went out on, either one the contact has delivered on since or a new one from the contact's prekey bundle (ADR 0045), so the contact never has to skip past lost Message numbers. If the Relay no longer knows the contact's Discovery Key, the Recovery waits for the contact's next Inbox Grant.
+A Recovery never repairs a Session. It resends on a Session newer than the one the Message went out on, either one the contact has delivered on since or a new one from the contact's prekey bundle (ADR 0038), so the contact never has to skip past lost Message numbers. If the Relay no longer knows the contact's Discovery Key, the Recovery waits for the contact's next Inbox Grant.
 
 ## Alternatives
 

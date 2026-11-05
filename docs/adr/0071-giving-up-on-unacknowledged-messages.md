@@ -1,6 +1,6 @@
 # Giving Up on Unacknowledged Messages
 
-A Probe that stays unacknowledged can signal another Recovery after a longer wait. Messages still unacknowledged once the Relay would have dropped them show as not delivered, and so do those whose Session is deleted unless a Recovery moved them (ADR 0051), so nothing waits forever.
+A Probe that stays unacknowledged can signal another Recovery after a longer wait. Messages still unacknowledged once the Relay would have dropped them show as not delivered, and so do those whose Session is deleted unless a Recovery moved them (ADR 0044), so nothing waits forever.
 
 ## Alternatives
 
