@@ -4,8 +4,7 @@ Broken code can still round-trip data and reject bad input, so a round trip or a
 
 ## Scope
 
-- Add a test only when the compiler, lints, and existing tests would miss what it catches: a failure in an important app flow, a costly failure, or a likely regression.
-- Remove, ignore, or weaken a test only when the compiler, a lint, or other tests catch the same failure, or when the code it tests is gone. Name what catches the failure in the pull request.
+- Add or keep a test only when it catches a failure in an important app flow, a costly failure, or a likely regression. Without the test, the compiler, lints, and other tests must miss that failure.
 - Test what a caller can observe, such as outputs, errors, and stored state.
 
 ## Placement
