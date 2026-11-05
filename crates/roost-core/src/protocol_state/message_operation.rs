@@ -883,6 +883,7 @@ impl Encrypting {
             initiate_handshake(rng, &bundle.identity_key, &bundle.bundle)
                 .map_err(ProtocolStateError::from)?;
         contact.record_discovery_key(bundle_discovery_key);
+        contact.needs_discovery_key_check = false;
         let (peer_sessions, evicted) = match load_peer_sessions(
             self.reads.snapshot(),
             &peer_sessions_address(self.recipient),

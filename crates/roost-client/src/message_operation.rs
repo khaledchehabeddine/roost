@@ -279,7 +279,9 @@ pub enum InboundMessageOutcome {
         result: AcknowledgmentResult,
     },
     /// An authenticated acknowledgment named no Pending Acknowledgment, such as one already
-    /// cleared. Commit it anyway, so the advanced state recognizes a retry as a duplicate.
+    /// cleared. Commit it anyway, so the advanced state recognizes a retry as a duplicate. If it
+    /// names a Message Roost reported as not delivered, a later copy arrived, so correct that
+    /// status.
     AcknowledgmentUnmatched {
         /// Payload for this outcome.
         result: AcknowledgmentResult,

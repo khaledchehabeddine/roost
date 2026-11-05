@@ -26,7 +26,7 @@
   - Avoid: cache
 - **Delivery Capability**: The secret, one per Epoch, that the Relay checks before it admits an Established Message to an inbox.
   - Avoid: inbox token
-- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which signals Recovery and gives up on Messages the Relay would have dropped.
+- **Delivery Check**: A check of a contact's unacknowledged Messages at a time the app passes, which signals Recovery and gives up on Messages whose first copy the Relay would have dropped.
   - Avoid: retry check, retry timer
 - **Device**: The app install that holds one Identity's private keys.
   - Avoid: client, installation, instance

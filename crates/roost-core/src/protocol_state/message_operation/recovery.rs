@@ -18,10 +18,10 @@ use super::super::{
     validate_contact_identity_key,
 };
 use super::{
-    Encrypting, LocalIdentityKeys, MessageDestination, MessageEncryptionStep,
+    DiscoveryKeyCheck, Encrypting, LocalIdentityKeys, MessageDestination, MessageEncryptionStep,
     MessageOperationError, OutboundMessageResult, OutgoingMessage, PeerPreKeyBundle, Planned,
-    SendIntent, SignedSenderCertificate, StateReads, changes, contact_update, supply_state,
-    text_kind,
+    RotatedContact, SendIntent, SignedSenderCertificate, StateReads, changes, contact_update,
+    supply_state, text_kind,
 };
 use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
@@ -35,7 +35,8 @@ use zeroize::Zeroizing;
 const QUIET_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
 /// How long after a recovery Roost may signal another one for Messages still unacknowledged.
 const RECHECK_PERIOD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// How long the Relay holds a Message, after which an unacknowledged one shows as not delivered.
+/// How long the Relay holds a Message. An unacknowledged one shows as not delivered this long after
+/// its first send, even if a resend can still arrive.
 const UNDELIVERED_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// What a delivery check found.
@@ -53,8 +54,8 @@ pub enum DeliveryCheckStep {
     Ready {
         /// What the check found.
         result: DeliveryCheckResult,
-        /// The state changes to commit with the recovery job. They list the Messages the Relay
-        /// would have dropped by now as undelivered.
+        /// The state changes to commit with the recovery job. They list the Messages whose first
+        /// copy the Relay would have dropped by now as undelivered.
         changes: StateChanges,
     },
 }
@@ -62,13 +63,12 @@ pub enum DeliveryCheckStep {
 /// A check, at a time the app passes, of the Messages this identity sent one contact that the
 /// contact hasn't acknowledged.
 ///
-/// The check gives up on Messages after 30 days. It signals a recovery after a day without an
-/// acknowledgment, or as soon as the contact sends an Inbox Grant newer than the one a waiting
-/// Message went to, delivers on a newer Session, or acknowledges a recovery's probe, and once
-/// signaled, a recovery comes back only after a week or when the contact proves a newer grant or
-/// Session. Call [`Self::step`] until it returns
-/// [`DeliveryCheckStep::Ready`], supplying the records each other step asks for. Dropping the check
-/// commits nothing.
+/// The check gives up on Messages 30 days after their first send. It signals a recovery after a day
+/// without an acknowledgment, or as soon as the contact sends an Inbox Grant newer than the one a
+/// waiting Message went to, delivers on a newer Session, or acknowledges a recovery's probe, and
+/// once signaled, a recovery comes back only after a week or when the contact proves a newer grant
+/// or Session. Call [`Self::step`] until it returns [`DeliveryCheckStep::Ready`], supplying the
+/// records each other step asks for. Dropping the check commits nothing.
 pub struct DeliveryCheck(Option<Box<Checking>>);
 
 struct Checking {
@@ -187,9 +187,9 @@ impl Checking {
         }
     }
 
-    // Gives up on Messages the Relay has dropped, and signals a recovery of the rest when the
-    // contact has been quiet too long, granted a newer inbox than one a Message went to, or
-    // delivered on a newer Session. A blocked contact gets none.
+    // Gives up on Messages whose first copy the Relay has dropped, and signals a recovery of the
+    // rest when the contact has been quiet too long, granted a newer inbox than one a Message went
+    // to, or delivered on a newer Session. A blocked contact gets none.
     fn check(&self, accepted: AcceptedContact) -> Result<Checked, ProtocolStateError> {
         let AcceptedContact {
             mut contact,
@@ -314,15 +314,19 @@ impl<'a, 'b> Outstanding<'a, 'b> {
     }
 
     // Returns the oldest Message waiting on a Session older than the one the contact delivered on
-    // since, which may have lost it, or held behind a probe with no copy on its way. The newer
-    // Session holds nothing sent before the Message, so the contact misses no Message on it.
+    // since, which may have lost it, or held on a probe's Session the contact has answered, with
+    // no copy on its way. The newer Session holds nothing sent before the Message, so the contact
+    // misses no Message on it.
     fn left_behind(&self) -> Option<&'b Unacknowledged<'a>> {
         if !self.current_is_replied {
             return None;
         }
         self.recoverable
             .iter()
-            .find(|message| message.entry.held || self.before_current.contains(&message.session_id))
+            .find(|message| {
+                (message.entry.held && message.session_id == self.current)
+                    || self.before_current.contains(&message.session_id)
+            })
             .copied()
     }
 }
@@ -441,8 +445,9 @@ pub enum MessageRecoveryStep {
     /// The destination whose Transport Binding to supply through
     /// [`MessageRecovery::supply_transport_binding`].
     NeedsTransport(MessageDestination),
-    /// A new Session needs this contact's prekey bundle, and the given one is missing or older
-    /// than the contact's Discovery Key. The recovery has ended: fetch the bundle and start again.
+    /// A new Session, or the first resend after an unblock, needs this contact's prekey bundle, and
+    /// the given one is missing or older than the contact's Discovery Key. The recovery has ended:
+    /// fetch the bundle and start again.
     NeedsPreKeyBundle(ContactIdentityKey),
     /// The first Message this recovery resent on a new Session isn't acknowledged yet, and the
     /// rest wait for it. The recovery has ended and nothing changed, and a delivery check signals
@@ -464,10 +469,11 @@ pub enum MessageRecoveryStep {
 /// returns its result once.
 ///
 /// Roost picks the Message and the Session. When the contact delivered on a Session newer than the
-/// one holding the Message, the Message goes there, so the contact misses no Message on it. Otherwise, under a signaled recovery, the
-/// oldest Message starts a new Session from the contact's prekey bundle, and the rest wait until
-/// the contact acknowledges it. Call [`Self::step`] until it returns
-/// [`MessageRecoveryStep::Ready`], [`MessageRecoveryStep::NeedsPreKeyBundle`],
+/// one holding the Message, the Message goes there, so the contact misses no Message on it, unless
+/// the check after an unblock finds a newer Discovery Key, which starts a new Session instead.
+/// Otherwise, under a signaled recovery, the oldest Message starts a new Session from the contact's
+/// prekey bundle, and the rest wait until the contact acknowledges it. Call [`Self::step`] until it
+/// returns [`MessageRecoveryStep::Ready`], [`MessageRecoveryStep::NeedsPreKeyBundle`],
 /// [`MessageRecoveryStep::AwaitingProbe`], or [`MessageRecoveryStep::Finished`], supplying what
 /// each other step asks for. Dropping the recovery commits nothing.
 pub struct MessageRecovery(Option<Box<Recovering>>);
@@ -673,11 +679,40 @@ impl Recovering {
         let records = load_pending_by_session(snapshot, &sessions, limits)?;
         let waiting = unacknowledged(&records);
         let outstanding = Outstanding::new(&waiting, &sessions, snapshot, limits)?;
-        // The contact delivered on a newer Session, so the Message goes there with no fetch.
+        // The contact delivered on a newer Session, so the Message goes there with no fetch, unless
+        // an unblock needs a check, since the Relay silently drops Messages sent to a rotated
+        // inbox.
         if let Some(message) = outstanding.left_behind() {
-            let target = Target::Current {
-                session_id: outstanding.current,
-                starter: sessions.current_starter(),
+            let check = if contact.needs_discovery_key_check {
+                self.encrypting.check_discovery_key(contact)?
+            } else {
+                DiscoveryKeyCheck::Checked(Box::new(contact))
+            };
+            let (contact, message, target) = match check {
+                DiscoveryKeyCheck::NeedsBundle => {
+                    return Ok(Selected::Ended(MessageRecoveryStep::NeedsPreKeyBundle(
+                        self.encrypting.recipient,
+                    )));
+                }
+                DiscoveryKeyCheck::Rotated(rotated) => {
+                    let RotatedContact {
+                        contact,
+                        bundle,
+                        bundle_discovery_key,
+                    } = *rotated;
+                    let target = Target::New {
+                        bundle: Box::new(bundle),
+                        bundle_discovery_key,
+                    };
+                    (contact, outstanding.oldest().unwrap_or(message), target)
+                }
+                DiscoveryKeyCheck::Checked(contact) => {
+                    let target = Target::Current {
+                        session_id: outstanding.current,
+                        starter: sessions.current_starter(),
+                    };
+                    (*contact, message, target)
+                }
             };
             return Ok(Selected::Resend(Box::new(Resend::of(
                 contact, message, target,

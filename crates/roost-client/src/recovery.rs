@@ -34,8 +34,8 @@ pub enum DeliveryCheckStep {
     Ready {
         /// The recovery signal.
         result: DeliveryCheckResult,
-        /// The state changes to commit with the recovery job. They list the Messages the Relay
-        /// would have dropped by now as undelivered.
+        /// The state changes to commit with the recovery job. They list the Messages whose first
+        /// copy the Relay would have dropped by now as undelivered.
         changes: StateChanges,
     },
 }
@@ -80,11 +80,11 @@ pub enum MessageRecoveryStep {
         /// Where the Message goes.
         destination: MessageDestination,
     },
-    /// A new Session needs the contact's prekey bundle. The recovery has ended: release the
-    /// Identity Lock, fetch the bundle by the contact's stored Discovery Key, keep it with the
-    /// job, and start again. When the Relay answers that it doesn't know that key, the contact
-    /// rotated: end the job, and a later check signals again once the contact's newer grant or
-    /// Session arrives.
+    /// A new Session, or the first resend after an unblock, needs the contact's prekey bundle. The
+    /// recovery has ended: release the Identity Lock, fetch the bundle by the contact's stored
+    /// Discovery Key, keep it with the job, and start again. When the Relay answers that it doesn't
+    /// know that key, the contact rotated: end the job, and a later check signals again once the
+    /// contact's newer grant or Session arrives.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
         identity_key: IdentityKey,
@@ -192,15 +192,15 @@ impl Messaging {
     /// Starts checking the Messages this identity sent a contact that the contact hasn't
     /// acknowledged, at `now_millis`.
     ///
-    /// Run a check for each contact with unacknowledged Messages after committing anything
-    /// received from them, and at least once a day. The app never resends a Message the Relay
-    /// accepted, since the Relay redelivers it until the contact saves it. The check says instead
-    /// when a recovery starts, which encrypts the Messages again on a newer Session, and which
-    /// Messages the Relay would have dropped by now. Roost sets the waits: a recovery starts after
-    /// a day without an acknowledgment, or as soon as the contact sends an Inbox Grant newer than
-    /// the one a waiting Message went to, delivers on a newer Session, or acknowledges a
-    /// recovery's probe, and once started, comes back only after a week or once the contact sends
-    /// a newer Inbox Grant or starts a new Session.
+    /// Run a check for each contact with unacknowledged Messages after committing anything received
+    /// from them, and at least once a day. The app never resends a Message the Relay accepted,
+    /// since the Relay redelivers it until the contact saves it. The check says instead when a
+    /// recovery starts, which encrypts the Messages again on a newer Session, and which Messages'
+    /// first copies the Relay would have dropped by now. A later copy of one can still arrive.
+    /// Roost sets the waits: a recovery starts after a day without an acknowledgment, or as soon as
+    /// the contact sends an Inbox Grant newer than the one a waiting Message went to, delivers on a
+    /// newer Session, or acknowledges a recovery's probe, and once started, comes back only after a
+    /// week or once the contact sends a newer Inbox Grant or starts a new Session.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `contact` or `now_millis` is out of range.

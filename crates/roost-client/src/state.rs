@@ -103,7 +103,7 @@ pub struct StateChanges {
     /// The operation to reserve before the commit and finalize after it, if any.
     pub operation_id: Option<OperationId>,
     /// Sent Messages Roost stops waiting for, oldest first, because the Relay would have dropped
-    /// them by now or the Session they wait on is gone.
+    /// their first copies by now or the Session they wait on is gone.
     pub undelivered: Vec<MessageId>,
 }
 
