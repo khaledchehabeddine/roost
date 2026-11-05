@@ -4,7 +4,7 @@ The app calls Roost only through generated Swift and Kotlin code, so `roost-clie
 
 ## Boundary
 
-- Keep every UniFFI attribute and app-facing type conversion in `roost-client`.
+- Keep every UniFFI attribute, and every conversion to or from an exported type, in `roost-client`.
 - Write a UniFFI record's conversions as crate-private methods, such as `from_core` and `to_core`, not `From` implementations, which can't be made private.
 
 ## Types

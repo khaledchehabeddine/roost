@@ -1,6 +1,6 @@
 # Cryptography
 
-The app holds private keys and Messages and reads bytes from anyone, so a mistake here can leak them.
+The app holds private keys and messages and reads bytes from anyone, so a mistake here can leak them.
 
 ## Primitives
 
@@ -89,5 +89,5 @@ fn decode_example_message(bytes: &[u8]) -> Result<ExampleWire, ExampleError> {
 
 ## Protocol State
 
-- Change protocol state, such as a ratchet or a one-time prekey, only after the whole Message, header included, authenticates, and leave it unchanged when it doesn't.
+- Change protocol state, such as a ratchet or a one-time prekey, only after the whole message, header included, authenticates, and leave it unchanged when it doesn't.
 - Delete a message key once it decrypts its message, and a chain key once it's replaced.

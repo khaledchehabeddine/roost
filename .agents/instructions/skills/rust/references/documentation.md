@@ -42,13 +42,13 @@ impl ExampleState {
 }
 ```
 
-## App-Facing API
+## Exported API
 
 - Leave out what a Swift or Kotlin developer wouldn't know, such as Rust types, internal crate names, protocol shorthand, and wire formats.
 - On each method, say what the app must persist and what it must check itself.
 - Explain what Roost and the app each own on the type apps create first, since crate documentation doesn't reach the bindings.
 - Write examples as one `swift` block and one `kotlin` block, never Rust.
-- Write `# Errors` only on app-facing API methods, with a bullet for each error the method can return, starting with its link.
+- Write `# Errors` only on functions `roost-client` exports through UniFFI, with a bullet for each error the function can return, starting with its link.
 
 ### ❌ Bad
 
