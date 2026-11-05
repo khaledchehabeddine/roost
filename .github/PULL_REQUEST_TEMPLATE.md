@@ -34,7 +34,7 @@
 
 ## Limitations
 
-<!-- List each known limitation or follow-up as a bullet, with the reason. Omit this section if it's empty. -->
+<!-- List each known limitation, follow-up, or rejected finding as a bullet, with the reason. Omit this section if it's empty. -->
 
 ---
 Created with [<agent name>](<url>).

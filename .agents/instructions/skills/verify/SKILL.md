@@ -11,10 +11,12 @@
 3. Run mutation testing on this branch's changes:
 
    ```sh
-   git add -N .
+   mkdir -p .scratch
+   git ls-files -z --others --exclude-standard > .scratch/untracked
+   xargs -0 -r git add -N -- < .scratch/untracked
    git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ $(git merge-base HEAD origin/main) | cargo mutants --in-diff /dev/stdin --workspace --test-workspace=true --output .scratch
-   git reset -- .
+   xargs -0 -r git reset -q -- < .scratch/untracked
    ```
 
    When only tests changed, pass `--file <path>` for the files they test in place of `--in-diff`. Resolve each missed mutant with a new or stronger test, or report it with the reason. Rerun step 2 after adding tests. Report a timeout as caught, and a diff with no Rust source as Skipped.
-4. Write the results to `.scratch/verify.md` with the [report template](templates/report.md).
+4. Write the results to `.scratch/verify.md` in the form of the Verification section of the [PR template](../../../../.github/PULL_REQUEST_TEMPLATE.md).
