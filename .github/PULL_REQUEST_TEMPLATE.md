@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- Say what this PR does and why, in one or two sentences. -->
+<!-- Say what this pull request does and why, in one or two sentences. -->
 
 ## Changes
 
@@ -34,7 +34,7 @@
 
 ## Limitations
 
-<!-- List each known limitation, follow-up, or rejected finding as a bullet, with the reason. Omit this section if it's empty. -->
+<!-- List each known limitation or follow-up as a bullet, with the reason. Omit this section if it's empty. -->
 
 ---
 Created with [<agent name>](<url>).

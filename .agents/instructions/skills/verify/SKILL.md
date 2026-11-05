@@ -1,6 +1,6 @@
 # Verify
 
-1. List each requirement of the task and how to prove it's correct.
+1. List each requirement of the task and how to prove the change meets it.
 2. Run these checks, and rerun them after each fix:
    - Format: `cargo fmt --all -- --check`
    - Lint: `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
@@ -19,4 +19,4 @@
    ```
 
    When only tests changed, pass `--file <path>` for the files they test in place of `--in-diff`. Resolve each missed mutant with a new or stronger test, or report it with the reason. Rerun step 2 after adding tests. Report a timeout as caught, and a diff with no Rust source as Skipped.
-4. Write the results to `.scratch/verify.md` in the form of the Verification section of the [PR template](../../../../.github/PULL_REQUEST_TEMPLATE.md).
+4. Write the results to `.scratch/verify.md` in the form of the Verification section of the [pull request template](../../../../.github/PULL_REQUEST_TEMPLATE.md).
