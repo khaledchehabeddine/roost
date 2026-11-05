@@ -212,10 +212,12 @@ impl ContactRecord {
         !self.received_before_acceptance.is_empty()
     }
 
-    /// Lifts the block, and makes the next send check whether the contact rotated meanwhile.
+    /// Lifts the block, makes the next send check whether the contact rotated meanwhile, and
+    /// forgets a recovery signaled before the block, whose job may have failed on it.
     pub(super) fn unblock(&mut self) {
         self.blocked = false;
         self.needs_discovery_key_check = true;
+        self.forget_recovery();
     }
 
     /// Returns whether the stored Discovery Key is newer than `discovery_key`, such as one from a

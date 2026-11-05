@@ -649,3 +649,386 @@ fn messages_to_a_blocked_contact_still_show_as_not_delivered_but_are_never_recov
     assert!(!after_a_day.starts_recovery);
     assert_eq!(alice.host.undelivered(), [sent.message_id]);
 }
+
+#[test]
+fn a_recovery_stays_on_the_current_session_when_its_pending_acknowledgments_are_lost() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    bob.host.forget_session();
+    bob.forget_sessions_with(&alice);
+    let before = alice
+        .host
+        .addresses(ProtocolStateKind::PendingAcknowledgments);
+    let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
+    alice.receive(&restart.message);
+    let lost = alice
+        .host
+        .addresses(ProtocolStateKind::PendingAcknowledgments)
+        .into_iter()
+        .find(|address| !before.contains(address))
+        .unwrap();
+    alice.host.remove(&lost);
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
+            .starts_recovery
+    );
+
+    let resent = alice.recover(&bob, None).committed();
+
+    assert_eq!(resent.message_id, first.message_id);
+    assert_eq!(resent.session_id, restart.session_id);
+    assert_eq!(waiting_on(&alice, restart.session_id), [first.message_id]);
+}
+
+// Alice's Message waits on a Session older than the one Bob wrote on after losing his, when Alice
+// blocks Bob.
+fn blocked_with_a_message_left_behind(relay: &Relay) -> (Device, Device, SentMessage, SentMessage) {
+    let (mut alice, mut bob) = befriended(relay);
+    let first = alice.send(&bob, b"first");
+    bob.host.forget_session();
+    bob.forget_sessions_with(&alice);
+    let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
+    alice.receive(&restart.message);
+    alice.block(bob.identity_key());
+    (alice, bob, first, restart)
+}
+
+#[test]
+fn a_recovery_after_an_unblock_starts_a_new_session_when_the_contact_rotated_during_the_block() {
+    let relay = Relay::new();
+    let (mut alice, mut bob, first, restart) = blocked_with_a_message_left_behind(&relay);
+    let rotation = bob.rotate_inbox();
+    alice.unblock(bob.identity_key());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
+            .starts_recovery
+    );
+    assert!(matches!(
+        alice.recover(&bob, None),
+        Recovered::NeedsPreKeyBundle
+    ));
+
+    let resent = alice.recover(&bob, Some(bob.bundle())).committed();
+
+    assert_eq!(resent.message_id, first.message_id);
+    assert_ne!(resent.session_id, restart.session_id);
+    assert!(matches!(
+        Route::of(&resent.destination),
+        Route::FirstMessage { discovery_key, .. }
+            if discovery_key == *rotation.discovery_key.public_key.as_bytes()
+    ));
+    assert_eq!(
+        accepted(bob.receive(&resent.message)).plaintext.as_slice(),
+        b"first"
+    );
+}
+
+#[test]
+fn a_recovery_after_an_unblock_stays_on_the_kept_session_when_the_contact_didnt_rotate() {
+    let relay = Relay::new();
+    let (mut alice, bob, first, restart) = blocked_with_a_message_left_behind(&relay);
+    alice.unblock(bob.identity_key());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
+            .starts_recovery
+    );
+    assert!(matches!(
+        alice.recover(&bob, None),
+        Recovered::NeedsPreKeyBundle
+    ));
+
+    let resent = alice.recover(&bob, Some(bob.bundle())).committed();
+
+    assert_eq!(resent.message_id, first.message_id);
+    assert_eq!(resent.session_id, restart.session_id);
+    assert_eq!(Route::of(&resent.destination), bob.established_route());
+    // The check happens once.
+    alice.send(&bob, b"no bundle needed");
+}
+
+#[test]
+fn a_recovery_after_an_unblock_waits_for_a_new_session_when_the_relay_no_longer_knows_the_key() {
+    let relay = Relay::new();
+    let (mut alice, mut bob, first, _) = blocked_with_a_message_left_behind(&relay);
+    bob.rotate_inbox();
+    alice.unblock(bob.identity_key());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
+            .starts_recovery
+    );
+    // The Relay can't find a bundle for the stored key, so the app ends this job.
+    assert!(matches!(
+        alice.recover(&bob, None),
+        Recovered::NeedsPreKeyBundle
+    ));
+
+    // A fresh contact link names the new inbox, and Alice's next send starts a Session there.
+    let mut outgoing = alice.outgoing(&bob, b"found your link");
+    outgoing.prekey_bundle = Some(bob.bundle());
+    let sent = alice.send_with(outgoing, Intent::Message);
+    let received = accepted(bob.receive(&sent.message));
+    alice.receive(&received.acknowledgment.unwrap());
+
+    let resent = alice.recover(&bob, None).committed();
+    assert_eq!(resent.message_id, first.message_id);
+    assert_eq!(resent.session_id, sent.session_id);
+    assert_eq!(Route::of(&resent.destination), bob.established_route());
+}
+
+#[test]
+fn a_session_a_recovery_starts_after_an_unblock_ends_the_check() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    let second = alice.send(&bob, b"second");
+    alice.block(bob.identity_key());
+    alice.unblock(bob.identity_key());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let probe = alice.recover(&bob, Some(bob.bundle())).committed();
+    assert_eq!(probe.message_id, first.message_id);
+    let received = accepted(bob.receive(&probe.message));
+    alice.receive(&received.acknowledgment.unwrap());
+
+    let resent = alice.recover(&bob, None).committed();
+
+    assert_eq!(resent.message_id, second.message_id);
+    assert_eq!(resent.session_id, probe.session_id);
+    alice.send(&bob, b"no bundle needed");
+}
+
+// Bob rotates, and Alice's next send starts a Session from his new bundle.
+fn send_through_a_new_bundle(alice: &mut Device, bob: &mut Device, text: &[u8]) -> SentMessage {
+    bob.rotate_inbox();
+    let mut outgoing = alice.outgoing(bob, text);
+    outgoing.prekey_bundle = Some(bob.bundle());
+    alice.send_with(outgoing, Intent::Message)
+}
+
+#[test]
+fn a_late_message_on_an_older_session_sends_the_messages_held_behind_a_probe() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = send_through_a_new_bundle(&mut alice, &mut bob, b"first");
+    let second = alice.send(&bob, b"second");
+    for _ in 0..4 {
+        send_through_a_new_bundle(&mut alice, &mut bob, b"to the newer inbox");
+    }
+    // Bob writes on the oldest Session with his latest grant, so Alice holds a capability.
+    let late = bob.send(&alice, b"late");
+    let later = bob.send(&alice, b"later");
+    alice.receive(&late.message);
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let probe = alice.recover(&bob, Some(bob.bundle())).committed();
+    assert_eq!(probe.message_id, first.message_id);
+
+    alice.receive(&later.message);
+
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let resent = alice.recover(&bob, None).committed();
+    assert_eq!(resent.message_id, second.message_id);
+    assert_eq!(resent.session_id, later.session_id);
+}
+
+#[test]
+fn a_recovery_without_a_capability_for_a_late_session_fails_until_the_probes_acknowledgment() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    let second = alice.send(&bob, b"second");
+    // Bob answers on the first of Alice's newer Sessions, and his Message arrives late, with a
+    // grant older than the key Alice now holds.
+    let older = send_through_a_new_bundle(&mut alice, &mut bob, b"to the newer inbox");
+    bob.receive(&older.message);
+    let late = bob.send(&alice, b"late");
+    for _ in 0..4 {
+        send_through_a_new_bundle(&mut alice, &mut bob, b"to the newer inbox");
+    }
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let probe = alice.recover(&bob, Some(bob.bundle())).committed();
+    assert_eq!(probe.message_id, first.message_id);
+
+    alice.receive(&late.message);
+
+    assert!(matches!(
+        alice.observe_recovery(&bob, None),
+        Err(DeviceError::Operation(
+            MessageOperationError::ProtocolState(ProtocolStateError::NoDeliveryCapability)
+        ))
+    ));
+    let received = accepted(bob.receive(&probe.message));
+    alice.receive(&received.acknowledgment.unwrap());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let resent = alice.recover(&bob, None).committed();
+    assert_eq!(resent.message_id, second.message_id);
+    assert_eq!(resent.session_id, probe.session_id);
+}
+
+#[test]
+fn a_late_message_just_after_the_probes_acknowledgment_still_sends_the_held_messages() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    let second = alice.send(&bob, b"second");
+    let older = send_through_a_new_bundle(&mut alice, &mut bob, b"to the newer inbox");
+    bob.receive(&older.message);
+    let late = bob.send(&alice, b"late");
+    for _ in 0..4 {
+        send_through_a_new_bundle(&mut alice, &mut bob, b"to the newer inbox");
+    }
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let probe = alice.recover(&bob, Some(bob.bundle())).committed();
+    assert_eq!(probe.message_id, first.message_id);
+    let received = accepted(bob.receive(&probe.message));
+    alice.receive(&received.acknowledgment.unwrap());
+
+    alice.receive(&late.message);
+
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let resent = alice.recover(&bob, None).committed();
+    assert_eq!(resent.message_id, second.message_id);
+    assert_eq!(resent.session_id, late.session_id);
+}
+
+#[test]
+fn a_recovery_signaled_before_a_block_signals_again_after_the_unblock() {
+    let relay = Relay::new();
+    let (mut alice, bob) = befriended(&relay);
+    alice.send(&bob, b"first");
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
+            .starts_recovery
+    );
+    alice.block(bob.identity_key());
+    alice.unblock(bob.identity_key());
+
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS + HOUR_MILLIS)
+            .starts_recovery
+    );
+}
+
+#[test]
+fn a_recovery_starts_a_new_session_when_its_bundle_names_a_newer_key_than_the_contact_delivered_on()
+{
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    bob.host.forget_session();
+    bob.forget_sessions_with(&alice);
+    let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
+    alice.receive(&restart.message);
+    let rotation = bob.rotate_inbox();
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
+            .starts_recovery
+    );
+
+    let resent = alice.recover(&bob, Some(bob.bundle())).committed();
+
+    assert_eq!(resent.message_id, first.message_id);
+    assert_ne!(resent.session_id, restart.session_id);
+    assert!(matches!(
+        Route::of(&resent.destination),
+        Route::FirstMessage { discovery_key, .. }
+            if discovery_key == *rotation.discovery_key.public_key.as_bytes()
+    ));
+}
+
+#[test]
+fn a_new_session_a_recovery_starts_after_an_unblock_sends_the_rest_after_the_probe() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let first = alice.send(&bob, b"first");
+    let second = alice.send(&bob, b"second");
+    bob.host.forget_session();
+    bob.forget_sessions_with(&alice);
+    let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
+    alice.receive(&restart.message);
+    alice.block(bob.identity_key());
+    bob.rotate_inbox();
+    alice.unblock(bob.identity_key());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
+            .starts_recovery
+    );
+
+    let probe = alice.recover(&bob, Some(bob.bundle())).committed();
+
+    assert_eq!(probe.message_id, first.message_id);
+    assert!(matches!(
+        alice.recover(&bob, None),
+        Recovered::AwaitingProbe(_)
+    ));
+    let received = accepted(bob.receive(&probe.message));
+    alice.receive(&received.acknowledgment.unwrap());
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
+            .starts_recovery
+    );
+    let resent = alice.recover(&bob, None).committed();
+    assert_eq!(resent.message_id, second.message_id);
+    assert_eq!(resent.session_id, probe.session_id);
+}
+
+#[test]
+fn a_message_resent_near_the_limit_shows_as_not_delivered_while_its_copy_can_still_arrive() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let sent = alice.send(&bob, b"first");
+    bob.host.forget_session();
+    bob.forget_sessions_with(&alice);
+    assert!(
+        alice
+            .check_deliveries(&bob, sent_at_millis() + 29 * DAY_MILLIS)
+            .starts_recovery
+    );
+    let resent = alice.recover(&bob, Some(bob.bundle())).committed();
+
+    alice.check_deliveries(&bob, sent_at_millis() + 30 * DAY_MILLIS + HOUR_MILLIS);
+
+    assert_eq!(alice.host.undelivered(), [sent.message_id]);
+    let received = accepted(bob.receive(&resent.message));
+    assert_eq!(received.plaintext.as_slice(), b"first");
+    assert!(matches!(
+        alice.receive(&received.acknowledgment.unwrap()),
+        InboundMessageOutcome::AcknowledgmentUnmatched(_)
+    ));
+}

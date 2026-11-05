@@ -151,17 +151,17 @@ pub(super) fn encode_pending_acknowledgments(
     encode_blob(address, &body, max_pending_acknowledgments_blob_len(limits))
 }
 
+// Returns the Session's pending acknowledgments. A Session that lost this record keeps working,
+// since its keys are intact, with nothing waiting on it.
 pub(super) fn load_pending_acknowledgments(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
     limits: ProtocolHardeningLimits,
 ) -> Result<LoadedPendingAcknowledgments, ProtocolStateError> {
-    let blob = snapshot
-        .get(address)
-        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-            address: address.clone(),
-        })?;
-    decode_pending_acknowledgments(address, blob, limits)
+    match snapshot.get(address) {
+        Some(blob) => decode_pending_acknowledgments(address, blob, limits),
+        None => Ok(LoadedPendingAcknowledgments::empty()),
+    }
 }
 
 // Returns whether the Session at `address` already processed an acknowledgment with `digest`.
@@ -171,11 +171,9 @@ pub(super) fn has_seen_acknowledgment(
     digest: [u8; DIGEST_LEN],
     limits: ProtocolHardeningLimits,
 ) -> Result<bool, ProtocolStateError> {
-    let blob = snapshot
-        .get(address)
-        .ok_or_else(|| ProtocolStateError::MissingRequiredState {
-            address: address.clone(),
-        })?;
+    let Some(blob) = snapshot.get(address) else {
+        return Ok(false);
+    };
     let wire = decode_wire(address, blob, limits)?;
     Ok(contains_digest(&wire.acknowledgment_digests, &digest))
 }

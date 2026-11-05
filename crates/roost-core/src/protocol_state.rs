@@ -615,7 +615,7 @@ pub enum InboundMessageOutcome {
     /// An acknowledgment cleared one of this identity's Pending Acknowledgments.
     AcknowledgmentMatched(Box<AcknowledgmentResult>),
     /// An authenticated acknowledgment named no Pending Acknowledgment, such as one already
-    /// cleared.
+    /// cleared, or a Message already reported as not delivered whose later copy arrived.
     AcknowledgmentUnmatched(Box<AcknowledgmentResult>),
 }
 

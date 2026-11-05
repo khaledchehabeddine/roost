@@ -827,10 +827,7 @@ fn oversized_or_corrupt_session_blob_is_a_decode_fault_without_reinitialization(
 #[test]
 fn missing_required_state_is_an_explicit_failure() {
     let fixture = ProtocolFixture::new();
-    let address = fixture
-        .alice
-        .host
-        .only(ProtocolStateKind::PendingAcknowledgments);
+    let address = fixture.alice.host.only(ProtocolStateKind::ContactState);
     let mut alice_store = fixture.alice.host.clone();
     alice_store.remove(&address);
 

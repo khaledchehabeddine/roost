@@ -1,6 +1,6 @@
 const MAX_TRANSPORT_BINDING_LEN: usize = 1024;
 
-/// Opaque public bytes supplied by a Caller-Owned Transport.
+/// Opaque public bytes supplied by the app's transport.
 ///
 /// Core authenticates these bytes with one encrypted Message, but never interprets, transmits, or
 /// stores them. Each receive also includes them in the digest that catches a repeated delivery.

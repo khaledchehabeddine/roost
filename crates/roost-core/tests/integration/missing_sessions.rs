@@ -1,12 +1,15 @@
 //! A send to a contact whose Session records the host lost starts a new Session from a fetched
-//! bundle, and refuses to when the contact isn't accepted. A Message on a Session the records no
-//! longer keep names an unknown Session.
+//! bundle, and refuses to when the contact isn't accepted. A Session that lost only its Pending
+//! Acknowledgments keeps working. A Message on a Session the records no longer keep names an
+//! unknown Session.
 
-use crate::support::HostCommitError;
 use crate::support::device::{
     Device, DeviceError, Encrypted, Intent, Relay, Route, befriended, redraft, requested,
 };
-use roost_core::{InboundMessageOutcome, MessageOperationError, ProtocolStateError};
+use crate::support::{HostCommitError, accepted};
+use roost_core::{
+    InboundMessageOutcome, MessageOperationError, ProtocolStateError, ProtocolStateKind,
+};
 
 // Sends `plaintext` from `sender` to `recipient`, fetching `recipient`'s bundle when asked, as the
 // app restarts an attempt that ends with `NeedsPreKeyBundle`.
@@ -64,6 +67,53 @@ fn a_send_to_an_accepted_contact_without_its_current_session_starts_a_new_sessio
         alice.send(&bob, b"on the new one").session_id,
         sent.session_id
     );
+}
+
+#[test]
+fn a_session_that_lost_its_pending_acknowledgments_keeps_sending_and_tracks_new_messages() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let kept = alice.send(&bob, b"before the loss");
+    let address = alice.host.only(ProtocolStateKind::PendingAcknowledgments);
+    alice.host.remove(&address);
+
+    let sent = alice.send(&bob, b"after the loss");
+
+    assert_eq!(sent.session_id, kept.session_id);
+    let waiting = alice
+        .store
+        .protocol_engine()
+        .pending_acknowledgments(&alice.host.snapshot(), sent.session_id)
+        .unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].message_id, sent.message_id);
+    accepted(bob.receive(&kept.message));
+    assert_eq!(
+        accepted(bob.receive(&sent.message)).plaintext.as_slice(),
+        b"after the loss"
+    );
+}
+
+#[test]
+fn an_acknowledgment_on_a_session_that_lost_its_pending_acknowledgments_is_unmatched_once() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = befriended(&relay);
+    let sent = alice.send(&bob, b"before the loss");
+    let acknowledgment = accepted(bob.receive(&sent.message)).acknowledgment.unwrap();
+    let address = alice.host.only(ProtocolStateKind::PendingAcknowledgments);
+    alice.host.remove(&address);
+
+    let outcome = alice.receive(&acknowledgment);
+
+    assert!(matches!(
+        outcome,
+        InboundMessageOutcome::AcknowledgmentUnmatched(_)
+    ));
+    alice.forget_received_digests();
+    assert!(matches!(
+        alice.receive(&acknowledgment),
+        InboundMessageOutcome::Duplicate
+    ));
 }
 
 #[test]
