@@ -115,5 +115,5 @@
   - Avoid: transport envelope, route record, delivery capability
 - **Trust State**: A contact's level of trust: pending while a Contact Request is open in either direction, accepted but unverified, or verified by Safety Number.
   - Avoid: certificate validity, blocking
-- **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys. Its Messages prove the sender holds its Identity Key until the peer replies, or for a Contact Request until the peer accepts.
+- **X3DH**: The handshake that starts a Session from a peer's Discovery Key and prekeys. Its Messages carry the handshake until the peer replies, or for a Contact Request until the peer accepts, and the First Message that creates the Session proves the sender holds its Identity Key.
   - Avoid: login, certificate validation
