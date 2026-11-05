@@ -5,4 +5,4 @@ Starting a Session needs the peer's prekey bundle, and the app must not hold its
 ## Alternatives
 
 - Keep the attempt open while the app fetches: it would hold plaintext and stale reads across a network call.
-- Have the app always fetch before a request: recovery also needs Roost to ask for a bundle, so apps would handle two patterns.
+- Have the app always fetch before a request: Recovery also needs Roost to ask for a bundle, so apps would handle two patterns.

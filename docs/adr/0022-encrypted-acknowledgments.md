@@ -1,6 +1,6 @@
 # Encrypted Acknowledgments
 
-An Acknowledgment Artifact is an encrypted Session Message that Core returns for the app to send, so servers in between can't see what was delivered. The app can't tell one from other Messages before decrypting it, so it goes through the same decryption and sender checks.
+An Acknowledgment Artifact is an encrypted Message that Core returns for the app to send, so the Relay can't see what was delivered. The app can't tell one from other Messages before decrypting it, so it goes through the same decryption and sender checks.
 
 ## Alternatives
 

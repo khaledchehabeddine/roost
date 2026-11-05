@@ -1,6 +1,6 @@
-# Caller-Owned Transport
+# App-Owned Transport
 
-Each app has its own delivery, push, and retry policy, so Roost does no networking. Roost returns Messages and acknowledgments as opaque bytes, and the app sends them however it chooses, with its own authentication, retries, and rate limits.
+Each app has its own delivery, push, and retry policy, so Roost does no networking. Roost returns Messages and acknowledgments for the app to send however it chooses, with its own authentication, retries, and rate limits.
 
 ## Alternatives
 

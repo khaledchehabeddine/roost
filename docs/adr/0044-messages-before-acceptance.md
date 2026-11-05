@@ -1,6 +1,6 @@
 # Messages Before Acceptance
 
-Before a contact is accepted, each side may send a few Messages so people can check who they're talking to, and one constant in Roost sets how many. Each side counts the distinct MessageIDs it sent to or received from that contact, refuses to send past the limit, and withholds the plaintext of Messages it receives past it. Sealed sender hides the sender from the Relay, so only the recipient can enforce a limit per sender.
+Before a contact is accepted, each side may send a few Messages so people can check who they're talking to, and Roost sets how many. Each side counts the distinct MessageIDs it sent to or received from that contact, refuses to send past the limit, and withholds the plaintext of Messages it receives past it. Sealed sender hides the sender from the Relay, so only the recipient can enforce a limit per sender.
 
 ## Alternatives
 

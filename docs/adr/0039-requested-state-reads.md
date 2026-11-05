@@ -1,6 +1,6 @@
 # Requested State Reads
 
-Roost learns which records a Message needs only as it reads them, such as a Session found through its contact's record, so it asks the app for exact records, round by round. A Message Operation keeps what it has read and its provisional work until it returns its result, so the app never resubmits a record and Roost never repeats cryptography. A call that reads only one record the app can name up front, such as unblocking a contact, takes that record or its absence directly.
+Roost learns which records a Message needs only as it reads them, such as a Session found through the record of its contact's Sessions, so it asks the app for exact records, round by round. A Message Operation keeps what it has read and its provisional work until it returns its result, so the app never resubmits a record and Roost never repeats cryptography. A call that reads only one record the app can name up front, such as unblocking a contact, takes that record or its absence directly.
 
 ## Alternatives
 

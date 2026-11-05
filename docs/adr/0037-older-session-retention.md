@@ -4,4 +4,4 @@ A peer keeps Sessions it no longer sends on, so Messages already on their way to
 
 ## Alternatives
 
-- Delete older Sessions after a set time without a Message: a contact who keeps starting Sessions could grow storage without limit, and Roost would need the app to supply the time.
+- Delete older Sessions after a set time without a Message: a contact who keeps starting Sessions could grow storage without limit.

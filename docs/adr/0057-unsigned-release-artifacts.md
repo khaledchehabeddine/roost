@@ -1,6 +1,6 @@
 # Unsigned Release Artifacts
 
-While one maintainer releases, the mobile artifacts carry no signatures, and consumers rely on checksum pins.
+While one maintainer releases, the mobile artifacts carry no signatures, and the Swift package pins its XCFramework by checksum.
 
 ## Alternatives
 

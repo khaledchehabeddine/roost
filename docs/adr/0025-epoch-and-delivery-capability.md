@@ -4,5 +4,5 @@ The Discovery Key's Epoch also numbers the inbox, and the Delivery Capability is
 
 ## Alternatives
 
-- Count inbox rotations apart from the Epoch: the Relay sees only one number, and merging the two later would need a live migration.
-- Derive the capability from the Discovery Key: the capability must not be recoverable from public keys and must rotate on its own.
+- Count Inbox Rotations apart from the Epoch: the Relay sees only one number, and merging the two later would need a live migration.
+- Derive the capability from the Discovery Key: the capability must not be recoverable from public keys.

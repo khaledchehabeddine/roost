@@ -1,4 +1,4 @@
-# Caller-Held Protocol State
+# App-Held Protocol State
 
 An app and its extensions may each run a Library Instance for one Identity, so the app stores all protocol state as Protocol State Blobs and Roost keeps no copy between operations. Each operation returns its state updates with its Messages and signals, and the app commits them in one transaction, so a crash can't send a Message without saving its state.
 

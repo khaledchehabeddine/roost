@@ -1,6 +1,6 @@
 # Inbox Grants
 
-A contact can deliver to an inbox only with its Discovery Key and Delivery Capability, so Roost builds, from SecureStorage, an Inbox Grant that carries both. The app never handles grants or its own capability, and sees a peer's capability only in an established Message's destination, while a first Message routes by the recipient's prekeys.
+A contact can deliver to an inbox only with its Discovery Key and Delivery Capability, so Roost builds, from SecureStorage, an Inbox Grant that carries both. The app never handles grants or its own capability, and sees a peer's capability only in an Established Message's destination, while a First Message routes by the recipient's prekeys.
 
 ## Alternatives
 

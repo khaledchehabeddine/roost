@@ -1,6 +1,6 @@
 # Remembering Deleted Sessions
 
-When Roost deletes a Session, it remembers the SessionID until the Session's signed prekey expires, so a replayed first Message can't revive the Session and pull outgoing Messages onto it. Those records are limited per contact too, so a contact who churns Sessions on purpose can only lose their own.
+When Roost deletes a Session this side accepted, it remembers the SessionID until the Session's signed prekey expires, so a replayed First Message can't revive the Session and pull outgoing Messages onto it. Those records are limited per contact too, so a contact who churns Sessions on purpose can only lose their own.
 
 ## Alternatives
 

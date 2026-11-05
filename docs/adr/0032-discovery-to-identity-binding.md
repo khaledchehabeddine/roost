@@ -4,4 +4,4 @@ The Identity Key and the Discovery Key sign each other, but only the Identity Ke
 
 ## Alternatives
 
-- Add the Epoch and a timestamp to the Discovery Key's signature: it would change a finished specification and add fields two independent implementations must match exactly.
+- Add the Epoch and a timestamp to the Discovery Key's signature: each Discovery Key already belongs to one Epoch, so the fields would repeat what the Identity Key's signature says.

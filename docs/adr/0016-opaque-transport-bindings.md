@@ -1,6 +1,6 @@
 # Opaque Transport Bindings
 
-Every Message Roost seals or opens takes a Transport Binding, and the Sealed Sender Frame authenticates the binding's exact bytes. The app owns those bytes, and Roost never parses, sends, or stores them, so Roost guarantees they arrive unchanged but says nothing about their meaning. Roost finds a first Message's prekeys from the public keys its frame names, and reports their prekey IDs in its destination, so neither direction parses the app's transport format.
+Every Message Roost seals or opens takes a Transport Binding, and the Sealed Sender Frame authenticates the binding's exact bytes. The app owns those bytes, and Roost never parses, sends, or stores them, so Roost guarantees they arrive unchanged but says nothing about their meaning. Roost finds a First Message's prekeys from the prekey references its frame carries, and reports their Prekey IDs in its destination, so neither direction parses the app's transport format.
 
 ## Alternatives
 
