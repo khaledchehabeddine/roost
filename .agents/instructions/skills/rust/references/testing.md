@@ -4,7 +4,7 @@ Broken code can still round-trip data and reject bad input, so a round trip or a
 
 ## Scope
 
-- Add or keep a test only when it catches a costly failure or likely regression that nothing else would.
+- Add or keep a test only when it catches a costly failure or likely regression that nothing else would, or when the rule below for key derivations, signatures, and hashes requires it.
 - Test what a caller can observe, such as outputs, errors, and stored state.
 
 ## Placement

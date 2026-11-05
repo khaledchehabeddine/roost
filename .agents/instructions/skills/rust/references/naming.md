@@ -1,7 +1,5 @@
 # Naming
 
-Many values here share a type, such as public keys and integer times, so only their names tell them apart.
-
 ## Names
 
 - Spell out each word in a name, such as `chain_key`, not `ck`, except widely used abbreviations, such as `id`, `len`, and `AEAD`.

@@ -1,7 +1,5 @@
 # Cargo
 
-Every dependency ships inside the app, so each new one is more code to trust and keep updated.
-
 ## Dependencies
 
 - For new functionality, use the first of these that provides it:

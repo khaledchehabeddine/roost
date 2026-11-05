@@ -1,7 +1,5 @@
 # Implementation
 
-This code runs inside the app, so a failure here can crash it or leave changes behind.
-
 ## Checks
 
 - Check every input and precondition before changing any state.
