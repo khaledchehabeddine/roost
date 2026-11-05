@@ -7,4 +7,4 @@ Read [SKILL.md](../../../.agents/instructions/skills/commit-push/SKILL.md).
 
 Review Skills: `code-review high`.
 
-PR Footer: `Created with [Claude Code](https://claude.com/claude-code).`
+Pull Request Footer: `Created with [Claude Code](https://claude.com/claude-code).`

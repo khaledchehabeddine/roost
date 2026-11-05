@@ -7,4 +7,4 @@ Read [SKILL.md](../../instructions/skills/commit-push/SKILL.md).
 
 Review Skills: `review-agent`.
 
-PR Footer: `Created with [Codex](https://openai.com/codex).`
+Pull Request Footer: `Created with [Codex](https://openai.com/codex).`
