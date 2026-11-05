@@ -2,17 +2,35 @@
   "permissions": {
     "ask": [
       "Bash(gh release delete*)",
+      "Bash(git -C *)",
       "Bash(git clean *)",
       "Bash(git reset --hard*)",
       "Bash(rm -f -r*)",
       "Bash(rm -r -f*)",
       "Bash(rm -fr*)",
-      "Bash(rm -rf*)"
+      "Bash(rm -rf*)",
+      "Bash(rm -f -R*)",
+      "Bash(rm -R -f*)",
+      "Bash(rm -fR*)",
+      "Bash(rm -Rf*)",
+      "Bash(rm --force --recursive*)",
+      "Bash(rm --recursive --force*)",
+      "Bash(rm --force -r*)",
+      "Bash(rm --force -R*)",
+      "Bash(rm -r --force*)",
+      "Bash(rm -R --force*)",
+      "Bash(rm -f --recursive*)",
+      "Bash(rm --recursive -f*)"
     ],
     "deny": [
       "Bash(git push --force)",
       "Bash(git push --force *)",
-      "Bash(git push -f*)"
+      "Bash(git push -f*)",
+      "Bash(git push * --force)",
+      "Bash(git push * --force *)",
+      "Bash(git push * -f)",
+      "Bash(git push * -f *)",
+      "Bash(git push * +*)"
     ]
   }
 }

@@ -1,7 +1,6 @@
 prefix_rule(
     pattern = ["gh", "release", "delete"],
     decision = "prompt",
-    justification = "gh release delete removes a published GitHub release. Confirm intent before discarding release assets and notes.",
     match = ["gh release delete v0.3.0"],
     not_match = ["gh release create", "gh release view"],
 )
@@ -9,7 +8,6 @@ prefix_rule(
 prefix_rule(
     pattern = ["git", "clean"],
     decision = "prompt",
-    justification = "git clean deletes untracked files. Confirm intent before discarding work.",
     match = ["git clean -fd", "git clean -f -d src/", "git clean -xdf"],
     not_match = ["git status", "git stash"],
 )
@@ -17,31 +15,41 @@ prefix_rule(
 prefix_rule(
     pattern = ["git", "reset", "--hard"],
     decision = "prompt",
-    justification = "Hard reset silently discards uncommitted changes. Confirm intent before resetting; use --keep to refuse if work would be lost.",
     match = ["git reset --hard", "git reset --hard HEAD~1"],
     not_match = ["git reset --soft HEAD~1", "git reset HEAD file.rs", "git reset --keep HEAD~1"],
 )
 
 prefix_rule(
-    pattern = ["rm", ["-r", "-f"], ["-r", "-f"]],
+    pattern = ["rm", ["-r", "-R", "--recursive", "-f", "--force"], ["-r", "-R", "--recursive", "-f", "--force"]],
     decision = "prompt",
-    justification = "Recursive force delete with separated flags is destructive. Confirm the target path.",
-    match = ["rm -r -f target", "rm -f -r /tmp/build"],
-    not_match = ["rm -r dir", "rm -f file"],
+    match = ["rm -r -f target", "rm -f -r /tmp/build", "rm -R -f target", "rm -f -R target", "rm --recursive --force target", "rm -r --force target", "rm --force -R target"],
+    not_match = ["rm -r dir", "rm -f file", "rm --recursive dir", "rm --force file"],
 )
 
 prefix_rule(
-    pattern = ["rm", ["-rf", "-fr"]],
+    pattern = ["rm", ["-rf", "-fr", "-Rf", "-fR"]],
     decision = "prompt",
-    justification = "Recursive force delete is destructive. Confirm the target path.",
-    match = ["rm -rf target", "rm -fr /tmp/build"],
+    match = ["rm -rf target", "rm -fr /tmp/build", "rm -Rf target", "rm -fR target"],
     not_match = ["rm file.txt", "rm -r dir"],
+)
+
+prefix_rule(
+    pattern = ["git", "-C"],
+    decision = "prompt",
+    match = ["git -C . push --force", "git -C . reset --hard", "git -C . clean -fd"],
+    not_match = ["git status", "git push origin main"],
+)
+
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "prompt",
+    match = ["git push origin main", "git push origin main --force", "git push origin +main"],
+    not_match = ["git status", "git pull"],
 )
 
 prefix_rule(
     pattern = ["git", "push", ["-f", "--force"]],
     decision = "forbidden",
-    justification = "Force push is forbidden. Use --force-with-lease instead.",
     match = ["git push --force", "git push -f origin main"],
     not_match = ["git push origin main", "git push --force-with-lease"],
 )
