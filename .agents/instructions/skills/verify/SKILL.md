@@ -1,6 +1,6 @@
 # Verify
 
-1. List each requirement of the task and how to prove the change meets it.
+1. List each requirement of the task and how to prove it's correct.
 2. Run these checks, and rerun them after each fix:
    - Format: `cargo fmt --all -- --check`
    - Lint: `cargo clippy --locked --workspace --all-targets --all-features -- -D warnings`
@@ -11,12 +11,10 @@
 3. Run mutation testing on this branch's changes:
 
    ```sh
-   mkdir -p .scratch
-   git ls-files -z --others --exclude-standard > .scratch/untracked
-   xargs -0 -r git add -N -- < .scratch/untracked
+   git add -N .
    git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ $(git merge-base HEAD origin/main) | cargo mutants --in-diff /dev/stdin --workspace --test-workspace=true --output .scratch
-   xargs -0 -r git reset -q -- < .scratch/untracked
+   git diff -z --name-only --diff-filter=A | xargs -0 -r git reset -q --
    ```
 
    When only tests changed, pass `--file <path>` for the files they test in place of `--in-diff`. Resolve each missed mutant with a new or stronger test, or report it with the reason. Rerun step 2 after adding tests. Report a timeout as caught, and a diff with no Rust source as Skipped.
-4. Write the results to `.scratch/verify.md` in the form of the Verification section of the [pull request template](../../../../.github/PULL_REQUEST_TEMPLATE.md).
+4. Write the results to `.scratch/verify.md`, following the [pull request template's](../../../../.github/PULL_REQUEST_TEMPLATE.md) Verification section.
