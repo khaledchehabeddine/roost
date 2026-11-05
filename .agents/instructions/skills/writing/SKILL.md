@@ -1,15 +1,14 @@
 # Writing
 
-Make each sentence clear on the first read. These rules don't apply to names or string literals in code. Where another skill or document sets a format, follow that format.
+These rules don't apply to names or string literals in code. Where another skill or document sets a format or a length, follow it.
 
 ## Content
 
-- Cut any point the reader doesn't need, such as "This change follows best practices".
+- Cut any point the reader doesn't need, such as "This change follows best practices" or a closing "ensuring security".
 - Say exactly what happens, such as "a failed update leaves the earlier updates applied", not "updates are handled safely".
-- Cut a closing phrase that names a vague benefit, such as "ensuring security".
 - State a point directly, such as "it also authenticates messages", not "it doesn't just encrypt messages, it authenticates them".
 - Give a reason in agent instructions only when it changes what the agent does.
-- Comment only to prevent a reader's mistake, except for documentation comments.
+- Comment only to prevent a reader's mistake, except for required documentation comments.
 
 ## Sentences
 
@@ -19,7 +18,7 @@ Make each sentence clear on the first read. These rules don't apply to names or 
 - Use the plain word, such as "is", not "serves as".
 - Connect ideas with words, not symbols, such as "then" in place of "→".
 - Spell out abbreviations, except standard terms such as "AEAD".
-- Write in American English.
+- Use American spelling.
 
 ## Punctuation and Formatting
 

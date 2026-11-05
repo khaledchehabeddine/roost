@@ -1,6 +1,6 @@
 # Documentation
 
-UniFFI copies exported items' comments into the Swift and Kotlin bindings, so host developers read them without the Rust code.
+UniFFI copies exported items' comments into the Swift and Kotlin bindings, so app developers read them without the Rust code.
 
 ## Comments
 
@@ -42,13 +42,13 @@ impl ExampleState {
 }
 ```
 
-## Host API
+## Exported API
 
 - Leave out what a Swift or Kotlin developer wouldn't know, such as Rust types, internal crate names, protocol shorthand, and wire formats.
-- On each method, say what the host must persist and what it must check itself.
-- Explain what Roost and the host each own on the type hosts create first, since crate documentation doesn't reach the bindings.
+- On each method, say what the app must persist and what it must check itself.
+- Explain what Roost and the app each own on the type apps create first, since crate documentation doesn't reach the bindings.
 - Write examples as one `swift` block and one `kotlin` block, never Rust.
-- Write `# Errors` only on host API methods, with a bullet for each error the host can act on, starting with its link.
+- Write `# Errors` only on functions exported through UniFFI, with a bullet for each error the function can return, starting with its link.
 
 ### ❌ Bad
 

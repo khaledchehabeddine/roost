@@ -6,7 +6,6 @@
 - Before changing what Roost does, read [FEATURES.md](FEATURES.md).
 - Before changing a design, read the [ADRs](docs/adr/) that cover it.
 - Before naming a domain concept, read [GLOSSARY.md](GLOSSARY.md).
-- Before creating a branch, commit, or pull request, read [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Workflow
 

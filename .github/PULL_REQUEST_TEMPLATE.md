@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- Say what this PR does and why, in one or two sentences. -->
+<!-- Say what this pull request does and why, in one or two sentences. -->
 
 ## Changes
 

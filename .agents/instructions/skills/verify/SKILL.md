@@ -13,8 +13,8 @@
    ```sh
    git add -N .
    git diff --no-color --no-ext-diff --src-prefix=a/ --dst-prefix=b/ $(git merge-base HEAD origin/main) | cargo mutants --in-diff /dev/stdin --workspace --test-workspace=true --output .scratch
-   git reset -- .
+   git diff -z --name-only --diff-filter=A | xargs -0 -r git reset --
    ```
 
    When only tests changed, pass `--file <path>` for the files they test in place of `--in-diff`. Resolve each missed mutant with a new or stronger test, or report it with the reason. Rerun step 2 after adding tests. Report a timeout as caught, and a diff with no Rust source as Skipped.
-4. Write the results to `.scratch/verify.md` with the [report template](templates/report.md).
+4. Write the results to `.scratch/verify.md`, following the [pull request template's](../../../../.github/PULL_REQUEST_TEMPLATE.md) Verification section.

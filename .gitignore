@@ -11,10 +11,8 @@ ios/.build/
 ios/.swiftpm/
 
 # Agents
-.claude/agent-memory-local/
 .claude/settings.local.json
 .claude/worktrees/
-.codex/config.local.toml
 .scratch/
 
 # JetBrains

@@ -22,6 +22,6 @@ Follow the [template](templates/adr.md) when writing an ADR in `docs/adr/`.
 - State the context, decision, and reason in one to three sentences.
 - Give each decision its own ADR.
 - List an alternative only when a reader might ask why it wasn't chosen, and give the reason in one sentence.
-- Leave out code details, such as caller duties, limits, test coverage, and encodings.
+- Leave out code details, such as how the app calls the API, limits, test coverage, and encodings.
 - Update an ADR in place when its decision changes.
 - Delete an ADR when its decision no longer applies, renumber the ADRs after it, and update every reference.
