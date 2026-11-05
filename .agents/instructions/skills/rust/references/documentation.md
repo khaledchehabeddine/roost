@@ -48,7 +48,7 @@ impl ExampleState {
 - On each method, say what the app must persist and what it must check itself.
 - Explain what Roost and the app each own on the type apps create first, since crate documentation doesn't reach the bindings.
 - Write examples as one `swift` block and one `kotlin` block, never Rust.
-- Write `# Errors` only on functions `roost-client` exports through UniFFI, with a bullet for each error the function can return, starting with its link.
+- Write `# Errors` only on functions exported through UniFFI, with a bullet for each error the function can return, starting with its link.
 
 ### ❌ Bad
 

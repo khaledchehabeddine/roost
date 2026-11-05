@@ -12,4 +12,4 @@ Read every reference before writing or reviewing Rust.
 - [Naming](references/naming.md): names, including timestamps and integer times.
 - [Structure](references/structure.md): grouping code into modules and files.
 - [Testing](references/testing.md): what to test, where tests go, test names, and assertions.
-- [UniFFI](references/uniffi.md): the `roost-client` boundary, and the types and errors it exports.
+- [UniFFI](references/uniffi.md): the UniFFI boundary, and the types and errors it exports.

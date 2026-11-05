@@ -5,7 +5,7 @@ This code runs inside the app, so a failure here can crash it or leave changes b
 ## Checks
 
 - Check every input and precondition before changing any state.
-- Move a check that several functions repeat into one function, such as a length check that encoding and decoding share.
+- Group repeated checks for a value in one function, such as encoding and decoding.
 
 ## State Changes
 
