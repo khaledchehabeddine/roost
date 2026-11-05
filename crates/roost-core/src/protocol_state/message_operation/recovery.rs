@@ -66,9 +66,10 @@ pub enum DeliveryCheckStep {
 /// The check gives up on Messages 30 days after their first send. It signals a recovery after a day
 /// without an acknowledgment, or as soon as the contact sends an Inbox Grant newer than the one a
 /// waiting Message went to, delivers on a newer Session, or acknowledges a recovery's probe, and
-/// once signaled, a recovery comes back only after a week or when the contact proves a newer grant
-/// or Session. Call [`Self::step`] until it returns [`DeliveryCheckStep::Ready`], supplying the
-/// records each other step asks for. Dropping the check commits nothing.
+/// once signaled, a recovery comes back only after a week, after an unblock, or when the contact
+/// proves a newer grant or Session. Call [`Self::step`] until it returns
+/// [`DeliveryCheckStep::Ready`], supplying the records each other step asks for. Dropping the check
+/// commits nothing.
 pub struct DeliveryCheck(Option<Box<Checking>>);
 
 struct Checking {
@@ -314,19 +315,15 @@ impl<'a, 'b> Outstanding<'a, 'b> {
     }
 
     // Returns the oldest Message waiting on a Session older than the one the contact delivered on
-    // since, which may have lost it, or held on a probe's Session the contact has answered, with
-    // no copy on its way. The newer Session holds nothing sent before the Message, so the contact
-    // misses no Message on it.
+    // since, which may have lost it, or held behind a probe with no copy on its way. The newer
+    // Session holds nothing sent before the Message, so the contact misses no Message on it.
     fn left_behind(&self) -> Option<&'b Unacknowledged<'a>> {
         if !self.current_is_replied {
             return None;
         }
         self.recoverable
             .iter()
-            .find(|message| {
-                (message.entry.held && message.session_id == self.current)
-                    || self.before_current.contains(&message.session_id)
-            })
+            .find(|message| message.entry.held || self.before_current.contains(&message.session_id))
             .copied()
     }
 }
@@ -431,7 +428,7 @@ pub struct OutgoingRecovery {
     /// The local Identity's certificate sealed into the resent Message.
     pub sender_certificate: SignedSenderCertificate,
     /// The bundle the app fetched after [`MessageRecoveryStep::NeedsPreKeyBundle`], kept with the
-    /// recovery job until a Session uses it.
+    /// recovery job until a Session uses it or the job ends.
     pub prekey_bundle: Option<PeerPreKeyBundle>,
 }
 
@@ -470,12 +467,13 @@ pub enum MessageRecoveryStep {
 ///
 /// Roost picks the Message and the Session. When the contact delivered on a Session newer than the
 /// one holding the Message, the Message goes there, so the contact misses no Message on it, unless
-/// the check after an unblock finds a newer Discovery Key, which starts a new Session instead.
-/// Otherwise, under a signaled recovery, the oldest Message starts a new Session from the contact's
-/// prekey bundle, and the rest wait until the contact acknowledges it. Call [`Self::step`] until it
-/// returns [`MessageRecoveryStep::Ready`], [`MessageRecoveryStep::NeedsPreKeyBundle`],
-/// [`MessageRecoveryStep::AwaitingProbe`], or [`MessageRecoveryStep::Finished`], supplying what
-/// each other step asks for. Dropping the recovery commits nothing.
+/// the app's bundle names a newer Discovery Key, which starts a new Session instead. Otherwise,
+/// under a signaled recovery, the oldest Message starts a new Session from the contact's prekey
+/// bundle, and the rest wait until the contact acknowledges it or delivers on another Session. Call
+/// [`Self::step`] until it returns [`MessageRecoveryStep::Ready`],
+/// [`MessageRecoveryStep::NeedsPreKeyBundle`], [`MessageRecoveryStep::AwaitingProbe`], or
+/// [`MessageRecoveryStep::Finished`], supplying what each other step asks for. Dropping the
+/// recovery commits nothing.
 pub struct MessageRecovery(Option<Box<Recovering>>);
 
 struct Recovering {
@@ -679,16 +677,11 @@ impl Recovering {
         let records = load_pending_by_session(snapshot, &sessions, limits)?;
         let waiting = unacknowledged(&records);
         let outstanding = Outstanding::new(&waiting, &sessions, snapshot, limits)?;
-        // The contact delivered on a newer Session, so the Message goes there with no fetch, unless
-        // an unblock needs a check, since the Relay silently drops Messages sent to a rotated
-        // inbox.
+        // The contact delivered on a newer Session, so the Message goes there, with no fetch unless
+        // an unblock needs a check. A bundle naming a newer key starts a new Session instead, since
+        // the Relay silently drops Messages sent to a rotated inbox.
         if let Some(message) = outstanding.left_behind() {
-            let check = if contact.needs_discovery_key_check {
-                self.encrypting.check_discovery_key(contact)?
-            } else {
-                DiscoveryKeyCheck::Checked(Box::new(contact))
-            };
-            let (contact, message, target) = match check {
+            let (contact, message, target) = match self.encrypting.check_discovery_key(contact)? {
                 DiscoveryKeyCheck::NeedsBundle => {
                     return Ok(Selected::Ended(MessageRecoveryStep::NeedsPreKeyBundle(
                         self.encrypting.recipient,

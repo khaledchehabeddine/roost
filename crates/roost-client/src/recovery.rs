@@ -56,7 +56,7 @@ pub struct OutgoingRecovery {
     /// The local identity's certificate, sealed into the resent Message.
     pub sender_certificate: SignedSenderCertificate,
     /// The contact's bundle, fetched after a [`MessageRecoveryStep::NeedsPreKeyBundle`] step and
-    /// kept with the recovery job until a Session uses it.
+    /// kept with the recovery job until a Session uses it or the job ends.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
@@ -117,9 +117,9 @@ pub enum MessageRecoveryStep {
 /// Session newer than the one it was sent on, so the contact never misses a Message on it: a
 /// Session the contact delivered on since, or else a new Session from the contact's bundle, where
 /// the oldest Message goes first as a probe and the rest wait for a delivery check after the
-/// contact acknowledges it. Each [`MessageRecoveryStep::Ready`] result replaces the Message's
-/// earlier copy, so commit it in one transaction with replacing the app's send work for that
-/// MessageID, and never send the old copy again.
+/// contact acknowledges it or delivers on another Session. Each [`MessageRecoveryStep::Ready`]
+/// result replaces the Message's earlier copy, so commit it in one transaction with replacing the
+/// app's send work for that MessageID, and never send the old copy again.
 ///
 /// Track each recovery as its own job, apart from the Message's original send, whose record
 /// already says it's done. Drive each step as [`MessageEncryption`](crate::MessageEncryption)
@@ -200,7 +200,8 @@ impl Messaging {
     /// Roost sets the waits: a recovery starts after a day without an acknowledgment, or as soon as
     /// the contact sends an Inbox Grant newer than the one a waiting Message went to, delivers on a
     /// newer Session, or acknowledges a recovery's probe, and once started, comes back only after a
-    /// week or once the contact sends a newer Inbox Grant or starts a new Session.
+    /// week, after an unblock, or once the contact sends a newer Inbox Grant or starts a new
+    /// Session.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `contact` or `now_millis` is out of range.
