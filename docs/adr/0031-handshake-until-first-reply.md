@@ -1,7 +1,7 @@
 # Handshake Until First Reply
 
-As in Signal, every Message an initiator sends on a new Session carries the handshake until a reply arrives, or for a Contact Request until the peer accepts (ADR 0057), so a lost or late first Message doesn't block the ones after it. The recipient looks up the Message's SessionID first and runs X3DH only for a Session it doesn't have yet. The cost is larger Messages until the first reply, and the Relay can tell which Messages carry a handshake.
+As in Signal, every message an initiator sends on a new session carries the handshake until a reply arrives, or for a contact request until the peer accepts (ADR 0057), so a lost or late first message doesn't block the ones after it. The recipient looks up the message's session ID first and runs X3DH only for a session it doesn't have yet. The cost is larger messages until the first reply, and the relay can tell which messages carry a handshake.
 
 ## Alternatives
 
-- Send the handshake only in the first Message: a lost or late first Message would leave every later Message undecryptable until the app resent it.
+- Send the handshake only in the first message: a lost or late first message would leave every later message undecryptable until the app resent it.

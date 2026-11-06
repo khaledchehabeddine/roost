@@ -1,4 +1,4 @@
-//! The one record Roost keeps for each contact, keyed by the contact's Identity Key.
+//! The one record Roost keeps for each contact, keyed by the contact's identity key.
 
 use super::grant::{
     CAPABILITY_LEN, DiscoveryKeyStamp, InboxGrant, is_newer_discovery_key, parse_discovery_key,
@@ -22,21 +22,21 @@ pub(super) fn contact_address(identity_key: ContactIdentityKey) -> ProtocolState
     ProtocolStateAddress::new(ProtocolStateKind::ContactState, identity_key.into())
 }
 
-/// Whether a Message received before acceptance fits the limit on Messages before acceptance.
+/// Whether a message received before acceptance fits the limit on messages before acceptance.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReceivedCount {
     WithinLimit,
     PastLimit,
 }
 
-/// A Message this side sent before acceptance, and the local grant it carried.
+/// A message this side sent before acceptance, and the local grant it carried.
 #[derive(Clone, Copy)]
 struct SentBeforeAcceptance {
     message_id: MessageId,
     grant: Option<DiscoveryKeyStamp>,
 }
 
-/// A recovery a delivery check signaled for the contact's unacknowledged Messages.
+/// A recovery a delivery check signaled for the contact's unacknowledged messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RecoverySignal {
     /// When the delivery check signaled it, in Unix milliseconds.
@@ -49,37 +49,37 @@ pub(super) struct RecoverySignal {
 pub(super) enum RecoveryProgress {
     /// Nothing is resent yet.
     Signaled,
-    /// Messages went out again on a Session the contact delivered on.
+    /// Messages went out again on a session the contact delivered on.
     Resent,
-    /// This Message went out first on a new Session, and the rest wait for its acknowledgment.
+    /// This message went out first on a new session, and the rest wait for its acknowledgment.
     Probed(MessageId),
 }
 
-/// A contact as Roost stores it, including the peer's Delivery Capability.
+/// A contact as Roost stores it, including the peer's delivery capability.
 pub(super) struct ContactRecord {
     pub(super) identity_key: ContactIdentityKey,
     pub(super) discovery_key: Option<ContactDiscoveryKey>,
     /// The peer's capability for `discovery_key`, once a grant for it arrived.
     delivery_capability: Option<Zeroizing<[u8; CAPABILITY_LEN]>>,
-    /// The newest of the local Identity's grants the contact acknowledged a Message carrying.
+    /// The newest of the local identity's grants the contact acknowledged a message carrying.
     acknowledged_grant: Option<DiscoveryKeyStamp>,
     pub(super) trust_state: ContactTrustState,
     pub(super) blocked: bool,
     sent_before_acceptance: Vec<SentBeforeAcceptance>,
-    /// The last Grant Update this side sent before acceptance, which doesn't count toward the
+    /// The last grant update this side sent before acceptance, which doesn't count toward the
     /// limit.
     grant_update_before_acceptance: Option<SentBeforeAcceptance>,
     received_before_acceptance: Vec<MessageId>,
     /// Whether the next send first checks the contact's current prekey bundle, since the contact
     /// may have rotated its inbox while blocked.
     pub(super) needs_discovery_key_check: bool,
-    /// The recovery signaled for the contact's unacknowledged Messages, until none is left or the
-    /// contact proves a newer grant or Session.
+    /// The recovery signaled for the contact's unacknowledged messages, until none is left or the
+    /// contact proves a newer grant or session.
     recovery: Option<RecoverySignal>,
 }
 
 impl ContactRecord {
-    /// Starts a Pending record for a contact whose Discovery Key Roost has verified.
+    /// Starts a pending record for a contact whose discovery key Roost has verified.
     pub(super) fn pending(
         identity_key: ContactIdentityKey,
         discovery_key: Option<ContactDiscoveryKey>,
@@ -112,7 +112,7 @@ impl ContactRecord {
         self.trust_state != ContactTrustState::Pending
     }
 
-    /// Records both consents, which ends the limit on Messages before acceptance.
+    /// Records both consents, which ends the limit on messages before acceptance.
     pub(super) fn accept(&mut self) {
         if self.trust_state == ContactTrustState::Pending {
             self.trust_state = ContactTrustState::Unverified;
@@ -122,26 +122,26 @@ impl ContactRecord {
         self.received_before_acceptance.clear();
     }
 
-    /// Records that the contact's Inbox Grant arrived on a Session `starter` started, which accepts
+    /// Records that the contact's inbox grant arrived on a session `starter` started, which accepts
     /// the contact when this side started it.
     ///
     /// The asked side shares its grant only once it accepts, so its grant on the requester's
-    /// Session accepts as a Contact Acceptance does. A restore can lose that acceptance, and the
-    /// grant then arrives again on the next Session the requester starts.
+    /// session accepts as a contact acceptance does. A restore can lose that acceptance, and the
+    /// grant then arrives again on the next session the requester starts.
     pub(super) fn accept_by_grant(&mut self, starter: Starter) {
         if starter == Starter::Local {
             self.accept();
         }
     }
 
-    /// Returns whether this side acknowledges the contact's Messages on a Session `starter`
+    /// Returns whether this side acknowledges the contact's messages on a session `starter`
     /// started.
     ///
     /// An accepted contact gets acknowledgments. Before acceptance only the asked side
     /// acknowledges, once it has replied, so a stranger can't tell whether a request arrived.
     ///
-    /// Either way it waits for the contact's capability, which a bundle naming a newer Discovery
-    /// Key drops. The Message still arrives. The contact's grant then comes with its next Message,
+    /// Either way it waits for the contact's capability, which a bundle naming a newer discovery
+    /// key drops. The message still arrives. The contact's grant then comes with its next message,
     /// or with the resends of the recovery that the missing acknowledgment starts.
     pub(super) fn should_acknowledge(&self, starter: Starter) -> bool {
         self.delivery_capability.is_some()
@@ -149,10 +149,10 @@ impl ContactRecord {
                 || (starter == Starter::Peer && !self.sent_before_acceptance.is_empty()))
     }
 
-    /// Counts a Message this side sends before acceptance with the local grant stamped `grant`,
+    /// Counts a message this side sends before acceptance with the local grant stamped `grant`,
     /// refusing one past the limit.
     ///
-    /// A MessageID already counted, such as a resent draft, counts once.
+    /// A message ID already counted, such as a resent draft, counts once.
     pub(super) fn count_sent(
         &mut self,
         message_id: MessageId,
@@ -176,12 +176,12 @@ impl ContactRecord {
         Ok(())
     }
 
-    /// Forgets the Messages this side sent before acceptance, so the limit counts from zero.
+    /// Forgets the messages this side sent before acceptance, so the limit counts from zero.
     pub(super) fn forget_sent_before_acceptance(&mut self) {
         self.sent_before_acceptance.clear();
     }
 
-    /// Records a Grant Update this side sends before acceptance with the local grant stamped
+    /// Records a grant update this side sends before acceptance with the local grant stamped
     /// `grant`, so its acknowledgment shows the contact holds that grant.
     ///
     /// It doesn't count toward the limit, and only the latest one is kept, since an older one
@@ -193,7 +193,7 @@ impl ContactRecord {
         });
     }
 
-    /// Counts a Message received before acceptance. A MessageID already counted counts once.
+    /// Counts a message received before acceptance. A message ID already counted counts once.
     pub(super) fn count_received(&mut self, message_id: MessageId) -> ReceivedCount {
         if self.received_before_acceptance.contains(&message_id) {
             return ReceivedCount::WithinLimit;
@@ -205,7 +205,7 @@ impl ContactRecord {
         ReceivedCount::WithinLimit
     }
 
-    /// Returns whether the contact sent this side a Message before acceptance, as every requester
+    /// Returns whether the contact sent this side a message before acceptance, as every requester
     /// did with its request.
     pub(super) fn has_written_before_acceptance(&self) -> bool {
         !self.received_before_acceptance.is_empty()
@@ -219,14 +219,14 @@ impl ContactRecord {
         self.forget_recovery();
     }
 
-    /// Returns whether the stored Discovery Key is newer than `discovery_key`, such as one from a
+    /// Returns whether the stored discovery key is newer than `discovery_key`, such as one from a
     /// stale prekey bundle.
     pub(super) fn has_newer_discovery_key_than(&self, discovery_key: &ContactDiscoveryKey) -> bool {
         self.discovery_key
             .is_some_and(|current| is_newer_discovery_key(&current, discovery_key))
     }
 
-    /// Replaces the Discovery Key with `discovery_key` when it is newer, dropping the capability,
+    /// Replaces the discovery key with `discovery_key` when it is newer, dropping the capability,
     /// which belongs to the older one.
     pub(super) fn record_discovery_key(&mut self, discovery_key: ContactDiscoveryKey) {
         if self
@@ -238,7 +238,7 @@ impl ContactRecord {
         }
     }
 
-    /// Keeps `grant` when its Discovery Key is newer, or is the stored one without a capability.
+    /// Keeps `grant` when its discovery key is newer, or is the stored one without a capability.
     ///
     /// A stale grant changes nothing.
     pub(super) fn record_grant(&mut self, grant: InboxGrant) {
@@ -256,7 +256,7 @@ impl ContactRecord {
         }
     }
 
-    /// Returns the recovery signaled for the contact's unacknowledged Messages, if any.
+    /// Returns the recovery signaled for the contact's unacknowledged messages, if any.
     pub(super) fn recovery(&self) -> Option<RecoverySignal> {
         self.recovery
     }
@@ -274,11 +274,11 @@ impl ContactRecord {
         });
     }
 
-    /// Records that a recovery resent a Message, as the probe on a new Session when `probe` holds
+    /// Records that a recovery resent a message, as the probe on a new session when `probe` holds
     /// its ID.
     ///
     /// The first resend attaches the local grant again until the contact acknowledges it, since a
-    /// contact that lost its Session may have lost the grant too.
+    /// contact that lost its session may have lost the grant too.
     pub(super) fn record_resend(&mut self, probe: Option<MessageId>) {
         if self
             .recovery
@@ -291,10 +291,10 @@ impl ContactRecord {
         }
     }
 
-    /// Returns whether the contact granted a Discovery Key newer than the one stamped `sent_to`,
-    /// so a Message sent to that one may have gone to a dead inbox, which the Relay doesn't report.
+    /// Returns whether the contact granted a discovery key newer than the one stamped `sent_to`,
+    /// so a message sent to that one may have gone to a dead inbox, which the relay doesn't report.
     ///
-    /// A newer key known without its grant came with a new Session, and the Messages left behind
+    /// A newer key known without its grant came with a new session, and the messages left behind
     /// go out on it once the contact replies there.
     pub(super) fn has_newer_grant_than(&self, sent_to: Option<DiscoveryKeyStamp>) -> bool {
         self.delivery_capability.is_some()
@@ -303,7 +303,7 @@ impl ContactRecord {
             })
     }
 
-    /// Returns the peer's Discovery Key and capability, which an established Message needs.
+    /// Returns the peer's discovery key and capability, which an established message needs.
     pub(super) fn established_route(
         &self,
     ) -> Result<([u8; PUBLIC_KEY_LEN], RecipientDeliveryCapability), ProtocolStateError> {
@@ -316,15 +316,15 @@ impl ContactRecord {
         }
     }
 
-    /// Returns whether the contact hasn't yet acknowledged a Message carrying the local grant
+    /// Returns whether the contact hasn't yet acknowledged a message carrying the local grant
     /// stamped `current`.
     fn needs_grant(&self, current: DiscoveryKeyStamp) -> bool {
         self.acknowledged_grant
             .is_none_or(|acknowledged| acknowledged < current)
     }
 
-    /// Returns whether the contact gets the local grant stamped `current` on a Message or
-    /// acknowledgment on a Session `starter` started.
+    /// Returns whether the contact gets the local grant stamped `current` on a message or
+    /// acknowledgment on a session `starter` started.
     ///
     /// The asked side keeps its grant private until it accepts, so a requester it turns down never
     /// holds the capability, and a blocked contact never gets one.
@@ -334,13 +334,13 @@ impl ContactRecord {
             && self.needs_grant(current)
     }
 
-    /// Forgets which local grant the contact acknowledged, so the next acknowledgment and Messages
+    /// Forgets which local grant the contact acknowledged, so the next acknowledgment and messages
     /// carry the grant again.
     pub(super) fn forget_acknowledged_grant(&mut self) {
         self.acknowledged_grant = None;
     }
 
-    /// Records that the contact acknowledged a Message carrying the grant stamped `stamp`.
+    /// Records that the contact acknowledged a message carrying the grant stamped `stamp`.
     pub(super) fn acknowledge_grant(&mut self, stamp: DiscoveryKeyStamp) {
         if self
             .acknowledged_grant
@@ -351,7 +351,7 @@ impl ContactRecord {
     }
 
     /// Records that the contact acknowledged `message_id`, which this side sent before acceptance,
-    /// and with it any grant that Message carried.
+    /// and with it any grant that message carried.
     pub(super) fn acknowledge_sent_before_acceptance(&mut self, message_id: MessageId) {
         let grant = self
             .sent_before_acceptance
@@ -558,7 +558,7 @@ fn decode_error(address: &ProtocolStateAddress, reason: &str) -> ProtocolStateEr
     }
 }
 
-// A MessageID sent before acceptance and the stamp of the grant it carried.
+// A message ID sent before acceptance and the stamp of the grant it carried.
 type SentBeforeAcceptanceWire = ([u8; MESSAGE_ID_LEN], Option<(u64, u32)>);
 
 // When a recovery was signaled, and how far it got.

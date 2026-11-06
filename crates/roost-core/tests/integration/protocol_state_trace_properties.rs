@@ -1,4 +1,4 @@
-//! Generated protocol-state traces across Core's public Message and Protocol State Blob boundary.
+//! Generated protocol-state traces across Core's public message and protocol state blob boundary.
 
 use crate::support::{ProtocolFixture, StoredMessage, validation};
 use proptest::prelude::*;

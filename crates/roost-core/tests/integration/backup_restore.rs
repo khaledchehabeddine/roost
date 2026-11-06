@@ -1,7 +1,7 @@
 //! Restoring a backup brings back every contact, and each contact can send and receive again right
-//! away on new Sessions. The exception is an Asked Side that hasn't accepted yet. This side drops
-//! its acceptance on the old Session and can only send it a new Contact Request. Both sides end up
-//! accepted whether the Asked Side accepts before or after that request.
+//! away on new sessions. The exception is an asked side that hasn't accepted yet. This side drops
+//! its acceptance on the old session and can only send it a new contact request. Both sides end up
+//! accepted whether the asked side accepts before or after that request.
 
 use crate::support::device::{
     DeviceError, Intent, Recovered, Relay, Route, befriended, redraft, requested,
@@ -28,7 +28,7 @@ fn a_restored_side_talks_both_ways_and_gets_messages_sent_after_the_backup_once(
         alice.receive(&update.message),
         InboundMessageOutcome::GrantUpdate(_)
     ));
-    // The Relay still delivers the first copies, which name the Session Bob no longer has.
+    // The relay still delivers the first copies, which name the session Bob no longer has.
     for original in [&first, &second] {
         assert!(matches!(
             bob.receive(&original.message),
@@ -85,7 +85,7 @@ fn a_restored_side_talks_both_ways_with_a_contact_that_rotated_after_the_backup(
     };
     // Bob's old phone acknowledges Alice's new grant before it breaks.
     alice.receive(&received.acknowledgment.unwrap());
-    // Bob's restored record holds Alice's old Discovery Key, and her bundle shows the new one.
+    // Bob's restored record holds Alice's old discovery key, and her bundle shows the new one.
     bob.restore(&backup);
 
     let reconnect = bob.send_fetching_a_bundle(&alice, b"", Intent::GrantUpdate);
@@ -292,7 +292,7 @@ fn asking_again_accepts_a_restored_requester_that_used_up_the_limit() {
         bob.receive(&acknowledgment),
         InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
-    // The backup counts all the Messages Alice may send before acceptance.
+    // The backup counts all the messages Alice may send before acceptance.
     alice.restore(&backup);
 
     let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
@@ -325,7 +325,7 @@ fn a_restored_requester_that_used_up_the_limit_asks_again_within_the_asked_sides
 
     let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
 
-    // Bob already received all the Messages Alice may send him before he accepts.
+    // Bob already received all the messages Alice may send him before he accepts.
     let InboundMessageOutcome::Withheld(withheld) = bob.receive(&request.message) else {
         panic!("expected the new request withheld");
     };

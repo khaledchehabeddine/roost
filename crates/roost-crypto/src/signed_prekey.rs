@@ -115,7 +115,7 @@ pub struct PublicSignedPreKey {
     /// Stable unsigned identifier allocated within [`Self::epoch`].
     ///
     /// The identifier is lookup metadata and is not covered by [`Self::signature`]. A host that
-    /// needs it authenticated as transport metadata must include it in its Transport Binding.
+    /// needs it authenticated as transport metadata must include it in its transport binding.
     pub id: u64,
     /// Discovery-key epoch this signed prekey was produced under.
     pub epoch: u32,

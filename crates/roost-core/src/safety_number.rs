@@ -5,7 +5,7 @@ const SAFETY_NUMBER_DIGITS: usize = 60;
 const SAFETY_NUMBER_GROUP_SIZE: usize = 5;
 const SAFETY_NUMBER_GROUPS: usize = 12;
 
-/// A Safety Number derived from two permanent Identity Keys.
+/// A safety number derived from two permanent identity keys.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SafetyNumber {
     /// BLAKE3 derivation bytes before display reduction.
@@ -14,19 +14,19 @@ pub struct SafetyNumber {
     pub grouped_decimal: String,
 }
 
-/// Errors returned by Safety Number derivation.
+/// Errors returned by safety number derivation.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SafetyNumberError {
-    /// One Identity Key uses a non-canonical or weak public-key encoding.
+    /// One identity key uses a non-canonical or weak public-key encoding.
     #[error("identity key encoding is invalid")]
     InvalidIdentityKey,
 }
 
-/// Derives the display Safety Number for two permanent Identity Keys.
+/// Derives the display safety number for two permanent identity keys.
 ///
-/// Both inputs must use canonical X25519 and Ed25519 public-key encodings. Discovery Keys are not
-/// inputs, so Discovery Key rotation does not change the Safety Number for the same two Identity
-/// Keys. The two canonical Identity Key encodings are sorted before hashing so both parties derive
+/// Both inputs must use canonical X25519 and Ed25519 public-key encodings. Discovery keys are not
+/// inputs, so discovery key rotation does not change the safety number for the same two identity
+/// keys. The two canonical identity key encodings are sorted before hashing so both parties derive
 /// the same value.
 pub fn derive_safety_number(
     first: IdentityKey,

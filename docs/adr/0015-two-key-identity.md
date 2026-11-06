@@ -1,3 +1,3 @@
 # Two-Key Identity
 
-An Identity has a permanent Identity Key and a rotatable Discovery Key. With one key, changing where peers reach an Identity would change the Identity too, which resets peers' trust. Safety Numbers and Sender Certificates use the Identity Key, which signs the Discovery Key, so an Inbox Rotation changes where peers reach an Identity while they keep their trust and Safety Numbers.
+An identity has a permanent identity key and a rotatable discovery key. With one key, changing where peers reach an identity would change the identity too, which resets peers' trust. Safety numbers and sender certificates use the identity key, which signs the discovery key, so an inbox rotation changes where peers reach an identity while they keep their trust and safety numbers.

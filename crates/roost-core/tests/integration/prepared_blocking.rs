@@ -1,4 +1,4 @@
-//! Prepared blocking across Protocol State and SecureStorage.
+//! Prepared blocking across protocol state and SecureStorage.
 //!
 //! The scenario commits the contact update and inbox rotation through their separate host-owned
 //! stores while one stable prepared-operation identifier coordinates recovery.
@@ -6,7 +6,7 @@
 use crate::support::device::{Device, Relay};
 use roost_core::{ContactIdentityKey, ProtocolStateBlob};
 
-// Bob holds Alice's Contact Request, and returns her Identity Key and her record's bytes.
+// Bob holds Alice's contact request, and returns her identity key and her record's bytes.
 fn setup() -> (Device, ContactIdentityKey, ProtocolStateBlob) {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);

@@ -41,14 +41,14 @@ pub enum RoostError {
         reason: String,
     },
     /// The contact isn't accepted, so Roost refuses the send: this side already sent the most
-    /// Messages allowed before acceptance, no Session exists to send on, or a Grant Update would
-    /// give a requester this side hasn't accepted its Inbox Grant.
+    /// messages allowed before acceptance, no session exists to send on, or a grant update would
+    /// give a requester this side hasn't accepted its inbox grant.
     #[error("contact is not accepted: {reason}")]
     ContactNotAccepted {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// Stored Discovery Key, signed prekey, or prepared-operation material is corrupt.
+    /// Stored discovery key, signed prekey, or prepared-operation material is corrupt.
     #[error("stored key material is corrupt")]
     Corrupt,
     /// Backup decryption failed because the passphrase or backup bytes did not authenticate.
@@ -69,21 +69,21 @@ pub enum RoostError {
     /// A restored identity must rotate its inbox before using prekeys.
     #[error("inbox rotation required after backup restore")]
     InboxRotationRequired,
-    /// An established Message needs the contact's Delivery Capability, and no Inbox Grant from
-    /// the contact has supplied one for its current Discovery Key.
+    /// An established message needs the contact's delivery capability, and no inbox grant from
+    /// the contact has supplied one for its current discovery key.
     #[error("no delivery capability for this contact")]
     NoDeliveryCapability,
-    /// Requested identity, Discovery Key, or prekey material is not stored.
+    /// Requested identity, discovery key, or prekey material is not stored.
     #[error("key material not found")]
     NotFound,
-    /// A different first Message already used the one-time prekey this one names, so Roost refuses
+    /// A different first message already used the one-time prekey this one names, so Roost refuses
     /// it.
     #[error("one-time prekey already used: {reason}")]
     OneTimePreKeyUsed {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// A Message Operation already returned its result or failed, so start a new one from fresh
+    /// A message operation already returned its result or failed, so start a new one from fresh
     /// reads.
     #[error("message operation has finished")]
     OperationFinished,
@@ -124,15 +124,15 @@ pub enum RoostError {
     /// The bounded prepared-operation journal has no free unfinished-operation slot.
     #[error("too many unfinished prepared operations")]
     TooManyUnfinishedOperations,
-    /// The most sent Messages allowed already wait for the contact's acknowledgment on the
-    /// Session, so Roost refuses another. Keep the draft and send it once the contact acknowledges
+    /// The most sent messages allowed already wait for the contact's acknowledgment on the
+    /// session, so Roost refuses another. Keep the draft and send it once the contact acknowledges
     /// some, or a delivery check gives up on them.
     #[error("{limit} messages already wait for an acknowledgment")]
     TooManyPendingAcknowledgments {
-        /// Most Messages that wait for an acknowledgment on one Session.
+        /// Most messages that wait for an acknowledgment on one session.
         limit: u64,
     },
-    /// A Message, Sender Certificate, blob, backup, or prekey version is unsupported.
+    /// A message, sender certificate, blob, backup, or prekey version is unsupported.
     #[error("unsupported version: {reason}")]
     UnsupportedVersion {
         /// Diagnostic context for logging only.

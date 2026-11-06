@@ -9,20 +9,20 @@ use roost_core::{
     PublicationBundle as CorePublicationBundle, Signature,
 };
 
-/// A signed prekey's public half, which peers use to start a Session.
+/// A signed prekey's public half, which peers use to start a session.
 ///
-/// Verify it with the matching Discovery Key's verifying key.
+/// Verify it with the matching discovery key's verifying key.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicSignedPreKey {
-    /// Stable unsigned identifier within the Discovery Key epoch. A host that needs this lookup
-    /// value authenticated as transport metadata must include it in its Transport Binding.
+    /// Stable unsigned identifier within the discovery key epoch. A host that needs this lookup
+    /// value authenticated as transport metadata must include it in its transport binding.
     pub id: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
     /// Ed25519 signature over `public_key`, `epoch`, and the creation time in whole Unix seconds.
     /// Always 64 bytes.
     pub signature: Vec<u8>,
-    /// Discovery Key epoch this signed prekey is bound to.
+    /// Discovery key epoch this signed prekey is bound to.
     pub epoch: u32,
     /// Creation time in Unix milliseconds, always a whole number of seconds.
     pub created_at_millis: u64,
@@ -59,16 +59,16 @@ impl PublicSignedPreKey {
     }
 }
 
-/// A one-time prekey's public half, which peers use to start a Session.
+/// A one-time prekey's public half, which peers use to start a session.
 ///
 /// Its secret half stays in SecureStorage, and Roost uses it at most once.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicOneTimePreKey {
-    /// One-time prekey identifier within the current Discovery Key epoch.
+    /// One-time prekey identifier within the current discovery key epoch.
     pub id: u64,
     /// X25519 public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
-    /// Discovery Key epoch this one-time prekey is bound to.
+    /// Discovery key epoch this one-time prekey is bound to.
     pub epoch: u32,
     /// Creation time in Unix milliseconds, always a whole number of seconds.
     pub created_at_millis: u64,
@@ -95,17 +95,17 @@ impl PublicOneTimePreKey {
     }
 }
 
-/// A Discovery Key's public half, which peers use to verify this identity's signed prekeys.
+/// A discovery key's public half, which peers use to verify this identity's signed prekeys.
 ///
-/// Verify it with the Identity Key's signing key before trusting [`Self::verifying_key`].
+/// Verify it with the identity key's signing key before trusting [`Self::verifying_key`].
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicDiscoveryKey {
     /// X25519 key-agreement public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
-    /// Ed25519 verifying key bytes that validate this Discovery Key's signed prekeys. Always 32
+    /// Ed25519 verifying key bytes that validate this discovery key's signed prekeys. Always 32
     /// bytes.
     pub verifying_key: Vec<u8>,
-    /// The Identity Key's Ed25519 signature over this Discovery Key. Always 64 bytes.
+    /// The identity key's Ed25519 signature over this discovery key. Always 64 bytes.
     pub signature: Vec<u8>,
     /// Rotation epoch, monotonic within one storage lineage.
     pub epoch: u32,
@@ -152,26 +152,26 @@ impl PublicDiscoveryKey {
     }
 }
 
-/// A Discovery Key and signed prekey to publish together.
+/// A discovery key and signed prekey to publish together.
 ///
-/// The signed prekey verifies with the included Discovery Key.
+/// The signed prekey verifies with the included discovery key.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PublicationBundle {
     /// Version of the public prekey bundle format.
     pub version: u8,
-    /// The Discovery Key, whose signature is the Identity Key's half of the binding between the
+    /// The discovery key, whose signature is the identity key's half of the binding between the
     /// two keys.
     pub discovery_key: PublicDiscoveryKey,
     /// [`Self::discovery_key`]'s signature over the identity it belongs to, the other half of that
     /// binding. Always 64 bytes.
     ///
-    /// Publish this alongside the Discovery Key. A relay verifies both halves before accepting a
+    /// Publish this alongside the discovery key. A relay verifies both halves before accepting a
     /// registration and rejects it when either fails.
     pub discovery_to_identity: Vec<u8>,
-    /// Public commitment to this inbox's Delivery Capability. Always 32 bytes.
+    /// Public commitment to this inbox's delivery capability. Always 32 bytes.
     ///
     /// Register this value. The capability itself is a secret that Roost shares with contacts only
-    /// inside Inbox Grants.
+    /// inside inbox grants.
     pub recipient_delivery_verifier: Vec<u8>,
     /// Public signed prekey for this publication.
     pub signed_prekey: PublicSignedPreKey,
@@ -192,28 +192,28 @@ impl PublicationBundle {
     }
 }
 
-/// A contact's identity and Discovery Key, decoded from a contact link with their binding
+/// A contact's identity and discovery key, decoded from a contact link with their binding
 /// signatures verified.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct ContactPublication {
     /// The contact's identity.
     pub identity: Identity,
-    /// The Discovery Key the contact had when they made the link.
+    /// The discovery key the contact had when they made the link.
     pub discovery_key: PublicDiscoveryKey,
 }
 
-/// Decodes the Contact Publication from a contact link and verifies the signatures that bind its
-/// identity and Discovery Key.
+/// Decodes the contact publication from a contact link and verifies the signatures that bind its
+/// identity and discovery key.
 ///
 /// It reads and writes no state, so the app can check a link before the user decides anything,
 /// even for someone who is already a contact. To ask the link's owner to be a contact, fetch the
-/// prekey bundle for [`ContactPublication::discovery_key`] from the Relay, and pass it in a
+/// prekey bundle for [`ContactPublication::discovery_key`] from the relay, and pass it in a
 /// [`PreKeyBundle`] with [`ContactPublication::identity`]. When the owner is already a contact,
 /// fetch the bundle only if [`is_newer_discovery_key`] says the link's key is newer than the
 /// stored one, then pass it in
 /// [`OutgoingMessage::prekey_bundle`](crate::OutgoingMessage::prekey_bundle).
 ///
-/// A valid publication shows only that whoever holds the identity made it. Compare Safety Numbers
+/// A valid publication shows only that whoever holds the identity made it. Compare safety numbers
 /// to learn who that is.
 ///
 /// # Errors
@@ -231,19 +231,19 @@ pub fn decode_contact_publication(bytes: Vec<u8>) -> Result<ContactPublication, 
     })
 }
 
-/// Returns whether `candidate` is newer than `current`, the Discovery Key stored for the same
+/// Returns whether `candidate` is newer than `current`, the discovery key stored for the same
 /// contact.
 ///
-/// A newer Discovery Key has a later creation time, or the same creation time and a higher epoch,
+/// A newer discovery key has a later creation time, or the same creation time and a higher epoch,
 /// since a restored backup can repeat an epoch. Any key is newer than no stored key. Check a
-/// contact link's Discovery Key against
+/// contact link's discovery key against
 /// [`ContactState::discovery_key`](crate::ContactState::discovery_key) before fetching its bundle,
 /// since each fetch of a contact's current bundle uses up one of its one-time prekeys. It checks
 /// no signatures, so pass only a key from [`decode_contact_publication`] whose identity matches the
 /// contact's.
 ///
 /// # Errors
-/// - [`RoostError::InvalidData`] if either Discovery Key is malformed.
+/// - [`RoostError::InvalidData`] if either discovery key is malformed.
 #[uniffi::export]
 pub fn is_newer_discovery_key(
     candidate: PublicDiscoveryKey,
@@ -259,19 +259,19 @@ pub fn is_newer_discovery_key(
     }))
 }
 
-/// A contact's published keys as the app fetched them from the Relay, to start a Session with.
+/// A contact's published keys as the app fetched them from the relay, to start a session with.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct PreKeyBundle {
     /// The contact's identity.
     pub identity: Identity,
-    /// The contact's Discovery Key, both binding signatures, and signed prekey.
+    /// The contact's discovery key, both binding signatures, and signed prekey.
     pub publication: PublicationBundle,
-    /// The one-time prekey the Relay handed out, absent once the contact's pool ran out.
+    /// The one-time prekey the relay handed out, absent once the contact's pool ran out.
     pub one_time_prekey: Option<PublicOneTimePreKey>,
 }
 
 impl PreKeyBundle {
-    // The Discovery Key's signature over the identity travels beside the prekey bundle, which has
+    // The discovery key's signature over the identity travels beside the prekey bundle, which has
     // no field for it, since it verifies against the identity the bundle doesn't carry.
     pub(crate) fn to_core(&self) -> Result<roost_core::PeerPreKeyBundle, RoostError> {
         let publication = &self.publication;

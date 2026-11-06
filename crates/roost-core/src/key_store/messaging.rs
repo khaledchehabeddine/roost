@@ -10,7 +10,7 @@ use roost_crypto::{
 };
 use std::time::SystemTime;
 
-/// Errors returned when a Message Operation can't start.
+/// Errors returned when a message operation can't start.
 #[derive(Debug, thiserror::Error)]
 pub enum MessageStartError {
     /// Loading local discovery-key state failed.
@@ -22,25 +22,25 @@ pub enum MessageStartError {
     /// A committed KeyStore operation must be recovered before local keys can be used.
     #[error(transparent)]
     Operation(#[from] KeyStoreOperationError),
-    /// The Message's inputs failed their checks.
+    /// The message's inputs failed their checks.
     #[error(transparent)]
     ProtocolState(#[from] ProtocolStateError),
 }
 
-/// The local prekeys a first Message names.
+/// The local prekeys a first message names.
 pub(crate) struct FirstMessagePreKeys {
     pub(crate) signed_prekey: SignedPreKey,
     pub(crate) one_time_prekey: Option<OneTimePreKey>,
-    /// Every signed prekey this identity still holds, so Roost can forget deleted SessionIDs that
+    /// Every signed prekey this identity still holds, so Roost can forget deleted session IDs that
     /// no handshake can recreate.
     pub(crate) held_signed_prekeys: Vec<PublicSignedPreKey>,
 }
 
 impl KeyStore {
-    /// Starts encrypting an ordinary Message to a contact.
+    /// Starts encrypting an ordinary message to a contact.
     ///
-    /// The operation loads the local Identity's keys now and touches SecureStorage no more.
-    /// Roost selects the Session and the contact's Discovery Key as the operation reads them.
+    /// The operation loads the local identity's keys now and touches SecureStorage no more.
+    /// Roost selects the session and the contact's discovery key as the operation reads them.
     pub fn start_encryption(
         &self,
         message: OutgoingMessage,
@@ -48,10 +48,10 @@ impl KeyStore {
         self.start_send(message, SendIntent::Message)
     }
 
-    /// Starts encrypting a Contact Request, whose commit creates the contact's Pending record.
+    /// Starts encrypting a contact request, whose commit creates the contact's pending record.
     ///
-    /// A request to a contact who already asked sends a Contact Acceptance instead, and one to an
-    /// accepted contact sends an ordinary Message.
+    /// A request to a contact who already asked sends a contact acceptance instead, and one to an
+    /// accepted contact sends an ordinary message.
     pub fn request_contact(
         &self,
         message: OutgoingMessage,
@@ -59,11 +59,11 @@ impl KeyStore {
         self.start_send(message, SendIntent::Request)
     }
 
-    /// Starts encrypting a Contact Acceptance, whose commit accepts the contact.
+    /// Starts encrypting a contact acceptance, whose commit accepts the contact.
     ///
-    /// An acceptance to a contact already accepted sends an ordinary Message instead. When the
-    /// request's Session records are missing, such as after a backup restore, the acceptance starts
-    /// a new Session with a Contact Request, which accepts both sides when it arrives. Roost then
+    /// An acceptance to a contact already accepted sends an ordinary message instead. When the
+    /// request's session records are missing, such as after a backup restore, the acceptance starts
+    /// a new session with a contact request, which accepts both sides when it arrives. Roost then
     /// refuses only a contact that never wrote, so the app accepts only a request the contact sent.
     pub fn accept_contact(
         &self,
@@ -72,12 +72,12 @@ impl KeyStore {
         self.start_send(message, SendIntent::Acceptance)
     }
 
-    /// Starts encrypting a Grant Update, which carries only the current Inbox Grant.
+    /// Starts encrypting a grant update, which carries only the current inbox grant.
     ///
     /// The app picks who gets one and when, such as every contact after an inbox rotation, and
     /// Roost decides who may hold the grant. A blocked contact or a requester this side hasn't
     /// accepted is refused, and a contact that already acknowledged the current grant gets
-    /// nothing. A requester's Grant Updates don't count toward the limit on Messages before
+    /// nothing. A requester's grant updates don't count toward the limit on messages before
     /// acceptance.
     pub fn start_grant_update(
         &self,
@@ -86,11 +86,11 @@ impl KeyStore {
         self.start_send(update.into_message(), SendIntent::GrantUpdate)
     }
 
-    /// Starts one step of recovering a contact's unacknowledged Messages on a newer Session.
+    /// Starts one step of recovering a contact's unacknowledged messages on a newer session.
     ///
     /// The app runs steps as the recovery job a delivery check signaled, committing each resent
-    /// Message, until one ends with nothing left to resend or waiting for the probe. The operation
-    /// loads the local Identity's keys now and touches SecureStorage no more.
+    /// message, until one ends with nothing left to resend or waiting for the probe. The operation
+    /// loads the local identity's keys now and touches SecureStorage no more.
     pub fn start_recovery(
         &self,
         recovery: OutgoingRecovery,
@@ -114,12 +114,12 @@ impl KeyStore {
         self.load_local_identity_keys()
     }
 
-    /// Starts decrypting a received Message.
+    /// Starts decrypting a received message.
     ///
-    /// The operation loads the local Identity's keys and reads the clock now. It reads
-    /// SecureStorage again only for the prekeys a first Message names, or the previous Discovery
-    /// Key an established Message was sealed to before a rotation, and stages the use of a
-    /// one-time prekey as a Prepared KeyStore Operation that travels in the result's state changes.
+    /// The operation loads the local identity's keys and reads the clock now. It reads
+    /// SecureStorage again only for the prekeys a first message names, or the previous discovery
+    /// key an established message was sealed to before a rotation, and stages the use of a
+    /// one-time prekey as a prepared KeyStore operation that travels in the result's state changes.
     pub fn start_decryption(
         &self,
         message: IncomingMessage,
@@ -131,8 +131,8 @@ impl KeyStore {
             .start_decryption(self.clone(), SystemTime::now(), keys, message)?)
     }
 
-    // Returns the Discovery Key a rotation replaced whose X25519 public key is `public_key`, while
-    // the Relay may still hold Messages sealed to it at `now`.
+    // Returns the discovery key a rotation replaced whose X25519 public key is `public_key`, while
+    // the relay may still hold messages sealed to it at `now`.
     pub(crate) fn previous_discovery_key(
         &self,
         public_key: &[u8; 32],
@@ -142,7 +142,7 @@ impl KeyStore {
         Ok(self.0.discovery.previous_key(public_key, now)?)
     }
 
-    // Returns the ID of the signed prekey a first Message names when it is one kept after a
+    // Returns the ID of the signed prekey a first message names when it is one kept after a
     // rotation, which needs proof of admission, or `None` when it is the current one.
     pub(crate) fn signed_prekey_needing_admission(
         &self,
@@ -158,7 +158,7 @@ impl KeyStore {
         Ok((!is_current).then(|| signed_prekey.id()))
     }
 
-    // Loads the signed and one-time prekeys a first Message names, without consuming either.
+    // Loads the signed and one-time prekeys a first message names, without consuming either.
     pub(crate) fn first_message_prekeys(
         &self,
         reference: &SealedFramePreKeyReference,
@@ -187,7 +187,7 @@ impl KeyStore {
         })
     }
 
-    // Stages consuming the one-time prekey a new Session used, and returns the operation's ID.
+    // Stages consuming the one-time prekey a new session used, and returns the operation's ID.
     pub(crate) fn prepare_one_time_prekey_use(
         &self,
         epoch: u32,

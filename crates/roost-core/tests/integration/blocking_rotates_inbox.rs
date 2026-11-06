@@ -32,7 +32,7 @@ fn blocking_a_contact_rotates_the_inbox() {
 }
 
 /// Blocking someone already blocked must not churn every other contact's delivery capability for
-/// no reason, since each rotation sends every remaining contact a new Inbox Grant.
+/// no reason, since each rotation sends every remaining contact a new inbox grant.
 #[test]
 fn blocking_an_already_blocked_contact_does_not_rotate_again() {
     let relay = Relay::new();

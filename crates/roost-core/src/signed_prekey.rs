@@ -28,10 +28,10 @@ pub enum SignedPreKeyError {
     /// The system clock is before the Unix epoch.
     #[error("system clock is before Unix epoch")]
     Clock,
-    /// The stored signed prekey's signature does not verify against the current Discovery Key.
+    /// The stored signed prekey's signature does not verify against the current discovery key.
     #[error("stored signed prekey signature does not match the discovery key")]
     Corrupt,
-    /// Loading the Discovery Key for signed prekey rotation returned a [`DiscoveryKeyError`].
+    /// Loading the discovery key for signed prekey rotation returned a [`DiscoveryKeyError`].
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
     /// The stored retained signed prekeys repeat an identifier.
@@ -86,7 +86,7 @@ pub enum SignedPreKeyError {
         /// Current signed prekey's identifier.
         current_id: u64,
     },
-    /// Signing a new signed prekey with the Discovery Key failed.
+    /// Signing a new signed prekey with the discovery key failed.
     #[error("signing the signed prekey failed")]
     SignedPreKeySignature(#[source] SignatureError),
     /// The underlying [`SecureStorage`] returned an error.
@@ -137,7 +137,7 @@ impl SignedPreKeyManager {
             .collect())
     }
 
-    // Returns the signed prekey a first Message names by its public key, and whether it is the
+    // Returns the signed prekey a first message names by its public key, and whether it is the
     // current one rather than one kept after a rotation.
     pub(crate) fn prekey_for_first_message(
         &self,
@@ -377,7 +377,7 @@ impl SignedPreKeyWire {
     }
 }
 
-// A signed prekey a rotation replaced, kept while the Relay may still hold first Messages for it.
+// A signed prekey a rotation replaced, kept while the relay may still hold first messages for it.
 #[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 struct RetainedSignedPreKeyWire {
     prekey: SignedPreKeyWire,

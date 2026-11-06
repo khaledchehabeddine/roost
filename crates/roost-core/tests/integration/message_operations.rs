@@ -1,4 +1,4 @@
-//! Message Operations that ask a host for exact records and return results it commits atomically.
+//! Message operations that ask a host for exact records and return results it commits atomically.
 
 use crate::support::device::{Device, Intent, Relay, Route, Sealed, binding, redraft};
 use rand::SeedableRng;
@@ -673,7 +673,7 @@ fn an_unmatched_acknowledgment_still_commits_its_advanced_state() {
     establish(&mut alice, &mut bob);
     let sent = alice.encrypt_to(&bob, b"forgotten").unwrap();
     let message = sent.result.message.clone();
-    // The host keeps the ratchet's advance but loses the Pending Acknowledgment.
+    // The host keeps the ratchet's advance but loses the pending acknowledgment.
     let session_only: Vec<_> = sent
         .changes
         .into_updates()

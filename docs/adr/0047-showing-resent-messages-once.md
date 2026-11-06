@@ -1,7 +1,7 @@
 # Showing Resent Messages Once
 
-A Message that Recovery resends has new bytes, and so a new Deduplication Digest, but keeps its MessageID. The app already stores every MessageID, so it shows one Message per sender and MessageID, while still committing and acknowledging each copy.
+A message that recovery resends has new bytes, and so a new deduplication digest, but keeps its message ID. The app already stores every message ID, so it shows one message per sender and message ID, while still committing and acknowledging each copy.
 
 ## Alternatives
 
-- Let Core remember recent MessageIDs per contact: it would need a limit, and no limit covers every resend while the Relay holds a Message.
+- Let Core remember recent message IDs per contact: it would need a limit, and no limit covers every resend while the relay holds a message.

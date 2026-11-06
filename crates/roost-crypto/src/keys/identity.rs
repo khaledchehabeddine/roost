@@ -8,7 +8,7 @@ use roost_protocol::{
 
 const IDENTITY_KEY_BINDING_CONTEXT: &[u8] = b"RoostIKBinding-v1:";
 
-/// Public Identity Key material plus the binding signature for its X25519 half.
+/// Public identity key material plus the binding signature for its X25519 half.
 #[derive(Clone, Debug)]
 pub struct PublicIdentityKey {
     /// X25519 public key agreement half.
@@ -20,7 +20,7 @@ pub struct PublicIdentityKey {
 }
 
 impl PublicIdentityKey {
-    /// Builds a public Identity Key from received boundary bytes.
+    /// Builds a public identity key from received boundary bytes.
     pub fn from_bytes(
         public_key: &[u8],
         verifying_key: &[u8],

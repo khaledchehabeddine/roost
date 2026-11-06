@@ -47,7 +47,7 @@ pub enum IdentityError {
     /// The random number generator failed while creating a backup.
     #[error("backup randomness failed")]
     BackupRandomness(#[source] rand::Error),
-    /// Signing the binding between the Identity Key's halves failed.
+    /// Signing the binding between the identity key's halves failed.
     #[error("signing the identity key binding failed")]
     BindingSignature(#[source] SignatureError),
     /// Backup decryption failed because the passphrase or ciphertext was invalid.
@@ -59,7 +59,7 @@ pub enum IdentityError {
     /// No identity is stored.
     #[error("no identity found")]
     NotFound,
-    /// The Identity Secret Blob failed to encode, or the stored one is malformed or uses an
+    /// The identity secret blob failed to encode, or the stored one is malformed or uses an
     /// unknown version.
     #[error("identity secret blob failed to encode or decode")]
     SecretBlob(#[source] StoredDataError),
@@ -86,7 +86,7 @@ impl Identity {
         &self.signing_key_pair.verifying
     }
 
-    /// Returns the public Identity Key proving that the X25519 and Ed25519 halves belong
+    /// Returns the public identity key proving that the X25519 and Ed25519 halves belong
     /// together.
     pub fn public(&self) -> Result<PublicIdentityKey, IdentityError> {
         let binding_signature =
@@ -124,7 +124,7 @@ impl Identity {
     }
 }
 
-// Both secret halves of the Identity Key, which the Identity Secret Blob and an Identity Backup
+// Both secret halves of the identity key, which the identity secret blob and an identity backup
 // each hold together.
 #[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 struct IdentitySecretsWire {

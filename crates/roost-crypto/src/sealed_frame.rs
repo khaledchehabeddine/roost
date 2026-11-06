@@ -23,7 +23,7 @@ const MAX_EXTERNAL_ASSOCIATED_DATA_LEN: usize = 1024;
 /// Optional X3DH prekey reference carried by an initial sealed-sender frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SealedFramePreKeyReference {
-    /// Recipient Discovery Key epoch targeted by the frame.
+    /// Recipient discovery key epoch targeted by the frame.
     pub discovery_epoch: u32,
     /// Recipient signed prekey X25519 public key.
     pub signed_prekey_public_key: [u8; 32],
@@ -34,7 +34,7 @@ pub struct SealedFramePreKeyReference {
 /// The one-time prekey a handshake used.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OneTimePreKeyReference {
-    /// The prekey's ID within its Discovery Key epoch.
+    /// The prekey's ID within its discovery key epoch.
     pub id: u64,
     /// The prekey's X25519 public key.
     pub public_key: [u8; 32],
@@ -45,7 +45,7 @@ pub struct OneTimePreKeyReference {
 pub struct SealedFrame {
     /// Sealed-frame wire version.
     pub version: u8,
-    /// Recipient Discovery Key X25519 public key.
+    /// Recipient discovery key X25519 public key.
     pub recipient_public_key: [u8; 32],
     /// Optional X3DH prekey reference.
     pub prekey_reference: Option<SealedFramePreKeyReference>,
@@ -164,7 +164,7 @@ pub fn seal_frame_with_associated_data<R: RngCore + CryptoRng>(
     Ok(frame)
 }
 
-/// Opens a sealed-sender frame for a Discovery Key while authenticating caller-supplied transport
+/// Opens a sealed-sender frame for a discovery key while authenticating caller-supplied transport
 /// associated data.
 pub fn open_frame_for_discovery_key_with_associated_data(
     recipient_key: &DiscoveryKey,
@@ -246,7 +246,7 @@ pub enum SealedFrameError {
     /// An X25519 exchange produced a non-contributory shared secret.
     #[error("x25519 shared secret was non-contributory")]
     NonContributorySharedSecret,
-    /// The frame is sealed to another Discovery Key.
+    /// The frame is sealed to another discovery key.
     #[error("sealed-sender frame targets another discovery key")]
     RecipientMismatch,
     /// Frame bytes have bytes left over after decoding.

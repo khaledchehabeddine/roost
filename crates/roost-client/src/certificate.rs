@@ -16,12 +16,12 @@ pub struct DomainSigningKey {
     pub verifying_key: Vec<u8>,
 }
 
-/// The app's list of revoked Identity Keys, if the list loaded.
+/// The app's list of revoked identity keys, if the list loaded.
 #[derive(uniffi::Record)]
 pub struct RevocationState {
     /// True when the list loaded.
     pub available: bool,
-    /// Revoked Identity Keys. Ignored when `available` is false.
+    /// Revoked identity keys. Ignored when `available` is false.
     pub revoked_identity_keys: Vec<IdentityKey>,
 }
 
@@ -35,7 +35,7 @@ pub struct SenderCertificateValidation {
     pub domain_signing_keys: Vec<DomainSigningKey>,
     /// Relay domain incoming certificates must name.
     pub expected_relay_domain: Vec<u8>,
-    /// The app's list of revoked Identity Keys, if the list loaded.
+    /// The app's list of revoked identity keys, if the list loaded.
     pub revocation_state: RevocationState,
     /// The time to validate the certificate at, in Unix milliseconds.
     pub reference_time_millis: u64,
@@ -46,7 +46,7 @@ pub struct SenderCertificateValidation {
 pub struct ValidatedSenderCertificate {
     /// Signing-key identifier read from the certificate.
     pub signing_key_id: Vec<u8>,
-    /// Sender Identity Key bound by the certificate.
+    /// Sender identity key bound by the certificate.
     pub identity_key: IdentityKey,
     /// Certificate expiry Unix timestamp in milliseconds, always a whole number of seconds.
     pub expires_at_millis: u64,

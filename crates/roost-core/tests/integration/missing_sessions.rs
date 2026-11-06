@@ -1,7 +1,7 @@
-//! A send to a contact whose Session records the host lost starts a new Session from a fetched
-//! bundle, and refuses to when the contact isn't accepted. A Session that lost only its Pending
-//! Acknowledgments keeps working. A Message on a Session the records no longer keep names an
-//! unknown Session.
+//! A send to a contact whose session records the host lost starts a new session from a fetched
+//! bundle, and refuses to when the contact isn't accepted. A session that lost only its pending
+//! acknowledgments keeps working. A message on a session the records no longer keep names an
+//! unknown session.
 
 use crate::support::device::{
     Device, DeviceError, Encrypted, Intent, Relay, Route, befriended, redraft, requested,
@@ -155,7 +155,7 @@ fn a_late_message_on_a_session_the_lost_list_no_longer_keeps_names_an_unknown_se
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
     let on_its_way = bob.send(&alice, b"sent before alice's new session");
-    // The host keeps the Session's own record but loses the list that keeps it.
+    // The host keeps the session's own record but loses the list that keeps it.
     alice.forget_sessions_with(&bob);
     send_fetching_a_bundle(&mut alice, &bob, b"after the loss");
     let before = alice.host.snapshot_bytes();

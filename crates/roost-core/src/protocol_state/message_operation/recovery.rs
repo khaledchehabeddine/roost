@@ -1,5 +1,5 @@
-//! Recovery: finding the Messages a contact hasn't acknowledged, and encrypting them again on a
-//! newer Session after a delivery check signals it.
+//! Recovery: finding the messages a contact hasn't acknowledged, and encrypting them again on a
+//! newer session after a delivery check signals it.
 
 use super::super::contact_record::{
     ContactRecord, RecoveryProgress, contact_address, load_contact,
@@ -30,12 +30,12 @@ use roost_protocol::{MessageId, PayloadKind, SessionId, to_unix_millis};
 use std::time::{Duration, SystemTime};
 use zeroize::Zeroizing;
 
-/// How long a Message waits for an acknowledgment before Roost signals a recovery. A contact who
-/// is only offline looks the same as one that lost its Session, so the wait is long.
+/// How long a message waits for an acknowledgment before Roost signals a recovery. A contact who
+/// is only offline looks the same as one that lost its session, so the wait is long.
 const QUIET_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
-/// How long after a recovery Roost may signal another one for Messages still unacknowledged.
+/// How long after a recovery Roost may signal another one for messages still unacknowledged.
 const RECHECK_PERIOD: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// How long the Relay holds a Message. An unacknowledged one shows as not delivered this long after
+/// How long the relay holds a message. An unacknowledged one shows as not delivered this long after
 /// its first send, even if a resend can still arrive.
 const UNDELIVERED_AFTER: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
@@ -54,20 +54,20 @@ pub enum DeliveryCheckStep {
     Ready {
         /// What the check found.
         result: DeliveryCheckResult,
-        /// The state changes to commit with the recovery job. They list the Messages whose first
-        /// copy the Relay would have dropped by now as undelivered.
+        /// The state changes to commit with the recovery job. They list the messages whose first
+        /// copy the relay would have dropped by now as undelivered.
         changes: StateChanges,
     },
 }
 
-/// A check, at a time the app passes, of the Messages this identity sent one contact that the
+/// A check, at a time the app passes, of the messages this identity sent one contact that the
 /// contact hasn't acknowledged.
 ///
-/// The check gives up on Messages 30 days after their first send. It signals a recovery after a day
-/// without an acknowledgment, or as soon as the contact sends an Inbox Grant newer than the one a
-/// waiting Message went to, delivers on a newer Session, or acknowledges a recovery's probe, and
+/// The check gives up on messages 30 days after their first send. It signals a recovery after a day
+/// without an acknowledgment, or as soon as the contact sends an inbox grant newer than the one a
+/// waiting message went to, delivers on a newer session, or acknowledges a recovery's probe, and
 /// once signaled, a recovery comes back only after a week, after an unblock, or when the contact
-/// proves a newer grant or Session. Call [`Self::step`] until it returns
+/// proves a newer grant or session. Call [`Self::step`] until it returns
 /// [`DeliveryCheckStep::Ready`], supplying the records each other step asks for. Dropping the check
 /// commits nothing.
 pub struct DeliveryCheck(Option<Box<Checking>>);
@@ -87,7 +87,7 @@ enum CheckPhase {
     Taken,
 }
 
-// An accepted contact's record and the Sessions kept with it, which every step after the first
+// An accepted contact's record and the sessions kept with it, which every step after the first
 // reads.
 struct AcceptedContact {
     contact: ContactRecord,
@@ -95,7 +95,7 @@ struct AcceptedContact {
 }
 
 impl ProtocolStateEngine {
-    /// Starts checking the Messages this identity sent `contact` that it hasn't acknowledged, at
+    /// Starts checking the messages this identity sent `contact` that it hasn't acknowledged, at
     /// `now`.
     pub fn start_delivery_check(
         &self,
@@ -188,9 +188,9 @@ impl Checking {
         }
     }
 
-    // Gives up on Messages whose first copy the Relay has dropped, and signals a recovery of the
-    // rest when the contact has been quiet too long, granted a newer inbox than one a Message went
-    // to, or delivered on a newer Session. A blocked contact gets none.
+    // Gives up on messages whose first copy the relay has dropped, and signals a recovery of the
+    // rest when the contact has been quiet too long, granted a newer inbox than one a message went
+    // to, or delivered on a newer session. A blocked contact gets none.
     fn check(&self, accepted: AcceptedContact) -> Result<Checked, ProtocolStateError> {
         let AcceptedContact {
             mut contact,
@@ -237,7 +237,7 @@ impl Checking {
                 let left_behind = outstanding.left_behind().is_some();
                 let may_signal = contact.recovery().is_none_or(|recovery| {
                     waited(recovery.signaled_at_millis, now_millis) >= RECHECK_PERIOD
-                        // The contact acknowledged the probe, so the rest go out on its Session.
+                        // The contact acknowledged the probe, so the rest go out on its session.
                         || (matches!(recovery.progress, RecoveryProgress::Probed(_)) && left_behind)
                 });
                 let quiet = waited(oldest.entry.first_sent_at_millis, now_millis) >= QUIET_PERIOD;
@@ -264,24 +264,24 @@ struct Checked {
     updates: Vec<ProtocolStateUpdate>,
 }
 
-// A Message this side sent that the contact hasn't acknowledged, and the Session it waits on.
+// A message this side sent that the contact hasn't acknowledged, and the session it waits on.
 struct Unacknowledged<'a> {
     session_id: SessionId,
     message_id: MessageId,
     entry: &'a LoadedPendingAcknowledgment,
 }
 
-// The Messages a recovery may resend, and where they wait relative to the Session Roost sends on.
+// The messages a recovery may resend, and where they wait relative to the session Roost sends on.
 struct Outstanding<'a, 'b> {
-    // Every unacknowledged Message except Grant Updates, which recovered Messages replace, oldest
+    // Every unacknowledged message except grant updates, which recovered messages replace, oldest
     // first.
     recoverable: Vec<&'b Unacknowledged<'a>>,
     current: SessionId,
-    // Whether the current Session's records exist.
+    // Whether the current session's records exist.
     current_is_kept: bool,
-    // Whether the contact delivered on the current Session, so it awaits no reply.
+    // Whether the contact delivered on the current session, so it awaits no reply.
     current_is_replied: bool,
-    // The Sessions kept with the contact that started before the current one.
+    // The sessions kept with the contact that started before the current one.
     before_current: Vec<SessionId>,
 }
 
@@ -314,9 +314,9 @@ impl<'a, 'b> Outstanding<'a, 'b> {
         self.recoverable.first().copied()
     }
 
-    // Returns the oldest Message waiting on a Session older than the one the contact delivered on
+    // Returns the oldest message waiting on a session older than the one the contact delivered on
     // since, which may have lost it, or held behind a probe with no copy on its way. The newer
-    // Session holds nothing sent before the Message, so the contact misses no Message on it.
+    // session holds nothing sent before the message, so the contact misses no message on it.
     fn left_behind(&self) -> Option<&'b Unacknowledged<'a>> {
         if !self.current_is_replied {
             return None;
@@ -328,7 +328,7 @@ impl<'a, 'b> Outstanding<'a, 'b> {
     }
 }
 
-// Asks for a contact's record and Session list, which a check or recovery reads first.
+// Asks for a contact's record and session list, which a check or recovery reads first.
 fn request_contact_records(
     reads: &mut StateReads,
     contact: ContactIdentityKey,
@@ -339,8 +339,8 @@ fn request_contact_records(
     ])
 }
 
-// Returns the contact's record and Sessions, when it's an accepted contact with Sessions. Only an
-// accepted contact acknowledges, so only its Messages wait for an acknowledgment.
+// Returns the contact's record and sessions, when it's an accepted contact with sessions. Only an
+// accepted contact acknowledges, so only its messages wait for an acknowledgment.
 fn load_accepted_contact(
     reads: &StateReads,
     contact: ContactIdentityKey,
@@ -357,7 +357,7 @@ fn load_accepted_contact(
     })
 }
 
-// Returns the pending acknowledgments of each Session kept with a peer that has any.
+// Returns the pending acknowledgments of each session kept with a peer that has any.
 fn load_pending_by_session(
     snapshot: &ProtocolStateSnapshot,
     sessions: &PeerSessions,
@@ -390,7 +390,7 @@ pub(super) fn pending_update(
     .with_snapshot(snapshot))
 }
 
-// Returns every Message still waiting in `records`, oldest first.
+// Returns every message still waiting in `records`, oldest first.
 fn unacknowledged(
     records: &[(SessionId, LoadedPendingAcknowledgments)],
 ) -> Vec<Unacknowledged<'_>> {
@@ -421,14 +421,14 @@ fn waited(since_millis: u64, now_millis: u64) -> Duration {
     Duration::from_millis(now_millis.saturating_sub(since_millis))
 }
 
-/// What the app passes to resend a contact's unacknowledged Messages on a newer Session.
+/// What the app passes to resend a contact's unacknowledged messages on a newer session.
 pub struct OutgoingRecovery {
-    /// The contact's Identity Key.
+    /// The contact's identity key.
     pub recipient: ContactIdentityKey,
-    /// The local Identity's certificate sealed into the resent Message.
+    /// The local identity's certificate sealed into the resent message.
     pub sender_certificate: SignedSenderCertificate,
     /// The bundle the app fetched after [`MessageRecoveryStep::NeedsPreKeyBundle`], kept with the
-    /// recovery job until a Session uses it or the job ends.
+    /// recovery job until a session uses it or the job ends.
     pub prekey_bundle: Option<PeerPreKeyBundle>,
 }
 
@@ -436,40 +436,40 @@ pub struct OutgoingRecovery {
 pub enum MessageRecoveryStep {
     /// The records to supply through [`MessageRecovery::supply_state`].
     NeedsState(Vec<ProtocolStateAddress>),
-    /// The content the app sent under this MessageID, to supply through
+    /// The content the app sent under this message ID, to supply through
     /// [`MessageRecovery::supply_content`].
     NeedsContent(MessageId),
-    /// The destination whose Transport Binding to supply through
+    /// The destination whose transport binding to supply through
     /// [`MessageRecovery::supply_transport_binding`].
     NeedsTransport(MessageDestination),
-    /// A new Session, or the first resend after an unblock, needs this contact's prekey bundle, and
-    /// the given one is missing or older than the contact's Discovery Key. The recovery has ended:
+    /// A new session, or the first resend after an unblock, needs this contact's prekey bundle, and
+    /// the given one is missing or older than the contact's discovery key. The recovery has ended:
     /// fetch the bundle and start again.
     NeedsPreKeyBundle(ContactIdentityKey),
-    /// The first Message this recovery resent on a new Session isn't acknowledged yet, and the
+    /// The first message this recovery resent on a new session isn't acknowledged yet, and the
     /// rest wait for it. The recovery has ended and nothing changed, and a delivery check signals
     /// it again once the contact acknowledges the probe.
     AwaitingProbe(MessageId),
     /// Nothing is left to resend. The recovery has ended and nothing changed.
     Finished,
-    /// One Message encrypted again under its MessageID, and the state changes to commit with it.
+    /// One message encrypted again under its message ID, and the state changes to commit with it.
     /// The recovery has ended.
     Ready {
-        /// The Message encrypted again.
+        /// The message encrypted again.
         result: Box<OutboundMessageResult>,
-        /// The state changes to commit with the Message.
+        /// The state changes to commit with the message.
         changes: StateChanges,
     },
 }
 
-/// One step of a recovery, which encrypts one unacknowledged Message again on a newer Session and
+/// One step of a recovery, which encrypts one unacknowledged message again on a newer session and
 /// returns its result once.
 ///
-/// Roost picks the Message and the Session. When the contact delivered on a Session newer than the
-/// one holding the Message, the Message goes there, so the contact misses no Message on it, unless
-/// the app's bundle names a newer Discovery Key, which starts a new Session instead. Otherwise,
-/// under a signaled recovery, the oldest Message starts a new Session from the contact's prekey
-/// bundle, and the rest wait until the contact acknowledges it or delivers on another Session. Call
+/// Roost picks the message and the session. When the contact delivered on a session newer than the
+/// one holding the message, the message goes there, so the contact misses no message on it, unless
+/// the app's bundle names a newer discovery key, which starts a new session instead. Otherwise,
+/// under a signaled recovery, the oldest message starts a new session from the contact's prekey
+/// bundle, and the rest wait until the contact acknowledges it or delivers on another session. Call
 /// [`Self::step`] until it returns [`MessageRecoveryStep::Ready`],
 /// [`MessageRecoveryStep::NeedsPreKeyBundle`], [`MessageRecoveryStep::AwaitingProbe`], or
 /// [`MessageRecoveryStep::Finished`], supplying what each other step asks for. Dropping the
@@ -490,7 +490,7 @@ enum RecoveryPhase {
     Taken,
 }
 
-// The Message a recovery resends, and where.
+// The message a recovery resends, and where.
 struct Resend {
     contact: ContactRecord,
     session_id: SessionId,
@@ -501,12 +501,12 @@ struct Resend {
 }
 
 enum Target {
-    // The Session the contact delivered on last.
+    // The session the contact delivered on last.
     Current {
         session_id: SessionId,
         starter: Starter,
     },
-    // A new Session from the contact's bundle.
+    // A new session from the contact's bundle.
     New {
         bundle: Box<PeerPreKeyBundle>,
         bundle_discovery_key: ContactDiscoveryKey,
@@ -514,14 +514,14 @@ enum Target {
 }
 
 impl ProtocolStateEngine {
-    // Starts one step of recovering the Messages sent to `recovery.recipient`, sealing with the
-    // local Identity's `keys`.
+    // Starts one step of recovering the messages sent to `recovery.recipient`, sealing with the
+    // local identity's `keys`.
     pub(crate) fn start_recovery(
         &self,
         keys: LocalIdentityKeys,
         recovery: OutgoingRecovery,
     ) -> Result<MessageRecovery, ProtocolStateError> {
-        // Roost picks the Message, whose ID, send time, and content replace these.
+        // Roost picks the message, whose ID, send time, and content replace these.
         let message = OutgoingMessage {
             recipient: recovery.recipient,
             message_id: MessageId::from_bytes([0; 16]),
@@ -588,7 +588,7 @@ impl MessageRecovery {
         Err(MessageOperationError::NotAwaitingContent)
     }
 
-    /// Supplies the Transport Binding for the pending [`MessageRecoveryStep::NeedsTransport`].
+    /// Supplies the transport binding for the pending [`MessageRecoveryStep::NeedsTransport`].
     pub fn supply_transport_binding(
         &mut self,
         transport_binding: TransportBinding,
@@ -669,7 +669,7 @@ impl Recovering {
         }
     }
 
-    // Picks the Message to resend and where, or ends the recovery.
+    // Picks the message to resend and where, or ends the recovery.
     fn select(&mut self, accepted: AcceptedContact) -> Result<Selected, ProtocolStateError> {
         let AcceptedContact { contact, sessions } = accepted;
         let limits = self.encrypting.engine.limits;
@@ -677,9 +677,9 @@ impl Recovering {
         let records = load_pending_by_session(snapshot, &sessions, limits)?;
         let waiting = unacknowledged(&records);
         let outstanding = Outstanding::new(&waiting, &sessions, snapshot, limits)?;
-        // The contact delivered on a newer Session, so the Message goes there, with no fetch unless
-        // an unblock needs a check. A bundle naming a newer key starts a new Session instead, since
-        // the Relay silently drops Messages sent to a rotated inbox.
+        // The contact delivered on a newer session, so the message goes there, with no fetch unless
+        // an unblock needs a check. A bundle naming a newer key starts a new session instead, since
+        // the relay silently drops messages sent to a rotated inbox.
         if let Some(message) = outstanding.left_behind() {
             let (contact, message, target) = match self.encrypting.check_discovery_key(contact)? {
                 DiscoveryKeyCheck::NeedsBundle => {
@@ -746,7 +746,7 @@ impl Recovering {
         ))))
     }
 
-    // Encrypts the selected Message again with the content the app sent.
+    // Encrypts the selected message again with the content the app sent.
     fn encrypt<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -769,7 +769,7 @@ impl Recovering {
                 starter,
             } => {
                 contact.record_resend(None);
-                // An acceptance counts only on the requester's Session.
+                // An acceptance counts only on the requester's session.
                 let payload_kind =
                     if payload_kind == PayloadKind::ContactAcceptance && starter == Starter::Peer {
                         payload_kind
@@ -801,7 +801,7 @@ impl Recovering {
     }
 }
 
-// What a recovery decided after reading the contact's Sessions.
+// What a recovery decided after reading the contact's sessions.
 enum Selected {
     Resend(Box<Resend>),
     Ended(MessageRecoveryStep),
@@ -821,7 +821,7 @@ impl Resend {
 }
 
 // Returns an encryption's step as a recovery's. A resend never asks for a bundle or has nothing
-// to send, since the recovery picked its Session first.
+// to send, since the recovery picked its session first.
 fn recovery_step(step: MessageEncryptionStep) -> MessageRecoveryStep {
     match step {
         MessageEncryptionStep::NeedsState(addresses) => MessageRecoveryStep::NeedsState(addresses),

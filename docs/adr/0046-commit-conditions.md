@@ -1,6 +1,6 @@
 # Commit Conditions
 
-Each result lists a Commit Condition for every record its operation read, including one it found absent, and the app commits only if Roost's check finds them all unchanged. So an operation can't overwrite another's work or commit after a record it relied on changed, such as a send after its contact was blocked.
+Each result lists a commit condition for every record its operation read, including one it found absent, and the app commits only if Roost's check finds them all unchanged. So an operation can't overwrite another's work or commit after a record it relied on changed, such as a send after its contact was blocked.
 
 ## Alternatives
 

@@ -58,7 +58,7 @@ impl ExampleClient {
     /// Returns the status of a prepared operation.
     ///
     /// # Errors
-    /// Returns [`ExampleError::NotFound`] if no operation has this id.
+    /// Returns [`ExampleError::NotFound`] if no operation has this ID.
     pub fn operation_status(&self, id: u64) -> Result<ExampleStatus, ExampleError> {
         let status = self.statuses.get(&id).ok_or(ExampleError::NotFound)?;
         Ok(*status)
@@ -74,7 +74,7 @@ impl ExampleClient {
     /// Returns the status of a prepared operation.
     ///
     /// # Errors
-    /// - [`ExampleError::NotFound`] if no operation has this id.
+    /// - [`ExampleError::NotFound`] if no operation has this ID.
     pub fn operation_status(&self, id: u64) -> Result<ExampleStatus, ExampleError> {
         let status = self.statuses.get(&id).ok_or(ExampleError::NotFound)?;
         Ok(*status)

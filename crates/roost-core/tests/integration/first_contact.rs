@@ -1,5 +1,5 @@
-//! Two identities that have never met request, accept, and message each other through Message
-//! Operations, committing every result through the host.
+//! Two identities that have never met request, accept, and message each other through message
+//! operations, committing every result through the host.
 
 use std::time::Duration;
 
@@ -232,7 +232,7 @@ fn the_receiver_withholds_plaintext_past_the_limit() {
     let contact_address = alice.contact_address(bob.identity_key());
     let count_before_third = alice.host.blob_bytes(&contact_address).unwrap();
     let third = alice.send(&bob, b"third");
-    // A sender that forgets its count, as a modified client would, sends a fourth distinct Message.
+    // A sender that forgets its count, as a modified client would, sends a fourth distinct message.
     alice.host.set_raw(contact_address, count_before_third);
     let fourth = alice.send(&bob, b"fourth");
     for message in [&second, &third] {
@@ -331,7 +331,7 @@ fn a_request_that_crosses_during_a_block_accepts_both_sides_after_the_unblock() 
         bob.contact(&alice).unwrap().trust_state,
         ContactTrustState::Unverified
     );
-    // Bob's Messages past the limit before acceptance still reach Alice.
+    // Bob's messages past the limit before acceptance still reach Alice.
     for plaintext in [&b"one"[..], b"two", b"three", b"four"] {
         let message = bob.send(&alice, plaintext);
         let received = accepted(alice.receive(&message.message));
@@ -395,7 +395,7 @@ fn a_bundle_older_than_the_contacts_discovery_key_asks_again() {
     bob.store.finalize_operation(rotation.id).unwrap();
     let acceptance = bob.accept_request(&alice, b"welcome");
     alice.receive(&acceptance.message);
-    // Alice's host lost her Sessions with Bob but kept his record, which the grant updated.
+    // Alice's host lost her sessions with Bob but kept his record, which the grant updated.
     alice.forget_sessions_with(&bob);
 
     let mut outgoing = alice.outgoing(&bob, b"hello again");
@@ -522,7 +522,7 @@ fn a_replayed_first_message_is_a_duplicate_and_another_on_its_one_time_prekey_fa
         bob.observe(&request.message).unwrap().outcome,
         InboundMessageOutcome::Duplicate
     ));
-    // A host that lost Alice's commit starts another Session on the same bundle.
+    // A host that lost Alice's commit starts another session on the same bundle.
     alice.host = before_request;
     let mut second = alice.outgoing(&bob, b"hi again");
     second.prekey_bundle = Some(bundle);
@@ -557,7 +557,7 @@ fn a_conflicting_commit_aborts_and_a_rerun_uses_the_one_time_prekey_once() {
         InboundMessageOutcome::ContactRequest(_)
     ));
     let stale_operation = stale.changes.operation().unwrap();
-    // Another receive commits first and changes the Deduplication Set this one read.
+    // Another receive commits first and changes the deduplication set this one read.
     let mut other = Device::new(&relay, 0xc0);
     let other_request = other.request(&bob, b"hi from carol");
     bob.receive(&other_request.message);
@@ -772,7 +772,7 @@ fn a_blocked_contacts_new_session_is_authenticated_and_kept_with_its_plaintext_w
         )
         .unwrap();
         bob.block(alice.identity_key());
-        // Blocking rotated Bob's inbox, so Alice reaches him only with a new Session.
+        // Blocking rotated Bob's inbox, so Alice reaches him only with a new session.
         alice.forget_sessions_with(&bob);
         let request = alice.request(&bob, b"hidden");
 
@@ -791,8 +791,8 @@ fn a_blocked_contacts_new_session_is_authenticated_and_kept_with_its_plaintext_w
     }
 }
 
-// Alice's modified client stores `list` as her record of the Sessions kept with `peer`. A list
-// `peer` wrote for her says she started their Session, so to Alice it says `peer` did.
+// Alice's modified client stores `list` as her record of the sessions kept with `peer`. A list
+// `peer` wrote for her says she started their session, so to Alice it says `peer` did.
 fn claim_the_peer_started_the_session(alice: &mut Device, peer: &Device, list: Vec<u8>) {
     let address = alice.sessions_address(peer.identity_key());
     alice.host.set_raw(address, list);

@@ -1,25 +1,25 @@
-/// Roost's fixed limits on what one Message or record may cost, and the Deduplication Set's range.
+/// Roost's fixed limits on what one message or record may cost, and the deduplication set's range.
 #[derive(uniffi::Record)]
 pub struct ProtocolHardeningLimits {
-    /// Maximum encoded Message bytes Roost decodes.
+    /// Maximum encoded message bytes Roost decodes.
     pub max_encoded_message_len: u64,
-    /// Maximum Protocol State Blob bytes Roost decodes.
+    /// Maximum protocol state blob bytes Roost decodes.
     pub max_protocol_state_blob_len: u64,
-    /// Maximum sender certificate bytes a Message may carry.
+    /// Maximum sender certificate bytes a message may carry.
     pub max_sender_certificate_len: u64,
-    /// Maximum sent Messages that wait for the contact's acknowledgment on one Session.
+    /// Maximum sent messages that wait for the contact's acknowledgment on one session.
     pub max_pending_acknowledgments: u64,
-    /// Smallest Deduplication Set size a receive may pass.
+    /// Smallest deduplication set size a receive may pass.
     pub min_deduplication_capacity: u32,
-    /// Deduplication Set size for apps without a reason to choose another.
+    /// Deduplication set size for apps without a reason to choose another.
     pub default_deduplication_capacity: u32,
-    /// Largest Deduplication Set size a receive may pass.
+    /// Largest deduplication set size a receive may pass.
     pub max_deduplication_capacity: u32,
-    /// Distinct Messages each side may send a contact before the contact accepts.
+    /// Distinct messages each side may send a contact before the contact accepts.
     pub max_messages_before_acceptance: u32,
 }
 
-/// Returns Roost's fixed limits and the Deduplication Set's range.
+/// Returns Roost's fixed limits and the deduplication set's range.
 #[uniffi::export]
 pub fn protocol_hardening_limits() -> ProtocolHardeningLimits {
     ProtocolHardeningLimits::from_core(roost_core::ProtocolHardeningLimits::default())

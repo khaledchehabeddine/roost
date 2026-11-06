@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-/// The relay that certifies every test Device's Identity Key.
+/// The relay that certifies every test device's identity key.
 pub(crate) struct Relay {
     domain_id: Vec<u8>,
     signing_key: SigningKeyPair,
@@ -51,7 +51,7 @@ impl Relay {
     }
 }
 
-// A Device's certificate and the relay key that vouches for every Device's certificate.
+// A device's certificate and the relay key that vouches for every device's certificate.
 #[derive(Clone)]
 struct Credential {
     certificate: Vec<u8>,
@@ -85,11 +85,11 @@ pub(crate) enum Intent {
     Message,
     Request,
     Acceptance,
-    /// A Grant Update, which ignores the draft's plaintext.
+    /// A grant update, which ignores the draft's plaintext.
     GrantUpdate,
 }
 
-/// A sealed Message, the changes to commit with it, and the destination Roost named for it.
+/// A sealed message, the changes to commit with it, and the destination Roost named for it.
 pub(crate) struct Sealed {
     pub(crate) result: OutboundMessageResult,
     pub(crate) changes: StateChanges,
@@ -173,7 +173,7 @@ pub(crate) struct Device {
     credential: Credential,
     /// The settings the app passes with each receive.
     pub(crate) settings: ReceiveSettings,
-    /// Whether the Relay's proofs show it admitted the first Messages this Device receives.
+    /// Whether the relay's proofs show it admitted the first messages this device receives.
     pub(crate) admits: bool,
     /// The app's copy of what each committed send carried, which a recovery encrypts again.
     contents: BTreeMap<[u8; 16], Vec<u8>>,
@@ -183,8 +183,8 @@ pub(crate) struct Device {
 
 const BACKUP_PASSPHRASE: &str = "correct horse battery staple";
 
-/// One backup file: the app's database, its copy of what each send carried, and the Identity
-/// Backup.
+/// One backup file: the app's database, its copy of what each send carried, and the identity
+/// backup.
 pub(crate) struct Backup {
     identity: Vec<u8>,
     host: HostStore,
@@ -228,7 +228,7 @@ impl Device {
         self.storage.open()
     }
 
-    /// Returns this Device as an app extension sees it: another KeyStore over the same
+    /// Returns this device as an app extension sees it: another KeyStore over the same
     /// SecureStorage, reading a copy of the same host records.
     pub(crate) fn second_instance_device(&self) -> Device {
         Device {
@@ -250,7 +250,7 @@ impl Device {
         self.store = self.storage.open();
     }
 
-    /// Returns what the app writes to one backup file: its database and the Identity Backup.
+    /// Returns what the app writes to one backup file: its database and the identity backup.
     pub(crate) fn back_up(&self) -> Backup {
         Backup {
             identity: self
@@ -283,19 +283,19 @@ impl Device {
         self.rotate_inbox()
     }
 
-    /// Forgets the Sessions kept with `peer`, as a host that lost that record does, so the next
-    /// request starts a new Session.
+    /// Forgets the sessions kept with `peer`, as a host that lost that record does, so the next
+    /// request starts a new session.
     pub(crate) fn forget_sessions_with(&mut self, peer: &Device) {
         let address = self.sessions_address(peer.identity_key());
         self.host.remove(&address);
     }
 
-    /// Returns the address of this Device's contact record for `peer`, as Roost names it.
+    /// Returns the address of this device's contact record for `peer`, as Roost names it.
     pub(crate) fn contact_address(&self, peer: ContactIdentityKey) -> ProtocolStateAddress {
         self.contact_record_address(peer, ProtocolStateKind::ContactState)
     }
 
-    /// Returns the address of this Device's record of the Sessions kept with `peer`, as Roost
+    /// Returns the address of this device's record of the sessions kept with `peer`, as Roost
     /// names it.
     pub(crate) fn sessions_address(&self, peer: ContactIdentityKey) -> ProtocolStateAddress {
         self.contact_record_address(peer, ProtocolStateKind::PeerSessions)
@@ -322,19 +322,19 @@ impl Device {
             .expect("a delivery check reads each of the contact's records")
     }
 
-    /// Returns the record this Device's host holds for `peer`, if any.
+    /// Returns the record this device's host holds for `peer`, if any.
     pub(crate) fn contact_record(&self, peer: ContactIdentityKey) -> Option<ProtocolStateBlob> {
         self.host
             .blob_bytes(&self.contact_address(peer))
             .map(ProtocolStateBlob::from_bytes)
     }
 
-    /// Returns this Device's certificate as its relay issued it.
+    /// Returns this device's certificate as its relay issued it.
     pub(crate) fn certificate(&self) -> SignedSenderCertificate {
         self.credential.signed()
     }
 
-    /// Returns a certificate for this Device's Identity Key that expires at `expires_at_secs`.
+    /// Returns a certificate for this device's identity key that expires at `expires_at_secs`.
     pub(crate) fn certified_until(&self, expires_at_secs: u64) -> SignedSenderCertificate {
         super::certificate_until(self.identity_key(), expires_at_secs)
     }
@@ -343,7 +343,7 @@ impl Device {
         self.store.current_publication().unwrap()
     }
 
-    /// Returns the contact this Device's host holds for `peer`, decoded after commit.
+    /// Returns the contact this device's host holds for `peer`, decoded after commit.
     pub(crate) fn contact(&self, peer: &Device) -> Option<ContactState> {
         let address = self.contact_address(peer.identity_key());
         self.host.blob_bytes(&address).map(|bytes| {
@@ -383,7 +383,7 @@ impl Device {
         }
     }
 
-    /// Returns where `peer`'s established Messages go: its current Discovery Key and inbox.
+    /// Returns where `peer`'s established messages go: its current discovery key and inbox.
     pub(crate) fn established_route(&self) -> Route {
         let publication = self.publication();
         Route::Established {
@@ -393,7 +393,7 @@ impl Device {
         }
     }
 
-    /// Encrypts an ordinary Message for `peer` under a new draft MessageID without committing it.
+    /// Encrypts an ordinary message for `peer` under a new draft message ID without committing it.
     pub(crate) fn encrypt_to(
         &mut self,
         peer: &Device,
@@ -403,7 +403,7 @@ impl Device {
         Ok(self.encrypt(outgoing, Intent::Message)?.ready())
     }
 
-    /// Returns what the app passes to send `plaintext` to `peer` under a new draft MessageID.
+    /// Returns what the app passes to send `plaintext` to `peer` under a new draft message ID.
     pub(crate) fn outgoing(&mut self, peer: &Device, plaintext: &[u8]) -> OutgoingMessage {
         let message_id = self.next_message_id();
         OutgoingMessage {
@@ -423,19 +423,19 @@ impl Device {
         self.send_with(outgoing, Intent::Request)
     }
 
-    /// Accepts `peer`'s Contact Request and commits the acceptance.
+    /// Accepts `peer`'s contact request and commits the acceptance.
     pub(crate) fn accept_request(&mut self, peer: &Device, plaintext: &[u8]) -> SentMessage {
         let outgoing = self.outgoing(peer, plaintext);
         self.send_with(outgoing, Intent::Acceptance)
     }
 
-    /// Sends to `peer` on whichever Session Roost selects, and commits it.
+    /// Sends to `peer` on whichever session Roost selects, and commits it.
     pub(crate) fn send(&mut self, peer: &Device, plaintext: &[u8]) -> SentMessage {
         let outgoing = self.outgoing(peer, plaintext);
         self.send_with(outgoing, Intent::Message)
     }
 
-    /// Sends `peer` a Grant Update and commits it.
+    /// Sends `peer` a grant update and commits it.
     pub(crate) fn send_grant_update(&mut self, peer: &Device) -> SentMessage {
         let outgoing = self.outgoing(peer, b"");
         self.send_with(outgoing, Intent::GrantUpdate)
@@ -456,7 +456,7 @@ impl Device {
         self.send_with(outgoing, intent)
     }
 
-    /// Encrypts `outgoing` as `intent` and commits the sealed Message.
+    /// Encrypts `outgoing` as `intent` and commits the sealed message.
     pub(crate) fn send_with(&mut self, outgoing: OutgoingMessage, intent: Intent) -> SentMessage {
         self.contents
             .insert(*outgoing.message_id.as_bytes(), outgoing.plaintext.to_vec());
@@ -464,7 +464,7 @@ impl Device {
         self.commit_sent(sealed)
     }
 
-    // Commits `sealed` and queues its Message.
+    // Commits `sealed` and queues its message.
     fn commit_sent(&mut self, sealed: Sealed) -> SentMessage {
         let Sealed {
             result,
@@ -508,7 +508,7 @@ impl Device {
         )?)
     }
 
-    /// Checks the delivery of what this Device sent `peer` at `now_millis`, and commits the
+    /// Checks the delivery of what this device sent `peer` at `now_millis`, and commits the
     /// result.
     pub(crate) fn check_deliveries(
         &mut self,
@@ -534,8 +534,8 @@ impl Device {
         }
     }
 
-    /// Runs one recovery of what this Device sent `peer`, supplying the app's copy of each
-    /// Message's content and `prekey_bundle`, and commits a resent Message.
+    /// Runs one recovery of what this device sent `peer`, supplying the app's copy of each
+    /// message's content and `prekey_bundle`, and commits a resent message.
     pub(crate) fn recover(
         &mut self,
         peer: &Device,
@@ -550,7 +550,7 @@ impl Device {
         }
     }
 
-    /// Runs one recovery of what this Device sent `peer` without committing.
+    /// Runs one recovery of what this device sent `peer` without committing.
     pub(crate) fn observe_recovery(
         &self,
         peer: &Device,
@@ -595,7 +595,7 @@ impl Device {
         }
     }
 
-    /// Returns what the app passes to receive `message` with this Device's settings.
+    /// Returns what the app passes to receive `message` with this device's settings.
     pub(crate) fn incoming(&self, message: &SealedFrame) -> IncomingMessage {
         IncomingMessage {
             message: message.clone(),
@@ -625,7 +625,7 @@ impl Device {
     /// Decrypts `message` without committing the result, and reports what the operation asked for.
     pub(crate) fn observe(&self, message: &SealedFrame) -> Result<Decrypted, DeviceError> {
         let mut decryption = self.store.start_decryption(self.incoming(message))?;
-        // Each Message's ephemeral key varies the seed, so each ratchet step draws new keys.
+        // Each message's ephemeral key varies the seed, so each ratchet step draws new keys.
         let mut seed = message.ephemeral_public_key;
         seed[0] ^= self.tag;
         let mut rng = ChaCha20Rng::from_seed(seed);
@@ -688,7 +688,7 @@ impl Device {
         }
     }
 
-    /// Blocks `peer`, given whatever record this Device holds for them, and commits the block.
+    /// Blocks `peer`, given whatever record this device holds for them, and commits the block.
     pub(crate) fn block(&mut self, peer: ContactIdentityKey) -> Option<PublicationBundle> {
         let record = self.contact_record(peer);
         let block = self
@@ -699,7 +699,7 @@ impl Device {
         block.publication
     }
 
-    /// Unblocks `peer`, given whatever record this Device holds for them, and commits it.
+    /// Unblocks `peer`, given whatever record this device holds for them, and commits it.
     pub(crate) fn unblock(&mut self, peer: ContactIdentityKey) {
         let record = self.contact_record(peer);
         let changes = self
@@ -710,7 +710,7 @@ impl Device {
         self.commit_changes(changes).unwrap();
     }
 
-    /// Deletes the Deduplication Set, as if every recorded digest had aged out.
+    /// Deletes the deduplication set, as if every recorded digest had aged out.
     pub(crate) fn forget_received_digests(&mut self) {
         let address = self.host.only(ProtocolStateKind::DeduplicationSet);
         self.host.remove(&address);
@@ -767,9 +767,9 @@ pub(crate) fn run_encryption(
 
 /// How one recovery ended.
 pub(crate) enum Recovered {
-    /// A Message encrypted again and not yet committed.
+    /// A message encrypted again and not yet committed.
     Resent(Box<Sealed>),
-    /// A Message encrypted again, committed, and queued for sending.
+    /// A message encrypted again, committed, and queued for sending.
     Committed(Box<SentMessage>),
     NeedsPreKeyBundle,
     AwaitingProbe(MessageId),
@@ -787,7 +787,7 @@ impl Recovered {
     }
 }
 
-/// A Message the host committed and queued for sending.
+/// A message the host committed and queued for sending.
 pub(crate) struct SentMessage {
     pub(crate) session_id: SessionId,
     pub(crate) message_id: MessageId,
@@ -796,7 +796,7 @@ pub(crate) struct SentMessage {
     pub(crate) destination: MessageDestination,
 }
 
-/// Why a Device's Message Operation failed.
+/// Why a device's message operation failed.
 #[derive(Debug)]
 pub(crate) enum DeviceError {
     Operation(MessageOperationError),

@@ -1,4 +1,4 @@
-//! Sessions that two Devices establish through real X3DH and find again by SessionID.
+//! Sessions that two devices establish through real X3DH and find again by session ID.
 
 use crate::support::CREATED_AT_SECS;
 use crate::support::device::{Device, DeviceError, Intent, Relay, SentMessage};
@@ -47,8 +47,8 @@ fn establish(initiator: &mut Device, responder: &mut Device) -> SessionId {
     request.session_id
 }
 
-// Starts another Session from `initiator` to an accepted `responder`, as a host that lost its
-// Session list does by requesting again, and has `responder` reply on it.
+// Starts another session from `initiator` to an accepted `responder`, as a host that lost its
+// session list does by requesting again, and has `responder` reply on it.
 fn reestablish(initiator: &mut Device, responder: &mut Device) -> SessionId {
     initiator.forget_sessions_with(responder);
     let request = initiator.request(responder, b"hello again");
@@ -96,7 +96,7 @@ fn any_message_before_acceptance_can_start_the_session() {
         first.message.prekey_reference
     );
 
-    // The first Message is late, so the second one starts the Session.
+    // The first message is late, so the second one starts the session.
     let InboundMessageOutcome::ContactRequest(started) = bob.receive(&second.message) else {
         panic!("expected a contact request");
     };
@@ -197,7 +197,7 @@ fn each_peer_sends_on_the_session_that_last_delivered() {
     let from_bob = bob.request(&alice, b"from bob");
     let lower = from_alice.session_id.min(from_bob.session_id);
     let higher = from_alice.session_id.max(from_bob.session_id);
-    // Whoever started the higher Session sends on it again before the requests cross.
+    // Whoever started the higher session sends on it again before the requests cross.
     let alice_started_higher = from_alice.session_id == higher;
     let in_flight = if alice_started_higher {
         alice.send(&bob, b"on the higher session")
@@ -241,7 +241,7 @@ fn sessions_beyond_five_older_ones_are_deleted_and_stop_receiving() {
     ));
 }
 
-// Returns the MessageIDs `device` still waits to have acknowledged on `session_id`.
+// Returns the message IDs `device` still waits to have acknowledged on `session_id`.
 fn waiting_on(device: &Device, session_id: SessionId) -> Vec<roost_protocol::MessageId> {
     device
         .store
@@ -283,7 +283,7 @@ fn a_session_a_send_evicts_lists_its_unacknowledged_messages_as_undelivered() {
     let oldest = establish(&mut alice, &mut bob);
     let oldest_record = alice.host.only(ProtocolStateKind::RatchetSession);
     let stranded = alice.send(&bob, b"never acknowledged");
-    // Each rotation makes Alice's next send start a Session from Bob's newer bundle.
+    // Each rotation makes Alice's next send start a session from Bob's newer bundle.
     for _ in 0..5 {
         bob.rotate_inbox();
         let mut outgoing = alice.outgoing(&bob, b"to the newer inbox");
@@ -422,7 +422,7 @@ fn a_tampered_or_misdelivered_first_message_changes_nothing() {
     assert_eq!(bob.host.snapshot_bytes(), bob_before);
     assert_eq!(carol.host.snapshot_bytes(), carol_before);
 
-    // Nothing was consumed, so the genuine Message still starts the Session.
+    // Nothing was consumed, so the genuine message still starts the session.
     let received = accepted_message(bob.receive(&request.message));
     assert_eq!(received.session_id, request.session_id);
 }
@@ -434,7 +434,7 @@ fn a_request_refuses_a_discovery_key_that_does_not_vouch_for_the_identity() {
     let bob = Device::new(&relay, 0xb0);
     let mallory = Device::new(&relay, 0xd0);
     let mut bundle = bob.bundle();
-    // Mallory's Discovery Key signature, valid bytes over the wrong identity.
+    // Mallory's discovery key signature, valid bytes over the wrong identity.
     bundle.discovery_to_identity = mallory.bundle().discovery_to_identity;
     let before = alice.host.snapshot_bytes();
     let mut outgoing = alice.outgoing(&bob, b"hello bob");
@@ -488,7 +488,7 @@ fn a_first_message_keeps_the_padding_and_size_limits() {
         ))
     ));
 
-    // The request's Inbox Grant shares the largest padding bucket with the longest content.
+    // The request's inbox grant shares the largest padding bucket with the longest content.
     let largest = vec![0x2a; 65_291];
     let request = alice.request(&bob, &largest);
     assert!(request.message.to_bytes().unwrap().len() > 64 * 1024);

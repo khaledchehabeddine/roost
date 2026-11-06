@@ -648,7 +648,7 @@ impl KeyStore {
     /// Validates secure inputs and reserves an operation for the host transaction.
     ///
     /// Calling this repeatedly after a successful reservation is idempotent. The caller must next
-    /// commit the returned Protocol State updates and outputs atomically, then call
+    /// commit the returned protocol state updates and outputs atomically, then call
     /// [`Self::finalize_operation`]. Abort only after proving the host transaction did not commit.
     /// If the host result is ambiguous, reload its operation record and reconcile it through
     /// [`Self::unfinished_operations`].

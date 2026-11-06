@@ -21,24 +21,24 @@ const DISCOVERY_KEY_VERSION: u8 = 3;
 const PREVIOUS_DISCOVERY_KEYS_VERSION: u8 = 2;
 // Identity creation starts at epoch 1.
 const FIRST_EPOCH: u32 = 1;
-// Enough for several blocks close together to keep each other's queued Messages readable.
+// Enough for several blocks close together to keep each other's queued messages readable.
 const MAX_PREVIOUS_DISCOVERY_KEYS: usize = 5;
-// How long the Relay may hold a queued Message.
+// How long the relay may hold a queued message.
 const PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW: Duration = Duration::from_secs(30 * 86_400);
 
-/// Errors returned by Discovery Key operations.
+/// Errors returned by discovery key operations.
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryKeyError {
     /// The system clock is before the Unix epoch.
     #[error("system clock is before Unix epoch")]
     Clock,
-    /// The stored Discovery Key's signature does not verify against the Identity Key.
+    /// The stored discovery key's signature does not verify against the identity key.
     #[error("stored discovery key signature does not match the identity key")]
     Corrupt,
-    /// Signing a new Discovery Key with the Identity Key failed.
+    /// Signing a new discovery key with the identity key failed.
     #[error("signing the discovery key failed")]
     DiscoveryKeySignature(#[source] SignatureError),
-    /// Loading the identity for Discovery Key signing or verification returned an
+    /// Loading the identity for discovery key signing or verification returned an
     /// [`IdentityError`].
     #[error("loading the identity failed")]
     Identity(#[from] IdentityError),
@@ -48,19 +48,19 @@ pub enum DiscoveryKeyError {
     /// The internal storage lock was poisoned by a panicked thread.
     #[error("internal lock poisoned")]
     LockPoisoned,
-    /// No Discovery Key is stored.
+    /// No discovery key is stored.
     #[error("no discovery key stored")]
     NotFound,
     /// The underlying [`SecureStorage`] returned an error.
     #[error("discovery key storage failed")]
     Storage(#[from] StorageError),
-    /// A Discovery Key entry failed to encode, or the stored one is malformed or uses an unknown
+    /// A discovery key entry failed to encode, or the stored one is malformed or uses an unknown
     /// version and must be reset before a rotation replaces it.
     #[error("discovery key entry failed to encode or decode")]
     StoredData(#[from] StoredDataError),
 }
 
-// Manages Discovery Key generation, rotation, verification, and persistence.
+// Manages discovery key generation, rotation, verification, and persistence.
 pub(crate) struct DiscoveryKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
@@ -74,7 +74,7 @@ impl DiscoveryKeyManager {
         DiscoveryKeyManager { storage, identity }
     }
 
-    // Loads the Discovery Key and verifies its signature against the Identity Key.
+    // Loads the discovery key and verifies its signature against the identity key.
     pub(crate) fn current(&self) -> Result<DiscoveryKey, DiscoveryKeyError> {
         let discovery_key = self.load_current()?.discovery_key.to_key();
         let identity = self.identity.load_identity()?;
@@ -83,10 +83,10 @@ impl DiscoveryKeyManager {
         Ok(discovery_key)
     }
 
-    // Returns the Delivery Capability of the current epoch's inbox.
+    // Returns the delivery capability of the current epoch's inbox.
     //
     // The caller presents it only to authorized contacts and never registers it. Only its verifier
-    // is registered with the Relay.
+    // is registered with the relay.
     pub(crate) fn current_capability(
         &self,
     ) -> Result<RecipientDeliveryCapability, DiscoveryKeyError> {
@@ -110,7 +110,7 @@ impl DiscoveryKeyManager {
             .map_err(DiscoveryKeyError::IdentityBindingSignature)
     }
 
-    // Returns the epoch of the stored Discovery Key, without verifying its signature, or `None`
+    // Returns the epoch of the stored discovery key, without verifying its signature, or `None`
     // when none is stored.
     pub(crate) fn stored_epoch(&self) -> Result<Option<u32>, DiscoveryKeyError> {
         Ok(self
@@ -118,10 +118,10 @@ impl DiscoveryKeyManager {
             .map(|current| current.discovery_key.epoch))
     }
 
-    // Replaces the Discovery Key and Delivery Capability with new ones at the next epoch.
+    // Replaces the discovery key and delivery capability with new ones at the next epoch.
     //
     // A key whose signature doesn't verify is still replaced, but a malformed entry must be reset
-    // first. The replaced key joins the previous keys, which drop any past the Relay's queue time
+    // first. The replaced key joins the previous keys, which drop any past the relay's queue time
     // and then the oldest past the limit.
     pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
         &self,
@@ -137,7 +137,7 @@ impl DiscoveryKeyManager {
         let discovery_key =
             generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs)
                 .map_err(DiscoveryKeyError::DiscoveryKeySignature)?;
-        // The capability rotates with the Discovery Key because both belong to one epoch, and
+        // The capability rotates with the discovery key because both belong to one epoch, and
         // they are written in one entry so they cannot diverge.
         let capability = generate_recipient_delivery_capability(rng);
         let entry = encode_versioned(
@@ -162,8 +162,8 @@ impl DiscoveryKeyManager {
         Ok(discovery_key)
     }
 
-    // Returns the previous Discovery Key with X25519 public key `public_key`, if the Relay may
-    // still hold Messages for it at `now`.
+    // Returns the previous discovery key with X25519 public key `public_key`, if the relay may
+    // still hold messages for it at `now`.
     //
     // Reading leaves expired keys in place, so only a prepared operation deletes them.
     pub(crate) fn previous_key(
@@ -180,7 +180,7 @@ impl DiscoveryKeyManager {
             .find(|discovery_key| discovery_key.public_key().as_bytes() == public_key))
     }
 
-    // Deletes the previous Discovery Keys the Relay can no longer hold Messages for at `now`.
+    // Deletes the previous discovery keys the relay can no longer hold messages for at `now`.
     pub(crate) fn delete_expired_previous(&self, now: SystemTime) -> Result<(), DiscoveryKeyError> {
         let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
         let mut previous = self.load_previous()?;
@@ -192,15 +192,15 @@ impl DiscoveryKeyManager {
         self.store_previous(&previous)
     }
 
-    // Deletes the Discovery Key and every previous one. `KeyStore::prepare_identity_deletion`
-    // deletes the prekeys the Discovery Key signed first.
+    // Deletes the discovery key and every previous one. `KeyStore::prepare_identity_deletion`
+    // deletes the prekeys the discovery key signed first.
     pub(crate) fn reset(&self) -> Result<(), DiscoveryKeyError> {
         let mut storage = self.lock_storage()?;
         storage.delete(PREVIOUS_DISCOVERY_KEYS)?;
         Ok(storage.delete(DISCOVERY_KEY)?)
     }
 
-    // Returns the stored Discovery Key entry verbatim, for an encrypted backup.
+    // Returns the stored discovery key entry verbatim, for an encrypted backup.
     pub(crate) fn export_entry(&self) -> Result<Zeroizing<Vec<u8>>, DiscoveryKeyError> {
         let entry = self
             .lock_storage()?
@@ -210,8 +210,8 @@ impl DiscoveryKeyManager {
         Ok(entry)
     }
 
-    // Checks that a Discovery Key entry from a backup decodes and is signed by the restored
-    // Identity Key, before an import changes storage.
+    // Checks that a discovery key entry from a backup decodes and is signed by the restored
+    // identity key, before an import changes storage.
     pub(crate) fn validate_entry_for_identity(
         entry: &[u8],
         identity_verifying_key: &VerifyingKey,
@@ -224,7 +224,7 @@ impl DiscoveryKeyManager {
         .map_err(|_| DiscoveryKeyError::Corrupt)
     }
 
-    // Restores a Discovery Key entry from a backup verbatim with a single store, keeping its epoch
+    // Restores a discovery key entry from a backup verbatim with a single store, keeping its epoch
     // lineage and identity signature. The next read verifies the signature again.
     pub(crate) fn restore_entry(&self, entry: &[u8]) -> Result<(), DiscoveryKeyError> {
         decode_current(entry)?;
@@ -283,12 +283,12 @@ fn decode_current(entry: &[u8]) -> Result<CurrentDiscoveryKeyWire, DiscoveryKeyE
     Ok(decode_versioned(DISCOVERY_KEY_VERSION, entry)?)
 }
 
-// Returns whether a key retired at `retired_at_secs` may still open queued Messages at `now_secs`.
+// Returns whether a key retired at `retired_at_secs` may still open queued messages at `now_secs`.
 fn is_retained(retired_at_secs: u64, now_secs: u64) -> bool {
     now_secs.saturating_sub(retired_at_secs) < PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW.as_secs()
 }
 
-// A Discovery Key's secrets and signed fields, as the current entry and each previous one hold
+// A discovery key's secrets and signed fields, as the current entry and each previous one hold
 // them.
 #[derive(Default, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 struct DiscoveryKeyWire {
@@ -324,15 +324,15 @@ impl DiscoveryKeyWire {
     }
 }
 
-// The current Discovery Key with its inbox's Delivery Capability.
+// The current discovery key with its inbox's delivery capability.
 #[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 struct CurrentDiscoveryKeyWire {
     discovery_key: DiscoveryKeyWire,
     delivery_capability: [u8; 32],
 }
 
-// A Discovery Key a rotation replaced, kept only to open Messages already sealed to it. Its
-// capability isn't kept, since the Relay refuses it once the new inbox is registered.
+// A discovery key a rotation replaced, kept only to open messages already sealed to it. Its
+// capability isn't kept, since the relay refuses it once the new inbox is registered.
 #[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
 struct PreviousDiscoveryKeyWire {
     discovery_key: DiscoveryKeyWire,

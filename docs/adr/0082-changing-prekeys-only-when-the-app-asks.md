@@ -5,4 +5,4 @@ Roost rotates signed prekeys and refills one-time prekeys only when the app asks
 ## Alternatives
 
 - Rotate signed prekeys while publishing: publishing should only read.
-- Refill one-time prekeys while receiving: receiving should only use up the prekey the Message names.
+- Refill one-time prekeys while receiving: receiving should only use up the prekey the message names.

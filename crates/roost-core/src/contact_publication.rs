@@ -11,13 +11,13 @@ use serde::{Deserialize, Serialize};
 
 const CONTACT_PUBLICATION_VERSION: u8 = 1;
 
-/// An Identity's public Identity Key and current Discovery Key, with the signatures that bind the
+/// An identity's public identity key and current discovery key, with the signatures that bind the
 /// two, as a contact link carries them.
 #[derive(Clone, Debug)]
 pub struct ContactPublication {
-    /// The Identity Key, whose binding signature ties its agreement key to its signing key.
+    /// The identity key, whose binding signature ties its agreement key to its signing key.
     pub identity: PublicIdentityKey,
-    /// The current Discovery Key, whose signature is the Identity Key's half of the binding
+    /// The current discovery key, whose signature is the identity key's half of the binding
     /// between the two keys.
     pub discovery_key: PublicDiscoveryKey,
     /// [`Self::discovery_key`]'s signature over [`Self::identity`], the other half of that
@@ -28,7 +28,7 @@ pub struct ContactPublication {
 /// A reason a [`ContactPublication`] doesn't encode, or bytes don't decode into one.
 #[derive(Debug, thiserror::Error)]
 pub enum ContactPublicationError {
-    /// The bytes don't decode as a Contact Publication, or the publication failed to encode.
+    /// The bytes don't decode as a contact publication, or the publication failed to encode.
     #[error("contact publication format is invalid")]
     Format(#[from] StoredDataError),
     /// A key or signature is malformed, or a signature doesn't verify.
@@ -62,8 +62,8 @@ impl ContactPublication {
         Ok(encode_versioned(CONTACT_PUBLICATION_VERSION, &wire)?.to_vec())
     }
 
-    /// Decodes a publication from `bytes` and verifies the Identity Key's own binding and both
-    /// halves of its binding with the Discovery Key.
+    /// Decodes a publication from `bytes` and verifies the identity key's own binding and both
+    /// halves of its binding with the discovery key.
     ///
     /// Only the bytes [`Self::encode`] writes decode, so two links that differ in their bytes
     /// never hold the same publication.

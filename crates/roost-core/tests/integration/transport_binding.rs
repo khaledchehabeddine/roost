@@ -1,4 +1,4 @@
-//! Exercises caller-owned binding bytes across Core construction, Message, and acknowledgment APIs.
+//! Exercises caller-owned binding bytes across Core construction, message, and acknowledgment APIs.
 
 use crate::support::device::{Sealed, run_encryption};
 use crate::support::{ProtocolFixture, accepted, run_decryption, trusted_validation};
