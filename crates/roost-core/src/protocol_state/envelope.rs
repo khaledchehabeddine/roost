@@ -2,10 +2,7 @@
 //! ratchet ciphertext, and the Sealed Sender Envelope inside it, and the checks that authenticate a
 //! Message's sender.
 
-use super::{
-    InboundSenderCertificateValidation, ProtocolStateError, contact_identity_keys_match,
-    encode_zeroizing,
-};
+use super::{ProtocolStateError, encode_zeroizing};
 use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
 use crate::hardening::ProtocolHardeningLimits;
@@ -19,11 +16,13 @@ use roost_crypto::{
 };
 use roost_protocol::{
     MESSAGE_TRANSCRIPT_CONTEXT, MessageId, MessageTranscriptInput, PUBLIC_KEY_LEN, PayloadKind,
-    SessionId, is_valid_x25519_public_key, message_transcript, pad_sealed_payload,
-    parse_ed25519_verifying_key_bytes, unpad_sealed_payload, verify_with_context,
+    SenderCertificateValidation, SessionId, is_valid_x25519_public_key, message_transcript,
+    pad_sealed_payload, parse_ed25519_verifying_key_bytes, unpad_sealed_payload,
+    verify_with_context,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const RATCHETED_PAYLOAD_CONTEXT: &[u8] = b"RoostRatchetedPayload-v1:";
@@ -45,7 +44,7 @@ pub struct SenderIdentityMaterial {
     /// Domain-signed sender certificate bytes.
     pub certificate: Vec<u8>,
     /// Domain signature over the sender certificate.
-    pub signature: Vec<u8>,
+    pub signature: [u8; SIGNATURE_LEN],
 }
 
 impl SenderIdentityMaterial {
@@ -316,7 +315,11 @@ fn decode_sealed_sender_envelope(
         identity_verifying_key: wire.sender_identity_verifying_key,
         identity_binding_signature: wire.sender_identity_binding_signature,
         certificate: wire.sender_certificate,
-        signature: wire.sender_signature,
+        signature: wire
+            .sender_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid("sender signature length is invalid"))?,
     };
     if !trailing.is_empty() {
         return Err(invalid("sealed-sender envelope has trailing bytes"));
@@ -435,12 +438,6 @@ pub(super) fn validate_sender_identity(
             sender_identity.certificate.len()
         )));
     }
-    if sender_identity.signature.len() > limits.max_sender_signature_len {
-        return Err(invalid(&format!(
-            "sender signature length exceeds limit: {}",
-            sender_identity.signature.len()
-        )));
-    }
     Ok(())
 }
 
@@ -461,22 +458,19 @@ pub(super) struct LocalSender<'a> {
 // Validates the sender certificate an authenticated Message seals, and returns the Identity Key it
 // certifies, which must be the one the Message's sealed sender names.
 pub(super) fn certified_sender_identity_key(
-    validation: &InboundSenderCertificateValidation,
+    validation: &SenderCertificateValidation,
     certificate_grace: Duration,
     sender_identity: &SenderIdentityMaterial,
 ) -> Result<ContactIdentityKey, ProtocolStateError> {
     let validated = validation
         .validate(
             &sender_identity.certificate,
-            &sender_identity.signature,
+            &Signature::from_bytes(&sender_identity.signature),
             certificate_grace,
         )
         .map_err(ProtocolStateError::SenderCertificateValidation)?;
-    let identity_key = ContactIdentityKey {
-        x25519_public_key: validated.identity_key.x25519_public_key,
-        ed25519_verifying_key: validated.identity_key.ed25519_verifying_key,
-    };
-    if !contact_identity_keys_match(&identity_key, &sender_identity.contact_identity_key()) {
+    let identity_key = validated.identity_key;
+    if !bool::from(identity_key.ct_eq(&sender_identity.contact_identity_key())) {
         return Err(invalid(
             "sender certificate identity key does not match sealed sender",
         ));
@@ -648,9 +642,11 @@ pub(super) fn authenticate_session_message(
     peer_identity_key: ContactIdentityKey,
     recipient_identity_verifying_key: &[u8; PUBLIC_KEY_LEN],
 ) -> Result<(), ProtocolStateError> {
-    if !contact_identity_keys_match(
-        &decoded.sender_identity.contact_identity_key(),
-        &peer_identity_key,
+    if !bool::from(
+        decoded
+            .sender_identity
+            .contact_identity_key()
+            .ct_eq(&peer_identity_key),
     ) {
         return Err(invalid("sealed sender identity key does not match session"));
     }
@@ -802,7 +798,7 @@ mod tests {
             base_key: Some([2; 32]),
             id: MessageId::from_bytes([3; 16]),
             sent_at_millis: 4,
-            payload_kind: PayloadKind::EncryptedText,
+            payload_kind: PayloadKind::Content,
         }
     }
 
@@ -853,7 +849,7 @@ mod tests {
             identity_verifying_key: signing_key.verifying.to_bytes(),
             identity_binding_signature: binding_signature.to_bytes().to_vec(),
             certificate: b"sender certificate".to_vec(),
-            signature: Vec::new(),
+            signature: [0; 64],
         };
         let session_id = SessionId::from_bytes([3u8; 16]);
         let recipient_identity_verifying_key = [4u8; 32];
@@ -866,7 +862,7 @@ mod tests {
                 recipient_identity_verifying_key: &recipient_identity_verifying_key,
                 id,
                 sent_at_millis: 6,
-                payload_kind: PayloadKind::EncryptedText,
+                payload_kind: PayloadKind::Content,
                 payload,
                 sender_certificate: &sender_identity.certificate,
             },
@@ -879,7 +875,7 @@ mod tests {
             recipient_identity_verifying_key: &recipient_identity_verifying_key,
             id,
             sent_at_millis: 6,
-            payload_kind: PayloadKind::EncryptedText,
+            payload_kind: PayloadKind::Content,
             payload,
             sender_certificate: &sender_identity.certificate,
         };
@@ -949,7 +945,7 @@ mod tests {
                 identity_verifying_key: identity.verifying_key.to_bytes(),
                 identity_binding_signature: identity.binding_signature.to_bytes().to_vec(),
                 certificate: Vec::new(),
-                signature: Vec::new(),
+                signature: [0; 64],
             },
             identity,
             signing_key,
@@ -1068,7 +1064,7 @@ mod tests {
                 session_id,
                 id: MessageId::from_bytes([3; 16]),
                 sent_at_millis: 4,
-                payload_kind: PayloadKind::EncryptedText,
+                payload_kind: PayloadKind::Content,
                 payload: b"hello bob",
             },
             SignedRecipient {

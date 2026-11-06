@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
 
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
-const CERTIFICATE_VERSION: u8 = 2;
+const CERTIFICATE_LABEL: &[u8] = b"RoostSenderCertificate-v1:";
+const CERTIFICATE_VERSION: u8 = 1;
 pub(crate) const DOMAIN_SIGNING_KEY_ID: &[u8] = b"relay-signing-key";
 pub(crate) const RELAY_DOMAIN: &[u8] = b"relay.example";
 
@@ -28,11 +28,13 @@ pub(crate) fn issue_certificate(
     expires_at_secs: u64,
 ) -> (Vec<u8>, Vec<u8>) {
     let certificate = [
-        CERTIFICATE_DOMAIN_TAG,
+        CERTIFICATE_LABEL,
         &[CERTIFICATE_VERSION],
-        &[u8::try_from(DOMAIN_SIGNING_KEY_ID.len()).unwrap()],
+        &u32::try_from(DOMAIN_SIGNING_KEY_ID.len())
+            .unwrap()
+            .to_be_bytes(),
         DOMAIN_SIGNING_KEY_ID,
-        &[u8::try_from(RELAY_DOMAIN.len()).unwrap()],
+        &u32::try_from(RELAY_DOMAIN.len()).unwrap().to_be_bytes(),
         RELAY_DOMAIN,
         &identity_key.agreement_key,
         &identity_key.signing_key,

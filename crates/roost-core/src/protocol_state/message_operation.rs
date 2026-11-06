@@ -33,11 +33,10 @@ use super::session::{
 use super::{
     AcknowledgmentResult, BlockedContactAcknowledgmentPolicy, BlockedInboundMessageResult,
     DIGEST_LEN, GrantUpdateResult, InboundMessageOutcome, InboundMessageResult,
-    InboundSenderCertificateValidation, OutboundMessageResult, ProtocolHardeningLimits,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine,
-    ProtocolStateError, ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings,
-    SenderIdentityMaterial, StateChanges, WithheldInboundMessageResult,
-    contact_identity_keys_match, match_state_entries, validate_contact_identity_key,
+    OutboundMessageResult, ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError, ProtocolStateSnapshot,
+    ProtocolStateUpdate, ReceiveSettings, SenderIdentityMaterial, StateChanges,
+    WithheldInboundMessageResult, match_state_entries, validate_contact_identity_key,
 };
 use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
@@ -49,7 +48,10 @@ use roost_crypto::{
     SealedFramePreKeyReference, Signature, SigningKeyPair, accept_handshake, initiate_handshake,
     sign_identity_key_binding, verify_discovery_to_identity_binding,
 };
-use roost_protocol::{MAX_SEALED_PLAINTEXT_LEN, MessageId, PUBLIC_KEY_LEN, PayloadKind, SessionId};
+use roost_protocol::{
+    MAX_SEALED_PLAINTEXT_LEN, MessageId, PUBLIC_KEY_LEN, PayloadKind, SenderCertificateValidation,
+    SessionId,
+};
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 use subtle::ConstantTimeEq;
@@ -89,7 +91,7 @@ pub struct SignedSenderCertificate {
     /// Domain-signed sender certificate bytes.
     pub certificate: Vec<u8>,
     /// Domain signature over the certificate.
-    pub signature: Vec<u8>,
+    pub signature: [u8; Signature::BYTE_SIZE],
 }
 
 /// A contact's published keys as the app fetched them from the Relay.
@@ -157,7 +159,10 @@ pub struct IncomingMessage {
     /// The app's settings for this receive.
     pub settings: ReceiveSettings,
     /// Trust, revocation, and time inputs for the sender's certificate.
-    pub sender_certificate_validation: InboundSenderCertificateValidation,
+    ///
+    /// Roost checks the certificate after it decrypts a unique Message and before local blocking,
+    /// so no plaintext surfaces without a revocation verdict.
+    pub sender_certificate_validation: SenderCertificateValidation,
     /// Unix timestamp in milliseconds sealed into the acknowledgment.
     pub acknowledgment_sent_at_millis: u64,
     /// The local Identity's certificate sealed into the acknowledgment.
@@ -722,7 +727,7 @@ impl Encrypting {
             (SendIntent::Message | SendIntent::Request, _) => {
                 let carries_grant = contact.receives_grant(starter, local_grant);
                 contact.count_sent(self.message_id, carries_grant.then_some(local_grant))?;
-                text_kind(carries_grant)
+                content_kind(carries_grant)
             }
         };
         Ok(self.request_session(Planned {
@@ -737,7 +742,7 @@ impl Encrypting {
         match self.intent {
             SendIntent::GrantUpdate => carries_grant.then_some(PayloadKind::GrantUpdate),
             SendIntent::Message | SendIntent::Request | SendIntent::Acceptance => {
-                Some(text_kind(carries_grant))
+                Some(content_kind(carries_grant))
             }
         }
     }
@@ -780,7 +785,7 @@ impl Encrypting {
             x25519_public_key: *bundle.identity_key.public_key.as_bytes(),
             ed25519_verifying_key: bundle.identity_key.verifying_key.to_bytes(),
         };
-        if !contact_identity_keys_match(&bundle_identity_key, &self.recipient) {
+        if !bool::from(bundle_identity_key.ct_eq(&self.recipient)) {
             return Err(ProtocolStateError::InvalidMessage {
                 reason: "prekey bundle belongs to another identity".into(),
             });
@@ -953,7 +958,7 @@ impl Encrypting {
             state,
             pending_handshake,
         } = load_required_session(snapshot, &address, limits)?;
-        if !contact_identity_keys_match(&peer_identity_key, &self.recipient) {
+        if !bool::from(peer_identity_key.ct_eq(&self.recipient)) {
             return Err(ProtocolStateError::InvalidStateBinding {
                 address,
                 reason: "session belongs to another peer".into(),
@@ -1140,11 +1145,11 @@ fn counts_toward_limit(payload_kind: PayloadKind) -> bool {
     payload_kind != PayloadKind::GrantUpdate
 }
 
-fn text_kind(carries_grant: bool) -> PayloadKind {
+fn content_kind(carries_grant: bool) -> PayloadKind {
     if carries_grant {
-        PayloadKind::EncryptedTextWithGrant
+        PayloadKind::ContentWithGrant
     } else {
-        PayloadKind::EncryptedText
+        PayloadKind::Content
     }
 }
 
@@ -1169,7 +1174,7 @@ struct Decrypting {
     encoded: Vec<u8>,
     transport_binding: TransportBinding,
     settings: ReceiveSettings,
-    validation: InboundSenderCertificateValidation,
+    validation: SenderCertificateValidation,
     acknowledgment_sent_at_millis: u64,
     reads: StateReads,
     phase: DecryptionPhase,
@@ -2515,7 +2520,7 @@ mod tests {
                 keys,
                 SignedSenderCertificate {
                     certificate: Vec::new(),
-                    signature: Vec::new(),
+                    signature: [0; 64],
                 },
             ),
             Err(ProtocolStateError::InvalidMessage { reason })
@@ -2545,16 +2550,16 @@ mod tests {
                 message,
                 transport_binding: TransportBinding::new(b"route".to_vec()).unwrap(),
                 settings: ReceiveSettings::default(),
-                sender_certificate_validation: InboundSenderCertificateValidation {
+                sender_certificate_validation: SenderCertificateValidation {
                     domain_signing_keys: Vec::new(),
                     expected_relay_domain: b"relay.test".to_vec(),
-                    revoked_identity_keys: Some(Vec::new()),
+                    revocation_state: roost_protocol::RevocationState::Available(Vec::new()),
                     reference_time: SystemTime::UNIX_EPOCH,
                 },
                 acknowledgment_sent_at_millis: 0,
                 acknowledgment_sender_certificate: SignedSenderCertificate {
                     certificate: Vec::new(),
-                    signature: Vec::new(),
+                    signature: [0; 64],
                 },
             })
             .unwrap();
@@ -2607,7 +2612,7 @@ mod tests {
             identity_verifying_key: identity_key.verifying_key.to_bytes(),
             identity_binding_signature: identity_key.binding_signature.to_bytes().to_vec(),
             certificate: Vec::new(),
-            signature: Vec::new(),
+            signature: [0; 64],
         };
         let public_discovery_key = discovery_key.public();
         let discovery_to_identity = discovery_key.sign_identity_binding(&identity_key).unwrap();
@@ -2626,7 +2631,7 @@ mod tests {
                     session_id,
                     id: MessageId::from_bytes([3; 16]),
                     sent_at_millis: 4,
-                    payload_kind: PayloadKind::EncryptedTextWithGrant,
+                    payload_kind: PayloadKind::ContentWithGrant,
                     payload: b"hi bob",
                 },
                 &handshake,

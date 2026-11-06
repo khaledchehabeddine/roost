@@ -132,7 +132,7 @@ pub enum RoostError {
         /// Most Messages that wait for an acknowledgment on one Session.
         limit: u64,
     },
-    /// A Message, blob, backup, or prekey version is unsupported.
+    /// A Message, Sender Certificate, blob, backup, or prekey version is unsupported.
     #[error("unsupported version: {reason}")]
     UnsupportedVersion {
         /// Diagnostic context for logging only.
@@ -505,15 +505,18 @@ impl From<SenderCertificateValidationError> for RoostError {
     fn from(e: SenderCertificateValidationError) -> Self {
         let reason = reason_from_chain(&e);
         match e {
-            // An oversized grace window is the host's setting, not a fault in the certificate.
+            // An oversized grace window is the app's setting, not a fault in the certificate.
             SenderCertificateValidationError::GraceWindowTooLarge { .. } => {
                 RoostError::InvalidData { reason }
             }
+            SenderCertificateValidationError::UnsupportedVersion { .. } => {
+                RoostError::UnsupportedVersion { reason }
+            }
             SenderCertificateValidationError::MalformedCertificate
+            | SenderCertificateValidationError::CertificateTooLong { .. }
             | SenderCertificateValidationError::RelayDomainMismatch
             | SenderCertificateValidationError::InvalidKeyEncoding
             | SenderCertificateValidationError::UnknownSigningKeyId
-            | SenderCertificateValidationError::UntrustedSigningKeyId
             | SenderCertificateValidationError::DuplicateSigningKeyId
             | SenderCertificateValidationError::SignatureFailure
             | SenderCertificateValidationError::RevocationStateUnavailable
@@ -617,6 +620,16 @@ mod tests {
             RoostError::from(KeyStoreError::Identity(IdentityError::BackupFormat(
                 StoredDataError::UnsupportedVersion(0xff)
             ))),
+            RoostError::UnsupportedVersion { .. }
+        ));
+    }
+
+    #[test]
+    fn an_unknown_sender_certificate_version_is_an_unsupported_version() {
+        assert!(matches!(
+            RoostError::from(ProtocolStateError::SenderCertificateValidation(
+                SenderCertificateValidationError::UnsupportedVersion { version: 2 }
+            )),
             RoostError::UnsupportedVersion { .. }
         ));
     }

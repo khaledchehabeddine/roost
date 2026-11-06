@@ -75,8 +75,7 @@ pub use one_time_prekey::OneTimePreKeyError;
 pub use protocol_state::{
     AcknowledgmentResult, AdmissionRequest, BlockedContactAcknowledgmentPolicy,
     BlockedInboundMessageResult, DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep,
-    GrantUpdateResult, InboundMessageOutcome, InboundMessageResult,
-    InboundSenderCertificateValidation, IncomingMessage, KnownDomainSigningKey,
+    GrantUpdateResult, InboundMessageOutcome, InboundMessageResult, IncomingMessage,
     MAX_PROTOCOL_STATE_ENTRIES, MessageDecryption, MessageDecryptionStep, MessageDestination,
     MessageEncryption, MessageEncryptionStep, MessageOperationError, MessageRecovery,
     MessageRecoveryStep, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
@@ -92,8 +91,10 @@ pub use roost_crypto::{
     RatchetStateError, SealedFrame, SealedFrameError, SealedFramePreKeyReference, Signature,
     verify_discovery_to_identity_binding, verify_public_identity_key,
 };
-pub use roost_protocol::SessionId;
-pub use safety_number::{IdentityKey, SafetyNumber, SafetyNumberError, derive_safety_number};
+pub use roost_protocol::{
+    DomainSigningKey, IdentityKey, RevocationState, SenderCertificateValidation, SessionId,
+};
+pub use safety_number::{SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{SecureStorage, StorageError};
 pub use stored_data::StoredDataError;

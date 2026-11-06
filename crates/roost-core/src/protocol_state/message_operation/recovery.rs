@@ -21,7 +21,7 @@ use super::{
     DiscoveryKeyCheck, Encrypting, LocalIdentityKeys, MessageDestination, MessageEncryptionStep,
     MessageOperationError, OutboundMessageResult, OutgoingMessage, PeerPreKeyBundle, Planned,
     RotatedContact, SendIntent, SignedSenderCertificate, StateReads, changes, contact_update,
-    supply_state, text_kind,
+    content_kind, supply_state,
 };
 use crate::TransportBinding;
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
@@ -775,7 +775,7 @@ impl Recovering {
                         payload_kind
                     } else {
                         let local_grant = self.encrypting.sender.grant().stamp();
-                        text_kind(contact.receives_grant(starter, local_grant))
+                        content_kind(contact.receives_grant(starter, local_grant))
                     };
                 let prepared = self.encrypting.prepare_seal(Planned {
                     contact,

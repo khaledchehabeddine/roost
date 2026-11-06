@@ -348,7 +348,7 @@ mod tests {
             // The largest values give each field its longest encoding.
             let entry = LoadedPendingAcknowledgment {
                 first_sent_at_millis: u64::MAX,
-                payload_kind: PayloadKind::EncryptedTextWithGrant,
+                payload_kind: PayloadKind::ContentWithGrant,
                 grant: Some(DiscoveryKeyStamp {
                     created_at_secs: u64::MAX,
                     epoch: u32::MAX,

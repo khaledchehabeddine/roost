@@ -6,13 +6,13 @@ use crate::support::{
 };
 use roost_client::{
     BlockedContactAcknowledgmentPolicy, ContactSafetyNumberConfirmation, ContactTrustState,
-    DeliveryCheckResult, DeliveryCheckStep, DomainSigningKey, DomainSigningKeyStatus,
-    IdentityContext, IdentityKey, InboundMessageOutcome, IncomingMessage, Message,
-    MessageDecryptionStep, MessageDestination, MessageEncryption, MessageEncryptionStep, MessageId,
-    MessageRecoveryStep, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
-    OutgoingRecovery, PayloadKind, PreKeyBundle, ProtocolStateKind, ReceiveSettings,
-    RevocationState, RoostError, SenderCertificateValidation, SessionId, SignedSenderCertificate,
-    StateChanges, StateEntry, StateKey, TransportBinding, derive_safety_number,
+    DeliveryCheckResult, DeliveryCheckStep, DomainSigningKey, IdentityContext, IdentityKey,
+    InboundMessageOutcome, IncomingMessage, Message, MessageDecryptionStep, MessageDestination,
+    MessageEncryption, MessageEncryptionStep, MessageId, MessageRecoveryStep,
+    OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery, PayloadKind,
+    PreKeyBundle, ProtocolStateKind, ReceiveSettings, RevocationState, RoostError,
+    SenderCertificateValidation, SessionId, SignedSenderCertificate, StateChanges, StateEntry,
+    StateKey, TransportBinding, derive_safety_number,
 };
 use roost_crypto::RecipientDeliveryCapability;
 use std::collections::{HashMap, HashSet};
@@ -39,7 +39,6 @@ fn validation() -> SenderCertificateValidation {
         domain_signing_keys: vec![DomainSigningKey {
             id: DOMAIN_SIGNING_KEY_ID.to_vec(),
             verifying_key: domain_signing_key().verifying.to_bytes().to_vec(),
-            status: DomainSigningKeyStatus::Trusted,
         }],
         expected_relay_domain: RELAY_DOMAIN.to_vec(),
         revocation_state: RevocationState {

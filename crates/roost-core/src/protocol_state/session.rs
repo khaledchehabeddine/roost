@@ -7,7 +7,6 @@ use super::{
 };
 use crate::contact::ContactIdentityKey;
 use crate::hardening::ProtocolHardeningLimits;
-use crate::safety_number::identity_key_is_valid;
 use roost_crypto::{
     Handshake, OneTimePreKeyReference, PublicKey, RatchetState, SealedFramePreKeyReference,
 };
@@ -122,7 +121,7 @@ fn decode_session(
         ));
     }
     let peer_identity_key = ContactIdentityKey::from(wire.peer_identity_key);
-    if !identity_key_is_valid(&peer_identity_key) {
+    if !peer_identity_key.is_valid() {
         return Err(decode_error(
             address,
             "session contact identity key is invalid",

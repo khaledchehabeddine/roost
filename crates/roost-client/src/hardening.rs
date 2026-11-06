@@ -7,8 +7,6 @@ pub struct ProtocolHardeningLimits {
     pub max_protocol_state_blob_len: u64,
     /// Maximum sender certificate bytes a Message may carry.
     pub max_sender_certificate_len: u64,
-    /// Maximum sender signature bytes a Message may carry.
-    pub max_sender_signature_len: u64,
     /// Maximum sent Messages that wait for the contact's acknowledgment on one Session.
     pub max_pending_acknowledgments: u64,
     /// Smallest Deduplication Set size a receive may pass.
@@ -34,7 +32,6 @@ impl ProtocolHardeningLimits {
             max_encoded_message_len: value.max_encoded_message_len as u64,
             max_protocol_state_blob_len: value.max_protocol_state_blob_len as u64,
             max_sender_certificate_len: value.max_sender_certificate_len as u64,
-            max_sender_signature_len: value.max_sender_signature_len as u64,
             max_pending_acknowledgments: value.max_pending_acknowledgments as u64,
             min_deduplication_capacity: value.min_deduplication_capacity as u32,
             default_deduplication_capacity: value.default_deduplication_capacity as u32,

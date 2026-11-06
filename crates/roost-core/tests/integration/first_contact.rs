@@ -62,7 +62,7 @@ fn a_request_routes_to_the_bundles_prekeys_and_records_a_pending_contact() {
     let request = alice.send_with(outgoing, Intent::Request);
 
     assert_eq!(first_message_route(&request.destination), expected_route);
-    assert_eq!(request.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(request.payload_kind, PayloadKind::ContentWithGrant);
     let contact = alice.contact(&bob).unwrap();
     assert_eq!(contact.trust_state, ContactTrustState::Pending);
     assert_eq!(
@@ -103,7 +103,7 @@ fn a_reply_before_acceptance_reaches_the_requester_with_its_capability_and_no_gr
         established_verifier(&reply.destination),
         alice.publication().recipient_delivery_verifier
     );
-    assert_eq!(reply.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(reply.payload_kind, PayloadKind::Content);
     let received = accepted(alice.receive(&reply.message));
     assert_eq!(received.plaintext.as_slice(), b"who is this?");
     assert!(received.acknowledgment.is_none());
@@ -123,7 +123,7 @@ fn the_requester_keeps_sending_first_messages_until_acceptance() {
     let follow_up = alice.send(&bob, b"it's alice");
 
     first_message_route(&follow_up.destination);
-    assert_eq!(follow_up.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(follow_up.payload_kind, PayloadKind::ContentWithGrant);
 }
 
 #[test]
@@ -609,12 +609,9 @@ fn a_grant_rides_on_messages_until_the_contact_acknowledges_one() {
     let (mut alice, mut bob) = befriended(&relay);
 
     let first = alice.send(&bob, b"first");
-    assert_eq!(first.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(first.payload_kind, PayloadKind::ContentWithGrant);
     let unacknowledged = alice.send(&bob, b"second");
-    assert_eq!(
-        unacknowledged.payload_kind,
-        PayloadKind::EncryptedTextWithGrant
-    );
+    assert_eq!(unacknowledged.payload_kind, PayloadKind::ContentWithGrant);
     let acknowledgment = accepted(bob.receive(&first.message))
         .acknowledgment
         .unwrap();
@@ -622,7 +619,7 @@ fn a_grant_rides_on_messages_until_the_contact_acknowledges_one() {
 
     assert_eq!(
         alice.send(&bob, b"third").payload_kind,
-        PayloadKind::EncryptedText
+        PayloadKind::Content
     );
 }
 
@@ -635,7 +632,7 @@ fn after_an_inbox_rotation_contacts_get_the_new_grant() {
     bob.store.finalize_operation(rotation.id).unwrap();
 
     let message = bob.send(&alice, b"new inbox");
-    assert_eq!(message.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(message.payload_kind, PayloadKind::ContentWithGrant);
     alice.receive(&message.message);
 
     assert_eq!(
@@ -670,7 +667,7 @@ fn the_requesters_grant_stops_once_the_asked_side_acknowledges_a_message_carryin
     let reply = bob.send(&alice, b"who is this?");
     alice.receive(&reply.message);
     let second = alice.send(&bob, b"it's alice");
-    assert_eq!(second.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(second.payload_kind, PayloadKind::ContentWithGrant);
     let acknowledgment = accepted(bob.receive(&second.message))
         .acknowledgment
         .unwrap();
@@ -679,7 +676,7 @@ fn the_requesters_grant_stops_once_the_asked_side_acknowledges_a_message_carryin
 
     assert_eq!(
         alice.send(&bob, b"third").payload_kind,
-        PayloadKind::EncryptedText
+        PayloadKind::Content
     );
 }
 
@@ -913,7 +910,7 @@ fn a_request_without_a_grant_from_an_identity_with_no_record_is_refused() {
     }
     alice.forget_sessions_with(&bob);
     let ungranted = alice.request(&bob, b"no grant this time");
-    assert_eq!(ungranted.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(ungranted.payload_kind, PayloadKind::Content);
 
     assert!(matches!(
         bob.observe(&ungranted.message),

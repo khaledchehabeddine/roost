@@ -1,5 +1,6 @@
 use crate::certificate::SenderCertificateValidation;
 use crate::context::{Contacts, Messaging};
+use crate::encoding::fixed_64;
 use crate::error::{RoostError, reason_from_chain};
 use crate::identity::IdentityKey;
 use crate::message::{Message, MessageId, PayloadKind, SenderIdentityMaterial, SessionId};
@@ -17,7 +18,7 @@ use zeroize::Zeroizing;
 pub struct SignedSenderCertificate {
     /// The certificate bytes the relay issued.
     pub certificate: Vec<u8>,
-    /// The relay domain's signature over the certificate.
+    /// The relay domain's signature over the certificate. Always 64 bytes.
     pub signature: Vec<u8>,
 }
 
@@ -527,8 +528,8 @@ impl Messaging {
     /// result's changes carry the operation that uses it up.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if the Message, Transport Binding, settings, or validation
-    ///   inputs are malformed or outside Roost's limits.
+    /// - [`RoostError::InvalidData`] if the Message, Transport Binding, settings, validation inputs,
+    ///   or acknowledgment certificate are malformed or outside Roost's limits.
     /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
     /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
@@ -545,7 +546,7 @@ impl Messaging {
             acknowledgment_sent_at_millis: message.acknowledgment_sent_at_millis,
             acknowledgment_sender_certificate: message
                 .acknowledgment_sender_certificate
-                .into_core(),
+                .into_core()?,
         })?;
         Ok(Arc::new(MessageDecryption(Mutex::new(Some(operation)))))
     }
@@ -697,7 +698,8 @@ impl MessageDecryption {
     ///   prekey this one names. A repeat of the same Message is a duplicate instead.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed, including the
     ///   sender's contact record.
-    /// - [`RoostError::UnsupportedVersion`] if the Message or a record uses an unknown version.
+    /// - [`RoostError::UnsupportedVersion`] if the Message, the sender's certificate, or a record
+    ///   uses an unknown version.
     /// - [`RoostError::InvalidData`] if the Message is malformed.
     pub fn step(&self) -> Result<MessageDecryptionStep, RoostError> {
         with_operation(&self.0, |decryption| {
@@ -769,11 +771,11 @@ pub(crate) fn with_operation<T, R>(
 }
 
 impl SignedSenderCertificate {
-    pub(crate) fn into_core(self) -> roost_core::SignedSenderCertificate {
-        roost_core::SignedSenderCertificate {
+    pub(crate) fn into_core(self) -> Result<roost_core::SignedSenderCertificate, RoostError> {
+        Ok(roost_core::SignedSenderCertificate {
             certificate: self.certificate,
-            signature: self.signature,
-        }
+            signature: fixed_64(&self.signature, "sender certificate signature")?,
+        })
     }
 }
 
@@ -784,7 +786,7 @@ impl OutgoingMessage {
             recipient: self.recipient.to_core()?,
             message_id: self.message_id.to_core()?,
             sent_at_millis: self.sent_at_millis,
-            sender_certificate: self.sender_certificate.into_core(),
+            sender_certificate: self.sender_certificate.into_core()?,
             plaintext,
             prekey_bundle: self
                 .prekey_bundle
@@ -801,7 +803,7 @@ impl OutgoingGrantUpdate {
             recipient: self.recipient.to_core()?,
             message_id: self.message_id.to_core()?,
             sent_at_millis: self.sent_at_millis,
-            sender_certificate: self.sender_certificate.into_core(),
+            sender_certificate: self.sender_certificate.into_core()?,
             prekey_bundle: self
                 .prekey_bundle
                 .as_ref()

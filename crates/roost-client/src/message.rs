@@ -86,20 +86,20 @@ pub struct SenderIdentityMaterial {
     pub identity: Identity,
     /// Opaque sender certificate bytes.
     pub certificate: Vec<u8>,
-    /// Opaque sender signature bytes.
+    /// The relay domain's signature over the certificate. Always 64 bytes.
     pub signature: Vec<u8>,
 }
 
 /// Payload kind recovered after decrypt.
 #[derive(uniffi::Enum)]
 pub enum PayloadKind {
-    /// Encrypted application text content.
-    EncryptedText,
-    /// Delivery or processing acknowledgment.
+    /// Content from the app.
+    Content,
+    /// A delivery acknowledgment.
     Acknowledgment,
-    /// Encrypted application text that carried the sender's Inbox Grant, which Roost kept.
-    EncryptedTextWithGrant,
-    /// A Contact Acceptance and its encrypted application text.
+    /// Content from the app that carried the sender's Inbox Grant, which Roost kept.
+    ContentWithGrant,
+    /// A Contact Acceptance and its content from the app.
     ContactAcceptance,
     /// An acknowledgment that carried the sender's Inbox Grant, which Roost kept.
     AcknowledgmentWithGrant,
@@ -118,7 +118,7 @@ impl SenderIdentityMaterial {
                 binding_signature: value.identity_binding_signature.clone(),
             },
             certificate: value.certificate.clone(),
-            signature: value.signature.clone(),
+            signature: value.signature.to_vec(),
         }
     }
 }
@@ -197,9 +197,9 @@ impl FrameOneTimePreKeyReference {
 impl PayloadKind {
     pub(crate) fn from_protocol(value: roost_protocol::PayloadKind) -> Self {
         match value {
-            roost_protocol::PayloadKind::EncryptedText => Self::EncryptedText,
+            roost_protocol::PayloadKind::Content => Self::Content,
             roost_protocol::PayloadKind::Acknowledgment => Self::Acknowledgment,
-            roost_protocol::PayloadKind::EncryptedTextWithGrant => Self::EncryptedTextWithGrant,
+            roost_protocol::PayloadKind::ContentWithGrant => Self::ContentWithGrant,
             roost_protocol::PayloadKind::ContactAcceptance => Self::ContactAcceptance,
             roost_protocol::PayloadKind::AcknowledgmentWithGrant => Self::AcknowledgmentWithGrant,
             roost_protocol::PayloadKind::GrantUpdate => Self::GrantUpdate,

@@ -2,7 +2,7 @@ use curve25519_dalek::{montgomery::MontgomeryPoint, traits::Identity};
 use ed25519_dalek::VerifyingKey;
 use subtle::ConstantTimeEq;
 
-/// Length of a Curve25519 public key encoding.
+/// Length of an X25519 or Ed25519 public key encoding.
 pub const PUBLIC_KEY_LEN: usize = 32;
 
 /// Returns whether an X25519 public key is canonically encoded and not low order.
@@ -43,50 +43,28 @@ fn x25519_field_modulus() -> [u8; PUBLIC_KEY_LEN] {
     modulus
 }
 
-const IDENTITY_KEY_DOMAIN_TAG: &[u8] = b"RoostIK-v1:";
-/// Length of the canonical two-half Identity Key encoding.
-pub const IDENTITY_KEY_ENCODING_LEN: usize = IDENTITY_KEY_DOMAIN_TAG.len() + PUBLIC_KEY_LEN * 2;
-
-/// Encodes the two public Identity Key halves with their canonical domain tag.
-///
-/// Callers validate both key halves at their input boundary before using this encoding as an identity.
-#[must_use]
-pub fn identity_key_encoding(
-    x25519_public_key: &[u8; PUBLIC_KEY_LEN],
-    ed25519_verifying_key: &[u8; PUBLIC_KEY_LEN],
-) -> [u8; IDENTITY_KEY_ENCODING_LEN] {
-    let mut encoding = [0u8; IDENTITY_KEY_ENCODING_LEN];
-    let offset = IDENTITY_KEY_DOMAIN_TAG.len();
-    encoding[..offset].copy_from_slice(IDENTITY_KEY_DOMAIN_TAG);
-    encoding[offset..offset + PUBLIC_KEY_LEN].copy_from_slice(x25519_public_key);
-    encoding[offset + PUBLIC_KEY_LEN..].copy_from_slice(ed25519_verifying_key);
-    encoding
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn x25519_validation_rejects_non_canonical_key() {
-        assert!(!is_valid_x25519_public_key(&x25519_field_modulus()));
+        let mut base_point_plus_modulus = x25519_field_modulus();
+        base_point_plus_modulus[0] += 9;
+        let mut base_point_with_high_bit = [0; PUBLIC_KEY_LEN];
+        base_point_with_high_bit[0] = 9;
+        base_point_with_high_bit[PUBLIC_KEY_LEN - 1] = 0x80;
+        for key in [base_point_plus_modulus, base_point_with_high_bit] {
+            assert!(!is_valid_x25519_public_key(&key));
+        }
     }
 
     #[test]
     fn x25519_validation_rejects_low_order_keys() {
         let mut twist_low_order = x25519_field_modulus();
         twist_low_order[0] -= 1;
-
         for key in [[0; PUBLIC_KEY_LEN], twist_low_order] {
             assert!(!is_valid_x25519_public_key(&key));
         }
-    }
-
-    #[test]
-    fn identity_key_encoding_changes_with_each_half() {
-        let expected = identity_key_encoding(&[0x01; 32], &[0x02; 32]);
-
-        assert_ne!(identity_key_encoding(&[0x03; 32], &[0x02; 32]), expected);
-        assert_ne!(identity_key_encoding(&[0x01; 32], &[0x03; 32]), expected);
     }
 }

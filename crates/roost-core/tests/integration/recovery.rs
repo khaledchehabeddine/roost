@@ -191,7 +191,7 @@ fn a_contact_that_starts_a_new_session_gets_each_unacknowledged_message_again_on
         assert_eq!(resent.message_id, original.message_id);
         assert_eq!(Route::of(&resent.destination), bob.established_route());
         // Bob may have lost Alice's grant with the Session.
-        assert_eq!(resent.payload_kind, PayloadKind::EncryptedTextWithGrant);
+        assert_eq!(resent.payload_kind, PayloadKind::ContentWithGrant);
     }
     assert!(waiting_on(&alice, first.session_id).is_empty());
     assert_eq!(
@@ -311,8 +311,8 @@ fn a_recovery_resends_the_longest_message_and_every_message_after_it() {
     );
     let rest = alice.recover(&bob, None).committed();
 
-    assert_eq!(longest.payload_kind, PayloadKind::EncryptedText);
-    assert_eq!(probe.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(longest.payload_kind, PayloadKind::Content);
+    assert_eq!(probe.payload_kind, PayloadKind::ContentWithGrant);
     assert_eq!(probe.message_id, longest.message_id);
     assert_eq!(received.plaintext.len(), max);
     assert_eq!(rest.message_id, after.message_id);

@@ -6,17 +6,17 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     AdmissionRequest, ContactIdentityKey, ContactState, DeliveryCheckResult, DeliveryCheckStep,
-    InboundMessageOutcome, InboundSenderCertificateValidation, IncomingMessage, KeyStore,
-    KeyStoreError, KeyStoreOperationError, KnownDomainSigningKey, MessageDecryptionStep,
-    MessageDestination, MessageEncryption, MessageEncryptionStep, MessageOperationError,
-    MessageRecoveryStep, MessageStartError, OutboundMessageResult, OutgoingGrantUpdate,
-    OutgoingMessage, OutgoingRecovery, PeerPreKeyBundle, PreKeyBundle, PreparedKeyStoreOperation,
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKind, ProtocolStateUpdate,
-    PublicIdentityKey, PublicationBundle, ReceiveSettings, SealedFrame, SessionId,
+    DomainSigningKey, InboundMessageOutcome, IncomingMessage, KeyStore, KeyStoreError,
+    KeyStoreOperationError, MessageDecryptionStep, MessageDestination, MessageEncryption,
+    MessageEncryptionStep, MessageOperationError, MessageRecoveryStep, MessageStartError,
+    OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery,
+    PeerPreKeyBundle, PreKeyBundle, PreparedKeyStoreOperation, ProtocolStateAddress,
+    ProtocolStateBlob, ProtocolStateKind, ProtocolStateUpdate, PublicIdentityKey,
+    PublicationBundle, ReceiveSettings, SealedFrame, SenderCertificateValidation, SessionId,
     SignedSenderCertificate, StateChanges, TransportBinding,
 };
 use roost_crypto::SigningKeyPair;
-use roost_protocol::{DomainSigningKeyStatus, MessageId, PayloadKind};
+use roost_protocol::{MessageId, PayloadKind};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -41,7 +41,7 @@ impl Relay {
             identity_key(identity),
             CREATED_AT_SECS + 100_000,
         );
-        let signature = self.signing_key.sign(&certificate).to_bytes().to_vec();
+        let signature = self.signing_key.sign(&certificate).to_bytes();
         Credential {
             certificate,
             signature,
@@ -55,7 +55,7 @@ impl Relay {
 #[derive(Clone)]
 struct Credential {
     certificate: Vec<u8>,
-    signature: Vec<u8>,
+    signature: [u8; 64],
     domain_id: Vec<u8>,
     domain_verifying_key: [u8; 32],
 }
@@ -64,16 +64,15 @@ impl Credential {
     fn signed(&self) -> SignedSenderCertificate {
         SignedSenderCertificate {
             certificate: self.certificate.clone(),
-            signature: self.signature.clone(),
+            signature: self.signature,
         }
     }
 
-    fn validation(&self) -> InboundSenderCertificateValidation {
+    fn validation(&self) -> SenderCertificateValidation {
         validation(
-            vec![KnownDomainSigningKey {
+            vec![DomainSigningKey {
                 id: self.domain_id.clone(),
                 verifying_key: self.domain_verifying_key,
-                status: DomainSigningKeyStatus::Trusted,
             }],
             Vec::new(),
         )
@@ -863,7 +862,7 @@ pub(crate) fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
         sent_at_millis: draft.sent_at_millis,
         sender_certificate: SignedSenderCertificate {
             certificate: draft.sender_certificate.certificate.clone(),
-            signature: draft.sender_certificate.signature.clone(),
+            signature: draft.sender_certificate.signature,
         },
         plaintext: draft.plaintext.clone(),
         prekey_bundle: None,

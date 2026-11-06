@@ -1,6 +1,6 @@
 use crate::protocol_state::StateChanges;
-use crate::safety_number::IdentityKey;
 use roost_crypto::{PublicDiscoveryKey, Signature};
+use roost_protocol::IdentityKey;
 use roost_protocol::PUBLIC_KEY_LEN;
 use serde::{Deserialize, Serialize};
 
