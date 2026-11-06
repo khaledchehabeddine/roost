@@ -236,12 +236,13 @@ pub(crate) fn validation(
     domain_signing_keys: Vec<DomainSigningKey>,
     revoked_identity_keys: Vec<ContactIdentityKey>,
 ) -> SenderCertificateValidation {
-    SenderCertificateValidation {
+    SenderCertificateValidation::new(
         domain_signing_keys,
-        expected_relay_domain: TEST_RELAY_DOMAIN.to_vec(),
-        revocation_state: RevocationState::Available(revoked_identity_keys),
-        reference_time: from_unix_secs(CREATED_AT_SECS).unwrap(),
-    }
+        TEST_RELAY_DOMAIN.to_vec(),
+        RevocationState::Available(revoked_identity_keys),
+        from_unix_secs(CREATED_AT_SECS).unwrap(),
+    )
+    .unwrap()
 }
 
 /// The test domain's validation inputs with nothing revoked.

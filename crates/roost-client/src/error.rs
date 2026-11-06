@@ -34,7 +34,7 @@ pub enum RoostError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// Sender certificate validation rejected caller input.
+    /// Sender certificate validation rejected the certificate.
     #[error("certificate rejected: {reason}")]
     CertificateRejected {
         /// Diagnostic context for logging only.
@@ -505,8 +505,13 @@ impl From<SenderCertificateValidationError> for RoostError {
     fn from(e: SenderCertificateValidationError) -> Self {
         let reason = reason_from_chain(&e);
         match e {
-            // An oversized grace window is the app's setting, not a fault in the certificate.
-            SenderCertificateValidationError::GraceWindowTooLarge { .. } => {
+            // These errors come from the app's own inputs, not from the certificate.
+            SenderCertificateValidationError::GraceWindowTooLarge { .. }
+            | SenderCertificateValidationError::EmptySigningKeyId { .. }
+            | SenderCertificateValidationError::DuplicateSigningKeyId { .. }
+            | SenderCertificateValidationError::InvalidDomainSigningKey { .. }
+            | SenderCertificateValidationError::EmptyRelayDomain
+            | SenderCertificateValidationError::InvalidRevokedIdentityKey { .. } => {
                 RoostError::InvalidData { reason }
             }
             SenderCertificateValidationError::UnsupportedVersion { .. } => {
@@ -517,7 +522,6 @@ impl From<SenderCertificateValidationError> for RoostError {
             | SenderCertificateValidationError::RelayDomainMismatch
             | SenderCertificateValidationError::InvalidKeyEncoding
             | SenderCertificateValidationError::UnknownSigningKeyId
-            | SenderCertificateValidationError::DuplicateSigningKeyId
             | SenderCertificateValidationError::SignatureFailure
             | SenderCertificateValidationError::RevocationStateUnavailable
             | SenderCertificateValidationError::RevokedIdentityKey

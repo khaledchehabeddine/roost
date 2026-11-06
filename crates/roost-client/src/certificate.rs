@@ -11,6 +11,8 @@ use std::time::Duration;
 #[derive(uniffi::Record)]
 pub struct DomainSigningKey {
     /// Identifier that certificates signed by this key carry.
+    ///
+    /// It must not be empty. No other trusted key may have the same identifier.
     pub id: Vec<u8>,
     /// Ed25519 verifying key bytes. Always 32 bytes.
     pub verifying_key: Vec<u8>,
@@ -34,6 +36,8 @@ pub struct SenderCertificateValidation {
     /// Domain signing keys the app trusts.
     pub domain_signing_keys: Vec<DomainSigningKey>,
     /// Relay domain incoming certificates must name.
+    ///
+    /// It must not be empty.
     pub expected_relay_domain: Vec<u8>,
     /// The app's list of revoked identity keys, if the list loaded.
     pub revocation_state: RevocationState,
@@ -64,7 +68,8 @@ impl IdentityContext {
     ///   malformed, expired, revoked, or signed by a key the app doesn't trust.
     /// - [`RoostError::UnsupportedVersion`] if the certificate has a version Roost doesn't read.
     /// - [`RoostError::InvalidData`] if a key, the signature, the reference time, or the grace is
-    ///   malformed or too large.
+    ///   malformed or too large, if a key identifier or the relay domain is empty, or if two
+    ///   trusted keys share an identifier.
     pub fn validate_sender_certificate(
         &self,
         certificate: SignedSenderCertificate,
@@ -87,16 +92,17 @@ impl IdentityContext {
 
 impl SenderCertificateValidation {
     pub(crate) fn to_core(&self) -> Result<roost_core::SenderCertificateValidation, RoostError> {
-        Ok(roost_core::SenderCertificateValidation {
-            domain_signing_keys: self
-                .domain_signing_keys
-                .iter()
-                .map(DomainSigningKey::to_core)
-                .collect::<Result<_, _>>()?,
-            expected_relay_domain: self.expected_relay_domain.clone(),
-            revocation_state: self.revocation_state.to_core()?,
-            reference_time: time_from_millis(self.reference_time_millis, "reference_time_millis")?,
-        })
+        let domain_signing_keys = self
+            .domain_signing_keys
+            .iter()
+            .map(DomainSigningKey::to_core)
+            .collect::<Result<_, _>>()?;
+        Ok(roost_core::SenderCertificateValidation::new(
+            domain_signing_keys,
+            self.expected_relay_domain.clone(),
+            self.revocation_state.to_core()?,
+            time_from_millis(self.reference_time_millis, "reference_time_millis")?,
+        )?)
     }
 }
 

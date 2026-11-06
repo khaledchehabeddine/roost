@@ -276,3 +276,67 @@ fn sender_certificate_is_rejected_when_revocation_is_unavailable() {
         SenderCertificateValidationError::RevocationStateUnavailable,
     );
 }
+
+#[test]
+fn validation_input_errors_are_invalid_data() {
+    let signed = IssuedCertificate::new();
+    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let valid = || signed.validation(CERTIFICATE_EXPIRES_AT_MILLIS);
+    let trusted = || DomainSigningKey {
+        id: DOMAIN_SIGNING_KEY_ID.to_vec(),
+        verifying_key: signed.domain_verifying_key.clone(),
+    };
+    let with_keys = |domain_signing_keys| SenderCertificateValidation {
+        domain_signing_keys,
+        ..valid()
+    };
+    let low_order_key = IdentityKey {
+        agreement_key: vec![0; 32],
+        ..signed.identity_key.clone()
+    };
+    let cases = [
+        (
+            with_keys(vec![DomainSigningKey {
+                verifying_key: vec![0xff; 32],
+                ..trusted()
+            }]),
+            SenderCertificateValidationError::InvalidDomainSigningKey { index: 0 },
+        ),
+        (
+            with_keys(vec![DomainSigningKey {
+                id: Vec::new(),
+                ..trusted()
+            }]),
+            SenderCertificateValidationError::EmptySigningKeyId { index: 0 },
+        ),
+        (
+            with_keys(vec![trusted(), trusted()]),
+            SenderCertificateValidationError::DuplicateSigningKeyId { index: 1 },
+        ),
+        (
+            SenderCertificateValidation {
+                expected_relay_domain: Vec::new(),
+                ..valid()
+            },
+            SenderCertificateValidationError::EmptyRelayDomain,
+        ),
+        (
+            SenderCertificateValidation {
+                revocation_state: RevocationState {
+                    available: true,
+                    revoked_identity_keys: vec![low_order_key],
+                },
+                ..valid()
+            },
+            SenderCertificateValidationError::InvalidRevokedIdentityKey { index: 0 },
+        ),
+    ];
+
+    for (validation, expected) in cases {
+        match context.validate_sender_certificate(signed.signed(), validation, 0) {
+            Err(RoostError::InvalidData { reason }) => assert_eq!(reason, expected.to_string()),
+            Err(error) => panic!("expected InvalidData, got {error:?}"),
+            Ok(_) => panic!("expected InvalidData, got a validated certificate"),
+        }
+    }
+}

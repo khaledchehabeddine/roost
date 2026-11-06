@@ -1,7 +1,7 @@
 use crate::identity_key::IdentityKey;
 use crate::key_encoding::{PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
 use crate::unix_time::from_unix_secs;
-use ed25519_dalek::Signature;
+use ed25519_dalek::{Signature, VerifyingKey};
 use std::time::{Duration, SystemTime};
 use subtle::{Choice, ConstantTimeEq};
 
@@ -17,14 +17,15 @@ pub const MAX_CERTIFICATE_GRACE_WINDOW: Duration = Duration::from_secs(300);
 
 /// The trust, revocation, and time inputs for validating sender certificates.
 pub struct SenderCertificateValidation {
-    /// Domain signing keys the app trusts.
-    pub domain_signing_keys: Vec<DomainSigningKey>,
-    /// Relay domain the certificate must name.
-    pub expected_relay_domain: Vec<u8>,
-    /// The app's list of revoked identity keys, if the list loaded.
-    pub revocation_state: RevocationState,
-    /// The time to check expiry at.
-    pub reference_time: SystemTime,
+    domain_signing_keys: Vec<ParsedDomainSigningKey>,
+    expected_relay_domain: Vec<u8>,
+    revocation_state: RevocationState,
+    reference_time: SystemTime,
+}
+
+struct ParsedDomainSigningKey {
+    id: Vec<u8>,
+    verifying_key: VerifyingKey,
 }
 
 /// A domain signing key the app trusts.
@@ -54,7 +55,8 @@ pub struct ValidatedSenderCertificate {
     pub expires_at_secs: u64,
 }
 
-/// An error returned while validating a sender certificate.
+/// An error returned while building a [`SenderCertificateValidation`] or validating a sender
+/// certificate.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SenderCertificateValidationError {
     /// The certificate bytes are malformed.
@@ -77,15 +79,39 @@ pub enum SenderCertificateValidationError {
     /// The certificate names a different relay domain than the app expects.
     #[error("sender certificate names an unexpected relay domain")]
     RelayDomainMismatch,
-    /// A public key isn't canonically encoded, or is low order or weak.
+    /// The certificate's identity key isn't canonically encoded, or is low order or weak.
     #[error("sender certificate key encoding is invalid")]
     InvalidKeyEncoding,
     /// No trusted domain signing key has the identifier the certificate names.
     #[error("sender certificate signing-key identifier is unknown")]
     UnknownSigningKeyId,
-    /// More than one trusted domain signing key has the identifier the certificate names.
-    #[error("sender certificate signing-key identifier is duplicated")]
-    DuplicateSigningKeyId,
+    /// A trusted domain signing key has an empty identifier.
+    #[error("trusted domain signing key {index} has an empty identifier")]
+    EmptySigningKeyId {
+        /// Position of the key in the app's list.
+        index: usize,
+    },
+    /// More than one trusted domain signing key has the same identifier.
+    #[error("trusted domain signing key {index} repeats an earlier key's identifier")]
+    DuplicateSigningKeyId {
+        /// Position of the later key in the app's list.
+        index: usize,
+    },
+    /// A trusted domain signing key isn't canonically encoded, or is weak.
+    #[error("trusted domain signing key {index} is invalid")]
+    InvalidDomainSigningKey {
+        /// Position of the key in the app's list.
+        index: usize,
+    },
+    /// The relay domain the app expects is empty.
+    #[error("expected relay domain is empty")]
+    EmptyRelayDomain,
+    /// A revoked identity key isn't canonically encoded, or is low order or weak.
+    #[error("revoked identity key {index} is invalid")]
+    InvalidRevokedIdentityKey {
+        /// Position of the key in the app's list.
+        index: usize,
+    },
     /// The signature doesn't verify under the domain signing key the certificate names.
     #[error("sender certificate signature failed")]
     SignatureFailure,
@@ -109,6 +135,33 @@ pub enum SenderCertificateValidationError {
 }
 
 impl SenderCertificateValidation {
+    /// Returns validation inputs after checking each trusted key, identifier, and revoked key.
+    ///
+    /// [`validate`](Self::validate) checks expiry at `reference_time`.
+    pub fn new(
+        domain_signing_keys: Vec<DomainSigningKey>,
+        expected_relay_domain: Vec<u8>,
+        revocation_state: RevocationState,
+        reference_time: SystemTime,
+    ) -> Result<Self, SenderCertificateValidationError> {
+        let domain_signing_keys = parse_domain_signing_keys(domain_signing_keys)?;
+        if expected_relay_domain.is_empty() {
+            return Err(SenderCertificateValidationError::EmptyRelayDomain);
+        }
+        if let RevocationState::Available(revoked_identity_keys) = &revocation_state
+            && let Some(index) = revoked_identity_keys.iter().position(|key| !key.is_valid())
+        {
+            return Err(SenderCertificateValidationError::InvalidRevokedIdentityKey { index });
+        }
+
+        Ok(Self {
+            domain_signing_keys,
+            expected_relay_domain,
+            revocation_state,
+            reference_time,
+        })
+    }
+
     /// Validates a sender certificate, accepting one that expired at most `grace_window` ago.
     ///
     /// Verifies the signature only under the domain signing key the certificate names, and checks
@@ -141,18 +194,20 @@ impl SenderCertificateValidation {
             return Err(SenderCertificateValidationError::RelayDomainMismatch);
         }
 
-        let domain_signing_key =
-            matching_domain_signing_key(&parsed.signing_key_id, &self.domain_signing_keys)?;
-        let verifying_key = parse_ed25519_verifying_key_bytes(&domain_signing_key.verifying_key)
-            .ok_or(SenderCertificateValidationError::InvalidKeyEncoding)?;
-        verifying_key
+        let domain_signing_key = self
+            .domain_signing_keys
+            .iter()
+            .find(|key| key.id == parsed.signing_key_id)
+            .ok_or(SenderCertificateValidationError::UnknownSigningKeyId)?;
+        domain_signing_key
+            .verifying_key
             .verify_strict(certificate, signature)
             .map_err(|_| SenderCertificateValidationError::SignatureFailure)?;
 
         let RevocationState::Available(revoked_identity_keys) = &self.revocation_state else {
             return Err(SenderCertificateValidationError::RevocationStateUnavailable);
         };
-        if identity_key_is_revoked(&parsed.identity_key, revoked_identity_keys)? {
+        if identity_key_is_revoked(&parsed.identity_key, revoked_identity_keys) {
             return Err(SenderCertificateValidationError::RevokedIdentityKey);
         }
         if certificate_is_expired(parsed.expires_at_secs, self.reference_time, grace_window) {
@@ -226,34 +281,36 @@ fn take_field<'a>(bytes: &mut &'a [u8]) -> Result<&'a [u8], SenderCertificateVal
     take(bytes, len)
 }
 
-fn matching_domain_signing_key<'a>(
-    id: &[u8],
-    domain_signing_keys: &'a [DomainSigningKey],
-) -> Result<&'a DomainSigningKey, SenderCertificateValidationError> {
-    let mut matched = None;
-    for key in domain_signing_keys {
-        if key.id == id {
-            if matched.is_some() {
-                return Err(SenderCertificateValidationError::DuplicateSigningKeyId);
-            }
-            matched = Some(key);
+fn parse_domain_signing_keys(
+    domain_signing_keys: Vec<DomainSigningKey>,
+) -> Result<Vec<ParsedDomainSigningKey>, SenderCertificateValidationError> {
+    let mut parsed: Vec<ParsedDomainSigningKey> = Vec::new();
+    for (index, key) in domain_signing_keys.into_iter().enumerate() {
+        if key.id.is_empty() {
+            return Err(SenderCertificateValidationError::EmptySigningKeyId { index });
         }
+        if parsed.iter().any(|earlier| earlier.id == key.id) {
+            return Err(SenderCertificateValidationError::DuplicateSigningKeyId { index });
+        }
+        let verifying_key = parse_ed25519_verifying_key_bytes(&key.verifying_key)
+            .ok_or(SenderCertificateValidationError::InvalidDomainSigningKey { index })?;
+        parsed.push(ParsedDomainSigningKey {
+            id: key.id,
+            verifying_key,
+        });
     }
-    matched.ok_or(SenderCertificateValidationError::UnknownSigningKeyId)
+    Ok(parsed)
 }
 
 fn identity_key_is_revoked(
     identity_key: &IdentityKey,
     revoked_identity_keys: &[IdentityKey],
-) -> Result<bool, SenderCertificateValidationError> {
+) -> bool {
     let mut revoked = Choice::from(0);
     for revoked_identity_key in revoked_identity_keys {
-        if !revoked_identity_key.is_valid() {
-            return Err(SenderCertificateValidationError::InvalidKeyEncoding);
-        }
         revoked |= identity_key.ct_eq(revoked_identity_key);
     }
-    Ok(revoked.into())
+    revoked.into()
 }
 
 fn certificate_is_expired(
@@ -355,12 +412,13 @@ mod tests {
         domain_signing_keys: Vec<DomainSigningKey>,
         revoked_identity_keys: Vec<IdentityKey>,
     ) -> SenderCertificateValidation {
-        SenderCertificateValidation {
+        SenderCertificateValidation::new(
             domain_signing_keys,
-            expected_relay_domain: RELAY_DOMAIN.to_vec(),
-            revocation_state: RevocationState::Available(revoked_identity_keys),
-            reference_time: at(NOW_SECS),
-        }
+            RELAY_DOMAIN.to_vec(),
+            RevocationState::Available(revoked_identity_keys),
+            at(NOW_SECS),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -667,34 +725,58 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_canonical_domain_signing_key() {
+    fn rejects_each_invalid_app_input() {
         let domain_key = signing_key(0x01);
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
+        let trusted = || trusted_key(PRIMARY_ID, &domain_key);
         let non_canonical = DomainSigningKey {
-            id: PRIMARY_ID.to_vec(),
+            id: SECONDARY_ID.to_vec(),
             verifying_key: [0xff; PUBLIC_KEY_LEN],
         };
-        let validation = validation(vec![non_canonical], vec![]);
-
-        assert_eq!(
-            signed.validate(&validation),
-            Err(SenderCertificateValidationError::InvalidKeyEncoding)
-        );
-    }
-
-    #[test]
-    fn ignores_unrelated_non_canonical_domain_signing_key() {
-        let domain_key = signing_key(0x01);
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
-        let non_canonical = DomainSigningKey {
-            id: b"other".to_vec(),
-            verifying_key: [0xff; PUBLIC_KEY_LEN],
+        let low_order = IdentityKey {
+            x25519_public_key: [0; PUBLIC_KEY_LEN],
+            ..identity_key()
         };
-        let validation = validation(
-            vec![trusted_key(PRIMARY_ID, &domain_key), non_canonical],
-            vec![],
-        );
+        let cases = [
+            (
+                vec![trusted(), trusted_key(b"", &domain_key)],
+                RELAY_DOMAIN,
+                vec![],
+                SenderCertificateValidationError::EmptySigningKeyId { index: 1 },
+            ),
+            (
+                vec![trusted(), trusted()],
+                RELAY_DOMAIN,
+                vec![],
+                SenderCertificateValidationError::DuplicateSigningKeyId { index: 1 },
+            ),
+            (
+                vec![trusted(), non_canonical],
+                RELAY_DOMAIN,
+                vec![],
+                SenderCertificateValidationError::InvalidDomainSigningKey { index: 1 },
+            ),
+            (
+                vec![trusted()],
+                b"".as_slice(),
+                vec![],
+                SenderCertificateValidationError::EmptyRelayDomain,
+            ),
+            (
+                vec![trusted()],
+                RELAY_DOMAIN,
+                vec![identity_key(), low_order],
+                SenderCertificateValidationError::InvalidRevokedIdentityKey { index: 1 },
+            ),
+        ];
 
-        signed.validate(&validation).unwrap();
+        for (domain_signing_keys, relay_domain, revoked_identity_keys, expected) in cases {
+            let result = SenderCertificateValidation::new(
+                domain_signing_keys,
+                relay_domain.to_vec(),
+                RevocationState::Available(revoked_identity_keys),
+                at(NOW_SECS),
+            );
+            assert_eq!(result.err(), Some(expected));
+        }
     }
 }

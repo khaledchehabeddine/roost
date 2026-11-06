@@ -1,15 +1,19 @@
 //! Message operations that ask a host for exact records and return results it commits atomically.
 
 use crate::support::device::{Device, Intent, Relay, Route, Sealed, binding, redraft};
+use crate::support::{CREATED_AT_SECS, TEST_RELAY_DOMAIN, trusted_domain_signing_key};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     BlockedContactAcknowledgmentPolicy, InboundMessageOutcome, MessageDecryption,
     MessageDecryptionStep, MessageEncryption, MessageEncryptionStep, MessageOperationError,
     ProtocolHardeningLimits, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateError,
-    ProtocolStateKind, ReceiveSettings, StateChanges, StateEntryError, commit_conditions_match,
+    ProtocolStateKind, ReceiveSettings, RevocationState, SenderCertificateValidation, StateChanges,
+    StateEntryError, commit_conditions_match,
 };
-use roost_protocol::{MAX_CERTIFICATE_GRACE_WINDOW, SenderCertificateValidationError};
+use roost_protocol::{
+    MAX_CERTIFICATE_GRACE_WINDOW, SenderCertificateValidationError, from_unix_secs,
+};
 use std::time::Duration;
 
 // Has `initiator` ask `responder`, `responder` accept, and `initiator` receive the acceptance.
@@ -712,7 +716,13 @@ fn an_acknowledgment_needs_a_valid_sender_certificate() {
     };
     let mut incoming = alice.incoming(received.acknowledgment.as_ref().unwrap());
     // Bob's certificate expired long before this reference time.
-    incoming.sender_certificate_validation.reference_time += Duration::from_secs(1_000_000);
+    incoming.sender_certificate_validation = SenderCertificateValidation::new(
+        vec![trusted_domain_signing_key()],
+        TEST_RELAY_DOMAIN.to_vec(),
+        RevocationState::Available(Vec::new()),
+        from_unix_secs(CREATED_AT_SECS + 1_000_000).unwrap(),
+    )
+    .unwrap();
     let before = alice.host.snapshot_bytes();
 
     let failure = crate::support::run_decryption(
