@@ -3,7 +3,7 @@ use crate::error::RoostError;
 use crate::identity::{Identity, IdentityKey};
 use roost_core::{OneTimePreKeyReference, SealedFrame, SealedFramePreKeyReference};
 
-/// The identifier a sender gives a Message, which a resend after recovery keeps.
+/// The identifier a sender gives a message, which a resend after recovery keeps.
 ///
 /// The value is 32 lowercase hexadecimal digits, so it compares and hashes as a plain string.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
@@ -27,7 +27,7 @@ impl MessageId {
     }
 }
 
-/// The identifier both peers derive for a Session, which addresses its state.
+/// The identifier both peers derive for a session, which addresses its state.
 ///
 /// The value is 32 lowercase hexadecimal digits, so it compares and hashes as a plain string.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
@@ -47,7 +47,7 @@ impl SessionId {
 /// Transport-visible X3DH prekey reference in a sealed-sender frame.
 #[derive(Clone, uniffi::Record)]
 pub struct FramePreKeyReference {
-    /// Recipient Discovery Key epoch.
+    /// Recipient discovery key epoch.
     pub discovery_epoch: u32,
     /// Recipient signed-prekey X25519 public key. Always 32 bytes.
     pub signed_prekey_public_key: Vec<u8>,
@@ -64,14 +64,14 @@ pub struct FrameOneTimePreKeyReference {
     pub public_key: Vec<u8>,
 }
 
-/// Transport-visible sealed-sender frame exchanged as a Message.
+/// Transport-visible sealed-sender frame exchanged as a message.
 #[derive(Clone, uniffi::Record)]
 pub struct Message {
     /// Sealed-frame wire version.
     pub version: u8,
-    /// Recipient Discovery Key X25519 public key. Always 32 bytes.
+    /// Recipient discovery key X25519 public key. Always 32 bytes.
     pub recipient_public_key: Vec<u8>,
-    /// X3DH prekey reference, present while a new Session's Messages carry the handshake.
+    /// X3DH prekey reference, present while a new session's messages carry the handshake.
     pub prekey_reference: Option<FramePreKeyReference>,
     /// Per-frame ephemeral X25519 public key. Always 32 bytes.
     pub ephemeral_public_key: Vec<u8>,
@@ -79,7 +79,7 @@ pub struct Message {
     pub ciphertext: Vec<u8>,
 }
 
-/// The sender's identity and certificate, revealed only after the Message authenticates.
+/// The sender's identity and certificate, revealed only after the message authenticates.
 #[derive(uniffi::Record)]
 pub struct SenderIdentityMaterial {
     /// The sender's identity.
@@ -97,13 +97,13 @@ pub enum PayloadKind {
     Content,
     /// A delivery acknowledgment.
     Acknowledgment,
-    /// Content from the app that carried the sender's Inbox Grant, which Roost kept.
+    /// Content from the app that carried the sender's inbox grant, which Roost kept.
     ContentWithGrant,
-    /// A Contact Acceptance and its content from the app.
+    /// A contact acceptance and its content from the app.
     ContactAcceptance,
-    /// An acknowledgment that carried the sender's Inbox Grant, which Roost kept.
+    /// An acknowledgment that carried the sender's inbox grant, which Roost kept.
     AcknowledgmentWithGrant,
-    /// A Grant Update, which carries only the sender's Inbox Grant.
+    /// A grant update, which carries only the sender's inbox grant.
     GrantUpdate,
 }
 
@@ -207,10 +207,10 @@ impl PayloadKind {
     }
 }
 
-/// Encodes a Message into canonical sealed-frame bytes.
+/// Encodes a message into canonical sealed-frame bytes.
 ///
 /// # Errors
-/// - [`RoostError::InvalidData`] if a key has the wrong length or the Message is longer than
+/// - [`RoostError::InvalidData`] if a key has the wrong length or the message is longer than
 ///   Roost's limits.
 #[uniffi::export]
 pub fn encode_message(message: Message) -> Result<Vec<u8>, RoostError> {
@@ -220,7 +220,7 @@ pub fn encode_message(message: Message) -> Result<Vec<u8>, RoostError> {
 /// Decodes canonical sealed-frame bytes into transport-visible fields.
 ///
 /// # Errors
-/// - [`RoostError::UnsupportedVersion`] if the Message uses an unknown version.
+/// - [`RoostError::UnsupportedVersion`] if the message uses an unknown version.
 /// - [`RoostError::InvalidData`] if the bytes are malformed or longer than Roost's limits.
 #[uniffi::export]
 pub fn decode_message(bytes: Vec<u8>) -> Result<Message, RoostError> {

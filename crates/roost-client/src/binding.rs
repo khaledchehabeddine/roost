@@ -1,7 +1,7 @@
 //! Standalone IK/DK binding verification exposed through UniFFI.
 //!
 //! Both directions of the mutual binding are implemented in `roost-crypto` and checked on every
-//! path that starts a Session or takes an Inbox Grant. Apart from decoding a Contact Publication,
+//! path that starts a session or takes an inbox grant. Apart from decoding a contact publication,
 //! neither is reachable from a binding without this module. A request checks them only once the
 //! app holds a whole prekey bundle. A client that looks someone up from a typed discovery key must
 //! decide whether the identity a relay answered with is the one that discovery key vouches for
@@ -25,8 +25,8 @@ use roost_protocol::parse_ed25519_verifying_key_bytes;
 /// Verifies that an identity's binding signature ties its agreement key to its signing key.
 ///
 /// It shows only that whoever holds the signing key claimed the agreement key beside it, not which
-/// Discovery Key, if any, vouches for the identity. When the identity came from a Discovery Key
-/// lookup, also check it with [`verify_discovery_to_identity_binding`] against the Discovery Key
+/// discovery key, if any, vouches for the identity. When the identity came from a discovery key
+/// lookup, also check it with [`verify_discovery_to_identity_binding`] against the discovery key
 /// the user supplied. A relay's signature checked under a key the same relay handed over proves
 /// only that the relay is self-consistent.
 ///
@@ -42,9 +42,9 @@ pub fn verify_identity_key_binding(identity: Identity) -> Result<(), RoostError>
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s two public keys.
 ///
-/// This check is the whole security of adding a contact by Discovery Key: the relay answers a
-/// lookup with an identity, and nothing else shows that the Discovery Key authorized it. Pass the
-/// Discovery Key the user typed, never one read from the response being checked. The signature
+/// This check is the whole security of adding a contact by discovery key: the relay answers a
+/// lookup with an identity, and nothing else shows that the discovery key authorized it. Pass the
+/// discovery key the user typed, never one read from the response being checked. The signature
 /// doesn't cover the identity's own binding signature, so check that with
 /// [`verify_identity_key_binding`] too.
 ///
@@ -76,7 +76,7 @@ pub fn verify_discovery_to_identity_binding(
     )?)
 }
 
-/// Builds the public identity key the Discovery Key's verifier takes from an identity key that
+/// Builds the public identity key the discovery key's verifier takes from an identity key that
 /// carries no signature.
 ///
 /// [`crypto_verify_discovery_to_identity_binding`] reads exactly two fields of the key, the

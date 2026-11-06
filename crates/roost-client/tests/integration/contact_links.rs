@@ -1,4 +1,4 @@
-//! A host puts its Contact Publication in a contact link, and another host checks the link.
+//! A host puts its contact publication in a contact link, and another host checks the link.
 
 use crate::support::{MemoryStorage, complete};
 use roost_client::{
@@ -19,7 +19,7 @@ fn published_identity() -> Arc<IdentityContext> {
     context
 }
 
-// Returns the Discovery Key in the context's current contact link.
+// Returns the discovery key in the context's current contact link.
 fn linked_discovery_key(context: &IdentityContext) -> PublicDiscoveryKey {
     decode_contact_publication(context.encode_contact_publication().unwrap())
         .unwrap()
@@ -90,7 +90,7 @@ fn a_contact_publication_with_any_bit_flipped_fails() {
 #[test]
 fn a_padded_epoch_fails_as_malformed() {
     let bytes = published_identity().encode_contact_publication().unwrap();
-    // The format version, the Identity Key's 128 bytes, then the Discovery Key's two 32-byte keys.
+    // The format version, the identity key's 128 bytes, then the discovery key's two 32-byte keys.
     const EPOCH_AT: usize = 1 + 128 + 32 + 32;
     // A new identity's first epoch takes one byte, and writing it in two leaves its value alone.
     assert_eq!(bytes[EPOCH_AT], 1);
@@ -107,7 +107,7 @@ fn a_padded_epoch_fails_as_malformed() {
 fn a_discovery_key_under_another_identity_fails_authentication() {
     let alice = published_identity().encode_contact_publication().unwrap();
     let mallory = published_identity().encode_contact_publication().unwrap();
-    // The format version, then the Identity Key's two 32-byte keys and 64-byte binding signature.
+    // The format version, then the identity key's two 32-byte keys and 64-byte binding signature.
     const IDENTITY_END: usize = 1 + 32 + 32 + 64;
 
     let forged = [&alice[..IDENTITY_END], &mallory[IDENTITY_END..]].concat();

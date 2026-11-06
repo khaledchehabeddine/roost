@@ -1,6 +1,6 @@
-//! The layers inside a Sealed Sender Frame: the part sealed to the recipient's Discovery Key, the
-//! ratchet ciphertext, and the Sealed Sender Envelope inside it, and the checks that authenticate a
-//! Message's sender.
+//! The layers inside a sealed sender frame: the part sealed to the recipient's discovery key, the
+//! ratchet ciphertext, and the sealed sender envelope inside it, and the checks that authenticate a
+//! message's sender.
 
 use super::{ProtocolStateError, encode_zeroizing};
 use crate::TransportBinding;
@@ -28,15 +28,15 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 const RATCHETED_PAYLOAD_CONTEXT: &[u8] = b"RoostRatchetedPayload-v1:";
 const SIGNATURE_LEN: usize = 64;
 
-/// Sender identity material decoded only after a Message's ciphertext authenticates.
+/// Sender identity material decoded only after a message's ciphertext authenticates.
 ///
 /// `Clone` is intentional for post-decryption metadata handoff; owned opaque bytes zeroize on drop.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SenderIdentityMaterial {
-    /// Sender Identity Key X25519 public bytes. Always 32 bytes.
+    /// Sender identity key X25519 public bytes. Always 32 bytes.
     #[zeroize(skip)]
     pub identity_key: [u8; 32],
-    /// Sender Identity Key Ed25519 verifying-key bytes. Always 32 bytes.
+    /// Sender identity key Ed25519 verifying-key bytes. Always 32 bytes.
     #[zeroize(skip)]
     pub identity_verifying_key: [u8; 32],
     /// Ed25519 signature binding `identity_key` to `identity_verifying_key`.
@@ -48,7 +48,7 @@ pub struct SenderIdentityMaterial {
 }
 
 impl SenderIdentityMaterial {
-    /// Returns the sender's Identity Key as contact state records it.
+    /// Returns the sender's identity key as contact state records it.
     pub(super) fn contact_identity_key(&self) -> ContactIdentityKey {
         ContactIdentityKey {
             x25519_public_key: self.identity_key,
@@ -66,7 +66,7 @@ impl SenderIdentityMaterial {
     }
 }
 
-/// The fields every Message seals to the recipient's Discovery Key beside its ratchet ciphertext.
+/// The fields every message seals to the recipient's discovery key beside its ratchet ciphertext.
 #[derive(Clone, Copy)]
 pub(super) struct MessageMetadata {
     pub(super) session_id: SessionId,
@@ -78,8 +78,8 @@ pub(super) struct MessageMetadata {
 }
 
 impl MessageMetadata {
-    // Binds the whole sealed layer and the recipient to the ratchet ciphertext, so a Discovery Key
-    // holder can't move a ciphertext to another Session or change what the Message claims to be.
+    // Binds the whole sealed layer and the recipient to the ratchet ciphertext, so a discovery key
+    // holder can't move a ciphertext to another session or change what the message claims to be.
     fn associated_data(&self, recipient_public_key: &[u8; PUBLIC_KEY_LEN]) -> Vec<u8> {
         let mut associated_data =
             Vec::with_capacity(RATCHETED_PAYLOAD_CONTEXT.len() + 16 + 32 + 16 + 8 + 1 + 33);
@@ -100,7 +100,7 @@ impl MessageMetadata {
     }
 }
 
-/// A Message's layer sealed to the recipient's Discovery Key, after opening.
+/// A message's layer sealed to the recipient's discovery key, after opening.
 pub(super) struct OpenedMessage {
     pub(super) metadata: MessageMetadata,
     pub(super) recipient_public_key: [u8; PUBLIC_KEY_LEN],
@@ -109,7 +109,7 @@ pub(super) struct OpenedMessage {
 }
 
 impl OpenedMessage {
-    /// Decrypts the ratchet ciphertext and decodes the Sealed Sender Envelope inside it.
+    /// Decrypts the ratchet ciphertext and decodes the sealed sender envelope inside it.
     ///
     /// `state` changes even when decoding fails afterwards, so callers keep the advanced state only
     /// after the envelope authenticates.
@@ -134,7 +134,7 @@ impl OpenedMessage {
     }
 }
 
-/// Seals `envelope` under the ratchet and then to the recipient's Discovery Key.
+/// Seals `envelope` under the ratchet and then to the recipient's discovery key.
 fn seal_message<R: RngCore + CryptoRng>(
     rng: &mut R,
     state: &mut RatchetState,
@@ -169,7 +169,7 @@ fn seal_message<R: RngCore + CryptoRng>(
 
 /// Opens the layer of `message` sealed to `recipient_discovery_key`.
 ///
-/// Nothing in the result is authenticated beyond having been sealed to this Discovery Key, which
+/// Nothing in the result is authenticated beyond having been sealed to this discovery key, which
 /// anyone can do, until its ratchet ciphertext decrypts.
 pub(super) fn open_message(
     message: &SealedFrame,
@@ -225,11 +225,11 @@ pub(super) fn open_message(
     })
 }
 
-/// How the sender of a Message proves who they are.
+/// How the sender of a message proves who they are.
 enum OutboundAuthentication<'a> {
-    /// A signature over the Message Transcript, for Messages after the handshake.
+    /// A signature over the message transcript, for messages after the handshake.
     Signature(&'a Signature),
-    /// A first-message proof, with the Discovery Key the recipient replies to.
+    /// A first-message proof, with the discovery key the recipient replies to.
     Proof {
         discovery_key: &'a PublicDiscoveryKey,
         discovery_to_identity: &'a Signature,
@@ -237,7 +237,7 @@ enum OutboundAuthentication<'a> {
     },
 }
 
-/// How a received Message's sender proved who they are.
+/// How a received message's sender proved who they are.
 pub(super) enum SenderAuthentication {
     Signature([u8; SIGNATURE_LEN]),
     Proof {
@@ -289,7 +289,7 @@ fn encode_sealed_sender_envelope(
             }
         }
     };
-    // The sealed Message's encoded size is checked against Roost's limits once it exists.
+    // The sealed message's encoded size is checked against Roost's limits once it exists.
     encode_zeroizing(&SealedSenderEnvelopeWire {
         sender_identity_key: sender_identity.identity_key,
         sender_identity_verifying_key: sender_identity.identity_verifying_key,
@@ -441,22 +441,22 @@ pub(super) fn validate_sender_identity(
     Ok(())
 }
 
-// The local Identity's keys and credentials, which authenticate the Messages it sends.
+// The local identity's keys and credentials, which authenticate the messages it sends.
 pub(super) struct LocalSender<'a> {
-    // Public identity material and sender certificate sealed into each Message.
+    // Public identity material and sender certificate sealed into each message.
     pub(super) identity: &'a SenderIdentityMaterial,
-    // Identity Key signing half, which signs Messages sent after the peer replies.
+    // Identity key signing half, which signs messages sent after the peer replies.
     pub(super) signing_key: &'a SigningKeyPair,
-    // Identity Key agreement half, which proves Messages that carry a handshake.
+    // Identity key agreement half, which proves messages that carry a handshake.
     pub(super) agreement_key: &'a KeyPair,
-    // Current Discovery Key, sealed into Messages that carry a handshake so the peer can reply.
+    // Current discovery key, sealed into messages that carry a handshake so the peer can reply.
     pub(super) discovery_key: &'a PublicDiscoveryKey,
-    // The current Discovery Key's signature over the Identity Key.
+    // The current discovery key's signature over the identity key.
     pub(super) discovery_to_identity: &'a Signature,
 }
 
-// Validates the sender certificate an authenticated Message seals, and returns the Identity Key it
-// certifies, which must be the one the Message's sealed sender names.
+// Validates the sender certificate an authenticated message seals, and returns the identity key it
+// certifies, which must be the one the message's sealed sender names.
 pub(super) fn certified_sender_identity_key(
     validation: &SenderCertificateValidation,
     certificate_grace: Duration,
@@ -478,23 +478,23 @@ pub(super) fn certified_sender_identity_key(
     Ok(identity_key)
 }
 
-// What one outbound Message says, before Roost seals it.
+// What one outbound message says, before Roost seals it.
 pub(super) struct OutboundContent<'a> {
     pub(super) session_id: SessionId,
     pub(super) id: MessageId,
     pub(super) sent_at_millis: u64,
     pub(super) payload_kind: PayloadKind,
-    // The plaintext, after the Inbox Grant when the payload kind carries one.
+    // The plaintext, after the inbox grant when the payload kind carries one.
     pub(super) payload: &'a [u8],
 }
 
-// Where a signed Message goes and whose Identity Key its transcript names.
+// Where a signed message goes and whose identity key its transcript names.
 pub(super) struct SignedRecipient<'a> {
     pub(super) discovery_key: [u8; PUBLIC_KEY_LEN],
     pub(super) identity_verifying_key: &'a [u8; PUBLIC_KEY_LEN],
 }
 
-// Seals a Message whose sender signs its transcript, as every Message after the handshake does.
+// Seals a message whose sender signs its transcript, as every message after the handshake does.
 pub(super) fn seal_signed<R: RngCore + CryptoRng>(
     rng: &mut R,
     state: &mut RatchetState,
@@ -542,7 +542,7 @@ pub(super) fn seal_signed<R: RngCore + CryptoRng>(
     )
 }
 
-// Seals a Message that carries the handshake and proves its sender instead of signing.
+// Seals a message that carries the handshake and proves its sender instead of signing.
 pub(super) fn seal_proved<R: RngCore + CryptoRng>(
     rng: &mut R,
     state: &mut RatchetState,
@@ -590,8 +590,8 @@ pub(super) fn seal_proved<R: RngCore + CryptoRng>(
     )
 }
 
-// Checks a first Message's proof and the Discovery Key it seals, and returns the sender's
-// Identity Key and that Discovery Key.
+// Checks a first message's proof and the discovery key it seals, and returns the sender's
+// identity key and that discovery key.
 pub(super) fn authenticate_first_message(
     decoded: &DecodedSealedSenderEnvelope,
     handshake: &Handshake,
@@ -631,11 +631,11 @@ pub(super) fn authenticate_first_message(
     ))
 }
 
-// Checks that a Message on a known Session comes from the Session's peer and, after the handshake,
+// Checks that a message on a known session comes from the session's peer and, after the handshake,
 // that the peer signed it.
 //
-// A Message that still carries the handshake needs no further check: only the peer holds the
-// Session's keys, and the handshake was proved when the Session was created.
+// A message that still carries the handshake needs no further check: only the peer holds the
+// session's keys, and the handshake was proved when the session was created.
 pub(super) fn authenticate_session_message(
     decoded: &DecodedSealedSenderEnvelope,
     opened: &OpenedMessage,
@@ -668,7 +668,7 @@ pub(super) fn authenticate_session_message(
     }
 }
 
-// Checks that the local Discovery Key belongs to the local Identity Key a transcript names.
+// Checks that the local discovery key belongs to the local identity key a transcript names.
 pub(super) fn verify_recipient_keys(
     recipient_discovery_key: &DiscoveryKey,
     recipient_identity_verifying_key: &[u8; PUBLIC_KEY_LEN],
@@ -962,8 +962,8 @@ mod tests {
         .unwrap()
     }
 
-    // Authenticates a first Message from `claimed` that seals `sealed` and its binding over
-    // `bound`, with a proof the Discovery Key checks reject before anyone verifies it.
+    // Authenticates a first message from `claimed` that seals `sealed` and its binding over
+    // `bound`, with a proof the discovery key checks reject before anyone verifies it.
     fn authenticate(
         claimed: &Sender,
         sealed: &DiscoveryKey,
@@ -1082,8 +1082,8 @@ mod tests {
             limits,
         )
         .unwrap();
-        // Whoever holds Bob's Discovery Key seals the same ratchet ciphertext under another
-        // SessionID.
+        // Whoever holds Bob's discovery key seals the same ratchet ciphertext under another
+        // session ID.
         let plaintext = open_frame_for_discovery_key_with_associated_data(
             &bob_discovery_key,
             &message,
@@ -1121,7 +1121,7 @@ mod tests {
             swapped.decrypt(&mut rng, &mut receiving, limits),
             Err(ProtocolStateError::Ratchet(RatchetError::Aead))
         ));
-        // The stored state still opens the genuine Message.
+        // The stored state still opens the genuine message.
         let original = open_message(&message, &bob_discovery_key, &binding).unwrap();
         let decoded = original
             .decrypt(

@@ -1,4 +1,4 @@
-//! Exercises Safety Number derivation.
+//! Exercises safety number derivation.
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -29,7 +29,7 @@ fn setup() -> Setup {
     }
 }
 
-/// Pinned on purpose, unlike Roost's other derivations: people compare Safety Numbers across app
+/// Pinned on purpose, unlike Roost's other derivations: people compare safety numbers across app
 /// versions, so a change to the derivation or the display must fail here before it ships.
 #[test]
 fn safety_number_matches_expected_hash_and_display() {

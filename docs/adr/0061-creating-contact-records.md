@@ -1,6 +1,6 @@
 # Creating Contact Records
 
-Roost creates a contact record only when someone sends a Contact Request or the app blocks a stranger, so a record always means someone asked or was blocked.
+Roost creates a contact record only when someone sends a contact request or the app blocks a stranger, so a record always means someone asked or was blocked.
 
 ## Alternatives
 

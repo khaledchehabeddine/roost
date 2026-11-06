@@ -34,13 +34,13 @@ pub enum DeliveryCheckStep {
     Ready {
         /// The recovery signal.
         result: DeliveryCheckResult,
-        /// The state changes to commit with the recovery job. They list the Messages whose first
-        /// copy the Relay would have dropped by now as undelivered.
+        /// The state changes to commit with the recovery job. They list the messages whose first
+        /// copy the relay would have dropped by now as undelivered.
         changes: StateChanges,
     },
 }
 
-/// A check of the Messages this identity sent one contact that the contact hasn't acknowledged.
+/// A check of the messages this identity sent one contact that the contact hasn't acknowledged.
 ///
 /// Drive it as [`MessageEncryption`](crate::MessageEncryption) describes. The check returns its
 /// result once, and every call after that, or after any error, returns
@@ -48,15 +48,15 @@ pub enum DeliveryCheckStep {
 #[derive(uniffi::Object)]
 pub struct DeliveryCheck(Mutex<Option<roost_core::DeliveryCheck>>);
 
-/// What the app passes to resend a contact's unacknowledged Messages on a newer Session.
+/// What the app passes to resend a contact's unacknowledged messages on a newer session.
 #[derive(uniffi::Record)]
 pub struct OutgoingRecovery {
-    /// The contact's Identity Key.
+    /// The contact's identity key.
     pub recipient: IdentityKey,
-    /// The local identity's certificate, sealed into the resent Message.
+    /// The local identity's certificate, sealed into the resent message.
     pub sender_certificate: SignedSenderCertificate,
     /// The contact's bundle, fetched after a [`MessageRecoveryStep::NeedsPreKeyBundle`] step and
-    /// kept with the recovery job until a Session uses it or the job ends.
+    /// kept with the recovery job until a session uses it or the job ends.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
@@ -71,57 +71,57 @@ pub enum MessageRecoveryStep {
     /// Supply the content the app sent under `message_id` through
     /// [`MessageRecovery::supply_content`].
     NeedsContent {
-        /// The Message to encrypt again.
+        /// The message to encrypt again.
         message_id: MessageId,
     },
-    /// Supply the Transport Binding that reaches `destination` through
+    /// Supply the transport binding that reaches `destination` through
     /// [`MessageRecovery::supply_transport_binding`].
     NeedsTransport {
-        /// Where the Message goes.
+        /// Where the message goes.
         destination: MessageDestination,
     },
-    /// A new Session, or the first resend after an unblock, needs the contact's prekey bundle. The
-    /// recovery has ended: release the Identity Lock, fetch the bundle by the contact's stored
-    /// Discovery Key, keep it with the job, and start again. When the Relay answers that it doesn't
+    /// A new session, or the first resend after an unblock, needs the contact's prekey bundle. The
+    /// recovery has ended: release the identity lock, fetch the bundle by the contact's stored
+    /// discovery key, keep it with the job, and start again. When the relay answers that it doesn't
     /// know that key, the contact rotated: end the job, and a later check signals again once the
-    /// contact's newer grant or Session arrives.
+    /// contact's newer grant or session arrives.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
         identity_key: IdentityKey,
     },
-    /// The first Message the recovery resent on a new Session isn't acknowledged yet, and the
+    /// The first message the recovery resent on a new session isn't acknowledged yet, and the
     /// rest wait for it. The recovery has ended and there is nothing to commit: end the job. A
     /// delivery check after the contact acknowledges `message_id` starts the recovery again.
     AwaitingProbe {
-        /// The Message whose acknowledgment the rest wait for.
+        /// The message whose acknowledgment the rest wait for.
         message_id: MessageId,
     },
     /// Nothing is left to resend. The recovery has ended and there is nothing to commit: end the
     /// job.
     Finished,
-    /// One Message encrypted again, and the state changes to commit with it. The recovery has
+    /// One message encrypted again, and the state changes to commit with it. The recovery has
     /// ended: commit them, then start again.
     Ready {
-        /// The Message under its original MessageID, send time, and kind.
+        /// The message under its original message ID, send time, and kind.
         result: OutboundMessageResult,
-        /// The state changes to commit with the Message.
+        /// The state changes to commit with the message.
         changes: StateChanges,
     },
 }
 
-/// One step of a recovery job, which encrypts one Message the contact hasn't acknowledged again
-/// on a newer Session.
+/// One step of a recovery job, which encrypts one message the contact hasn't acknowledged again
+/// on a newer session.
 ///
-/// Roost keeps no copy of a sent Message, so the app supplies its content, and the new copy keeps
-/// its MessageID, send time, and kind, so the contact shows it once. Roost picks the Message and a
-/// Session newer than the one it was sent on, so the contact never misses a Message on it: a
-/// Session the contact delivered on since, or else a new Session from the contact's bundle, where
-/// the oldest Message goes first as a probe and the rest wait for a delivery check after the
-/// contact acknowledges it or delivers on another Session. Each [`MessageRecoveryStep::Ready`]
-/// result replaces the Message's earlier copy, so commit it in one transaction with replacing the
-/// app's send work for that MessageID, and never send the old copy again.
+/// Roost keeps no copy of a sent message, so the app supplies its content, and the new copy keeps
+/// its message ID, send time, and kind, so the contact shows it once. Roost picks the message and a
+/// session newer than the one it was sent on, so the contact never misses a message on it: a
+/// session the contact delivered on since, or else a new session from the contact's bundle, where
+/// the oldest message goes first as a probe and the rest wait for a delivery check after the
+/// contact acknowledges it or delivers on another session. Each [`MessageRecoveryStep::Ready`]
+/// result replaces the message's earlier copy, so commit it in one transaction with replacing the
+/// app's send work for that message ID, and never send the old copy again.
 ///
-/// Track each recovery as its own job, apart from the Message's original send, whose record
+/// Track each recovery as its own job, apart from the message's original send, whose record
 /// already says it's done. Drive each step as [`MessageEncryption`](crate::MessageEncryption)
 /// describes, and start a new one until a step ends the job.
 ///
@@ -138,14 +138,14 @@ pub enum MessageRecoveryStep {
 ///             case .needsTransport(let destination):
 ///                 try recovery.supplyTransportBinding(transportBinding: router.binding(to: destination))
 ///             case .needsPreKeyBundle(let identityKey):
-///                 // Fetch outside the Identity Lock. An unknown Discovery Key ends the job.
+///                 // Fetch outside the identity lock. An unknown discovery key ends the job.
 ///                 job.outgoing.prekeyBundle = try await relay.prekeyBundle(for: identityKey)
 ///                 try jobs.save(job)
 ///                 break steps
 ///             case .awaitingProbe, .finished:
 ///                 return try jobs.end(job)
 ///             case .ready(let result, let changes):
-///                 // Replaces the send work for its MessageID.
+///                 // Replaces the send work for its message ID.
 ///                 try database.commitResend(result, changes: changes)
 ///                 break steps
 ///             }
@@ -167,7 +167,7 @@ pub enum MessageRecoveryStep {
 ///                 is MessageRecoveryStep.NeedsTransport ->
 ///                     recovery.supplyTransportBinding(router.bindingTo(step.destination))
 ///                 is MessageRecoveryStep.NeedsPreKeyBundle -> {
-///                     // Fetch outside the Identity Lock. An unknown Discovery Key ends the job.
+///                     // Fetch outside the identity lock. An unknown discovery key ends the job.
 ///                     job.outgoing = job.outgoing.copy(prekeyBundle = relay.prekeyBundle(step.identityKey))
 ///                     jobs.save(job)
 ///                     break@steps
@@ -175,7 +175,7 @@ pub enum MessageRecoveryStep {
 ///                 is MessageRecoveryStep.AwaitingProbe, is MessageRecoveryStep.Finished ->
 ///                     return jobs.end(job)
 ///                 is MessageRecoveryStep.Ready -> {
-///                     // Replaces the send work for its MessageID.
+///                     // Replaces the send work for its message ID.
 ///                     database.commitResend(step.result, step.changes)
 ///                     break@steps
 ///                 }
@@ -189,19 +189,19 @@ pub struct MessageRecovery(Mutex<Option<roost_core::MessageRecovery>>);
 
 #[uniffi::export]
 impl Messaging {
-    /// Starts checking the Messages this identity sent a contact that the contact hasn't
+    /// Starts checking the messages this identity sent a contact that the contact hasn't
     /// acknowledged, at `now_millis`.
     ///
-    /// Run a check for each contact with unacknowledged Messages after committing anything received
-    /// from them, and at least once a day. The app never resends a Message the Relay accepted,
-    /// since the Relay redelivers it until the contact saves it. The check says instead when a
-    /// recovery starts, which encrypts the Messages again on a newer Session, and which Messages'
-    /// first copies the Relay would have dropped by now. A later copy of one can still arrive.
+    /// Run a check for each contact with unacknowledged messages after committing anything received
+    /// from them, and at least once a day. The app never resends a message the relay accepted,
+    /// since the relay redelivers it until the contact saves it. The check says instead when a
+    /// recovery starts, which encrypts the messages again on a newer session, and which messages'
+    /// first copies the relay would have dropped by now. A later copy of one can still arrive.
     /// Roost sets the waits: a recovery starts after a day without an acknowledgment, or as soon as
-    /// the contact sends an Inbox Grant newer than the one a waiting Message went to, delivers on a
-    /// newer Session, or acknowledges a recovery's probe, and once started, comes back only after a
-    /// week, after an unblock, or once the contact sends a newer Inbox Grant or starts a new
-    /// Session.
+    /// the contact sends an inbox grant newer than the one a waiting message went to, delivers on a
+    /// newer session, or acknowledges a recovery's probe, and once started, comes back only after a
+    /// week, after an unblock, or once the contact sends a newer inbox grant or starts a new
+    /// session.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `contact` or `now_millis` is out of range.
@@ -224,8 +224,8 @@ impl Messaging {
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if a key, certificate, or bundle is malformed.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_recovery(
@@ -270,11 +270,11 @@ impl MessageRecovery {
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the recovery already returned its result or failed.
     /// - [`RoostError::BlockedContact`] if the contact is blocked.
-    /// - [`RoostError::NoDeliveryCapability`] if the Message goes to a Session the contact
-    ///   delivered on, and no Inbox Grant has supplied the contact's Delivery Capability.
-    /// - [`RoostError::TooManyPendingAcknowledgments`] if the most Messages allowed already wait
-    ///   for the contact's acknowledgment on that Session.
-    /// - [`RoostError::AuthenticationFailed`] if a bundle's signatures don't bind its Discovery Key
+    /// - [`RoostError::NoDeliveryCapability`] if the message goes to a session the contact
+    ///   delivered on, and no inbox grant has supplied the contact's delivery capability.
+    /// - [`RoostError::TooManyPendingAcknowledgments`] if the most messages allowed already wait
+    ///   for the contact's acknowledgment on that session.
+    /// - [`RoostError::AuthenticationFailed`] if a bundle's signatures don't bind its discovery key
     ///   and the contact's identity in both directions.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed.
     /// - [`RoostError::UnsupportedVersion`] if a record uses an unknown format version.
@@ -296,7 +296,7 @@ impl MessageRecovery {
         with_operation(&self.0, |recovery| Ok(recovery.supply_state(entries?)?))
     }
 
-    /// Supplies the content the app sent under the MessageID the pending
+    /// Supplies the content the app sent under the message ID the pending
     /// [`MessageRecoveryStep::NeedsContent`] named.
     ///
     /// # Errors
@@ -307,10 +307,10 @@ impl MessageRecovery {
         with_operation(&self.0, |recovery| Ok(recovery.supply_content(content)?))
     }
 
-    /// Supplies the Transport Binding the pending [`MessageRecoveryStep::NeedsTransport`] asked
+    /// Supplies the transport binding the pending [`MessageRecoveryStep::NeedsTransport`] asked
     /// for.
     ///
-    /// Retain the exact binding with the Message for sending.
+    /// Retain the exact binding with the message for sending.
     ///
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the recovery already returned its result or failed.

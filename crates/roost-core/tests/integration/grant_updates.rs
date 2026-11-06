@@ -1,4 +1,4 @@
-//! Grant Updates carry an identity's current Inbox Grant to the contacts the app picks, and Roost
+//! Grant updates carry an identity's current inbox grant to the contacts the app picks, and Roost
 //! decides who may hold it.
 
 use crate::support::device::{
@@ -106,7 +106,7 @@ fn a_requester_sends_grant_updates_outside_the_limit_so_the_acceptance_reaches_i
 
     let update = alice.send_grant_update(&bob);
 
-    // The requester's Messages carry the handshake until the asked side accepts.
+    // The requester's messages carry the handshake until the asked side accepts.
     assert!(matches!(
         update.destination,
         roost_core::MessageDestination::FirstMessage { .. }
@@ -154,7 +154,7 @@ fn a_grant_update_cannot_start_a_contact() {
     let mut bob = Device::new(&relay, 0xb0);
     let request = alice.request(&bob, b"hi bob");
     alice.rotate_inbox();
-    // The Grant Update carries the request's handshake and reaches Bob before the request.
+    // The grant update carries the request's handshake and reaches Bob before the request.
     let update = alice.send_grant_update(&bob);
 
     assert!(matches!(

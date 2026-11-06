@@ -26,7 +26,7 @@ use std::time::SystemTime;
 /// Errors returned by [`KeyStore`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum KeyStoreError {
-    /// A Discovery Key operation failed.
+    /// A discovery key operation failed.
     #[error(transparent)]
     Discovery(#[from] DiscoveryKeyError),
     /// An identity-layer operation failed.
@@ -46,29 +46,29 @@ pub enum KeyStoreError {
     SignedPreKey(#[from] SignedPreKeyError),
 }
 
-/// A key publication that verifies from the Identity Key to the Discovery Key to the signed
+/// A key publication that verifies from the identity key to the discovery key to the signed
 /// prekey.
 ///
 /// Peers verify [`Self::discovery_key`] with the identity verifying key, then verify
-/// [`Self::signed_prekey`] with the Discovery Key's verifying key.
+/// [`Self::signed_prekey`] with the discovery key's verifying key.
 #[derive(Clone, Debug)]
 pub struct PublicationBundle {
     /// Version of the public prekey bundle format.
     pub version: u8,
-    /// The Discovery Key for this publication.
+    /// The discovery key for this publication.
     ///
-    /// Its `signature` field is the Identity Key's half of the mutual binding.
+    /// Its `signature` field is the identity key's half of the mutual binding.
     pub discovery_key: PublicDiscoveryKey,
-    /// The Discovery Key's half of the mutual binding: [`Self::discovery_key`] signing the identity
+    /// The discovery key's half of the mutual binding: [`Self::discovery_key`] signing the identity
     /// it belongs to.
     ///
-    /// A Relay verifies both halves before accepting a registration, and a peer that starts from a
-    /// Discovery Key verifies this one to learn that the Discovery Key authorized the identity.
+    /// A relay verifies both halves before accepting a registration, and a peer that starts from a
+    /// discovery key verifies this one to learn that the discovery key authorized the identity.
     pub discovery_to_identity: Signature,
-    /// Public commitment to the Delivery Capability of this inbox.
+    /// Public commitment to the delivery capability of this inbox.
     ///
-    /// Register this with the Relay. The capability it commits to is a secret that Roost shares
-    /// with contacts only inside Inbox Grants.
+    /// Register this with the relay. The capability it commits to is a secret that Roost shares
+    /// with contacts only inside inbox grants.
     pub recipient_delivery_verifier: RecipientDeliveryVerifier,
     /// The signed prekey for this publication.
     pub signed_prekey: PublicSignedPreKey,
@@ -76,14 +76,14 @@ pub struct PublicationBundle {
 
 /// Result of blocking a contact.
 pub struct ContactBlock {
-    /// The contact change to commit, carrying the inbox rotation's Prepared KeyStore Operation
+    /// The contact change to commit, carrying the inbox rotation's prepared KeyStore operation
     /// when the block rotated the inbox.
     pub changes: StateChanges,
     /// The rotated inbox's publication, or `None` when the contact was already blocked.
     ///
-    /// Present means every remaining contact holds a stale Delivery Capability until a Message,
-    /// acknowledgment, or Grant Update carries them the new Inbox Grant. The blocked contact never
-    /// gets one, which is what makes the block bite at the Relay rather than only locally.
+    /// Present means every remaining contact holds a stale delivery capability until a message,
+    /// acknowledgment, or grant update carries them the new inbox grant. The blocked contact never
+    /// gets one, which is what makes the block bite at the relay rather than only locally.
     pub publication: Option<PublicationBundle>,
 }
 
@@ -98,12 +98,12 @@ struct KeyStoreInner {
     lifecycle: Mutex<()>,
 }
 
-/// Facade over identity, Discovery Key, and prekey managers sharing one [`SecureStorage`].
+/// Facade over identity, discovery key, and prekey managers sharing one [`SecureStorage`].
 ///
 /// Clones share the same underlying storage and synchronization. Separately constructed instances
 /// do not. A host that uses multiple instances or processes for one identity namespace must hold
-/// one Identity Lock across them, from the first call of any operation, including a Message
-/// Operation, until its commit is resolved, and while it recovers unfinished operations.
+/// one identity lock across them, from the first call of any operation, including a message
+/// operation, until its commit is resolved, and while it recovers unfinished operations.
 ///
 /// Methods named `prepare_*` stage a secure-storage change and return it with an operation id.
 /// Reserve the operation, persist its output and id in the host transaction, then finalize:
@@ -162,7 +162,7 @@ impl KeyStore {
         }))
     }
 
-    /// Prepares fresh identity and Discovery Key material without changing authoritative storage.
+    /// Prepares fresh identity and discovery key material without changing authoritative storage.
     pub fn prepare_identity_creation(
         &self,
     ) -> Result<PreparedKeyStoreOperation<Identity>, KeyStoreError> {
@@ -171,7 +171,7 @@ impl KeyStore {
 
     /// Returns the stored [`Identity`], or `None` when no identity is stored.
     ///
-    /// A storage fault or a malformed Identity Secret Blob is an error, not `None`.
+    /// A storage fault or a malformed identity secret blob is an error, not `None`.
     pub fn identity(&self) -> Result<Option<Identity>, KeyStoreError> {
         match self.load_identity() {
             Ok(identity) => Ok(Some(identity)),
@@ -187,7 +187,7 @@ impl KeyStore {
         Ok(self.0.identity.load_identity()?)
     }
 
-    /// Returns the current Discovery Key and signed prekey, which verify as one chain.
+    /// Returns the current discovery key and signed prekey, which verify as one chain.
     ///
     /// Public one-time prekeys come from [`Self::prepare_one_time_prekeys`] and
     /// [`Self::prepare_one_time_prekey_replenishment`].
@@ -197,7 +197,7 @@ impl KeyStore {
         self.publication()
     }
 
-    /// Returns the stored Identity Key and the current Discovery Key, which a contact link carries.
+    /// Returns the stored identity key and the current discovery key, which a contact link carries.
     ///
     /// It fails whenever [`Self::current_publication`] does, so a link never points peers at an
     /// inbox that has no publication.
@@ -232,10 +232,10 @@ impl KeyStore {
     }
 
     /// Blocks a contact, given its record or the record's absence, and rotates the inbox so the
-    /// block takes effect at the Relay.
+    /// block takes effect at the relay.
     ///
-    /// Blocking alone only stops Messages being surfaced locally; the Relay would still accept and
-    /// queue them, because the blocked contact still holds a working Delivery Capability or knows
+    /// Blocking alone only stops messages being surfaced locally; the relay would still accept and
+    /// queue them, because the blocked contact still holds a working delivery capability or knows
     /// the inbox's prekeys. Rotating the inbox replaces both, even for a stranger who never got a
     /// grant, so a blocked person can't come back with a new identity at the same address. A
     /// stranger with no record gets one that holds only the block.
@@ -265,9 +265,9 @@ impl KeyStore {
         })
     }
 
-    /// Prepares exactly `batch_size` one-time prekeys for the current Discovery Key's epoch.
+    /// Prepares exactly `batch_size` one-time prekeys for the current discovery key's epoch.
     ///
-    /// The new secrets remain staged until finalization. No Discovery Key rotation is required.
+    /// The new secrets remain staged until finalization. No discovery key rotation is required.
     /// The call fails if the requested batch would exceed the pool cap.
     pub fn prepare_one_time_prekeys(
         &self,
@@ -279,7 +279,7 @@ impl KeyStore {
     /// Prepares replenishment of the stored one-time prekey pool.
     ///
     /// Returns the public one-time prekeys created by this call. A missing or stale pool is
-    /// rebuilt for the current Discovery Key's epoch; a current pool above the replenish threshold
+    /// rebuilt for the current discovery key's epoch; a current pool above the replenish threshold
     /// is left unchanged and returns an empty list. The returned no-op operation must still be
     /// finalized or aborted.
     pub fn prepare_one_time_prekey_replenishment(
@@ -290,14 +290,14 @@ impl KeyStore {
 
     /// Prepares rotation of the whole inbox.
     ///
-    /// Advances the epoch, replaces the Discovery Key and the Delivery Capability together, clears
+    /// Advances the epoch, replaces the discovery key and the delivery capability together, clears
     /// epoch-bound one-time prekeys, and returns the publishable material. A preparation failure
     /// discards the staged changes, leaving the previous authoritative inbox intact.
     ///
-    /// This invalidates every contact's Delivery Capability until a Message, acknowledgment, or
-    /// Grant Update carries them the new Inbox Grant — that is what makes it the mechanism behind
-    /// blocking, and why it is not merely a Discovery Key rotation. The replaced Discovery Key
-    /// still opens Messages the Relay queued for it, for as long as the Relay may hold them.
+    /// This invalidates every contact's delivery capability until a message, acknowledgment, or
+    /// grant update carries them the new inbox grant — that is what makes it the mechanism behind
+    /// blocking, and why it is not merely a discovery key rotation. The replaced discovery key
+    /// still opens messages the relay queued for it, for as long as the relay may hold them.
     pub fn prepare_inbox_rotation(
         &self,
     ) -> Result<PreparedKeyStoreOperation<PublicationBundle>, KeyStoreError> {
@@ -305,7 +305,7 @@ impl KeyStore {
     }
 
     /// Prepares a signed prekey rotation when the stored one is stale or missing, and deletes the
-    /// previous Discovery Keys the Relay can no longer hold Messages for.
+    /// previous discovery keys the relay can no longer hold messages for.
     ///
     /// Returns the new public signed prekey when callers need to upload it, or `None` when no
     /// rotation was needed. The returned operation must be finalized or aborted either way.
@@ -325,10 +325,10 @@ impl KeyStore {
         self.prepare_operation(|staged| staged.rotate_signed_prekey())
     }
 
-    /// Exports the stored identity and current Discovery Key as a passphrase-encrypted backup.
+    /// Exports the stored identity and current discovery key as a passphrase-encrypted backup.
     ///
-    /// Requires a stored Discovery Key; a partially generated identity must be completed with
-    /// [`Self::prepare_identity_creation`] (which repairs a missing Discovery Key) before
+    /// Requires a stored discovery key; a partially generated identity must be completed with
+    /// [`Self::prepare_identity_creation`] (which repairs a missing discovery key) before
     /// exporting.
     pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
@@ -341,17 +341,17 @@ impl KeyStore {
             .export_encrypted_backup(&mut OsRng, passphrase, &discovery_key_entry)?)
     }
 
-    /// Prepares restoration of an identity and Discovery Key from an encrypted backup.
+    /// Prepares restoration of an identity and discovery key from an encrypted backup.
     ///
-    /// Authenticates the backup and validates the restored Discovery Key against the restored
+    /// Authenticates the backup and validates the restored discovery key against the restored
     /// identity before staging changes, so a wrong passphrase or malformed backup leaves existing
     /// material untouched. Reserve this operation, then in the transaction that commits its ID,
     /// keep the [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState)
     /// records restored with the host's database and delete every other protocol-state record, then
-    /// finalize. A restored Session would reuse message keys its copy already used, so each
-    /// contact's next Message starts a new Session instead. Roost stops tracking a Message once its
-    /// Session is deleted, so in the same transaction, also mark each sent Message that has no
-    /// acknowledgment yet not delivered. The restored identity keeps the Discovery Key's epoch
+    /// finalize. A restored session would reuse message keys its copy already used, so each
+    /// contact's next message starts a new session instead. Roost stops tracking a message once its
+    /// session is deleted, so in the same transaction, also mark each sent message that has no
+    /// acknowledgment yet not delivered. The restored identity keeps the discovery key's epoch
     /// lineage from the backup, but prekey generation and publication stay blocked until
     /// [`Self::prepare_inbox_rotation`] advances to the next epoch. This avoids reusing prekey
     /// identifiers already published under the backed-up epoch.
@@ -363,7 +363,7 @@ impl KeyStore {
         self.prepare_operation(move |staged| staged.import_backup(data, passphrase))
     }
 
-    /// Prepares deletion of the stored prekeys, Discovery Key, and identity.
+    /// Prepares deletion of the stored prekeys, discovery key, and identity.
     ///
     /// Reserve this operation, atomically wipe host-owned protocol state, then finalize.
     /// Interrupted finalization resumes from durable progress.
@@ -386,8 +386,8 @@ impl KeyStore {
 // The changes each prepared operation stages. They run on the staging KeyStore that
 // `prepare_operation` builds while it holds the lifecycle guard, and each reads the clock once.
 impl KeyStore {
-    // Creates the identity and its first Discovery Key, or completes a creation that stored the
-    // identity but not the Discovery Key.
+    // Creates the identity and its first discovery key, or completes a creation that stored the
+    // identity but not the discovery key.
     fn create_identity(&self) -> Result<Identity, KeyStoreError> {
         let identity = match self.0.identity.generate_identity(&mut OsRng) {
             Ok(identity) => identity,
@@ -613,7 +613,7 @@ mod tests {
 
     /// The binding is recomputed per read rather than persisted, so it must be byte-stable.
     /// Ed25519 is deterministic and the payload carries no timestamp, so two reads of an
-    /// unchanged Discovery Key must produce identical bytes.
+    /// unchanged discovery key must produce identical bytes.
     #[test]
     fn discovery_to_identity_binding_is_stable_across_reads() {
         let key_store = store();
@@ -779,8 +779,8 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([0xe1; 32]);
         let (key_store, storage) = store_with_storage();
         commit_identity_creation(&key_store);
-        // An inbox rotation long ago retired the first Discovery Key, so the Relay can no longer
-        // hold Messages for it, and the next signed prekey is fresh.
+        // An inbox rotation long ago retired the first discovery key, so the relay can no longer
+        // hold messages for it, and the next signed prekey is fresh.
         let long_ago = from_unix_secs(1_700_000_000).unwrap();
         key_store
             .0
@@ -865,7 +865,7 @@ mod tests {
                 "pass",
                 |error| matches!(error, KeyStoreError::Discovery(DiscoveryKeyError::Corrupt)),
             ),
-            // An authentic backup whose Discovery Key entry is malformed.
+            // An authentic backup whose discovery key entry is malformed.
             (backup(&[0xAAu8; 50]), "pass", |error| {
                 matches!(
                     error,
@@ -1045,7 +1045,7 @@ mod tests {
         commit_identity_creation(&destination_store);
         commit_import(&destination_store, &backup, "pass");
 
-        // The restored Discovery Key keeps the source epoch lineage instead of resetting to
+        // The restored discovery key keeps the source epoch lineage instead of resetting to
         // the first epoch, and verifies against the restored identity.
         assert_eq!(discovery_key(&destination_store).unwrap().epoch, 3);
     }

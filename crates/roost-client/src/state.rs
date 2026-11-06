@@ -14,24 +14,24 @@ use zeroize::Zeroize;
 /// Stable category for an opaque protocol-state blob.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, uniffi::Enum)]
 pub enum ProtocolStateKind {
-    /// A Session's encryption state, stored under its SessionID.
+    /// A session's encryption state, stored under its session ID.
     RatchetSession,
-    /// The Deduplication Set.
+    /// The deduplication set.
     DeduplicationSet,
-    /// A Session's Pending Acknowledgments, stored under its SessionID.
+    /// A session's pending acknowledgments, stored under its session ID.
     PendingAcknowledgments,
-    /// A contact's record, stored under its Identity Key, which holds the peer's Delivery
-    /// Capability. Read it through [`Contacts::contact_state`](crate::Contacts::contact_state).
+    /// A contact's record, stored under its identity key, which holds the peer's delivery
+    /// capability. Read it through [`Contacts::contact_state`](crate::Contacts::contact_state).
     ContactState,
-    /// Identity-key-addressed record of the Sessions kept with one peer and the one Roost sends
+    /// Identity-key-addressed record of the sessions kept with one peer and the one Roost sends
     /// on.
     PeerSessions,
 }
 
 /// The name of one record the host stores: its kind and its ID.
 ///
-/// The ID is lowercase hexadecimal. For a contact's records it encodes the contact's Identity
-/// Key, so the host can find every record of one contact without decoding a blob.
+/// The ID is lowercase hexadecimal. For a contact's records it encodes the contact's identity
+/// key, so the host can find every record of one contact without decoding a blob.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
 pub struct StateKey {
     /// The record's kind.
@@ -72,14 +72,14 @@ pub struct CommitCondition {
 }
 
 /// The records an operation's result relies on, the records it writes, the operation that commits
-/// with them, if any, and the sent Messages Roost stops waiting for.
+/// with them, if any, and the sent messages Roost stops waiting for.
 ///
 /// Message operations and delivery checks return these beside their result. They're empty when
 /// the result changes nothing, such as a duplicate.
 ///
 /// Inside one transaction, read the record under each condition's key, call [`Self::matches`],
 /// and only when it returns `true` write every update together with the result's effects, such as
-/// a Message to send, and show each of [`Self::undelivered`] that has content as not delivered.
+/// a message to send, and show each of [`Self::undelivered`] that has content as not delivered.
 /// When it returns `false`, another operation changed a record first: roll back, then start the
 /// operation again from fresh reads.
 ///
@@ -102,8 +102,8 @@ pub struct StateChanges {
     pub updates: Vec<StateUpdate>,
     /// The operation to reserve before the commit and finalize after it, if any.
     pub operation_id: Option<OperationId>,
-    /// Sent Messages Roost stops waiting for, oldest first, because the Relay would have dropped
-    /// their first copies by now or the Session they wait on is gone.
+    /// Sent messages Roost stops waiting for, oldest first, because the relay would have dropped
+    /// their first copies by now or the session they wait on is gone.
     pub undelivered: Vec<MessageId>,
 }
 

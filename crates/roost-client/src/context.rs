@@ -15,7 +15,7 @@ use roost_core::{
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
-/// Largest authentication transcript the Identity Key will sign, in bytes.
+/// Largest authentication transcript the identity key will sign, in bytes.
 ///
 /// A relay authentication transcript is 159 bytes for the HTTP form and 120 for the WebSocket
 /// form, so this leaves room for long request targets while keeping the export from doubling as a
@@ -37,15 +37,15 @@ const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 /// can serve the same identity, and the app passes [`ReceiveSettings`](crate::ReceiveSettings) with
 /// each receive.
 ///
-/// Roost owns the identity's keys, backups, prekeys, inbox rotations, and the Inbox Grants that
-/// share its inbox with contacts, the contents of Protocol State Blobs, and the journal that makes
+/// Roost owns the identity's keys, backups, prekeys, inbox rotations, and the inbox grants that
+/// share its inbox with contacts, the contents of protocol state blobs, and the journal that makes
 /// key changes recoverable. It reads no clock
 /// for certificate checks, does no networking, and keeps no copy of protocol state between calls.
 ///
-/// The host owns the [`SecureStorage`] adapter, the database that stores Protocol State Blobs and
+/// The host owns the [`SecureStorage`] adapter, the database that stores protocol state blobs and
 /// operation IDs, and its transactions. It stores the blobs without decoding them or keeping a
 /// copy of its own, and calls Roost outside its database transactions, off the main thread. It
-/// holds the Identity Lock, one lock that covers every process sharing the identity, from the
+/// holds the identity lock, one lock that covers every process sharing the identity, from the
 /// first call of any operation, such as a send or a key change, until its commit is resolved, and
 /// while it recovers unfinished operations.
 ///
@@ -130,32 +130,32 @@ pub struct IdentityContext {
 ///
 /// Each send and receive is a [`MessageEncryption`](crate::MessageEncryption) or
 /// [`MessageDecryption`](crate::MessageDecryption) that asks the host for exact records and
-/// Transport Bindings. The host commits each result's [`StateChanges`](crate::StateChanges)
-/// together with its application effects. Roost starts Sessions with [`Contacts::request_contact`],
-/// picks the Session for each Message, and finds it again from the SessionID each Message carries,
+/// transport bindings. The host commits each result's [`StateChanges`](crate::StateChanges)
+/// together with its application effects. Roost starts sessions with [`Contacts::request_contact`],
+/// picks the session for each message, and finds it again from the session ID each message carries,
 /// so the host never chooses one.
 ///
-/// Send each Message until the Relay accepts it, then stop: the Relay redelivers it until the
-/// contact saves it. A [`DeliveryCheck`](crate::DeliveryCheck) says when to recover Messages on a
-/// newer Session, which only the sender can tell is needed, since the contact can't tell who sent a
-/// Message it can't decrypt.
+/// Send each message until the relay accepts it, then stop: the relay redelivers it until the
+/// contact saves it. A [`DeliveryCheck`](crate::DeliveryCheck) says when to recover messages on a
+/// newer session, which only the sender can tell is needed, since the contact can't tell who sent a
+/// message it can't decrypt.
 ///
-/// The SessionID is sealed to the recipient's Discovery Key, so anyone who gets that Discovery Key
-/// can read it from recorded Messages and tell which of them belong to the same Session. Until the
-/// recipient replies, every Message on a new Session also shows the transport which of the
-/// recipient's prekeys started it, so the transport can tell those Messages belong together.
+/// The session ID is sealed to the recipient's discovery key, so anyone who gets that discovery key
+/// can read it from recorded messages and tell which of them belong to the same session. Until the
+/// recipient replies, every message on a new session also shows the transport which of the
+/// recipient's prekeys started it, so the transport can tell those messages belong together.
 #[derive(uniffi::Object)]
 pub struct Messaging {
     pub(crate) inner: Arc<CoreKeyStore>,
 }
 
-/// Contact Requests and acceptance, trust, blocking, and the decoders for contact records, for one
+/// Contact requests and acceptance, trust, blocking, and the decoders for contact records, for one
 /// [`IdentityContext`].
 ///
 /// A contact record exists only once someone asks: the host's own
-/// [`Self::request_contact`] creates one when it commits, and so does a received Contact Request.
-/// Roost shares this identity's Inbox Grant with contacts inside Messages, so the host never
-/// handles a Delivery Capability except in an established Message's destination. Changes become
+/// [`Self::request_contact`] creates one when it commits, and so does a received contact request.
+/// Roost shares this identity's inbox grant with contacts inside messages, so the host never
+/// handles a delivery capability except in an established message's destination. Changes become
 /// visible when the host commits them; read contacts through [`Self::contact_states`] after that.
 #[derive(uniffi::Object)]
 pub struct Contacts {
@@ -204,7 +204,7 @@ impl IdentityContext {
             .transpose()
     }
 
-    /// Prepares a new identity and its first Discovery Key.
+    /// Prepares a new identity and its first discovery key.
     ///
     /// The host saves the identity with the operation ID, and publishes it only after
     /// finalization. Finalizing also completes an identity whose earlier creation stopped partway.
@@ -241,14 +241,14 @@ impl IdentityContext {
         ))
     }
 
-    /// Signs a host-built authentication transcript with the Identity Key and returns the
+    /// Signs a host-built authentication transcript with the identity key and returns the
     /// 64-byte signature.
     ///
     /// The transcript is signed exactly as given, so the host puts its own domain separation inside
     /// it, as a relay authentication transcript does with its `Relay-HTTP-Auth-v1` prefix. Roost
     /// refuses a transcript that starts with `Roost`, in any letter case, because every preimage
     /// Roost signs starts with it: without the check, this method could sign an
-    /// identity binding or a Message transcript chosen by whoever supplied the bytes. Signing is
+    /// identity binding or a message transcript chosen by whoever supplied the bytes. Signing is
     /// deterministic, so the same transcript always gives the same signature.
     ///
     /// # Errors
@@ -271,14 +271,14 @@ impl IdentityContext {
             .to_vec())
     }
 
-    /// Returns a passphrase-encrypted backup of the identity and its current Discovery Key.
+    /// Returns a passphrase-encrypted backup of the identity and its current discovery key.
     ///
     /// Each call runs Argon2id with 64 MiB of memory, so call it off the main thread. The backup is
     /// about 274 bytes and restores on any device with [`Self::prepare_backup_import`].
     ///
     /// # Errors
     /// - [`RoostError::BackupFailed`] if key derivation or encryption fails.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, RoostError> {
@@ -292,17 +292,17 @@ impl IdentityContext {
     /// that saves the operation ID, the host keeps the
     /// [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState) records it
     /// restored with its own database and deletes every other protocol-state record for the
-    /// identity. Reusing a restored Session would reuse its encryption keys, so each contact's
-    /// next Message starts a new Session, and the contact encrypts its unacknowledged Messages
-    /// again on it. In the same transaction, show each sent Message that has content and no
-    /// acknowledgment yet as not delivered, since Roost stops tracking a Message once its Session
+    /// identity. Reusing a restored session would reuse its encryption keys, so each contact's
+    /// next message starts a new session, and the contact encrypts its unacknowledged messages
+    /// again on it. In the same transaction, show each sent message that has content and no
+    /// acknowledgment yet as not delivered, since Roost stops tracking a message once its session
     /// is deleted. After finalization, prekeys and publication stay blocked until
-    /// [`Self::prepare_inbox_rotation`] moves to the next Discovery Key epoch, so the restored
+    /// [`Self::prepare_inbox_rotation`] moves to the next discovery key epoch, so the restored
     /// identity never reuses prekey IDs already published under the backed-up one. Then send each
-    /// contact a Grant Update through [`Contacts::start_grant_update`], so every contact can reach
-    /// this identity again without a new link. A Grant Update to a contact this identity asked,
+    /// contact a grant update through [`Contacts::start_grant_update`], so every contact can reach
+    /// this identity again without a new link. A grant update to a contact this identity asked,
     /// and that hasn't accepted, fails with [`RoostError::ContactNotAccepted`], since the restore
-    /// dropped the Session its acceptance would arrive on. Send that contact a new request through
+    /// dropped the session its acceptance would arrive on. Send that contact a new request through
     /// [`Contacts::request_contact`] instead. If it accepted meanwhile, its acknowledgment of the
     /// request accepts it on this side too. Each call runs Argon2id with 64 MiB of memory.
     ///
@@ -327,7 +327,7 @@ impl IdentityContext {
         ))
     }
 
-    /// Returns the current Discovery Key and signed prekey, which verify as one chain.
+    /// Returns the current discovery key and signed prekey, which verify as one chain.
     ///
     /// Publish the two together: reading them separately could pair keys from different rotations,
     /// which peers reject.
@@ -335,25 +335,25 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain.
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
-    /// - [`RoostError::NotFound`] if no identity, Discovery Key, or signed prekey is stored.
+    /// - [`RoostError::NotFound`] if no identity, discovery key, or signed prekey is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn current_publication(&self) -> Result<PublicationBundle, RoostError> {
         PublicationBundle::from_core(self.inner.current_publication()?)
     }
 
-    /// Returns this identity's Contact Publication, the bytes a contact link carries.
+    /// Returns this identity's contact publication, the bytes a contact link carries.
     ///
-    /// The publication holds the identity and its current Discovery Key with the signatures that
+    /// The publication holds the identity and its current discovery key with the signatures that
     /// bind them, and nothing secret. The app owns the rest of the link, including how it writes
     /// these bytes into it. Make a new link after each inbox rotation, since an older one leads to
-    /// an inbox the Relay no longer serves.
+    /// an inbox the relay no longer serves.
     ///
     /// # Errors
     /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain.
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::InvalidData`] if the stored identity is malformed.
-    /// - [`RoostError::NotFound`] if no identity, Discovery Key, or signed prekey is stored.
+    /// - [`RoostError::NotFound`] if no identity, discovery key, or signed prekey is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     /// - [`RoostError::UnsupportedVersion`] if the stored identity uses an unknown format version.
@@ -361,20 +361,20 @@ impl IdentityContext {
         Ok(self.inner.contact_publication()?.encode()?)
     }
 
-    /// Prepares an inbox rotation: a Discovery Key at the next epoch, a signed prekey, and a
-    /// Delivery Capability.
+    /// Prepares an inbox rotation: a discovery key at the next epoch, a signed prekey, and a
+    /// delivery capability.
     ///
     /// Rotation clears the previous inbox's one-time prekeys and invalidates every contact's
-    /// Delivery Capability. Roost keeps the previous Discovery Key long enough to open Messages
-    /// the Relay still holds for it, but not the previous prekeys, so Contact Requests still
+    /// delivery capability. Roost keeps the previous discovery key long enough to open messages
+    /// the relay still holds for it, but not the previous prekeys, so contact requests still
     /// queued for the old inbox are lost.
     ///
-    /// After finalizing, register the new inbox with the Relay before sending anything, and on
+    /// After finalizing, register the new inbox with the relay before sending anything, and on
     /// launch whenever [`Self::current_publication`] shows a newer epoch than the last one
-    /// registered. Roost attaches the new Inbox Grant to each contact's Messages and
-    /// acknowledgments from finalization on, until that contact acknowledges one. Send a Grant
-    /// Update through [`Contacts::start_grant_update`] to each contact that should stay able to
-    /// reach this identity without waiting for a Message.
+    /// registered. Roost attaches the new inbox grant to each contact's messages and
+    /// acknowledgments from finalization on, until that contact acknowledges one. Send a grant
+    /// update through [`Contacts::start_grant_update`] to each contact that should stay able to
+    /// reach this identity without waiting for a message.
     ///
     /// # Errors
     /// - [`RoostError::NotFound`] if no identity is stored.
@@ -394,13 +394,13 @@ impl IdentityContext {
     }
 
     /// Prepares a new signed prekey if the current one is missing or stale, and deletes the
-    /// previous Discovery Keys the Relay can no longer hold Messages for.
+    /// previous discovery keys the relay can no longer hold messages for.
     ///
     /// Call this at launch. Finalize or abort the operation even when it returns no signed prekey.
     ///
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -423,7 +423,7 @@ impl IdentityContext {
     ///
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -441,12 +441,12 @@ impl IdentityContext {
         })
     }
 
-    /// Prepares exactly `count` one-time prekeys for the current Discovery Key.
+    /// Prepares exactly `count` one-time prekeys for the current discovery key.
     ///
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::InvalidData`] if the pool can't hold `count` more prekeys.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -475,7 +475,7 @@ impl IdentityContext {
     ///
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.

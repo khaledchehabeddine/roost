@@ -7,9 +7,9 @@ use roost_core::{
 /// An identity's public keys, safe to cache or send to peers.
 #[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct Identity {
-    /// The Identity Key.
+    /// The identity key.
     pub key: IdentityKey,
-    /// The signature that binds the Identity Key's agreement key to its signing key. Always 64
+    /// The signature that binds the identity key's agreement key to its signing key. Always 64
     /// bytes.
     pub binding_signature: Vec<u8>,
 }

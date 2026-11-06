@@ -21,7 +21,7 @@ fn rng(seed: u8) -> ChaCha20Rng {
     ChaCha20Rng::from_seed([seed; 32])
 }
 
-// Alice encrypts on the fixture's Session without committing.
+// Alice encrypts on the fixture's session without committing.
 fn alice_sends(fixture: &ProtocolFixture, sequence: u16, plaintext: &[u8]) -> Sealed {
     fixture
         .encrypt(
@@ -98,8 +98,8 @@ fn blocked(outcome: InboundMessageOutcome) -> roost_core::BlockedInboundMessageR
 }
 
 // Has Bob block Alice. The block rotates Bob's inbox, so Alice reaches him again only by requesting
-// on his new prekeys, which starts the fixture's new Session. Returns the address of the record Bob
-// keeps for that Session.
+// on his new prekeys, which starts the fixture's new session. Returns the address of the record Bob
+// keeps for that session.
 fn block_alice(fixture: &mut ProtocolFixture) -> ProtocolStateAddress {
     fixture.bob.block(fixture.alice.identity_key());
     fixture.alice.forget_sessions_with(&fixture.bob);
@@ -364,9 +364,9 @@ fn unique_received_message_is_accepted_recorded_and_emitted_once() {
 fn skipped_key_total_overflow_rejects_the_message_on_every_attempt() {
     let mut fixture = ProtocolFixture::new();
     let mut sequence = 0u16;
-    // Each round skips 100 of Alice's Messages, the most one header may skip, then has Bob reply
+    // Each round skips 100 of Alice's messages, the most one header may skip, then has Bob reply
     // so Alice starts a new sending chain. The acknowledgment Alice returns for that reply takes
-    // the chain's first key, so 100 more Messages skip 100 keys. Five rounds fill Bob's 500-key
+    // the chain's first key, so 100 more messages skip 100 keys. Five rounds fill Bob's 500-key
     // cache.
     for round in 0..5u8 {
         let mut last = None;
@@ -644,7 +644,7 @@ fn certificate_identity_key_must_match_sealed_sender() {
 fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
     let fixture = ProtocolFixture::new();
     let carol = Device::new(&Relay::new(), 0x77);
-    // Alice's Session state, but Carol's keys and sealed identity.
+    // Alice's session state, but Carol's keys and sealed identity.
     let mut outgoing = fixture.outgoing(9, b"wrong sender");
     outgoing.sender_certificate = carol.certificate();
     let encrypted = run_encryption(

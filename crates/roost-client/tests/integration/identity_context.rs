@@ -137,7 +137,7 @@ fn operation_ids_must_be_canonical() {
     ));
 }
 
-/// A Sender Certificate signed by a relay's domain key, with the keys a host checks it against.
+/// A sender certificate signed by a relay's domain key, with the keys a host checks it against.
 struct IssuedCertificate {
     identity_key: IdentityKey,
     certificate: Vec<u8>,

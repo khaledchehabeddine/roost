@@ -17,18 +17,18 @@ const ACKNOWLEDGMENT_DIGEST_LABEL: &[u8] = b"RoostAcknowledgmentDigest-v1:";
 const PENDING_ACKNOWLEDGMENT_ENTRY_CAP: usize = 64;
 const PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP: usize = 64;
 
-/// A sent Message still waiting for its acknowledgment.
+/// A sent message still waiting for its acknowledgment.
 ///
-/// Roost keeps no copy of the Message, so a recovery encrypts the app's copy of its content again.
+/// Roost keeps no copy of the message, so a recovery encrypts the app's copy of its content again.
 pub struct PendingAcknowledgment {
-    /// Original outbound Message ID.
+    /// Original outbound message ID.
     pub message_id: MessageId,
     /// First-send Unix timestamp in milliseconds.
     pub first_sent_at_millis: u64,
 }
 
 impl ProtocolStateEngine {
-    /// Returns all pending acknowledgments stored for a Session.
+    /// Returns all pending acknowledgments stored for a session.
     pub fn pending_acknowledgments(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -53,7 +53,7 @@ pub(super) struct LoadedPendingAcknowledgments {
 }
 
 impl LoadedPendingAcknowledgments {
-    // A new Session's list, with nothing waiting and no acknowledgment seen.
+    // A new session's list, with nothing waiting and no acknowledgment seen.
     pub(super) fn empty() -> Self {
         Self {
             pending: BTreeMap::new(),
@@ -61,7 +61,7 @@ impl LoadedPendingAcknowledgments {
         }
     }
 
-    // Records a Message waiting for its acknowledgment, refusing one past the limit.
+    // Records a message waiting for its acknowledgment, refusing one past the limit.
     pub(super) fn record(
         &mut self,
         message_id: MessageId,
@@ -92,14 +92,14 @@ impl LoadedPendingAcknowledgments {
 
 pub(super) struct LoadedPendingAcknowledgment {
     pub(super) first_sent_at_millis: u64,
-    /// The payload kind sealed in the Message, which a recovery keeps when it resends it.
+    /// The payload kind sealed in the message, which a recovery keeps when it resends it.
     pub(super) payload_kind: PayloadKind,
-    /// The local grant the Message carried, which its acknowledgment confirms the peer holds.
+    /// The local grant the message carried, which its acknowledgment confirms the peer holds.
     pub(super) grant: Option<DiscoveryKeyStamp>,
-    /// The peer's Discovery Key the Message went to, whose inbox a newer grant shows may be gone.
+    /// The peer's discovery key the message went to, whose inbox a newer grant shows may be gone.
     pub(super) sent_to: Option<DiscoveryKeyStamp>,
-    /// Whether the Message waits here behind a recovery's probe with no copy on this Session yet,
-    /// since the probe's new Session deleted the one it went out on.
+    /// Whether the message waits here behind a recovery's probe with no copy on this session yet,
+    /// since the probe's new session deleted the one it went out on.
     pub(super) held: bool,
 }
 
@@ -151,7 +151,7 @@ pub(super) fn encode_pending_acknowledgments(
     encode_blob(address, &body, max_pending_acknowledgments_blob_len(limits))
 }
 
-// Returns the Session's pending acknowledgments. A Session that lost this record keeps working,
+// Returns the session's pending acknowledgments. A session that lost this record keeps working,
 // since its keys are intact, with nothing waiting on it.
 pub(super) fn load_pending_acknowledgments(
     snapshot: &ProtocolStateSnapshot,
@@ -164,7 +164,7 @@ pub(super) fn load_pending_acknowledgments(
     }
 }
 
-// Returns whether the Session at `address` already processed an acknowledgment with `digest`.
+// Returns whether the session at `address` already processed an acknowledgment with `digest`.
 pub(super) fn has_seen_acknowledgment(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -242,9 +242,9 @@ fn max_pending_acknowledgments_blob_len(limits: ProtocolHardeningLimits) -> usiz
         + limits.max_acknowledgment_digests * DIGEST_LEN
 }
 
-// Returns the deletions of each evicted Session's records, which the operation must have read,
-// and the Messages still waiting on those Sessions, oldest first, which no acknowledgment can
-// reach once the Sessions are gone.
+// Returns the deletions of each evicted session's records, which the operation must have read,
+// and the messages still waiting on those sessions, oldest first, which no acknowledgment can
+// reach once the sessions are gone.
 pub(super) fn evict_sessions(
     snapshot: &ProtocolStateSnapshot,
     evicted: &[SessionId],
@@ -277,7 +277,7 @@ pub(super) fn evict_sessions(
     Ok((deletions, stranded))
 }
 
-// A Message that waited on a Session an operation evicts.
+// A message that waited on a session an operation evicts.
 pub(super) struct StrandedMessage {
     pub(super) message_id: MessageId,
     pub(super) entry: LoadedPendingAcknowledgment,

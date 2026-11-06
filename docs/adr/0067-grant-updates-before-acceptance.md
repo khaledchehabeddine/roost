@@ -1,7 +1,7 @@
 # Grant Updates Before Acceptance
 
-A Requester may send the Asked Side Grant Updates before acceptance, outside the limit on Messages before acceptance (ADR 0037). They carry no content, and without them the Asked Side's acceptance would go to a dead Delivery Capability.
+A requester may send the asked side grant updates before acceptance, outside the limit on messages before acceptance (ADR 0037). They carry no content, and without them the asked side's acceptance would go to a dead delivery capability.
 
 ## Alternatives
 
-- Count Grant Updates toward the limit before acceptance: each rotation would cost the Requester one of its Messages.
+- Count grant updates toward the limit before acceptance: each rotation would cost the requester one of its messages.

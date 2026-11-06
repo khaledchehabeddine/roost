@@ -2,12 +2,12 @@
 //!
 //! This implementation crate coordinates [`roost_crypto`] operations with caller-owned storage.
 //! Mobile consumers use `roost-client`. Platform adapters provide [`SecureStorage`] for keys and
-//! the host owns durable Protocol State Blob transactions.
+//! the host owns durable protocol state blob transactions.
 //!
 //! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys and the
 //! [`ProtocolStateEngine`], and starts each [`MessageEncryption`] and [`MessageDecryption`]. A
-//! Message Operation asks the host for exact records and returns [`StateChanges`] the host commits
-//! only while every Commit Condition holds. The host holds one Identity Lock across every instance
+//! message operation asks the host for exact records and returns [`StateChanges`] the host commits
+//! only while every commit condition holds. The host holds one identity lock across every instance
 //! and process sharing an identity, from an operation's first call until its commit is resolved,
 //! and during prepared-operation recovery. See [`KeyStore`] and [`StateChanges`] for the storage
 //! and commit contracts.

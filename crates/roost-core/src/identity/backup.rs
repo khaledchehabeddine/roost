@@ -3,8 +3,8 @@
 //! A backup starts with its version and a cleartext header that carries the Argon2id parameters,
 //! salt and nonce, and the cipher authenticates both as associated data. An unknown version is
 //! rejected before key derivation, and a work-factor parameter can't be altered without failing
-//! decryption. The ciphertext holds the Identity Key's secret halves and the verbatim Discovery
-//! Key entry, which this module treats as opaque so its version stays owned by `discovery_key.rs`.
+//! decryption. The ciphertext holds the identity key's secret halves and the verbatim discovery
+//! key entry, which this module treats as opaque so its version stays owned by `discovery_key.rs`.
 
 use super::{Identity, IdentityError, IdentityManager, IdentitySecretsWire};
 use crate::stored_data::{
@@ -70,7 +70,7 @@ struct DecodedBackupContentsWire {
 }
 
 impl IdentityManager {
-    // Exports the current identity and the given Discovery Key entry as an encrypted backup.
+    // Exports the current identity and the given discovery key entry as an encrypted backup.
     pub(crate) fn export_encrypted_backup<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -117,7 +117,7 @@ impl IdentityManager {
     }
 }
 
-// Decrypts a backup into its Identity and the opaque Discovery Key entry.
+// Decrypts a backup into its identity and the opaque discovery key entry.
 pub(crate) fn decrypt_backup(
     data: &[u8],
     passphrase: &str,
@@ -215,7 +215,7 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
     use std::sync::{Arc, Mutex};
 
-    // An arbitrary opaque Discovery Key entry, since this module never inspects its bytes.
+    // An arbitrary opaque discovery key entry, since this module never inspects its bytes.
     const DISCOVERY_KEY_ENTRY: [u8; 8] = [0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8];
 
     fn manager() -> IdentityManager {

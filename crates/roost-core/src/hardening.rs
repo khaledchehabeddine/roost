@@ -9,32 +9,32 @@ pub(crate) const MAX_DEDUPLICATION_CAPACITY: usize = 2048;
 const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
 pub(crate) const MAX_PENDING_ACKNOWLEDGMENTS: usize = 1024;
 pub(crate) const MAX_ACKNOWLEDGMENT_DIGESTS: usize = 1024;
-/// How many distinct Messages each side may send a contact before the contact is accepted.
+/// How many distinct messages each side may send a contact before the contact is accepted.
 pub(crate) const MAX_MESSAGES_BEFORE_ACCEPTANCE: usize = 3;
 
-/// The fixed ceilings on externally influenced protocol work, and the Deduplication Set's range.
+/// The fixed ceilings on externally influenced protocol work, and the deduplication set's range.
 ///
-/// Apps choose only the Deduplication Set's size, within the range here, and pass it with each
+/// Apps choose only the deduplication set's size, within the range here, and pass it with each
 /// receive. Every other limit is fixed so no configuration can disable memory and CPU bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProtocolHardeningLimits {
-    /// Maximum encoded sealed-sender Message bytes accepted before parsing.
+    /// Maximum encoded sealed-sender message bytes accepted before parsing.
     pub max_encoded_message_len: usize,
-    /// Maximum general Protocol State Blob bytes accepted before body decode.
+    /// Maximum general protocol state blob bytes accepted before body decode.
     pub max_protocol_state_blob_len: usize,
     /// Maximum sender certificate bytes accepted after sealed-sender decrypt.
     pub max_sender_certificate_len: usize,
-    /// Maximum pending outbound Messages retained for acknowledgment processing.
+    /// Maximum pending outbound messages retained for acknowledgment processing.
     pub max_pending_acknowledgments: usize,
     /// Maximum processed acknowledgment digests retained for duplicate detection.
     pub max_acknowledgment_digests: usize,
-    /// Smallest Deduplication Set an app may choose.
+    /// Smallest deduplication set an app may choose.
     pub min_deduplication_capacity: usize,
-    /// Deduplication Set size for apps without a reason to choose another.
+    /// Deduplication set size for apps without a reason to choose another.
     pub default_deduplication_capacity: usize,
-    /// Largest Deduplication Set an app may choose.
+    /// Largest deduplication set an app may choose.
     pub max_deduplication_capacity: usize,
-    /// Distinct Messages each side may send a contact before the contact is accepted.
+    /// Distinct messages each side may send a contact before the contact is accepted.
     pub max_messages_before_acceptance: usize,
 }
 

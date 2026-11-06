@@ -18,7 +18,7 @@ fn befriended(relay: &Relay) -> (Device, Device) {
     (alice, bob)
 }
 
-// Confirms `peer`'s Safety Number on `device` and commits the result.
+// Confirms `peer`'s safety number on `device` and commits the result.
 fn verify(device: &mut Device, peer: &Device) {
     let safety_number = derive_safety_number(device.identity_key(), peer.identity_key()).unwrap();
     let confirmation = device

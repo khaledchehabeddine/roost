@@ -4,7 +4,7 @@ use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 // Domain string for the verifier derivation. Unlike signature contexts such as `RoostDK-v1:`,
-// this is lowercase-kebab with no trailing colon, because Relay derives the same verifier from
+// this is lowercase-kebab with no trailing colon, because relay derives the same verifier from
 // these exact bytes.
 const VERIFIER_DOMAIN: &[u8] = b"roost-recipient-delivery-capability-v1";
 // Single separator byte between the domain string and the capability.

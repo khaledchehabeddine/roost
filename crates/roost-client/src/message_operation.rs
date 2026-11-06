@@ -22,49 +22,49 @@ pub struct SignedSenderCertificate {
     pub signature: Vec<u8>,
 }
 
-/// What the app sends: a recipient, the draft's MessageID, and the plaintext.
+/// What the app sends: a recipient, the draft's message ID, and the plaintext.
 #[derive(uniffi::Record)]
 pub struct OutgoingMessage {
-    /// The contact's Identity Key. Roost picks the Session and the contact's Discovery Key.
+    /// The contact's identity key. Roost picks the session and the contact's discovery key.
     pub recipient: IdentityKey,
-    /// The MessageID from [`Messaging::create_message`], saved with the draft and kept across
+    /// The message ID from [`Messaging::create_message`], saved with the draft and kept across
     /// retries.
     pub message_id: MessageId,
-    /// When the app sent the Message, in Unix milliseconds.
+    /// When the app sent the message, in Unix milliseconds.
     pub sent_at_millis: u64,
-    /// The local identity's certificate, sealed into the Message.
+    /// The local identity's certificate, sealed into the message.
     pub sender_certificate: SignedSenderCertificate,
     /// The plaintext to encrypt, at most 65,291 bytes.
     pub plaintext: Vec<u8>,
     /// The contact's bundle, fetched after a [`MessageEncryptionStep::NeedsPreKeyBundle`] step or
-    /// for the Discovery Key in a fresh contact link, and saved with the draft until a Session uses
-    /// it. A bundle whose Discovery Key is newer than the contact's starts a new Session, and Roost
-    /// ignores any other bundle when no new Session is needed.
+    /// for the discovery key in a fresh contact link, and saved with the draft until a session uses
+    /// it. A bundle whose discovery key is newer than the contact's starts a new session, and Roost
+    /// ignores any other bundle when no new session is needed.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
-/// What the app sends to give a contact this identity's current Inbox Grant.
+/// What the app sends to give a contact this identity's current inbox grant.
 #[derive(uniffi::Record)]
 pub struct OutgoingGrantUpdate {
-    /// The contact's Identity Key. Roost picks the Session and the contact's Discovery Key.
+    /// The contact's identity key. Roost picks the session and the contact's discovery key.
     pub recipient: IdentityKey,
-    /// A MessageID from [`Messaging::create_message`], kept across retries.
+    /// A message ID from [`Messaging::create_message`], kept across retries.
     pub message_id: MessageId,
-    /// When the app sent the Grant Update, in Unix milliseconds.
+    /// When the app sent the grant update, in Unix milliseconds.
     pub sent_at_millis: u64,
-    /// The local identity's certificate, sealed into the Message.
+    /// The local identity's certificate, sealed into the message.
     pub sender_certificate: SignedSenderCertificate,
     /// The contact's bundle, fetched after a [`MessageEncryptionStep::NeedsPreKeyBundle`] step and
-    /// kept until a send uses it. Roost ignores it when no check or new Session needs it.
+    /// kept until a send uses it. Roost ignores it when no check or new session needs it.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
 /// What the app received, with what Roost needs to check and acknowledge it.
 #[derive(uniffi::Record)]
 pub struct IncomingMessage {
-    /// The received Message.
+    /// The received message.
     pub message: Message,
-    /// The exact Transport Binding the Message arrived with.
+    /// The exact transport binding the message arrived with.
     pub transport_binding: TransportBinding,
     /// The settings for this receive.
     pub settings: ReceiveSettings,
@@ -79,14 +79,14 @@ pub struct IncomingMessage {
 /// The settings the app passes with each receive.
 ///
 /// Roost holds no settings, so the app and its extensions apply whatever each receive passes.
-/// Read the value the app should use from one place, such as its own settings or its Relay.
+/// Read the value the app should use from one place, such as its own settings or its relay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct ReceiveSettings {
-    /// How many received-Message digests the Deduplication Set keeps, within
+    /// How many received-message digests the deduplication set keeps, within
     /// [`ProtocolHardeningLimits`](crate::ProtocolHardeningLimits)'s range. Roost resizes the set
     /// when this changes, dropping the oldest digests first.
     pub deduplication_capacity: u32,
-    /// Whether a blocked contact's Messages get an acknowledgment.
+    /// Whether a blocked contact's messages get an acknowledgment.
     pub blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy,
     /// How long after expiry a sender certificate still validates, in milliseconds, at most
     /// 300,000.
@@ -105,15 +105,15 @@ pub enum BlockedContactAcknowledgmentPolicy {
     SilentReceipt,
 }
 
-/// Where Roost sends a Message, and how the Relay admits it, so the app can supply a Transport
-/// Binding that reaches it.
+/// Where Roost sends a message, and how the relay admits it, so the app can supply a transport
+/// binding that reaches it.
 #[derive(uniffi::Enum)]
 pub enum MessageDestination {
-    /// A first Message, which the Relay admits against the recipient's current prekeys.
+    /// A first message, which the relay admits against the recipient's current prekeys.
     FirstMessage {
-        /// The recipient's Identity Key.
+        /// The recipient's identity key.
         identity_key: IdentityKey,
-        /// The X25519 public key of the recipient Discovery Key the Message is sealed to. Always
+        /// The X25519 public key of the recipient discovery key the message is sealed to. Always
         /// 32 bytes.
         discovery_key: Vec<u8>,
         /// The recipient signed prekey the handshake used.
@@ -121,26 +121,26 @@ pub enum MessageDestination {
         /// The recipient one-time prekey the handshake used, absent when none was left.
         one_time_prekey_id: Option<u64>,
     },
-    /// An established Message, which the Relay admits with the recipient's Delivery Capability.
+    /// An established message, which the relay admits with the recipient's delivery capability.
     Established {
-        /// The recipient's Identity Key.
+        /// The recipient's identity key.
         identity_key: IdentityKey,
-        /// The X25519 public key of the recipient Discovery Key the Message is sealed to. Always
+        /// The X25519 public key of the recipient discovery key the message is sealed to. Always
         /// 32 bytes.
         discovery_key: Vec<u8>,
-        /// The recipient's 32-byte Delivery Capability. It is a secret: pass it only to the Relay
-        /// in this Message's submission, and don't store or log it.
+        /// The recipient's 32-byte delivery capability. It is a secret: pass it only to the relay
+        /// in this message's submission, and don't store or log it.
         delivery_capability: Vec<u8>,
     },
 }
 
-/// The signed prekey a first Message names, kept after a rotation, which the app must prove the
-/// Relay admitted the Message against.
+/// The signed prekey a first message names, kept after a rotation, which the app must prove the
+/// relay admitted the message against.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Record)]
 pub struct AdmissionRequest {
-    /// The local Discovery Key epoch the signed prekey belongs to.
+    /// The local discovery key epoch the signed prekey belongs to.
     pub discovery_epoch: u32,
-    /// The signed prekey's ID, which the Relay's admission proof must name.
+    /// The signed prekey's ID, which the relay's admission proof must name.
     pub signed_prekey_id: u64,
 }
 
@@ -152,29 +152,29 @@ pub enum MessageEncryptionStep {
         /// The records to read.
         keys: Vec<StateKey>,
     },
-    /// Supply the Transport Binding that reaches `destination` through
+    /// Supply the transport binding that reaches `destination` through
     /// [`MessageEncryption::supply_transport_binding`].
     NeedsTransport {
-        /// Where the Message goes.
+        /// Where the message goes.
         destination: MessageDestination,
     },
-    /// A new Session, or the first send after an unblock, needs the contact's prekey bundle, and
-    /// the draft has none or one older than the contact's Discovery Key. A send to an accepted
-    /// contact, or an acceptance of a request, whose Session records are missing starts a new
-    /// Session too. The operation has ended: release the Identity Lock, fetch the bundle, save it
+    /// A new session, or the first send after an unblock, needs the contact's prekey bundle, and
+    /// the draft has none or one older than the contact's discovery key. A send to an accepted
+    /// contact, or an acceptance of a request, whose session records are missing starts a new
+    /// session too. The operation has ended: release the identity lock, fetch the bundle, save it
     /// with the draft, and start again with the same draft.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
         identity_key: IdentityKey,
     },
-    /// The contact already acknowledged a Message carrying the current Inbox Grant, so a Grant
-    /// Update has nothing to carry. The operation has ended and there is nothing to commit.
+    /// The contact already acknowledged a message carrying the current inbox grant, so a grant
+    /// update has nothing to carry. The operation has ended and there is nothing to commit.
     NothingToSend,
-    /// The sealed Message, and the state changes to commit with it. The operation has ended.
+    /// The sealed message, and the state changes to commit with it. The operation has ended.
     Ready {
-        /// The sealed Message.
+        /// The sealed message.
         result: OutboundMessageResult,
-        /// The state changes to commit with the Message.
+        /// The state changes to commit with the message.
         changes: StateChanges,
     },
 }
@@ -191,40 +191,40 @@ pub enum MessageDecryptionStep {
         /// The records to read.
         keys: Vec<StateKey>,
     },
-    /// The first Message names a signed prekey kept after a rotation. Check the Relay's
-    /// admission proof for this Message: its signature, the frame's digest, the first-message
+    /// The first message names a signed prekey kept after a rotation. Check the relay's
+    /// admission proof for this message: its signature, the frame's digest, the first-message
     /// route, and `admission.signed_prekey_id`. Then call
-    /// [`MessageDecryption::confirm_admission`], or drop the operation and the Message.
+    /// [`MessageDecryption::confirm_admission`], or drop the operation and the message.
     NeedsAdmission {
         /// The signed prekey the proof must name.
         admission: AdmissionRequest,
     },
-    /// Supply the Transport Binding that reaches `destination` through
+    /// Supply the transport binding that reaches `destination` through
     /// [`MessageDecryption::supply_acknowledgment_transport_binding`].
     NeedsAcknowledgmentTransport {
         /// Where the acknowledgment goes: the sender, after it authenticated.
         destination: MessageDestination,
     },
-    /// What the Message turned out to be, and the state changes to commit with its effects. The
+    /// What the message turned out to be, and the state changes to commit with its effects. The
     /// operation has ended.
     Ready {
-        /// What the Message turned out to be.
+        /// What the message turned out to be.
         outcome: InboundMessageOutcome,
         /// The state changes to commit with the outcome's effects, empty when it has none.
         changes: StateChanges,
     },
 }
 
-/// An outbound Message from one Message Operation.
+/// An outbound message from one message operation.
 #[derive(uniffi::Record)]
 pub struct OutboundMessageResult {
-    /// The Session Roost selected for the Message.
+    /// The session Roost selected for the message.
     pub session_id: SessionId,
-    /// The draft's MessageID, sealed inside the Message.
+    /// The draft's message ID, sealed inside the message.
     pub message_id: MessageId,
     /// Sender-observed Unix timestamp in milliseconds.
     pub sent_at_millis: u64,
-    /// Payload kind sealed in the Message.
+    /// Payload kind sealed in the message.
     pub payload_kind: PayloadKind,
     /// Message to send after durable commit.
     pub message: Message,
@@ -239,49 +239,49 @@ pub struct OutboundMessageResult {
 #[derive(uniffi::Enum)]
 pub enum InboundMessageOutcome {
     /// Authenticated plaintext, and an acknowledgment when this side acknowledges, for a unique
-    /// Message.
+    /// message.
     Accepted {
         /// Payload for this outcome.
         result: InboundMessageResult,
     },
-    /// A Contact Request: the first Message from an identity with no contact record, which the
-    /// changes record as a Pending contact. Nothing is acknowledged until this side replies.
+    /// A contact request: the first message from an identity with no contact record, which the
+    /// changes record as a pending contact. Nothing is acknowledged until this side replies.
     ContactRequest {
         /// Payload for this outcome.
         result: InboundMessageResult,
     },
-    /// A blocked Message with state changes and the acknowledgment its receive allows.
+    /// A blocked message with state changes and the acknowledgment its receive allows.
     Blocked {
         /// Payload for this outcome.
         result: BlockedInboundMessageResult,
     },
-    /// A Message past the limit before acceptance, whose plaintext Roost withholds.
+    /// A message past the limit before acceptance, whose plaintext Roost withholds.
     Withheld {
         /// Payload for this outcome.
         result: WithheldInboundMessageResult,
     },
-    /// A Grant Update: Roost kept the contact's new Inbox Grant, and there is nothing to show.
+    /// A grant update: Roost kept the contact's new inbox grant, and there is nothing to show.
     GrantUpdate {
         /// Payload for this outcome.
         result: GrantUpdateResult,
     },
-    /// An already accepted encrypted Message. No effects are produced, and its changes are empty.
+    /// An already accepted encrypted message. No effects are produced, and its changes are empty.
     Duplicate,
-    /// The Message names a Session this identity doesn't keep and carries no handshake, such as
+    /// The message names a session this identity doesn't keep and carries no handshake, such as
     /// one whose records it lost. No effects are produced, and its changes are empty.
     UnknownSession,
-    /// The first Message names a Session this identity deleted, so nothing was created. No
+    /// The first message names a session this identity deleted, so nothing was created. No
     /// effects are produced, and its changes are empty.
     DeletedSession,
-    /// An acknowledgment cleared one of this identity's Pending Acknowledgments. Commit it before
-    /// treating the acknowledged Message as delivered. Roost sends no reply to an acknowledgment.
+    /// An acknowledgment cleared one of this identity's pending acknowledgments. Commit it before
+    /// treating the acknowledged message as delivered. Roost sends no reply to an acknowledgment.
     AcknowledgmentMatched {
         /// Payload for this outcome.
         result: AcknowledgmentResult,
     },
-    /// An authenticated acknowledgment named no Pending Acknowledgment, such as one already
+    /// An authenticated acknowledgment named no pending acknowledgment, such as one already
     /// cleared. Commit it anyway, so the advanced state recognizes a retry as a duplicate. If it
-    /// names a Message Roost reported as not delivered, a later copy arrived, so correct that
+    /// names a message Roost reported as not delivered, a later copy arrived, so correct that
     /// status.
     AcknowledgmentUnmatched {
         /// Payload for this outcome.
@@ -289,20 +289,20 @@ pub enum InboundMessageOutcome {
     },
 }
 
-/// Authenticated Message data that remains provisional until the host transaction commits.
+/// Authenticated message data that remains provisional until the host transaction commits.
 ///
-/// The host commits the Message, acknowledgment, and state changes in one transaction. When the
+/// The host commits the message, acknowledgment, and state changes in one transaction. When the
 /// changes carry an operation, the host finalizes it before showing the plaintext. Plaintext is
 /// host-owned secret bytes; clear discarded copies promptly.
 ///
-/// A sender's recovery resends a Message under its original MessageID with new bytes, so show one
-/// Message per sender and MessageID, and check before notifying, including in a notification
+/// A sender's recovery resends a message under its original message ID with new bytes, so show one
+/// message per sender and message ID, and check before notifying, including in a notification
 /// extension. When one is already shown, still commit the changes and send the acknowledgment.
 #[derive(uniffi::Record)]
 pub struct InboundMessageResult {
-    /// The Session the Message arrived on.
+    /// The session the message arrived on.
     pub session_id: SessionId,
-    /// Authenticated MessageID.
+    /// Authenticated message ID.
     pub message_id: MessageId,
     /// Authenticated sender timestamp in milliseconds.
     pub sent_at_millis: u64,
@@ -312,35 +312,35 @@ pub struct InboundMessageResult {
     pub plaintext: Vec<u8>,
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
-    /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it,
+    /// Encrypted acknowledgment to commit with the transport binding the host supplied for it,
     /// absent while the contact isn't accepted and this side doesn't acknowledge yet, or while no
-    /// Inbox Grant has supplied the contact's current Delivery Capability.
+    /// inbox grant has supplied the contact's current delivery capability.
     pub acknowledgment: Option<Message>,
 }
 
-/// A Message from a contact who hasn't accepted, past the limit on Messages before acceptance.
+/// A message from a contact who hasn't accepted, past the limit on messages before acceptance.
 ///
-/// Roost withholds its plaintext and sends no acknowledgment. Commit the changes so the Session
+/// Roost withholds its plaintext and sends no acknowledgment. Commit the changes so the session
 /// keeps up.
 #[derive(uniffi::Record)]
 pub struct WithheldInboundMessageResult {
-    /// The Session the Message arrived on.
+    /// The session the message arrived on.
     pub session_id: SessionId,
-    /// Authenticated MessageID.
+    /// Authenticated message ID.
     pub message_id: MessageId,
 }
 
-/// A Grant Update whose Inbox Grant Roost kept, so later Messages reach the contact's current
+/// A grant update whose inbox grant Roost kept, so later messages reach the contact's current
 /// inbox.
 ///
 /// Commit the changes, and the acknowledgment when present, but show nothing.
 #[derive(uniffi::Record)]
 pub struct GrantUpdateResult {
-    /// The Session the Grant Update arrived on.
+    /// The session the grant update arrived on.
     pub session_id: SessionId,
-    /// Authenticated MessageID.
+    /// Authenticated message ID.
     pub message_id: MessageId,
-    /// Encrypted acknowledgment to commit with the Transport Binding the host supplied for it,
+    /// Encrypted acknowledgment to commit with the transport binding the host supplied for it,
     /// absent while this side doesn't acknowledge the contact yet.
     pub acknowledgment: Option<Message>,
 }
@@ -360,19 +360,19 @@ pub struct BlockedInboundMessageResult {
 /// Commit its changes before clearing the host's own delivery state.
 #[derive(uniffi::Record)]
 pub struct AcknowledgmentResult {
-    /// The Session the acknowledgment arrived on.
+    /// The session the acknowledgment arrived on.
     pub session_id: SessionId,
-    /// The acknowledgment's own MessageID.
+    /// The acknowledgment's own message ID.
     pub message_id: MessageId,
     /// Authenticated sender timestamp in milliseconds.
     pub sent_at_millis: u64,
-    /// The outbound MessageID the acknowledgment names.
+    /// The outbound message ID the acknowledgment names.
     pub acknowledged_message_id: MessageId,
     /// Authenticated sender material.
     pub sender_identity: SenderIdentityMaterial,
 }
 
-/// One attempt to encrypt a Message to a contact.
+/// One attempt to encrypt a message to a contact.
 ///
 /// Call [`Self::step`] until it returns [`MessageEncryptionStep::Ready`],
 /// [`MessageEncryptionStep::NeedsPreKeyBundle`], or [`MessageEncryptionStep::NothingToSend`],
@@ -381,8 +381,8 @@ pub struct AcknowledgmentResult {
 /// operation does its cryptography in [`Self::step`], so asking again before supplying returns the
 /// same request without repeating it.
 ///
-/// The destination says how the Relay admits the Message: a first Message by the recipient's
-/// prekey IDs, or an established one by the recipient's Delivery Capability.
+/// The destination says how the relay admits the message: a first message by the recipient's
+/// prekey IDs, or an established one by the recipient's delivery capability.
 ///
 /// The operation returns its result once. After that, and after any error, every call returns
 /// [`RoostError::OperationFinished`], so start a new operation from fresh reads. Releasing an
@@ -399,12 +399,12 @@ pub struct AcknowledgmentResult {
 ///         case .needsTransport(let destination):
 ///             try encryption.supplyTransportBinding(transportBinding: router.binding(to: destination))
 ///         case .needsPreKeyBundle(let identityKey):
-///             // Fetch outside the Identity Lock, keep the bundle with the draft, and restart.
+///             // Fetch outside the identity lock, keep the bundle with the draft, and restart.
 ///             draft.prekeyBundle = try await relay.prekeyBundle(for: identityKey)
 ///             try drafts.save(draft)
 ///             break steps
 ///         case .nothingToSend:
-///             return // Only a Grant Update ends here.
+///             return // Only a grant update ends here.
 ///         case .ready(let result, let changes):
 ///             sealed = (result, changes)
 ///             break steps
@@ -433,12 +433,12 @@ pub struct AcknowledgmentResult {
 ///             is MessageEncryptionStep.NeedsTransport ->
 ///                 encryption.supplyTransportBinding(router.bindingTo(step.destination))
 ///             is MessageEncryptionStep.NeedsPreKeyBundle -> {
-///                 // Fetch outside the Identity Lock, keep the bundle with the draft, and restart.
+///                 // Fetch outside the identity lock, keep the bundle with the draft, and restart.
 ///                 draft = draft.copy(prekeyBundle = relay.prekeyBundle(step.identityKey))
 ///                 drafts.save(draft)
 ///                 break@steps
 ///             }
-///             is MessageEncryptionStep.NothingToSend -> return // Only a Grant Update ends here.
+///             is MessageEncryptionStep.NothingToSend -> return // Only a grant update ends here.
 ///             is MessageEncryptionStep.Ready -> {
 ///                 ready = step
 ///                 break@steps
@@ -459,12 +459,12 @@ pub struct AcknowledgmentResult {
 #[derive(uniffi::Object)]
 pub struct MessageEncryption(Mutex<Option<roost_core::MessageEncryption>>);
 
-/// One attempt to decrypt a received Message.
+/// One attempt to decrypt a received message.
 ///
-/// Drive it as [`MessageEncryption`] describes. A first Message on a signed prekey kept after a
-/// rotation asks for proof that the Relay admitted it before Roost uses that prekey. A Message
-/// that needs an acknowledgment asks for the acknowledgment's Transport Binding only after its
-/// sender authenticates and Roost decides to reply, because the route the Message arrived on may
+/// Drive it as [`MessageEncryption`] describes. A first message on a signed prekey kept after a
+/// rotation asks for proof that the relay admitted it before Roost uses that prekey. A message
+/// that needs an acknowledgment asks for the acknowledgment's transport binding only after its
+/// sender authenticates and Roost decides to reply, because the route the message arrived on may
 /// not reach the sender. An acknowledgment the app receives decrypts here too and never asks for
 /// one.
 ///
@@ -481,10 +481,10 @@ pub struct MessageDecryption(Mutex<Option<roost_core::MessageDecryption>>);
 
 #[uniffi::export]
 impl Messaging {
-    /// Returns a new random MessageID for a draft.
+    /// Returns a new random message ID for a draft.
     ///
-    /// Save it with the draft before the first send attempt, and pass the same MessageID to every
-    /// retry, so the recipient sees one Message however many attempts it takes.
+    /// Save it with the draft before the first send attempt, and pass the same message ID to every
+    /// retry, so the recipient sees one message however many attempts it takes.
     pub fn create_message(&self) -> Result<MessageId, RoostError> {
         let mut bytes = [0u8; 16];
         OsRng
@@ -500,17 +500,17 @@ impl Messaging {
         )))
     }
 
-    /// Starts encrypting a Message to a contact.
+    /// Starts encrypting a message to a contact.
     ///
     /// The operation reads the local identity's keys now and touches SecureStorage no more. A
-    /// contact that hasn't accepted gets a few Messages before refusing more, and an accepted
-    /// contact gets this identity's Inbox Grant attached until it acknowledges one.
+    /// contact that hasn't accepted gets a few messages before refusing more, and an accepted
+    /// contact gets this identity's inbox grant attached until it acknowledges one.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or the plaintext is
+    /// - [`RoostError::InvalidData`] if a key, message ID, certificate, or the plaintext is
     ///   malformed or too long.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_encryption(
@@ -521,17 +521,17 @@ impl Messaging {
         Ok(Arc::new(MessageEncryption(Mutex::new(Some(operation)))))
     }
 
-    /// Starts decrypting a received Message, including a first Message that starts a Session.
+    /// Starts decrypting a received message, including a first message that starts a session.
     ///
     /// The operation reads the local identity's keys now. It reads SecureStorage again only for
-    /// the prekeys a first Message names. When the first Message uses a one-time prekey, the
+    /// the prekeys a first message names. When the first message uses a one-time prekey, the
     /// result's changes carry the operation that uses it up.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if the Message, Transport Binding, settings, validation inputs,
+    /// - [`RoostError::InvalidData`] if the message, transport binding, settings, validation inputs,
     ///   or acknowledgment certificate are malformed or outside Roost's limits.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_decryption(
@@ -554,20 +554,20 @@ impl Messaging {
 
 #[uniffi::export]
 impl Contacts {
-    /// Starts encrypting a Contact Request, whose commit creates the contact's Pending record.
+    /// Starts encrypting a contact request, whose commit creates the contact's pending record.
     ///
-    /// A new contact needs a Session, so without a usable bundle in the draft the operation ends
+    /// A new contact needs a session, so without a usable bundle in the draft the operation ends
     /// with [`MessageEncryptionStep::NeedsPreKeyBundle`]. Each restart reads fresh state: when the
-    /// contact asked meanwhile, the request becomes a Contact Acceptance, and when the contact
-    /// already accepted, an ordinary Message. The draft keeps one MessageID across restarts. A
-    /// request counts toward the limit on Messages before acceptance, and once a restore drops the
-    /// contact's Sessions, the count starts over with the next request.
+    /// contact asked meanwhile, the request becomes a contact acceptance, and when the contact
+    /// already accepted, an ordinary message. The draft keeps one message ID across restarts. A
+    /// request counts toward the limit on messages before acceptance, and once a restore drops the
+    /// contact's sessions, the count starts over with the next request.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or bundle is malformed, or
+    /// - [`RoostError::InvalidData`] if a key, message ID, certificate, or bundle is malformed, or
     ///   the plaintext is too long.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn request_contact(
@@ -578,21 +578,21 @@ impl Contacts {
         Ok(Arc::new(MessageEncryption(Mutex::new(Some(operation)))))
     }
 
-    /// Starts encrypting a Grant Update, which carries only this identity's current Inbox Grant.
+    /// Starts encrypting a grant update, which carries only this identity's current inbox grant.
     ///
     /// After an inbox rotation, send one to each contact that should stay able to reach this
-    /// identity, after registering the new inbox with the Relay. Roost decides who may hold the
+    /// identity, after registering the new inbox with the relay. Roost decides who may hold the
     /// grant, so the app can send one to every contact without checking: when stepping, a blocked
     /// contact fails with [`RoostError::BlockedContact`], a requester this side hasn't accepted
     /// fails with [`RoostError::ContactNotAccepted`], and a contact that already acknowledged the
-    /// current grant ends with [`MessageEncryptionStep::NothingToSend`]. A requester's Grant
-    /// Updates don't count toward the limit on Messages before acceptance. The recipient shows
+    /// current grant ends with [`MessageEncryptionStep::NothingToSend`]. A requester's grant
+    /// updates don't count toward the limit on messages before acceptance. The recipient shows
     /// nothing.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key, MessageID, certificate, or bundle is malformed.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
+    /// - [`RoostError::InvalidData`] if a key, message ID, certificate, or bundle is malformed.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_grant_update(
@@ -603,20 +603,20 @@ impl Contacts {
         Ok(Arc::new(MessageEncryption(Mutex::new(Some(operation)))))
     }
 
-    /// Starts encrypting a Contact Acceptance, which carries this identity's Inbox Grant and
+    /// Starts encrypting a contact acceptance, which carries this identity's inbox grant and
     /// whose commit accepts the contact.
     ///
     /// Only the side a contact asked accepts. When the contact is already accepted, the
-    /// acceptance becomes an ordinary Message. When the request's Session is gone, such as after a
-    /// backup restore, the acceptance starts a new Session from the contact's bundle, and its
-    /// first Message is a Contact Request that accepts both sides when it arrives. Roost then
+    /// acceptance becomes an ordinary message. When the request's session is gone, such as after a
+    /// backup restore, the acceptance starts a new session from the contact's bundle, and its
+    /// first message is a contact request that accepts both sides when it arrives. Roost then
     /// refuses only a contact that never wrote, so accept only a request the contact sent.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key, MessageID, or certificate is malformed, the
-    ///   plaintext is too long, or when stepping, if no Contact Request from the contact is open.
-    /// - [`RoostError::NotFound`] if no identity or Discovery Key is stored.
-    /// - [`RoostError::Corrupt`] if the stored Discovery Key fails its binding checks.
+    /// - [`RoostError::InvalidData`] if a key, message ID, or certificate is malformed, the
+    ///   plaintext is too long, or when stepping, if no contact request from the contact is open.
+    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn accept_contact(
@@ -636,17 +636,17 @@ impl MessageEncryption {
     /// - [`RoostError::OperationFinished`] if the operation already returned its result or failed.
     /// - [`RoostError::BlockedContact`] if the contact is blocked.
     /// - [`RoostError::ContactNotAccepted`] if the contact hasn't accepted and this side already
-    ///   sent the most Messages allowed before acceptance, no Session exists to send on, or a
-    ///   Grant Update would give a requester this side hasn't accepted its Inbox Grant.
-    /// - [`RoostError::NoDeliveryCapability`] if an established Message needs the contact's
-    ///   Delivery Capability and no Inbox Grant has supplied one.
-    /// - [`RoostError::TooManyPendingAcknowledgments`] if the most Messages allowed already wait
-    ///   for the contact's acknowledgment on the Session.
-    /// - [`RoostError::AuthenticationFailed`] if a bundle's signatures don't bind its Discovery Key
+    ///   sent the most messages allowed before acceptance, no session exists to send on, or a
+    ///   grant update would give a requester this side hasn't accepted its inbox grant.
+    /// - [`RoostError::NoDeliveryCapability`] if an established message needs the contact's
+    ///   delivery capability and no inbox grant has supplied one.
+    /// - [`RoostError::TooManyPendingAcknowledgments`] if the most messages allowed already wait
+    ///   for the contact's acknowledgment on the session.
+    /// - [`RoostError::AuthenticationFailed`] if a bundle's signatures don't bind its discovery key
     ///   and the contact's identity in both directions.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed.
     /// - [`RoostError::UnsupportedVersion`] if a record uses an unknown format version.
-    /// - [`RoostError::InvalidData`] if the Message is too large to seal.
+    /// - [`RoostError::InvalidData`] if the message is too large to seal.
     pub fn step(&self) -> Result<MessageEncryptionStep, RoostError> {
         with_operation(&self.0, |encryption| {
             Ok(MessageEncryptionStep::from_core(
@@ -666,10 +666,10 @@ impl MessageEncryption {
         with_operation(&self.0, |encryption| Ok(encryption.supply_state(entries?)?))
     }
 
-    /// Supplies the Transport Binding the pending [`MessageEncryptionStep::NeedsTransport`] asked
+    /// Supplies the transport binding the pending [`MessageEncryptionStep::NeedsTransport`] asked
     /// for.
     ///
-    /// Retain the exact binding with the Message for sending and retransmission.
+    /// Retain the exact binding with the message for sending and retransmission.
     ///
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the operation already returned its result or failed.
@@ -691,16 +691,16 @@ impl MessageDecryption {
     ///
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the operation already returned its result or failed.
-    /// - [`RoostError::AuthenticationFailed`] if the Message fails to decrypt, its sender fails to
-    ///   authenticate, or an Inbox Grant it carries fails its signatures.
+    /// - [`RoostError::AuthenticationFailed`] if the message fails to decrypt, its sender fails to
+    ///   authenticate, or an inbox grant it carries fails its signatures.
     /// - [`RoostError::CertificateRejected`] if the sender's certificate fails validation.
-    /// - [`RoostError::OneTimePreKeyUsed`] if a different first Message already used the one-time
-    ///   prekey this one names. A repeat of the same Message is a duplicate instead.
+    /// - [`RoostError::OneTimePreKeyUsed`] if a different first message already used the one-time
+    ///   prekey this one names. A repeat of the same message is a duplicate instead.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed, including the
     ///   sender's contact record.
-    /// - [`RoostError::UnsupportedVersion`] if the Message, the sender's certificate, or a record
+    /// - [`RoostError::UnsupportedVersion`] if the message, the sender's certificate, or a record
     ///   uses an unknown version.
-    /// - [`RoostError::InvalidData`] if the Message is malformed.
+    /// - [`RoostError::InvalidData`] if the message is malformed.
     pub fn step(&self) -> Result<MessageDecryptionStep, RoostError> {
         with_operation(&self.0, |decryption| {
             Ok(MessageDecryptionStep::from_core(
@@ -720,8 +720,8 @@ impl MessageDecryption {
         with_operation(&self.0, |decryption| Ok(decryption.supply_state(entries?)?))
     }
 
-    /// Confirms the pending [`MessageDecryptionStep::NeedsAdmission`]: the Relay's proof shows it
-    /// admitted this exact Message as a first Message against the named signed prekey.
+    /// Confirms the pending [`MessageDecryptionStep::NeedsAdmission`]: the relay's proof shows it
+    /// admitted this exact message as a first message against the named signed prekey.
     ///
     /// # Errors
     /// - [`RoostError::OperationFinished`] if the operation already returned its result or failed.
@@ -730,7 +730,7 @@ impl MessageDecryption {
         with_operation(&self.0, |decryption| Ok(decryption.confirm_admission()?))
     }
 
-    /// Supplies the Transport Binding the pending
+    /// Supplies the transport binding the pending
     /// [`MessageDecryptionStep::NeedsAcknowledgmentTransport`] asked for.
     ///
     /// Retain the exact binding with the acknowledgment for sending and retransmission.

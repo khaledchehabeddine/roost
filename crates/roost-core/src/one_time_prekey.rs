@@ -34,7 +34,7 @@ pub enum OneTimePreKeyError {
     /// The system clock is before the Unix epoch.
     #[error("system clock is before Unix epoch")]
     Clock,
-    /// Loading the Discovery Key returned a [`DiscoveryKeyError`].
+    /// Loading the discovery key returned a [`DiscoveryKeyError`].
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
     /// The stored pool repeats an identifier.
@@ -60,7 +60,7 @@ pub enum OneTimePreKeyError {
     /// The requested one-time prekey was never created.
     #[error("one-time prekey not found")]
     NotFound,
-    /// The requested one-time prekey belongs to another Discovery Key epoch than the pool.
+    /// The requested one-time prekey belongs to another discovery key epoch than the pool.
     #[error("one-time prekey epoch {epoch} differs from the pool's epoch {pool_epoch}")]
     StaleEpoch {
         /// Requested epoch.
@@ -74,7 +74,7 @@ pub enum OneTimePreKeyError {
     /// The pool failed to encode, or the stored one is malformed or uses an unknown version.
     #[error("one-time prekey pool failed to encode or decode")]
     StoredData(#[from] StoredDataError),
-    /// A Session already used the requested one-time prekey.
+    /// A session already used the requested one-time prekey.
     #[error("one-time prekey {id} was already used")]
     Used {
         /// The used one-time prekey's identifier.

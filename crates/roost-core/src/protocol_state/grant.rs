@@ -1,5 +1,5 @@
-//! Inbox Grants: the Discovery Key, its binding signatures, and the Delivery Capability that an
-//! Identity sends a contact inside the payload of a Message.
+//! Inbox grants: the discovery key, its binding signatures, and the delivery capability that an
+//! identity sends a contact inside the payload of a message.
 
 use super::{ProtocolStateError, encode_zeroizing};
 use crate::contact::ContactDiscoveryKey;
@@ -21,15 +21,15 @@ const MAX_EPOCH_LEN: usize = 5;
 const MAX_CREATED_AT_LEN: usize = 10;
 const SIGNATURE_LEN_PREFIX_LEN: usize = 1;
 /// Length of the longest grant [`encode_granted_payload`] puts before a plaintext, which every
-/// Message's content leaves room for.
+/// message's content leaves room for.
 pub(super) const MAX_ENCODED_GRANT_LEN: usize = 2 * PUBLIC_KEY_LEN
     + MAX_EPOCH_LEN
     + MAX_CREATED_AT_LEN
     + 2 * (SIGNATURE_LEN_PREFIX_LEN + SIGNATURE_LEN)
     + CAPABILITY_LEN;
 
-/// Where a Discovery Key falls in the order contacts keep the newest by: its signed creation
-/// time, then its Epoch, since a restored backup can repeat an Epoch.
+/// Where a discovery key falls in the order contacts keep the newest by: its signed creation
+/// time, then its epoch, since a restored backup can repeat an epoch.
 ///
 /// The derived ordering compares the fields in declaration order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -66,7 +66,7 @@ pub fn is_newer_discovery_key(
     DiscoveryKeyStamp::of(candidate) > DiscoveryKeyStamp::of(current)
 }
 
-/// Returns the public Discovery Key these fields describe, or `None` when a key or the signature
+/// Returns the public discovery key these fields describe, or `None` when a key or the signature
 /// is malformed. The caller still verifies the signature.
 pub(super) fn parse_discovery_key(
     x25519_public_key: [u8; PUBLIC_KEY_LEN],
@@ -88,13 +88,13 @@ pub(super) fn parse_discovery_key(
     })
 }
 
-/// A verified Inbox Grant from an authenticated sender.
+/// A verified inbox grant from an authenticated sender.
 pub(super) struct InboxGrant {
     pub(super) discovery_key: ContactDiscoveryKey,
     pub(super) delivery_capability: Zeroizing<[u8; CAPABILITY_LEN]>,
 }
 
-/// The local Identity's own Inbox Grant, built from SecureStorage for one operation.
+/// The local identity's own inbox grant, built from SecureStorage for one operation.
 pub(super) struct LocalGrant<'a> {
     pub(super) discovery_key: &'a PublicDiscoveryKey,
     pub(super) discovery_to_identity: &'a Signature,
@@ -110,7 +110,7 @@ impl LocalGrant<'_> {
     }
 }
 
-/// Returns `grant` followed by `plaintext`, the payload of a Message whose kind carries a grant.
+/// Returns `grant` followed by `plaintext`, the payload of a message whose kind carries a grant.
 pub(super) fn encode_granted_payload(
     grant: &LocalGrant<'_>,
     plaintext: &[u8],
@@ -136,7 +136,7 @@ pub(super) fn encode_granted_payload(
 
 /// Splits a granted payload into the grant, verified against `sender`, and the plaintext after it.
 ///
-/// A grant that fails to decode or whose signatures `sender` doesn't verify rejects the Message.
+/// A grant that fails to decode or whose signatures `sender` doesn't verify rejects the message.
 pub(super) fn open_granted_payload(
     payload: &[u8],
     sender: &PublicIdentityKey,

@@ -23,9 +23,9 @@ const CERTIFICATE_LABEL: &[u8] = b"RoostSenderCertificate-v1:";
 const CERTIFICATE_VERSION: u8 = 1;
 const TEST_DOMAIN_ID: &[u8] = b"test-domain";
 
-/// Alice and Bob, each a Device, who accepted each other: Alice asked on the fixture's Session and
-/// Bob's Contact Acceptance replied on it, so Alice's Messages no longer carry the handshake, and
-/// each acknowledged the other's Inbox Grant, so neither sends one again.
+/// Alice and Bob, each a device, who accepted each other: Alice asked on the fixture's session and
+/// Bob's contact acceptance replied on it, so Alice's messages no longer carry the handshake, and
+/// each acknowledged the other's inbox grant, so neither sends one again.
 pub(crate) struct ProtocolFixture {
     pub(crate) session_id: SessionId,
     pub(crate) alice: Device,
@@ -33,8 +33,8 @@ pub(crate) struct ProtocolFixture {
     pub(crate) binding: TransportBinding,
 }
 
-/// The app's database: the records Roost asked it to keep, the Messages it queued, and the sent
-/// Messages it shows as not delivered.
+/// The app's database: the records Roost asked it to keep, the messages it queued, and the sent
+/// messages it shows as not delivered.
 #[derive(Clone, Default)]
 pub(crate) struct HostStore {
     blobs: BTreeMap<ProtocolStateAddress, Zeroizing<Vec<u8>>>,
@@ -56,7 +56,7 @@ impl HostStore {
         snapshot
     }
 
-    /// Commits `changes` in one transaction when every Commit Condition still holds, and returns
+    /// Commits `changes` in one transaction when every commit condition still holds, and returns
     /// the updates it wrote.
     pub(crate) fn commit(
         &mut self,
@@ -65,7 +65,7 @@ impl HostStore {
         self.commit_with(changes, None)
     }
 
-    /// Commits a sent Message's changes and queues the Message in the same transaction.
+    /// Commits a sent message's changes and queues the message in the same transaction.
     pub(crate) fn commit_sent(
         &mut self,
         sent: &OutboundMessageResult,
@@ -93,7 +93,7 @@ impl HostStore {
     }
 
     // Checks every condition, then writes the updates, queues `outbox`, and marks the undelivered
-    // Messages, as one transaction.
+    // messages, as one transaction.
     fn commit_with(
         &mut self,
         changes: StateChanges,
@@ -118,7 +118,7 @@ impl HostStore {
         &self.outbox
     }
 
-    /// Returns every sent Message the host shows as not delivered, in the order commits marked
+    /// Returns every sent message the host shows as not delivered, in the order commits marked
     /// them.
     pub(crate) fn undelivered(&self) -> &[MessageId] {
         &self.undelivered
@@ -129,7 +129,7 @@ impl HostStore {
     }
 
     /// Returns this database as restoring it from a backup leaves it: the contact records kept,
-    /// and every other record and queued Message gone.
+    /// and every other record and queued message gone.
     pub(crate) fn restored(&self) -> Self {
         Self {
             blobs: self
@@ -160,7 +160,7 @@ impl HostStore {
         address.clone()
     }
 
-    /// Deletes the records of the one Session the host holds, as a host that lost them does.
+    /// Deletes the records of the one session the host holds, as a host that lost them does.
     pub(crate) fn forget_session(&mut self) {
         for kind in [
             ProtocolStateKind::RatchetSession,
@@ -223,7 +223,7 @@ pub(crate) struct StoredMessage {
     pub(crate) message: SealedFrame,
 }
 
-/// The test domain's signing key, which every Device's Relay certificate names.
+/// The test domain's signing key, which every device's relay certificate names.
 pub(crate) fn trusted_domain_signing_key() -> DomainSigningKey {
     DomainSigningKey {
         id: TEST_DOMAIN_ID.to_vec(),
@@ -327,7 +327,7 @@ impl ProtocolFixture {
         let acceptance = bob.accept_request(&alice, b"reply");
         let acknowledgment = accepted(alice.receive(&acceptance.message)).acknowledgment;
         bob.receive(&acknowledgment.unwrap());
-        // Bob acknowledges a Message carrying Alice's grant, so neither side sends a grant again.
+        // Bob acknowledges a message carrying Alice's grant, so neither side sends a grant again.
         let ready = alice.send(&bob, b"ready");
         let acknowledgment = accepted(bob.receive(&ready.message)).acknowledgment;
         alice.receive(&acknowledgment.unwrap());
@@ -339,13 +339,13 @@ impl ProtocolFixture {
         }
     }
 
-    /// Has Bob send to Alice on the Session Roost selects, and Alice receive it.
+    /// Has Bob send to Alice on the session Roost selects, and Alice receive it.
     pub(crate) fn bob_replies(&mut self, seed: u8) {
         let reply = self.bob.send(&self.alice, &[seed]);
         accepted(self.alice.receive(&reply.message));
     }
 
-    /// Returns Alice's input for sending `plaintext` to Bob as Message number `sequence`.
+    /// Returns Alice's input for sending `plaintext` to Bob as message number `sequence`.
     pub(crate) fn outgoing(&self, sequence: u16, plaintext: &[u8]) -> OutgoingMessage {
         let mut id = [0; 16];
         id[..2].copy_from_slice(&sequence.to_be_bytes());
@@ -454,7 +454,7 @@ impl ProtocolFixture {
         )
     }
 
-    /// Has Alice encrypt to Bob and commits the Message with its changes.
+    /// Has Alice encrypt to Bob and commits the message with its changes.
     pub(crate) fn encrypt_from_alice(&mut self, sequence: u16, plaintext: &[u8]) -> StoredMessage {
         let Sealed {
             result, changes, ..
@@ -494,7 +494,7 @@ impl ProtocolFixture {
     }
 }
 
-/// A received Message after the host committed it.
+/// A received message after the host committed it.
 pub(crate) struct ReceivedMessage {
     pub(crate) message_id: MessageId,
     pub(crate) plaintext: Zeroizing<Vec<u8>>,
@@ -508,8 +508,8 @@ pub(crate) fn accepted(outcome: InboundMessageOutcome) -> roost_core::InboundMes
     *result
 }
 
-/// Returns the bytes the test domain signs for `identity_key`, as a Relay issues a Sender
-/// Certificate.
+/// Returns the bytes the test domain signs for `identity_key`, as a relay issues a sender
+/// certificate.
 pub(crate) fn sender_certificate_bytes(
     signing_key_id: &[u8],
     identity_key: ContactIdentityKey,

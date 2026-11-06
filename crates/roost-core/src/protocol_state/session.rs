@@ -1,4 +1,4 @@
-//! Session state, and the Sessions Roost keeps with each peer and which one it sends on.
+//! Session state, and the sessions Roost keeps with each peer and which one it sends on.
 
 use super::{
     ContactIdentityKeyWire, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError,
@@ -13,9 +13,9 @@ use roost_crypto::{
 use roost_protocol::{PUBLIC_KEY_LEN, SessionId, is_valid_x25519_public_key};
 use serde::{Deserialize, Serialize};
 
-/// Most Sessions kept per peer besides the one Roost sends on.
+/// Most sessions kept per peer besides the one Roost sends on.
 const MAX_OLDER_SESSIONS: usize = 5;
-/// Most deleted SessionIDs remembered per peer.
+/// Most deleted session IDs remembered per peer.
 const MAX_DELETED_SESSIONS: usize = 5;
 
 pub(super) fn session_address(session_id: SessionId) -> ProtocolStateAddress {
@@ -26,7 +26,7 @@ pub(super) fn pending_acknowledgment_address(session_id: SessionId) -> ProtocolS
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, session_id.into())
 }
 
-/// Returns the addresses of the records a Session keeps.
+/// Returns the addresses of the records a session keeps.
 pub(super) fn session_record_addresses(session_id: SessionId) -> [ProtocolStateAddress; 2] {
     [
         session_address(session_id),
@@ -44,13 +44,13 @@ impl From<SessionId> for ProtocolStateKey {
     }
 }
 
-/// A decoded Session blob.
+/// A decoded session blob.
 pub(super) struct LoadedSession {
-    /// The peer the handshake authenticated, fixed for the Session's life.
+    /// The peer the handshake authenticated, fixed for the session's life.
     pub(super) peer_identity_key: ContactIdentityKey,
     pub(super) state: Box<RatchetState>,
-    /// The handshake this side started, which its Messages carry until the peer replies, or for a
-    /// Contact Request until the peer accepts.
+    /// The handshake this side started, which its messages carry until the peer replies, or for a
+    /// contact request until the peer accepts.
     pub(super) pending_handshake: Option<PendingHandshake>,
 }
 
@@ -61,7 +61,7 @@ pub(super) struct PendingHandshake {
     pub(super) signed_prekey_id: u64,
 }
 
-/// Returns the Session at `address`, or `None` when the snapshot has none.
+/// Returns the session at `address`, or `None` when the snapshot has none.
 pub(super) fn load_session(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -140,7 +140,7 @@ fn decode_session(
     })
 }
 
-/// Where a responder's Session came from, so its SessionID can be refused while the prekey that
+/// Where a responder's session came from, so its session ID can be refused while the prekey that
 /// could recreate it still exists.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SignedPreKeyUse {
@@ -148,7 +148,7 @@ pub(super) struct SignedPreKeyUse {
     pub(super) public_key: [u8; PUBLIC_KEY_LEN],
 }
 
-/// Which side started a Session with its handshake.
+/// Which side started a session with its handshake.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Starter {
     Local,
@@ -158,9 +158,9 @@ pub(super) enum Starter {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct SessionEntry {
     pub(super) session_id: SessionId,
-    /// The signed prekey this side accepted the Session with, or `None` if this side started it.
+    /// The signed prekey this side accepted the session with, or `None` if this side started it.
     accepted_with: Option<SignedPreKeyUse>,
-    /// Where the Session falls in the order this side started or accepted the peer's Sessions.
+    /// Where the session falls in the order this side started or accepted the peer's sessions.
     position: u64,
 }
 
@@ -179,8 +179,8 @@ struct DeletedSession {
     signed_prekey: SignedPreKeyUse,
 }
 
-/// The Sessions kept with one peer: the one Roost sends on, older ones that still receive, and
-/// deleted SessionIDs a replayed first Message must not bring back.
+/// The sessions kept with one peer: the one Roost sends on, older ones that still receive, and
+/// deleted session IDs a replayed first message must not bring back.
 #[derive(Debug, Eq, PartialEq)]
 pub(super) struct PeerSessions {
     current: SessionEntry,
@@ -191,7 +191,7 @@ pub(super) struct PeerSessions {
 }
 
 impl PeerSessions {
-    /// Starts the list with its first Session.
+    /// Starts the list with its first session.
     pub(super) fn new(session_id: SessionId, accepted_with: Option<SignedPreKeyUse>) -> Self {
         Self {
             current: SessionEntry {
@@ -204,23 +204,23 @@ impl PeerSessions {
         }
     }
 
-    /// Returns the Session Roost sends on.
+    /// Returns the session Roost sends on.
     pub(super) fn current(&self) -> SessionId {
         self.current.session_id
     }
 
-    /// Returns which side started the Session Roost sends on.
+    /// Returns which side started the session Roost sends on.
     pub(super) fn current_starter(&self) -> Starter {
         self.current.starter()
     }
 
     /// Returns which side started `session_id`, or `None` when it isn't one of this peer's
-    /// Sessions.
+    /// sessions.
     pub(super) fn starter(&self, session_id: SessionId) -> Option<Starter> {
         self.entry(session_id).map(SessionEntry::starter)
     }
 
-    /// Returns every Session kept with this peer, the one Roost sends on first.
+    /// Returns every session kept with this peer, the one Roost sends on first.
     pub(super) fn session_ids(&self) -> impl Iterator<Item = SessionId> + '_ {
         self.entries().map(|entry| entry.session_id)
     }
@@ -234,7 +234,7 @@ impl PeerSessions {
             .is_some_and(|(earlier, later)| earlier < later)
     }
 
-    /// Returns whether `session_id` is one of this peer's Sessions.
+    /// Returns whether `session_id` is one of this peer's sessions.
     pub(super) fn contains(&self, session_id: SessionId) -> bool {
         self.current.session_id == session_id
             || self
@@ -250,19 +250,20 @@ impl PeerSessions {
             .any(|deleted| deleted.session_id == session_id)
     }
 
-    /// Forgets deleted SessionIDs whose signed prekey is gone, since no handshake can recreate them.
+    /// Forgets deleted session IDs whose signed prekey is gone, since no handshake can recreate
+    /// them.
     pub(super) fn forget_deletions_unless(&mut self, is_held: impl Fn(&SignedPreKeyUse) -> bool) {
         self.deleted
             .retain(|deleted| is_held(&deleted.signed_prekey));
     }
 
-    /// Returns the Sessions starting one more would evict, whichever Session it makes current.
+    /// Returns the sessions starting one more would evict, whichever session it makes current.
     pub(super) fn evicted_by_next_start(&self) -> &[SessionEntry] {
         let excess = (self.older.len() + 1).saturating_sub(MAX_OLDER_SESSIONS);
         &self.older[..excess]
     }
 
-    /// Makes a new Session the one Roost sends on, and returns the Sessions this evicts.
+    /// Makes a new session the one Roost sends on, and returns the sessions this evicts.
     pub(super) fn start(
         &mut self,
         session_id: SessionId,
@@ -274,10 +275,10 @@ impl PeerSessions {
         self.evict()
     }
 
-    /// Adds a Session the peer started while this side's own start still awaits a reply, and
-    /// returns the Sessions this evicts.
+    /// Adds a session the peer started while this side's own start still awaits a reply, and
+    /// returns the sessions this evicts.
     ///
-    /// Both peers keep the lower SessionID, so they converge when they start at once.
+    /// Both peers keep the lower session ID, so they converge when they start at once.
     pub(super) fn start_alongside(
         &mut self,
         session_id: SessionId,
@@ -291,8 +292,8 @@ impl PeerSessions {
         self.evict()
     }
 
-    // Returns the entry for a Session that starts after every one kept. A peer can't start
-    // `u64::MAX` Sessions, so the position never saturates.
+    // Returns the entry for a session that starts after every one kept. A peer can't start
+    // `u64::MAX` sessions, so the position never saturates.
     fn next_entry(
         &self,
         session_id: SessionId,
@@ -310,17 +311,17 @@ impl PeerSessions {
         }
     }
 
-    // Returns every Session kept with this peer, the one Roost sends on first.
+    // Returns every session kept with this peer, the one Roost sends on first.
     fn entries(&self) -> impl Iterator<Item = &SessionEntry> {
         std::iter::once(&self.current).chain(&self.older)
     }
 
-    // Returns the kept Session `session_id`, if any.
+    // Returns the kept session `session_id`, if any.
     fn entry(&self, session_id: SessionId) -> Option<&SessionEntry> {
         self.entries().find(|entry| entry.session_id == session_id)
     }
 
-    /// Makes `session_id` the one Roost sends on because it just delivered a Message, and returns
+    /// Makes `session_id` the one Roost sends on because it just delivered a message, and returns
     /// whether that changed anything.
     pub(super) fn record_delivery(
         &mut self,
@@ -344,7 +345,7 @@ impl PeerSessions {
         Ok(true)
     }
 
-    // Deletes the oldest Sessions beyond the limit, remembering the ones this side accepted.
+    // Deletes the oldest sessions beyond the limit, remembering the ones this side accepted.
     fn evict(&mut self) -> Vec<SessionId> {
         let excess = self.older.len().saturating_sub(MAX_OLDER_SESSIONS);
         let evicted: Vec<SessionEntry> = self.older.drain(..excess).collect();

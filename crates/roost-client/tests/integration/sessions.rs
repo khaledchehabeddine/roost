@@ -1,4 +1,4 @@
-//! Two hosts become contacts and exchange Messages through the exported Message Operations.
+//! Two hosts become contacts and exchange messages through the exported message operations.
 
 use crate::support::{
     DOMAIN_SIGNING_KEY_ID, MemoryStorage, RELAY_DOMAIN, complete, domain_signing_key,
@@ -49,14 +49,14 @@ fn validation() -> SenderCertificateValidation {
     }
 }
 
-/// A sealed Message, the changes to commit with it, and the destination Roost named for it.
+/// A sealed message, the changes to commit with it, and the destination Roost named for it.
 struct Sealed {
     result: OutboundMessageResult,
     changes: StateChanges,
     destination: MessageDestination,
 }
 
-/// What a received Message turned out to be, and the changes to commit with it.
+/// What a received message turned out to be, and the changes to commit with it.
 struct Received {
     outcome: InboundMessageOutcome,
     changes: StateChanges,
@@ -308,7 +308,7 @@ impl Host {
         }
     }
 
-    // Runs one recovery of what this host sent `peer`, supplying `content` for the Message it
+    // Runs one recovery of what this host sent `peer`, supplying `content` for the message it
     // names, and returns how it ended with the destination it named.
     fn recover(
         &self,
@@ -347,7 +347,7 @@ impl Host {
     }
 }
 
-// Copies a draft, as an app restarts it under the same MessageID.
+// Copies a draft, as an app restarts it under the same message ID.
 fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
     OutgoingMessage {
         recipient: draft.recipient.clone(),
@@ -385,7 +385,7 @@ fn verifier(destination: &MessageDestination) -> Vec<u8> {
         .to_vec()
 }
 
-// Alice asks Bob, Bob accepts, and Alice receives the acceptance. Returns the SessionID as each
+// Alice asks Bob, Bob accepts, and Alice receives the acceptance. Returns the session ID as each
 // host saw it.
 fn establish(alice: &mut Host, bob: &mut Host) -> (SessionId, SessionId) {
     let request = alice.request(bob, b"hello bob");

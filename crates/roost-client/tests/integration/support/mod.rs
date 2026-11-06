@@ -21,7 +21,7 @@ pub(crate) fn domain_signing_key() -> SigningKeyPair {
     SigningKeyPair::from_signing_bytes([0x41; 32])
 }
 
-/// Returns a Sender Certificate for `identity_key` that expires at `expires_at_secs`, encoded as a
+/// Returns a sender certificate for `identity_key` that expires at `expires_at_secs`, encoded as a
 /// relay's domain authority does before signing, and the domain's signature over it.
 pub(crate) fn issue_certificate(
     identity_key: &IdentityKey,

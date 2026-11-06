@@ -12,7 +12,7 @@ const DEDUPLICATION_DIGEST_LABEL: &[u8] = b"RoostDeduplicationDigest-v1:";
 const DEDUPLICATION_KEY_LEN: usize = 32;
 const DEDUPLICATION_SET_KEY: &[u8] = &[0];
 
-// The Deduplication Set is the only record of its kind, so its key is fixed.
+// The deduplication set is the only record of its kind, so its key is fixed.
 pub(super) fn deduplication_address() -> ProtocolStateAddress {
     ProtocolStateAddress::new(
         ProtocolStateKind::DeduplicationSet,
@@ -41,7 +41,7 @@ impl LoadedDeduplicationSet {
         super::contains_digest(&self.digests, digest)
     }
 
-    // Records a received Message's digest, forgetting the oldest past the set's size.
+    // Records a received message's digest, forgetting the oldest past the set's size.
     pub(super) fn record(&mut self, digest: [u8; DIGEST_LEN]) {
         push_bounded(&mut self.digests, digest, self.capacity);
     }
@@ -85,7 +85,7 @@ pub(super) fn encode_deduplication_set(
     encode_blob(address, &body, limits.max_protocol_state_blob_len)
 }
 
-// Returns the Deduplication Set at the size `settings` names, creating it on the first receive and
+// Returns the deduplication set at the size `settings` names, creating it on the first receive and
 // evicting the oldest digests when the size shrinks.
 pub(super) fn receiving_deduplication_set<R: RngCore + CryptoRng>(
     rng: &mut R,

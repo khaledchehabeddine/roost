@@ -1,6 +1,6 @@
 # State Keys Show Their Kind
 
-Each key the app stores a record under shows the record's Protocol State Kind, so the app can find its contact records to list or watch them without decoding anything.
+Each key the app stores a record under shows the record's protocol state kind, so the app can find its contact records to list or watch them without decoding anything.
 
 ## Alternatives
 

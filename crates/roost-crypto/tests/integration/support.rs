@@ -1,4 +1,4 @@
-//! Bob's published keys, and the Sessions Alice starts from them through the X3DH handshake.
+//! Bob's published keys, and the sessions Alice starts from them through the X3DH handshake.
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -42,7 +42,7 @@ pub(crate) fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     )
 }
 
-/// Starts a Session from Alice to Bob, and has Bob decrypt Alice's first Message on it.
+/// Starts a session from Alice to Bob, and has Bob decrypt Alice's first message on it.
 pub(crate) fn bootstrap(
     setup: &mut Setup,
     rng: &mut ChaCha20Rng,

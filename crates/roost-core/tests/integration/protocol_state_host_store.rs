@@ -1,4 +1,4 @@
-//! A Commit Condition that a record is absent fails once another commit writes the record.
+//! A commit condition that a record is absent fails once another commit writes the record.
 
 use crate::support::HostCommitError;
 use crate::support::device::{Device, Relay};

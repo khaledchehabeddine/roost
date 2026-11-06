@@ -16,9 +16,9 @@ pub struct ContactBlock {
     pub changes: StateChanges,
     /// The rotated inbox's publication, absent when the contact was already blocked.
     ///
-    /// Register it with the Relay after finalizing and before sending anything. Every remaining
-    /// contact then holds a stale Delivery Capability until a Message, acknowledgment, or Grant
-    /// Update carries them the new Inbox Grant, which Roost attaches by itself from finalization
+    /// Register it with the relay after finalizing and before sending anything. Every remaining
+    /// contact then holds a stale delivery capability until a message, acknowledgment, or grant
+    /// update carries them the new inbox grant, which Roost attaches by itself from finalization
     /// on. The blocked contact never gets one, so the block takes effect at the relay.
     pub publication: Option<PublicationBundle>,
 }
@@ -26,23 +26,23 @@ pub struct ContactBlock {
 /// The trust level the app records for a contact.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum ContactTrustState {
-    /// A Contact Request is open in either direction.
+    /// A contact request is open in either direction.
     Pending,
-    /// Both sides consented, but the Safety Number wasn't verified out of band.
+    /// Both sides consented, but the safety number wasn't verified out of band.
     Unverified,
-    /// The contact's Safety Number was verified out of band.
+    /// The contact's safety number was verified out of band.
     Verified,
 }
 
 /// A contact as its record holds it, decoded after the host commits.
 ///
-/// The peer's Delivery Capability is not part of it: Roost hands it out only in an established
-/// Message's destination.
+/// The peer's delivery capability is not part of it: Roost hands it out only in an established
+/// message's destination.
 #[derive(Clone, uniffi::Record)]
 pub struct ContactState {
-    /// The contact's permanent Identity Key.
+    /// The contact's permanent identity key.
     pub identity_key: IdentityKey,
-    /// The contact's current Discovery Key, absent for a stranger blocked before they sent
+    /// The contact's current discovery key, absent for a stranger blocked before they sent
     /// anything.
     pub discovery_key: Option<PublicDiscoveryKey>,
     /// The trust level the app records for the contact.
@@ -51,19 +51,19 @@ pub struct ContactState {
     pub blocked: bool,
 }
 
-/// The result of confirming a contact's Safety Number.
+/// The result of confirming a contact's safety number.
 #[derive(uniffi::Enum)]
 pub enum ContactSafetyNumberConfirmation {
-    /// The Safety Number matched. Commit the changes before showing the contact as verified.
+    /// The safety number matched. Commit the changes before showing the contact as verified.
     Matched {
         /// The changes that verify the contact.
         changes: StateChanges,
     },
-    /// The Safety Number didn't match, and nothing changed.
+    /// The safety number didn't match, and nothing changed.
     Mismatched,
 }
 
-/// Derived Safety Number.
+/// Derived safety number.
 #[derive(uniffi::Record)]
 pub struct SafetyNumber {
     /// Raw derivation bytes.
@@ -72,7 +72,7 @@ pub struct SafetyNumber {
     pub grouped_decimal: String,
 }
 
-/// Derives a Safety Number for two permanent Identity Keys.
+/// Derives a safety number for two permanent identity keys.
 ///
 /// # Errors
 /// - [`RoostError::InvalidData`] if a key has the wrong length or isn't a valid public key.
@@ -93,9 +93,9 @@ impl Contacts {
     /// Prepares blocking a contact, given the record the host holds for them or none, and rotates
     /// the inbox so the block takes effect at the relay.
     ///
-    /// Blocking stops this device sending to the contact and surfacing their Messages, even a
+    /// Blocking stops this device sending to the contact and surfacing their messages, even a
     /// stranger's: one with no record gets a record that holds only the block. Rotation replaces
-    /// the inbox's prekeys and Delivery Capability, so a blocked person can't come back with a new
+    /// the inbox's prekeys and delivery capability, so a blocked person can't come back with a new
     /// identity at the same address. Blocking an already-blocked contact rotates nothing and
     /// carries no operation.
     ///
@@ -136,7 +136,7 @@ impl Contacts {
         })
     }
 
-    /// Returns the contact a Contact State record holds, or no contact when the entry has no bytes.
+    /// Returns the contact a contact state record holds, or no contact when the entry has no bytes.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if the key is malformed.
@@ -157,7 +157,7 @@ impl Contacts {
             .transpose()
     }
 
-    /// Returns the contact each Contact State record holds, in the order given.
+    /// Returns the contact each contact state record holds, in the order given.
     ///
     /// Pass the host's committed records of kind
     /// [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState), so views can
@@ -188,20 +188,20 @@ impl Contacts {
             .collect()
     }
 
-    /// Confirms a contact's Safety Number using this context's local Identity, given the record
+    /// Confirms a contact's safety number using this context's local identity, given the record
     /// the host holds for the contact.
     ///
     /// The contact must already be accepted. A mismatch, including malformed presented text,
-    /// changes nothing. The local Identity comes from this context's storage and cannot be supplied
+    /// changes nothing. The local identity comes from this context's storage and cannot be supplied
     /// by the caller.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if the stored local Identity or a key is malformed.
-    /// - [`RoostError::NotFound`] if the context has no local Identity.
+    /// - [`RoostError::InvalidData`] if the stored local identity or a key is malformed.
+    /// - [`RoostError::NotFound`] if the context has no local identity.
     /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
     /// - [`RoostError::ProtocolStateFault`] if the record is absent, pending, or malformed.
     /// - [`RoostError::Storage`] if SecureStorage fails.
-    /// - [`RoostError::UnsupportedVersion`] if the stored Identity or the record has an unsupported
+    /// - [`RoostError::UnsupportedVersion`] if the stored identity or the record has an unsupported
     ///   version.
     pub fn confirm_contact_safety_number(
         &self,
@@ -226,15 +226,15 @@ impl Contacts {
 
     /// Unblocks a contact locally, given the record the host holds for them or none.
     ///
-    /// Commit the changes before resuming local delivery. Existing Sessions keep working, and the
-    /// next Message carries this identity's current Inbox Grant over them. The contact may have
+    /// Commit the changes before resuming local delivery. Existing sessions keep working, and the
+    /// next message carries this identity's current inbox grant over them. The contact may have
     /// rotated its own inbox during the block, so the first send after an unblock ends with
     /// [`NeedsPreKeyBundle`](crate::MessageEncryptionStep::NeedsPreKeyBundle): fetch the contact's
-    /// bundle by its stored Discovery Key. When the Relay answers that it doesn't know that key,
+    /// bundle by its stored discovery key. When the relay answers that it doesn't know that key,
     /// the contact rotated: keep the draft and ask for a fresh contact link. If
-    /// [`is_newer_discovery_key`](crate::is_newer_discovery_key) says its Discovery Key is newer,
-    /// fetch its bundle, which starts a new Session. When the contact's own request is still open,
-    /// that Session's first Message is a Contact Request, which accepts the contact on both sides.
+    /// [`is_newer_discovery_key`](crate::is_newer_discovery_key) says its discovery key is newer,
+    /// fetch its bundle, which starts a new session. When the contact's own request is still open,
+    /// that session's first message is a contact request, which accepts the contact on both sides.
     /// Unblocking a stranger blocked before they sent anything deletes their record, since nobody
     /// asked.
     ///

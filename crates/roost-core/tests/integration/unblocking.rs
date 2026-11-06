@@ -1,4 +1,4 @@
-//! Unblocking keeps a contact's Sessions, and the first send after it checks whether the contact
+//! Unblocking keeps a contact's sessions, and the first send after it checks whether the contact
 //! rotated its inbox during the block.
 
 use crate::support::accepted;
@@ -168,7 +168,7 @@ fn a_requester_reaches_this_side_after_an_unblock_only_from_the_new_bundle() {
     bob.block(alice.identity_key());
     bob.unblock(alice.identity_key());
 
-    // The block rotated Bob's inbox, so Alice's first Session names prekeys Bob deleted.
+    // The block rotated Bob's inbox, so Alice's first session names prekeys Bob deleted.
     let stale = alice.send(&bob, b"still there?");
     assert!(matches!(
         bob.decrypt(&stale.message),

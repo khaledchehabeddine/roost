@@ -105,10 +105,10 @@ pub struct PreparedOneTimePreKeys {
 
 /// An inbox rotation, provisional until its operation is finalized.
 ///
-/// The previous Discovery Key stays current until finalization.
+/// The previous discovery key stays current until finalization.
 #[derive(uniffi::Record)]
 pub struct PreparedInboxRotation {
-    /// The operation that makes the new Discovery Key current.
+    /// The operation that makes the new discovery key current.
     pub operation_id: OperationId,
     /// The new inbox's publication, to publish and register after finalization.
     pub publication: PublicationBundle,

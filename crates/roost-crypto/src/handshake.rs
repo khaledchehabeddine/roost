@@ -1,5 +1,5 @@
-//! Implements the X3DH handshake that starts Double Ratchet Sessions, and the proof that a first
-//! Message's sender holds their Identity Key.
+//! Implements the X3DH handshake that starts Double Ratchet sessions, and the proof that a first
+//! message's sender holds their identity key.
 
 use crate::discovery_key::{DiscoveryKey, PublicDiscoveryKey, verify_public_discovery_key};
 use crate::double_ratchet::{RatchetError, RatchetState, RootKey};
@@ -24,7 +24,7 @@ const SESSION_ID_INFO: &[u8] = b"RoostSessionId-v1:";
 const SENDER_PROOF_CONTEXT: &[u8] = b"RoostX3DH-v1:sender-proof:";
 /// Current public prekey bundle format version.
 pub const PREKEY_BUNDLE_VERSION: u8 = 1;
-/// Length of the proof a first Message carries.
+/// Length of the proof a first message carries.
 pub const SENDER_PROOF_LEN: usize = 32;
 
 /// Public prekey material used by the initiator to start an X3DH session.
@@ -45,19 +45,19 @@ pub struct PreKeyBundle {
 pub struct Handshake {
     /// The initiator's ephemeral X25519 public key.
     pub base_key: PublicKey,
-    /// The responder Discovery Key the handshake targets.
+    /// The responder discovery key the handshake targets.
     pub responder_discovery_key: PublicKey,
     /// The responder prekeys the handshake used.
     pub prekey_reference: SealedFramePreKeyReference,
 }
 
-/// What a first Message's sender proof covers besides the handshake.
+/// What a first message's sender proof covers besides the handshake.
 pub struct SenderProofTranscript<'a> {
     /// The handshake the proof belongs to.
     pub handshake: &'a Handshake,
-    /// The sender's Identity Key, whose agreement half makes the proof.
+    /// The sender's identity key, whose agreement half makes the proof.
     pub sender_identity_key: &'a PublicIdentityKey,
-    /// The sender's Discovery Key, sealed with the proof so the recipient can reply.
+    /// The sender's discovery key, sealed with the proof so the recipient can reply.
     pub sender_discovery_key: &'a PublicDiscoveryKey,
     /// The sender certificate sealed with the proof.
     pub sender_certificate: &'a [u8],
@@ -65,10 +65,10 @@ pub struct SenderProofTranscript<'a> {
     pub sender_certificate_signature: &'a [u8],
 }
 
-/// Starts a Session with the responder whose bundle the initiator fetched.
+/// Starts a session with the responder whose bundle the initiator fetched.
 ///
-/// The initiator's base key and first ratchet key are drawn from `rng`. The bundle's Discovery Key
-/// must be signed by `responder_identity_key` and its signed prekey by that Discovery Key. Both
+/// The initiator's base key and first ratchet key are drawn from `rng`. The bundle's discovery key
+/// must be signed by `responder_identity_key` and its signed prekey by that discovery key. Both
 /// peers derive the returned [`SessionId`], and nobody else can.
 pub fn initiate_handshake<R: RngCore + CryptoRng>(
     rng: &mut R,
@@ -128,10 +128,10 @@ pub fn initiate_handshake<R: RngCore + CryptoRng>(
     Ok((state, session_id, handshake))
 }
 
-/// Accepts a handshake with the responder's Discovery Key and the prekeys the handshake names.
+/// Accepts a handshake with the responder's discovery key and the prekeys the handshake names.
 ///
 /// This authenticates nobody: the caller checks the sender's proof with
-/// [`verify_sender_proof`] after the first Message decrypts.
+/// [`verify_sender_proof`] after the first message decrypts.
 pub fn accept_handshake(
     handshake: &Handshake,
     responder_discovery_key: &DiscoveryKey,
@@ -188,7 +188,7 @@ pub fn accept_handshake(
     Ok((state, session_id))
 }
 
-/// Proves that the sender holds the Identity Key named in `transcript`.
+/// Proves that the sender holds the identity key named in `transcript`.
 ///
 /// Only the holder of the responder's signed prekey can check the proof, so unlike a signature it
 /// doesn't let the recipient prove to anyone else who contacted them.
@@ -208,7 +208,7 @@ pub fn prove_sender(
     derive_sender_proof(&secret, &sender_proof_transcript(transcript)?)
 }
 
-/// Checks a first Message's proof with the signed prekey its handshake used.
+/// Checks a first message's proof with the signed prekey its handshake used.
 pub fn verify_sender_proof(
     responder_signed_prekey: &SignedPreKey,
     transcript: &SenderProofTranscript<'_>,
@@ -228,13 +228,13 @@ pub fn verify_sender_proof(
 /// An error returned while starting or accepting an X3DH handshake or checking its proof.
 #[derive(Debug, thiserror::Error)]
 pub enum HandshakeError {
-    /// The handshake targets a different Discovery Key than the responder's.
+    /// The handshake targets a different discovery key than the responder's.
     #[error("handshake targets another discovery key")]
     DiscoveryKeyMismatch,
     /// HKDF-SHA256 rejected the requested output length.
     #[error("hkdf-sha256 expand exceeded output limit")]
     HkdfExpand,
-    /// An Identity Key, Discovery Key, or public signed prekey failed validation.
+    /// An identity key, discovery key, or public signed prekey failed validation.
     #[error("handshake public key validation failed")]
     PublicKey(#[from] PublicKeyError),
     /// Handshake names a one-time prekey that was not supplied.
@@ -315,11 +315,11 @@ fn validate_one_time_prekey(
     }
 }
 
-// Runs HKDF-SHA256 once over the DH outputs and expands the root key and the SessionID under
+// Runs HKDF-SHA256 once over the DH outputs and expands the root key and the session ID under
 // separate labels.
 //
 // No salt means RFC 5869's all-zero salt, which X3DH also uses. The extract step turns the DH
-// outputs into a pseudorandom key, and the info labels keep the root key and SessionID apart.
+// outputs into a pseudorandom key, and the info labels keep the root key and session ID apart.
 fn derive_root_key_and_session_id(
     discovery_key_shared_secret: &SharedSecret,
     signed_prekey_shared_secret: &SharedSecret,

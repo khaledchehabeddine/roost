@@ -1,8 +1,8 @@
 //! Cryptographic primitives for private end-to-end encrypted messaging.
 //!
-//! Handles key generation, Identity Key and Discovery Key binding signatures, signed and one-time
-//! prekeys, Delivery Capabilities, X3DH handshakes and sender proofs, Double Ratchet encryption,
-//! and Sealed Sender Frames. Higher layers handle persistence, replay tracking, and transport.
+//! Handles key generation, identity key and discovery key binding signatures, signed and one-time
+//! prekeys, delivery capabilities, X3DH handshakes and sender proofs, Double Ratchet encryption,
+//! and sealed sender frames. Higher layers handle persistence, replay tracking, and transport.
 //!
 //! The identity key signs the public discovery key. The discovery key signs the public signed
 //! prekey. Initiators verify both responder signatures, use [`initiate_handshake`] to create the

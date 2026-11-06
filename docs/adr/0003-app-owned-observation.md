@@ -4,4 +4,4 @@ Roost has no subscriptions or change feeds. Apps watch their own database with t
 
 ## Alternatives
 
-- An event stream per Library Instance: it adds work to keep each stream alive and in sync, and makes commits no safer.
+- An event stream per library instance: it adds work to keep each stream alive and in sync, and makes commits no safer.

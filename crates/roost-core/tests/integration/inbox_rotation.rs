@@ -24,7 +24,7 @@ fn blocked(outcome: InboundMessageOutcome) -> roost_core::BlockedInboundMessageR
     *result
 }
 
-// Alice starts a new Session from Bob's current bundle, as she must once his inbox rotated.
+// Alice starts a new session from Bob's current bundle, as she must once his inbox rotated.
 fn restart_session(alice: &mut Device, bob: &Device) -> crate::support::device::SentMessage {
     alice.forget_sessions_with(bob);
     alice.request(bob, b"new session")
@@ -34,7 +34,7 @@ fn restart_session(alice: &mut Device, bob: &Device) -> crate::support::device::
 fn an_acknowledgment_carries_the_grant_to_a_contact_on_a_newer_discovery_key() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
-    // Bob rotates without writing to Alice, so only his bundle names the new Discovery Key.
+    // Bob rotates without writing to Alice, so only his bundle names the new discovery key.
     let rotation = bob.rotate_inbox();
     let request = restart_session(&mut alice, &bob);
     let acknowledgment = accepted(bob.receive(&request.message))
@@ -62,7 +62,7 @@ fn a_silent_receipt_to_a_blocked_contact_carries_no_grant() {
 
     alice.receive(&acknowledgment);
 
-    // Alice holds no Delivery Capability for Bob's rotated inbox, so she can't reach it.
+    // Alice holds no delivery capability for Bob's rotated inbox, so she can't reach it.
     assert!(matches!(
         alice.encrypt_to(&bob, b"after the block"),
         Err(DeviceError::Operation(

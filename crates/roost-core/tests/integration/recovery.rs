@@ -1,4 +1,4 @@
-//! The sender finds Messages its contact hasn't acknowledged and recovers them on a newer Session,
+//! The sender finds messages its contact hasn't acknowledged and recovers them on a newer session,
 //! and the contact shows each one once.
 
 use crate::support::HostCommitError;
@@ -15,7 +15,7 @@ use roost_protocol::PayloadKind;
 const HOUR_MILLIS: u64 = 60 * 60 * 1000;
 const DAY_MILLIS: u64 = 24 * HOUR_MILLIS;
 
-// Every test Message is sent within a second of this time.
+// Every test message is sent within a second of this time.
 fn sent_at_millis() -> u64 {
     CREATED_AT_SECS * 1000
 }
@@ -155,7 +155,7 @@ fn a_message_sent_to_the_new_inbox_after_a_newer_grant_signals_nothing_within_a_
     assert!(!checked.starts_recovery);
 }
 
-// Returns the MessageIDs `device` still waits to have acknowledged on `session_id`.
+// Returns the message IDs `device` still waits to have acknowledged on `session_id`.
 fn waiting_on(
     device: &Device,
     session_id: roost_core::SessionId,
@@ -174,7 +174,7 @@ fn a_contact_that_starts_a_new_session_gets_each_unacknowledged_message_again_on
     let (mut alice, mut bob) = befriended(&relay);
     let first = alice.send(&bob, b"first");
     let second = alice.send(&bob, b"second");
-    // Bob loses his Session with Alice before either arrives, and writes on a new one.
+    // Bob loses his session with Alice before either arrives, and writes on a new one.
     bob.host.forget_session();
     bob.forget_sessions_with(&alice);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
@@ -190,7 +190,7 @@ fn a_contact_that_starts_a_new_session_gets_each_unacknowledged_message_again_on
         assert_eq!(resent.session_id, restart.session_id);
         assert_eq!(resent.message_id, original.message_id);
         assert_eq!(Route::of(&resent.destination), bob.established_route());
-        // Bob may have lost Alice's grant with the Session.
+        // Bob may have lost Alice's grant with the session.
         assert_eq!(resent.payload_kind, PayloadKind::ContentWithGrant);
     }
     assert!(waiting_on(&alice, first.session_id).is_empty());
@@ -223,7 +223,7 @@ fn a_silent_contact_gets_one_probe_on_a_new_session_and_the_rest_once_it_acknowl
     let (mut alice, mut bob) = befriended(&relay);
     let first = alice.send(&bob, b"first");
     let second = alice.send(&bob, b"second");
-    // Bob loses the Session but keeps Alice as a contact, so he can't tell she wrote.
+    // Bob loses the session but keeps Alice as a contact, so he can't tell she wrote.
     bob.host.forget_session();
     assert!(
         alice
@@ -280,7 +280,7 @@ fn a_silent_contact_gets_one_probe_on_a_new_session_and_the_rest_once_it_acknowl
 fn a_recovery_resends_the_longest_message_and_every_message_after_it() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
-    // Bob acknowledges a Message carrying Alice's grant, so her next Messages leave it off.
+    // Bob acknowledges a message carrying Alice's grant, so her next messages leave it off.
     let ready = alice.send(&bob, b"ready");
     alice.receive(
         &accepted(bob.receive(&ready.message))
@@ -318,7 +318,7 @@ fn a_recovery_resends_the_longest_message_and_every_message_after_it() {
     assert_eq!(rest.message_id, after.message_id);
 }
 
-// Alice sends Bob a Message he never acknowledges, and a day later starts a recovery.
+// Alice sends Bob a message he never acknowledges, and a day later starts a recovery.
 fn unanswered(relay: &Relay) -> (Device, Device, SentMessage) {
     let (mut alice, bob) = befriended(relay);
     let sent = alice.send(&bob, b"are you there?");
@@ -360,7 +360,7 @@ fn a_probe_that_evicts_its_own_session_isnt_listed_as_undelivered() {
     let (mut alice, bob) = befriended(&relay);
     let sent = alice.send(&bob, b"are you there?");
     let sent_record = alice.host.only(ProtocolStateKind::RatchetSession);
-    // Each rotation makes Alice's next send start a Session, until hers with the Message is the
+    // Each rotation makes Alice's next send start a session, until hers with the message is the
     // oldest one kept.
     for _ in 0..5 {
         bob.rotate_inbox();
@@ -397,7 +397,7 @@ fn messages_held_behind_a_probe_whose_session_evicts_theirs_go_out_once_it_is_ac
     let (mut alice, mut bob) = befriended(&relay);
     let first = alice.send(&bob, b"first");
     let second = alice.send(&bob, b"second");
-    // Each rotation makes Alice's next send start a Session, until hers with both Messages is the
+    // Each rotation makes Alice's next send start a session, until hers with both messages is the
     // oldest one kept.
     for _ in 0..5 {
         bob.rotate_inbox();
@@ -449,7 +449,7 @@ fn a_newer_session_from_the_contact_during_the_fetch_wins_over_the_bundle() {
         Recovered::NeedsPreKeyBundle
     ));
     let bundle = bob.bundle();
-    // While Alice fetches, Bob, who lost the Session, writes on a new one.
+    // While Alice fetches, Bob, who lost the session, writes on a new one.
     bob.host.forget_session();
     bob.forget_sessions_with(&alice);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
@@ -578,7 +578,7 @@ fn a_recovery_nobody_signaled_resends_nothing() {
 fn after_the_relay_refuses_the_fetch_only_the_contacts_new_session_signals_again() {
     let relay = Relay::new();
     let (mut alice, mut bob, sent) = unanswered(&relay);
-    // The Relay doesn't know Bob's old Discovery Key, so Alice's app ends the recovery job.
+    // The relay doesn't know Bob's old discovery key, so Alice's app ends the recovery job.
     assert!(matches!(
         alice.recover(&bob, None),
         Recovered::NeedsPreKeyBundle
@@ -613,7 +613,7 @@ fn a_probe_lost_to_a_rotation_goes_out_again_on_a_new_session_once_the_newer_gra
     let (mut alice, mut bob, sent) = unanswered(&relay);
     let probe = alice.recover(&bob, Some(bob.bundle())).committed();
     // Bob rotates before the probe arrives, which deletes the prekeys it used, and then gives
-    // Alice his new grant on the older Session he still has.
+    // Alice his new grant on the older session he still has.
     let rotation = bob.rotate_inbox();
     let update = bob.send_grant_update(&alice);
     alice.receive(&update.message);
@@ -682,7 +682,7 @@ fn a_recovery_stays_on_the_current_session_when_its_pending_acknowledgments_are_
     assert_eq!(waiting_on(&alice, restart.session_id), [first.message_id]);
 }
 
-// Alice's Message waits on a Session older than the one Bob wrote on after losing his, when Alice
+// Alice's message waits on a session older than the one Bob wrote on after losing his, when Alice
 // blocks Bob.
 fn blocked_with_a_message_left_behind(relay: &Relay) -> (Device, Device, SentMessage, SentMessage) {
     let (mut alice, mut bob) = befriended(relay);
@@ -761,13 +761,13 @@ fn a_recovery_after_an_unblock_waits_for_a_new_session_when_the_relay_no_longer_
             .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
             .starts_recovery
     );
-    // The Relay can't find a bundle for the stored key, so the app ends this job.
+    // The relay can't find a bundle for the stored key, so the app ends this job.
     assert!(matches!(
         alice.recover(&bob, None),
         Recovered::NeedsPreKeyBundle
     ));
 
-    // A fresh contact link names the new inbox, and Alice's next send starts a Session there.
+    // A fresh contact link names the new inbox, and Alice's next send starts a session there.
     let mut outgoing = alice.outgoing(&bob, b"found your link");
     outgoing.prekey_bundle = Some(bob.bundle());
     let sent = alice.send_with(outgoing, Intent::Message);
@@ -805,7 +805,7 @@ fn a_session_a_recovery_starts_after_an_unblock_ends_the_check() {
     alice.send(&bob, b"no bundle needed");
 }
 
-// Bob rotates, and Alice's next send starts a Session from his new bundle.
+// Bob rotates, and Alice's next send starts a session from his new bundle.
 fn send_through_a_new_bundle(alice: &mut Device, bob: &mut Device, text: &[u8]) -> SentMessage {
     bob.rotate_inbox();
     let mut outgoing = alice.outgoing(bob, text);
@@ -822,7 +822,7 @@ fn a_late_message_on_an_older_session_sends_the_messages_held_behind_a_probe() {
     for _ in 0..4 {
         send_through_a_new_bundle(&mut alice, &mut bob, b"to the newer inbox");
     }
-    // Bob writes on the oldest Session with his latest grant, so Alice holds a capability.
+    // Bob writes on the oldest session with his latest grant, so Alice holds a capability.
     let late = bob.send(&alice, b"late");
     let later = bob.send(&alice, b"later");
     alice.receive(&late.message);
@@ -852,7 +852,7 @@ fn a_recovery_without_a_capability_for_a_late_session_fails_until_the_probes_ack
     let (mut alice, mut bob) = befriended(&relay);
     let first = alice.send(&bob, b"first");
     let second = alice.send(&bob, b"second");
-    // Bob answers on the first of Alice's newer Sessions, and his Message arrives late, with a
+    // Bob answers on the first of Alice's newer sessions, and his message arrives late, with a
     // grant older than the key Alice now holds.
     let older = send_through_a_new_bundle(&mut alice, &mut bob, b"to the newer inbox");
     bob.receive(&older.message);

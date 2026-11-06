@@ -49,7 +49,7 @@ const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
 // Deduplication and acknowledgment digests keep this many bytes of their hash.
 const DIGEST_LEN: usize = 16;
 
-/// The key part of a protocol-state address: a SessionID, an Identity Key, or a host-chosen key.
+/// The key part of a protocol-state address: a session ID, an identity key, or a host-chosen key.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProtocolStateKey(Vec<u8>);
 
@@ -84,15 +84,15 @@ impl From<ContactIdentityKey> for ProtocolStateKey {
 /// The stable category for an opaque protocol-state blob.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ProtocolStateKind {
-    /// SessionID-addressed Double Ratchet session state.
+    /// Session-ID-addressed Double Ratchet session state.
     RatchetSession,
     /// Deduplication-set state.
     DeduplicationSet,
-    /// SessionID-addressed pending-acknowledgment state.
+    /// Session-ID-addressed pending-acknowledgment state.
     PendingAcknowledgments,
-    /// Identity-key-addressed contact state, including the peer's Delivery Capability.
+    /// Identity-key-addressed contact state, including the peer's delivery capability.
     ContactState,
-    /// Identity-key-addressed record of the Sessions kept with one peer and the one Roost sends on.
+    /// Identity-key-addressed record of the sessions kept with one peer and the one Roost sends on.
     PeerSessions,
 }
 
@@ -172,7 +172,7 @@ impl ProtocolStateBlob {
 
 /// A Core-computed condition the host must enforce inside its state transaction.
 ///
-/// All updates and associated effects must commit atomically under the host's Identity Lock. A
+/// All updates and associated effects must commit atomically under the host's identity lock. A
 /// failed condition requires reloading state and processing the operation again.
 #[derive(Clone, Copy, Debug)]
 pub enum ProtocolStateCommitCondition {
@@ -261,14 +261,14 @@ impl ProtocolStateUpdate {
     }
 }
 
-/// The records an operation's result relies on, the records it writes, the Prepared KeyStore
-/// Operation that commits with them, if any, and the sent Messages Roost stops waiting for.
+/// The records an operation's result relies on, the records it writes, the prepared KeyStore
+/// operation that commits with them, if any, and the sent messages Roost stops waiting for.
 ///
-/// Message Operations and delivery checks return these beside their result, so the host commits
+/// Message operations and delivery checks return these beside their result, so the host commits
 /// them through [`Self::conditions`] and [`Self::into_updates`] and keeps the rest of the result.
 /// They're empty when the result changes nothing, such as a duplicate.
 ///
-/// The host reads the record at each Commit Condition's address inside its transaction, and
+/// The host reads the record at each commit condition's address inside its transaction, and
 /// commits the updates with the result's effects only when [`commit_conditions_match`] holds for
 /// them. The host marks each of [`Self::undelivered`] not delivered in the same transaction. When
 /// [`Self::operation`] is present, the host reserves it before the transaction, commits its ID
@@ -315,20 +315,20 @@ impl StateChanges {
         self
     }
 
-    /// Returns the Prepared KeyStore Operation that commits with these changes, if any.
+    /// Returns the prepared KeyStore operation that commits with these changes, if any.
     #[must_use]
     pub fn operation(&self) -> Option<KeyStoreOperationId> {
         self.operation
     }
 
-    /// Returns each Commit Condition with the address it applies to, in address order.
+    /// Returns each commit condition with the address it applies to, in address order.
     #[must_use]
     pub fn conditions(&self) -> &[(ProtocolStateAddress, ProtocolStateCommitCondition)] {
         &self.conditions
     }
 
-    /// Returns the sent Messages Roost stops waiting for, oldest first, because the Relay would
-    /// have dropped them by now or their Session is deleted.
+    /// Returns the sent messages Roost stops waiting for, oldest first, because the relay would
+    /// have dropped them by now or their session is deleted.
     #[must_use]
     pub fn undelivered(&self) -> &[MessageId] {
         &self.undelivered
@@ -448,26 +448,26 @@ impl ProtocolStateSnapshot {
     }
 }
 
-/// An outbound Message from one Message Operation.
+/// An outbound message from one message operation.
 pub struct OutboundMessageResult {
-    /// The Session Roost selected for the Message.
+    /// The session Roost selected for the message.
     pub session_id: SessionId,
-    /// Stable identifier sealed inside the produced Message.
+    /// Stable identifier sealed inside the produced message.
     pub message_id: MessageId,
-    /// Sender-observed Unix timestamp sealed inside the produced Message.
+    /// Sender-observed Unix timestamp sealed inside the produced message.
     pub sent_at_millis: u64,
-    /// Payload kind sealed inside the produced Message.
+    /// Payload kind sealed inside the produced message.
     pub payload_kind: PayloadKind,
     /// Message to hand to the consumer transport after state commit.
     pub message: SealedFrame,
 }
 
-/// Inbound plaintext from one Message Operation.
+/// Inbound plaintext from one message operation.
 ///
-/// A sender's recovery resends a Message under its original MessageID with new bytes, so the app
-/// shows one Message per sender and MessageID, and still commits and acknowledges each copy.
+/// A sender's recovery resends a message under its original message ID with new bytes, so the app
+/// shows one message per sender and message ID, and still commits and acknowledges each copy.
 pub struct InboundMessageResult {
-    /// The Session the Message arrived on.
+    /// The session the message arrived on.
     pub session_id: SessionId,
     /// Message ID recovered after decrypt.
     pub message_id: MessageId,
@@ -480,24 +480,24 @@ pub struct InboundMessageResult {
     /// Sender identity material decoded from the sealed-sender envelope.
     pub sender_identity: SenderIdentityMaterial,
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
-    /// the contact isn't accepted and this side doesn't acknowledge yet, or while no Inbox Grant
-    /// has supplied the contact's current Delivery Capability.
+    /// the contact isn't accepted and this side doesn't acknowledge yet, or while no inbox grant
+    /// has supplied the contact's current delivery capability.
     pub acknowledgment: Option<SealedFrame>,
 }
 
-/// A Message from a contact who isn't accepted, past the limit on Messages before acceptance.
+/// A message from a contact who isn't accepted, past the limit on messages before acceptance.
 ///
 /// Roost withholds its plaintext and sends no acknowledgment.
 pub struct WithheldInboundMessageResult {
-    /// The Session the Message arrived on.
+    /// The session the message arrived on.
     pub session_id: SessionId,
     /// Message ID recovered after decrypt.
     pub message_id: MessageId,
 }
 
-/// A Grant Update whose Inbox Grant Roost kept, which has nothing to show.
+/// A grant update whose inbox grant Roost kept, which has nothing to show.
 pub struct GrantUpdateResult {
-    /// The Session the Grant Update arrived on.
+    /// The session the grant update arrived on.
     pub session_id: SessionId,
     /// Message ID recovered after decrypt.
     pub message_id: MessageId,
@@ -506,11 +506,11 @@ pub struct GrantUpdateResult {
     pub acknowledgment: Option<SealedFrame>,
 }
 
-/// Accepted blocked inbound Message result without consumer-visible plaintext.
+/// Accepted blocked inbound message result without consumer-visible plaintext.
 pub struct BlockedInboundMessageResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, or `None` when
-    /// the blocked-contact acknowledgment policy suppresses it or no Inbox Grant has supplied the
-    /// contact's current Delivery Capability.
+    /// the blocked-contact acknowledgment policy suppresses it or no inbox grant has supplied the
+    /// contact's current delivery capability.
     pub acknowledgment: Option<SealedFrame>,
 }
 
@@ -519,45 +519,45 @@ pub struct BlockedInboundMessageResult {
 /// Its state changes commit whether it matched or not, so a retried acknowledgment is a
 /// duplicate.
 pub struct AcknowledgmentResult {
-    /// The Session the acknowledgment arrived on.
+    /// The session the acknowledgment arrived on.
     pub session_id: SessionId,
-    /// Acknowledgment Message ID recovered after decrypt.
+    /// Acknowledgment message ID recovered after decrypt.
     pub message_id: MessageId,
     /// Acknowledgment timestamp recovered after decrypt.
     pub sent_at_millis: u64,
-    /// The outbound Message ID the acknowledgment names.
+    /// The outbound message ID the acknowledgment names.
     pub acknowledged_message_id: MessageId,
     /// Sender identity material decoded from the acknowledgment.
     pub sender_identity: SenderIdentityMaterial,
 }
 
-/// The result of receiving an inbound encrypted Message.
+/// The result of receiving an inbound encrypted message.
 pub enum InboundMessageOutcome {
-    /// A unique Message decrypted and advanced protocol state.
+    /// A unique message decrypted and advanced protocol state.
     Accepted(Box<InboundMessageResult>),
-    /// A first Message from an Identity with no contact record, which creates a Pending one.
+    /// A first message from an identity with no contact record, which creates a pending one.
     ContactRequest(Box<InboundMessageResult>),
-    /// A unique blocked Message decrypted and advanced protocol state.
+    /// A unique blocked message decrypted and advanced protocol state.
     Blocked(Box<BlockedInboundMessageResult>),
-    /// A Message past the limit before acceptance decrypted, and its plaintext is withheld.
+    /// A message past the limit before acceptance decrypted, and its plaintext is withheld.
     Withheld(Box<WithheldInboundMessageResult>),
-    /// A Grant Update from a contact who isn't blocked, whose Inbox Grant Roost kept.
+    /// A grant update from a contact who isn't blocked, whose inbox grant Roost kept.
     GrantUpdate(Box<GrantUpdateResult>),
-    /// The Message matched an already-accepted encrypted byte sequence.
+    /// The message matched an already-accepted encrypted byte sequence.
     Duplicate,
-    /// The Message names a Session this identity doesn't keep and carries no handshake, such as
+    /// The message names a session this identity doesn't keep and carries no handshake, such as
     /// one whose records it lost, and nothing changed.
     UnknownSession,
-    /// The first Message names a Session this identity deleted, so nothing was created.
+    /// The first message names a session this identity deleted, so nothing was created.
     DeletedSession,
-    /// An acknowledgment cleared one of this identity's Pending Acknowledgments.
+    /// An acknowledgment cleared one of this identity's pending acknowledgments.
     AcknowledgmentMatched(Box<AcknowledgmentResult>),
-    /// An authenticated acknowledgment named no Pending Acknowledgment, such as one already
-    /// cleared, or a Message already reported as not delivered whose later copy arrived.
+    /// An authenticated acknowledgment named no pending acknowledgment, such as one already
+    /// cleared, or a message already reported as not delivered whose later copy arrived.
     AcknowledgmentUnmatched(Box<AcknowledgmentResult>),
 }
 
-/// Whether a blocked sender receives an acknowledgment for an accepted-but-hidden Message.
+/// Whether a blocked sender receives an acknowledgment for an accepted-but-hidden message.
 ///
 /// The default preserves privacy: a blocked sender cannot distinguish a block from an unreachable
 /// recipient. Opting in to [`Self::SilentReceipt`] trades that away for delivery confirmation.
@@ -574,7 +574,7 @@ pub enum BlockedContactAcknowledgmentPolicy {
 
 /// The settings an app passes with each receive, checked against Roost's limits.
 ///
-/// Roost holds no settings, so every Library Instance serving one identity, in the app or its
+/// Roost holds no settings, so every library instance serving one identity, in the app or its
 /// extensions, applies the values the app passes at that moment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReceiveSettings {
@@ -584,7 +584,7 @@ pub struct ReceiveSettings {
 }
 
 impl ReceiveSettings {
-    /// Returns settings after checking the Deduplication Set's size and the certificate grace.
+    /// Returns settings after checking the deduplication set's size and the certificate grace.
     pub fn new(
         deduplication_capacity: usize,
         blocked_contact_acknowledgment_policy: BlockedContactAcknowledgmentPolicy,
@@ -608,7 +608,7 @@ impl ReceiveSettings {
 }
 
 impl Default for ReceiveSettings {
-    /// Returns the default Deduplication Set size, no receipts to blocked senders, and no grace.
+    /// Returns the default deduplication set size, no receipts to blocked senders, and no grace.
     fn default() -> Self {
         Self {
             deduplication_capacity: DEFAULT_DEDUPLICATION_CAPACITY,
@@ -622,12 +622,12 @@ impl Default for ReceiveSettings {
 ///
 /// Consumers must read required blobs from an atomic, durable, crash-consistent, and
 /// integrity-preserving store before each operation, then commit returned updates atomically with
-/// any produced Message. Library Instances for one Identity take turns under the host's
-/// Identity Lock, from an operation's first call until its commit is resolved. Consumers still
-/// commit a result only while every Commit Condition in its [`StateChanges`] holds.
+/// any produced message. Library instances for one identity take turns under the host's
+/// identity lock, from an operation's first call until its commit is resolved. Consumers still
+/// commit a result only while every commit condition in its [`StateChanges`] holds.
 ///
-/// Received-message deduplication is scoped to one local Identity through the
-/// [`ProtocolStateKind::DeduplicationSet`] blob. It drops byte-identical encrypted Message retries
+/// Received-message deduplication is scoped to one local identity through the
+/// [`ProtocolStateKind::DeduplicationSet`] blob. It drops byte-identical encrypted message retries
 /// before decryption; Double Ratchet replay rejection still handles cryptographic replays after
 /// decryption starts.
 #[derive(Clone, Copy)]
@@ -642,7 +642,7 @@ impl ProtocolStateEngine {
         }
     }
 
-    /// Returns the contact a Contact State record holds.
+    /// Returns the contact a contact state record holds.
     pub fn decode_contact(
         &self,
         address: &ProtocolStateAddress,
@@ -659,10 +659,10 @@ impl ProtocolStateEngine {
 
     /// Unblocks a contact, given its record or the record's absence.
     ///
-    /// Existing Sessions remain usable, and the next Message carries the current Inbox Grant over
+    /// Existing sessions remain usable, and the next message carries the current inbox grant over
     /// them. The contact may have rotated its own inbox during the block, so the first send after
-    /// an unblock asks for its prekey bundle, and a bundle whose Discovery Key is newer starts a
-    /// new Session. Unblocking a stranger blocked before they sent anything deletes their record,
+    /// an unblock asks for its prekey bundle, and a bundle whose discovery key is newer starts a
+    /// new session. Unblocking a stranger blocked before they sent anything deletes their record,
     /// since nobody asked.
     pub fn unblock_contact(
         &self,
@@ -688,10 +688,10 @@ impl ProtocolStateEngine {
         Ok(StateChanges::for_record(address, record, Some(update)))
     }
 
-    /// Records out-of-band Safety Number confirmation for an accepted contact, given its record.
+    /// Records out-of-band safety number confirmation for an accepted contact, given its record.
     ///
-    /// The presented value must match the Safety Number derived from `local_identity_key` and
-    /// `contact_identity_key`. In-band Messages and acknowledgments never call this transition.
+    /// The presented value must match the safety number derived from `local_identity_key` and
+    /// `contact_identity_key`. In-band messages and acknowledgments never call this transition.
     pub fn confirm_contact_safety_number(
         &self,
         local_identity_key: IdentityKey,
@@ -763,7 +763,7 @@ impl ProtocolStateEngine {
         ))
     }
 
-    // Returns the update that makes `session_id` the Session Roost sends on, if it isn't already.
+    // Returns the update that makes `session_id` the session Roost sends on, if it isn't already.
     fn delivery_update(
         &self,
         snapshot: &ProtocolStateSnapshot,
@@ -788,7 +788,7 @@ impl ProtocolStateEngine {
     }
 
     // Returns whether this side started `session_id` and hasn't heard back on it yet, from a peer
-    // whose current Discovery Key is `peer_discovery_key`. A Session the host wiped, or one started
+    // whose current discovery key is `peer_discovery_key`. A session the host wiped, or one started
     // on prekeys the peer's rotation since deleted, awaits nothing, so the peer's new handshake
     // can replace it.
     fn awaits_reply(
@@ -814,31 +814,31 @@ pub enum ProtocolStateError {
     /// The contact is locally blocked.
     #[error("contact is blocked")]
     BlockedContact,
-    /// The contact isn't accepted, so Roost refuses the send: a Grant Update would give a
-    /// requester the Inbox Grant, or no Session exists to send on.
+    /// The contact isn't accepted, so Roost refuses the send: a grant update would give a
+    /// requester the inbox grant, or no session exists to send on.
     #[error("contact is not accepted")]
     ContactNotAccepted,
-    /// A received Contact Inbox Grant's signatures don't verify against its sender's Identity
-    /// Key, so the whole Message is rejected.
+    /// A received contact inbox grant's signatures don't verify against its sender's identity
+    /// key, so the whole message is rejected.
     #[error("inbox grant does not verify")]
     InvalidInboxGrant,
-    /// The contact has no open Contact Request for this side to accept.
+    /// The contact has no open contact request for this side to accept.
     #[error("no contact request to accept")]
     NoContactRequest,
-    /// An established Message needs the peer's Delivery Capability, and no grant has supplied one
-    /// for its current Discovery Key.
+    /// An established message needs the peer's delivery capability, and no grant has supplied one
+    /// for its current discovery key.
     #[error("no delivery capability for this contact")]
     NoDeliveryCapability,
-    /// This side already sent the most Messages allowed before the contact accepts.
+    /// This side already sent the most messages allowed before the contact accepts.
     #[error("contact is not accepted and the limit of {limit} messages is reached")]
     PendingLimitReached {
-        /// Distinct Messages each side may send before acceptance.
+        /// Distinct messages each side may send before acceptance.
         limit: usize,
     },
     /// The time a delivery check was given has no Unix timestamp in milliseconds.
     #[error("time is out of range")]
     TimeOutOfRange,
-    /// A Contact Acceptance arrived on a Session this side didn't start with a Contact Request.
+    /// A contact acceptance arrived on a session this side didn't start with a contact request.
     #[error("contact acceptance answers no request")]
     UnsolicitedAcceptance,
     /// The operation snapshot would hold more entries than its cap.
@@ -847,10 +847,10 @@ pub enum ProtocolStateError {
         /// Most entries one snapshot holds.
         max: usize,
     },
-    /// The most Messages allowed already wait for the contact's acknowledgment on the Session.
+    /// The most messages allowed already wait for the contact's acknowledgment on the session.
     #[error("{limit} messages already wait for an acknowledgment on this session")]
     PendingAcknowledgmentLimitReached {
-        /// Most Messages that wait for an acknowledgment on one Session.
+        /// Most messages that wait for an acknowledgment on one session.
         limit: usize,
     },
     /// A persisted blob failed structural decoding.
@@ -881,16 +881,16 @@ pub enum ProtocolStateError {
     /// Sealing or opening a sealed-sender frame failed.
     #[error("protocol-state sealed frame failed")]
     SealedFrame(#[from] roost_crypto::SealedFrameError),
-    /// A Message transcript signature failed context framing or verification.
+    /// A message transcript signature failed context framing or verification.
     #[error("protocol-state signature failed")]
     Signature(#[from] SignatureError),
-    /// A Message's fields are too long for its transcript.
+    /// A message's fields are too long for its transcript.
     #[error("message transcript failed")]
     MessageTranscript(#[from] MessageTranscriptError),
-    /// A plaintext doesn't fit the padding, or a received Message's padding is malformed.
+    /// A plaintext doesn't fit the padding, or a received message's padding is malformed.
     #[error("sealed payload padding failed")]
     SealedPayload(#[from] SealedPayloadError),
-    /// A Message's content is longer than Roost accepts.
+    /// A message's content is longer than Roost accepts.
     #[error("message content is {len} bytes, longer than {max}")]
     ContentTooLong {
         /// Length of the content.
@@ -901,7 +901,7 @@ pub enum ProtocolStateError {
     /// Sender-certificate validation failed during receive.
     #[error("sender certificate validation failed")]
     SenderCertificateValidation(#[source] SenderCertificateValidationError),
-    /// A Message did not carry the expected ratcheted payload.
+    /// A message did not carry the expected ratcheted payload.
     #[error("invalid message: {reason}")]
     InvalidMessage {
         /// Diagnostic failure context for logs only.
@@ -958,7 +958,7 @@ pub enum ProtocolStateError {
     },
 }
 
-// Computes the digest a Commit Condition holds for a record that must stay unchanged.
+// Computes the digest a commit condition holds for a record that must stay unchanged.
 fn protocol_state_blob_digest(blob: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"RoostProtocolStateCommit-v1:");
@@ -1060,7 +1060,7 @@ fn validate_contact_identity_key(
 }
 
 // Hashes `label`, then `transport_binding` and `encoded_message` each after its length, into a
-// Deduplication or acknowledgment digest. Both inputs are far shorter than `u32::MAX` bytes.
+// deduplication or acknowledgment digest. Both inputs are far shorter than `u32::MAX` bytes.
 fn digest_of(
     mut hasher: blake3::Hasher,
     label: &[u8],
