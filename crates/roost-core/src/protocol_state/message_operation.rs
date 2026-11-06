@@ -2550,12 +2550,13 @@ mod tests {
                 message,
                 transport_binding: TransportBinding::new(b"route".to_vec()).unwrap(),
                 settings: ReceiveSettings::default(),
-                sender_certificate_validation: SenderCertificateValidation {
-                    domain_signing_keys: Vec::new(),
-                    expected_relay_domain: b"relay.test".to_vec(),
-                    revocation_state: roost_protocol::RevocationState::Available(Vec::new()),
-                    reference_time: SystemTime::UNIX_EPOCH,
-                },
+                sender_certificate_validation: SenderCertificateValidation::new(
+                    Vec::new(),
+                    b"relay.test".to_vec(),
+                    roost_protocol::RevocationState::Available(Vec::new()),
+                    SystemTime::UNIX_EPOCH,
+                )
+                .unwrap(),
                 acknowledgment_sent_at_millis: 0,
                 acknowledgment_sender_certificate: SignedSenderCertificate {
                     certificate: Vec::new(),

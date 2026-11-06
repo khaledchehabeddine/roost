@@ -2,8 +2,8 @@
 
 use crate::support::device::{Decrypted, Device, Relay, Sealed, run_encryption};
 use crate::support::{
-    CREATED_AT_SECS, HostStore, ProtocolFixture, accepted, trusted_domain_signing_key,
-    trusted_validation, validation,
+    CREATED_AT_SECS, HostStore, ProtocolFixture, TEST_RELAY_DOMAIN, accepted,
+    trusted_domain_signing_key, trusted_validation, validation,
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -14,7 +14,9 @@ use roost_core::{
     SenderCertificateValidation, SignedSenderCertificate,
 };
 use roost_crypto::{KeyPair, RatchetError, SealedFrameError};
-use roost_protocol::{MAX_CERTIFICATE_GRACE_WINDOW, PayloadKind, SenderCertificateValidationError};
+use roost_protocol::{
+    MAX_CERTIFICATE_GRACE_WINDOW, PayloadKind, SenderCertificateValidationError, from_unix_secs,
+};
 use std::time::Duration;
 
 fn rng(seed: u8) -> ChaCha20Rng {
@@ -530,10 +532,13 @@ fn revoked_certificate_rejects_before_local_block_handling() {
 #[test]
 fn a_certificate_that_fails_validation_rejects_before_plaintext_is_surfaced() {
     let fixture = ProtocolFixture::new();
-    let unavailable_revocations = SenderCertificateValidation {
-        revocation_state: RevocationState::Unavailable,
-        ..trusted_validation()
-    };
+    let unavailable_revocations = SenderCertificateValidation::new(
+        vec![trusted_domain_signing_key()],
+        TEST_RELAY_DOMAIN.to_vec(),
+        RevocationState::Unavailable,
+        from_unix_secs(CREATED_AT_SECS).unwrap(),
+    )
+    .unwrap();
     let cases = [
         (
             fixture.alice.certificate(),
