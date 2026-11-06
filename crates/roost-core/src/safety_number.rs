@@ -1,28 +1,9 @@
-use roost_protocol::{
-    PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
-};
+use roost_protocol::IdentityKey;
 
 const SAFETY_NUMBER_DOMAIN_TAG: &[u8] = b"RoostSafetyNumber-v1:";
 const SAFETY_NUMBER_DIGITS: usize = 60;
 const SAFETY_NUMBER_GROUP_SIZE: usize = 5;
 const SAFETY_NUMBER_GROUPS: usize = 12;
-
-/// A permanent Identity Key, which owns Safety Numbers, trust, and certificate decisions.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct IdentityKey {
-    /// Canonical X25519 public key bytes.
-    pub x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    /// Canonical Ed25519 verifying-key bytes.
-    pub ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-}
-
-impl IdentityKey {
-    /// Returns the canonical Identity Key encoding that Safety Numbers and contact state use.
-    #[must_use]
-    pub(crate) fn canonical_encoding(&self) -> [u8; roost_protocol::IDENTITY_KEY_ENCODING_LEN] {
-        roost_protocol::identity_key_encoding(&self.x25519_public_key, &self.ed25519_verifying_key)
-    }
-}
 
 /// A Safety Number derived from two permanent Identity Keys.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,13 +50,9 @@ pub fn derive_safety_number(
     })
 }
 
-pub(crate) fn identity_key_is_valid(identity_key: &IdentityKey) -> bool {
-    is_valid_x25519_public_key(&identity_key.x25519_public_key)
-        && parse_ed25519_verifying_key_bytes(&identity_key.ed25519_verifying_key).is_some()
-}
-
 fn validate_identity_key(identity_key: &IdentityKey) -> Result<(), SafetyNumberError> {
-    identity_key_is_valid(identity_key)
+    identity_key
+        .is_valid()
         .then_some(())
         .ok_or(SafetyNumberError::InvalidIdentityKey)
 }

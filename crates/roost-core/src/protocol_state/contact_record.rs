@@ -10,7 +10,6 @@ use super::{
 };
 use crate::contact::{ContactDiscoveryKey, ContactIdentityKey, ContactState, ContactTrustState};
 use crate::hardening::{MAX_MESSAGES_BEFORE_ACCEPTANCE, ProtocolHardeningLimits};
-use crate::safety_number::identity_key_is_valid;
 use roost_crypto::RecipientDeliveryCapability;
 use roost_protocol::{MessageId, PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
 use serde::{Deserialize, Serialize};
@@ -448,7 +447,7 @@ impl ContactRecord {
             x25519_public_key: wire.identity_x25519_public_key,
             ed25519_verifying_key: wire.identity_ed25519_verifying_key,
         };
-        if !identity_key_is_valid(&identity_key) {
+        if !identity_key.is_valid() {
             return Err(decode_error(address, "contact identity key is invalid"));
         }
         if address

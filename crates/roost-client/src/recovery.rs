@@ -330,7 +330,7 @@ impl OutgoingRecovery {
     fn into_core(self) -> Result<roost_core::OutgoingRecovery, RoostError> {
         Ok(roost_core::OutgoingRecovery {
             recipient: self.recipient.to_core()?,
-            sender_certificate: self.sender_certificate.into_core(),
+            sender_certificate: self.sender_certificate.into_core()?,
             prekey_bundle: self
                 .prekey_bundle
                 .as_ref()

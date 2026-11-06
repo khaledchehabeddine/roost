@@ -1,13 +1,13 @@
-//! Authenticated Message metadata, transcript construction, and sealed payload padding.
+//! Authenticated message metadata, transcript construction, and sealed payload padding.
 
 use crate::key_encoding::PUBLIC_KEY_LEN;
+use crate::sender_certificate::MAX_SENDER_CERTIFICATE_LEN;
 use zeroize::Zeroizing;
 
 const SESSION_ID_LEN: usize = 16;
 const MESSAGE_ID_LEN: usize = 16;
-/// Domain separator for established Message signatures.
+/// Domain separator for established message signatures.
 pub const MESSAGE_TRANSCRIPT_CONTEXT: &[u8] = b"RoostMessageTranscript-v1:";
-// Length of the plaintext-size prefix at the start of a padded payload.
 const SEALED_PAYLOAD_LEN_PREFIX_LEN: usize = 4;
 // Padded payload lengths, including the length prefix.
 const SEALED_PAYLOAD_BUCKETS: [usize; 12] = [
@@ -18,8 +18,6 @@ const MAX_TRANSCRIPT_PAYLOAD_LEN: usize = SEALED_PAYLOAD_BUCKETS[SEALED_PAYLOAD_
 /// Longest plaintext the largest padding bucket holds.
 pub const MAX_SEALED_PLAINTEXT_LEN: usize =
     MAX_TRANSCRIPT_PAYLOAD_LEN - SEALED_PAYLOAD_LEN_PREFIX_LEN;
-// Longest sender certificate a Message transcript accepts.
-const MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
 // The fixed-width transcript fields, plus the length prefixes of its payload and certificate.
 const TRANSCRIPT_FIXED_LEN: usize = SESSION_ID_LEN
     + PUBLIC_KEY_LEN
@@ -28,14 +26,14 @@ const TRANSCRIPT_FIXED_LEN: usize = SESSION_ID_LEN
     + size_of::<u8>()
     + 2 * size_of::<u32>();
 
-/// The identifier both peers derive from a Session's handshake.
+/// The identifier both peers derive from a session's handshake.
 ///
-/// It addresses the Session's state and travels sealed in every Message on the Session.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+/// It addresses the session's state and travels sealed in every message on the session.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SessionId([u8; SESSION_ID_LEN]);
 
 impl SessionId {
-    /// Creates a Session identifier from its bytes.
+    /// Creates a session identifier from its bytes.
     #[must_use]
     pub fn from_bytes(bytes: [u8; SESSION_ID_LEN]) -> Self {
         Self(bytes)
@@ -48,12 +46,12 @@ impl SessionId {
     }
 }
 
-/// The identifier a sender gives a Message.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+/// The identifier a sender gives a message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MessageId([u8; MESSAGE_ID_LEN]);
 
 impl MessageId {
-    /// Creates a Message identifier from its bytes.
+    /// Creates a message identifier from its bytes.
     #[must_use]
     pub fn from_bytes(bytes: [u8; MESSAGE_ID_LEN]) -> Self {
         Self(bytes)
@@ -66,20 +64,20 @@ impl MessageId {
     }
 }
 
-/// The semantic type of a Message payload.
+/// The semantic type of a message payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PayloadKind {
-    /// Encrypted application text content.
-    EncryptedText,
-    /// Delivery or processing acknowledgment.
+    /// Content from the app.
+    Content,
+    /// A delivery acknowledgment.
     Acknowledgment,
-    /// Encrypted application text content that follows the sender's Inbox Grant.
-    EncryptedTextWithGrant,
-    /// A Contact Acceptance: the accepter's Inbox Grant, then encrypted application text content.
+    /// Content from the app that follows the sender's inbox grant.
+    ContentWithGrant,
+    /// A contact acceptance: the accepter's inbox grant, then content from the app.
     ContactAcceptance,
-    /// An acknowledgment that follows the sender's Inbox Grant.
+    /// An acknowledgment that follows the sender's inbox grant.
     AcknowledgmentWithGrant,
-    /// A Grant Update: the sender's Inbox Grant and no content.
+    /// A grant update: the sender's inbox grant and no content.
     GrantUpdate,
 }
 
@@ -87,10 +85,10 @@ impl PayloadKind {
     /// Returns the canonical wire tag.
     pub fn tag(self) -> u8 {
         match self {
-            PayloadKind::EncryptedText => 0,
+            PayloadKind::Content => 0,
             PayloadKind::Acknowledgment => 1,
             // Tags 2 and 3 belonged to removed kinds.
-            PayloadKind::EncryptedTextWithGrant => 4,
+            PayloadKind::ContentWithGrant => 4,
             PayloadKind::ContactAcceptance => 5,
             PayloadKind::AcknowledgmentWithGrant => 6,
             PayloadKind::GrantUpdate => 7,
@@ -100,9 +98,9 @@ impl PayloadKind {
     /// Returns the payload kind a canonical wire tag names, or `None` for an unknown tag.
     pub fn from_tag(tag: u8) -> Option<Self> {
         match tag {
-            0 => Some(PayloadKind::EncryptedText),
+            0 => Some(PayloadKind::Content),
             1 => Some(PayloadKind::Acknowledgment),
-            4 => Some(PayloadKind::EncryptedTextWithGrant),
+            4 => Some(PayloadKind::ContentWithGrant),
             5 => Some(PayloadKind::ContactAcceptance),
             6 => Some(PayloadKind::AcknowledgmentWithGrant),
             7 => Some(PayloadKind::GrantUpdate),
@@ -110,18 +108,18 @@ impl PayloadKind {
         }
     }
 
-    /// Returns whether the payload starts with the sender's Inbox Grant.
+    /// Returns whether the payload starts with the sender's inbox grant.
     pub fn carries_grant(self) -> bool {
         matches!(
             self,
-            PayloadKind::EncryptedTextWithGrant
+            PayloadKind::ContentWithGrant
                 | PayloadKind::ContactAcceptance
                 | PayloadKind::AcknowledgmentWithGrant
                 | PayloadKind::GrantUpdate
         )
     }
 
-    /// Returns whether the payload acknowledges an earlier Message.
+    /// Returns whether the payload acknowledges an earlier message.
     pub fn is_acknowledgment(self) -> bool {
         matches!(
             self,
@@ -130,13 +128,13 @@ impl PayloadKind {
     }
 }
 
-/// Fields authenticated by an established Message signature.
+/// Fields authenticated by an established message signature.
 pub struct MessageTranscriptInput<'a> {
-    /// Session the Message belongs to.
+    /// Session the message belongs to.
     pub session_id: SessionId,
     /// Canonical recipient Ed25519 Identity Key.
     pub recipient_identity_verifying_key: &'a [u8; PUBLIC_KEY_LEN],
-    /// Sender-selected Message ID.
+    /// Sender-selected message ID.
     pub id: MessageId,
     /// Sender-observed Unix timestamp in milliseconds.
     pub sent_at_millis: u64,
@@ -160,14 +158,14 @@ pub fn message_transcript(
             max: MAX_TRANSCRIPT_PAYLOAD_LEN,
         },
     )?;
-    let sender_certificate_len = transcript_length_prefix(
-        input.sender_certificate,
-        MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN,
-    )
-    .ok_or(MessageTranscriptError::SenderCertificateTooLong {
-        len: input.sender_certificate.len(),
-        max: MAX_TRANSCRIPT_SENDER_CERTIFICATE_LEN,
-    })?;
+    let sender_certificate_len =
+        transcript_length_prefix(input.sender_certificate, MAX_SENDER_CERTIFICATE_LEN).ok_or(
+            MessageTranscriptError::SenderCertificateTooLong {
+                len: input.sender_certificate.len(),
+                max: MAX_SENDER_CERTIFICATE_LEN,
+            },
+        )?;
+
     // Both limits keep this sum far below `usize::MAX`.
     let capacity = TRANSCRIPT_FIXED_LEN + input.payload.len() + input.sender_certificate.len();
     let mut transcript = Zeroizing::new(Vec::with_capacity(capacity));
@@ -183,7 +181,6 @@ pub fn message_transcript(
     Ok(transcript)
 }
 
-// Returns a transcript field's big-endian length prefix, or `None` when it exceeds `max_len`.
 fn transcript_length_prefix(field: &[u8], max_len: usize) -> Option<[u8; 4]> {
     if field.len() > max_len {
         return None;
@@ -191,7 +188,7 @@ fn transcript_length_prefix(field: &[u8], max_len: usize) -> Option<[u8; 4]> {
     u32::try_from(field.len()).ok().map(u32::to_be_bytes)
 }
 
-/// An error returned while building a Message Transcript.
+/// An error returned while building a message transcript.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum MessageTranscriptError {
     /// The payload is longer than a transcript accepts.
@@ -223,6 +220,7 @@ pub fn pad_sealed_payload(plaintext: &[u8]) -> Result<Zeroizing<Vec<u8>>, Sealed
         .find(|bucket| plaintext.len() <= bucket - SEALED_PAYLOAD_LEN_PREFIX_LEN)
         .ok_or_else(too_long)?;
     let plaintext_len = u32::try_from(plaintext.len()).map_err(|_| too_long())?;
+
     let mut padded = Zeroizing::new(Vec::with_capacity(bucket));
     padded.extend_from_slice(&plaintext_len.to_be_bytes());
     padded.extend_from_slice(plaintext);
@@ -237,6 +235,7 @@ pub fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedP
     if !SEALED_PAYLOAD_BUCKETS.contains(&padded.len()) {
         return Err(invalid_bucket());
     }
+
     let (len_prefix, body) = padded
         .split_first_chunk::<SEALED_PAYLOAD_LEN_PREFIX_LEN>()
         .ok_or_else(invalid_bucket)?;
@@ -248,6 +247,7 @@ pub fn unpad_sealed_payload(padded: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealedP
             plaintext_len,
             max: body.len(),
         })?;
+
     if fill.iter().any(|byte| *byte != 0) {
         return Err(SealedPayloadError::NonzeroPadding);
     }
@@ -290,14 +290,54 @@ pub enum SealedPayloadError {
 mod tests {
     use super::*;
 
+    const RECIPIENT_KEY: [u8; PUBLIC_KEY_LEN] = [0x02; PUBLIC_KEY_LEN];
+
+    fn transcript_input<'a>(
+        payload: &'a [u8],
+        sender_certificate: &'a [u8],
+    ) -> MessageTranscriptInput<'a> {
+        MessageTranscriptInput {
+            session_id: SessionId::from_bytes([0x01; SESSION_ID_LEN]),
+            recipient_identity_verifying_key: &RECIPIENT_KEY,
+            id: MessageId::from_bytes([0x03; MESSAGE_ID_LEN]),
+            sent_at_millis: 0x0405,
+            payload_kind: PayloadKind::GrantUpdate,
+            payload,
+            sender_certificate,
+        }
+    }
+
+    #[test]
+    fn message_transcript_puts_each_field_in_order() {
+        let transcript = message_transcript(transcript_input(b"pay", b"cert")).unwrap();
+
+        let expected = [
+            &[0x01; SESSION_ID_LEN][..],
+            &RECIPIENT_KEY,
+            &[0x03; MESSAGE_ID_LEN],
+            &0x0405u64.to_be_bytes(),
+            &[PayloadKind::GrantUpdate.tag()],
+            &3u32.to_be_bytes(),
+            b"pay",
+            &4u32.to_be_bytes(),
+            b"cert",
+        ]
+        .concat();
+        assert_eq!(transcript.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn message_transcript_allocates_exactly_its_length() {
+        let transcript = message_transcript(transcript_input(&[0x04; 100], &[0x05; 200])).unwrap();
+        assert_eq!(transcript.capacity(), transcript.len());
+    }
+
     #[test]
     fn sealed_payload_padding_unpads_each_bucket() {
         for bucket in SEALED_PAYLOAD_BUCKETS {
             let plaintext = vec![0x42; bucket - SEALED_PAYLOAD_LEN_PREFIX_LEN];
-
             let padded = pad_sealed_payload(&plaintext).unwrap();
             let unpadded = unpad_sealed_payload(&padded).unwrap();
-
             assert_eq!(padded.len(), bucket);
             assert_eq!(unpadded.as_slice(), plaintext.as_slice());
         }
@@ -310,9 +350,7 @@ mod tests {
             let mut padded = vec![0x41; bucket];
             padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN]
                 .copy_from_slice(&u32::try_from(plaintext_len).unwrap().to_be_bytes());
-
             let plaintext = unpad_sealed_payload(&padded).unwrap();
-
             assert_eq!(plaintext.len(), plaintext_len);
             assert!(plaintext.iter().all(|byte| *byte == 0x41));
         }
@@ -334,7 +372,6 @@ mod tests {
         let max = SEALED_PAYLOAD_BUCKETS[0] - SEALED_PAYLOAD_LEN_PREFIX_LEN;
         let plaintext_len = u32::try_from(max + 1).unwrap();
         padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&plaintext_len.to_be_bytes());
-
         assert_eq!(
             unpad_sealed_payload(&padded),
             Err(SealedPayloadError::LengthPrefixTooLarge { plaintext_len, max })
@@ -347,7 +384,6 @@ mod tests {
         padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN].copy_from_slice(&1u32.to_be_bytes());
         padded[SEALED_PAYLOAD_LEN_PREFIX_LEN] = 0xaa;
         padded[SEALED_PAYLOAD_LEN_PREFIX_LEN + 1] = 0x01;
-
         assert_eq!(
             unpad_sealed_payload(&padded),
             Err(SealedPayloadError::NonzeroPadding)

@@ -46,7 +46,7 @@ This list describes what Roost does today. Each feature gets one to three senten
 
 - **Hide the sender.** Every Message, including acknowledgments, travels in the Sealed Sender Frame, which shows only what routing needs. Roost pads the content to the next power-of-two size.
 - **Authenticate the sender.** A First Message proves its sender holds their Identity Key, with a proof only the recipient can check. Each Established Message carries the sender's signature over its Message Transcript.
-- **Check Sender Certificates.** Roost checks the Sender Certificate of every Message it opens against the trusted domain keys, Relay Domain, revoked Identity Keys, and time the app passes. It refuses the certificate when the app reports its revocation data as unavailable. Roost also runs this check on any Sender Certificate the app passes.
+- **Check Sender Certificates.** Roost checks the Sender Certificate of every Message it opens against the trusted domain keys, Relay Domain, revoked Identity Keys, time, and expiry grace window of up to 5 minutes that the app passes. It refuses the certificate when the app reports its revocation data as unavailable. Roost also runs this check on any Sender Certificate the app passes.
 
 ## Delivery
 

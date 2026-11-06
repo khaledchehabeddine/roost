@@ -50,7 +50,7 @@ fn an_unchanged_discovery_key_keeps_the_session_and_carries_the_new_grant() {
     let sent = alice.send_with(outgoing, Intent::Message);
 
     assert_eq!(sent.session_id, kept);
-    assert_eq!(sent.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(sent.payload_kind, PayloadKind::ContentWithGrant);
     assert_eq!(Route::of(&sent.destination), bob.established_route());
     bob.receive(&sent.message);
     assert_eq!(
@@ -112,7 +112,7 @@ fn accepting_a_requester_that_rotated_during_the_block_sends_a_crossing_request(
 
     let sent = bob.send_with(outgoing, Intent::Acceptance);
 
-    assert_eq!(sent.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(sent.payload_kind, PayloadKind::ContentWithGrant);
     assert!(matches!(
         Route::of(&sent.destination),
         Route::FirstMessage { .. }
@@ -149,7 +149,7 @@ fn a_message_to_a_requester_that_rotated_during_the_block_accepts_it() {
 
     let sent = bob.send_with(outgoing, Intent::Message);
 
-    assert_eq!(sent.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(sent.payload_kind, PayloadKind::ContentWithGrant);
     assert_eq!(
         bob.contact(&alice).unwrap().trust_state,
         ContactTrustState::Unverified

@@ -702,7 +702,7 @@ mod tests {
         "RoostMessageTranscript-v1:",
         "RoostIK-v1:",
         "RoostSafetyNumber-v1:",
-        "RoostSenderCertificate-v2:",
+        "RoostSenderCertificate-v1:",
         "RoostProtocolStateCommit-v1:",
         "roost-recipient-delivery-capability-v1",
     ];

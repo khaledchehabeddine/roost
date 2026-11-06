@@ -5,23 +5,22 @@ use device::{Decrypted, Device, Relay, Sealed, binding, run_encryption};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    ContactIdentityKey, InboundMessageOutcome, InboundSenderCertificateValidation, IncomingMessage,
-    KnownDomainSigningKey, MessageDecryptionStep, MessageOperationError, MessageStartError,
-    OutboundMessageResult, OutgoingMessage, ProtocolStateAddress, ProtocolStateBlob,
-    ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings, SealedFrame,
-    SessionId, SignedSenderCertificate, StateChanges, TransportBinding, commit_conditions_match,
+    ContactIdentityKey, DomainSigningKey, InboundMessageOutcome, IncomingMessage,
+    MessageDecryptionStep, MessageOperationError, MessageStartError, OutboundMessageResult,
+    OutgoingMessage, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKind,
+    ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings, RevocationState, SealedFrame,
+    SenderCertificateValidation, SessionId, SignedSenderCertificate, StateChanges,
+    TransportBinding, commit_conditions_match,
 };
 use roost_crypto::{SigningKeyPair, generate_signing_key_pair};
-use roost_protocol::{
-    DomainSigningKeyStatus, MessageId, SenderCertificateIdentityKey, from_unix_secs,
-};
+use roost_protocol::{MessageId, from_unix_secs};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
 pub(crate) const CREATED_AT_SECS: u64 = 1_700_000_000;
 pub(crate) const TEST_RELAY_DOMAIN: &[u8] = b"relay.test";
-const CERTIFICATE_DOMAIN_TAG: &[u8] = b"RoostSenderCertificate-v2:";
-const CERTIFICATE_VERSION: u8 = 2;
+const CERTIFICATE_LABEL: &[u8] = b"RoostSenderCertificate-v1:";
+const CERTIFICATE_VERSION: u8 = 1;
 const TEST_DOMAIN_ID: &[u8] = b"test-domain";
 
 /// Alice and Bob, each a Device, who accepted each other: Alice asked on the fixture's Session and
@@ -225,29 +224,28 @@ pub(crate) struct StoredMessage {
 }
 
 /// The test domain's signing key, which every Device's Relay certificate names.
-pub(crate) fn trusted_domain_signing_key() -> KnownDomainSigningKey {
-    KnownDomainSigningKey {
+pub(crate) fn trusted_domain_signing_key() -> DomainSigningKey {
+    DomainSigningKey {
         id: TEST_DOMAIN_ID.to_vec(),
         verifying_key: test_domain_key().verifying.to_bytes(),
-        status: DomainSigningKeyStatus::Trusted,
     }
 }
 
 /// Every identity's certificate validation inputs at the fixed test time.
 pub(crate) fn validation(
-    domain_signing_keys: Vec<KnownDomainSigningKey>,
-    revoked_identity_keys: Vec<SenderCertificateIdentityKey>,
-) -> InboundSenderCertificateValidation {
-    InboundSenderCertificateValidation {
+    domain_signing_keys: Vec<DomainSigningKey>,
+    revoked_identity_keys: Vec<ContactIdentityKey>,
+) -> SenderCertificateValidation {
+    SenderCertificateValidation {
         domain_signing_keys,
         expected_relay_domain: TEST_RELAY_DOMAIN.to_vec(),
-        revoked_identity_keys: Some(revoked_identity_keys),
+        revocation_state: RevocationState::Available(revoked_identity_keys),
         reference_time: from_unix_secs(CREATED_AT_SECS).unwrap(),
     }
 }
 
 /// The test domain's validation inputs with nothing revoked.
-pub(crate) fn trusted_validation() -> InboundSenderCertificateValidation {
+pub(crate) fn trusted_validation() -> SenderCertificateValidation {
     validation(vec![trusted_domain_signing_key()], Vec::new())
 }
 
@@ -258,7 +256,7 @@ pub(crate) fn certificate_until(
 ) -> SignedSenderCertificate {
     let certificate = sender_certificate_bytes(TEST_DOMAIN_ID, identity_key, expires_at_secs);
     SignedSenderCertificate {
-        signature: test_domain_key().sign(&certificate).to_bytes().to_vec(),
+        signature: test_domain_key().sign(&certificate).to_bytes(),
         certificate,
     }
 }
@@ -368,7 +366,7 @@ impl ProtocolFixture {
         &self,
         message: &SealedFrame,
         settings: ReceiveSettings,
-        validation: InboundSenderCertificateValidation,
+        validation: SenderCertificateValidation,
     ) -> IncomingMessage {
         IncomingMessage {
             message: message.clone(),
@@ -517,13 +515,12 @@ pub(crate) fn sender_certificate_bytes(
     identity_key: ContactIdentityKey,
     expires_at_secs: u64,
 ) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(CERTIFICATE_DOMAIN_TAG);
+    let mut bytes = CERTIFICATE_LABEL.to_vec();
     bytes.push(CERTIFICATE_VERSION);
-    bytes.push(signing_key_id.len() as u8);
-    bytes.extend_from_slice(signing_key_id);
-    bytes.push(TEST_RELAY_DOMAIN.len() as u8);
-    bytes.extend_from_slice(TEST_RELAY_DOMAIN);
+    for field in [signing_key_id, TEST_RELAY_DOMAIN] {
+        bytes.extend_from_slice(&u32::try_from(field.len()).unwrap().to_be_bytes());
+        bytes.extend_from_slice(field);
+    }
     bytes.extend_from_slice(&identity_key.x25519_public_key);
     bytes.extend_from_slice(&identity_key.ed25519_verifying_key);
     bytes.extend_from_slice(&expires_at_secs.to_be_bytes());

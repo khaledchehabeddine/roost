@@ -5,9 +5,8 @@ use crate::support::{
     issue_certificate,
 };
 use roost_client::{
-    DomainSigningKey, DomainSigningKeyStatus, IdentityContext, IdentityKey, OperationId,
-    OperationStatus, RevocationState, RoostError, SenderCertificateValidation,
-    SignedSenderCertificate, ValidatedSenderCertificate,
+    DomainSigningKey, IdentityContext, IdentityKey, OperationId, OperationStatus, RevocationState,
+    RoostError, SenderCertificateValidation, SignedSenderCertificate, ValidatedSenderCertificate,
 };
 use roost_crypto::{KeyPair, SigningKeyPair};
 use roost_protocol::SenderCertificateValidationError;
@@ -174,7 +173,6 @@ impl IssuedCertificate {
             domain_signing_keys: vec![DomainSigningKey {
                 id: DOMAIN_SIGNING_KEY_ID.to_vec(),
                 verifying_key: self.domain_verifying_key.clone(),
-                status: DomainSigningKeyStatus::Trusted,
             }],
             expected_relay_domain: RELAY_DOMAIN.to_vec(),
             revocation_state: RevocationState {
@@ -228,7 +226,6 @@ fn expired_sender_certificate_validates_only_within_the_passed_grace() {
         .validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS, 0)
         .unwrap();
     assert_eq!(validated.identity_key, signed.identity_key);
-    assert_eq!(validated.relay_domain, RELAY_DOMAIN);
     assert_eq!(validated.expires_at_millis, CERTIFICATE_EXPIRES_AT_MILLIS);
     assert_rejected_for(
         signed.validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS + 1, 0),

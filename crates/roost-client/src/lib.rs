@@ -28,8 +28,7 @@ mod transport_binding;
 
 pub use binding::{verify_discovery_to_identity_binding, verify_identity_key_binding};
 pub use certificate::{
-    DomainSigningKey, DomainSigningKeyStatus, RevocationState, SenderCertificateValidation,
-    ValidatedSenderCertificate,
+    DomainSigningKey, RevocationState, SenderCertificateValidation, ValidatedSenderCertificate,
 };
 pub use contact::{
     ContactBlock, ContactSafetyNumberConfirmation, ContactState, ContactTrustState, SafetyNumber,

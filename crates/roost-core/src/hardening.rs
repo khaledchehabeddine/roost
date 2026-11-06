@@ -1,13 +1,12 @@
 use crate::ProtocolStateError;
 use roost_crypto::SealedFrame;
+use roost_protocol::MAX_SENDER_CERTIFICATE_LEN;
 
 pub(crate) const DEFAULT_DEDUPLICATION_CAPACITY: usize = 1024;
 pub(crate) const MIN_DEDUPLICATION_CAPACITY: usize = 64;
 pub(crate) const MAX_DEDUPLICATION_CAPACITY: usize = 2048;
 
 const MAX_PROTOCOL_STATE_BLOB_LEN: usize = 64 * 1024;
-const MAX_SENDER_CERTIFICATE_LEN: usize = 16 * 1024;
-const MAX_SENDER_SIGNATURE_LEN: usize = 4 * 1024;
 pub(crate) const MAX_PENDING_ACKNOWLEDGMENTS: usize = 1024;
 pub(crate) const MAX_ACKNOWLEDGMENT_DIGESTS: usize = 1024;
 /// How many distinct Messages each side may send a contact before the contact is accepted.
@@ -25,8 +24,6 @@ pub struct ProtocolHardeningLimits {
     pub max_protocol_state_blob_len: usize,
     /// Maximum sender certificate bytes accepted after sealed-sender decrypt.
     pub max_sender_certificate_len: usize,
-    /// Maximum sender signature bytes accepted after sealed-sender decrypt.
-    pub max_sender_signature_len: usize,
     /// Maximum pending outbound Messages retained for acknowledgment processing.
     pub max_pending_acknowledgments: usize,
     /// Maximum processed acknowledgment digests retained for duplicate detection.
@@ -47,7 +44,6 @@ impl Default for ProtocolHardeningLimits {
             max_encoded_message_len: SealedFrame::MAX_ENCODED_LEN,
             max_protocol_state_blob_len: MAX_PROTOCOL_STATE_BLOB_LEN,
             max_sender_certificate_len: MAX_SENDER_CERTIFICATE_LEN,
-            max_sender_signature_len: MAX_SENDER_SIGNATURE_LEN,
             max_pending_acknowledgments: MAX_PENDING_ACKNOWLEDGMENTS,
             max_acknowledgment_digests: MAX_ACKNOWLEDGMENT_DIGESTS,
             min_deduplication_capacity: MIN_DEDUPLICATION_CAPACITY,

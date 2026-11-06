@@ -59,3 +59,7 @@ fn load_example_set(storage: &ExampleStorage) -> Result<ExampleSet, ExampleError
     Ok(storage.load()?.unwrap_or_default())
 }
 ```
+
+## Blank Lines
+
+- Use a blank line only between steps, such as checking input and changing state, in a function body longer than ten lines.

@@ -904,8 +904,6 @@ version = "0.16.0"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
- "rand",
- "rand_chacha",
  "subtle",
  "thiserror",
  "zeroize",

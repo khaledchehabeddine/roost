@@ -9,15 +9,12 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     BlockedContactAcknowledgmentPolicy, ContactTrustState, InboundMessageOutcome,
-    InboundSenderCertificateValidation, MessageOperationError, MessageStartError,
-    ProtocolHardeningLimits, ProtocolStateAddress, ProtocolStateError, ProtocolStateKind,
-    ReceiveSettings, SealedFrame, SignedSenderCertificate,
+    MessageOperationError, MessageStartError, ProtocolHardeningLimits, ProtocolStateAddress,
+    ProtocolStateError, ProtocolStateKind, ReceiveSettings, RevocationState, SealedFrame,
+    SenderCertificateValidation, SignedSenderCertificate,
 };
 use roost_crypto::{KeyPair, RatchetError, SealedFrameError};
-use roost_protocol::{
-    DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, PayloadKind,
-    SenderCertificateIdentityKey, SenderCertificateValidationError,
-};
+use roost_protocol::{MAX_CERTIFICATE_GRACE_WINDOW, PayloadKind, SenderCertificateValidationError};
 use std::time::Duration;
 
 fn rng(seed: u8) -> ChaCha20Rng {
@@ -55,7 +52,7 @@ fn bob_receives(
     store: &HostStore,
     message: &SealedFrame,
     settings: ReceiveSettings,
-    sender_certificate_validation: InboundSenderCertificateValidation,
+    sender_certificate_validation: SenderCertificateValidation,
     seed: u8,
 ) -> Result<Decrypted, MessageOperationError> {
     fixture.decrypt(
@@ -120,14 +117,6 @@ fn block_alice(fixture: &mut ProtocolFixture) -> ProtocolStateAddress {
         .into_iter()
         .find(|address| !older.contains(address))
         .expect("the request starts a Session")
-}
-
-fn alice_revoked_identity_key(fixture: &ProtocolFixture) -> SenderCertificateIdentityKey {
-    let identity_key = fixture.alice.identity_key();
-    SenderCertificateIdentityKey {
-        x25519_public_key: identity_key.x25519_public_key,
-        ed25519_verifying_key: identity_key.ed25519_verifying_key,
-    }
 }
 
 fn blob(store: &HostStore, address: &ProtocolStateAddress) -> Vec<u8> {
@@ -218,7 +207,7 @@ fn sealed_frame_hides_message_metadata_until_decrypt() {
 
     assert_eq!(decrypted.message_id, encrypted.message_id);
     assert_eq!(decrypted.sent_at_millis, 1_700_000_300_000 + 0x42);
-    assert_eq!(decrypted.payload_kind, PayloadKind::EncryptedText);
+    assert_eq!(decrypted.payload_kind, PayloadKind::Content);
     assert_eq!(decrypted.plaintext.as_slice(), b"hidden metadata");
 }
 
@@ -323,32 +312,23 @@ fn oversized_inbound_message_rejects_before_any_read() {
 }
 
 #[test]
-fn oversized_sender_material_is_refused_before_sealing() {
+fn oversized_sender_certificate_is_refused_before_sealing() {
     let fixture = ProtocolFixture::new();
     let limits = ProtocolHardeningLimits::default();
-    let certificate = fixture.alice.certificate();
-    for oversized in [
-        SignedSenderCertificate {
-            certificate: vec![0; limits.max_sender_certificate_len + 1],
-            signature: certificate.signature.clone(),
-        },
-        SignedSenderCertificate {
-            certificate: certificate.certificate.clone(),
-            signature: vec![0; limits.max_sender_signature_len + 1],
-        },
-    ] {
-        let mut outgoing = fixture.outgoing(0x39, b"certificate limit");
-        outgoing.sender_certificate = oversized;
+    let mut outgoing = fixture.outgoing(0x39, b"certificate limit");
+    outgoing.sender_certificate = SignedSenderCertificate {
+        certificate: vec![0; limits.max_sender_certificate_len + 1],
+        signature: fixture.alice.certificate().signature,
+    };
 
-        let result = fixture.alice.store.start_encryption(outgoing);
+    let result = fixture.alice.store.start_encryption(outgoing);
 
-        assert!(matches!(
-            result,
-            Err(MessageStartError::ProtocolState(
-                ProtocolStateError::InvalidMessage { .. }
-            ))
-        ));
-    }
+    assert!(matches!(
+        result,
+        Err(MessageStartError::ProtocolState(
+            ProtocolStateError::InvalidMessage { .. }
+        ))
+    ));
 }
 
 #[test]
@@ -504,7 +484,7 @@ fn discovery_key_rotation_does_not_bypass_blocked_inbound_message() {
     fixture.alice.store.reserve_operation(rotation.id).unwrap();
     fixture.alice.store.finalize_operation(rotation.id).unwrap();
     let encrypted = alice_sends(&fixture, 0x54, b"rotated blocked").result;
-    assert_eq!(encrypted.payload_kind, PayloadKind::EncryptedTextWithGrant);
+    assert_eq!(encrypted.payload_kind, PayloadKind::ContentWithGrant);
 
     let received =
         bob_receives_validated(&fixture, &fixture.bob.host, &encrypted.message, 0x54).unwrap();
@@ -528,7 +508,7 @@ fn revoked_certificate_rejects_before_local_block_handling() {
     let encrypted = alice_sends(&fixture, 0x55, b"revoked blocked")
         .result
         .message;
-    let revoked = vec![alice_revoked_identity_key(&fixture)];
+    let revoked = vec![fixture.alice.identity_key()];
 
     let result = bob_receives(
         &fixture,
@@ -550,10 +530,8 @@ fn revoked_certificate_rejects_before_local_block_handling() {
 #[test]
 fn a_certificate_that_fails_validation_rejects_before_plaintext_is_surfaced() {
     let fixture = ProtocolFixture::new();
-    let mut untrusted = trusted_domain_signing_key();
-    untrusted.status = DomainSigningKeyStatus::Untrusted;
-    let unavailable_revocations = InboundSenderCertificateValidation {
-        revoked_identity_keys: None,
+    let unavailable_revocations = SenderCertificateValidation {
+        revocation_state: RevocationState::Unavailable,
         ..trusted_validation()
     };
     let cases = [
@@ -564,8 +542,8 @@ fn a_certificate_that_fails_validation_rejects_before_plaintext_is_surfaced() {
         ),
         (
             fixture.alice.certificate(),
-            validation(vec![untrusted], Vec::new()),
-            SenderCertificateValidationError::UntrustedSigningKeyId,
+            validation(Vec::new(), Vec::new()),
+            SenderCertificateValidationError::UnknownSigningKeyId,
         ),
         (
             fixture.alice.certified_until(CREATED_AT_SECS - 1),

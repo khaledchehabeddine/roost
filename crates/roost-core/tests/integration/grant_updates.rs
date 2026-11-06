@@ -143,7 +143,7 @@ fn a_requesters_grant_update_the_asked_side_acknowledged_stops_the_grant() {
     assert_eq!(alice.host.snapshot_bytes(), before);
     assert_eq!(
         alice.send(&bob, b"after the update").payload_kind,
-        PayloadKind::EncryptedText
+        PayloadKind::Content
     );
 }
 

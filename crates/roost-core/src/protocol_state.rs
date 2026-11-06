@@ -14,7 +14,7 @@ use crate::hardening::{
     DEFAULT_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits, validate_deduplication_capacity,
 };
 use crate::key_store::KeyStoreOperationId;
-use crate::safety_number::{IdentityKey, derive_safety_number, identity_key_is_valid};
+use crate::safety_number::derive_safety_number;
 use crate::stored_data::{deserialize_bounded, encode_zeroizing};
 use contact_record::{ContactRecord, contact_address};
 pub use envelope::SenderIdentityMaterial;
@@ -30,11 +30,8 @@ pub(crate) use message_operation::{LocalIdentityKeys, SendIntent};
 pub use pending_acknowledgment::PendingAcknowledgment;
 use roost_crypto::SealedFrame;
 use roost_protocol::{
-    DomainSigningKey, DomainSigningKeyStatus, MAX_CERTIFICATE_GRACE_WINDOW, MessageId,
-    MessageTranscriptError, PUBLIC_KEY_LEN, PayloadKind, RevocationState, SealedPayloadError,
-    SenderCertificateIdentityKey, SenderCertificateValidationError,
-    SenderCertificateValidationInput, SessionId, SignatureError, ValidatedSenderCertificate,
-    validate_sender_certificate,
+    IdentityKey, MAX_CERTIFICATE_GRACE_WINDOW, MessageId, MessageTranscriptError, PUBLIC_KEY_LEN,
+    PayloadKind, SealedPayloadError, SenderCertificateValidationError, SessionId, SignatureError,
 };
 use serde::{Deserialize, Serialize};
 use session::{
@@ -42,7 +39,7 @@ use session::{
 };
 use std::collections::BTreeMap;
 use std::fmt;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use subtle::{Choice, ConstantTimeEq};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -463,65 +460,6 @@ pub struct OutboundMessageResult {
     pub payload_kind: PayloadKind,
     /// Message to hand to the consumer transport after state commit.
     pub message: SealedFrame,
-}
-
-/// Sender-certificate validation inputs for receive-time Identity-keyed decisions.
-///
-/// Core validates the sealed sender certificate after decrypting a unique Message, rejects revoked
-/// Identity Keys before local blocking, and uses the validated sender Identity Key to suppress
-/// blocked inbound plaintext. An unavailable revocation source fails validation closed, so no
-/// plaintext is surfaced without a revocation verdict.
-pub struct InboundSenderCertificateValidation {
-    /// Known domain-signing keys indexed by certificate signing-key identifier.
-    pub domain_signing_keys: Vec<KnownDomainSigningKey>,
-    /// Relay domain the recipient expects incoming certificates to name.
-    pub expected_relay_domain: Vec<u8>,
-    /// Revoked Identity Keys, or `None` when the revocation source failed to load.
-    pub revoked_identity_keys: Option<Vec<SenderCertificateIdentityKey>>,
-    /// Caller-supplied time used for expiry evaluation.
-    pub reference_time: SystemTime,
-}
-
-impl InboundSenderCertificateValidation {
-    /// Validates a sender certificate, accepting one that expired at most `grace` ago.
-    pub fn validate(
-        &self,
-        certificate: &[u8],
-        signature: &[u8],
-        grace: Duration,
-    ) -> Result<ValidatedSenderCertificate, SenderCertificateValidationError> {
-        let domain_signing_keys: Vec<DomainSigningKey<'_>> = self
-            .domain_signing_keys
-            .iter()
-            .map(|key| DomainSigningKey {
-                id: &key.id,
-                verifying_key: &key.verifying_key,
-                status: key.status,
-            })
-            .collect();
-        validate_sender_certificate(SenderCertificateValidationInput {
-            certificate,
-            signature,
-            domain_signing_keys: &domain_signing_keys,
-            expected_relay_domain: &self.expected_relay_domain,
-            revocation_state: match &self.revoked_identity_keys {
-                Some(revoked) => RevocationState::Available(revoked),
-                None => RevocationState::Unavailable,
-            },
-            reference_time: self.reference_time,
-            grace_window: grace,
-        })
-    }
-}
-
-/// A domain-signing key the app knows, trusted or not.
-pub struct KnownDomainSigningKey {
-    /// Identifier matched exactly against the certificate signing-key identifier.
-    pub id: Vec<u8>,
-    /// Canonical Ed25519 verifying-key bytes.
-    pub verifying_key: [u8; PUBLIC_KEY_LEN],
-    /// Whether certificates signed by this key may validate.
-    pub status: DomainSigningKeyStatus,
 }
 
 /// Inbound plaintext from one Message Operation.
@@ -1112,25 +1050,13 @@ fn validate_contact_identity_key(
     address: &ProtocolStateAddress,
     identity_key: &ContactIdentityKey,
 ) -> Result<(), ProtocolStateError> {
-    if !identity_key_is_valid(identity_key) {
+    if !identity_key.is_valid() {
         return Err(ProtocolStateError::InvalidStateBinding {
             address: address.clone(),
             reason: "contact identity key is invalid".into(),
         });
     }
     Ok(())
-}
-
-fn contact_identity_keys_match(left: &ContactIdentityKey, right: &ContactIdentityKey) -> bool {
-    left.x25519_public_key
-        .ct_eq(&right.x25519_public_key)
-        .unwrap_u8()
-        == 1
-        && left
-            .ed25519_verifying_key
-            .ct_eq(&right.ed25519_verifying_key)
-            .unwrap_u8()
-            == 1
 }
 
 // Hashes `label`, then `transport_binding` and `encoded_message` each after its length, into a
