@@ -105,8 +105,8 @@ struct KeyStoreInner {
 /// one identity lock across them, from the first call of any operation, including a message
 /// operation, until its commit is resolved, and while it recovers unfinished operations.
 ///
-/// Methods named `prepare_*` stage a secure-storage change and return it with an operation id.
-/// Reserve the operation, persist its output and id in the host transaction, then finalize:
+/// Methods named `prepare_*` stage a secure-storage change and return it with an operation ID.
+/// Reserve the operation, persist its output and ID in the host transaction, then finalize:
 ///
 /// ```
 /// use roost_core::{KeyStore, KeyStoreError, SecureStorage};
@@ -115,7 +115,7 @@ struct KeyStoreInner {
 ///     let store = KeyStore::new(storage);
 ///     let prepared = store.prepare_identity_creation()?;
 ///     store.reserve_operation(prepared.id)?;
-///     // Persist or publish `prepared.output` with the host operation id.
+///     // Persist or publish `prepared.output` with the host operation ID.
 ///     store.finalize_operation(prepared.id)?;
 ///     Ok(())
 /// }
