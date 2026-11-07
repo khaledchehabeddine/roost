@@ -126,8 +126,8 @@ pub struct PublicSignedPreKey {
 /// Generates a signed prekey with the supplied Ed25519 signing key and caller-allocated
 /// identifier.
 ///
-/// `id` is stable lookup metadata within one discovery-key epoch. It is not part of the signature
-/// payload; a route-bound caller authenticates it as associated data with the encrypted initial.
+/// `id` is stable lookup metadata within one discovery-key epoch. The signature doesn't cover it,
+/// and no frame carries it.
 pub(crate) fn generate_signed_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     signing_key: &SigningKeyPair,
