@@ -1,10 +1,10 @@
 use crate::keys::{PublicKeyError, contributory_diffie_hellman, parse_public_key};
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// A single-use X25519 prekey bound to a discovery-key epoch.
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(ZeroizeOnDrop)]
 pub struct OneTimePreKey {
     #[zeroize(skip)]
     id: u64,
@@ -13,37 +13,24 @@ pub struct OneTimePreKey {
     public_key: PublicKey,
     #[zeroize(skip)]
     epoch: u32,
-    #[zeroize(skip)]
-    created_at_secs: u64,
 }
 
 impl OneTimePreKey {
     /// Restores a one-time prekey from secret bytes and stored metadata.
-    pub fn from_secret_bytes(id: u64, secret: [u8; 32], epoch: u32, created_at_secs: u64) -> Self {
-        let secret_key = StaticSecret::from(secret);
+    pub fn from_secret_bytes(id: u64, secret: &[u8; 32], epoch: u32) -> Self {
+        let secret_key = StaticSecret::from(*secret);
         let public_key = PublicKey::from(&secret_key);
         Self {
             id,
             secret_key,
             public_key,
             epoch,
-            created_at_secs,
         }
-    }
-
-    /// Returns the caller-assigned prekey identifier.
-    pub(crate) fn id(&self) -> u64 {
-        self.id
     }
 
     /// Returns the X25519 public key.
     pub fn public_key(&self) -> &PublicKey {
         &self.public_key
-    }
-
-    /// Returns the discovery-key epoch this prekey was produced under.
-    pub(crate) fn epoch(&self) -> u32 {
-        self.epoch
     }
 
     /// Derives a shared secret with `peer`, or `None` when `peer` forces a known one.
@@ -62,13 +49,12 @@ impl OneTimePreKey {
             id: self.id,
             public_key: self.public_key,
             epoch: self.epoch,
-            created_at_secs: self.created_at_secs,
         }
     }
 }
 
 /// Public one-time prekey material distributed to peers.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PublicOneTimePreKey {
     /// Caller-assigned identifier used by the responder to consume the matching secret key.
     pub id: u64,
@@ -76,8 +62,6 @@ pub struct PublicOneTimePreKey {
     pub public_key: PublicKey,
     /// Discovery-key epoch this prekey was produced under.
     pub epoch: u32,
-    /// Unix timestamp in seconds when this prekey was generated.
-    pub created_at_secs: u64,
 }
 
 impl PublicOneTimePreKey {
@@ -85,17 +69,11 @@ impl PublicOneTimePreKey {
     ///
     /// This checks only the key's encoding. [`initiate_handshake`](crate::initiate_handshake)
     /// rejects a prekey from another epoch than the bundle's discovery key.
-    pub fn from_bytes(
-        id: u64,
-        public_key: &[u8],
-        epoch: u32,
-        created_at_secs: u64,
-    ) -> Result<Self, PublicKeyError> {
+    pub fn from_bytes(id: u64, public_key: &[u8], epoch: u32) -> Result<Self, PublicKeyError> {
         Ok(Self {
             id,
             public_key: parse_public_key(public_key)?,
             epoch,
-            created_at_secs,
         })
     }
 }
@@ -106,7 +84,6 @@ pub fn generate_one_time_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     id: u64,
     epoch: u32,
-    created_at_secs: u64,
 ) -> OneTimePreKey {
     let secret_key = StaticSecret::random_from_rng(&mut *rng);
     let public_key = PublicKey::from(&secret_key);
@@ -115,7 +92,6 @@ pub fn generate_one_time_prekey<R: RngCore + CryptoRng>(
         secret_key,
         public_key,
         epoch,
-        created_at_secs,
     }
 }
 
@@ -128,41 +104,35 @@ mod tests {
     #[test]
     fn public_fields_match_one_time_prekey() {
         let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
-        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
+        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3);
         let bundle = one_time_prekey.public();
-        assert_eq!(bundle.id, one_time_prekey.id());
+        assert_eq!(bundle.id, 9);
         assert_eq!(
             bundle.public_key.as_bytes(),
             one_time_prekey.public_key().as_bytes()
         );
-        assert_eq!(bundle.epoch, one_time_prekey.epoch());
-        assert_eq!(bundle.created_at_secs, 1_700_000_000);
+        assert_eq!(bundle.epoch, 3);
     }
 
     #[test]
     fn public_from_bytes_round_trip_preserves_fields() {
         let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
-        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
+        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3);
         let bundle = one_time_prekey.public();
 
-        let parsed = PublicOneTimePreKey::from_bytes(
-            bundle.id,
-            bundle.public_key.as_bytes(),
-            bundle.epoch,
-            bundle.created_at_secs,
-        )
-        .unwrap();
+        let parsed =
+            PublicOneTimePreKey::from_bytes(bundle.id, bundle.public_key.as_bytes(), bundle.epoch)
+                .unwrap();
 
         assert_eq!(parsed.id, bundle.id);
         assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
         assert_eq!(parsed.epoch, bundle.epoch);
-        assert_eq!(parsed.created_at_secs, bundle.created_at_secs);
     }
 
     #[test]
     fn public_from_bytes_rejects_wrong_public_key_length() {
         assert!(matches!(
-            PublicOneTimePreKey::from_bytes(9, &[0u8; 31], 3, 1_700_000_000),
+            PublicOneTimePreKey::from_bytes(9, &[0u8; 31], 3),
             Err(PublicKeyError::InvalidKeyEncoding)
         ));
     }
@@ -170,14 +140,9 @@ mod tests {
     #[test]
     fn from_secret_bytes_restores_diffie_hellman_secret() {
         let mut rng = ChaCha20Rng::from_seed([0x55u8; 32]);
-        let original = generate_one_time_prekey(&mut rng, 9, 3, 1_700_000_000);
-        let peer = generate_one_time_prekey(&mut rng, 10, 3, 1_700_000_000);
-        let restored = OneTimePreKey::from_secret_bytes(
-            original.id(),
-            *original.to_secret_bytes(),
-            original.epoch(),
-            1_700_000_000,
-        );
+        let original = generate_one_time_prekey(&mut rng, 9, 3);
+        let peer = generate_one_time_prekey(&mut rng, 10, 3);
+        let restored = OneTimePreKey::from_secret_bytes(9, &original.to_secret_bytes(), 3);
         assert_eq!(
             original
                 .diffie_hellman(peer.public_key())

@@ -29,7 +29,7 @@ impl From<&PublicDiscoveryKey> for ContactDiscoveryKey {
             ed25519_verifying_key: value.verifying_key.to_bytes(),
             epoch: value.epoch,
             created_at_secs: value.created_at_secs,
-            identity_signature: value.signature.to_bytes(),
+            identity_signature: value.identity_signature.to_bytes(),
         }
     }
 }

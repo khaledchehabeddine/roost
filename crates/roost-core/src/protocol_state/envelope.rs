@@ -163,7 +163,7 @@ fn seal_message<R: RngCore + CryptoRng>(
         &PublicKey::from(recipient_public_key),
         prekey_reference,
         &frame_plaintext,
-        transport_binding.as_bytes(),
+        transport_binding,
     )?)
 }
 
@@ -179,7 +179,7 @@ pub(super) fn open_message(
     let frame_plaintext = open_frame_for_discovery_key_with_associated_data(
         recipient_discovery_key,
         message,
-        transport_binding.as_bytes(),
+        transport_binding,
     )?;
     let (wire, trailing): (DecodedFramePlaintextWire, &[u8]) =
         postcard::take_from_bytes(&frame_plaintext)
@@ -274,7 +274,7 @@ fn encode_sealed_sender_envelope(
             discovery_to_identity,
             proof,
         } => {
-            identity_signature_bytes = discovery_key.signature.to_bytes();
+            identity_signature_bytes = discovery_key.identity_signature.to_bytes();
             discovery_to_identity_bytes = discovery_to_identity.to_bytes();
             AuthenticationWire::Proof {
                 discovery_key: DiscoveryKeyWire {
@@ -369,7 +369,7 @@ fn decoded_authentication(
                     verifying_key,
                     epoch: discovery_key.epoch,
                     created_at_secs: discovery_key.created_at_secs,
-                    signature: Signature::from_bytes(&identity_signature),
+                    identity_signature: Signature::from_bytes(&identity_signature),
                 }),
                 discovery_to_identity: Signature::from_bytes(&discovery_to_identity),
                 proof,
@@ -840,8 +840,8 @@ mod tests {
 
     #[test]
     fn message_transcript_signature_rejects_field_transplants() {
-        let signing_key = SigningKeyPair::from_signing_bytes([1u8; 32]);
-        let identity_key = KeyPair::from_secret_bytes([2u8; 32]);
+        let signing_key = SigningKeyPair::from_signing_bytes(&[1u8; 32]);
+        let identity_key = KeyPair::from_secret_bytes(&[2u8; 32]);
         let binding_signature =
             sign_identity_key_binding(&signing_key, &identity_key.public).unwrap();
         let sender_identity = SenderIdentityMaterial {
@@ -931,8 +931,8 @@ mod tests {
     }
 
     fn sender(seed: u8) -> Sender {
-        let signing_key = SigningKeyPair::from_signing_bytes([seed; 32]);
-        let agreement_key = KeyPair::from_secret_bytes([seed.wrapping_add(1); 32]);
+        let signing_key = SigningKeyPair::from_signing_bytes(&[seed; 32]);
+        let agreement_key = KeyPair::from_secret_bytes(&[seed.wrapping_add(1); 32]);
         let identity = PublicIdentityKey {
             public_key: agreement_key.public,
             verifying_key: signing_key.verifying,
@@ -989,7 +989,7 @@ mod tests {
             plaintext: Zeroizing::new(Vec::new()),
         };
         let handshake = Handshake {
-            base_key: KeyPair::from_secret_bytes([0x53; 32]).public,
+            base_key: KeyPair::from_secret_bytes(&[0x53; 32]).public,
             responder_discovery_key: *responder_discovery_key.public_key(),
             prekey_reference: SealedFramePreKeyReference {
                 discovery_epoch: 1,
@@ -1052,7 +1052,7 @@ mod tests {
             accept_handshake(&handshake, &bob_discovery_key, &signed_prekey, None).unwrap();
         let binding = TransportBinding::new(b"route".to_vec()).unwrap();
         let limits = ProtocolHardeningLimits::default();
-        let agreement_key = KeyPair::from_secret_bytes([0x11; 32]);
+        let agreement_key = KeyPair::from_secret_bytes(&[0x11; 32]);
         let alice_public_discovery_key = alice_discovery_key.public();
         let discovery_to_identity = alice_discovery_key
             .sign_identity_binding(&alice.identity)
@@ -1087,7 +1087,7 @@ mod tests {
         let plaintext = open_frame_for_discovery_key_with_associated_data(
             &bob_discovery_key,
             &message,
-            binding.as_bytes(),
+            &binding,
         )
         .unwrap();
         let wire: DecodedFramePlaintextWire = postcard::from_bytes(&plaintext).unwrap();
@@ -1107,7 +1107,7 @@ mod tests {
                 ciphertext: &wire.ciphertext,
             })
             .unwrap(),
-            binding.as_bytes(),
+            &binding,
         )
         .unwrap();
         let stored = receiving.to_bytes().unwrap();

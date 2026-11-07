@@ -148,11 +148,11 @@ struct IssuedCertificate {
 impl IssuedCertificate {
     fn new() -> Self {
         let identity_key = IdentityKey {
-            agreement_key: KeyPair::from_secret_bytes([0x31; 32])
+            agreement_key: KeyPair::from_secret_bytes(&[0x31; 32])
                 .public
                 .as_bytes()
                 .to_vec(),
-            signing_key: SigningKeyPair::from_signing_bytes([0x21; 32])
+            signing_key: SigningKeyPair::from_signing_bytes(&[0x21; 32])
                 .verifying
                 .to_bytes()
                 .to_vec(),

@@ -56,7 +56,9 @@ impl ContactPublication {
             discovery_ed25519_verifying_key: self.discovery_key.verifying_key.to_bytes(),
             epoch: self.discovery_key.epoch,
             created_at_secs: self.discovery_key.created_at_secs,
-            identity_signature: signature_to_wire(&self.discovery_key.signature.to_bytes()),
+            identity_signature: signature_to_wire(
+                &self.discovery_key.identity_signature.to_bytes(),
+            ),
             discovery_to_identity: signature_to_wire(&self.discovery_to_identity.to_bytes()),
         };
         Ok(encode_versioned(CONTACT_PUBLICATION_VERSION, &wire)?.to_vec())

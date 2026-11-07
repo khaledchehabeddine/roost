@@ -29,8 +29,7 @@ pub(crate) fn setup(seed: [u8; 32]) -> (Setup, ChaCha20Rng) {
     let bob_signed_prekey =
         generate_signed_prekey_for_discovery_key(&mut rng, &bob_discovery_key, 0, CREATED_AT_SECS)
             .unwrap();
-    let bob_one_time_prekey =
-        generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch(), CREATED_AT_SECS);
+    let bob_one_time_prekey = generate_one_time_prekey(&mut rng, 7, bob_discovery_key.epoch());
     (
         Setup {
             bob_identity_key,

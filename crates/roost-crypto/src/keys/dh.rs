@@ -2,12 +2,12 @@ pub use x25519_dalek::PublicKey;
 
 use rand::{CryptoRng, RngCore};
 use x25519_dalek::{SharedSecret, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An X25519 key pair for Diffie-Hellman key exchange.
 ///
 /// The secret key stays private. Use [`Self::to_secret_bytes`] only when storing the key pair.
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(ZeroizeOnDrop)]
 pub struct KeyPair {
     /// Public key shared with peers for X25519 Diffie-Hellman.
     #[zeroize(skip)]
@@ -27,8 +27,8 @@ impl KeyPair {
     }
 
     /// Restores a [`KeyPair`] from stored secret key bytes.
-    pub fn from_secret_bytes(bytes: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(bytes);
+    pub fn from_secret_bytes(bytes: &[u8; 32]) -> Self {
+        let secret = StaticSecret::from(*bytes);
         let public = PublicKey::from(&secret);
         KeyPair { public, secret }
     }
@@ -61,14 +61,13 @@ mod tests {
     #[test]
     fn key_pair_round_trip_via_secret_bytes() {
         let key_pair = generate_key_pair(&mut ChaCha20Rng::from_seed([1u8; 32]));
-        let restored = KeyPair::from_secret_bytes(*key_pair.to_secret_bytes());
+        let restored = KeyPair::from_secret_bytes(&key_pair.to_secret_bytes());
         assert_eq!(key_pair.public.as_bytes(), restored.public.as_bytes());
     }
 
     #[test]
     fn key_pair_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-
         assert_zeroizes_on_drop::<KeyPair>();
     }
 
@@ -77,7 +76,6 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([2u8; 32]);
         let alice = generate_key_pair(&mut rng);
         let bob = generate_key_pair(&mut rng);
-
         let alice_shared_secret = alice.diffie_hellman(&bob.public).unwrap();
         let bob_shared_secret = bob.diffie_hellman(&alice.public).unwrap();
         assert_eq!(alice_shared_secret.as_bytes(), bob_shared_secret.as_bytes());

@@ -254,9 +254,7 @@ impl From<OneTimePreKeyError> for RoostError {
     fn from(e: OneTimePreKeyError) -> Self {
         let reason = reason_from_chain(&e);
         match e {
-            OneTimePreKeyError::Clock | OneTimePreKeyError::LockPoisoned => {
-                RoostError::InternalError { reason }
-            }
+            OneTimePreKeyError::LockPoisoned => RoostError::InternalError { reason },
             OneTimePreKeyError::Discovery(e) => RoostError::from(e).with_reason(reason),
             OneTimePreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
             OneTimePreKeyError::StoredData(error) => RoostError::from_stored_data(&error, reason),
@@ -363,7 +361,7 @@ impl From<HandshakeError> for RoostError {
             | HandshakeError::OneTimePreKeyMismatch
             | HandshakeError::SenderProofInvalid
             | HandshakeError::SignedPreKeyMismatch => RoostError::AuthenticationFailed { reason },
-            HandshakeError::UnsupportedPreKeyBundleVersion(_) => {
+            HandshakeError::UnsupportedPreKeyBundleVersion { .. } => {
                 RoostError::UnsupportedVersion { reason }
             }
             HandshakeError::HkdfExpand => RoostError::InternalError { reason },
@@ -424,12 +422,12 @@ impl From<SealedFrameError> for RoostError {
             SealedFrameError::Encode | SealedFrameError::HkdfExpand => {
                 RoostError::InternalError { reason }
             }
-            SealedFrameError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
-            SealedFrameError::AssociatedDataTooLong { .. }
-            | SealedFrameError::CiphertextTooLong { .. }
+            SealedFrameError::UnsupportedVersion { .. } => {
+                RoostError::UnsupportedVersion { reason }
+            }
+            SealedFrameError::CiphertextTooLong { .. }
             | SealedFrameError::Decode
             | SealedFrameError::FrameTooLong { .. }
-            | SealedFrameError::IncompleteOneTimePreKey
             | SealedFrameError::InvalidPublicKey
             | SealedFrameError::RecipientMismatch
             | SealedFrameError::TrailingBytes { .. } => RoostError::InvalidData { reason },

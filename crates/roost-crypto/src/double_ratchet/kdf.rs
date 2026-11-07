@@ -4,20 +4,20 @@ use hmac::digest::FixedOutput;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use x25519_dalek::SharedSecret;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
-const ROOT_KEY_INFO: &[u8] = b"RoostRatchet_RK";
+const ROOT_KEY_INFO: &[u8] = b"RoostRatchetRootKey-v1:";
 const MESSAGE_KEY_INPUT: &[u8] = &[0x01];
 const NEXT_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
 // Root key for the Double Ratchet root chain.
 // Clone stays crate-private for ratchet rollback and chain advancement snapshots.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub(crate) struct RootKey([u8; 32]);
 
 impl RootKey {
-    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub(crate) fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(*bytes)
     }
 
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
@@ -27,12 +27,12 @@ impl RootKey {
 
 // Chain key for the Double Ratchet sending/receiving chain.
 // Clone stays crate-private for ratchet rollback and chain advancement snapshots.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub(super) struct ChainKey([u8; 32]);
 
 impl ChainKey {
-    pub(super) fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub(super) fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(*bytes)
     }
 
     pub(super) fn as_bytes(&self) -> &[u8; 32] {
@@ -42,12 +42,12 @@ impl ChainKey {
 
 // Single-use message encryption key derived from a chain key.
 // Clone stays crate-private for skipped-key rollback after failed authentication.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, ZeroizeOnDrop)]
 pub(super) struct MessageKey([u8; 32]);
 
 impl MessageKey {
-    pub(super) fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
+    pub(super) fn from_bytes(bytes: &[u8; 32]) -> Self {
+        Self(*bytes)
     }
 
     pub(super) fn as_bytes(&self) -> &[u8; 32] {
@@ -58,10 +58,6 @@ impl MessageKey {
 // Implements `KDF_RK` from the Double Ratchet specification
 // (https://signal.org/docs/specifications/doubleratchet/): derives the next root key and a chain
 // key from a root key and DH output.
-//
-// Uses HKDF-SHA256 with the root key as salt, DH output as input keying material, and
-// ROOT_KEY_INFO as the info string. Produces 64 bytes of output, split into a 32-byte root key and
-// a 32-byte chain key.
 pub(super) fn derive_root_and_chain_keys(
     root_key: &RootKey,
     dh_output: &SharedSecret,
@@ -136,7 +132,6 @@ mod tests {
             derive_chain_and_message_keys(&ChainKey([1; 32])).unwrap();
         let (other_next_chain_key, other_message_key) =
             derive_chain_and_message_keys(&ChainKey([2; 32])).unwrap();
-
         assert_ne!(other_next_chain_key.as_bytes(), next_chain_key.as_bytes());
         assert_ne!(other_message_key.as_bytes(), message_key.as_bytes());
         assert_ne!(next_chain_key.as_bytes(), message_key.as_bytes());

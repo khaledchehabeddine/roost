@@ -757,7 +757,7 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
         .as_bytes();
     let mut wrong_ephemeral = encrypted.clone();
     wrong_ephemeral.ephemeral_public_key =
-        *KeyPair::from_secret_bytes([0x55; 32]).public.as_bytes();
+        *KeyPair::from_secret_bytes(&[0x55; 32]).public.as_bytes();
 
     for message in [wrong_recipient, wrong_ephemeral] {
         let result = bob_receives_validated(&fixture, &fixture.bob.host, &message, 16);

@@ -5,11 +5,9 @@ use crate::stored_data::{
 };
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
-use roost_protocol::to_unix_secs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::SystemTime;
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -31,9 +29,6 @@ pub enum OneTimePreKeyError {
         /// Free slots in the pool.
         available: usize,
     },
-    /// The system clock is before the Unix epoch.
-    #[error("system clock is before Unix epoch")]
-    Clock,
     /// Loading the discovery key returned a [`DiscoveryKeyError`].
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
@@ -100,9 +95,8 @@ impl OneTimePreKeyManager {
     pub(crate) fn replenish<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
-        now: SystemTime,
     ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
-        self.append(rng, now, |pool| {
+        self.append(rng, |pool| {
             if pool.entries.len() > ONE_TIME_PREKEY_REPLENISH_THRESHOLD {
                 0
             } else {
@@ -115,9 +109,8 @@ impl OneTimePreKeyManager {
         &self,
         rng: &mut R,
         batch_size: usize,
-        now: SystemTime,
     ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
-        self.append(rng, now, |_| batch_size)
+        self.append(rng, |_| batch_size)
     }
 
     // Removes the one-time prekey `id` of `epoch` from the pool and returns it.
@@ -181,11 +174,9 @@ impl OneTimePreKeyManager {
     fn append<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
-        now: SystemTime,
         count: impl FnOnce(&OneTimePreKeyPoolWire) -> usize,
     ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
         let epoch = self.discovery.current()?.epoch();
-        let now_secs = to_unix_secs(now).ok_or(OneTimePreKeyError::Clock)?;
         let mut storage = self.lock_storage()?;
         let mut pool = match load_pool(&**storage)? {
             Some(stored) if stored.epoch == epoch => with_room(stored),
@@ -199,7 +190,7 @@ impl OneTimePreKeyManager {
         if count == 0 {
             return Ok(Vec::new());
         }
-        let prekeys = append_batch(rng, &mut pool, count, now_secs)?;
+        let prekeys = append_batch(rng, &mut pool, count)?;
         store_pool(&mut **storage, pool)?;
         Ok(prekeys)
     }
@@ -238,7 +229,6 @@ fn append_batch<R: RngCore + CryptoRng>(
     rng: &mut R,
     pool: &mut OneTimePreKeyPoolWire,
     batch_size: usize,
-    created_at_secs: u64,
 ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
     let available = MAX_ONE_TIME_PREKEYS - pool.entries.len();
     if batch_size > available {
@@ -256,11 +246,10 @@ fn append_batch<R: RngCore + CryptoRng>(
             .next_id
             .checked_add(1)
             .ok_or(OneTimePreKeyError::IdentifiersExhausted)?;
-        let one_time_prekey = generate_one_time_prekey(rng, id, pool.epoch, created_at_secs);
+        let one_time_prekey = generate_one_time_prekey(rng, id, pool.epoch);
         pool.entries.push(OneTimePreKeyWire {
             id,
             secret: *one_time_prekey.to_secret_bytes(),
-            created_at_secs,
         });
         prekeys.push(one_time_prekey.public());
     }
@@ -324,13 +313,11 @@ struct OneTimePreKeyWire {
     #[zeroize(skip)]
     id: u64,
     secret: [u8; 32],
-    #[zeroize(skip)]
-    created_at_secs: u64,
 }
 
 impl OneTimePreKeyWire {
     fn to_prekey(&self, epoch: u32) -> OneTimePreKey {
-        OneTimePreKey::from_secret_bytes(self.id, self.secret, epoch, self.created_at_secs)
+        OneTimePreKey::from_secret_bytes(self.id, &self.secret, epoch)
     }
 }
 
@@ -342,6 +329,7 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_protocol::from_unix_secs;
+    use std::time::SystemTime;
 
     const FIXED_NOW: u64 = 1_700_000_000;
 
@@ -373,7 +361,6 @@ mod tests {
         OneTimePreKeyWire {
             id,
             secret: [id as u8; 32],
-            created_at_secs: FIXED_NOW,
         }
     }
 
@@ -395,7 +382,7 @@ mod tests {
     fn replenish_creates_initial_pool() {
         let mut rng = ChaCha20Rng::from_seed([0xd1; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let bundles = manager.replenish(&mut rng, fixed_now()).unwrap();
+        let bundles = manager.replenish(&mut rng).unwrap();
         assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
         assert!(
             bundles
@@ -408,7 +395,7 @@ mod tests {
     fn consume_one_time_prekey_consumes_secret_once() {
         let mut rng = ChaCha20Rng::from_seed([0xd2; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let bundle = manager.replenish(&mut rng, fixed_now()).unwrap().remove(0);
+        let bundle = manager.replenish(&mut rng).unwrap().remove(0);
         let epoch = discovery.current().unwrap().epoch();
         let prekey = manager.consume_one_time_prekey(epoch, bundle.id).unwrap();
         assert_eq!(prekey.public().id, bundle.id);
@@ -423,7 +410,7 @@ mod tests {
     fn a_prekey_from_another_epoch_is_refused() {
         let mut rng = ChaCha20Rng::from_seed([0xd6; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let bundle = manager.replenish(&mut rng, fixed_now()).unwrap().remove(0);
+        let bundle = manager.replenish(&mut rng).unwrap().remove(0);
         let epoch = discovery.current().unwrap().epoch();
         let before = stored(&manager);
 
@@ -439,8 +426,8 @@ mod tests {
     fn generate_batch_creates_exact_caller_size_under_current_epoch() {
         let mut rng = ChaCha20Rng::from_seed([0xd3; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let first = manager.generate_batch(&mut rng, 3, fixed_now()).unwrap();
-        let second = manager.generate_batch(&mut rng, 2, fixed_now()).unwrap();
+        let first = manager.generate_batch(&mut rng, 3).unwrap();
+        let second = manager.generate_batch(&mut rng, 2).unwrap();
         let epoch = discovery.current().unwrap().epoch();
 
         assert_eq!(first.len(), 3);
@@ -466,12 +453,12 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([0xd4; 32]);
         let OneTimePreKeySetup { manager, .. } = setup_with_discovery_key();
         manager
-            .generate_batch(&mut rng, ONE_TIME_PREKEY_POOL_TARGET, fixed_now())
+            .generate_batch(&mut rng, ONE_TIME_PREKEY_POOL_TARGET)
             .unwrap();
         let before = stored(&manager);
 
         assert!(matches!(
-            manager.generate_batch(&mut rng, 1, fixed_now()),
+            manager.generate_batch(&mut rng, 1),
             Err(OneTimePreKeyError::BatchExceedsCapacity {
                 requested: 1,
                 available: 0
@@ -495,7 +482,7 @@ mod tests {
         let before = stored(&manager);
 
         assert!(matches!(
-            manager.generate_batch(&mut rng, 1, fixed_now()),
+            manager.generate_batch(&mut rng, 1),
             Err(OneTimePreKeyError::IdentifiersExhausted)
         ));
         assert_eq!(stored(&manager), before);
@@ -505,7 +492,7 @@ mod tests {
     fn marked_one_time_prekeys_require_an_inbox_rotation() {
         let mut rng = ChaCha20Rng::from_seed([0xd7; 32]);
         let OneTimePreKeySetup { manager, .. } = setup_with_discovery_key();
-        manager.replenish(&mut rng, fixed_now()).unwrap();
+        manager.replenish(&mut rng).unwrap();
 
         manager.mark_inbox_rotation_required().unwrap();
 
@@ -514,7 +501,7 @@ mod tests {
             Err(OneTimePreKeyError::InboxRotationRequired)
         ));
         assert!(matches!(
-            manager.replenish(&mut rng, fixed_now()),
+            manager.replenish(&mut rng),
             Err(OneTimePreKeyError::InboxRotationRequired)
         ));
     }

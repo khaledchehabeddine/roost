@@ -112,7 +112,7 @@ mod tests {
     fn fixed_identity() -> IdentityKey {
         IdentityKey {
             agreement_key: IDENTITY_X25519.to_vec(),
-            signing_key: SigningKeyPair::from_signing_bytes(IDENTITY_SIGNING_SECRET)
+            signing_key: SigningKeyPair::from_signing_bytes(&IDENTITY_SIGNING_SECRET)
                 .verifying
                 .to_bytes()
                 .to_vec(),
@@ -125,10 +125,10 @@ mod tests {
     fn discovery_to_identity_signature() -> Vec<u8> {
         let identity = PublicIdentityKey {
             public_key: IDENTITY_X25519.into(),
-            verifying_key: SigningKeyPair::from_signing_bytes(IDENTITY_SIGNING_SECRET).verifying,
+            verifying_key: SigningKeyPair::from_signing_bytes(&IDENTITY_SIGNING_SECRET).verifying,
             binding_signature: Signature::from_bytes(&[0; 64]),
         };
-        DiscoveryKey::from_secret_bytes([0; 32], DISCOVERY_SIGNING_SECRET, 0, 0, [0; 64])
+        DiscoveryKey::from_secret_bytes(&[0; 32], &DISCOVERY_SIGNING_SECRET, 0, 0, [0; 64])
             .sign_identity_binding(&identity)
             .unwrap()
             .to_bytes()
@@ -136,7 +136,7 @@ mod tests {
     }
 
     fn discovery_verifying_key() -> Vec<u8> {
-        SigningKeyPair::from_signing_bytes(DISCOVERY_SIGNING_SECRET)
+        SigningKeyPair::from_signing_bytes(&DISCOVERY_SIGNING_SECRET)
             .verifying
             .to_bytes()
             .to_vec()
@@ -175,8 +175,8 @@ mod tests {
     /// functions that each fix their own is what keeps it here.
     #[test]
     fn the_two_identity_contexts_do_not_accept_each_others_signatures() {
-        let identity_signing = SigningKeyPair::from_signing_bytes(IDENTITY_SIGNING_SECRET);
-        let discovery_signing = SigningKeyPair::from_signing_bytes(DISCOVERY_SIGNING_SECRET);
+        let identity_signing = SigningKeyPair::from_signing_bytes(&IDENTITY_SIGNING_SECRET);
+        let discovery_signing = SigningKeyPair::from_signing_bytes(&DISCOVERY_SIGNING_SECRET);
         let self_binding =
             sign_identity_key_binding(&identity_signing, &IDENTITY_X25519.into()).unwrap();
 
@@ -210,7 +210,7 @@ mod tests {
     /// signed.
     #[test]
     fn a_substituted_identity_fails_against_the_typed_discovery_key() {
-        let impostor = SigningKeyPair::from_signing_bytes([0x44; 32]);
+        let impostor = SigningKeyPair::from_signing_bytes(&[0x44; 32]);
         let impostor_identity = IdentityKey {
             agreement_key: IDENTITY_X25519.to_vec(),
             signing_key: impostor.verifying.to_bytes().to_vec(),

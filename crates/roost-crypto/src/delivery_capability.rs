@@ -1,34 +1,28 @@
 use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
-use subtle::{Choice, ConstantTimeEq};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
-// Domain string for the verifier derivation. Unlike signature contexts such as `RoostDK-v1:`,
-// this is lowercase-kebab with no trailing colon, because relay derives the same verifier from
-// these exact bytes.
-const VERIFIER_DOMAIN: &[u8] = b"roost-recipient-delivery-capability-v1";
-// Single separator byte between the domain string and the capability.
-const VERIFIER_SEPARATOR: [u8; 1] = [0x00];
+const VERIFIER_LABEL: &[u8] = b"RoostDeliveryVerifier-v1:";
 
 const CAPABILITY_LEN: usize = 32;
 const VERIFIER_LEN: usize = 32;
 
 /// A recipient-wide bearer secret authorizing delivery to one inbox until it rotates.
 ///
-/// Secret-bearing: hold it only as long as needed and persist it through platform secure storage.
-/// Deliberately not `Clone`, `Debug`, or `Serialize` — a bearer secret that reaches a log or an
-/// unintended copy is a delivery-authorization leak.
-#[derive(Zeroize, ZeroizeOnDrop)]
+/// Hold it only as long as needed, and persist it through platform secure storage. It isn't
+/// `Clone`, `Debug`, or `Serialize`, because a copy that reaches a log leaks delivery
+/// authorization.
+#[derive(ZeroizeOnDrop)]
 pub struct RecipientDeliveryCapability([u8; CAPABILITY_LEN]);
 
 impl RecipientDeliveryCapability {
-    /// Restores a capability from bytes the host previously persisted.
+    /// Restores a capability from bytes the app previously persisted.
     #[must_use]
-    pub fn from_bytes(bytes: [u8; CAPABILITY_LEN]) -> Self {
-        RecipientDeliveryCapability(bytes)
+    pub fn from_bytes(bytes: &[u8; CAPABILITY_LEN]) -> Self {
+        RecipientDeliveryCapability(*bytes)
     }
 
-    /// Exports the capability's secret bytes for host persistence.
+    /// Exports the capability's secret bytes for the app to persist.
     #[must_use]
     pub fn to_bytes(&self) -> Zeroizing<[u8; CAPABILITY_LEN]> {
         Zeroizing::new(self.0)
@@ -36,13 +30,12 @@ impl RecipientDeliveryCapability {
 
     /// Derives the public verifier registered with the relay.
     ///
-    /// SHA-256 over the domain string, one `0x00` separator byte, and the capability. Register the
-    /// result; never the capability itself.
+    /// The verifier is SHA-256 over a label and the capability. Register the verifier, never the
+    /// capability itself.
     #[must_use]
     pub fn verifier(&self) -> RecipientDeliveryVerifier {
         let mut hasher = Sha256::new();
-        hasher.update(VERIFIER_DOMAIN);
-        hasher.update(VERIFIER_SEPARATOR);
+        hasher.update(VERIFIER_LABEL);
         hasher.update(self.0);
         RecipientDeliveryVerifier(hasher.finalize().into())
     }
@@ -50,7 +43,7 @@ impl RecipientDeliveryCapability {
 
 /// The public SHA-256 commitment to a [`RecipientDeliveryCapability`].
 ///
-/// Safe to publish: the relay stores this so the bearer secret itself never reaches it.
+/// The relay stores it, so the capability itself never reaches the relay.
 #[derive(Clone, Copy, Debug)]
 pub struct RecipientDeliveryVerifier([u8; VERIFIER_LEN]);
 
@@ -62,25 +55,9 @@ impl RecipientDeliveryVerifier {
     }
 }
 
-impl ConstantTimeEq for RecipientDeliveryVerifier {
-    fn ct_eq(&self, other: &Self) -> Choice {
-        self.0.ct_eq(&other.0)
-    }
-}
-
-// Equality routes through ConstantTimeEq: a verifier is a hash, and the crypto rules bar `==` on
-// hashes regardless of whether this particular comparison is secret-dependent.
-impl PartialEq for RecipientDeliveryVerifier {
-    fn eq(&self, other: &Self) -> bool {
-        self.ct_eq(other).into()
-    }
-}
-
-impl Eq for RecipientDeliveryVerifier {}
-
 /// Generates a fresh 32-byte recipient delivery capability from `rng`.
 ///
-/// Production callers must pass an OS CSPRNG.
+/// Production code must pass `OsRng`.
 #[must_use]
 pub fn generate_recipient_delivery_capability<R: RngCore + CryptoRng>(
     rng: &mut R,
@@ -102,39 +79,36 @@ mod tests {
 
     #[test]
     fn distinct_capabilities_produce_distinct_verifiers() {
-        let first = RecipientDeliveryCapability::from_bytes([0x42u8; 32]);
-        let second = RecipientDeliveryCapability::from_bytes([0x43u8; 32]);
-
-        assert_ne!(first.verifier(), second.verifier());
+        let first = RecipientDeliveryCapability::from_bytes(&[0x42u8; 32]);
+        let second = RecipientDeliveryCapability::from_bytes(&[0x43u8; 32]);
+        assert_ne!(first.verifier().as_bytes(), second.verifier().as_bytes());
     }
 
     #[test]
     fn generated_capabilities_differ_between_draws() {
         let mut rng = seeded_rng();
-
         let first = generate_recipient_delivery_capability(&mut rng);
         let second = generate_recipient_delivery_capability(&mut rng);
-
         assert_ne!(*first.to_bytes(), *second.to_bytes());
     }
 
-    /// The host persists the capability and restores it later, so the round trip must
-    /// preserve the exact bytes and therefore the verifier the relay already holds.
+    /// The app persists the capability and restores it later, so the round trip must keep the
+    /// exact bytes and so the verifier the relay already holds.
     #[test]
     fn capability_round_trips_through_secret_bytes() {
         let mut rng = seeded_rng();
         let original = generate_recipient_delivery_capability(&mut rng);
-
-        let restored = RecipientDeliveryCapability::from_bytes(*original.to_bytes());
-
+        let restored = RecipientDeliveryCapability::from_bytes(&original.to_bytes());
         assert_eq!(*restored.to_bytes(), *original.to_bytes());
-        assert_eq!(restored.verifier(), original.verifier());
+        assert_eq!(
+            restored.verifier().as_bytes(),
+            original.verifier().as_bytes()
+        );
     }
 
     #[test]
     fn capability_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-
         assert_zeroizes_on_drop::<RecipientDeliveryCapability>();
     }
 }

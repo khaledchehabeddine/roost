@@ -22,8 +22,8 @@ fn blocking_a_contact_rotates_the_inbox() {
     );
     // The capability the blocked contact could have held no longer matches the registered verifier.
     assert_ne!(
-        publication.recipient_delivery_verifier,
-        before.recipient_delivery_verifier
+        publication.recipient_delivery_verifier.as_bytes(),
+        before.recipient_delivery_verifier.as_bytes()
     );
     assert_eq!(
         bob.publication().discovery_key.epoch,

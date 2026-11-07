@@ -7,7 +7,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-const MESSAGE_KEY_HKDF_INFO: &[u8] = b"RoostRatchet_MK";
+const MESSAGE_KEY_HKDF_INFO: &[u8] = b"RoostRatchetMessageKey-v1:";
 
 pub(super) fn encrypt(
     plaintext: &[u8],
@@ -76,10 +76,10 @@ mod tests {
 
     #[test]
     fn message_key_expansion_changes_with_the_message_key() {
-        let (encryption_key, nonce) = expand_message_key(&MessageKey::from_bytes([1; 32])).unwrap();
+        let (encryption_key, nonce) =
+            expand_message_key(&MessageKey::from_bytes(&[1; 32])).unwrap();
         let (other_encryption_key, other_nonce) =
-            expand_message_key(&MessageKey::from_bytes([2; 32])).unwrap();
-
+            expand_message_key(&MessageKey::from_bytes(&[2; 32])).unwrap();
         assert_ne!(*other_encryption_key, *encryption_key);
         assert_ne!(other_nonce, nonce);
     }

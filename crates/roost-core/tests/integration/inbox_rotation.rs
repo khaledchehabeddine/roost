@@ -44,8 +44,8 @@ fn an_acknowledgment_carries_the_grant_to_a_contact_on_a_newer_discovery_key() {
     alice.receive(&acknowledgment);
 
     assert_eq!(
-        established_verifier(&alice.send(&bob, b"after the handshake").destination),
-        rotation.recipient_delivery_verifier
+        established_verifier(&alice.send(&bob, b"after the handshake").destination).as_bytes(),
+        rotation.recipient_delivery_verifier.as_bytes()
     );
 }
 

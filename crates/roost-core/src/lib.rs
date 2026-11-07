@@ -56,7 +56,6 @@ mod safety_number;
 mod signed_prekey;
 mod storage;
 mod stored_data;
-mod transport_binding;
 
 pub use contact::{
     ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
@@ -93,9 +92,9 @@ pub use roost_crypto::{
 };
 pub use roost_protocol::{
     DomainSigningKey, IdentityKey, RevocationState, SenderCertificateValidation, SessionId,
+    TransportBinding, TransportBindingError,
 };
 pub use safety_number::{SafetyNumber, SafetyNumberError, derive_safety_number};
 pub use signed_prekey::SignedPreKeyError;
 pub use storage::{SecureStorage, StorageError};
 pub use stored_data::StoredDataError;
-pub use transport_binding::{TransportBinding, TransportBindingError};

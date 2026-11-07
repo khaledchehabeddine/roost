@@ -4,7 +4,7 @@
 use crate::discovery_key::{DiscoveryKey, PublicDiscoveryKey, verify_public_discovery_key};
 use crate::double_ratchet::{RatchetError, RatchetState, RootKey};
 use crate::keys::{
-    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, generate_key_pair,
+    KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, Signature, generate_key_pair,
     verify_public_identity_key,
 };
 use crate::one_time_prekey::{OneTimePreKey, PublicOneTimePreKey};
@@ -28,7 +28,7 @@ pub const PREKEY_BUNDLE_VERSION: u8 = 1;
 pub const SENDER_PROOF_LEN: usize = 32;
 
 /// Public prekey material used by the initiator to start an X3DH session.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PreKeyBundle {
     /// Version of the public prekey bundle format.
     pub version: u8,
@@ -41,7 +41,7 @@ pub struct PreKeyBundle {
 }
 
 /// The public half of a handshake, which the initiator sends until the responder replies.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy)]
 pub struct Handshake {
     /// The initiator's ephemeral X25519 public key.
     pub base_key: PublicKey,
@@ -62,7 +62,7 @@ pub struct SenderProofTranscript<'a> {
     /// The sender certificate sealed with the proof.
     pub sender_certificate: &'a [u8],
     /// The domain signature over the sender certificate.
-    pub sender_certificate_signature: &'a [u8],
+    pub sender_certificate_signature: &'a [u8; Signature::BYTE_SIZE],
 }
 
 /// Starts a session with the responder whose bundle the initiator fetched.
@@ -77,9 +77,9 @@ pub fn initiate_handshake<R: RngCore + CryptoRng>(
 ) -> Result<(RatchetState, SessionId, Handshake), HandshakeError> {
     verify_public_identity_key(responder_identity_key)?;
     if responder_prekey_bundle.version != PREKEY_BUNDLE_VERSION {
-        return Err(HandshakeError::UnsupportedPreKeyBundleVersion(
-            responder_prekey_bundle.version,
-        ));
+        return Err(HandshakeError::UnsupportedPreKeyBundleVersion {
+            version: responder_prekey_bundle.version,
+        });
     }
     verify_public_discovery_key(
         &responder_prekey_bundle.discovery_key,
@@ -130,8 +130,8 @@ pub fn initiate_handshake<R: RngCore + CryptoRng>(
 
 /// Accepts a handshake with the responder's discovery key and the prekeys the handshake names.
 ///
-/// This authenticates nobody: the caller checks the sender's proof with
-/// [`verify_sender_proof`] after the first message decrypts.
+/// This authenticates nobody. The caller checks the sender's proof with [`verify_sender_proof`]
+/// after the first message decrypts.
 pub fn accept_handshake(
     handshake: &Handshake,
     responder_discovery_key: &DiscoveryKey,
@@ -183,7 +183,7 @@ pub fn accept_handshake(
         one_time_prekey_shared_secret.as_ref(),
     )?;
     let signed_prekey_key_pair =
-        KeyPair::from_secret_bytes(*responder_signed_prekey.to_secret_bytes());
+        KeyPair::from_secret_bytes(&responder_signed_prekey.to_secret_bytes());
     let state = RatchetState::init_responder(root_key, signed_prekey_key_pair);
     Ok((state, session_id))
 }
@@ -272,8 +272,11 @@ pub enum HandshakeError {
         discovery_epoch: u32,
     },
     /// Prekey bundle uses a format version this build does not understand.
-    #[error("unsupported prekey bundle format version: {0}")]
-    UnsupportedPreKeyBundleVersion(u8),
+    #[error("unsupported prekey bundle format version: {version}")]
+    UnsupportedPreKeyBundleVersion {
+        /// The version the bundle names.
+        version: u8,
+    },
 }
 
 fn validate_bundle_epochs(bundle: &PreKeyBundle) -> Result<(), HandshakeError> {
@@ -306,18 +309,14 @@ fn validate_one_time_prekey(
                 .public_key
                 .ct_eq(prekey.public_key().as_bytes())
                 .into();
-            if prekey.id() != expected.id || !public_matches {
+            if !public_matches {
                 return Err(HandshakeError::OneTimePreKeyMismatch);
             }
-            check_epoch(prekey.epoch(), reference.discovery_epoch)?;
             Ok(Some(prekey))
         }
     }
 }
 
-// Runs HKDF-SHA256 once over the DH outputs and expands the root key and the session ID under
-// separate labels.
-//
 // No salt means RFC 5869's all-zero salt, which X3DH also uses. The extract step turns the DH
 // outputs into a pseudorandom key, and the info labels keep the root key and session ID apart.
 fn derive_root_key_and_session_id(
@@ -346,7 +345,7 @@ fn derive_root_key_and_session_id(
     hkdf.expand(SESSION_ID_INFO, &mut session_id)
         .map_err(|_| HandshakeError::HkdfExpand)?;
     Ok((
-        RootKey::from_bytes(*root_key),
+        RootKey::from_bytes(&root_key),
         SessionId::from_bytes(session_id),
     ))
 }
@@ -364,8 +363,7 @@ fn sender_proof_transcript(
             + 8
             + 4
             + input.sender_certificate.len()
-            + 4
-            + input.sender_certificate_signature.len(),
+            + Signature::BYTE_SIZE,
     ));
     transcript.extend_from_slice(SENDER_PROOF_CONTEXT);
     transcript.extend_from_slice(handshake.base_key.as_bytes());
@@ -385,7 +383,7 @@ fn sender_proof_transcript(
     transcript.extend_from_slice(input.sender_discovery_key.public_key.as_bytes());
     transcript.extend_from_slice(input.sender_discovery_key.verifying_key.as_bytes());
     extend_len_prefixed(&mut transcript, input.sender_certificate)?;
-    extend_len_prefixed(&mut transcript, input.sender_certificate_signature)?;
+    transcript.extend_from_slice(input.sender_certificate_signature);
     Ok(transcript)
 }
 
@@ -457,12 +455,7 @@ mod tests {
             FIXED_CREATED_AT_SECS,
         )
         .unwrap();
-        let bob_one_time_prekey = generate_one_time_prekey(
-            &mut rng,
-            9,
-            bob_discovery_key.epoch(),
-            FIXED_CREATED_AT_SECS,
-        );
+        let bob_one_time_prekey = generate_one_time_prekey(&mut rng, 9, bob_discovery_key.epoch());
         let setup = Setup {
             alice_identity_key_pair,
             alice_identity_key,
@@ -506,7 +499,7 @@ mod tests {
             sender_identity_key: &setup.alice_identity_key,
             sender_discovery_key,
             sender_certificate: b"sender certificate",
-            sender_certificate_signature: b"sender certificate signature",
+            sender_certificate_signature: &[0x51; Signature::BYTE_SIZE],
         }
     }
 
@@ -514,11 +507,9 @@ mod tests {
     fn handshakes_with_one_bundle_get_distinct_session_ids() {
         let (setup, mut rng) = setup();
         let bundle = bundle(&setup, false);
-
         let (_, first, _) = initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle).unwrap();
         let (_, second, _) =
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle).unwrap();
-
         assert_ne!(first, second);
     }
 
@@ -539,7 +530,7 @@ mod tests {
                 discovery_epoch: setup.bob_discovery_key.epoch(),
                 signed_prekey_public_key: *setup.bob_signed_prekey.public_key().as_bytes(),
                 one_time_prekey: Some(OneTimePreKeyReference {
-                    id: setup.bob_one_time_prekey.id(),
+                    id: setup.bob_one_time_prekey.public().id,
                     public_key: *setup.bob_one_time_prekey.public_key().as_bytes(),
                 }),
             }
@@ -573,12 +564,8 @@ mod tests {
     #[test]
     fn accept_rejects_prekeys_and_base_keys_the_handshake_does_not_name() {
         let (setup, mut rng) = setup();
-        let wrong_one_time_prekey = generate_one_time_prekey(
-            &mut rng,
-            10,
-            setup.bob_discovery_key.epoch(),
-            FIXED_CREATED_AT_SECS,
-        );
+        let wrong_one_time_prekey =
+            generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch());
         let other_signed_prekey = generate_signed_prekey_for_discovery_key(
             &mut rng,
             &setup.bob_discovery_key,
@@ -643,12 +630,8 @@ mod tests {
     #[test]
     fn initiate_rejects_stale_one_time_prekey_epoch() {
         let (setup, mut rng) = setup();
-        let stale_one_time_prekey = generate_one_time_prekey(
-            &mut rng,
-            10,
-            setup.bob_discovery_key.epoch() + 1,
-            FIXED_CREATED_AT_SECS,
-        );
+        let stale_one_time_prekey =
+            generate_one_time_prekey(&mut rng, 10, setup.bob_discovery_key.epoch() + 1);
         let bundle = PreKeyBundle {
             one_time_prekey: Some(stale_one_time_prekey.public()),
             ..bundle(&setup, false)
@@ -671,7 +654,7 @@ mod tests {
 
         assert!(matches!(
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle),
-            Err(HandshakeError::UnsupportedPreKeyBundleVersion(version))
+            Err(HandshakeError::UnsupportedPreKeyBundleVersion { version })
                 if version == PREKEY_BUNDLE_VERSION + 1
         ));
     }
@@ -679,7 +662,6 @@ mod tests {
     #[test]
     fn initiate_rejects_bundle_signed_by_another_identity() {
         let (setup, mut rng) = setup();
-
         assert!(matches!(
             initiate_handshake(&mut rng, &setup.alice_identity_key, &bundle(&setup, true)),
             Err(HandshakeError::PublicKey(PublicKeyError::Signature(
@@ -695,9 +677,7 @@ mod tests {
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
         let sender_discovery_key = setup.alice_discovery_key.public();
         let transcript = proof_transcript(&setup, &handshake, &sender_discovery_key);
-
         let proof = prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap();
-
         verify_sender_proof(&setup.bob_signed_prekey, &transcript, &proof).unwrap();
     }
 
@@ -792,7 +772,7 @@ mod tests {
                 ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
             SenderProofTranscript {
-                sender_certificate_signature: b"other signature",
+                sender_certificate_signature: &[0x52; Signature::BYTE_SIZE],
                 ..proof_transcript(&setup, &handshake, &sender_discovery_key)
             },
         ] {

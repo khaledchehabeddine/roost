@@ -6,15 +6,15 @@ use crate::keys::{
 use crate::signed_prekey::{SignedPreKey, generate_signed_prekey};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
-use roost_protocol::{SignatureError, verify_with_context};
+use roost_protocol::{PUBLIC_KEY_LEN, SignatureError, verify_with_context};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
-// Domain separator for identity-key signatures over discovery keys (IK→DK).
+// Labels the identity key's signature over a discovery key.
 const DISCOVERY_KEY_CONTEXT: &[u8] = b"RoostDK-v1:";
-
-// Domain separator for discovery-key signatures over identity keys (DK→IK).
+// Labels a discovery key's signature over the identity key.
 const DISCOVERY_TO_IDENTITY_CONTEXT: &[u8] = b"RoostDKToIK-v1:";
+const DISCOVERY_KEY_PAYLOAD_LEN: usize = 2 * PUBLIC_KEY_LEN + 4 + 8;
 
 /// A rotatable discovery key signed by the identity key.
 ///
@@ -40,13 +40,13 @@ impl DiscoveryKey {
     /// Public keys are derived from the secret bytes. The caller must verify the restored key
     /// with [`verify_public_discovery_key`].
     pub fn from_secret_bytes(
-        key_agreement_secret: [u8; 32],
-        signing_secret: [u8; 32],
+        key_agreement_secret: &[u8; 32],
+        signing_secret: &[u8; 32],
         epoch: u32,
         created_at_secs: u64,
         identity_signature: [u8; 64],
     ) -> Self {
-        let key_agreement_secret = StaticSecret::from(key_agreement_secret);
+        let key_agreement_secret = StaticSecret::from(*key_agreement_secret);
         let key_agreement_public = PublicKey::from(&key_agreement_secret);
         let signing = SigningKeyPair::from_signing_bytes(signing_secret);
         let identity_signature = Signature::from_bytes(&identity_signature);
@@ -92,7 +92,7 @@ impl DiscoveryKey {
             verifying_key: self.signing.verifying,
             epoch: self.epoch,
             created_at_secs: self.created_at_secs,
-            signature: self.identity_signature,
+            identity_signature: self.identity_signature,
         }
     }
 
@@ -108,14 +108,14 @@ impl DiscoveryKey {
 
     /// Signs `identity`'s public halves with this discovery key's Ed25519 half.
     ///
-    /// This is the DK→IK half of the mutual binding. A peer starting from a discovery
-    /// key verifies it to learn that the discovery key really authorized the identity it was
-    /// handed, without trusting whoever handed it over.
+    /// This is the discovery key's half of the binding between the two keys. A peer that starts
+    /// from a discovery key checks it to learn that the discovery key approved the identity it was
+    /// given, without trusting whoever gave it.
     ///
-    /// The signature covers only the two identity public halves — no epoch, no timestamp. The
-    /// IK→DK direction needs an epoch because one permanent identity key signs many discovery keys
-    /// over its lifetime; this direction does not, because a fresh discovery key is minted per
-    /// epoch and so already identifies the epoch it belongs to.
+    /// The signature covers only the identity key's two public halves, with no epoch or creation
+    /// time. The identity key's signature over a discovery key needs both, because one identity
+    /// key signs many discovery keys. Each discovery key belongs to one epoch, so its own signature
+    /// doesn't.
     pub fn sign_identity_binding(
         &self,
         identity: &PublicIdentityKey,
@@ -129,9 +129,9 @@ impl DiscoveryKey {
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s public halves.
 ///
-/// The DK→IK half of the mutual binding. Verify both directions before trusting a
-/// discovery-key-to-identity mapping: this one proves the discovery key authorized the identity,
-/// and [`verify_public_discovery_key`] proves the identity authorized the discovery key.
+/// Check both binding signatures before trusting that a discovery key belongs to an identity. This
+/// one shows that the discovery key approved the identity, and [`verify_public_discovery_key`]
+/// shows that the identity approved the discovery key.
 pub fn verify_discovery_to_identity_binding(
     identity: &PublicIdentityKey,
     discovery_verifying_key: &VerifyingKey,
@@ -160,7 +160,7 @@ pub struct PublicDiscoveryKey {
     /// Unix timestamp in seconds when the discovery key was generated.
     pub created_at_secs: u64,
     /// Identity-key signature over the domain-separated discovery-key payload.
-    pub signature: Signature,
+    pub identity_signature: Signature,
 }
 
 impl PublicDiscoveryKey {
@@ -173,14 +173,14 @@ impl PublicDiscoveryKey {
         verifying_key: &[u8],
         epoch: u32,
         created_at_secs: u64,
-        signature: &[u8],
+        identity_signature: &[u8],
     ) -> Result<Self, PublicKeyError> {
         Ok(PublicDiscoveryKey {
             public_key: parse_public_key(public_key)?,
             verifying_key: parse_verifying_key(verifying_key)?,
             epoch,
             created_at_secs,
-            signature: parse_signature(signature)?,
+            identity_signature: parse_signature(identity_signature)?,
         })
     }
 }
@@ -216,20 +216,20 @@ pub fn generate_discovery_key<R: RngCore + CryptoRng>(
 
 /// Verifies a public discovery key was signed by the identity verifying key.
 pub fn verify_public_discovery_key(
-    bundle: &PublicDiscoveryKey,
+    discovery_key: &PublicDiscoveryKey,
     identity_verifying_key: &VerifyingKey,
 ) -> Result<(), PublicKeyError> {
     let payload = discovery_key_payload(
-        &bundle.public_key,
-        &bundle.verifying_key,
-        bundle.epoch,
-        bundle.created_at_secs,
+        &discovery_key.public_key,
+        &discovery_key.verifying_key,
+        discovery_key.epoch,
+        discovery_key.created_at_secs,
     );
     verify_with_context(
         identity_verifying_key,
         DISCOVERY_KEY_CONTEXT,
         &payload,
-        &bundle.signature,
+        &discovery_key.identity_signature,
     )
     .map_err(Into::into)
 }
@@ -239,12 +239,12 @@ fn discovery_key_payload(
     verifying_key: &VerifyingKey,
     epoch: u32,
     created_at_secs: u64,
-) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(32 + 32 + 4 + 8);
-    payload.extend_from_slice(key_agreement_public.as_bytes());
-    payload.extend_from_slice(verifying_key.as_bytes());
-    payload.extend_from_slice(&epoch.to_be_bytes());
-    payload.extend_from_slice(&created_at_secs.to_be_bytes());
+) -> [u8; DISCOVERY_KEY_PAYLOAD_LEN] {
+    let mut payload = [0u8; DISCOVERY_KEY_PAYLOAD_LEN];
+    payload[..PUBLIC_KEY_LEN].copy_from_slice(key_agreement_public.as_bytes());
+    payload[PUBLIC_KEY_LEN..2 * PUBLIC_KEY_LEN].copy_from_slice(verifying_key.as_bytes());
+    payload[2 * PUBLIC_KEY_LEN..2 * PUBLIC_KEY_LEN + 4].copy_from_slice(&epoch.to_be_bytes());
+    payload[2 * PUBLIC_KEY_LEN + 4..].copy_from_slice(&created_at_secs.to_be_bytes());
     payload
 }
 
@@ -307,8 +307,8 @@ mod tests {
         let setup = setup();
         let original = &setup.discovery_key;
         let restored = DiscoveryKey::from_secret_bytes(
-            *original.key_agreement_secret_bytes(),
-            *original.signing_secret_bytes(),
+            &original.key_agreement_secret_bytes(),
+            &original.signing_secret_bytes(),
             original.epoch(),
             original.created_at_secs(),
             original.identity_signature().to_bytes(),
@@ -344,7 +344,7 @@ mod tests {
         assert_eq!(bundle.epoch, FIXED_EPOCH);
         assert_eq!(bundle.created_at_secs, FIXED_CREATED_AT_SECS);
         assert_eq!(
-            bundle.signature.to_bytes(),
+            bundle.identity_signature.to_bytes(),
             setup.discovery_key.identity_signature().to_bytes()
         );
     }
@@ -352,7 +352,6 @@ mod tests {
     #[test]
     fn discovery_key_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-
         assert_zeroizes_on_drop::<DiscoveryKey>();
     }
 
@@ -365,7 +364,7 @@ mod tests {
             bundle.verifying_key.as_bytes(),
             bundle.epoch,
             bundle.created_at_secs,
-            &bundle.signature.to_bytes(),
+            &bundle.identity_signature.to_bytes(),
         )
         .unwrap();
         assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
@@ -375,7 +374,10 @@ mod tests {
         );
         assert_eq!(parsed.epoch, bundle.epoch);
         assert_eq!(parsed.created_at_secs, bundle.created_at_secs);
-        assert_eq!(parsed.signature.to_bytes(), bundle.signature.to_bytes());
+        assert_eq!(
+            parsed.identity_signature.to_bytes(),
+            bundle.identity_signature.to_bytes()
+        );
     }
 
     #[test]
@@ -383,7 +385,7 @@ mod tests {
         let bundle = setup().discovery_key.public();
         let public_key = bundle.public_key.as_bytes();
         let verifying_key = bundle.verifying_key.as_bytes();
-        let signature = bundle.signature.to_bytes();
+        let signature = bundle.identity_signature.to_bytes();
 
         for (public_key, verifying_key, signature) in [
             (&public_key[1..], &verifying_key[..], &signature[..]),
@@ -409,7 +411,7 @@ mod tests {
             &non_decompressible_ed25519_verifying_key_bytes,
             FIXED_EPOCH,
             FIXED_CREATED_AT_SECS,
-            &bundle.signature.to_bytes(),
+            &bundle.identity_signature.to_bytes(),
         );
         assert!(matches!(result, Err(PublicKeyError::InvalidKeyEncoding)));
     }
@@ -490,7 +492,7 @@ mod tests {
         bare_payload.extend_from_slice(bundle.verifying_key.as_bytes());
         bare_payload.extend_from_slice(&bundle.epoch.to_be_bytes());
         bare_payload.extend_from_slice(&bundle.created_at_secs.to_be_bytes());
-        bundle.signature = setup.identity.sign(&bare_payload);
+        bundle.identity_signature = setup.identity.sign(&bare_payload);
         assert!(matches!(
             verify_public_discovery_key(&bundle, &setup.identity.verifying),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
@@ -517,7 +519,7 @@ mod tests {
 
     /// Builds a verifiable public identity key from fixed secret bytes.
     fn public_identity_key(signing_secret: [u8; 32], x25519_public: [u8; 32]) -> PublicIdentityKey {
-        let signing = SigningKeyPair::from_signing_bytes(signing_secret);
+        let signing = SigningKeyPair::from_signing_bytes(&signing_secret);
         let public_key = PublicKey::from(x25519_public);
         let binding_signature = sign_identity_key_binding(&signing, &public_key).unwrap();
         PublicIdentityKey {

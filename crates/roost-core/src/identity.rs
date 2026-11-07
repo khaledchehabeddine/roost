@@ -135,8 +135,8 @@ struct IdentitySecretsWire {
 impl IdentitySecretsWire {
     fn key_pairs(&self) -> (KeyPair, SigningKeyPair) {
         (
-            KeyPair::from_secret_bytes(self.agreement_secret),
-            SigningKeyPair::from_signing_bytes(self.signing_secret),
+            KeyPair::from_secret_bytes(&self.agreement_secret),
+            SigningKeyPair::from_signing_bytes(&self.signing_secret),
         )
     }
 }

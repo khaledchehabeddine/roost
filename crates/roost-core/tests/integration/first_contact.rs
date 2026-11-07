@@ -100,8 +100,8 @@ fn a_reply_before_acceptance_reaches_the_requester_with_its_capability_and_no_gr
     let reply = bob.send(&alice, b"who is this?");
 
     assert_eq!(
-        established_verifier(&reply.destination),
-        alice.publication().recipient_delivery_verifier
+        established_verifier(&reply.destination).as_bytes(),
+        alice.publication().recipient_delivery_verifier.as_bytes()
     );
     assert_eq!(reply.payload_kind, PayloadKind::Content);
     let received = accepted(alice.receive(&reply.message));
@@ -142,8 +142,8 @@ fn the_asked_side_acknowledges_only_after_its_first_reply() {
     let received = bob.observe(&third.message).unwrap();
 
     assert_eq!(
-        established_verifier(&received.acknowledgment_destination.unwrap()),
-        alice.publication().recipient_delivery_verifier
+        established_verifier(&received.acknowledgment_destination.unwrap()).as_bytes(),
+        alice.publication().recipient_delivery_verifier.as_bytes()
     );
     assert!(accepted(received.outcome).acknowledgment.is_some());
 }
@@ -162,8 +162,8 @@ fn an_acceptance_shares_the_asked_sides_grant_and_accepts_both_sides() {
     );
     let observed = alice.observe(&acceptance.message).unwrap();
     assert_eq!(
-        established_verifier(&observed.acknowledgment_destination.unwrap()),
-        bob.publication().recipient_delivery_verifier
+        established_verifier(&observed.acknowledgment_destination.unwrap()).as_bytes(),
+        bob.publication().recipient_delivery_verifier.as_bytes()
     );
     let received = accepted(observed.outcome);
     assert_eq!(received.plaintext.as_slice(), b"welcome");
@@ -174,8 +174,8 @@ fn an_acceptance_shares_the_asked_sides_grant_and_accepts_both_sides() {
     );
     let message = alice.send(&bob, b"hello again");
     assert_eq!(
-        established_verifier(&message.destination),
-        bob.publication().recipient_delivery_verifier
+        established_verifier(&message.destination).as_bytes(),
+        bob.publication().recipient_delivery_verifier.as_bytes()
     );
 }
 
@@ -380,8 +380,8 @@ fn a_request_restarted_after_the_peer_accepted_becomes_an_ordinary_message() {
 
     assert_eq!(sent.session_id, acceptance.session_id);
     assert_eq!(
-        established_verifier(&sent.destination),
-        bob.publication().recipient_delivery_verifier
+        established_verifier(&sent.destination).as_bytes(),
+        bob.publication().recipient_delivery_verifier.as_bytes()
     );
 }
 
@@ -636,8 +636,8 @@ fn after_an_inbox_rotation_contacts_get_the_new_grant() {
     alice.receive(&message.message);
 
     assert_eq!(
-        established_verifier(&alice.send(&bob, b"got it").destination),
-        rotation.output.recipient_delivery_verifier
+        established_verifier(&alice.send(&bob, b"got it").destination).as_bytes(),
+        rotation.output.recipient_delivery_verifier.as_bytes()
     );
 }
 
@@ -655,8 +655,8 @@ fn a_grant_for_an_older_discovery_key_changes_nothing() {
     alice.receive(&delayed.message);
 
     assert_eq!(
-        established_verifier(&alice.send(&bob, b"which inbox?").destination),
-        rotation.output.recipient_delivery_verifier
+        established_verifier(&alice.send(&bob, b"which inbox?").destination).as_bytes(),
+        rotation.output.recipient_delivery_verifier.as_bytes()
     );
 }
 

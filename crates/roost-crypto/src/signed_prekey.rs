@@ -1,18 +1,18 @@
 use crate::keys::{PublicKeyError, SigningKeyPair, contributory_diffie_hellman};
 use ed25519_dalek::{Signature, VerifyingKey};
 use rand::{CryptoRng, RngCore};
-use roost_protocol::{SignatureError, verify_with_context};
+use roost_protocol::{PUBLIC_KEY_LEN, SignatureError, verify_with_context};
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
-// Domain separator for signatures over signed prekey public keys and epoch metadata.
 const SIGNED_PREKEY_CONTEXT: &[u8] = b"RoostSPK-v1:";
+const SIGNED_PREKEY_PAYLOAD_LEN: usize = PUBLIC_KEY_LEN + 4 + 8;
 
 /// An X25519 prekey signed by an Ed25519 signing key.
 ///
 /// The secret key is zeroed on drop. The public key, signature, epoch, and creation timestamp
 /// remain available through accessors and [`Self::public`].
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(ZeroizeOnDrop)]
 pub struct SignedPreKey {
     secret_key: StaticSecret,
     #[zeroize(skip)]
@@ -69,13 +69,13 @@ impl SignedPreKey {
     ///
     /// The public key is derived from `secret`. The stored signature is not verified here.
     pub fn from_secret_bytes(
-        secret: [u8; 32],
+        secret: &[u8; 32],
         signature: [u8; 64],
         id: u64,
         epoch: u32,
         created_at_secs: u64,
     ) -> Self {
-        let secret_key = StaticSecret::from(secret);
+        let secret_key = StaticSecret::from(*secret);
         let public_key = PublicKey::from(&secret_key);
         let signature = Signature::from_bytes(&signature);
         SignedPreKey {
@@ -114,7 +114,7 @@ pub struct PublicSignedPreKey {
     pub signature: Signature,
     /// Stable unsigned identifier allocated within [`Self::epoch`].
     ///
-    /// The identifier is lookup metadata and is not covered by [`Self::signature`]. A host that
+    /// The identifier is lookup metadata and is not covered by [`Self::signature`]. An app that
     /// needs it authenticated as transport metadata must include it in its transport binding.
     pub id: u64,
     /// Discovery-key epoch this signed prekey was produced under.
@@ -151,24 +151,32 @@ pub(crate) fn generate_signed_prekey<R: RngCore + CryptoRng>(
 
 /// Verifies a public signed prekey against the verifying key that signed it.
 pub fn verify_public_signed_prekey(
-    bundle: &PublicSignedPreKey,
+    signed_prekey: &PublicSignedPreKey,
     signer_verifying_key: &VerifyingKey,
 ) -> Result<(), PublicKeyError> {
-    let payload = signed_prekey_payload(&bundle.public_key, bundle.epoch, bundle.created_at_secs);
+    let payload = signed_prekey_payload(
+        &signed_prekey.public_key,
+        signed_prekey.epoch,
+        signed_prekey.created_at_secs,
+    );
     verify_with_context(
         signer_verifying_key,
         SIGNED_PREKEY_CONTEXT,
         &payload,
-        &bundle.signature,
+        &signed_prekey.signature,
     )
     .map_err(Into::into)
 }
 
-fn signed_prekey_payload(public_key: &PublicKey, epoch: u32, created_at_secs: u64) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(32 + 4 + 8);
-    payload.extend_from_slice(public_key.as_bytes());
-    payload.extend_from_slice(&epoch.to_be_bytes());
-    payload.extend_from_slice(&created_at_secs.to_be_bytes());
+fn signed_prekey_payload(
+    public_key: &PublicKey,
+    epoch: u32,
+    created_at_secs: u64,
+) -> [u8; SIGNED_PREKEY_PAYLOAD_LEN] {
+    let mut payload = [0u8; SIGNED_PREKEY_PAYLOAD_LEN];
+    payload[..PUBLIC_KEY_LEN].copy_from_slice(public_key.as_bytes());
+    payload[PUBLIC_KEY_LEN..PUBLIC_KEY_LEN + 4].copy_from_slice(&epoch.to_be_bytes());
+    payload[PUBLIC_KEY_LEN + 4..].copy_from_slice(&created_at_secs.to_be_bytes());
     payload
 }
 
@@ -390,7 +398,7 @@ mod tests {
         )
         .unwrap();
         let restored = SignedPreKey::from_secret_bytes(
-            *original.to_secret_bytes(),
+            &original.to_secret_bytes(),
             original.signature().to_bytes(),
             original.id(),
             original.epoch(),
@@ -423,7 +431,7 @@ mod tests {
         )
         .unwrap();
         let restored = SignedPreKey::from_secret_bytes(
-            *original.to_secret_bytes(),
+            &original.to_secret_bytes(),
             original.signature().to_bytes(),
             original.id(),
             original.epoch(),

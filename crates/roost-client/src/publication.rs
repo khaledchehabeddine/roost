@@ -70,27 +70,19 @@ pub struct PublicOneTimePreKey {
     pub public_key: Vec<u8>,
     /// Discovery key epoch this one-time prekey is bound to.
     pub epoch: u32,
-    /// Creation time in Unix milliseconds, always a whole number of seconds.
-    pub created_at_millis: u64,
 }
 
 impl PublicOneTimePreKey {
-    pub(crate) fn from_core(one_time_prekey: CorePublicOneTimePreKey) -> Result<Self, RoostError> {
-        Ok(PublicOneTimePreKey {
+    pub(crate) fn from_core(one_time_prekey: CorePublicOneTimePreKey) -> Self {
+        PublicOneTimePreKey {
             id: one_time_prekey.id,
             public_key: one_time_prekey.public_key.as_bytes().to_vec(),
             epoch: one_time_prekey.epoch,
-            created_at_millis: millis_from_secs(
-                one_time_prekey.created_at_secs,
-                "one-time prekey creation time",
-            )?,
-        })
+        }
     }
 
     fn to_core(&self) -> Result<CorePublicOneTimePreKey, RoostError> {
-        let created_at_secs =
-            whole_secs_from_millis(self.created_at_millis, "one-time prekey created_at_millis")?;
-        CorePublicOneTimePreKey::from_bytes(self.id, &self.public_key, self.epoch, created_at_secs)
+        CorePublicOneTimePreKey::from_bytes(self.id, &self.public_key, self.epoch)
             .map_err(RoostError::from)
     }
 }
@@ -118,7 +110,7 @@ impl PublicDiscoveryKey {
         Ok(PublicDiscoveryKey {
             public_key: discovery_key.public_key.as_bytes().to_vec(),
             verifying_key: discovery_key.verifying_key.as_bytes().to_vec(),
-            signature: discovery_key.signature.to_bytes().to_vec(),
+            signature: discovery_key.identity_signature.to_bytes().to_vec(),
             epoch: discovery_key.epoch,
             created_at_millis: millis_from_secs(
                 discovery_key.created_at_secs,

@@ -1,4 +1,4 @@
-//! Exercises caller-owned binding bytes across Core construction, message, and acknowledgment APIs.
+//! Exercises app-owned binding bytes across Core's message and acknowledgment APIs.
 
 use crate::support::device::{Sealed, run_encryption};
 use crate::support::{ProtocolFixture, accepted, run_decryption, trusted_validation};
@@ -6,30 +6,9 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     InboundMessageOutcome, IncomingMessage, MessageOperationError, ProtocolStateError,
-    ReceiveSettings, TransportBinding, TransportBindingError,
+    ReceiveSettings, TransportBinding,
 };
 use roost_crypto::SealedFrameError;
-
-#[test]
-fn a_transport_binding_keeps_exact_bytes_up_to_the_associated_data_limit() {
-    const MAX_LEN: usize = 1024;
-    for (bytes, expected) in [
-        (vec![0x41, 0x00, 0xff, 0x7f], Ok(())),
-        (vec![0x41; MAX_LEN], Ok(())),
-        (Vec::new(), Err(TransportBindingError::Empty)),
-        (
-            vec![0x41; MAX_LEN + 1],
-            Err(TransportBindingError::TooLong {
-                length: MAX_LEN + 1,
-                maximum: MAX_LEN,
-            }),
-        ),
-    ] {
-        let bound = TransportBinding::new(bytes.clone()).map(|binding| binding.as_bytes().to_vec());
-
-        assert_eq!(bound, expected.map(|()| bytes));
-    }
-}
 
 #[test]
 fn messages_and_acknowledgments_authenticate_their_distinct_exact_bindings() {
