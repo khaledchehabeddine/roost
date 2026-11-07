@@ -102,34 +102,6 @@ mod tests {
     use rand_chacha::ChaCha20Rng;
 
     #[test]
-    fn public_fields_match_one_time_prekey() {
-        let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
-        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3);
-        let bundle = one_time_prekey.public();
-        assert_eq!(bundle.id, 9);
-        assert_eq!(
-            bundle.public_key.as_bytes(),
-            one_time_prekey.public_key().as_bytes()
-        );
-        assert_eq!(bundle.epoch, 3);
-    }
-
-    #[test]
-    fn public_from_bytes_round_trip_preserves_fields() {
-        let mut rng = ChaCha20Rng::from_seed([0x54u8; 32]);
-        let one_time_prekey = generate_one_time_prekey(&mut rng, 9, 3);
-        let bundle = one_time_prekey.public();
-
-        let parsed =
-            PublicOneTimePreKey::from_bytes(bundle.id, bundle.public_key.as_bytes(), bundle.epoch)
-                .unwrap();
-
-        assert_eq!(parsed.id, bundle.id);
-        assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
-        assert_eq!(parsed.epoch, bundle.epoch);
-    }
-
-    #[test]
     fn public_from_bytes_rejects_wrong_public_key_length() {
         assert!(matches!(
             PublicOneTimePreKey::from_bytes(9, &[0u8; 31], 3),

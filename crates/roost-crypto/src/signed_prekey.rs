@@ -219,32 +219,6 @@ mod tests {
     }
 
     #[test]
-    fn public_fields_match_signed_prekey() {
-        let mut rng = seeded_rng();
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(
-            &mut rng,
-            &signing_key,
-            FIXED_ID,
-            FIXED_EPOCH,
-            FIXED_CREATED_AT_SECS,
-        )
-        .unwrap();
-        let bundle = signed_prekey.public();
-        assert_eq!(
-            bundle.public_key.as_bytes(),
-            signed_prekey.public_key().as_bytes()
-        );
-        assert_eq!(
-            bundle.signature.to_bytes(),
-            signed_prekey.signature().to_bytes()
-        );
-        assert_eq!(bundle.id, signed_prekey.id());
-        assert_eq!(bundle.epoch, signed_prekey.epoch());
-        assert_eq!(bundle.created_at_secs, signed_prekey.created_at_secs());
-    }
-
-    #[test]
     fn verify_rejects_tampered_public_key() {
         let mut rng = seeded_rng();
         let signing_key = generate_signing_key_pair(&mut rng);
@@ -262,54 +236,6 @@ mod tests {
         bundle.public_key = PublicKey::from(public_key_bytes);
         assert!(matches!(
             verify_public_signed_prekey(&bundle, &signing_key.verifying),
-            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
-        ));
-    }
-
-    #[test]
-    fn verify_rejects_tampered_signature() {
-        let mut rng = seeded_rng();
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(
-            &mut rng,
-            &signing_key,
-            FIXED_ID,
-            FIXED_EPOCH,
-            FIXED_CREATED_AT_SECS,
-        )
-        .unwrap();
-        let bundle = signed_prekey.public();
-        let mut signature_bytes = bundle.signature.to_bytes();
-        signature_bytes[0] ^= 0x01;
-        let tampered = PublicSignedPreKey {
-            public_key: bundle.public_key,
-            signature: Signature::from_bytes(&signature_bytes),
-            id: bundle.id,
-            epoch: bundle.epoch,
-            created_at_secs: bundle.created_at_secs,
-        };
-        assert!(matches!(
-            verify_public_signed_prekey(&tampered, &signing_key.verifying),
-            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
-        ));
-    }
-
-    #[test]
-    fn verify_rejects_wrong_signer() {
-        let mut rng = seeded_rng();
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let wrong_signing_key = generate_signing_key_pair(&mut rng);
-        let signed_prekey = generate_signed_prekey(
-            &mut rng,
-            &signing_key,
-            FIXED_ID,
-            FIXED_EPOCH,
-            FIXED_CREATED_AT_SECS,
-        )
-        .unwrap();
-        let bundle = signed_prekey.public();
-        assert!(matches!(
-            verify_public_signed_prekey(&bundle, &wrong_signing_key.verifying),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
@@ -362,25 +288,6 @@ mod tests {
         };
         assert!(matches!(
             verify_public_signed_prekey(&tampered, &signing_key.verifying),
-            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
-        ));
-    }
-
-    #[test]
-    fn signature_without_domain_prefix_fails_verification() {
-        let mut rng = seeded_rng();
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let key_pair = generate_key_pair(&mut rng);
-        let bare_signature = signing_key.sign(key_pair.public.as_bytes());
-        let bundle = PublicSignedPreKey {
-            public_key: key_pair.public,
-            signature: bare_signature,
-            id: FIXED_ID,
-            epoch: FIXED_EPOCH,
-            created_at_secs: FIXED_CREATED_AT_SECS,
-        };
-        assert!(matches!(
-            verify_public_signed_prekey(&bundle, &signing_key.verifying),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }

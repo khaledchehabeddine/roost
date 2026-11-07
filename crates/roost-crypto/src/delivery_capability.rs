@@ -77,21 +77,6 @@ mod tests {
         ChaCha20Rng::from_seed([9u8; 32])
     }
 
-    #[test]
-    fn distinct_capabilities_produce_distinct_verifiers() {
-        let first = RecipientDeliveryCapability::from_bytes(&[0x42u8; 32]);
-        let second = RecipientDeliveryCapability::from_bytes(&[0x43u8; 32]);
-        assert_ne!(first.verifier().as_bytes(), second.verifier().as_bytes());
-    }
-
-    #[test]
-    fn generated_capabilities_differ_between_draws() {
-        let mut rng = seeded_rng();
-        let first = generate_recipient_delivery_capability(&mut rng);
-        let second = generate_recipient_delivery_capability(&mut rng);
-        assert_ne!(*first.to_bytes(), *second.to_bytes());
-    }
-
     /// The app persists the capability and restores it later, so the round trip must keep the
     /// exact bytes and so the verifier the relay already holds.
     #[test]

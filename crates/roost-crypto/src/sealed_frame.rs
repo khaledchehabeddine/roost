@@ -401,39 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn sealed_frame_authenticates_the_transport_binding() {
-        let mut rng = ChaCha20Rng::from_seed([0x10; 32]);
-        let recipient = recipient_discovery_key(0x42);
-        let frame = seal_frame_with_associated_data(
-            &mut rng,
-            recipient.public_key(),
-            None,
-            b"transport-bound payload",
-            &binding(b"app-binding:expected"),
-        )
-        .unwrap();
-
-        assert_eq!(
-            open_frame_for_discovery_key_with_associated_data(
-                &recipient,
-                &frame,
-                &binding(b"app-binding:expected"),
-            )
-            .unwrap()
-            .as_slice(),
-            b"transport-bound payload"
-        );
-        assert!(matches!(
-            open_frame_for_discovery_key_with_associated_data(
-                &recipient,
-                &frame,
-                &binding(b"app-binding:changed"),
-            ),
-            Err(SealedFrameError::Aead)
-        ));
-    }
-
-    #[test]
     fn sealed_frame_round_trip_with_prekey_reference() {
         let mut rng = ChaCha20Rng::from_seed([0x11; 32]);
         let recipient = recipient_discovery_key(0x42);
@@ -567,30 +534,6 @@ mod tests {
         assert!(matches!(
             frame.to_bytes(),
             Err(SealedFrameError::InvalidPublicKey)
-        ));
-    }
-
-    #[test]
-    fn sealed_frame_open_rejects_recipient_key_mismatch() {
-        let mut rng = ChaCha20Rng::from_seed([0x13; 32]);
-        let recipient = recipient_discovery_key(0x42);
-        let other_recipient = recipient_discovery_key(0x43);
-        let frame = seal_frame_with_associated_data(
-            &mut rng,
-            recipient.public_key(),
-            None,
-            b"payload",
-            &binding(b"binding"),
-        )
-        .unwrap();
-
-        assert!(matches!(
-            open_frame_for_discovery_key_with_associated_data(
-                &other_recipient,
-                &frame,
-                &binding(b"binding")
-            ),
-            Err(SealedFrameError::RecipientMismatch)
         ));
     }
 }

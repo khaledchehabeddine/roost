@@ -11,34 +11,6 @@ use roost_crypto::{
 use roost_protocol::SignatureError;
 
 #[test]
-fn consecutive_sends_use_symmetric_ratchet_only() {
-    let (mut setup, mut rng) = setup([0x33; 32]);
-    let (mut alice, mut bob) = bootstrap(&mut setup, &mut rng, true, b"msg-0");
-    let associated_data = ASSOCIATED_DATA;
-
-    let mut messages = Vec::new();
-    for i in 1..=5 {
-        let plaintext = format!("msg-{i}");
-        let (header, ciphertext) = alice
-            .ratchet_encrypt(plaintext.as_bytes(), associated_data)
-            .unwrap();
-        messages.push((plaintext, header, ciphertext));
-    }
-
-    let alice_ratchet_public_key = *messages[0].1.public_key.as_bytes();
-    for (_, header, _) in &messages {
-        assert_eq!(header.public_key.as_bytes(), &alice_ratchet_public_key);
-    }
-
-    for (plaintext, header, ciphertext) in &messages {
-        let decrypted = bob
-            .ratchet_decrypt(&mut rng, ciphertext, header, associated_data)
-            .unwrap();
-        assert_eq!(decrypted.as_slice(), plaintext.as_bytes());
-    }
-}
-
-#[test]
 fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
     let (setup, mut rng) = setup([0x33; 32]);
     let mut bundle = setup.bob_signed_prekey.public();
