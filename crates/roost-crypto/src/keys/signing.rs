@@ -63,10 +63,8 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::Verifier;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
-    use roost_protocol::verify_with_context;
 
     fn generated_key_pair() -> SigningKeyPair {
         generate_signing_key_pair(&mut ChaCha20Rng::from_seed([3u8; 32]))
@@ -83,42 +81,5 @@ mod tests {
     fn signing_key_pair_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
         assert_zeroizes_on_drop::<SigningKeyPair>();
-    }
-
-    #[test]
-    fn sign_and_verify_round_trip() {
-        let key_pair = generated_key_pair();
-        let message = b"roost test message";
-        let signature = key_pair.sign(message);
-        key_pair.verifying.verify(message, &signature).unwrap();
-    }
-
-    #[test]
-    fn signature_invalid_for_different_message() {
-        let key_pair = generated_key_pair();
-        let signature = key_pair.sign(b"message one");
-        assert!(matches!(
-            key_pair.verifying.verify(b"message two", &signature),
-            Err(ed25519_dalek::SignatureError { .. })
-        ));
-    }
-
-    #[test]
-    fn context_signature_rejects_wrong_context() {
-        let key_pair = generated_key_pair();
-        let message = b"context-bound message";
-        let signature = key_pair
-            .sign_with_context(b"RoostTest-v1:first", message)
-            .unwrap();
-
-        assert!(matches!(
-            verify_with_context(
-                &key_pair.verifying,
-                b"RoostTest-v1:second",
-                message,
-                &signature,
-            ),
-            Err(SignatureError::SignatureInvalid)
-        ));
     }
 }

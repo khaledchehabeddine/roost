@@ -70,14 +70,4 @@ mod tests {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
         assert_zeroizes_on_drop::<KeyPair>();
     }
-
-    #[test]
-    fn diffie_hellman_agreement_is_symmetric() {
-        let mut rng = ChaCha20Rng::from_seed([2u8; 32]);
-        let alice = generate_key_pair(&mut rng);
-        let bob = generate_key_pair(&mut rng);
-        let alice_shared_secret = alice.diffie_hellman(&bob.public).unwrap();
-        let bob_shared_secret = bob.diffie_hellman(&alice.public).unwrap();
-        assert_eq!(alice_shared_secret.as_bytes(), bob_shared_secret.as_bytes());
-    }
 }

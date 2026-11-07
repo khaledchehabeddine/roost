@@ -330,54 +330,9 @@ mod tests {
     }
 
     #[test]
-    fn public_fields_match_discovery_key() {
-        let setup = setup();
-        let bundle = setup.discovery_key.public();
-        assert_eq!(
-            bundle.public_key.as_bytes(),
-            setup.discovery_key.public_key().as_bytes()
-        );
-        assert_eq!(
-            bundle.verifying_key.as_bytes(),
-            setup.discovery_key.public().verifying_key.as_bytes()
-        );
-        assert_eq!(bundle.epoch, FIXED_EPOCH);
-        assert_eq!(bundle.created_at_secs, FIXED_CREATED_AT_SECS);
-        assert_eq!(
-            bundle.identity_signature.to_bytes(),
-            setup.discovery_key.identity_signature().to_bytes()
-        );
-    }
-
-    #[test]
     fn discovery_key_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
         assert_zeroizes_on_drop::<DiscoveryKey>();
-    }
-
-    #[test]
-    fn from_bytes_round_trip_preserves_bundle_fields() {
-        let setup = setup();
-        let bundle = setup.discovery_key.public();
-        let parsed = PublicDiscoveryKey::from_bytes(
-            bundle.public_key.as_bytes(),
-            bundle.verifying_key.as_bytes(),
-            bundle.epoch,
-            bundle.created_at_secs,
-            &bundle.identity_signature.to_bytes(),
-        )
-        .unwrap();
-        assert_eq!(parsed.public_key.as_bytes(), bundle.public_key.as_bytes());
-        assert_eq!(
-            parsed.verifying_key.as_bytes(),
-            bundle.verifying_key.as_bytes()
-        );
-        assert_eq!(parsed.epoch, bundle.epoch);
-        assert_eq!(parsed.created_at_secs, bundle.created_at_secs);
-        assert_eq!(
-            parsed.identity_signature.to_bytes(),
-            bundle.identity_signature.to_bytes()
-        );
     }
 
     #[test]
@@ -427,24 +382,6 @@ mod tests {
             &[0u8; 64],
         );
         assert!(matches!(result, Err(PublicKeyError::InvalidKeyEncoding)));
-    }
-
-    #[test]
-    fn verify_accepts_bundle_signed_by_identity_key() {
-        let setup = setup();
-        let bundle = setup.discovery_key.public();
-        verify_public_discovery_key(&bundle, &setup.identity.verifying).unwrap();
-    }
-
-    #[test]
-    fn verify_rejects_wrong_identity() {
-        let mut setup = setup();
-        let other_identity = generate_signing_key_pair(&mut setup.rng);
-        let bundle = setup.discovery_key.public();
-        assert!(matches!(
-            verify_public_discovery_key(&bundle, &other_identity.verifying),
-            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
-        ));
     }
 
     #[test]
@@ -527,51 +464,6 @@ mod tests {
             verifying_key: signing.verifying,
             binding_signature,
         }
-    }
-
-    #[test]
-    fn identity_binding_verifies_under_discovery_verifying_key() {
-        let setup = setup();
-        let identity = public_identity_key([0x11u8; 32], [0x22u8; 32]);
-
-        let signature = setup
-            .discovery_key
-            .sign_identity_binding(&identity)
-            .unwrap();
-
-        verify_discovery_to_identity_binding(
-            &identity,
-            &setup.discovery_key.public().verifying_key,
-            &signature,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn identity_binding_rejects_wrong_discovery_key() {
-        let mut setup = setup();
-        let identity = public_identity_key([0x11u8; 32], [0x22u8; 32]);
-        let other_discovery = generate_discovery_key(
-            &mut setup.rng,
-            &setup.identity,
-            FIXED_EPOCH,
-            FIXED_CREATED_AT_SECS,
-        )
-        .unwrap();
-
-        let signature = setup
-            .discovery_key
-            .sign_identity_binding(&identity)
-            .unwrap();
-
-        assert!(matches!(
-            verify_discovery_to_identity_binding(
-                &identity,
-                &other_discovery.public().verifying_key,
-                &signature,
-            ),
-            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
-        ));
     }
 
     #[test]

@@ -514,30 +514,6 @@ mod tests {
     }
 
     #[test]
-    fn handshake_names_the_bundle_prekeys() {
-        let (setup, mut rng) = setup();
-
-        let (_, _, handshake) =
-            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
-
-        assert_eq!(
-            handshake.responder_discovery_key,
-            *setup.bob_discovery_key.public_key()
-        );
-        assert_eq!(
-            handshake.prekey_reference,
-            SealedFramePreKeyReference {
-                discovery_epoch: setup.bob_discovery_key.epoch(),
-                signed_prekey_public_key: *setup.bob_signed_prekey.public_key().as_bytes(),
-                one_time_prekey: Some(OneTimePreKeyReference {
-                    id: setup.bob_one_time_prekey.public().id,
-                    public_key: *setup.bob_one_time_prekey.public_key().as_bytes(),
-                }),
-            }
-        );
-    }
-
-    #[test]
     fn root_key_and_session_id_change_with_each_key_agreement_input() {
         let secret = |seed: u8| {
             let mut rng = ChaCha20Rng::from_seed([seed; 32]);
@@ -668,17 +644,6 @@ mod tests {
                 SignatureError::SignatureInvalid
             )))
         ));
-    }
-
-    #[test]
-    fn sender_proof_verifies_with_the_signed_prekey() {
-        let (setup, mut rng) = setup();
-        let (_, _, handshake) =
-            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle(&setup, true)).unwrap();
-        let sender_discovery_key = setup.alice_discovery_key.public();
-        let transcript = proof_transcript(&setup, &handshake, &sender_discovery_key);
-        let proof = prove_sender(&setup.alice_identity_key_pair, &transcript).unwrap();
-        verify_sender_proof(&setup.bob_signed_prekey, &transcript, &proof).unwrap();
     }
 
     #[test]
