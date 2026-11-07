@@ -16,8 +16,8 @@ impl TransportBinding {
         }
         if bytes.len() > MAX_TRANSPORT_BINDING_LEN {
             return Err(TransportBindingError::TooLong {
-                len: bytes.len(),
-                max: MAX_TRANSPORT_BINDING_LEN,
+                length: bytes.len(),
+                maximum: MAX_TRANSPORT_BINDING_LEN,
             });
         }
         Ok(Self(bytes))
@@ -37,12 +37,12 @@ pub enum TransportBindingError {
     #[error("transport binding is empty")]
     Empty,
     /// The app passed more bytes than a transport binding holds.
-    #[error("transport binding length {len} exceeds {max}")]
+    #[error("transport binding length {length} exceeds {maximum}")]
     TooLong {
-        /// Passed byte length.
-        len: usize,
-        /// Longest transport binding in bytes.
-        max: usize,
+        /// Supplied byte length.
+        length: usize,
+        /// Maximum accepted byte length.
+        maximum: usize,
     },
 }
 
@@ -60,8 +60,8 @@ mod tests {
             (
                 vec![0x41; MAX_LEN + 1],
                 Err(TransportBindingError::TooLong {
-                    len: MAX_LEN + 1,
-                    max: MAX_LEN,
+                    length: MAX_LEN + 1,
+                    maximum: MAX_LEN,
                 }),
             ),
         ] {
