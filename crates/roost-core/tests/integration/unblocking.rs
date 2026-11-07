@@ -54,8 +54,8 @@ fn an_unchanged_discovery_key_keeps_the_session_and_carries_the_new_grant() {
     assert_eq!(Route::of(&sent.destination), bob.established_route());
     bob.receive(&sent.message);
     assert_eq!(
-        established_verifier(&bob.send(&alice, b"welcome back").destination),
-        alice.publication().recipient_delivery_verifier
+        established_verifier(&bob.send(&alice, b"welcome back").destination).as_bytes(),
+        alice.publication().recipient_delivery_verifier.as_bytes()
     );
     // The check happens once.
     alice.send(&bob, b"no bundle needed");
@@ -86,8 +86,8 @@ fn a_contact_that_rotated_during_the_block_gets_a_new_session() {
         InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
     assert_eq!(
-        established_verifier(&alice.send(&bob, b"after the handshake").destination),
-        rotation.recipient_delivery_verifier
+        established_verifier(&alice.send(&bob, b"after the handshake").destination).as_bytes(),
+        rotation.recipient_delivery_verifier.as_bytes()
     );
     let contact = alice.contact(&bob).unwrap();
     assert_eq!(contact.trust_state, ContactTrustState::Unverified);

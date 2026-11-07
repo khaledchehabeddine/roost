@@ -84,7 +84,7 @@ pub(super) fn parse_discovery_key(
         verifying_key: parse_ed25519_verifying_key_bytes(ed25519_verifying_key)?,
         epoch,
         created_at_secs,
-        signature: Signature::from_bytes(identity_signature),
+        identity_signature: Signature::from_bytes(identity_signature),
     })
 }
 
@@ -115,7 +115,7 @@ pub(super) fn encode_granted_payload(
     grant: &LocalGrant<'_>,
     plaintext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    let identity_signature = grant.discovery_key.signature.to_bytes();
+    let identity_signature = grant.discovery_key.identity_signature.to_bytes();
     let discovery_to_identity = grant.discovery_to_identity.to_bytes();
     let capability = grant.delivery_capability.to_bytes();
     let encoded_grant = encode_zeroizing(&InboxGrantWire {
@@ -230,8 +230,8 @@ mod tests {
     }
 
     fn owner(seed: u8) -> Owner {
-        let signing_key = SigningKeyPair::from_signing_bytes([seed; 32]);
-        let agreement_key = KeyPair::from_secret_bytes([seed.wrapping_add(1); 32]);
+        let signing_key = SigningKeyPair::from_signing_bytes(&[seed; 32]);
+        let agreement_key = KeyPair::from_secret_bytes(&[seed.wrapping_add(1); 32]);
         let identity = PublicIdentityKey {
             public_key: agreement_key.public,
             verifying_key: signing_key.verifying,
@@ -249,7 +249,7 @@ mod tests {
             discovery_to_identity: discovery_key.sign_identity_binding(&identity).unwrap(),
             identity,
             discovery_key,
-            capability: RecipientDeliveryCapability::from_bytes([seed; 32]),
+            capability: RecipientDeliveryCapability::from_bytes(&[seed; 32]),
         }
     }
 

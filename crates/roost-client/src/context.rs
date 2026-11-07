@@ -607,10 +607,10 @@ pub(crate) fn abort_unconverted(
 fn public_one_time_prekeys_from_core(
     one_time_prekeys: Vec<roost_core::PublicOneTimePreKey>,
 ) -> Result<Vec<PublicOneTimePreKey>, RoostError> {
-    one_time_prekeys
+    Ok(one_time_prekeys
         .into_iter()
         .map(PublicOneTimePreKey::from_core)
-        .collect()
+        .collect())
 }
 
 // Bounds what the identity key will sign for a caller-defined purpose. The prefix rule is the
@@ -693,7 +693,7 @@ mod tests {
     use std::sync::Arc;
 
     /// Every Ed25519 signature context and canonical-encoding domain tag Roost defines, plus the
-    /// protocol-state commit and lowercase hash domains.
+    /// protocol-state commit and delivery verifier labels.
     const DOMAIN_REGISTRY: [&str; 10] = [
         "RoostIKBinding-v1:",
         "RoostDK-v1:",
@@ -704,7 +704,7 @@ mod tests {
         "RoostSafetyNumber-v1:",
         "RoostSenderCertificate-v1:",
         "RoostProtocolStateCommit-v1:",
-        "roost-recipient-delivery-capability-v1",
+        "RoostDeliveryVerifier-v1:",
     ];
 
     const RELAY_HTTP_AUTH_CONTEXT: &[u8] = b"Relay-HTTP-Auth-v1";

@@ -34,7 +34,7 @@ impl PublicIdentityKey {
     }
 }
 
-/// Signs the IK X25519 half with the IK Ed25519 signing key.
+/// Signs the identity key's X25519 half with its Ed25519 signing key.
 pub fn sign_identity_key_binding(
     signing_key: &SigningKeyPair,
     public_key: &PublicKey,
@@ -45,28 +45,28 @@ pub fn sign_identity_key_binding(
     )
 }
 
-/// Verifies that an IK Ed25519 key owns its X25519 public half.
-pub fn verify_public_identity_key(bundle: &PublicIdentityKey) -> Result<(), PublicKeyError> {
-    if !is_valid_x25519_public_key(bundle.public_key.as_bytes()) {
+/// Verifies that an identity key's Ed25519 half signed its X25519 half.
+pub fn verify_public_identity_key(identity_key: &PublicIdentityKey) -> Result<(), PublicKeyError> {
+    if !is_valid_x25519_public_key(identity_key.public_key.as_bytes()) {
         return Err(PublicKeyError::InvalidKeyEncoding);
     }
-    let verifying_key_bytes = bundle.verifying_key.to_bytes();
+    let verifying_key_bytes = identity_key.verifying_key.to_bytes();
     parse_ed25519_verifying_key_bytes(&verifying_key_bytes)
         .ok_or(PublicKeyError::InvalidKeyEncoding)?;
     verify_with_context(
-        &bundle.verifying_key,
+        &identity_key.verifying_key,
         IDENTITY_KEY_BINDING_CONTEXT,
-        &identity_key_binding_payload(&bundle.public_key, &bundle.verifying_key),
-        &bundle.binding_signature,
+        &identity_key_binding_payload(&identity_key.public_key, &identity_key.verifying_key),
+        &identity_key.binding_signature,
     )
     .map_err(Into::into)
 }
 
 /// Returns the identity key's two public halves, the bytes both binding directions cover.
 ///
-/// The IK self-binding signs these under `RoostIKBinding-v1:`, and a discovery key signs the same
-/// bytes under `RoostDKToIK-v1:`. Only the context separates the two, so both
-/// directions must derive the payload here rather than rebuilding it.
+/// The identity key signs these under `RoostIKBinding-v1:`, and a discovery key signs the same
+/// bytes under `RoostDKToIK-v1:`. Only the label separates the two, so both directions must build
+/// the payload here.
 pub(crate) fn identity_key_binding_payload(
     public_key: &PublicKey,
     verifying_key: &VerifyingKey,
@@ -75,4 +75,53 @@ pub(crate) fn identity_key_binding_payload(
     payload[..PUBLIC_KEY_LEN].copy_from_slice(public_key.as_bytes());
     payload[PUBLIC_KEY_LEN..].copy_from_slice(verifying_key.as_bytes());
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::dh::KeyPair;
+    use crate::keys::signing::generate_signing_key_pair;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+
+    #[test]
+    fn identity_key_binding_rejects_swapped_x25519_half() {
+        let mut rng = ChaCha20Rng::from_seed([0x15; 32]);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let agreement_key = KeyPair::from_secret_bytes(&[0x44; 32]);
+        let other_agreement_key = KeyPair::from_secret_bytes(&[0x45; 32]);
+        let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
+
+        let tampered = PublicIdentityKey {
+            public_key: other_agreement_key.public,
+            verifying_key: signing_key.verifying,
+            binding_signature: signature,
+        };
+
+        assert!(matches!(
+            verify_public_identity_key(&tampered),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
+        ));
+    }
+
+    #[test]
+    fn identity_key_binding_rejects_swapped_ed25519_half() {
+        let mut rng = ChaCha20Rng::from_seed([0x16; 32]);
+        let signing_key = generate_signing_key_pair(&mut rng);
+        let other_signing_key = generate_signing_key_pair(&mut rng);
+        let agreement_key = KeyPair::from_secret_bytes(&[0x46; 32]);
+        let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
+
+        let tampered = PublicIdentityKey {
+            public_key: agreement_key.public,
+            verifying_key: other_signing_key.verifying,
+            binding_signature: signature,
+        };
+
+        assert!(matches!(
+            verify_public_identity_key(&tampered),
+            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
+        ));
+    }
 }

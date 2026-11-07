@@ -2,14 +2,15 @@
 //!
 //! Handles session and message identifiers, payload kinds, the message transcript, sealed payload
 //! padding, public key validation and the identity key encoding, context-framed Ed25519
-//! verification, sender certificate validation, and Unix time conversions. It holds no state,
-//! secret keys, storage, or network I/O.
+//! verification, sender certificate validation, transport bindings, and Unix time conversions. It
+//! holds no state, secret keys, storage, or network I/O.
 
 mod identity_key;
 mod key_encoding;
 mod message;
 mod sender_certificate;
 mod signature;
+mod transport_binding;
 mod unix_time;
 
 pub use identity_key::IdentityKey;
@@ -26,4 +27,5 @@ pub use sender_certificate::{
     SenderCertificateValidation, SenderCertificateValidationError, ValidatedSenderCertificate,
 };
 pub use signature::{SignatureError, contextual_message, verify_with_context};
+pub use transport_binding::{TransportBinding, TransportBindingError};
 pub use unix_time::{from_unix_millis, from_unix_secs, to_unix_millis, to_unix_secs};

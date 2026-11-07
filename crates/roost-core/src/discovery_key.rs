@@ -91,7 +91,7 @@ impl DiscoveryKeyManager {
         &self,
     ) -> Result<RecipientDeliveryCapability, DiscoveryKeyError> {
         Ok(RecipientDeliveryCapability::from_bytes(
-            self.load_current()?.delivery_capability,
+            &self.load_current()?.delivery_capability,
         ))
     }
 
@@ -315,8 +315,8 @@ impl DiscoveryKeyWire {
 
     fn to_key(&self) -> DiscoveryKey {
         DiscoveryKey::from_secret_bytes(
-            self.agreement_secret,
-            self.signing_secret,
+            &self.agreement_secret,
+            &self.signing_secret,
             self.epoch,
             self.created_at_secs,
             signature_from_wire(&self.identity_signature),

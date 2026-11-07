@@ -145,8 +145,8 @@ fn a_message_sent_to_the_new_inbox_after_a_newer_grant_signals_nothing_within_a_
     alice.receive(&update.message);
     let sent = alice.send(&bob, b"to your new inbox");
     assert_eq!(
-        established_verifier(&sent.destination),
-        rotation.recipient_delivery_verifier
+        established_verifier(&sent.destination).as_bytes(),
+        rotation.recipient_delivery_verifier.as_bytes()
     );
     accepted(alice.receive(&hello.message));
 

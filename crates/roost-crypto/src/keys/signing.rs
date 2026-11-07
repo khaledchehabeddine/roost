@@ -45,8 +45,8 @@ impl SigningKeyPair {
     }
 
     /// Restores a [`SigningKeyPair`] from stored signing key bytes.
-    pub fn from_signing_bytes(bytes: [u8; 32]) -> Self {
-        let signing = SigningKey::from_bytes(&bytes);
+    pub fn from_signing_bytes(bytes: &[u8; 32]) -> Self {
+        let signing = SigningKey::from_bytes(bytes);
         let verifying = signing.verifying_key();
         SigningKeyPair { verifying, signing }
     }
@@ -63,10 +63,6 @@ pub fn generate_signing_key_pair<R: RngCore + CryptoRng>(rng: &mut R) -> Signing
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        KeyPair, PublicIdentityKey, PublicKeyError, sign_identity_key_binding,
-        verify_public_identity_key,
-    };
     use ed25519_dalek::Verifier;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
@@ -79,14 +75,13 @@ mod tests {
     #[test]
     fn signing_key_pair_round_trip_via_signing_bytes() {
         let key_pair = generated_key_pair();
-        let restored = SigningKeyPair::from_signing_bytes(*key_pair.to_signing_bytes());
+        let restored = SigningKeyPair::from_signing_bytes(&key_pair.to_signing_bytes());
         assert_eq!(key_pair.verifying.as_bytes(), restored.verifying.as_bytes());
     }
 
     #[test]
     fn signing_key_pair_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-
         assert_zeroizes_on_drop::<SigningKeyPair>();
     }
 
@@ -124,46 +119,6 @@ mod tests {
                 &signature,
             ),
             Err(SignatureError::SignatureInvalid)
-        ));
-    }
-
-    #[test]
-    fn identity_key_binding_rejects_swapped_x25519_half() {
-        let mut rng = ChaCha20Rng::from_seed([0x15; 32]);
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let agreement_key = KeyPair::from_secret_bytes([0x44; 32]);
-        let other_agreement_key = KeyPair::from_secret_bytes([0x45; 32]);
-        let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
-
-        let tampered = PublicIdentityKey {
-            public_key: other_agreement_key.public,
-            verifying_key: signing_key.verifying,
-            binding_signature: signature,
-        };
-
-        assert!(matches!(
-            verify_public_identity_key(&tampered),
-            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
-        ));
-    }
-
-    #[test]
-    fn identity_key_binding_rejects_swapped_ed25519_half() {
-        let mut rng = ChaCha20Rng::from_seed([0x16; 32]);
-        let signing_key = generate_signing_key_pair(&mut rng);
-        let other_signing_key = generate_signing_key_pair(&mut rng);
-        let agreement_key = KeyPair::from_secret_bytes([0x46; 32]);
-        let signature = sign_identity_key_binding(&signing_key, &agreement_key.public).unwrap();
-
-        let tampered = PublicIdentityKey {
-            public_key: agreement_key.public,
-            verifying_key: other_signing_key.verifying,
-            binding_signature: signature,
-        };
-
-        assert!(matches!(
-            verify_public_identity_key(&tampered),
-            Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
 }

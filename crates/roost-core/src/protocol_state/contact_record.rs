@@ -310,7 +310,7 @@ impl ContactRecord {
         match (&self.discovery_key, &self.delivery_capability) {
             (Some(discovery_key), Some(capability)) => Ok((
                 discovery_key.x25519_public_key,
-                RecipientDeliveryCapability::from_bytes(**capability),
+                RecipientDeliveryCapability::from_bytes(capability),
             )),
             _ => Err(ProtocolStateError::NoDeliveryCapability),
         }

@@ -44,8 +44,8 @@ fn a_grant_update_after_a_rotation_reaches_the_contact_and_is_acknowledged() {
         InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
     assert_eq!(
-        established_verifier(&alice.send(&bob, b"got it").destination),
-        rotation.recipient_delivery_verifier
+        established_verifier(&alice.send(&bob, b"got it").destination).as_bytes(),
+        rotation.recipient_delivery_verifier.as_bytes()
     );
 }
 
@@ -118,8 +118,8 @@ fn a_requester_sends_grant_updates_outside_the_limit_so_the_acceptance_reaches_i
     );
     let acceptance = bob.accept_request(&alice, b"welcome");
     assert_eq!(
-        established_verifier(&acceptance.destination),
-        rotation.recipient_delivery_verifier
+        established_verifier(&acceptance.destination).as_bytes(),
+        rotation.recipient_delivery_verifier.as_bytes()
     );
 }
 

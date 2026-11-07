@@ -11,8 +11,6 @@ pub struct Header {
 }
 
 impl Header {
-    // Serializes the header as `public_key || previous_chain_length || message_number`.
-    // Count fields are encoded as big-endian u32 values.
     pub(super) fn serialize(&self) -> [u8; 40] {
         let mut serialized = [0u8; 40];
         serialized[..32].copy_from_slice(self.public_key.as_bytes());

@@ -361,7 +361,7 @@ impl SignedPreKeyWire {
 
     fn to_prekey(&self) -> SignedPreKey {
         SignedPreKey::from_secret_bytes(
-            self.secret,
+            &self.secret,
             signature_from_wire(&self.signature),
             self.id,
             self.epoch,

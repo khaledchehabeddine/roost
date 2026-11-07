@@ -407,7 +407,7 @@ impl Route {
             } => MessageDestination::Established {
                 identity_key,
                 discovery_key: *discovery_key,
-                delivery_capability: RecipientDeliveryCapability::from_bytes(**delivery_capability),
+                delivery_capability: RecipientDeliveryCapability::from_bytes(delivery_capability),
             },
         }
     }
@@ -2501,10 +2501,10 @@ mod tests {
 
     #[test]
     fn local_keys_whose_discovery_key_another_identity_signed_are_refused() {
-        let other = SigningKeyPair::from_signing_bytes([2; 32]);
+        let other = SigningKeyPair::from_signing_bytes(&[2; 32]);
         let keys = LocalIdentityKeys {
-            agreement_key: KeyPair::from_secret_bytes([1; 32]),
-            signing_key: SigningKeyPair::from_signing_bytes([1; 32]),
+            agreement_key: KeyPair::from_secret_bytes(&[1; 32]),
+            signing_key: SigningKeyPair::from_signing_bytes(&[1; 32]),
             discovery_key: generate_discovery_key(
                 &mut ChaCha20Rng::from_seed([3; 32]),
                 &other,
@@ -2512,7 +2512,7 @@ mod tests {
                 1_700_000_000,
             )
             .unwrap(),
-            delivery_capability: RecipientDeliveryCapability::from_bytes([4; 32]),
+            delivery_capability: RecipientDeliveryCapability::from_bytes(&[4; 32]),
         };
 
         assert!(matches!(
@@ -2593,8 +2593,8 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([0x41; 32]);
         let (mut state, session_id, handshake) =
             initiate_handshake(&mut rng, &bob_identity, &bundle).unwrap();
-        let signing_key = SigningKeyPair::from_signing_bytes([0x10; 32]);
-        let agreement_key = KeyPair::from_secret_bytes([0x11; 32]);
+        let signing_key = SigningKeyPair::from_signing_bytes(&[0x10; 32]);
+        let agreement_key = KeyPair::from_secret_bytes(&[0x11; 32]);
         let identity_key = PublicIdentityKey {
             public_key: agreement_key.public,
             verifying_key: signing_key.verifying,

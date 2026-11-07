@@ -18,7 +18,7 @@ pub(crate) fn complete(context: &IdentityContext, id: OperationId) {
 
 /// Returns the relay domain's signing key, which every test certificate names.
 pub(crate) fn domain_signing_key() -> SigningKeyPair {
-    SigningKeyPair::from_signing_bytes([0x41; 32])
+    SigningKeyPair::from_signing_bytes(&[0x41; 32])
 }
 
 /// Returns a sender certificate for `identity_key` that expires at `expires_at_secs`, encoded as a

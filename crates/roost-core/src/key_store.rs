@@ -57,7 +57,7 @@ pub struct PublicationBundle {
     pub version: u8,
     /// The discovery key for this publication.
     ///
-    /// Its `signature` field is the identity key's half of the mutual binding.
+    /// Its `identity_signature` field is the identity key's half of the mutual binding.
     pub discovery_key: PublicDiscoveryKey,
     /// The discovery key's half of the mutual binding: [`Self::discovery_key`] signing the identity
     /// it belongs to.
@@ -410,14 +410,11 @@ impl KeyStore {
         Ok(self
             .0
             .one_time_prekey
-            .generate_batch(&mut OsRng, batch_size, SystemTime::now())?)
+            .generate_batch(&mut OsRng, batch_size)?)
     }
 
     fn replenish_one_time_prekeys(&self) -> Result<Vec<PublicOneTimePreKey>, KeyStoreError> {
-        Ok(self
-            .0
-            .one_time_prekey
-            .replenish(&mut OsRng, SystemTime::now())?)
+        Ok(self.0.one_time_prekey.replenish(&mut OsRng)?)
     }
 
     fn rotate_inbox(&self) -> Result<PublicationBundle, KeyStoreError> {

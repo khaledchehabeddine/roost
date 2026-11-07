@@ -67,8 +67,6 @@ pub struct FrameOneTimePreKeyReference {
 /// Transport-visible sealed-sender frame exchanged as a message.
 #[derive(Clone, uniffi::Record)]
 pub struct Message {
-    /// Sealed-frame wire version.
-    pub version: u8,
     /// Recipient discovery key X25519 public key. Always 32 bytes.
     pub recipient_public_key: Vec<u8>,
     /// X3DH prekey reference, present while a new session's messages carry the handshake.
@@ -126,7 +124,6 @@ impl SenderIdentityMaterial {
 impl Message {
     pub(crate) fn from_core(message: SealedFrame) -> Self {
         Self {
-            version: message.version,
             recipient_public_key: message.recipient_public_key.to_vec(),
             prekey_reference: message
                 .prekey_reference
@@ -138,7 +135,6 @@ impl Message {
 
     pub(crate) fn into_core(self) -> Result<SealedFrame, RoostError> {
         Ok(SealedFrame {
-            version: self.version,
             recipient_public_key: fixed_32(&self.recipient_public_key, "recipient public key")?,
             prekey_reference: self
                 .prekey_reference
