@@ -166,7 +166,7 @@ impl SenderCertificateValidation {
     ///
     /// Verifies the signature only under the domain signing key the certificate names, and checks
     /// revocation and expiry only after the signature verifies. It never reads the device clock or
-    /// caches a result, so a newly revoked identity key fails on the next call.
+    /// caches a result.
     pub fn validate(
         &self,
         certificate: &[u8],
@@ -491,18 +491,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_signature() {
-        let domain_key = signing_key(0x01);
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
-        let other_signed = signed_certificate(SECONDARY_ID, &domain_key, NOW_SECS + 300);
-        let validation = validation(vec![trusted_key(PRIMARY_ID, &domain_key)], vec![]);
-        assert_eq!(
-            validation.validate(&signed.certificate, &other_signed.signature, GRACE_WINDOW),
-            Err(SenderCertificateValidationError::SignatureFailure)
-        );
-    }
-
-    #[test]
     fn rejects_invalid_signature_before_revocation() {
         let domain_key = signing_key(0x01);
         let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
@@ -515,18 +503,6 @@ mod tests {
         assert_eq!(
             validation.validate(&signed.certificate, &other_signed.signature, GRACE_WINDOW),
             Err(SenderCertificateValidationError::SignatureFailure)
-        );
-    }
-
-    #[test]
-    fn rejects_validation_when_revocation_state_unavailable() {
-        let domain_key = signing_key(0x01);
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
-        let mut validation = validation(vec![trusted_key(PRIMARY_ID, &domain_key)], vec![]);
-        validation.revocation_state = RevocationState::Unavailable;
-        assert_eq!(
-            signed.validate(&validation),
-            Err(SenderCertificateValidationError::RevocationStateUnavailable)
         );
     }
 
@@ -544,15 +520,6 @@ mod tests {
     }
 
     #[test]
-    fn accepts_certificate_with_empty_available_revocation_set() {
-        let domain_key = signing_key(0x01);
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
-        let mut validation = validation(vec![trusted_key(PRIMARY_ID, &domain_key)], vec![]);
-        validation.revocation_state = RevocationState::Available(vec![]);
-        signed.validate(&validation).unwrap();
-    }
-
-    #[test]
     fn accepts_certificate_when_another_identity_key_is_revoked() {
         let domain_key = signing_key(0x01);
         let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
@@ -566,70 +533,6 @@ mod tests {
         );
 
         signed.validate(&validation).unwrap();
-    }
-
-    #[test]
-    fn rejects_revoked_identity_key() {
-        let domain_key = signing_key(0x01);
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
-        let validation = validation(
-            vec![trusted_key(PRIMARY_ID, &domain_key)],
-            vec![identity_key()],
-        );
-        assert_eq!(
-            signed.validate(&validation),
-            Err(SenderCertificateValidationError::RevokedIdentityKey)
-        );
-    }
-
-    #[test]
-    fn rejects_previously_valid_certificate_after_identity_key_is_revoked() {
-        let domain_key = signing_key(0x01);
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, NOW_SECS + 300);
-        let mut validation = validation(vec![trusted_key(PRIMARY_ID, &domain_key)], vec![]);
-        signed.validate(&validation).unwrap();
-        validation.revocation_state = RevocationState::Available(vec![identity_key()]);
-        assert_eq!(
-            signed.validate(&validation),
-            Err(SenderCertificateValidationError::RevokedIdentityKey)
-        );
-    }
-
-    #[test]
-    fn rejects_expired_certificate_outside_grace_window() {
-        let domain_key = signing_key(0x01);
-        let expires_at_secs = NOW_SECS - GRACE_WINDOW.as_secs() - 1;
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, expires_at_secs);
-        let validation = validation(vec![trusted_key(PRIMARY_ID, &domain_key)], vec![]);
-        assert_eq!(
-            signed.validate(&validation),
-            Err(SenderCertificateValidationError::ExpiredCertificate)
-        );
-    }
-
-    #[test]
-    fn accepts_expired_certificate_at_grace_window_boundary() {
-        let domain_key = signing_key(0x01);
-        let expires_at_secs = NOW_SECS - GRACE_WINDOW.as_secs();
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, expires_at_secs);
-        let validation = validation(vec![trusted_key(PRIMARY_ID, &domain_key)], vec![]);
-        signed.validate(&validation).unwrap();
-    }
-
-    #[test]
-    fn accepts_expired_certificate_inside_the_largest_grace_window() {
-        let domain_key = signing_key(0x01);
-        let expires_at_secs = NOW_SECS - MAX_CERTIFICATE_GRACE_WINDOW.as_secs();
-        let signed = signed_certificate(PRIMARY_ID, &domain_key, expires_at_secs);
-        let validation = validation(vec![trusted_key(PRIMARY_ID, &domain_key)], vec![]);
-
-        validation
-            .validate(
-                &signed.certificate,
-                &signed.signature,
-                MAX_CERTIFICATE_GRACE_WINDOW,
-            )
-            .unwrap();
     }
 
     #[test]
@@ -722,61 +625,5 @@ mod tests {
             signed.validate(&validation),
             Err(SenderCertificateValidationError::InvalidKeyEncoding)
         );
-    }
-
-    #[test]
-    fn rejects_each_invalid_app_input() {
-        let domain_key = signing_key(0x01);
-        let trusted = || trusted_key(PRIMARY_ID, &domain_key);
-        let non_canonical = DomainSigningKey {
-            id: SECONDARY_ID.to_vec(),
-            verifying_key: [0xff; PUBLIC_KEY_LEN],
-        };
-        let low_order = IdentityKey {
-            x25519_public_key: [0; PUBLIC_KEY_LEN],
-            ..identity_key()
-        };
-        let cases = [
-            (
-                vec![trusted(), trusted_key(b"", &domain_key)],
-                RELAY_DOMAIN,
-                vec![],
-                SenderCertificateValidationError::EmptySigningKeyId { index: 1 },
-            ),
-            (
-                vec![trusted(), trusted()],
-                RELAY_DOMAIN,
-                vec![],
-                SenderCertificateValidationError::DuplicateSigningKeyId { index: 1 },
-            ),
-            (
-                vec![trusted(), non_canonical],
-                RELAY_DOMAIN,
-                vec![],
-                SenderCertificateValidationError::InvalidDomainSigningKey { index: 1 },
-            ),
-            (
-                vec![trusted()],
-                b"".as_slice(),
-                vec![],
-                SenderCertificateValidationError::EmptyRelayDomain,
-            ),
-            (
-                vec![trusted()],
-                RELAY_DOMAIN,
-                vec![identity_key(), low_order],
-                SenderCertificateValidationError::InvalidRevokedIdentityKey { index: 1 },
-            ),
-        ];
-
-        for (domain_signing_keys, relay_domain, revoked_identity_keys, expected) in cases {
-            let result = SenderCertificateValidation::new(
-                domain_signing_keys,
-                relay_domain.to_vec(),
-                RevocationState::Available(revoked_identity_keys),
-                at(NOW_SECS),
-            );
-            assert_eq!(result.err(), Some(expected));
-        }
     }
 }

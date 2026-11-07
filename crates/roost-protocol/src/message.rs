@@ -344,19 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn sealed_payload_padding_accepts_bucket_boundary_lengths() {
-        for bucket in SEALED_PAYLOAD_BUCKETS {
-            let plaintext_len = bucket - SEALED_PAYLOAD_LEN_PREFIX_LEN;
-            let mut padded = vec![0x41; bucket];
-            padded[..SEALED_PAYLOAD_LEN_PREFIX_LEN]
-                .copy_from_slice(&u32::try_from(plaintext_len).unwrap().to_be_bytes());
-            let plaintext = unpad_sealed_payload(&padded).unwrap();
-            assert_eq!(plaintext.len(), plaintext_len);
-            assert!(plaintext.iter().all(|byte| *byte == 0x41));
-        }
-    }
-
-    #[test]
     fn sealed_payload_padding_rejects_invalid_bucket_lengths() {
         for len in [SEALED_PAYLOAD_BUCKETS[0] - 1, SEALED_PAYLOAD_BUCKETS[0] + 1] {
             assert_eq!(

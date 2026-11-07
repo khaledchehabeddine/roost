@@ -296,18 +296,24 @@ fn validation_input_errors_are_invalid_data() {
     };
     let cases = [
         (
-            with_keys(vec![DomainSigningKey {
-                verifying_key: vec![0xff; 32],
-                ..trusted()
-            }]),
-            SenderCertificateValidationError::InvalidDomainSigningKey { index: 0 },
+            with_keys(vec![
+                trusted(),
+                DomainSigningKey {
+                    id: b"other".to_vec(),
+                    verifying_key: vec![0xff; 32],
+                },
+            ]),
+            SenderCertificateValidationError::InvalidDomainSigningKey { index: 1 },
         ),
         (
-            with_keys(vec![DomainSigningKey {
-                id: Vec::new(),
-                ..trusted()
-            }]),
-            SenderCertificateValidationError::EmptySigningKeyId { index: 0 },
+            with_keys(vec![
+                trusted(),
+                DomainSigningKey {
+                    id: Vec::new(),
+                    ..trusted()
+                },
+            ]),
+            SenderCertificateValidationError::EmptySigningKeyId { index: 1 },
         ),
         (
             with_keys(vec![trusted(), trusted()]),
@@ -324,11 +330,11 @@ fn validation_input_errors_are_invalid_data() {
             SenderCertificateValidation {
                 revocation_state: RevocationState {
                     available: true,
-                    revoked_identity_keys: vec![low_order_key],
+                    revoked_identity_keys: vec![signed.identity_key.clone(), low_order_key],
                 },
                 ..valid()
             },
-            SenderCertificateValidationError::InvalidRevokedIdentityKey { index: 0 },
+            SenderCertificateValidationError::InvalidRevokedIdentityKey { index: 1 },
         ),
     ];
 

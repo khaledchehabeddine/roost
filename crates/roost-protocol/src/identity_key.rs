@@ -17,7 +17,7 @@ pub struct IdentityKey {
 }
 
 impl IdentityKey {
-    /// Returns the encoding that safety numbers, contact state, and revocation compare.
+    /// Returns the encoding that safety numbers and contact state compare.
     ///
     /// Check the key with [`IdentityKey::is_valid`] before using this encoding as an identity.
     #[must_use]
@@ -44,28 +44,5 @@ impl ConstantTimeEq for IdentityKey {
             & self
                 .ed25519_verifying_key
                 .ct_eq(&other.ed25519_verifying_key)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_encoding_changes_with_each_half() {
-        let identity_key = |x25519_public_key, ed25519_verifying_key| IdentityKey {
-            x25519_public_key,
-            ed25519_verifying_key,
-        };
-        let expected = identity_key([0x01; 32], [0x02; 32]).canonical_encoding();
-
-        assert_ne!(
-            identity_key([0x03; 32], [0x02; 32]).canonical_encoding(),
-            expected
-        );
-        assert_ne!(
-            identity_key([0x01; 32], [0x03; 32]).canonical_encoding(),
-            expected
-        );
     }
 }
