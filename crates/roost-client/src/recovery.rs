@@ -96,7 +96,8 @@ pub enum MessageRecoveryStep {
     /// One message encrypted again, and the state changes to commit with it. The recovery has
     /// ended, so commit them, then start again.
     Ready {
-        /// The message under its original message ID, send time, and kind.
+        /// The message under its original message ID and send time. Its kind can differ from the
+        /// original's, such as content that now carries the inbox grant.
         result: OutboundMessageResult,
         /// The state changes to commit with the message.
         changes: StateChanges,
@@ -107,7 +108,7 @@ pub enum MessageRecoveryStep {
 /// on a newer session.
 ///
 /// Roost keeps no copy of a sent message, so the app supplies its content, and the new copy keeps
-/// its message ID, send time, and kind, so the contact shows it once. Roost picks the message and a
+/// its message ID and send time, so the contact shows it once. Roost picks the message and a
 /// session newer than the one it was sent on, so the contact never misses a message on it: a
 /// session the contact delivered on since, or else a new session from the contact's bundle, where
 /// the oldest message goes first as a probe and the rest wait for a delivery check after the
@@ -191,11 +192,11 @@ impl Messaging {
     /// since the relay redelivers it until the contact saves it. The check says instead when a
     /// recovery starts, which encrypts the messages again on a newer session, and which messages'
     /// first copies the relay would have dropped by now. A later copy of one can still arrive.
-    /// Roost sets the waits: a recovery starts after a day without an acknowledgment, or as soon as
-    /// the contact sends an inbox grant newer than the one a waiting message went to, delivers on a
-    /// newer session, or acknowledges a recovery's probe, and once started, comes back only after a
-    /// week, after an unblock, or once the contact sends a newer inbox grant or starts a new
-    /// session.
+    /// Roost sets the waits, and grant updates never start a recovery. A recovery starts once
+    /// another message waits a day without an acknowledgment, or as soon as the contact sends an
+    /// inbox grant newer than the one a waiting message went to, delivers on a newer session, or
+    /// acknowledges a recovery's probe. Once started, it comes back only after a week, after an
+    /// unblock, or once the contact sends a newer inbox grant or starts a new session.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `contact` or `now_millis` is out of range.
@@ -219,7 +220,8 @@ impl Messaging {
     /// # Errors
     /// - [`RoostError::InvalidData`] if a key, certificate, or bundle is malformed.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks, or the
+    ///   operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_recovery(

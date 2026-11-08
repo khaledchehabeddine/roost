@@ -39,7 +39,8 @@ pub struct OutgoingMessage {
     /// The contact's bundle, fetched after a [`MessageEncryptionStep::NeedsPreKeyBundle`] step or
     /// for the discovery key in a fresh contact link, and saved with the draft until a session uses
     /// it. A bundle whose discovery key is newer than the contact's starts a new session, and Roost
-    /// ignores any other bundle when no new session is needed.
+    /// ignores any other bundle when no new session is needed. A message to a requester through
+    /// their newer bundle accepts them.
     pub prekey_bundle: Option<PreKeyBundle>,
 }
 
@@ -348,8 +349,8 @@ pub struct GrantUpdateResult {
 /// A blocked receive with no plaintext available to the app.
 ///
 /// The acknowledgment is present only under [`BlockedContactAcknowledgmentPolicy::Acknowledge`].
-/// Commit it with the changes before sending; under the default policy the host persists only the
-/// processed state.
+/// Commit it with the changes before sending it. Under
+/// [`BlockedContactAcknowledgmentPolicy::Unreachable`], the app commits only the changes.
 #[derive(uniffi::Record)]
 pub struct BlockedInboundMessageResult {
     /// Acknowledgment when the receive's policy permits one.
@@ -511,7 +512,8 @@ impl Messaging {
     /// - [`RoostError::InvalidData`] if a key, message ID, certificate, or the plaintext is
     ///   malformed or too long.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks, or the
+    ///   operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_encryption(
@@ -532,7 +534,8 @@ impl Messaging {
     /// - [`RoostError::InvalidData`] if the message, transport binding, settings, validation inputs,
     ///   or acknowledgment certificate are malformed or outside Roost's limits.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks, or the
+    ///   operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_decryption(
@@ -568,7 +571,8 @@ impl Contacts {
     /// - [`RoostError::InvalidData`] if a key, message ID, certificate, or bundle is malformed, or
     ///   the plaintext is too long.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks, or the
+    ///   operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn request_contact(
@@ -593,7 +597,8 @@ impl Contacts {
     /// # Errors
     /// - [`RoostError::InvalidData`] if a key, message ID, certificate, or bundle is malformed.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks, or the
+    ///   operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_grant_update(
@@ -617,7 +622,8 @@ impl Contacts {
     /// - [`RoostError::InvalidData`] if a key, message ID, or certificate is malformed, the
     ///   plaintext is too long, or when stepping, if no contact request from the contact is open.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
+    /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks, or the
+    ///   operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn accept_contact(
@@ -697,6 +703,14 @@ impl MessageDecryption {
     /// - [`RoostError::CertificateRejected`] if the sender's certificate fails validation.
     /// - [`RoostError::OneTimePreKeyUsed`] if a different first message already used the one-time
     ///   prekey this one names. A repeat of the same message is a duplicate instead.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt, when a first message uses a
+    ///   one-time prekey.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished, when a first
+    ///   message uses a one-time prekey.
+    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished, when a
+    ///   first message uses a one-time prekey.
+    /// - [`RoostError::Storage`] if SecureStorage fails while reading the prekeys a first message
+    ///   names.
     /// - [`RoostError::ProtocolStateFault`] if a record is missing or malformed, including the
     ///   sender's contact record.
     /// - [`RoostError::UnsupportedVersion`] if the message, the sender's certificate, or a record
