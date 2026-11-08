@@ -99,7 +99,7 @@ impl Identity {
         })
     }
 
-    /// Signs `message` with the Ed25519 signing key and returns the [`Signature`].
+    /// Signs `message` with the Ed25519 signing key.
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key_pair.sign(message)
     }

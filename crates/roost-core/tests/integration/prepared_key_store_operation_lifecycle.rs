@@ -1,8 +1,3 @@
-//! Prepared identity creation across the public KeyStore and SecureStorage seam.
-//!
-//! The scenario proves that staged secret material is not authoritative until the app reserves
-//! and finalizes the prepared operation, including idempotent lifecycle calls.
-
 use crate::support::app_identity::DeviceStorage;
 use rand::rngs::OsRng;
 use roost_core::{KeyStoreError, KeyStoreOperationError, KeyStoreOperationStatus};

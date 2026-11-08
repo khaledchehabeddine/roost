@@ -1,6 +1,3 @@
-//! Grant updates carry an identity's current inbox grant to the contacts the app picks, and Roost
-//! decides who may hold it.
-
 use crate::support::device::{
     Device, DeviceError, Encrypted, Intent, Relay, befriended, established_verifier, requested,
 };

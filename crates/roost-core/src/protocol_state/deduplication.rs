@@ -29,7 +29,6 @@ pub(super) struct LoadedDeduplicationSet {
 }
 
 impl LoadedDeduplicationSet {
-    // Returns the digest that catches a repeated delivery of `encoded_message`.
     pub(super) fn digest(
         &self,
         transport_binding: &[u8],

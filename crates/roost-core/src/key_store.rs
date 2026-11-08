@@ -48,16 +48,12 @@ pub enum KeyStoreError {
 
 /// A key publication that verifies from the identity key to the discovery key to the signed
 /// prekey.
-///
-/// Peers verify [`Self::discovery_key`] with the identity verifying key, then verify
-/// [`Self::signed_prekey`] with the discovery key's verifying key.
 #[derive(Clone, Debug)]
 pub struct PublicationBundle {
     /// Version of the public prekey bundle format.
     pub version: u8,
-    /// The discovery key for this publication.
-    ///
-    /// Its `identity_signature` field is the identity key's half of the mutual binding.
+    /// The discovery key, whose `identity_signature` is the identity key's half of the mutual
+    /// binding.
     pub discovery_key: PublicDiscoveryKey,
     /// The discovery key's half of the mutual binding: [`Self::discovery_key`] signing the identity
     /// it belongs to.
@@ -81,9 +77,9 @@ pub struct ContactBlock {
     pub changes: StateChanges,
     /// The rotated inbox's publication, or `None` when the contact was already blocked.
     ///
-    /// Present means every remaining contact holds a stale delivery capability until a message,
+    /// When present, every remaining contact holds a stale delivery capability until a message,
     /// acknowledgment, or grant update carries them the new inbox grant. The blocked contact never
-    /// gets one, which is what makes the block bite at the relay rather than only locally.
+    /// gets one.
     pub publication: Option<PublicationBundle>,
 }
 
@@ -246,8 +242,8 @@ impl KeyStore {
     /// does not churn every contact's capability.
     ///
     /// Neither change is authoritative when this returns. Reserve the operation in
-    /// [`ContactBlock::changes`], commit the changes with its ID, then finalize it. Abort only after
-    /// proving the app's transaction did not commit.
+    /// [`ContactBlock::changes`], commit the changes with its ID, then finalize it. Abort only
+    /// after proving the app's transaction did not commit.
     pub fn prepare_block_contact<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -270,7 +266,6 @@ impl KeyStore {
 
     /// Prepares exactly `batch_size` one-time prekeys for the current discovery key's epoch.
     ///
-    /// The new secrets remain staged until finalization. No discovery key rotation is required.
     /// The call fails if the requested batch would exceed the pool cap.
     pub fn prepare_one_time_prekeys<R: RngCore + CryptoRng>(
         &self,
@@ -298,14 +293,14 @@ impl KeyStore {
 
     /// Prepares rotation of the whole inbox.
     ///
-    /// Advances the epoch, replaces the discovery key and the delivery capability together, clears
-    /// epoch-bound one-time prekeys, and returns the publishable material. A preparation failure
-    /// discards the staged changes, leaving the previous authoritative inbox intact.
+    /// Advances the epoch, replaces the discovery key, delivery capability, and signed prekey
+    /// together, clears epoch-bound one-time prekeys, and returns the publishable material. A
+    /// preparation failure discards the staged changes, leaving the previous authoritative inbox
+    /// intact.
     ///
     /// This invalidates every contact's delivery capability until a message, acknowledgment, or
-    /// grant update carries them the new inbox grant. That makes it the mechanism behind blocking,
-    /// and why it is not merely a discovery key rotation. The replaced discovery key
-    /// still opens messages the relay queued for it, for as long as the relay may hold them.
+    /// grant update carries them the new inbox grant. The replaced discovery key still opens
+    /// messages the relay queued for it, for as long as the relay may hold them.
     pub fn prepare_inbox_rotation<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -392,8 +387,8 @@ impl KeyStore {
         self.prepare_operation(rng, |staged, _| staged.delete_keys())
     }
 
-    // Keeps updates of several keys from interleaving across cloned keystores. The storage mutex
-    // only protects single storage calls, and this guard keeps the stored keys consistent.
+    // Keeps updates of several keys from interleaving across cloned keystores, since the storage
+    // mutex only protects single storage calls.
     fn lifecycle_guard(&self) -> MutexGuard<'_, ()> {
         self.0
             .lifecycle
@@ -403,7 +398,8 @@ impl KeyStore {
 }
 
 // The changes each prepared operation stages. They run on the staging KeyStore that
-// `prepare_operation` builds while it holds the lifecycle guard, and each reads the clock once.
+// `prepare_operation` builds while it holds the lifecycle guard, and each reads the clock at most
+// once.
 impl KeyStore {
     // Creates the identity and its first discovery key.
     fn create_identity<R: RngCore + CryptoRng>(
@@ -1041,8 +1037,7 @@ mod tests {
         commit_identity_creation(&destination_store);
         commit_import(&destination_store, &backup, "pass");
 
-        // The restored discovery key keeps the source epoch lineage instead of resetting to
-        // the first epoch, and verifies against the restored identity.
+        // `discovery_key` also verifies the restored key against the restored identity.
         assert_eq!(discovery_key(&destination_store).unwrap().epoch, 3);
     }
 

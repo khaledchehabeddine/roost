@@ -1,4 +1,4 @@
-//! Flows between devices through roost-core's public API, committed through a test app.
+//! Flows between devices through the public API, committed through a test app.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 mod authenticated_sessions;

@@ -57,11 +57,10 @@ use std::time::SystemTime;
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-// Longest content a message holds. A resend after a recovery carries the inbox grant even when the
-// original didn't, so every message leaves room for it.
+// A resend after a recovery carries the inbox grant even when the original didn't, so every message
+// leaves room for it.
 const MAX_CONTENT_LEN: usize = MAX_SEALED_PLAINTEXT_LEN - MAX_ENCODED_GRANT_LEN;
 
-/// The local identity's secret keys a message operation uses.
 pub(crate) struct LocalIdentityKeys {
     /// Identity key agreement half, which proves messages that carry a handshake.
     pub(crate) agreement_key: KeyPair,
@@ -76,19 +75,17 @@ pub(crate) struct LocalIdentityKeys {
 /// What the app asked an encryption to do, which the contact's current state may change.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SendIntent {
-    /// An ordinary message to a contact.
     Message,
     /// A contact request, which becomes an acceptance when the peer already asked.
     Request,
     /// A contact acceptance, which becomes an ordinary message once the contact is accepted.
     Acceptance,
-    /// A grant update, which carries only the local inbox grant.
     GrantUpdate,
 }
 
-/// A domain-signed sender certificate and the domain's signature over it.
+/// A sender certificate and the domain's signature over it.
 pub struct SignedSenderCertificate {
-    /// Domain-signed sender certificate bytes.
+    /// The encoded sender certificate.
     pub certificate: Vec<u8>,
     /// Domain signature over the certificate.
     pub signature: [u8; Signature::BYTE_SIZE],
@@ -104,7 +101,7 @@ pub struct PeerPreKeyBundle {
     pub bundle: PreKeyBundle,
 }
 
-/// What the app sends: a recipient, a stable draft message ID, and the plaintext.
+/// A message the app sends to a contact.
 pub struct OutgoingMessage {
     /// The contact's identity key, which selects the session and the destination.
     pub recipient: IdentityKey,
@@ -121,7 +118,7 @@ pub struct OutgoingMessage {
     pub prekey_bundle: Option<PeerPreKeyBundle>,
 }
 
-/// What the app sends to give a contact the current inbox grant: a recipient and a message ID.
+/// What the app sends to give a contact the current inbox grant.
 pub struct OutgoingGrantUpdate {
     /// The contact's identity key, which selects the session and the destination.
     pub recipient: IdentityKey,
@@ -137,7 +134,6 @@ pub struct OutgoingGrantUpdate {
 }
 
 impl OutgoingGrantUpdate {
-    // Returns the grant update as a message with no content.
     pub(crate) fn into_message(self) -> OutgoingMessage {
         OutgoingMessage {
             recipient: self.recipient,
@@ -269,8 +265,7 @@ pub enum MessageOperationError {
     /// A message's content was supplied while a recovery wasn't waiting for it.
     #[error("message recovery isn't waiting for content")]
     NotAwaitingContent,
-    /// Reading the prekeys a first message names, or staging the use of a one-time prekey,
-    /// failed.
+    /// Reading the keys a received message needs, or staging the use of a one-time prekey, failed.
     #[error(transparent)]
     KeyStore(#[from] KeyStoreError),
     /// Checking or processing the message failed.
@@ -427,7 +422,6 @@ struct PreparedSeal {
 }
 
 impl ProtocolStateEngine {
-    // Starts encrypting `message` with the local identity's `keys`.
     pub(crate) fn start_encryption(
         &self,
         keys: LocalIdentityKeys,
@@ -776,7 +770,7 @@ impl Encrypting {
         {
             return Ok(MessageEncryptionStep::NeedsPreKeyBundle(self.recipient));
         }
-        let contact = contact.unwrap_or_else(|| ContactRecord::pending(self.recipient, None));
+        let contact = contact.unwrap_or_else(|| ContactRecord::pending(self.recipient));
         self.start_session_from(rng, contact, bundle, bundle_discovery_key)
     }
 
@@ -1246,7 +1240,6 @@ struct AcceptedFirstMessage {
     one_time_prekey: Option<OneTimePreKeyUse>,
 }
 
-// The one-time prekey a new session used, by its epoch and ID.
 #[derive(Clone, Copy)]
 struct OneTimePreKeyUse {
     epoch: u32,
@@ -1273,7 +1266,6 @@ struct Delivery {
     plaintext: Zeroizing<Vec<u8>>,
     sender_identity: SenderIdentityMaterial,
     delivered: Delivered,
-    // Whether an acknowledgment carries the local inbox grant.
     acknowledgment_carries_grant: bool,
     // Every update except the session's, which sealing an acknowledgment advances.
     updates: Vec<ProtocolStateUpdate>,
@@ -1325,8 +1317,8 @@ impl MessageDecryption {
         supplied
     }
 
-    /// Confirms the pending [`MessageDecryptionStep::NeedsAdmission`]: the relay's proof shows it
-    /// admitted this exact message as a first message against the named signed prekey.
+    /// Confirms the pending [`MessageDecryptionStep::NeedsAdmission`] once the relay's proof shows
+    /// it admitted this exact message as a first message against the named signed prekey.
     pub fn confirm_admission(&mut self) -> Result<(), MessageOperationError> {
         let decrypting = self.0.as_mut().ok_or(MessageOperationError::Finished)?;
         if let DecryptionPhase::AdmissionRequested(first) = &mut decrypting.phase
@@ -1433,7 +1425,7 @@ impl Decrypting {
             return Ok(unchanged(InboundMessageOutcome::Duplicate));
         }
         let sealed_to = &self.message.recipient_public_key;
-        // Only an established message outlives a rotation, which deletes the prekeys a first
+        // Only an established message outlives an inbox rotation, which deletes the prekeys a first
         // message names.
         let previous = if self.message.prekey_reference.is_none()
             && sealed_to != self.local.keys.discovery_key.public_key().as_bytes()
@@ -1743,7 +1735,7 @@ impl Decrypting {
                 .into());
             }
             // A contact request carries the requester's grant, which the asked side's replies use.
-            None if grant.is_some() => ContactRecord::pending(sender_identity_key, None),
+            None if grant.is_some() => ContactRecord::pending(sender_identity_key),
             None => {
                 return Err(ProtocolStateError::InvalidMessage {
                     reason: "contact request carries no inbox grant".into(),
@@ -2290,7 +2282,6 @@ impl Decrypting {
     }
 }
 
-// Returns an outcome that changes nothing, such as a duplicate.
 fn unchanged(outcome: InboundMessageOutcome) -> MessageDecryptionStep {
     MessageDecryptionStep::Ready {
         outcome,
@@ -2463,7 +2454,6 @@ struct StateReads {
 }
 
 impl StateReads {
-    // Starts a read of `addresses` and returns them as the request.
     fn request(&mut self, addresses: Vec<ProtocolStateAddress>) -> Vec<ProtocolStateAddress> {
         self.pending = Some(addresses.clone());
         addresses
@@ -2560,7 +2550,6 @@ mod tests {
         (store, created.output.public().unwrap())
     }
 
-    // Runs `store`'s decryption of `message` over an app that holds no records.
     fn decrypt_over_no_records(
         store: &KeyStore,
         message: SealedFrame,

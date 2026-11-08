@@ -1,7 +1,7 @@
 //! Restoring a backup brings back every contact, and each contact can send and receive again right
-//! away on new sessions. The exception is an asked side that hasn't accepted yet. This side drops
-//! its acceptance on the old session and can only send it a new contact request. Both sides end up
-//! accepted whether the asked side accepts before or after that request.
+//! away on new sessions. The exception is a contact the restored side asked that hasn't accepted.
+//! The restored side loses any acceptance sent on the old session and can only send that contact a
+//! new contact request. Both sides end up accepted whether the contact accepts before or after it.
 
 use crate::support::device::{
     DeviceError, Intent, Recovered, Relay, Route, befriended, redraft, requested,
@@ -249,7 +249,7 @@ fn asking_again_accepts_a_restored_requester_whose_acceptance_was_lost() {
         bob.receive(&acknowledgment),
         InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
-    // The backup is from before the acceptance, so Bob has nothing left to resend.
+    // Alice acknowledged the acceptance, so Bob has nothing to resend, but her backup predates it.
     alice.restore(&backup);
 
     let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);

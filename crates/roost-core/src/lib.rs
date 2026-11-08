@@ -1,18 +1,15 @@
 //! Identity lifecycle, messaging, and state changes over protocol state the app holds.
 //!
-//! This crate coordinates [`roost_crypto`] operations with storage the app owns, and apps call it
-//! through `roost-client`. The app provides [`SecureStorage`] for keys and owns the transactions
-//! that store protocol state blobs.
+//! This crate coordinates [`roost_crypto`] operations with storage the app owns. The app provides
+//! [`SecureStorage`] for keys and owns the transactions that store protocol state blobs.
 //!
 //! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys, and the
 //! [`ProtocolStateEngine`], and starts each [`MessageEncryption`] and [`MessageDecryption`]. A
 //! message operation asks the app for exact records and returns [`StateChanges`] the app commits
-//! only while every commit condition holds. The app holds one identity lock across every instance
-//! and process sharing an identity, from an operation's first call until its commit is resolved,
-//! and while it resolves unfinished prepared operations. See [`KeyStore`] and [`StateChanges`] for
-//! the storage and commit contracts.
+//! only while every commit condition holds. See [`KeyStore`] and [`StateChanges`] for the storage
+//! and commit contracts.
 //!
-//! # Secret handling
+//! # Secret Handling
 //!
 //! Identity does not implement `Debug`.
 //!

@@ -1,13 +1,8 @@
-//! Prepared blocking across protocol state and SecureStorage.
-//!
-//! The scenario commits the contact update and inbox rotation through their separate stores while
-//! one stable prepared-operation identifier ties the two together.
-
 use crate::support::device::{Device, Relay};
 use rand::rngs::OsRng;
 use roost_core::{IdentityKey, ProtocolStateBlob};
 
-// Bob holds Alice's contact request, and returns her identity key and her record's bytes.
+// Bob holds Alice's contact request.
 fn setup() -> (Device, IdentityKey, ProtocolStateBlob) {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);

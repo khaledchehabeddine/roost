@@ -115,7 +115,7 @@ pub enum KeyStoreOperationError {
     /// SecureStorage returned a platform failure.
     #[error("prepared-operation storage failed")]
     Storage(#[from] StorageError),
-    /// The bounded unfinished-operation journal is full.
+    /// The journal already holds as many unfinished operations as it allows.
     #[error("too many unfinished prepared operations")]
     TooManyUnfinishedOperations,
 }
@@ -349,7 +349,6 @@ enum JournalStatusWire {
 #[derive(Deserialize, Serialize)]
 struct PreconditionWire<'a> {
     key: &'a str,
-    // The digest the entry's value must match, or `None` when the entry must be absent.
     digest: Option<[u8; PRECONDITION_DIGEST_LEN]>,
 }
 
@@ -370,7 +369,6 @@ struct StagingState {
 }
 
 impl StagingState {
-    // Moves the staged changes into a journal record's preconditions and mutations.
     fn into_record_parts(self) -> (Vec<SecureStoragePrecondition>, Vec<StagedMutation>) {
         let preconditions = self
             .preconditions

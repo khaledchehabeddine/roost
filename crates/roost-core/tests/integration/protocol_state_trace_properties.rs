@@ -1,6 +1,3 @@
-//! Generated protocol-state traces across roost-core's public message and protocol state blob
-//! boundary.
-
 use crate::support::{ProtocolFixture, StoredMessage, validation};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};

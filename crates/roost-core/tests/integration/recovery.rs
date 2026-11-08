@@ -1,6 +1,3 @@
-//! The sender finds messages its contact hasn't acknowledged and recovers them on a newer session,
-//! and the contact shows each one once.
-
 use crate::support::AppCommitError;
 use crate::support::device::{
     Device, DeviceError, Intent, Recovered, Relay, Route, SentMessage, befriended,
@@ -335,7 +332,7 @@ fn a_recovery_resends_the_longest_message_and_every_message_after_it() {
     assert_eq!(rest.message_id, after.message_id);
 }
 
-// Alice sends Bob a message he never acknowledges, and a day later starts a recovery.
+// Alice sends Bob a message he never acknowledges, and a check two days later signals recovery.
 fn unanswered(relay: &Relay) -> (Device, Device, SentMessage) {
     let (mut alice, bob) = befriended(relay);
     let sent = alice.send(&bob, b"are you there?");
@@ -702,8 +699,7 @@ fn a_recovery_stays_on_the_current_session_when_its_pending_acknowledgments_are_
     assert_eq!(waiting_on(&alice, restart.session_id), [first.message_id]);
 }
 
-// Alice's message waits on a session older than the one Bob wrote on after losing his, when Alice
-// blocks Bob.
+// Alice blocks Bob while her message waits on the session Bob lost and replaced.
 fn blocked_with_a_message_left_behind(relay: &Relay) -> (Device, Device, SentMessage, SentMessage) {
     let (mut alice, mut bob) = befriended(relay);
     let first = alice.send(&bob, b"first");
@@ -766,7 +762,7 @@ fn a_recovery_after_an_unblock_stays_on_the_kept_session_when_the_contact_didnt_
     assert_eq!(resent.message_id, first.message_id);
     assert_eq!(resent.session_id, restart.session_id);
     assert_eq!(Route::of(&resent.destination), bob.established_route());
-    // The check happens once.
+    // The recovery already made the unblock's bundle check, so this send needs no bundle.
     alice.send(&bob, b"no bundle needed");
 }
 

@@ -12,7 +12,6 @@ use roost_core::{
 use roost_crypto::SealedFrameError;
 use roost_protocol::PayloadKind;
 
-// Alice blocks Bob and later unblocks him.
 fn blocked_then_unblocked(relay: &Relay) -> (Device, Device) {
     let (mut alice, bob) = befriended(relay);
     alice.block(bob.identity_key());
@@ -57,7 +56,7 @@ fn an_unchanged_discovery_key_keeps_the_session_and_carries_the_new_grant() {
         established_verifier(&bob.send(&alice, b"welcome back").destination).as_bytes(),
         alice.publication().recipient_delivery_verifier.as_bytes()
     );
-    // The check happens once.
+    // Only the first send after the unblock asks for a bundle.
     alice.send(&bob, b"no bundle needed");
 }
 
@@ -94,7 +93,7 @@ fn a_contact_that_rotated_during_the_block_gets_a_new_session() {
     assert!(!contact.blocked);
 }
 
-// Alice asks Bob, Bob blocks her before answering, and Alice rotates her inbox during the block.
+// Alice asks Bob, Bob blocks her before answering, Alice rotates her inbox, and Bob unblocks her.
 fn requester_rotated_during_the_block(relay: &Relay) -> (Device, Device) {
     let (alice, mut bob) = requested(relay);
     bob.block(alice.identity_key());

@@ -52,8 +52,8 @@ pub enum DeliveryCheckStep {
     Ready {
         /// What the check found.
         result: DeliveryCheckResult,
-        /// The state changes to commit with the recovery job. They list the messages whose first
-        /// copy the relay would have dropped by now as undelivered.
+        /// The state changes to commit. They list the messages whose first copy the relay would
+        /// have dropped by now as undelivered.
         changes: StateChanges,
     },
 }
@@ -63,11 +63,10 @@ pub enum DeliveryCheckStep {
 ///
 /// The check gives up on messages 30 days after their first send. It signals a recovery after a day
 /// without an acknowledgment, or as soon as the contact sends an inbox grant newer than the one a
-/// waiting message went to, delivers on a newer session, or acknowledges a recovery's probe, and
-/// once signaled, a recovery comes back only after a week, after an unblock, or when the contact
-/// proves a newer grant or session. Call [`Self::step`] until it returns
-/// [`DeliveryCheckStep::Ready`], supplying the records each other step asks for. Dropping the check
-/// commits nothing.
+/// waiting message went to, delivers on a newer session, or acknowledges a recovery's probe. Once
+/// signaled, a recovery comes back only after a week, after an unblock, or when the contact proves
+/// a newer grant or session. Call [`Self::step`] until it returns [`DeliveryCheckStep::Ready`],
+/// supplying the records each other step asks for. Dropping the check commits nothing.
 pub struct DeliveryCheck(Option<Box<Checking>>);
 
 struct Checking {
@@ -277,7 +276,7 @@ struct Outstanding<'a, 'b> {
     // first.
     recoverable: Vec<&'b Unacknowledged<'a>>,
     current: SessionId,
-    // Whether the current session's records exist.
+    // Whether the current session's record exists.
     current_is_kept: bool,
     // Whether the contact delivered on the current session, so it awaits no reply.
     current_is_replied: bool,
@@ -375,7 +374,6 @@ fn load_pending_by_session(
         .collect()
 }
 
-// Returns the update that stores `pending` as `session_id`'s pending acknowledgments.
 pub(super) fn pending_update(
     snapshot: &ProtocolStateSnapshot,
     session_id: SessionId,
@@ -416,7 +414,7 @@ fn unacknowledged(
     waiting
 }
 
-// Returns how long has passed from `since_millis` to `now_millis`, or nothing for a time ahead.
+// Returns how long has passed from `since_millis` to `now_millis`, or zero for a time ahead.
 fn waited(since_millis: u64, now_millis: u64) -> Duration {
     Duration::from_millis(now_millis.saturating_sub(since_millis))
 }
@@ -443,8 +441,8 @@ pub enum MessageRecoveryStep {
     /// [`MessageRecovery::supply_transport_binding`].
     NeedsTransport(MessageDestination),
     /// A new session, or the first resend after an unblock, needs this contact's prekey bundle, and
-    /// the given one is missing or older than the contact's discovery key. The recovery has ended:
-    /// fetch the bundle and start again.
+    /// the given one is missing or older than the contact's discovery key. The recovery has ended,
+    /// so fetch the bundle and start again.
     NeedsPreKeyBundle(IdentityKey),
     /// The first message this recovery resent on a new session isn't acknowledged yet, and the
     /// rest wait for it. The recovery has ended and nothing changed, and a delivery check signals
@@ -514,8 +512,6 @@ enum Target {
 }
 
 impl ProtocolStateEngine {
-    // Starts one step of recovering the messages sent to `recovery.recipient`, sealing with the
-    // local identity's `keys`.
     pub(crate) fn start_recovery(
         &self,
         keys: LocalIdentityKeys,
@@ -746,7 +742,6 @@ impl Recovering {
         ))))
     }
 
-    // Encrypts the selected message again with the content the app sent.
     fn encrypt<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,

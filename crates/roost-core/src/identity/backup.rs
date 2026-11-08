@@ -1,11 +1,3 @@
-//! Passphrase-encrypted identity backup using Argon2id and XChaCha20-Poly1305.
-//!
-//! A backup starts with its version and a cleartext header that carries the Argon2id parameters,
-//! salt and nonce, and the cipher authenticates both as associated data. An unknown version is
-//! rejected before key derivation, and a work-factor parameter can't be altered without failing
-//! decryption. The ciphertext holds the identity key's secret halves and the verbatim discovery
-//! key entry, which this module treats as opaque so its version stays owned by `discovery_key.rs`.
-
 use super::{Identity, IdentityError, IdentityManager, IdentitySecretsWire};
 use crate::stored_data::{
     decode_exact, decode_versioned_prefix, encode_versioned, encode_zeroizing,
@@ -38,7 +30,8 @@ const MIN_ITERATIONS: u32 = 3;
 // it, so these bound the memory a forged header can make it allocate.
 const MAX_MEMORY_KIB: u32 = 1 << 20;
 const MAX_ITERATIONS: u32 = 16;
-// Export writes the defaults, so a default outside the import range would produce unreadable backups.
+// Export writes the defaults, so a default outside the import range would produce unreadable
+// backups.
 const _: () = assert!(
     DEFAULT_MEMORY_KIB >= MIN_MEMORY_KIB
         && DEFAULT_MEMORY_KIB <= MAX_MEMORY_KIB
@@ -68,7 +61,6 @@ struct DecodedBackupContentsWire {
 }
 
 impl IdentityManager {
-    // Exports the current identity and the given discovery key entry as an encrypted backup.
     pub(crate) fn export_encrypted_backup<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -115,7 +107,7 @@ impl IdentityManager {
     }
 }
 
-// Decrypts a backup into its identity and the opaque discovery key entry.
+// Returns the discovery key entry undecoded, so `discovery_key.rs` keeps owning its version.
 pub(crate) fn decrypt_backup(
     data: &[u8],
     passphrase: &str,
@@ -123,8 +115,7 @@ pub(crate) fn decrypt_backup(
     let (header, ciphertext): (BackupHeaderWire, &[u8]) =
         decode_versioned_prefix(BACKUP_FORMAT_VERSION, data)
             .map_err(IdentityError::BackupFormat)?;
-    // Check the costs before Argon2id spends memory on them. The floor blocks a downgrade, and the
-    // ceiling stops a forged header from exhausting memory.
+    // Check the costs before Argon2id spends memory on them. The floor blocks a downgrade.
     validate_import_argon2_params(header.memory_kib, header.iterations, header.parallelism)?;
     let associated_data = &data[..data.len() - ciphertext.len()];
 
@@ -305,9 +296,8 @@ mod tests {
     #[test]
     fn decrypt_backup_rejects_parameters_outside_their_bounds() {
         let backup = export(&manager_with_identity(), 0x74, "passphrase");
-        // Memory and iterations fail below their floors, and parallelism must equal 1. Oversized
-        // memory or iterations must fail before Argon2id allocates, so a forged header can't
-        // exhaust memory.
+        // Oversized memory or iterations must fail before Argon2id allocates, so a forged header
+        // can't exhaust memory.
         let changes: [fn(&mut BackupHeaderWire); 5] = [
             |header| header.memory_kib = 1,
             |header| header.iterations = 1,

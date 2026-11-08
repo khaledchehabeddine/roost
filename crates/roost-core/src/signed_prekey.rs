@@ -30,7 +30,7 @@ pub enum SignedPreKeyError {
     /// The stored signed prekey's signature does not verify against the current discovery key.
     #[error("stored signed prekey signature does not match the discovery key")]
     Corrupt(#[source] PublicKeyError),
-    /// Loading the discovery key for signed prekey rotation returned a [`DiscoveryKeyError`].
+    /// Loading the discovery key failed.
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
     /// Backup restoration requires an inbox rotation before prekeys may be used.
@@ -42,7 +42,7 @@ pub enum SignedPreKeyError {
     /// The internal storage lock was poisoned by a panicked thread.
     #[error("internal lock poisoned")]
     LockPoisoned,
-    /// No signed prekey is stored.
+    /// No signed prekey is stored, or none matches the requested one.
     #[error("no signed prekey stored")]
     NotFound,
     /// Rotating would discard a retained signed prekey that hasn't expired.
@@ -63,7 +63,6 @@ pub enum SignedPreKeyError {
     StoredData(#[from] StoredDataError),
 }
 
-// Manages signed prekey generation, rotation, and persistence.
 pub(crate) struct SignedPreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     discovery: Arc<DiscoveryKeyManager>,
@@ -77,12 +76,10 @@ impl SignedPreKeyManager {
         SignedPreKeyManager { storage, discovery }
     }
 
-    // Loads the current secret signed prekey from storage.
     pub(crate) fn current(&self, now: SystemTime) -> Result<SignedPreKey, SignedPreKeyError> {
         Ok(self.load_store(now)?.current.to_prekey())
     }
 
-    // Returns the public signed prekey to distribute to peers.
     pub(crate) fn current_public(
         &self,
         now: SystemTime,
@@ -157,7 +154,6 @@ impl SignedPreKeyManager {
         Ok(self.lock_storage()?.store(SIGNED_PREKEYS, &entry)?)
     }
 
-    // Forces an immediate signed prekey rotation.
     pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -353,7 +349,6 @@ mod tests {
         SignedPreKeyManager::new(storage, discovery)
     }
 
-    // Stores `current` as the only signed prekey.
     fn store_only(manager: &SignedPreKeyManager, current: &SignedPreKey) {
         let store = StoredSignedPreKeysWire {
             current: SignedPreKeyWire::from_prekey(current),

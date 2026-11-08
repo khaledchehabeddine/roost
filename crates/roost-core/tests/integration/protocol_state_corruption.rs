@@ -1,5 +1,3 @@
-//! Corrupt stored blobs fail a receive without replacing committed state.
-
 use crate::support::ProtocolFixture;
 use roost_core::{MessageOperationError, ProtocolStateError, ProtocolStateKind};
 

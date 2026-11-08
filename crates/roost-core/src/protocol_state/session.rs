@@ -1,5 +1,3 @@
-//! Session state, and the sessions Roost keeps with each peer and which one it sends on.
-
 use super::{
     IdentityKeyWire, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError, ProtocolStateKey,
     ProtocolStateKind, ProtocolStateSnapshot, decode_blob, decode_error, deserialize_bounded,
@@ -14,7 +12,6 @@ use serde::{Deserialize, Serialize};
 
 /// Most sessions kept per peer besides the one Roost sends on.
 const MAX_OLDER_SESSIONS: usize = 5;
-/// Most deleted session IDs remembered per peer.
 const MAX_DELETED_SESSIONS: usize = 5;
 
 pub(super) fn session_address(session_id: SessionId) -> ProtocolStateAddress {
@@ -25,7 +22,6 @@ pub(super) fn pending_acknowledgment_address(session_id: SessionId) -> ProtocolS
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, session_id.into())
 }
 
-/// Returns the addresses of the records a session keeps.
 pub(super) fn session_record_addresses(session_id: SessionId) -> [ProtocolStateAddress; 2] {
     [
         session_address(session_id),
@@ -43,7 +39,6 @@ impl From<SessionId> for ProtocolStateKey {
     }
 }
 
-/// A decoded session blob.
 pub(super) struct LoadedSession {
     /// The peer the handshake authenticated, fixed for the session's life.
     pub(super) peer_identity_key: IdentityKey,
@@ -60,7 +55,6 @@ pub(super) struct PendingHandshake {
     pub(super) signed_prekey_id: u64,
 }
 
-/// Returns the session at `address`, or `None` when the snapshot has none.
 pub(super) fn load_session(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -182,7 +176,6 @@ pub(super) struct PeerSessions {
 }
 
 impl PeerSessions {
-    /// Starts the list with its first session.
     pub(super) fn new(session_id: SessionId, accepted_with: Option<SignedPreKeyUse>) -> Self {
         Self {
             current: SessionEntry {
@@ -200,13 +193,10 @@ impl PeerSessions {
         self.current.session_id
     }
 
-    /// Returns which side started the session Roost sends on.
     pub(super) fn current_starter(&self) -> Starter {
         self.current.starter()
     }
 
-    /// Returns which side started `session_id`, or `None` when it isn't one of this peer's
-    /// sessions.
     pub(super) fn starter(&self, session_id: SessionId) -> Option<Starter> {
         self.entry(session_id).map(SessionEntry::starter)
     }
@@ -216,8 +206,8 @@ impl PeerSessions {
         self.entries().map(|entry| entry.session_id)
     }
 
-    /// Returns whether this side started or accepted `session_id` before `later`, both of them
-    /// kept with this peer.
+    /// Returns whether this side started or accepted `session_id` before `later`, or `false` when
+    /// either isn't kept with this peer.
     pub(super) fn started_before(&self, session_id: SessionId, later: SessionId) -> bool {
         let position = |session_id| self.entry(session_id).map(|entry| entry.position);
         position(session_id)
@@ -225,7 +215,6 @@ impl PeerSessions {
             .is_some_and(|(earlier, later)| earlier < later)
     }
 
-    /// Returns whether `session_id` is one of this peer's sessions.
     pub(super) fn contains(&self, session_id: SessionId) -> bool {
         self.current.session_id == session_id
             || self
@@ -269,7 +258,7 @@ impl PeerSessions {
     /// Adds a session the peer started while this side's own start still awaits a reply, and
     /// returns the sessions this evicts.
     ///
-    /// Both peers keep the lower session ID, so they converge when they start at once.
+    /// Both peers send on the lower session ID, so they converge when they start at once.
     pub(super) fn start_alongside(
         &mut self,
         session_id: SessionId,
@@ -302,12 +291,10 @@ impl PeerSessions {
         }
     }
 
-    // Returns every session kept with this peer, the one Roost sends on first.
     fn entries(&self) -> impl Iterator<Item = &SessionEntry> {
         std::iter::once(&self.current).chain(&self.older)
     }
 
-    // Returns the kept session `session_id`, if any.
     fn entry(&self, session_id: SessionId) -> Option<&SessionEntry> {
         self.entries().find(|entry| entry.session_id == session_id)
     }

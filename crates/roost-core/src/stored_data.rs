@@ -47,7 +47,7 @@ pub(crate) fn signature_from_wire(wire: &SignatureWire) -> [u8; SIGNATURE_LEN] {
     signature
 }
 
-// Encodes `wire` after `version`. A tuple encodes its fields in order, so the version comes first.
+// A tuple encodes its fields in order, so the version is the first byte.
 pub(crate) fn encode_versioned<T: Serialize>(
     version: u8,
     wire: &T,
@@ -55,7 +55,6 @@ pub(crate) fn encode_versioned<T: Serialize>(
     encode_zeroizing(&(version, wire))
 }
 
-// Checks that `bytes` start with `version`, then decodes the rest as one `T`.
 pub(crate) fn decode_versioned<'a, T: Deserialize<'a>>(
     version: u8,
     bytes: &'a [u8],
@@ -80,7 +79,6 @@ fn reject_trailing_bytes(rest: &[u8]) -> Result<(), StoredDataError> {
     }
 }
 
-// Checks that `bytes` start with `version`, then decodes a `T` and returns it with the bytes after.
 pub(crate) fn decode_versioned_prefix<'a, T: Deserialize<'a>>(
     version: u8,
     bytes: &'a [u8],

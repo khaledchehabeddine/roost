@@ -1,5 +1,4 @@
-//! Two identities that have never met request, accept, and message each other through message
-//! operations, committing every result through the app.
+//! Two identities that have never met request, accept, and message each other.
 
 use rand::rngs::OsRng;
 use std::time::Duration;

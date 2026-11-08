@@ -24,10 +24,8 @@ pub enum SafetyNumberError {
 
 /// Derives the display safety number for two permanent identity keys.
 ///
-/// Both inputs must use canonical X25519 and Ed25519 public-key encodings. Discovery keys are not
-/// inputs, so discovery key rotation does not change the safety number for the same two identity
-/// keys. The two canonical identity key encodings are sorted before hashing so both parties derive
-/// the same value.
+/// The order of the keys doesn't matter, so both parties derive the same number. A discovery key
+/// rotation doesn't change it, since discovery keys aren't inputs.
 pub fn derive_safety_number(
     first: IdentityKey,
     second: IdentityKey,

@@ -27,7 +27,7 @@ pub enum OneTimePreKeyError {
         /// Free slots in the pool.
         available: usize,
     },
-    /// Loading the discovery key returned a [`DiscoveryKeyError`].
+    /// Loading the discovery key failed.
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
     /// Every one-time prekey identifier has been used.
@@ -64,7 +64,6 @@ pub enum OneTimePreKeyError {
     },
 }
 
-// Manages one-time prekey pool generation, consumption, and persistence.
 pub(crate) struct OneTimePreKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     discovery: Arc<DiscoveryKeyManager>,

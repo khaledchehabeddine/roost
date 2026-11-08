@@ -15,7 +15,7 @@ const CONTACT_PUBLICATION_VERSION: u8 = 1;
 /// two, as a contact link carries them.
 #[derive(Clone, Debug)]
 pub struct ContactPublication {
-    /// The identity key, whose binding signature ties its agreement key to its signing key.
+    /// The identity key.
     pub identity: PublicIdentityKey,
     /// The current discovery key, whose signature is the identity key's half of the binding
     /// between the two keys.

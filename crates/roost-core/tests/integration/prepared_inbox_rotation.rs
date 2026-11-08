@@ -1,8 +1,3 @@
-//! Prepared inbox rotation across the public KeyStore and SecureStorage seam.
-//!
-//! The scenario proves that a newly returned inbox rotation remains provisional until the
-//! prepared secure mutation is reserved and finalized.
-
 use crate::support::app_identity::DeviceStorage;
 use rand::rngs::OsRng;
 use roost_core::KeyStore;

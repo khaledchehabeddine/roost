@@ -38,7 +38,6 @@ fn request_with(
     initiator.send_with(outgoing, Intent::Request)
 }
 
-// Has `initiator` ask `responder`, `responder` accept, and `initiator` receive the acceptance.
 fn establish(initiator: &mut Device, responder: &mut Device) -> SessionId {
     let request = initiator.request(responder, b"hello");
     accepted_message(responder.receive(&request.message));
@@ -330,8 +329,8 @@ fn a_replayed_first_message_cannot_revive_a_deleted_session() {
         reestablish(&mut alice, &mut bob);
     }
     assert!(bob.database.blob_bytes(&first_record).is_none());
-    // Bob still holds the signed prekey the deleted session used, so the next session keeps it
-    // remembered.
+    // Starting the next session keeps the deleted session's ID, since Bob still holds its signed
+    // prekey.
     reestablish(&mut alice, &mut bob);
     bob.forget_received_digests();
     let current = bob.send(&alice, b"current").session_id;

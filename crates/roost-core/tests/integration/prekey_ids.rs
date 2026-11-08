@@ -1,5 +1,3 @@
-//! Stable prekey identifiers across rotation through the public KeyStore interface.
-
 use crate::support::app_identity::DeviceStorage;
 use rand::rngs::OsRng;
 use roost_core::{KeyStore, PreparedKeyStoreOperation};

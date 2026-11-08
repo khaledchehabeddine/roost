@@ -1,5 +1,3 @@
-//! Devices that send and receive through KeyStore and commit through an app database.
-
 use super::app_identity::DeviceStorage;
 use super::{AppCommitError, AppDatabase, CREATED_AT_SECS, sender_certificate_bytes, validation};
 use rand::SeedableRng;
@@ -52,7 +50,6 @@ impl Relay {
     }
 }
 
-// A device's certificate and the relay key that vouches for every device's certificate.
 #[derive(Clone)]
 struct Credential {
     certificate: Vec<u8>,
@@ -86,11 +83,10 @@ pub(crate) enum Intent {
     Message,
     Request,
     Acceptance,
-    /// A grant update, which ignores the draft's plaintext.
+    /// Ignores the draft's plaintext.
     GrantUpdate,
 }
 
-/// A sealed message, the changes to commit with it, and the destination Roost named for it.
 pub(crate) struct Sealed {
     pub(crate) result: OutboundMessageResult,
     pub(crate) changes: StateChanges,
@@ -157,7 +153,6 @@ impl Route {
     }
 }
 
-/// How a decryption ended, the changes to commit with it, and what it asked for on the way.
 pub(crate) struct Decrypted {
     pub(crate) outcome: InboundMessageOutcome,
     pub(crate) changes: StateChanges,
@@ -172,7 +167,6 @@ pub(crate) struct Device {
     storage: DeviceStorage,
     pub(crate) identity: PublicIdentityKey,
     credential: Credential,
-    /// The settings the app passes with each receive.
     pub(crate) settings: ReceiveSettings,
     /// Whether the relay's proofs show it admitted the first messages this device receives.
     pub(crate) admits: bool,
@@ -246,12 +240,10 @@ impl Device {
         }
     }
 
-    /// Replaces the KeyStore with a new one over the same SecureStorage, as an app restart does.
     pub(crate) fn restart(&mut self) {
         self.store = self.storage.open();
     }
 
-    /// Returns what the app writes to one backup file: its database and the identity backup.
     pub(crate) fn back_up(&self) -> Backup {
         Backup {
             identity: self
@@ -284,20 +276,17 @@ impl Device {
         self.rotate_inbox()
     }
 
-    /// Forgets the sessions kept with `peer`, as an app that lost that record does, so the next
-    /// request starts a new session.
+    /// Deletes the list of sessions kept with `peer`, as an app that lost it does, so the next
+    /// request starts a new session. Each session's own record stays.
     pub(crate) fn forget_sessions_with(&mut self, peer: &Device) {
         let address = self.sessions_address(peer.identity_key());
         self.database.remove(&address);
     }
 
-    /// Returns the address of this device's contact record for `peer`, as Roost names it.
     pub(crate) fn contact_address(&self, peer: IdentityKey) -> ProtocolStateAddress {
         self.contact_record_address(peer, ProtocolStateKind::ContactState)
     }
 
-    /// Returns the address of this device's record of the sessions kept with `peer`, as Roost
-    /// names it.
     pub(crate) fn sessions_address(&self, peer: IdentityKey) -> ProtocolStateAddress {
         self.contact_record_address(peer, ProtocolStateKind::PeerSessions)
     }
@@ -323,19 +312,16 @@ impl Device {
             .expect("a delivery check reads each of the contact's records")
     }
 
-    /// Returns the record this device's database holds for `peer`, if any.
     pub(crate) fn contact_record(&self, peer: IdentityKey) -> Option<ProtocolStateBlob> {
         self.database
             .blob_bytes(&self.contact_address(peer))
             .map(ProtocolStateBlob::from_bytes)
     }
 
-    /// Returns this device's certificate as its relay issued it.
     pub(crate) fn certificate(&self) -> SignedSenderCertificate {
         self.credential.signed()
     }
 
-    /// Returns a certificate for this device's identity key that expires at `expires_at_secs`.
     pub(crate) fn certified_until(&self, expires_at_secs: u64) -> SignedSenderCertificate {
         super::certificate_until(self.identity_key(), expires_at_secs)
     }
@@ -344,7 +330,6 @@ impl Device {
         self.store.current_publication().unwrap()
     }
 
-    /// Returns the contact this device's database holds for `peer`, decoded after commit.
     pub(crate) fn contact(&self, peer: &Device) -> Option<ContactState> {
         let address = self.contact_address(peer.identity_key());
         self.database.blob_bytes(&address).map(|bytes| {
@@ -384,7 +369,7 @@ impl Device {
         }
     }
 
-    /// Returns where `peer`'s established messages go: its current discovery key and inbox.
+    /// Returns where established messages to this device go: its current discovery key and inbox.
     pub(crate) fn established_route(&self) -> Route {
         let publication = self.publication();
         Route::Established {
@@ -465,7 +450,6 @@ impl Device {
         self.commit_sent(sealed)
     }
 
-    // Commits `sealed` and queues its message.
     fn commit_sent(&mut self, sealed: Sealed) -> SentMessage {
         let Sealed {
             result,
@@ -661,7 +645,7 @@ impl Device {
     }
 
     /// Commits `changes`, reserving and finalizing the operation they carry around the app's
-    /// transaction, and aborting it when a condition fails. Returns the updates it wrote.
+    /// transaction, and aborting it when a condition fails.
     pub(crate) fn commit_changes(
         &mut self,
         changes: StateChanges,
@@ -717,7 +701,7 @@ impl Device {
         self.database.remove(&address);
     }
 
-    /// Rotates the inbox outside any block, and returns the new publication.
+    /// Rotates the inbox outside any block.
     pub(crate) fn rotate_inbox(&self) -> PublicationBundle {
         let rotation = self.store.prepare_inbox_rotation(&mut OsRng).unwrap();
         finalize(&self.store, &rotation);
@@ -797,7 +781,6 @@ pub(crate) struct SentMessage {
     pub(crate) destination: MessageDestination,
 }
 
-/// Why a device's message operation failed.
 #[derive(Debug)]
 pub(crate) enum DeviceError {
     Operation(MessageOperationError),
@@ -842,7 +825,6 @@ pub(crate) fn befriended(relay: &Relay) -> (Device, Device) {
     (alice, bob)
 }
 
-/// Returns the verifier of the capability an established destination carries.
 pub(crate) fn established_verifier(
     destination: &MessageDestination,
 ) -> roost_crypto::RecipientDeliveryVerifier {

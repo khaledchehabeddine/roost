@@ -44,7 +44,6 @@ pub struct SenderIdentityMaterial {
 }
 
 impl SenderIdentityMaterial {
-    /// Returns the sender's identity key as contact state records it.
     pub(super) fn contact_identity_key(&self) -> IdentityKey {
         IdentityKey {
             x25519_public_key: self.identity_key,
@@ -66,7 +65,7 @@ impl SenderIdentityMaterial {
 #[derive(Clone, Copy)]
 pub(super) struct MessageMetadata {
     pub(super) session_id: SessionId,
-    /// The X3DH base key, carried until the initiator's first reply.
+    /// The X3DH base key, carried until the peer replies or, for a contact request, accepts.
     pub(super) base_key: Option<[u8; PUBLIC_KEY_LEN]>,
     pub(super) id: MessageId,
     pub(super) sent_at_millis: u64,
@@ -215,7 +214,6 @@ pub(super) fn open_message(
     })
 }
 
-/// How a received message's sender proved who they are.
 pub(super) enum SenderAuthentication {
     Signature([u8; Signature::BYTE_SIZE]),
     Proof {
@@ -401,7 +399,6 @@ pub(super) fn certified_sender_identity_key(
     Ok(identity_key)
 }
 
-// What one outbound message says, before Roost seals it.
 pub(super) struct OutboundContent<'a> {
     pub(super) session_id: SessionId,
     pub(super) id: MessageId,
@@ -516,8 +513,7 @@ pub(super) fn seal_proved<R: RngCore + CryptoRng>(
     )
 }
 
-// Checks a first message's proof and the discovery key it seals, and returns the sender's
-// identity key and that discovery key.
+// Checks a first message's proof and the discovery key it seals.
 pub(super) fn authenticate_first_message(
     decoded: &DecodedSealedSenderEnvelope,
     handshake: &Handshake,
@@ -660,7 +656,6 @@ struct SealedSenderEnvelopeWire<'a> {
     padded_plaintext: &'a [u8],
 }
 
-// How the sender of a message proves who they are.
 #[derive(Deserialize, Serialize)]
 enum AuthenticationWire {
     // A signature over the message transcript, for messages after the handshake.

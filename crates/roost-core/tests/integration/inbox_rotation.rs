@@ -1,5 +1,3 @@
-//! Contacts keep reaching an inbox, and blocked contacts stay out, as inboxes rotate.
-
 use crate::support::accepted;
 use crate::support::device::{Device, DeviceError, Relay, befriended, established_verifier};
 use roost_core::{

@@ -1,5 +1,3 @@
-//! Message operations that ask the app for exact records and return results it commits atomically.
-
 use crate::support::device::{Device, Intent, Relay, Route, Sealed, binding, redraft};
 use crate::support::{CREATED_AT_SECS, TEST_RELAY_DOMAIN, trusted_domain_signing_key};
 use rand::SeedableRng;
@@ -16,7 +14,6 @@ use roost_protocol::{
 };
 use std::time::Duration;
 
-// Has `initiator` ask `responder`, `responder` accept, and `initiator` receive the acceptance.
 fn establish(initiator: &mut Device, responder: &mut Device) -> roost_core::SessionId {
     let request = initiator.request(responder, b"hello");
     responder.receive(&request.message);

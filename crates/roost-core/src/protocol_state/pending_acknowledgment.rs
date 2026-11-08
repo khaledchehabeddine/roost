@@ -21,7 +21,7 @@ const PENDING_ACKNOWLEDGMENTS_WIRE_OVERHEAD_CAP: usize = 64;
 ///
 /// Roost keeps no copy of the message, so a recovery encrypts the app's copy of its content again.
 pub struct PendingAcknowledgment {
-    /// Original outbound message ID.
+    /// The message ID.
     pub message_id: MessageId,
     /// First-send Unix timestamp in milliseconds.
     pub first_sent_at_millis: u64,
@@ -57,7 +57,6 @@ pub(super) struct LoadedPendingAcknowledgments {
 }
 
 impl LoadedPendingAcknowledgments {
-    // A new session's list, with nothing waiting and no acknowledgment seen.
     pub(super) fn empty() -> Self {
         Self {
             pending: BTreeMap::new(),
@@ -172,7 +171,6 @@ pub(super) fn load_pending_acknowledgments(
     }
 }
 
-// Returns whether the session at `address` already processed an acknowledgment with `digest`.
 pub(super) fn has_seen_acknowledgment(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,

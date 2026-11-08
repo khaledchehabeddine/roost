@@ -1,9 +1,3 @@
-//! Identity creation and restarts across the prepared-operation lifecycle and an app commit.
-//!
-//! Each scenario reserves a prepared identity, commits it in an app transaction with a chosen
-//! outcome, then resolves unfinished operations the way an app does at startup. An unknown outcome
-//! covers both a lost reply and a cancellation that hides whether the transaction committed.
-
 use crate::support::app_identity::{
     AppCommit, CommitResult, DeviceStorage, IdentityDatabase, resolve_unfinished,
 };

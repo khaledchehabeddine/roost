@@ -1,8 +1,3 @@
-//! A send to a contact whose session records the app lost starts a new session from a fetched
-//! bundle, and refuses to when the contact isn't accepted. A session that lost only its pending
-//! acknowledgments keeps working. A message on a session the records no longer keep names an
-//! unknown session.
-
 use crate::support::device::{
     Device, DeviceError, Encrypted, Intent, Relay, Route, befriended, redraft, requested,
 };
@@ -11,8 +6,7 @@ use roost_core::{
     InboundMessageOutcome, MessageOperationError, ProtocolStateError, ProtocolStateKind,
 };
 
-// Sends `plaintext` from `sender` to `recipient`, fetching `recipient`'s bundle when asked, as the
-// app restarts an attempt that ends with `NeedsPreKeyBundle`.
+// Sends `plaintext` to `recipient`, asserting that the first attempt asks for `recipient`'s bundle.
 fn send_fetching_a_bundle(
     sender: &mut Device,
     recipient: &Device,

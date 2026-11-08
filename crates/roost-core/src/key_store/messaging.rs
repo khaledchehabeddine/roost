@@ -20,7 +20,8 @@ pub enum MessageStartError {
     /// Loading local identity state failed.
     #[error(transparent)]
     Identity(#[from] IdentityError),
-    /// A reserved KeyStore operation must be finalized or aborted before local keys can be used.
+    /// A reserved KeyStore operation must be finalized or aborted first, or the operation journal
+    /// can't be read.
     #[error(transparent)]
     Operation(#[from] KeyStoreOperationError),
     /// The message's inputs failed their checks.

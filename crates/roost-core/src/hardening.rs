@@ -20,9 +20,10 @@ pub(crate) const MAX_MESSAGES_BEFORE_ACCEPTANCE: usize = 3;
 pub struct ProtocolHardeningLimits {
     /// Maximum encoded sealed sender message bytes accepted before parsing.
     pub max_encoded_message_len: usize,
-    /// Maximum general protocol state blob bytes accepted before body decode.
+    /// Maximum protocol state blob bytes accepted before decoding, except for pending
+    /// acknowledgments.
     pub max_protocol_state_blob_len: usize,
-    /// Maximum sender certificate bytes accepted after sealed sender decryption.
+    /// Maximum bytes of the local sender certificate Roost seals.
     pub max_sender_certificate_len: usize,
     /// Maximum pending outbound messages retained for acknowledgment processing.
     pub max_pending_acknowledgments: usize,

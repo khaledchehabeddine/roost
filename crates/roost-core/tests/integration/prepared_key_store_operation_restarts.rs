@@ -1,8 +1,3 @@
-//! Finishing prepared KeyStore operations across process replacement and storage failure.
-//!
-//! The scenario crosses the public KeyStore and SecureStorage seams to model orphaned preparation,
-//! a crash after reservation, ambiguous mutation results, and a crash during finalization.
-
 use crate::support::app_identity::DeviceStorage;
 use rand::rngs::OsRng;
 use roost_core::{
@@ -193,7 +188,7 @@ fn reserved_journal_transition_resumes_after_failures_before_and_after_apply() {
             FailureTiming::AfterApply => KeyStoreOperationStatus::Reserved,
         };
         assert_eq!(restarted.operation_status(prepared.id).unwrap(), expected);
-        // The app's transaction was deliberately not attempted, so abort is safe in either case.
+        // The app never ran its transaction, so aborting is safe either way.
         restarted.abort_operation(prepared.id).unwrap();
         assert!(restarted.identity().unwrap().is_none());
     }

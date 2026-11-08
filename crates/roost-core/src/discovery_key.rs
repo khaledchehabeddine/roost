@@ -20,7 +20,6 @@ const DISCOVERY_KEY: &str = "discovery/current";
 const PREVIOUS_DISCOVERY_KEYS: &str = "discovery/previous";
 const DISCOVERY_KEY_VERSION: u8 = 1;
 const PREVIOUS_DISCOVERY_KEYS_VERSION: u8 = 1;
-// Identity creation starts at epoch 1.
 const FIRST_EPOCH: u32 = 1;
 // Enough for several blocks close together to keep each other's queued messages readable.
 const MAX_PREVIOUS_DISCOVERY_KEYS: usize = 5;
@@ -37,8 +36,7 @@ pub enum DiscoveryKeyError {
     /// Signing a new discovery key with the identity key failed.
     #[error("signing the discovery key failed")]
     DiscoveryKeySignature(#[source] SignatureError),
-    /// Loading the identity for discovery key signing or verification returned an
-    /// [`IdentityError`].
+    /// Loading the identity failed.
     #[error("loading the identity failed")]
     Identity(#[from] IdentityError),
     /// Signing the discovery-to-identity binding failed.
@@ -59,7 +57,6 @@ pub enum DiscoveryKeyError {
     StoredData(#[from] StoredDataError),
 }
 
-// Manages discovery key generation, rotation, verification, and persistence.
 pub(crate) struct DiscoveryKeyManager {
     storage: Arc<Mutex<Box<dyn SecureStorage>>>,
     identity: Arc<IdentityManager>,
@@ -84,8 +81,8 @@ impl DiscoveryKeyManager {
 
     // Returns the delivery capability of the current epoch's inbox.
     //
-    // The caller presents it only to authorized contacts and never registers it. Only its verifier
-    // is registered with the relay.
+    // The caller sends it only to authorized contacts and registers only its verifier with the
+    // relay.
     pub(crate) fn current_capability(
         &self,
     ) -> Result<RecipientDeliveryCapability, DiscoveryKeyError> {
@@ -96,9 +93,8 @@ impl DiscoveryKeyManager {
 
     // Returns the signature of `discovery_key` over the stored identity's public halves.
     //
-    // Recomputed per call rather than persisted. The signature covers only the identity's two
-    // public halves, with no epoch or timestamp, and Ed25519 is deterministic, so every
-    // recomputation is byte-identical.
+    // Recomputed per call rather than persisted. It covers no epoch or timestamp, and Ed25519 is
+    // deterministic, so every recomputation is byte-identical.
     pub(crate) fn identity_binding(
         &self,
         discovery_key: &DiscoveryKey,
@@ -181,8 +177,8 @@ impl DiscoveryKeyManager {
         self.store_previous(&previous)
     }
 
-    // Deletes the discovery key and every previous one. `KeyStore::prepare_identity_deletion`
-    // deletes the prekeys the discovery key signed first.
+    // Deletes the discovery key and every previous one. `KeyStore::prepare_identity_deletion` first
+    // deletes the prekeys the discovery key signed.
     pub(crate) fn reset(&self) -> Result<(), DiscoveryKeyError> {
         let mut storage = self.lock_storage()?;
         storage.delete(PREVIOUS_DISCOVERY_KEYS)?;
@@ -242,7 +238,6 @@ impl DiscoveryKeyManager {
         Ok(previous)
     }
 
-    // Stores `previous`, or deletes the entry when no previous key remains.
     fn store_previous(
         &self,
         previous: &[PreviousDiscoveryKeyWire],
@@ -305,7 +300,6 @@ impl DiscoveryKeyWire {
     }
 }
 
-// The current discovery key with its inbox's delivery capability.
 #[derive(Deserialize, Serialize, ZeroizeOnDrop)]
 struct CurrentDiscoveryKeyWire {
     discovery_key: DiscoveryKeyWire,

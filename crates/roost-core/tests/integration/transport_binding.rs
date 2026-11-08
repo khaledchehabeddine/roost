@@ -1,5 +1,3 @@
-//! Exercises app-owned binding bytes across roost-core's message and acknowledgment calls.
-
 use crate::support::device::{Sealed, run_encryption};
 use crate::support::{ProtocolFixture, accepted, run_decryption, trusted_validation};
 use rand::SeedableRng;

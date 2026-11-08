@@ -23,9 +23,10 @@ const CERTIFICATE_LABEL: &[u8] = b"RoostSenderCertificate-v1:";
 const CERTIFICATE_VERSION: u8 = 1;
 const TEST_DOMAIN_ID: &[u8] = b"test-domain";
 
-/// Alice and Bob, each a device, who accepted each other: Alice asked on the fixture's session and
-/// Bob's contact acceptance replied on it, so Alice's messages no longer carry the handshake, and
-/// each acknowledged the other's inbox grant, so neither sends one again.
+/// Alice and Bob after Bob accepted Alice's contact request on `session_id`.
+///
+/// Alice's messages no longer carry the handshake, and each side acknowledged the other's inbox
+/// grant, so neither sends one again.
 pub(crate) struct ProtocolFixture {
     pub(crate) session_id: SessionId,
     pub(crate) alice: Device,
@@ -43,7 +44,6 @@ pub(crate) struct AppDatabase {
 }
 
 impl AppDatabase {
-    /// Returns the pending acknowledgment record of `session_id`, if the store holds one.
     pub(crate) fn pending_acknowledgments_record(
         &self,
         session_id: SessionId,
@@ -57,8 +57,7 @@ impl AppDatabase {
             .map(|blob| ProtocolStateBlob::from_bytes(blob.to_vec()))
     }
 
-    /// Commits `changes` in one transaction when every commit condition still holds, and returns
-    /// the updates it wrote.
+    /// Commits `changes` in one transaction when every commit condition still holds.
     pub(crate) fn commit(
         &mut self,
         changes: StateChanges,
@@ -75,7 +74,6 @@ impl AppDatabase {
         self.commit_with(changes, Some(sent.message.clone()))
     }
 
-    /// Returns the app's entry for each requested record, with `None` where it holds none.
     pub(crate) fn read(
         &self,
         addresses: &[ProtocolStateAddress],
@@ -93,8 +91,6 @@ impl AppDatabase {
             .collect()
     }
 
-    // Checks every condition, then writes the updates, queues `outbox`, and marks the undelivered
-    // messages, as one transaction.
     fn commit_with(
         &mut self,
         changes: StateChanges,
@@ -144,7 +140,6 @@ impl AppDatabase {
         }
     }
 
-    /// Returns the address of every record of `kind` the database holds.
     pub(crate) fn addresses(&self, kind: ProtocolStateKind) -> Vec<ProtocolStateAddress> {
         self.blobs
             .keys()
@@ -232,7 +227,7 @@ pub(crate) fn trusted_domain_signing_key() -> DomainSigningKey {
     }
 }
 
-/// Every identity's certificate validation inputs at the fixed test time.
+/// Returns certificate validation inputs for the test relay at the fixed test time.
 pub(crate) fn validation(
     domain_signing_keys: Vec<DomainSigningKey>,
     revoked_identity_keys: Vec<IdentityKey>,

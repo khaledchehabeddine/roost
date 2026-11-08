@@ -172,8 +172,7 @@ impl ProtocolStateBlob {
 
 /// A condition Roost computes, which the app checks inside its state transaction.
 ///
-/// All updates and their effects must commit atomically under the app's identity lock. A failed
-/// condition requires reloading state and processing the operation again.
+/// A failed condition requires reloading state and processing the operation again.
 #[derive(Clone, Copy, Debug)]
 pub enum ProtocolStateCommitCondition {
     /// No blob may exist at this address.
@@ -183,7 +182,6 @@ pub enum ProtocolStateCommitCondition {
 }
 
 impl ProtocolStateCommitCondition {
-    // Checks the condition against the blob read inside the app's transaction.
     fn is_satisfied_by(&self, blob: Option<&ProtocolStateBlob>) -> bool {
         match (self, blob) {
             (Self::Absent, None) => true,
@@ -210,7 +208,6 @@ pub struct ProtocolStateUpdate {
 }
 
 impl ProtocolStateUpdate {
-    /// Creates an update that stores `blob` at `address`.
     #[must_use]
     fn set(address: ProtocolStateAddress, blob: ProtocolStateBlob) -> Self {
         Self {
@@ -220,7 +217,6 @@ impl ProtocolStateUpdate {
         }
     }
 
-    /// Creates an update that removes `address`.
     #[must_use]
     fn delete(address: ProtocolStateAddress) -> Self {
         Self {
@@ -264,9 +260,8 @@ impl ProtocolStateUpdate {
 /// The records an operation's result relies on, the records it writes, the prepared KeyStore
 /// operation that commits with them, if any, and the sent messages Roost stops waiting for.
 ///
-/// Message operations and delivery checks return these beside their result, so the app commits
-/// them through [`Self::conditions`] and [`Self::into_updates`] and keeps the rest of the result.
-/// They're empty when the result changes nothing, such as a duplicate.
+/// Message operations, delivery checks, and contact changes return these beside their result.
+/// They're empty for a duplicate.
 ///
 /// The app reads the record at each commit condition's address inside its transaction, and commits
 /// the updates with the result's effects only when [`commit_conditions_match`] holds for them. The
@@ -281,7 +276,6 @@ pub struct StateChanges {
 }
 
 impl StateChanges {
-    // Returns changes for a result that relies on no record and writes none.
     fn empty() -> Self {
         Self {
             conditions: Vec::new(),
@@ -334,7 +328,7 @@ impl StateChanges {
         &self.undelivered
     }
 
-    /// Returns the updates to commit, consuming the changes.
+    /// Returns the updates to commit.
     #[must_use]
     pub fn into_updates(self) -> Vec<ProtocolStateUpdate> {
         self.updates
@@ -417,7 +411,6 @@ pub(crate) struct ProtocolStateSnapshot {
 }
 
 impl ProtocolStateSnapshot {
-    // Returns the blob stored at `address`, if present.
     pub(crate) fn get(&self, address: &ProtocolStateAddress) -> Option<&ProtocolStateBlob> {
         self.blobs.get(address)
     }
@@ -448,11 +441,11 @@ pub struct OutboundMessageResult {
 pub struct InboundMessageResult {
     /// The session the message arrived on.
     pub session_id: SessionId,
-    /// Message ID recovered after decrypt.
+    /// The sender's message ID.
     pub message_id: MessageId,
-    /// Sender-observed Unix timestamp recovered after decrypt.
+    /// The sender's Unix timestamp, in milliseconds.
     pub sent_at_millis: u64,
-    /// Payload kind recovered after decrypt.
+    /// The payload kind.
     pub payload_kind: PayloadKind,
     /// Decrypted plaintext bytes.
     pub plaintext: Zeroizing<Vec<u8>>,
@@ -470,15 +463,15 @@ pub struct InboundMessageResult {
 pub struct WithheldInboundMessageResult {
     /// The session the message arrived on.
     pub session_id: SessionId,
-    /// Message ID recovered after decrypt.
+    /// The sender's message ID.
     pub message_id: MessageId,
 }
 
-/// A grant update whose inbox grant Roost kept, which has nothing to show.
+/// A grant update, which has nothing to show.
 pub struct GrantUpdateResult {
     /// The session the grant update arrived on.
     pub session_id: SessionId,
-    /// Message ID recovered after decrypt.
+    /// The sender's message ID.
     pub message_id: MessageId,
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
     /// this side doesn't acknowledge the contact yet.
@@ -500,9 +493,9 @@ pub struct BlockedInboundMessageResult {
 pub struct AcknowledgmentResult {
     /// The session the acknowledgment arrived on.
     pub session_id: SessionId,
-    /// Acknowledgment message ID recovered after decrypt.
+    /// The acknowledgment's own message ID.
     pub message_id: MessageId,
-    /// Acknowledgment timestamp recovered after decrypt.
+    /// The sender's Unix timestamp for the acknowledgment.
     pub sent_at_millis: u64,
     /// The outbound message ID the acknowledgment names.
     pub acknowledged_message_id: MessageId,
@@ -520,9 +513,9 @@ pub enum InboundMessageOutcome {
     Blocked(Box<BlockedInboundMessageResult>),
     /// A message past the limit before acceptance decrypted, and its plaintext is withheld.
     Withheld(Box<WithheldInboundMessageResult>),
-    /// A grant update from a contact who isn't blocked, whose inbox grant Roost kept.
+    /// A grant update from a contact who isn't blocked.
     GrantUpdate(Box<GrantUpdateResult>),
-    /// The message matched an already-accepted encrypted byte sequence.
+    /// The message's bytes and transport binding match one already received.
     Duplicate,
     /// The message names a session this identity doesn't keep and carries no handshake, such as
     /// one whose records it lost, and nothing changed.
@@ -538,9 +531,7 @@ pub enum InboundMessageOutcome {
 
 /// Whether a blocked sender receives an acknowledgment for an accepted-but-hidden message.
 ///
-/// The default preserves privacy, since a blocked sender then can't tell a block from an
-/// unreachable recipient. Opting in to [`Self::Acknowledge`] trades that away for delivery
-/// confirmation.
+/// The default is [`Self::Unreachable`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BlockedContactAcknowledgmentPolicy {
     /// Return no acknowledgment and do not advance the sending chain, so a blocked sender can't
@@ -603,9 +594,7 @@ impl Default for ReceiveSettings {
 ///
 /// The app must read required blobs from an atomic, durable, crash-consistent, and
 /// integrity-preserving store before each operation, then commit returned updates atomically with
-/// any produced message. Library instances for one identity take turns under the app's identity
-/// lock, from an operation's first call until its commit is resolved. The app still commits a
-/// result only while every commit condition in its [`StateChanges`] holds.
+/// any produced message.
 ///
 /// Received-message deduplication is scoped to one local identity through the
 /// [`ProtocolStateKind::DeduplicationSet`] blob. It drops byte-identical encrypted message retries
@@ -671,7 +660,7 @@ impl ProtocolStateEngine {
     /// Records out-of-band safety number confirmation for an accepted contact, given its record.
     ///
     /// The presented value must match the safety number derived from `local_identity_key` and
-    /// `contact_identity_key`. In-band messages and acknowledgments never call this transition.
+    /// `contact_identity_key`.
     pub fn confirm_contact_safety_number(
         &self,
         local_identity_key: IdentityKey,
@@ -722,7 +711,7 @@ impl ProtocolStateEngine {
         validate_contact_identity_key(&address, &identity_key)?;
         let mut contact = match record {
             Some(blob) => ContactRecord::decode(&address, blob, self.limits)?,
-            None => ContactRecord::pending(identity_key, None),
+            None => ContactRecord::pending(identity_key),
         };
         if contact.blocked {
             return Ok((StateChanges::for_record(address, record, None), false));
@@ -823,7 +812,7 @@ pub enum ProtocolStateError {
         /// Most messages that wait for an acknowledgment on one session.
         limit: usize,
     },
-    /// A persisted blob failed structural decoding.
+    /// A stored blob failed to decode or holds an invalid record.
     #[error("protocol-state blob failed to decode at {address}: {reason}")]
     BlobDecode {
         /// Address whose blob failed to decode.
@@ -871,10 +860,11 @@ pub enum ProtocolStateError {
         /// Longest content Roost accepts.
         max: usize,
     },
-    /// Sender-certificate validation failed during receive.
+    /// A sender certificate failed validation, or the certificate grace is too long.
     #[error("sender certificate validation failed")]
     SenderCertificateValidation(#[source] SenderCertificateValidationError),
-    /// A message did not carry the expected ratcheted payload.
+    /// A message is malformed or doesn't authenticate, or a prekey bundle or sender certificate it
+    /// uses is invalid.
     #[error("invalid message: {reason}")]
     InvalidMessage {
         /// Diagnostic failure context for logs only.
@@ -1098,13 +1088,11 @@ fn contains_digest(digests: &[[u8; DIGEST_LEN]], digest: &[u8; DIGEST_LEN]) -> b
     bool::from(found)
 }
 
-// Appends `digest`, dropping the oldest digests beyond `capacity`.
 fn push_bounded(digests: &mut Vec<[u8; DIGEST_LEN]>, digest: [u8; DIGEST_LEN], capacity: usize) {
     digests.push(digest);
     keep_newest(digests, capacity);
 }
 
-// Drops the oldest digests beyond `capacity`.
 fn keep_newest(digests: &mut Vec<[u8; DIGEST_LEN]>, capacity: usize) {
     let excess = digests.len().saturating_sub(capacity);
     digests.drain(..excess);

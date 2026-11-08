@@ -1,5 +1,3 @@
-//! The one record Roost keeps for each contact, keyed by the contact's identity key.
-
 use super::grant::{
     CAPABILITY_LEN, DiscoveryKeyStamp, InboxGrant, is_newer_discovery_key, parse_discovery_key,
 };
@@ -41,12 +39,10 @@ struct SentBeforeAcceptance {
 /// A recovery a delivery check signaled for the contact's unacknowledged messages.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RecoverySignal {
-    /// When the delivery check signaled it, in Unix milliseconds.
     pub(super) signaled_at_millis: u64,
     pub(super) progress: RecoveryProgress,
 }
 
-/// How far a signaled recovery got.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RecoveryProgress {
     /// Nothing is resent yet.
@@ -81,14 +77,10 @@ pub(super) struct ContactRecord {
 }
 
 impl ContactRecord {
-    /// Starts a pending record for a contact whose discovery key Roost has verified.
-    pub(super) fn pending(
-        identity_key: IdentityKey,
-        discovery_key: Option<ContactDiscoveryKey>,
-    ) -> Self {
+    pub(super) fn pending(identity_key: IdentityKey) -> Self {
         Self {
             identity_key,
-            discovery_key,
+            discovery_key: None,
             delivery_capability: None,
             acknowledged_grant: None,
             trust_state: ContactTrustState::Pending,
@@ -221,8 +213,6 @@ impl ContactRecord {
         self.forget_recovery();
     }
 
-    /// Returns whether the stored discovery key is newer than `discovery_key`, such as one from a
-    /// stale prekey bundle.
     pub(super) fn has_newer_discovery_key_than(&self, discovery_key: &ContactDiscoveryKey) -> bool {
         self.discovery_key
             .is_some_and(|current| is_newer_discovery_key(&current, discovery_key))
@@ -241,8 +231,6 @@ impl ContactRecord {
     }
 
     /// Keeps `grant` when its discovery key is newer, or is the stored one without a capability.
-    ///
-    /// A stale grant changes nothing.
     pub(super) fn record_grant(&mut self, grant: InboxGrant) {
         let is_newer = self
             .discovery_key
@@ -258,7 +246,6 @@ impl ContactRecord {
         }
     }
 
-    /// Returns the recovery signaled for the contact's unacknowledged messages, if any.
     pub(super) fn recovery(&self) -> Option<RecoverySignal> {
         self.recovery
     }
@@ -268,7 +255,6 @@ impl ContactRecord {
         self.recovery = None;
     }
 
-    /// Records a recovery signaled at `now_millis`.
     pub(super) fn signal_recovery(&mut self, now_millis: u64) {
         self.recovery = Some(RecoverySignal {
             signaled_at_millis: now_millis,
@@ -514,7 +500,6 @@ impl ContactRecord {
     }
 }
 
-/// Returns the contact record at `address` in `snapshot`, if present.
 pub(super) fn load_contact(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -633,7 +618,9 @@ mod tests {
             x25519_public_key: [7; PUBLIC_KEY_LEN],
             ed25519_verifying_key: [7; PUBLIC_KEY_LEN],
         };
-        ContactRecord::pending(identity_key, Some(discovery_key))
+        let mut contact = ContactRecord::pending(identity_key);
+        contact.discovery_key = Some(discovery_key);
+        contact
     }
 
     fn capability(contact: &ContactRecord) -> Option<[u8; CAPABILITY_LEN]> {

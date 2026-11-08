@@ -4,11 +4,10 @@ use zeroize::Zeroizing;
 
 /// A key-value storage abstraction for sensitive byte payloads.
 ///
-/// Implementations usually wrap platform secure storage, and roost-client exports a version the
-/// app implements in Swift or Kotlin. Each operation must be durable when it returns
-/// success. An interrupted `store` must leave either the complete previous value or the complete
-/// new value, never a torn value. `store` and `delete` may be retried after an ambiguous failure,
-/// so repeating either operation must be safe.
+/// Implementations usually wrap platform secure storage. Each operation must be durable when it
+/// returns success. An interrupted `store` must leave either the complete previous value or the
+/// complete new value, never a torn value. `store` and `delete` may be retried after an ambiguous
+/// failure, so repeating either operation must be safe.
 pub trait SecureStorage: Send {
     /// Stores `value` under `key`, overwriting any existing entry.
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError>;
@@ -28,7 +27,6 @@ pub enum StorageError {
     IO(String),
 }
 
-// A SecureStorage held in memory, for this crate's unit tests.
 #[cfg(test)]
 #[derive(Default)]
 pub(crate) struct InMemorySecureStorage {

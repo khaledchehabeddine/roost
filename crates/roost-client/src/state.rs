@@ -205,7 +205,7 @@ pub(crate) fn state_keys(addresses: &[CoreProtocolStateAddress]) -> Vec<StateKey
     addresses.iter().map(StateKey::from_core).collect()
 }
 
-// Most entries the app may pass for one read.
+// Most records the app may pass in one call.
 const MAX_STATE_ENTRIES: usize = 4096;
 
 // Wraps every entry's bytes before checking any key, so a malformed entry leaves no copy behind.

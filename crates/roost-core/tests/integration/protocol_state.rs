@@ -1,5 +1,3 @@
-//! Exercises the public protocol-state API over opaque blobs the app holds.
-
 use crate::support::device::{Decrypted, Device, Relay, Sealed, run_encryption};
 use crate::support::{
     AppDatabase, CREATED_AT_SECS, ProtocolFixture, TEST_RELAY_DOMAIN, accepted,
@@ -49,7 +47,7 @@ fn alice_sends_certified(
         .unwrap()
 }
 
-// Bob receives `message` over `store` with the given settings and certificate validation inputs.
+// Bob receives `message` over `store` without committing.
 fn bob_receives(
     fixture: &ProtocolFixture,
     store: &AppDatabase,
@@ -75,7 +73,6 @@ fn bob_receives_validated(
     fixture.receive(store, message, seed)
 }
 
-// Returns the protocol fault an operation failed with.
 fn failure<T>(result: Result<T, MessageOperationError>) -> ProtocolStateError {
     match result {
         Err(MessageOperationError::ProtocolState(error)) => error,
@@ -100,9 +97,9 @@ fn blocked(outcome: InboundMessageOutcome) -> roost_core::BlockedInboundMessageR
     *result
 }
 
-// Has Bob block Alice. The block rotates Bob's inbox, so Alice reaches him again only by requesting
-// on his new prekeys, which starts the fixture's new session. Returns the address of the record Bob
-// keeps for that session.
+// The block rotates Bob's inbox, so Alice reaches him again only by requesting on his new prekeys,
+// which starts the fixture's new session. Returns the address of the record Bob keeps for that
+// session.
 fn block_alice(fixture: &mut ProtocolFixture) -> ProtocolStateAddress {
     fixture.bob.block(fixture.alice.identity_key());
     fixture.alice.forget_sessions_with(&fixture.bob);

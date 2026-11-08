@@ -1,6 +1,3 @@
-//! Inbox grants: the discovery key, its binding signatures, and the delivery capability that an
-//! identity sends a contact inside the payload of a message.
-
 use super::{ProtocolStateError, encode_zeroizing};
 use crate::contact::ContactDiscoveryKey;
 use crate::stored_data::{SignatureWire, signature_from_wire, signature_to_wire};
@@ -56,7 +53,7 @@ impl DiscoveryKeyStamp {
     }
 }
 
-/// Returns whether `candidate` is newer than `current` in the order contacts keep the newest by.
+/// Returns whether `candidate` is newer than `current`, comparing creation time, then epoch.
 pub fn is_newer_discovery_key(
     candidate: &ContactDiscoveryKey,
     current: &ContactDiscoveryKey,
