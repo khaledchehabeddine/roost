@@ -60,7 +60,9 @@ pub enum RoostError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// Input bytes are malformed or the wrong length.
+    /// Input or stored data is malformed or out of range, a call comes at a step that doesn't
+    /// expect it, or a key change would pass a limit, such as the number of retained signed
+    /// prekeys.
     #[error("invalid data: {reason}")]
     InvalidData {
         /// Description of what was invalid for logging only.
@@ -73,7 +75,7 @@ pub enum RoostError {
     /// the contact has supplied one for its current discovery key.
     #[error("no delivery capability for this contact")]
     NoDeliveryCapability,
-    /// Requested identity, discovery key, or prekey material is not stored.
+    /// The requested identity, discovery key, prekey, or prepared operation isn't stored.
     #[error("key material not found")]
     NotFound,
     /// A different first message already used the one-time prekey this one names, so Roost refuses
@@ -101,7 +103,9 @@ pub enum RoostError {
         /// Diagnostic context for logging only.
         reason: String,
     },
-    /// Protocol-state load, decode, encode, binding, or missing-state fault.
+    /// A protocol state record is missing, fails to decode, or doesn't fit the call, such as a
+    /// record stored under another record's key, a contact key that isn't canonical, a pending
+    /// contact's safety number, or a session that already exists.
     #[error("protocol-state fault: {reason}")]
     ProtocolStateFault {
         /// Diagnostic context for logging only.
@@ -132,7 +136,8 @@ pub enum RoostError {
         /// Most messages that wait for an acknowledgment on one session.
         limit: u64,
     },
-    /// A message, sender certificate, blob, backup, or prekey version is unsupported.
+    /// A message, sender certificate, protocol state blob, backup, contact publication, or stored
+    /// key uses a version Roost doesn't read.
     #[error("unsupported version: {reason}")]
     UnsupportedVersion {
         /// Diagnostic context for logging only.

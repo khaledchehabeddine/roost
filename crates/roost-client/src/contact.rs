@@ -109,6 +109,7 @@ impl Contacts {
     /// # Errors
     /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::ProtocolStateFault`] if the record is malformed or belongs to someone
     ///   else.
@@ -173,6 +174,7 @@ impl Contacts {
     /// # Errors
     /// - [`RoostError::InvalidData`] if the stored local identity or a key is malformed.
     /// - [`RoostError::NotFound`] if the context has no local identity.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::ProtocolStateFault`] if the record is absent, pending, or malformed.
     /// - [`RoostError::Storage`] if SecureStorage fails.

@@ -17,8 +17,8 @@ use zeroize::Zeroizing;
 /// ASCII prefix reserved for preimages Roost signs or verifies itself.
 ///
 /// Every signature context and domain tag Roost defines starts with it, so refusing it keeps
-/// [`IdentityContext::sign_authentication_transcript`] disjoint from all of them. Matched
-/// case-insensitively to cover the lowercase hash-domain convention as well.
+/// [`IdentityContext::sign_authentication_transcript`] disjoint from all of them. Matched in any
+/// letter case, so a label written in lowercase stays covered.
 const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 
 /// One local identity namespace: its keys in SecureStorage and every operation that uses them.
@@ -134,8 +134,9 @@ pub struct IdentityContext {
 ///
 /// The session ID is sealed to the recipient's discovery key, so anyone who gets that discovery key
 /// can read it from recorded messages and tell which of them belong to the same session. Until the
-/// recipient replies, every message on a new session also shows the transport which of the
-/// recipient's prekeys started it, so the transport can tell those messages belong together.
+/// recipient replies, or for a contact request until the recipient accepts, every message on a new
+/// session also shows the transport which of the recipient's prekeys started it, so the transport
+/// can tell those messages belong together.
 #[derive(uniffi::Object)]
 pub struct Messaging {
     pub(crate) inner: Arc<CoreKeyStore>,
@@ -187,6 +188,7 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::InvalidData`] if the stored identity is malformed.
     /// - [`RoostError::UnsupportedVersion`] if the stored identity uses an unknown format version.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn identity(&self) -> Result<Option<Identity>, RoostError> {
@@ -199,10 +201,11 @@ impl IdentityContext {
     /// Prepares a new identity and its first discovery key.
     ///
     /// The app saves the identity with the operation ID, and publishes it only after
-    /// finalization. Finalizing also completes an identity whose earlier creation stopped partway.
+    /// finalization.
     ///
     /// # Errors
     /// - [`RoostError::AlreadyExists`] if an identity is already stored.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -220,6 +223,7 @@ impl IdentityContext {
     /// operation ID. Preparing deletion with no identity stored still returns an operation.
     ///
     /// # Errors
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -242,6 +246,7 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::InvalidData`] if the transcript starts with the reserved prefix.
     /// - [`RoostError::NotFound`] if no identity is stored.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn sign_authentication_transcript(
@@ -260,11 +265,12 @@ impl IdentityContext {
     /// Returns a passphrase-encrypted backup of the identity and its current discovery key.
     ///
     /// Each call runs Argon2id with 64 MiB of memory, so call it off the main thread. The backup is
-    /// about 274 bytes and restores on any device with [`Self::prepare_backup_import`].
+    /// about 295 bytes and restores on any device with [`Self::prepare_backup_import`].
     ///
     /// # Errors
     /// - [`RoostError::BackupFailed`] if key derivation or encryption fails.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, RoostError> {
@@ -280,11 +286,11 @@ impl IdentityContext {
     /// that saves the operation ID, the app keeps the
     /// [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState) records it
     /// restored with its own database and deletes every other protocol-state record for the
-    /// identity. Reusing a restored session would reuse its encryption keys, so each contact's
-    /// next message starts a new session, and the contact encrypts its unacknowledged messages
-    /// again on it. In the same transaction, show each sent message that has content and no
-    /// acknowledgment yet as not delivered, since Roost stops tracking a message once its session
-    /// is deleted. After finalization, prekeys and publication stay blocked until
+    /// identity. Reusing a restored session would reuse its encryption keys, so this identity's
+    /// next message to each accepted contact starts a new session, and the contact encrypts its
+    /// unacknowledged messages again on it. In the same transaction, show each sent message that
+    /// has content and no acknowledgment yet as not delivered, since Roost stops tracking a message
+    /// once its session is deleted. After finalization, prekeys and publication stay blocked until
     /// [`Self::prepare_inbox_rotation`] moves to the next discovery key epoch, so the restored
     /// identity never reuses prekey IDs already published under the backed-up one. Then send each
     /// contact a grant update through [`Contacts::start_grant_update`], so every contact can reach
@@ -298,6 +304,7 @@ impl IdentityContext {
     /// - [`RoostError::DecryptionFailed`] if the passphrase is wrong or the backup was altered.
     /// - [`RoostError::InvalidData`] or [`RoostError::UnsupportedVersion`] if the backup is
     ///   malformed.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -321,7 +328,8 @@ impl IdentityContext {
     /// rotations, which peers reject.
     ///
     /// # Errors
-    /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain.
+    /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain, or the operation
+    ///   journal is corrupt.
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::NotFound`] if no identity, discovery key, or signed prekey is stored.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
@@ -338,7 +346,8 @@ impl IdentityContext {
     /// an inbox the relay no longer serves.
     ///
     /// # Errors
-    /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain.
+    /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain, or the operation
+    ///   journal is corrupt.
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::InvalidData`] if the stored identity is malformed.
     /// - [`RoostError::NotFound`] if no identity, discovery key, or signed prekey is stored.
@@ -366,6 +375,7 @@ impl IdentityContext {
     ///
     /// # Errors
     /// - [`RoostError::NotFound`] if no identity is stored.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -384,7 +394,10 @@ impl IdentityContext {
     ///
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
+    /// - [`RoostError::InvalidData`] if five older signed prekeys remain, so a rotation would
+    ///   discard one that hasn't expired.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -409,6 +422,7 @@ impl IdentityContext {
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::InvalidData`] if the pool can't hold `count` more prekeys.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -431,6 +445,7 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -453,6 +468,7 @@ impl IdentityContext {
     /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
     /// - [`RoostError::NotFound`] if no recent operation has this ID.
     /// - [`RoostError::OperationConflict`] if the operation was aborted.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::UnfinishedReservation`] if another reserved operation is unfinished.
     /// - [`RoostError::SecureStoragePreconditionChanged`] if another operation changed the keys
     ///   this one read. Abort it and prepare again.
@@ -470,6 +486,7 @@ impl IdentityContext {
     /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
     /// - [`RoostError::NotFound`] if no recent operation has this ID.
     /// - [`RoostError::OperationConflict`] if the operation isn't reserved or was aborted.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::Storage`] if SecureStorage fails. Finalize again to resume.
     pub fn finalize_operation(&self, id: OperationId) -> Result<(), RoostError> {
         self.inner.finalize_operation(id.to_core()?)?;
@@ -485,6 +502,7 @@ impl IdentityContext {
     /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
     /// - [`RoostError::NotFound`] if no recent operation has this ID.
     /// - [`RoostError::OperationConflict`] if finalization already started.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn abort_operation(&self, id: OperationId) -> Result<(), RoostError> {
         self.inner.abort_operation(id.to_core()?)?;
@@ -499,6 +517,7 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
     /// - [`RoostError::NotFound`] if no recent operation has this ID.
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn operation_status(&self, id: OperationId) -> Result<OperationStatus, RoostError> {
         Ok(OperationStatus::from_core(
@@ -509,6 +528,7 @@ impl IdentityContext {
     /// Returns every operation that is neither finalized nor aborted.
     ///
     /// # Errors
+    /// - [`RoostError::Corrupt`] if the operation journal is corrupt.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn unfinished_operations(&self) -> Result<Vec<UnfinishedOperation>, RoostError> {
         Ok(self
