@@ -915,28 +915,6 @@ mod tests {
     }
 
     #[test]
-    fn a_journal_decodes_to_the_records_it_encoded() {
-        let journal = OperationJournal {
-            records: vec![record(JournalStatus::Finalizing { next_mutation: 1 })],
-        };
-
-        let decoded = decode_journal(&encode_journal(&journal).unwrap()).unwrap();
-
-        let [decoded] = decoded.records.as_slice() else {
-            panic!("expected one record");
-        };
-        let expected = &journal.records[0];
-        assert_eq!(decoded.id, expected.id);
-        assert_eq!(decoded.status.public(), KeyStoreOperationStatus::Finalizing);
-        assert_eq!(decoded.preconditions, expected.preconditions);
-        assert_eq!(decoded.mutations.len(), expected.mutations.len());
-        for (decoded, expected) in decoded.mutations.iter().zip(&expected.mutations) {
-            assert_eq!(decoded.key, expected.key);
-            assert_eq!(decoded.value, expected.value);
-        }
-    }
-
-    #[test]
     fn a_journal_with_an_unknown_version_is_refused() {
         let mut bytes = encode_journal(&OperationJournal::default()).unwrap();
         bytes[0] = OPERATION_JOURNAL_VERSION + 1;

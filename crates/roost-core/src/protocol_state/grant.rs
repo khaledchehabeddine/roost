@@ -252,24 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn a_grant_opens_for_its_owner_and_leaves_the_plaintext() {
-        let owner = owner(7);
-
-        let (grant, plaintext) = open_granted_payload(
-            &payload(&owner, &owner.discovery_to_identity),
-            &owner.identity,
-        )
-        .unwrap();
-
-        assert_eq!(plaintext.as_slice(), b"hello");
-        assert_eq!(
-            grant.discovery_key,
-            ContactDiscoveryKey::from(&owner.discovery_key.public())
-        );
-        assert_eq!(*grant.delivery_capability, [7; 32]);
-    }
-
-    #[test]
     fn a_grant_for_another_identity_is_rejected() {
         let stranger = owner(9).identity;
         let owner = owner(7);

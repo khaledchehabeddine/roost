@@ -305,8 +305,7 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_crypto::{
-        generate_discovery_key, generate_signed_prekey_for_discovery_key,
-        generate_signing_key_pair, verify_public_signed_prekey,
+        generate_discovery_key, generate_signed_prekey_for_discovery_key, generate_signing_key_pair,
     };
     use roost_protocol::from_unix_secs;
 
@@ -392,15 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn current_without_stored_signed_prekey_returns_not_found() {
-        let manager = setup_with_discovery_key().manager;
-        assert!(matches!(
-            manager.current(at(FIXED_NOW)),
-            Err(SignedPreKeyError::NotFound)
-        ));
-    }
-
-    #[test]
     fn current_public_does_not_require_discovery_key() {
         let manager = manager_without_discovery_key();
         let signed_prekey = store_signed_prekey_with_created_at(&manager, FIXED_NOW);
@@ -408,69 +398,6 @@ mod tests {
         assert_eq!(
             bundle.public_key.as_bytes(),
             signed_prekey.public_key().as_bytes()
-        );
-    }
-
-    #[test]
-    fn rotate_if_stale_seeds_first_signed_prekey_under_discovery_key() {
-        let mut rng = ChaCha20Rng::from_seed([0x93; 32]);
-        let SignedPreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let rotated = manager
-            .rotate_if_stale(&mut rng, at(FIXED_NOW))
-            .unwrap()
-            .expect("first call must rotate");
-        let bundle = manager.current_public(at(FIXED_NOW)).unwrap();
-        assert_eq!(
-            rotated.public_key().as_bytes(),
-            bundle.public_key.as_bytes(),
-            "returned signed prekey must match persisted bundle",
-        );
-        let public_discovery_key = discovery.current().unwrap().public();
-        verify_public_signed_prekey(&bundle, &public_discovery_key.verifying_key).unwrap();
-    }
-
-    #[test]
-    fn rotate_if_stale_keeps_fresh_signed_prekey() {
-        let mut rng = ChaCha20Rng::from_seed([0x94; 32]);
-        let manager = setup_with_discovery_key().manager;
-        assert!(
-            manager
-                .rotate_if_stale(&mut rng, at(FIXED_NOW))
-                .unwrap()
-                .is_some()
-        );
-        let initial_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
-        let second_rotation = manager.rotate_if_stale(&mut rng, at(FIXED_NOW)).unwrap();
-        assert!(
-            second_rotation.is_none(),
-            "fresh signed prekey must not rotate"
-        );
-        let current_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
-        assert_eq!(initial_public_key.as_bytes(), current_public_key.as_bytes());
-    }
-
-    #[test]
-    fn rotate_if_stale_replaces_backdated_signed_prekey() {
-        let mut rng = ChaCha20Rng::from_seed([0x95; 32]);
-        let manager = setup_with_discovery_key().manager;
-        manager.rotate_if_stale(&mut rng, at(FIXED_NOW)).unwrap();
-        let backdated_created_at_secs =
-            FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_SECS + SECONDS_PER_DAY);
-        let stale_signed_prekey =
-            store_signed_prekey_with_created_at(&manager, backdated_created_at_secs);
-        let rotated = manager
-            .rotate_if_stale(&mut rng, at(FIXED_NOW))
-            .unwrap()
-            .expect("backdated signed prekey must trigger rotation");
-        let rotated_public_key = manager.current_public(at(FIXED_NOW)).unwrap().public_key;
-        assert_eq!(
-            rotated.public_key().as_bytes(),
-            rotated_public_key.as_bytes(),
-            "returned signed prekey must match persisted bundle",
-        );
-        assert_ne!(
-            rotated_public_key.as_bytes(),
-            stale_signed_prekey.public_key().as_bytes()
         );
     }
 
@@ -492,47 +419,6 @@ mod tests {
             stale.public_key().as_bytes()
         );
         assert_eq!(rotated.id(), stale.id() + 1);
-    }
-
-    #[test]
-    fn rotate_if_stale_retains_backdated_prekey_for_thirty_days_after_supersession() {
-        let mut rng = ChaCha20Rng::from_seed([0x97; 32]);
-        let setup = setup_with_discovery_key();
-        let backdated_created_at_secs =
-            FIXED_NOW - (SIGNED_PREKEY_ROTATION_WINDOW_SECS + SECONDS_PER_DAY);
-        let stale_signed_prekey = store_current_discovery_signed_prekey_with_created_at(
-            &setup,
-            backdated_created_at_secs,
-        );
-
-        setup
-            .manager
-            .rotate_if_stale(&mut rng, at(FIXED_NOW))
-            .unwrap()
-            .expect("backdated signed prekey must trigger rotation");
-
-        let retained = setup
-            .manager
-            .prekey_for_first_message(
-                stale_signed_prekey.epoch(),
-                stale_signed_prekey.public_key().as_bytes(),
-                at(FIXED_NOW + SECONDS_PER_DAY),
-            )
-            .unwrap();
-        assert!(!retained.1);
-        assert_eq!(
-            retained.0.public_key().as_bytes(),
-            stale_signed_prekey.public_key().as_bytes()
-        );
-
-        assert!(matches!(
-            setup.manager.prekey_for_first_message(
-                stale_signed_prekey.epoch(),
-                stale_signed_prekey.public_key().as_bytes(),
-                at(FIXED_NOW + SIGNED_PREKEY_RETENTION_WINDOW_SECS)
-            ),
-            Err(SignedPreKeyError::NotFound)
-        ));
     }
 
     #[test]

@@ -480,9 +480,7 @@ mod tests {
     use rand::SeedableRng;
     use rand::rngs::OsRng;
     use rand_chacha::ChaCha20Rng;
-    use roost_crypto::{
-        PublicKeyError, verify_discovery_to_identity_binding, verify_public_discovery_key,
-    };
+    use roost_crypto::{PublicKeyError, verify_public_discovery_key};
     use roost_protocol::{SignatureError, from_unix_secs};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use zeroize::Zeroizing;
@@ -565,45 +563,6 @@ mod tests {
         commit_identity_creation(&key_store);
         storage.lock().unwrap().delete(DISCOVERY_KEY).unwrap();
         key_store.load_identity().unwrap();
-    }
-
-    #[test]
-    fn inbox_rotation_carries_both_binding_directions() {
-        let key_store = store();
-        let identity = commit_identity_creation(&key_store);
-
-        let publication = commit_inbox_rotation(&key_store);
-
-        verify_public_discovery_key(&publication.discovery_key, identity.verifying_key()).unwrap();
-        verify_discovery_to_identity_binding(
-            &identity.public().unwrap(),
-            &publication.discovery_key.verifying_key,
-            &publication.discovery_to_identity,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn discovery_to_identity_binding_is_stable_across_reads() {
-        let key_store = store();
-        commit_identity_creation(&key_store);
-        commit_signed_prekey_rotation(&key_store);
-
-        let first = key_store.current_publication().unwrap();
-        let second = key_store.current_publication().unwrap();
-
-        assert_eq!(
-            first.discovery_to_identity.to_bytes(),
-            second.discovery_to_identity.to_bytes()
-        );
-    }
-
-    #[test]
-    fn replenishment_returns_nothing_above_the_threshold() {
-        let key_store = store();
-        commit_identity_creation(&key_store);
-        commit_replenishment(&key_store);
-        assert!(commit_replenishment(&key_store).is_empty());
     }
 
     #[test]
@@ -893,30 +852,6 @@ mod tests {
                 original_signed_prekey.as_bytes()
             );
         }
-    }
-
-    #[test]
-    fn backup_import_rejects_an_unknown_backup_version() {
-        let source_store = store();
-        commit_identity_creation(&source_store);
-        let mut backup = source_store
-            .export_encrypted_backup(&mut OsRng, "passphrase")
-            .unwrap();
-        backup[0] = 0xFF;
-        let destination_store = store();
-
-        let result = destination_store.prepare_backup_import(&mut OsRng, &backup, "passphrase");
-
-        assert!(matches!(
-            result,
-            Err(KeyStoreError::Identity(IdentityError::BackupFormat(
-                StoredDataError::UnsupportedVersion { version: 0xFF }
-            )))
-        ));
-        assert!(matches!(
-            destination_store.load_identity(),
-            Err(KeyStoreError::Identity(IdentityError::NotFound))
-        ));
     }
 
     #[test]

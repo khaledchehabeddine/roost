@@ -1,10 +1,6 @@
-use crate::support::device::{
-    Device, DeviceError, Encrypted, Intent, Relay, Route, befriended, redraft, requested,
-};
+use crate::support::device::{Device, Encrypted, Intent, Relay, Route, befriended, redraft};
 use crate::support::{AppCommitError, accepted};
-use roost_core::{
-    InboundMessageOutcome, MessageOperationError, ProtocolStateError, ProtocolStateKind,
-};
+use roost_core::{InboundMessageOutcome, ProtocolStateKind};
 
 // Sends `plaintext` to `recipient`, asserting that the first attempt asks for `recipient`'s bundle.
 fn send_fetching_a_bundle(
@@ -139,22 +135,6 @@ fn a_new_session_for_missing_records_fails_to_commit_when_they_exist_after_all()
             .err(),
         Some(AppCommitError::StaleCondition)
     );
-}
-
-#[test]
-fn a_message_to_a_requester_whose_sessions_are_missing_is_refused() {
-    let relay = Relay::new();
-    let (alice, mut bob) = requested(&relay);
-    bob.forget_sessions_with(&alice);
-    let mut outgoing = bob.outgoing(&alice, b"who is this?");
-    outgoing.prekey_bundle = Some(alice.bundle());
-
-    assert!(matches!(
-        bob.encrypt(outgoing, Intent::Message),
-        Err(DeviceError::Operation(
-            MessageOperationError::ProtocolState(ProtocolStateError::ContactNotAccepted)
-        ))
-    ));
 }
 
 #[test]

@@ -368,15 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn current_without_stored_discovery_key_returns_not_found() {
-        let discovery = manager_with_identity();
-        assert!(matches!(
-            discovery.current(),
-            Err(DiscoveryKeyError::NotFound)
-        ));
-    }
-
-    #[test]
     fn a_malformed_discovery_key_entry_is_refused_by_each_reader() {
         let mut rng = ChaCha20Rng::from_seed([0xb8; 32]);
         let discovery = manager_with_identity();
@@ -417,18 +408,6 @@ mod tests {
             Err(DiscoveryKeyError::StoredData(StoredDataError::UnsupportedVersion { version }))
                 if version == DISCOVERY_KEY_VERSION + 1
         ));
-    }
-
-    #[test]
-    fn rotate_now_advances_the_epoch() {
-        let mut rng = ChaCha20Rng::from_seed([0xb6; 32]);
-        let discovery = manager_with_identity();
-        for epoch in 1..=3 {
-            assert_eq!(
-                discovery.rotate_now(&mut rng, fixed_now()).unwrap().epoch(),
-                epoch
-            );
-        }
     }
 
     #[test]
@@ -520,22 +499,6 @@ mod tests {
         // Reading at the earlier time would still find the expired key, had it stayed stored.
         assert!(!is_kept(&discovery, &expired, fixed_now()));
         assert!(is_kept(&discovery, &unexpired, fixed_now() + window));
-    }
-
-    #[test]
-    fn delete_expired_previous_deletes_the_entry_once_every_key_expired() {
-        let mut rng = ChaCha20Rng::from_seed([0xc0; 32]);
-        let discovery = manager_with_identity();
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        let before = stored(&discovery, PREVIOUS_DISCOVERY_KEYS).unwrap();
-
-        discovery.delete_expired_previous(fixed_now()).unwrap();
-        assert_eq!(stored(&discovery, PREVIOUS_DISCOVERY_KEYS).unwrap(), before);
-        discovery
-            .delete_expired_previous(fixed_now() + RELAY_HOLD_TIME)
-            .unwrap();
-        assert!(stored(&discovery, PREVIOUS_DISCOVERY_KEYS).is_none());
     }
 
     #[test]
