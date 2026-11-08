@@ -397,11 +397,10 @@ fn a_bundle_older_than_the_contacts_discovery_key_asks_again() {
     alice.forget_sessions_with(&bob);
 
     let mut outgoing = alice.outgoing(&bob, b"hello again");
-    outgoing.prekey_bundle = Some(stale);
+    let mut first = crate::support::device::redraft(&outgoing);
+    first.prekey_bundle = Some(stale);
     assert!(matches!(
-        alice
-            .encrypt(crate::support::device::redraft(&outgoing), Intent::Request)
-            .unwrap(),
+        alice.encrypt(first, Intent::Request).unwrap(),
         Encrypted::NeedsPreKeyBundle(_)
     ));
     outgoing.prekey_bundle = Some(bob.bundle());

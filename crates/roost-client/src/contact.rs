@@ -24,7 +24,8 @@ pub struct ContactBlock {
     pub publication: Option<PublicationBundle>,
 }
 
-/// The trust level the app records for a contact.
+/// The trust level Roost records for a contact, which an acceptance and a safety number
+/// confirmation raise.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum ContactTrustState {
     /// A contact request is open in either direction.
@@ -46,7 +47,7 @@ pub struct ContactState {
     /// The contact's current discovery key, absent for a stranger blocked before they sent
     /// anything.
     pub discovery_key: Option<PublicDiscoveryKey>,
-    /// The trust level the app records for the contact.
+    /// The trust level Roost records for the contact.
     pub trust_state: ContactTrustState,
     /// Whether this device blocked the contact.
     pub blocked: bool,

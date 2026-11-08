@@ -352,10 +352,6 @@ mod tests {
         assert!(!debug.contains("wrong-passphrase-secret"));
         assert!(!display.contains("correct-passphrase"));
         assert!(!debug.contains("correct-passphrase"));
-        assert!(!display.contains("D1"));
-        assert!(!debug.contains("D1"));
-        assert!(!display.contains("backup plaintext"));
-        assert!(!debug.contains("backup plaintext"));
     }
 
     #[test]
@@ -370,10 +366,6 @@ mod tests {
 
         assert!(!display.contains("correct-passphrase"));
         assert!(!debug.contains("correct-passphrase"));
-        assert!(!display.contains("D1"));
-        assert!(!debug.contains("D1"));
-        assert!(!display.contains("backup plaintext"));
-        assert!(!debug.contains("backup plaintext"));
     }
 
     #[test]

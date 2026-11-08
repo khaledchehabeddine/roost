@@ -95,7 +95,9 @@ impl LoadedPendingAcknowledgments {
 
 pub(super) struct LoadedPendingAcknowledgment {
     pub(super) first_sent_at_millis: u64,
-    /// The payload kind sealed in the message, which a recovery keeps when it resends it.
+    /// The payload kind sealed in the message. A recovery skips grant updates, keeps a contact
+    /// acceptance when it resends on a session the peer started, and picks the content kind again
+    /// for the rest.
     pub(super) payload_kind: PayloadKind,
     /// The local grant the message carried, which its acknowledgment confirms the peer holds.
     pub(super) grant: Option<DiscoveryKeyStamp>,
