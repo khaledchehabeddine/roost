@@ -2,9 +2,9 @@
 //!
 //! It handles identities and their backups, prekeys and inbox rotation, contacts and contact
 //! links, blocking and safety numbers, message operations, delivery checks and recovery, sender
-//! certificate and binding checks, and the one error type every call shares. Hosts create one
+//! certificate and binding checks, and the one error type every call shares. Apps create one
 //! [`IdentityContext`] per identity namespace over their own [`SecureStorage`]. Its documentation
-//! says what Roost and the host each own.
+//! says what Roost and the app each own.
 
 uniffi::setup_scaffolding!("roost_client");
 

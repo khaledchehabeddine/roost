@@ -22,16 +22,12 @@ const HKDF_INFO_WITHOUT_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:without-opk";
 const HKDF_INFO_WITH_ONE_TIME_PREKEY: &[u8] = b"RoostX3DH-v1:with-opk";
 const SESSION_ID_INFO: &[u8] = b"RoostSessionId-v1:";
 const SENDER_PROOF_CONTEXT: &[u8] = b"RoostX3DH-v1:sender-proof:";
-/// Current public prekey bundle format version.
-pub const PREKEY_BUNDLE_VERSION: u8 = 1;
 /// Length of the proof a first message carries.
 pub const SENDER_PROOF_LEN: usize = 32;
 
 /// Public prekey material used by the initiator to start an X3DH session.
 #[derive(Clone)]
 pub struct PreKeyBundle {
-    /// Version of the public prekey bundle format.
-    pub version: u8,
     /// Responder discovery key, signed by the responder's identity key.
     pub discovery_key: PublicDiscoveryKey,
     /// Responder signed prekey, signed by the discovery key.
@@ -75,11 +71,6 @@ pub fn initiate_handshake<R: RngCore + CryptoRng>(
     responder_prekey_bundle: &PreKeyBundle,
 ) -> Result<(RatchetState, SessionId, Handshake), HandshakeError> {
     verify_public_identity_key(responder_identity_key)?;
-    if responder_prekey_bundle.version != PREKEY_BUNDLE_VERSION {
-        return Err(HandshakeError::UnsupportedPreKeyBundleVersion {
-            version: responder_prekey_bundle.version,
-        });
-    }
     verify_public_discovery_key(
         &responder_prekey_bundle.discovery_key,
         &responder_identity_key.verifying_key,
@@ -269,12 +260,6 @@ pub enum HandshakeError {
         epoch: u32,
         /// The discovery key's epoch.
         discovery_epoch: u32,
-    },
-    /// Prekey bundle uses a format version this build does not understand.
-    #[error("unsupported prekey bundle format version: {version}")]
-    UnsupportedPreKeyBundleVersion {
-        /// The version the bundle names.
-        version: u8,
     },
 }
 
@@ -468,7 +453,6 @@ mod tests {
 
     fn bundle(setup: &Setup, include_one_time: bool) -> PreKeyBundle {
         PreKeyBundle {
-            version: PREKEY_BUNDLE_VERSION,
             discovery_key: setup.bob_discovery_key.public(),
             signed_prekey: setup.bob_signed_prekey.public(),
             one_time_prekey: include_one_time.then(|| setup.bob_one_time_prekey.public()),
@@ -615,21 +599,6 @@ mod tests {
             initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle),
             Err(HandshakeError::StalePreKey { epoch, discovery_epoch })
                 if epoch == discovery_epoch + 1
-        ));
-    }
-
-    #[test]
-    fn initiate_rejects_unsupported_prekey_bundle_version() {
-        let (setup, mut rng) = setup();
-        let bundle = PreKeyBundle {
-            version: PREKEY_BUNDLE_VERSION + 1,
-            ..bundle(&setup, true)
-        };
-
-        assert!(matches!(
-            initiate_handshake(&mut rng, &setup.bob_identity_key, &bundle),
-            Err(HandshakeError::UnsupportedPreKeyBundleVersion { version })
-                if version == PREKEY_BUNDLE_VERSION + 1
         ));
     }
 

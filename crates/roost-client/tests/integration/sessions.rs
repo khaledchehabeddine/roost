@@ -1,4 +1,4 @@
-//! Two hosts become contacts and exchange messages through the exported message operations.
+//! Two apps become contacts and exchange messages through the exported message operations.
 
 use crate::support::{
     DOMAIN_SIGNING_KEY_ID, MemoryStorage, RELAY_DOMAIN, complete, domain_signing_key,
@@ -12,7 +12,7 @@ use roost_client::{
     OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery, PayloadKind,
     PreKeyBundle, ProtocolStateKind, ReceiveSettings, RevocationState, RoostError,
     SenderCertificateValidation, SessionId, SignedSenderCertificate, StateChanges, StateEntry,
-    StateKey, TransportBinding, derive_safety_number,
+    StateKey, TransportBinding, decode_message, derive_safety_number, encode_message,
 };
 use roost_crypto::RecipientDeliveryCapability;
 use std::collections::{HashMap, HashSet};
@@ -62,15 +62,15 @@ struct Received {
     changes: StateChanges,
 }
 
-/// One app's IdentityContext, its host store, and the certificate its relay issued.
-struct Host {
+/// One app's IdentityContext, its records, and the certificate its relay issued.
+struct App {
     context: Arc<IdentityContext>,
     records: HashMap<StateKey, Vec<u8>>,
     certificate: Vec<u8>,
     certificate_signature: Vec<u8>,
 }
 
-impl Host {
+impl App {
     fn new() -> Self {
         let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
         let identity = context.prepare_identity_creation().unwrap();
@@ -130,25 +130,23 @@ impl Host {
             .collect()
     }
 
-    // Returns the record the host holds for `peer`'s contact, by decoding each contact record.
-    fn contact_record(&self, peer: &Host) -> Option<Vec<u8>> {
+    // Returns the record the app holds for `peer`'s contact, by decoding each contact record.
+    fn contact_record(&self, peer: &App) -> Option<Vec<u8>> {
         let contacts = self.context.contacts();
         self.records
             .iter()
             .filter(|(key, _)| matches!(key.kind, ProtocolStateKind::ContactState))
             .find(|(key, blob)| {
-                contacts
-                    .contact_state(StateEntry {
-                        key: (*key).clone(),
-                        blob: Some((*blob).clone()),
-                    })
-                    .unwrap()
-                    .is_some_and(|contact| contact.identity_key == peer.identity_key())
+                let entry = StateEntry {
+                    key: (*key).clone(),
+                    blob: Some((*blob).clone()),
+                };
+                contacts.contact_states(vec![entry]).unwrap()[0].identity_key == peer.identity_key()
             })
             .map(|(_, blob)| blob.clone())
     }
 
-    // Writes `changes` only when every condition holds, as one host transaction does, around the
+    // Writes `changes` only when every condition holds, as one app transaction does, around the
     // operation the changes carry.
     fn commit(&mut self, changes: &StateChanges) -> bool {
         if let Some(operation) = &changes.operation_id {
@@ -177,7 +175,7 @@ impl Host {
         true
     }
 
-    fn outgoing(&self, recipient: &Host, plaintext: &[u8]) -> OutgoingMessage {
+    fn outgoing(&self, recipient: &App, plaintext: &[u8]) -> OutgoingMessage {
         OutgoingMessage {
             recipient: recipient.identity_key(),
             message_id: self.context.messaging().create_message().unwrap(),
@@ -188,7 +186,7 @@ impl Host {
         }
     }
 
-    fn grant_update(&self, recipient: &Host) -> OutgoingGrantUpdate {
+    fn grant_update(&self, recipient: &App) -> OutgoingGrantUpdate {
         OutgoingGrantUpdate {
             recipient: recipient.identity_key(),
             message_id: self.context.messaging().create_message().unwrap(),
@@ -213,7 +211,7 @@ impl Host {
                 MessageEncryptionStep::NeedsPreKeyBundle { identity_key } => {
                     return Err(identity_key);
                 }
-                MessageEncryptionStep::NothingToSend => panic!("expected a Message to seal"),
+                MessageEncryptionStep::NothingToSend => panic!("expected a message to seal"),
                 MessageEncryptionStep::Ready { result, changes } => {
                     return Ok(Sealed {
                         result,
@@ -230,7 +228,7 @@ impl Host {
         Ok(self.seal(encryption).unwrap())
     }
 
-    fn send(&mut self, recipient: &Host, plaintext: &[u8]) -> (SessionId, MessageId, Message) {
+    fn send(&mut self, recipient: &App, plaintext: &[u8]) -> (SessionId, MessageId, Message) {
         let sent = self.encrypt(self.outgoing(recipient, plaintext)).unwrap();
         assert!(self.commit(&sent.changes));
         (
@@ -241,7 +239,7 @@ impl Host {
     }
 
     // Asks `recipient` to become a contact, fetching their bundle when Roost asks for it.
-    fn request(&mut self, recipient: &Host, plaintext: &[u8]) -> Sealed {
+    fn request(&mut self, recipient: &App, plaintext: &[u8]) -> Sealed {
         let contacts = self.context.contacts();
         let mut draft = self.outgoing(recipient, plaintext);
         let first = self.seal(contacts.request_contact(redraft(&draft)).unwrap());
@@ -252,7 +250,7 @@ impl Host {
         sealed
     }
 
-    fn accept(&mut self, requester: &Host, plaintext: &[u8]) -> Sealed {
+    fn accept(&mut self, requester: &App, plaintext: &[u8]) -> Sealed {
         let encryption = self
             .context
             .contacts()
@@ -264,10 +262,20 @@ impl Host {
     }
 
     fn decrypt(&self, message: Message) -> Result<Received, RoostError> {
+        self.decrypt_with(message, settings())
+    }
+
+    // Decrypts `message` after encoding and decoding it, as it travels between apps.
+    fn decrypt_with(
+        &self,
+        message: Message,
+        settings: ReceiveSettings,
+    ) -> Result<Received, RoostError> {
+        let message = decode_message(encode_message(message).unwrap()).unwrap();
         let decryption = self.context.messaging().start_decryption(IncomingMessage {
             message,
             transport_binding: binding(),
-            settings: settings(),
+            settings,
             sender_certificate_validation: validation(),
             acknowledgment_sent_at_millis: NOW_MILLIS,
             acknowledgment_sender_certificate: self.signed_certificate(),
@@ -289,9 +297,9 @@ impl Host {
     }
 }
 
-impl Host {
-    // Checks the delivery of what this host sent `peer`, and commits the result.
-    fn check_deliveries(&mut self, peer: &Host, now_millis: u64) -> DeliveryCheckResult {
+impl App {
+    // Checks the delivery of what this app sent `peer`, and commits the result.
+    fn check_deliveries(&mut self, peer: &App, now_millis: u64) -> DeliveryCheckResult {
         let check = self
             .context
             .messaging()
@@ -310,11 +318,11 @@ impl Host {
         }
     }
 
-    // Runs one recovery of what this host sent `peer`, supplying `content` for the message it
+    // Runs one recovery of what this app sent `peer`, supplying `content` for the message it
     // names, and returns how it ended with the destination it named.
     fn recover(
         &self,
-        peer: &Host,
+        peer: &App,
         prekey_bundle: Option<PreKeyBundle>,
         content: &[u8],
     ) -> (MessageRecoveryStep, Option<MessageDestination>) {
@@ -341,7 +349,6 @@ impl Host {
                     recovery.supply_transport_binding(binding()).unwrap();
                 }
                 ended @ (MessageRecoveryStep::NeedsPreKeyBundle { .. }
-                | MessageRecoveryStep::AwaitingProbe { .. }
                 | MessageRecoveryStep::Finished
                 | MessageRecoveryStep::Ready { .. }) => return (ended, destination),
             }
@@ -368,7 +375,7 @@ fn received(outcome: InboundMessageOutcome) -> roost_client::InboundMessageResul
     let (InboundMessageOutcome::Accepted { result }
     | InboundMessageOutcome::ContactRequest { result }) = outcome
     else {
-        panic!("expected a delivered Message")
+        panic!("expected a delivered message")
     };
     result
 }
@@ -379,7 +386,7 @@ fn verifier(destination: &MessageDestination) -> Vec<u8> {
         ..
     } = destination
     else {
-        panic!("expected an established Message");
+        panic!("expected an established message");
     };
     RecipientDeliveryCapability::from_bytes(delivery_capability.as_slice().try_into().unwrap())
         .verifier()
@@ -388,8 +395,8 @@ fn verifier(destination: &MessageDestination) -> Vec<u8> {
 }
 
 // Alice asks Bob, Bob accepts, and Alice receives the acceptance. Returns the session ID as each
-// host saw it.
-fn establish(alice: &mut Host, bob: &mut Host) -> (SessionId, SessionId) {
+// app saw it.
+fn establish(alice: &mut App, bob: &mut App) -> (SessionId, SessionId) {
     let request = alice.request(bob, b"hello bob");
     let decrypted = bob.decrypt(request.result.message.clone()).unwrap();
     let InboundMessageOutcome::ContactRequest { result } = decrypted.outcome else {
@@ -406,8 +413,8 @@ fn establish(alice: &mut Host, bob: &mut Host) -> (SessionId, SessionId) {
 
 #[test]
 fn a_request_routes_to_the_bundle_and_commits_its_one_time_prekey_with_the_contact() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
 
     let request = alice.request(&bob, b"hello bob");
 
@@ -418,7 +425,7 @@ fn a_request_routes_to_the_bundle_and_commits_its_one_time_prekey_with_the_conta
         ..
     } = &request.destination
     else {
-        panic!("expected a first Message");
+        panic!("expected a first message");
     };
     assert_eq!(*identity_key, bob.identity_key());
     let publication = bob.context.current_publication().unwrap();
@@ -448,8 +455,8 @@ fn a_request_routes_to_the_bundle_and_commits_its_one_time_prekey_with_the_conta
 
 #[test]
 fn an_acceptance_opens_established_routes_to_both_inboxes() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
     let request = alice.request(&bob, b"hello bob");
     let decrypted = bob.decrypt(request.result.message).unwrap();
     received(decrypted.outcome);
@@ -490,8 +497,8 @@ fn an_acceptance_opens_established_routes_to_both_inboxes() {
 
 #[test]
 fn a_reply_and_its_acknowledgment_round_trip_on_one_canonical_session_id() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
 
     let (alice_view, bob_view) = establish(&mut alice, &mut bob);
 
@@ -527,9 +534,9 @@ fn a_reply_and_its_acknowledgment_round_trip_on_one_canonical_session_id() {
 
 #[test]
 fn safety_number_confirmation_uses_the_contexts_local_identity() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
-    let charlie = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
+    let charlie = App::new();
     establish(&mut alice, &mut bob);
     let contacts = alice.context.contacts();
     let foreign = derive_safety_number(charlie.identity_key(), bob.identity_key()).unwrap();
@@ -554,7 +561,7 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
         )
         .unwrap()
     else {
-        panic!("expected the Safety Number to match");
+        panic!("expected the safety number to match");
     };
     assert!(alice.commit(&changes));
 
@@ -562,7 +569,7 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
     let contact = alice
         .context
         .contacts()
-        .contact_state(StateEntry {
+        .contact_states(vec![StateEntry {
             key: alice
                 .records
                 .iter()
@@ -571,16 +578,16 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
                 .0
                 .clone(),
             blob: record,
-        })
+        }])
         .unwrap()
-        .unwrap();
+        .remove(0);
     assert!(matches!(contact.trust_state, ContactTrustState::Verified));
 }
 
 #[test]
 fn blocking_rotates_the_inbox_through_the_operation_its_changes_carry() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
     establish(&mut alice, &mut bob);
     let before = alice.context.current_publication().unwrap();
 
@@ -608,9 +615,44 @@ fn blocking_rotates_the_inbox_through_the_operation_its_changes_carry() {
 }
 
 #[test]
+fn a_blocked_contacts_message_is_acknowledged_only_when_the_receive_allows_it() {
+    let mut alice = App::new();
+    let mut bob = App::new();
+    establish(&mut alice, &mut bob);
+    let block = bob
+        .context
+        .contacts()
+        .prepare_block_contact(alice.identity_key(), bob.contact_record(&alice))
+        .unwrap();
+    assert!(bob.commit(&block.changes));
+    let (_, _, message) = alice.send(&bob, b"are you there?");
+
+    let unreachable = bob.decrypt(message.clone()).unwrap();
+    let acknowledged = bob
+        .decrypt_with(
+            message,
+            ReceiveSettings {
+                blocked_contact_acknowledgment_policy:
+                    BlockedContactAcknowledgmentPolicy::Acknowledge,
+                ..settings()
+            },
+        )
+        .unwrap();
+
+    assert!(matches!(
+        unreachable.outcome,
+        InboundMessageOutcome::Blocked { result } if result.acknowledgment.is_none()
+    ));
+    assert!(matches!(
+        acknowledged.outcome,
+        InboundMessageOutcome::Blocked { result } if result.acknowledgment.is_some()
+    ));
+}
+
+#[test]
 fn a_grant_update_after_a_rotation_is_acknowledged_and_then_has_nothing_to_send() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
     establish(&mut alice, &mut bob);
     let rotation = bob.context.prepare_inbox_rotation().unwrap();
     complete(&bob.context, rotation.operation_id);
@@ -631,7 +673,7 @@ fn a_grant_update_after_a_rotation_is_acknowledged_and_then_has_nothing_to_send(
     assert!(bob.commit(&update.changes));
     let decrypted = alice.decrypt(update.result.message).unwrap();
     let InboundMessageOutcome::GrantUpdate { result } = decrypted.outcome else {
-        panic!("expected a Grant Update");
+        panic!("expected a grant update");
     };
     let acknowledgment = result.acknowledgment.unwrap();
     assert!(alice.commit(&decrypted.changes));
@@ -654,8 +696,8 @@ fn a_grant_update_after_a_rotation_is_acknowledged_and_then_has_nothing_to_send(
 
 #[test]
 fn each_draft_gets_its_own_canonical_message_id() {
-    let alice = Host::new();
-    let bob = Host::new();
+    let alice = App::new();
+    let bob = App::new();
     let messaging = alice.context.messaging();
     let ids: HashSet<_> = (0..16)
         .map(|_| messaging.create_message().unwrap())
@@ -680,8 +722,8 @@ fn each_draft_gets_its_own_canonical_message_id() {
 
 #[test]
 fn a_malformed_entry_ends_the_operation() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
     establish(&mut alice, &mut bob);
     let encryption = alice
         .context
@@ -710,8 +752,8 @@ fn a_malformed_entry_ends_the_operation() {
 
 #[test]
 fn calls_from_two_threads_take_turns() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
     establish(&mut alice, &mut bob);
     let encryption: Arc<MessageEncryption> = alice
         .context
@@ -740,8 +782,8 @@ fn calls_from_two_threads_take_turns() {
 
 #[test]
 fn matches_refuses_stale_and_malformed_records() {
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
     establish(&mut alice, &mut bob);
     let sent = alice.encrypt(alice.outgoing(&bob, b"conditional")).unwrap();
     let keys: Vec<_> = sent
@@ -766,8 +808,8 @@ fn matches_refuses_stale_and_malformed_records() {
 #[test]
 fn a_silent_contact_gets_its_unacknowledged_message_again_through_a_probe() {
     const DAY_MILLIS: u64 = 24 * 60 * 60 * 1000;
-    let mut alice = Host::new();
-    let mut bob = Host::new();
+    let mut alice = App::new();
+    let mut bob = App::new();
     establish(&mut alice, &mut bob);
     let (_, message_id, _) = alice.send(&bob, b"are you there?");
 
@@ -784,7 +826,7 @@ fn a_silent_contact_gets_its_unacknowledged_message_again_through_a_probe() {
     let (MessageRecoveryStep::Ready { result, changes }, Some(destination)) =
         alice.recover(&bob, Some(bob.bundle()), b"are you there?")
     else {
-        panic!("expected a resent Message");
+        panic!("expected a resent message");
     };
     assert!(matches!(
         destination,
@@ -796,7 +838,7 @@ fn a_silent_contact_gets_its_unacknowledged_message_again_through_a_probe() {
 
     assert!(matches!(
         alice.recover(&bob, None, b"").0,
-        MessageRecoveryStep::AwaitingProbe { message_id: probe } if probe == message_id
+        MessageRecoveryStep::Finished
     ));
     let delivered = received(bob.decrypt(result.message).unwrap().outcome);
     assert_eq!(delivered.message_id, message_id);

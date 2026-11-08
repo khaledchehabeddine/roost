@@ -77,7 +77,7 @@ impl IdentityContext {
         certificate_grace_millis: u64,
     ) -> Result<ValidatedSenderCertificate, RoostError> {
         let certificate = certificate.into_core()?;
-        let validated = validation.to_core()?.validate(
+        let validated = validation.into_core()?.validate(
             &certificate.certificate,
             &Signature::from_bytes(&certificate.signature),
             Duration::from_millis(certificate_grace_millis),
@@ -91,15 +91,15 @@ impl IdentityContext {
 }
 
 impl SenderCertificateValidation {
-    pub(crate) fn to_core(&self) -> Result<roost_core::SenderCertificateValidation, RoostError> {
+    pub(crate) fn into_core(self) -> Result<roost_core::SenderCertificateValidation, RoostError> {
         let domain_signing_keys = self
             .domain_signing_keys
-            .iter()
-            .map(DomainSigningKey::to_core)
+            .into_iter()
+            .map(DomainSigningKey::into_core)
             .collect::<Result<_, _>>()?;
         Ok(roost_core::SenderCertificateValidation::new(
             domain_signing_keys,
-            self.expected_relay_domain.clone(),
+            self.expected_relay_domain,
             self.revocation_state.to_core()?,
             time_from_millis(self.reference_time_millis, "reference_time_millis")?,
         )?)
@@ -107,10 +107,10 @@ impl SenderCertificateValidation {
 }
 
 impl DomainSigningKey {
-    fn to_core(&self) -> Result<roost_core::DomainSigningKey, RoostError> {
+    fn into_core(self) -> Result<roost_core::DomainSigningKey, RoostError> {
         Ok(roost_core::DomainSigningKey {
-            id: self.id.clone(),
             verifying_key: fixed_32(&self.verifying_key, "domain signing verifying key")?,
+            id: self.id,
         })
     }
 }

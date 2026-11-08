@@ -69,8 +69,8 @@ pub use discovery_key::{
 };
 pub use double_ratchet::{Header, RatchetError, RatchetState, RatchetStateError};
 pub use handshake::{
-    Handshake, HandshakeError, PREKEY_BUNDLE_VERSION, PreKeyBundle, SENDER_PROOF_LEN,
-    SenderProofTranscript, accept_handshake, initiate_handshake, prove_sender, verify_sender_proof,
+    Handshake, HandshakeError, PreKeyBundle, SENDER_PROOF_LEN, SenderProofTranscript,
+    accept_handshake, initiate_handshake, prove_sender, verify_sender_proof,
 };
 pub use keys::{
     KeyPair, PublicIdentityKey, PublicKey, PublicKeyError, Signature, SigningKeyPair, VerifyingKey,

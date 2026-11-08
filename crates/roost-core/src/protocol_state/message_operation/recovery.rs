@@ -276,8 +276,6 @@ struct Outstanding<'a, 'b> {
     // first.
     recoverable: Vec<&'b Unacknowledged<'a>>,
     current: SessionId,
-    // Whether the current session's record exists.
-    current_is_kept: bool,
     // Whether the contact delivered on the current session, so it awaits no reply.
     current_is_replied: bool,
     // The sessions kept with the contact that started before the current one.
@@ -299,7 +297,6 @@ impl<'a, 'b> Outstanding<'a, 'b> {
                 .filter(|message| message.entry.payload_kind != PayloadKind::GrantUpdate)
                 .collect(),
             current,
-            current_is_kept: current_session.is_some(),
             current_is_replied: current_session
                 .is_some_and(|session| session.pending_handshake.is_none()),
             before_current: sessions
@@ -444,11 +441,8 @@ pub enum MessageRecoveryStep {
     /// the given one is missing or older than the contact's discovery key. The recovery has ended,
     /// so fetch the bundle and start again.
     NeedsPreKeyBundle(IdentityKey),
-    /// The first message this recovery resent on a new session isn't acknowledged yet, and the
-    /// rest wait for it. The recovery has ended and nothing changed, and a delivery check signals
-    /// it again once the contact acknowledges the probe.
-    AwaitingProbe(MessageId),
-    /// Nothing is left to resend. The recovery has ended and nothing changed.
+    /// Nothing is left to resend until a delivery check signals again, such as after the contact
+    /// acknowledges the probe. The recovery has ended and nothing changed.
     Finished,
     /// One message encrypted again under its message ID, and the state changes to commit with it.
     /// The recovery has ended.
@@ -469,9 +463,8 @@ pub enum MessageRecoveryStep {
 /// under a signaled recovery, the oldest message starts a new session from the contact's prekey
 /// bundle, and the rest wait until the contact acknowledges it or delivers on another session. Call
 /// [`Self::step`] until it returns [`MessageRecoveryStep::Ready`],
-/// [`MessageRecoveryStep::NeedsPreKeyBundle`], [`MessageRecoveryStep::AwaitingProbe`], or
-/// [`MessageRecoveryStep::Finished`], supplying what each other step asks for. Dropping the
-/// recovery commits nothing.
+/// [`MessageRecoveryStep::NeedsPreKeyBundle`], or [`MessageRecoveryStep::Finished`], supplying what
+/// each other step asks for. Dropping the recovery commits nothing.
 pub struct MessageRecovery(Option<Box<Recovering>>);
 
 struct Recovering {
@@ -712,11 +705,6 @@ impl Recovering {
         };
         // What's left already went out under this signal, so it waits for the next one.
         match recovery.progress {
-            RecoveryProgress::Probed(probe)
-                if outstanding.current_is_kept && !outstanding.current_is_replied =>
-            {
-                return Ok(Selected::Ended(MessageRecoveryStep::AwaitingProbe(probe)));
-            }
             RecoveryProgress::Probed(_) | RecoveryProgress::Resent => {
                 return Ok(Selected::Ended(MessageRecoveryStep::Finished));
             }

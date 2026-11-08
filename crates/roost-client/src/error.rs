@@ -9,7 +9,7 @@ use roost_protocol::{SenderCertificateValidationError, SignatureError};
 
 /// The error Roost's calls throw.
 ///
-/// Each variant is a failure the host handles differently. `reason` fields are diagnostic strings
+/// Each variant is a failure the app handles differently. `reason` fields are diagnostic strings
 /// for logs and must not drive application logic.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum RoostError {
@@ -359,9 +359,6 @@ impl From<HandshakeError> for RoostError {
             | HandshakeError::OneTimePreKeyMismatch
             | HandshakeError::SenderProofInvalid
             | HandshakeError::SignedPreKeyMismatch => RoostError::AuthenticationFailed { reason },
-            HandshakeError::UnsupportedPreKeyBundleVersion { .. } => {
-                RoostError::UnsupportedVersion { reason }
-            }
             HandshakeError::HkdfExpand => RoostError::InternalError { reason },
             HandshakeError::DiscoveryKeyMismatch
             | HandshakeError::MissingOneTimePreKey
@@ -593,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn unexpected_storage_callback_failure_keeps_the_host_reason() {
+    fn unexpected_storage_callback_failure_keeps_the_app_reason() {
         assert!(matches!(
             RoostError::from(uniffi::UnexpectedUniFFICallbackError::new("disk full")),
             RoostError::Storage { reason } if reason == "disk full"

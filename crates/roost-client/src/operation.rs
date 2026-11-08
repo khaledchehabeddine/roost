@@ -7,13 +7,15 @@ use crate::publication::{PublicOneTimePreKey, PublicSignedPreKey, PublicationBun
 use roost_core::{
     KeyStoreOperationId as CoreKeyStoreOperationId,
     KeyStoreOperationStatus as CoreKeyStoreOperationStatus,
+    PreparedKeyStoreOperation as CorePreparedKeyStoreOperation,
+    PublicOneTimePreKey as CorePublicOneTimePreKey,
     UnfinishedKeyStoreOperation as CoreUnfinishedKeyStoreOperation,
 };
 
-/// Identifier of one prepared operation, which the host saves in the transaction it commits.
+/// Identifier of one prepared operation, which the app saves in the transaction it commits.
 ///
 /// The value is 32 lowercase hexadecimal digits, so it compares and hashes as a plain string.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct OperationId {
     /// The identifier's canonical text.
     pub value: String,
@@ -36,13 +38,13 @@ impl OperationId {
 
 /// The durable phase of a prepared operation.
 ///
-/// At startup the host compares this with its own transaction record to decide whether to
+/// At startup the app compares this with its own transaction record to decide whether to
 /// finalize or abort the operation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, uniffi::Enum)]
+#[derive(Debug, PartialEq, uniffi::Enum)]
 pub enum OperationStatus {
     /// Secret changes are staged and may be reserved or aborted.
     Prepared,
-    /// SecureStorage still matches what the operation read, and the host may commit.
+    /// SecureStorage still matches what the operation read, and the app may commit.
     Reserved,
     /// Secret changes are being applied, and finalization must resume after an interruption.
     Finalizing,
@@ -65,7 +67,7 @@ impl OperationStatus {
 }
 
 /// A prepared operation that is neither finalized nor aborted.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(uniffi::Record)]
 pub struct UnfinishedOperation {
     /// The operation's identifier.
     pub id: OperationId,
@@ -93,7 +95,7 @@ pub struct PreparedIdentity {
 
 /// New one-time prekeys, provisional until their operation is finalized.
 ///
-/// The host may queue the public keys for upload in the same transaction that saves the operation
+/// The app may queue the public keys for upload in the same transaction that saves the operation
 /// ID, and uploads them only after finalization.
 #[derive(uniffi::Record)]
 pub struct PreparedOneTimePreKeys {
@@ -101,6 +103,21 @@ pub struct PreparedOneTimePreKeys {
     pub operation_id: OperationId,
     /// The new public one-time prekeys, empty when the pool needed none.
     pub one_time_prekeys: Vec<PublicOneTimePreKey>,
+}
+
+impl PreparedOneTimePreKeys {
+    pub(crate) fn from_core(
+        prepared: CorePreparedKeyStoreOperation<Vec<CorePublicOneTimePreKey>>,
+    ) -> Self {
+        Self {
+            operation_id: OperationId::from_core(prepared.id),
+            one_time_prekeys: prepared
+                .output
+                .into_iter()
+                .map(PublicOneTimePreKey::from_core)
+                .collect(),
+        }
+    }
 }
 
 /// An inbox rotation, provisional until its operation is finalized.

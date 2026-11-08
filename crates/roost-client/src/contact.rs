@@ -1,4 +1,4 @@
-use crate::context::{Contacts, abort_unconverted};
+use crate::context::Contacts;
 use crate::error::RoostError;
 use crate::identity::IdentityKey;
 use crate::publication::{PublicDiscoveryKey, PublicationBundle};
@@ -25,7 +25,7 @@ pub struct ContactBlock {
 }
 
 /// The trust level Roost records for a contact.
-#[derive(Clone, Copy, uniffi::Enum)]
+#[derive(uniffi::Enum)]
 pub enum ContactTrustState {
     /// A contact request is open in either direction.
     Pending,
@@ -35,11 +35,11 @@ pub enum ContactTrustState {
     Verified,
 }
 
-/// A contact as its record holds it, decoded after the host commits.
+/// A contact as its record holds it, decoded after the app commits.
 ///
-/// The peer's delivery capability is not part of it: Roost hands it out only in an established
+/// The peer's delivery capability isn't part of it, since Roost hands it out only in an established
 /// message's destination.
-#[derive(Clone, uniffi::Record)]
+#[derive(uniffi::Record)]
 pub struct ContactState {
     /// The contact's permanent identity key.
     pub identity_key: IdentityKey,
@@ -91,19 +91,19 @@ pub fn derive_safety_number(
 
 #[uniffi::export]
 impl Contacts {
-    /// Prepares blocking a contact, given the record the host holds for them or none, and rotates
+    /// Prepares blocking a contact, given the record the app holds for them or none, and rotates
     /// the inbox so the block takes effect at the relay.
     ///
     /// Blocking stops this device sending to the contact and surfacing their messages, even a
-    /// stranger's: one with no record gets a record that holds only the block. Rotation replaces
-    /// the inbox's prekeys and delivery capability, so a blocked person can't come back with a new
-    /// identity at the same address. Blocking an already-blocked contact rotates nothing and
-    /// carries no operation.
+    /// stranger's. A stranger with no record gets a record that holds only the block. Rotation
+    /// replaces the inbox's prekeys and delivery capability, so a blocked person can't come back
+    /// with a new identity at the same address. Blocking an already-blocked contact rotates nothing
+    /// and carries no operation.
     ///
     /// When [`ContactBlock::changes`] carries an operation, reserve it, commit the changes with
     /// its ID, then finalize it before registering [`ContactBlock::publication`] as
     /// [`IdentityContext::prepare_inbox_rotation`](crate::IdentityContext::prepare_inbox_rotation)
-    /// describes. Abort only after proving the host transaction did not commit. Each block
+    /// describes. Abort only after proving the app's transaction did not commit. Each block
     /// rotates the inbox once, even for blocks close together.
     ///
     /// # Errors
@@ -124,45 +124,18 @@ impl Contacts {
             identity_key.to_core()?,
             record.as_ref(),
         )?;
-        let operation = block.changes.operation();
-        let publication = match block
-            .publication
-            .map(PublicationBundle::from_core)
-            .transpose()
-        {
-            Ok(publication) => publication,
-            Err(error) => return Err(abort_unconverted(&self.inner, operation, error)),
-        };
         Ok(ContactBlock {
             changes: StateChanges::from_core(block.changes),
-            publication,
+            publication: block
+                .publication
+                .map(PublicationBundle::from_core)
+                .transpose()?,
         })
-    }
-
-    /// Returns the contact a contact state record holds, or no contact when the entry has no bytes.
-    ///
-    /// # Errors
-    /// - [`RoostError::InvalidData`] if the key is malformed.
-    /// - [`RoostError::ProtocolStateFault`] if the entry isn't a contact record, or the record is
-    ///   malformed or stored under another identity's key.
-    /// - [`RoostError::UnsupportedVersion`] if the record has an unsupported version.
-    pub fn contact_state(&self, record: StateEntry) -> Result<Option<ContactState>, RoostError> {
-        let address = record.key.to_core()?;
-        record
-            .blob
-            .map(|blob| {
-                ContactState::from_core(
-                    self.inner
-                        .protocol_engine()
-                        .decode_contact(&address, &CoreProtocolStateBlob::from_bytes(blob))?,
-                )
-            })
-            .transpose()
     }
 
     /// Returns the contact each contact state record holds, in the order given.
     ///
-    /// Pass the host's committed records of kind
+    /// Pass the app's committed records of kind
     /// [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState), so views can
     /// refresh after each commit without Roost keeping subscriptions or cursors.
     ///
@@ -192,11 +165,10 @@ impl Contacts {
     }
 
     /// Confirms a contact's safety number using this context's local identity, given the record
-    /// the host holds for the contact.
+    /// the app holds for the contact.
     ///
     /// The contact must already be accepted. A mismatch, including malformed presented text,
-    /// changes nothing. The local identity comes from this context's storage and cannot be supplied
-    /// by the caller.
+    /// changes nothing.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if the stored local identity or a key is malformed.
@@ -227,14 +199,14 @@ impl Contacts {
         ))
     }
 
-    /// Unblocks a contact locally, given the record the host holds for them or none.
+    /// Unblocks a contact locally, given the record the app holds for them or none.
     ///
     /// Commit the changes before resuming local delivery. Existing sessions keep working, and the
     /// next message carries this identity's current inbox grant over them. The contact may have
     /// rotated its own inbox during the block, so the first send after an unblock ends with
-    /// [`NeedsPreKeyBundle`](crate::MessageEncryptionStep::NeedsPreKeyBundle): fetch the contact's
+    /// [`NeedsPreKeyBundle`](crate::MessageEncryptionStep::NeedsPreKeyBundle). Fetch the contact's
     /// bundle by its stored discovery key. When the relay answers that it doesn't know that key,
-    /// the contact rotated: keep the draft and ask for a fresh contact link. If
+    /// the contact rotated, so keep the draft and ask for a fresh contact link. If
     /// [`is_newer_discovery_key`](crate::is_newer_discovery_key) says its discovery key is newer,
     /// fetch its bundle, which starts a new session. When the contact's own request is still open,
     /// that session's first message is a contact request, which accepts the contact on both sides.

@@ -16,8 +16,8 @@ use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
-    RecipientDeliveryVerifier, Signature, verify_public_signed_prekey,
+    PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey, RecipientDeliveryVerifier,
+    Signature, verify_public_signed_prekey,
 };
 use roost_protocol::IdentityKey;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -50,8 +50,6 @@ pub enum KeyStoreError {
 /// prekey.
 #[derive(Clone, Debug)]
 pub struct PublicationBundle {
-    /// Version of the public prekey bundle format.
-    pub version: u8,
     /// The discovery key, whose `identity_signature` is the identity key's half of the mutual
     /// binding.
     pub discovery_key: PublicDiscoveryKey,
@@ -221,7 +219,6 @@ impl KeyStore {
         verify_public_signed_prekey(&signed_prekey, &discovery_key.verifying_key)
             .map_err(SignedPreKeyError::Corrupt)?;
         Ok(PublicationBundle {
-            version: PREKEY_BUNDLE_VERSION,
             discovery_key,
             discovery_to_identity,
             recipient_delivery_verifier,
@@ -423,7 +420,6 @@ impl KeyStore {
         let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
         let signed_prekey = self.0.signed_prekey.rotate_now(rng, now)?;
         Ok(PublicationBundle {
-            version: PREKEY_BUNDLE_VERSION,
             discovery_key: discovery_key.public(),
             discovery_to_identity,
             recipient_delivery_verifier,
@@ -674,7 +670,6 @@ mod tests {
         assert_eq!(first.epoch, 1);
 
         let rotation = commit_inbox_rotation(&key_store);
-        assert_eq!(rotation.version, PREKEY_BUNDLE_VERSION);
         assert_eq!(rotation.discovery_key.epoch, 2);
         assert_ne!(
             rotation.discovery_key.public_key.as_bytes(),

@@ -3,13 +3,13 @@ use roost_core::TransportBinding as CoreTransportBinding;
 
 /// Opaque public bytes authenticated with one encrypted message.
 ///
-/// The host defines the bytes and their meaning. Roost authenticates them, but never interprets,
+/// The app defines the bytes and their meaning. Roost authenticates them, but never interprets,
 /// transmits, or stores them. Each receive also includes them in the digest that catches a
 /// repeated delivery. Retain the exact value with an outbound message and supply it again for
 /// receive or retransmission.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(uniffi::Record)]
 pub struct TransportBinding {
-    /// Non-empty caller-owned bytes, limited to 1,024 bytes.
+    /// Non-empty app-owned bytes, limited to 1,024 bytes.
     pub bytes: Vec<u8>,
 }
 

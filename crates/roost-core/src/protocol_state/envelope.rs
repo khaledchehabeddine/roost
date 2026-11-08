@@ -531,7 +531,8 @@ pub(super) fn authenticate_first_message(
     verify_public_discovery_key(discovery_key, &sender_identity_key.verifying_key)
         .map_err(|_| invalid("sender discovery key is not signed by its identity key"))?;
     verify_discovery_to_identity_binding(
-        &sender_identity_key,
+        &sender_identity_key.public_key,
+        &sender_identity_key.verifying_key,
         &discovery_key.verifying_key,
         discovery_to_identity,
     )
@@ -696,9 +697,8 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_crypto::{
-        PREKEY_BUNDLE_VERSION, PreKeyBundle, RatchetError, accept_handshake,
-        generate_discovery_key, generate_signed_prekey_for_discovery_key, initiate_handshake,
-        sign_identity_key_binding,
+        PreKeyBundle, RatchetError, accept_handshake, generate_discovery_key,
+        generate_signed_prekey_for_discovery_key, initiate_handshake, sign_identity_key_binding,
     };
     use roost_protocol::SignatureError;
 
@@ -954,7 +954,6 @@ mod tests {
         )
         .unwrap();
         let bundle = PreKeyBundle {
-            version: PREKEY_BUNDLE_VERSION,
             discovery_key: bob_discovery_key.public(),
             signed_prekey: signed_prekey.public(),
             one_time_prekey: None,

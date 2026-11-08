@@ -12,9 +12,9 @@ use roost_core::{
 /// A signed prekey's public half, which peers use to start a session.
 ///
 /// Verify it with the matching discovery key's verifying key.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PublicSignedPreKey {
-    /// Stable unsigned identifier within the discovery key epoch. A host that needs this lookup
+    /// Stable unsigned identifier within the discovery key epoch. An app that needs this lookup
     /// value authenticated as transport metadata must include it in its transport binding.
     pub id: u64,
     /// X25519 public key bytes. Always 32 bytes.
@@ -62,7 +62,7 @@ impl PublicSignedPreKey {
 /// A one-time prekey's public half, which peers use to start a session.
 ///
 /// Its secret half stays in SecureStorage, and Roost uses it at most once.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PublicOneTimePreKey {
     /// One-time prekey identifier within the current discovery key epoch.
     pub id: u64,
@@ -90,7 +90,7 @@ impl PublicOneTimePreKey {
 /// A discovery key's public half, which peers use to verify this identity's signed prekeys.
 ///
 /// Verify it with the identity key's signing key before trusting [`Self::verifying_key`].
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PublicDiscoveryKey {
     /// X25519 key-agreement public key bytes. Always 32 bytes.
     pub public_key: Vec<u8>,
@@ -114,7 +114,7 @@ impl PublicDiscoveryKey {
             epoch: discovery_key.epoch,
             created_at_millis: millis_from_secs(
                 discovery_key.created_at_secs,
-                "Discovery Key creation time",
+                "discovery key creation time",
             )?,
         })
     }
@@ -127,7 +127,7 @@ impl PublicDiscoveryKey {
             epoch: discovery_key.epoch,
             created_at_millis: millis_from_secs(
                 discovery_key.created_at_secs,
-                "contact Discovery Key creation time",
+                "contact discovery key creation time",
             )?,
         })
     }
@@ -137,7 +137,7 @@ impl PublicDiscoveryKey {
             &self.public_key,
             &self.verifying_key,
             self.epoch,
-            whole_secs_from_millis(self.created_at_millis, "Discovery Key created_at_millis")?,
+            whole_secs_from_millis(self.created_at_millis, "discovery key created_at_millis")?,
             &self.signature,
         )
         .map_err(RoostError::from)
@@ -147,10 +147,8 @@ impl PublicDiscoveryKey {
 /// A discovery key and signed prekey to publish together.
 ///
 /// The signed prekey verifies with the included discovery key.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct PublicationBundle {
-    /// Version of the public prekey bundle format.
-    pub version: u8,
     /// The discovery key, whose signature is the identity key's half of the binding between the
     /// two keys.
     pub discovery_key: PublicDiscoveryKey,
@@ -172,7 +170,6 @@ pub struct PublicationBundle {
 impl PublicationBundle {
     pub(crate) fn from_core(publication: CorePublicationBundle) -> Result<Self, RoostError> {
         Ok(PublicationBundle {
-            version: publication.version,
             discovery_key: PublicDiscoveryKey::from_core(publication.discovery_key)?,
             discovery_to_identity: publication.discovery_to_identity.to_bytes().to_vec(),
             recipient_delivery_verifier: publication
@@ -186,7 +183,7 @@ impl PublicationBundle {
 
 /// A contact's identity and discovery key, decoded from a contact link with their binding
 /// signatures verified.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Debug, uniffi::Record)]
 pub struct ContactPublication {
     /// The contact's identity.
     pub identity: Identity,
@@ -252,7 +249,7 @@ pub fn is_newer_discovery_key(
 }
 
 /// A contact's published keys as the app fetched them from the relay, to start a session with.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, uniffi::Record)]
 pub struct PreKeyBundle {
     /// The contact's identity.
     pub identity: Identity,
@@ -274,7 +271,6 @@ impl PreKeyBundle {
                 "discovery_to_identity",
             )?),
             bundle: CorePreKeyBundle {
-                version: publication.version,
                 discovery_key: publication.discovery_key.to_core()?,
                 signed_prekey: publication.signed_prekey.to_core()?,
                 one_time_prekey: self

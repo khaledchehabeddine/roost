@@ -123,20 +123,21 @@ impl DiscoveryKey {
     }
 }
 
-/// Verifies that `discovery_verifying_key` signed `identity`'s public halves.
+/// Verifies that `discovery_verifying_key` signed an identity's two public halves.
 ///
 /// Check both binding signatures before trusting that a discovery key belongs to an identity. This
 /// one shows that the discovery key approved the identity, and [`verify_public_discovery_key`]
 /// shows that the identity approved the discovery key.
 pub fn verify_discovery_to_identity_binding(
-    identity: &PublicIdentityKey,
+    identity_public_key: &PublicKey,
+    identity_verifying_key: &VerifyingKey,
     discovery_verifying_key: &VerifyingKey,
     signature: &Signature,
 ) -> Result<(), PublicKeyError> {
     verify_with_context(
         discovery_verifying_key,
         DISCOVERY_TO_IDENTITY_CONTEXT,
-        &identity_key_binding_payload(&identity.public_key, &identity.verifying_key),
+        &identity_key_binding_payload(identity_public_key, identity_verifying_key),
         signature,
     )
     .map_err(Into::into)
@@ -475,13 +476,23 @@ mod tests {
         public_key_bytes[0] ^= 0x01;
         tampered_x25519.public_key = PublicKey::from(public_key_bytes);
         assert!(matches!(
-            verify_discovery_to_identity_binding(&tampered_x25519, verifying_key, &signature),
+            verify_discovery_to_identity_binding(
+                &tampered_x25519.public_key,
+                &tampered_x25519.verifying_key,
+                verifying_key,
+                &signature,
+            ),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
 
         let tampered_ed25519 = public_identity_key([0x44u8; 32], [0x22u8; 32]);
         assert!(matches!(
-            verify_discovery_to_identity_binding(&tampered_ed25519, verifying_key, &signature),
+            verify_discovery_to_identity_binding(
+                &tampered_ed25519.public_key,
+                &tampered_ed25519.verifying_key,
+                verifying_key,
+                &signature,
+            ),
             Err(PublicKeyError::Signature(SignatureError::SignatureInvalid))
         ));
     }
@@ -498,7 +509,8 @@ mod tests {
 
         assert!(matches!(
             verify_discovery_to_identity_binding(
-                &identity,
+                &identity.public_key,
+                &identity.verifying_key,
                 &setup.discovery_key.public().verifying_key,
                 &signature,
             ),
@@ -519,7 +531,8 @@ mod tests {
 
         assert!(matches!(
             verify_discovery_to_identity_binding(
-                &identity,
+                &identity.public_key,
+                &identity.verifying_key,
                 &setup.discovery_key.public().verifying_key,
                 &signature,
             ),

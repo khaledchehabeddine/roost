@@ -239,10 +239,7 @@ fn a_silent_contact_gets_one_probe_on_a_new_session_and_the_rest_once_it_acknowl
         Recovered::NeedsPreKeyBundle
     ));
     let probe = alice.recover(&bob, Some(bob.bundle())).committed();
-    assert!(matches!(
-        alice.recover(&bob, None),
-        Recovered::AwaitingProbe(id) if id == first.message_id
-    ));
+    assert!(matches!(alice.recover(&bob, None), Recovered::Finished));
 
     assert_eq!(probe.message_id, first.message_id);
     assert_ne!(probe.session_id, first.session_id);
@@ -452,6 +449,7 @@ fn of_two_processes_recovering_at_once_only_the_first_commits() {
     let Recovered::Resent(first) = alice.observe_recovery(&bob, Some(bob.bundle())).unwrap() else {
         panic!("expected a resend");
     };
+    assert_eq!(first.result.message_id, sent.message_id);
     let Recovered::Resent(second) = extension
         .observe_recovery(&bob, Some(bob.bundle()))
         .unwrap()
@@ -471,10 +469,7 @@ fn of_two_processes_recovering_at_once_only_the_first_commits() {
         Some(AppCommitError::StaleCondition)
     );
     extension.database = alice.database.clone();
-    assert!(matches!(
-        extension.recover(&bob, None),
-        Recovered::AwaitingProbe(id) if id == sent.message_id
-    ));
+    assert!(matches!(extension.recover(&bob, None), Recovered::Finished));
 }
 
 #[test]
@@ -975,10 +970,7 @@ fn a_new_session_a_recovery_starts_after_an_unblock_sends_the_rest_after_the_pro
     let probe = alice.recover(&bob, Some(bob.bundle())).committed();
 
     assert_eq!(probe.message_id, first.message_id);
-    assert!(matches!(
-        alice.recover(&bob, None),
-        Recovered::AwaitingProbe(_)
-    ));
+    assert!(matches!(alice.recover(&bob, None), Recovered::Finished));
     let received = accepted(bob.receive(&probe.message));
     alice.receive(&received.acknowledgment.unwrap());
     assert!(

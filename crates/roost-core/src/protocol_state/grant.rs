@@ -154,7 +154,8 @@ fn verify_grant(
     verify_public_discovery_key(&discovery_key, &sender.verifying_key)
         .map_err(|_| ProtocolStateError::InvalidInboxGrant)?;
     verify_discovery_to_identity_binding(
-        sender,
+        &sender.public_key,
+        &sender.verifying_key,
         &discovery_key.verifying_key,
         &Signature::from_bytes(&signature_from_wire(&wire.discovery_to_identity)),
     )

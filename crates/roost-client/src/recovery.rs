@@ -81,26 +81,20 @@ pub enum MessageRecoveryStep {
         destination: MessageDestination,
     },
     /// A new session, or the first resend after an unblock, needs the contact's prekey bundle. The
-    /// recovery has ended: release the identity lock, fetch the bundle by the contact's stored
+    /// recovery has ended, so release the identity lock, fetch the bundle by the contact's stored
     /// discovery key, keep it with the job, and start again. When the relay answers that it doesn't
-    /// know that key, the contact rotated: end the job, and a later check signals again once the
+    /// know that key, the contact rotated, so end the job. A later check signals again once the
     /// contact's newer grant or session arrives.
     NeedsPreKeyBundle {
         /// The contact whose bundle to fetch.
         identity_key: IdentityKey,
     },
-    /// The first message the recovery resent on a new session isn't acknowledged yet, and the
-    /// rest wait for it. The recovery has ended and there is nothing to commit: end the job. A
-    /// delivery check after the contact acknowledges `message_id` starts the recovery again.
-    AwaitingProbe {
-        /// The message whose acknowledgment the rest wait for.
-        message_id: MessageId,
-    },
-    /// Nothing is left to resend. The recovery has ended and there is nothing to commit: end the
-    /// job.
+    /// Nothing is left to resend until a delivery check starts the recovery again, such as after
+    /// the contact acknowledges the probe. The recovery has ended and there is nothing to commit,
+    /// so end the job.
     Finished,
     /// One message encrypted again, and the state changes to commit with it. The recovery has
-    /// ended: commit them, then start again.
+    /// ended, so commit them, then start again.
     Ready {
         /// The message under its original message ID, send time, and kind.
         result: OutboundMessageResult,
@@ -142,7 +136,7 @@ pub enum MessageRecoveryStep {
 ///                 job.outgoing.prekeyBundle = try await relay.prekeyBundle(for: identityKey)
 ///                 try jobs.save(job)
 ///                 break steps
-///             case .awaitingProbe, .finished:
+///             case .finished:
 ///                 return try jobs.end(job)
 ///             case .ready(let result, let changes):
 ///                 // Replaces the send work for its message ID.
@@ -172,7 +166,7 @@ pub enum MessageRecoveryStep {
 ///                     jobs.save(job)
 ///                     break@steps
 ///                 }
-///                 is MessageRecoveryStep.AwaitingProbe, is MessageRecoveryStep.Finished ->
+///                 is MessageRecoveryStep.Finished ->
 ///                     return jobs.end(job)
 ///                 is MessageRecoveryStep.Ready -> {
 ///                     // Replaces the send work for its message ID.
@@ -379,9 +373,6 @@ impl MessageRecoveryStep {
                     identity_key: IdentityKey::from_core(identity_key),
                 }
             }
-            roost_core::MessageRecoveryStep::AwaitingProbe(message_id) => Self::AwaitingProbe {
-                message_id: MessageId::from_core(message_id),
-            },
             roost_core::MessageRecoveryStep::Finished => Self::Finished,
             roost_core::MessageRecoveryStep::Ready { result, changes } => Self::Ready {
                 result: OutboundMessageResult::from_core(*result),
