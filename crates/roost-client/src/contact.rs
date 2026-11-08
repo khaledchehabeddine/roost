@@ -3,6 +3,7 @@ use crate::error::RoostError;
 use crate::identity::IdentityKey;
 use crate::publication::{PublicDiscoveryKey, PublicationBundle};
 use crate::state::{StateChanges, StateEntry, entries_to_core};
+use rand::rngs::OsRng;
 use roost_core::{
     ContactSafetyNumberConfirmation as CoreSafetyNumberConfirmation,
     ProtocolStateBlob as CoreProtocolStateBlob,
@@ -108,7 +109,7 @@ impl Contacts {
     /// # Errors
     /// - [`RoostError::InvalidData`] if `identity_key` has the wrong length.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::ProtocolStateFault`] if the record is malformed or belongs to someone
     ///   else.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -118,9 +119,11 @@ impl Contacts {
         record: Option<Vec<u8>>,
     ) -> Result<ContactBlock, RoostError> {
         let record = record.map(CoreProtocolStateBlob::from_bytes);
-        let block = self
-            .inner
-            .prepare_block_contact(identity_key.to_core()?, record.as_ref())?;
+        let block = self.inner.prepare_block_contact(
+            &mut OsRng,
+            identity_key.to_core()?,
+            record.as_ref(),
+        )?;
         let operation = block.changes.operation();
         let publication = match block
             .publication
@@ -198,7 +201,7 @@ impl Contacts {
     /// # Errors
     /// - [`RoostError::InvalidData`] if the stored local identity or a key is malformed.
     /// - [`RoostError::NotFound`] if the context has no local identity.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::ProtocolStateFault`] if the record is absent, pending, or malformed.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     /// - [`RoostError::UnsupportedVersion`] if the stored identity or the record has an unsupported
@@ -213,7 +216,7 @@ impl Contacts {
         let local = self.inner.load_identity()?;
         Ok(ContactSafetyNumberConfirmation::from_core(
             self.inner.protocol_engine().confirm_contact_safety_number(
-                roost_core::ContactIdentityKey {
+                roost_core::IdentityKey {
                     x25519_public_key: *local.public_key().as_bytes(),
                     ed25519_verifying_key: *local.verifying_key().as_bytes(),
                 },

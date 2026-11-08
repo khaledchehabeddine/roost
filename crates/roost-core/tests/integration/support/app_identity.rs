@@ -8,7 +8,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
-/// SecureStorage that outlives each KeyStore, as a device keychain outlives the app process.
+/// SecureStorage that outlives each KeyStore, as the platform's secure storage outlives the app
+/// process.
 #[derive(Clone, Default)]
 pub(crate) struct DeviceStorage(Arc<Mutex<BTreeMap<String, Zeroizing<Vec<u8>>>>>);
 
@@ -38,17 +39,17 @@ impl SecureStorage for DeviceStorage {
     }
 }
 
-/// How one host transaction ends.
-pub(crate) enum HostCommit {
-    /// The transaction commits and the host sees that it did.
+/// How one app transaction ends.
+pub(crate) enum AppCommit {
+    /// The transaction commits and the app sees that it did.
     Applies,
     /// The transaction commits, but a lost reply or a cancellation hides that it did.
     AppliesWithUnknownOutcome,
-    /// Nothing commits, and the host can't tell whether it did.
+    /// Nothing commits, and the app can't tell whether it did.
     FailsWithUnknownOutcome,
 }
 
-/// What the host learns when a transaction ends.
+/// What the app learns when a transaction ends.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum CommitResult {
     Committed,
@@ -70,11 +71,11 @@ impl IdentityDatabase {
     pub(crate) fn commit_identity(
         &self,
         operation: KeyStoreOperationId,
-        commit: HostCommit,
+        commit: AppCommit,
     ) -> CommitResult {
         let applies = matches!(
             commit,
-            HostCommit::Applies | HostCommit::AppliesWithUnknownOutcome
+            AppCommit::Applies | AppCommit::AppliesWithUnknownOutcome
         );
         if applies {
             let mut records = self.0.lock().unwrap();
@@ -82,8 +83,8 @@ impl IdentityDatabase {
             records.pending_finalizations.insert(*operation.as_bytes());
         }
         match commit {
-            HostCommit::Applies => CommitResult::Committed,
-            HostCommit::AppliesWithUnknownOutcome | HostCommit::FailsWithUnknownOutcome => {
+            AppCommit::Applies => CommitResult::Committed,
+            AppCommit::AppliesWithUnknownOutcome | AppCommit::FailsWithUnknownOutcome => {
                 CommitResult::Unknown
             }
         }
@@ -118,10 +119,13 @@ impl IdentityDatabase {
     }
 }
 
-/// Resolves unfinished operations against the host's records, as a host does at startup.
+/// Resolves unfinished operations against the app's records, as an app does at startup.
 ///
-/// Panics when SecureStorage and the host disagree, since a host must stop rather than guess.
-pub(crate) fn recover(store: &KeyStore, database: &IdentityDatabase) -> Result<(), KeyStoreError> {
+/// Panics when SecureStorage and the app disagree, since an app must stop rather than guess.
+pub(crate) fn resolve_unfinished(
+    store: &KeyStore,
+    database: &IdentityDatabase,
+) -> Result<(), KeyStoreError> {
     for unfinished in store.unfinished_operations()? {
         let id = unfinished.id;
         match (unfinished.status, database.has_committed(id)) {
@@ -133,11 +137,11 @@ pub(crate) fn recover(store: &KeyStore, database: &IdentityDatabase) -> Result<(
                 store.abort_operation(id)?;
             }
             (status, committed) => {
-                panic!("SecureStorage reports {status:?} but host commit is {committed}")
+                panic!("SecureStorage reports {status:?} but database commit is {committed}")
             }
         }
     }
-    // Finalization that finished before the host recorded it no longer appears as unfinished.
+    // Finalization that finished before the app recorded it no longer appears as unfinished.
     for id in database.pending_finalizations() {
         assert_eq!(
             store.operation_status(id)?,

@@ -18,11 +18,11 @@ pub(crate) const MAX_MESSAGES_BEFORE_ACCEPTANCE: usize = 3;
 /// receive. Every other limit is fixed so no configuration can disable memory and CPU bounds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProtocolHardeningLimits {
-    /// Maximum encoded sealed-sender message bytes accepted before parsing.
+    /// Maximum encoded sealed sender message bytes accepted before parsing.
     pub max_encoded_message_len: usize,
     /// Maximum general protocol state blob bytes accepted before body decode.
     pub max_protocol_state_blob_len: usize,
-    /// Maximum sender certificate bytes accepted after sealed-sender decrypt.
+    /// Maximum sender certificate bytes accepted after sealed sender decryption.
     pub max_sender_certificate_len: usize,
     /// Maximum pending outbound messages retained for acknowledgment processing.
     pub max_pending_acknowledgments: usize,
@@ -54,12 +54,8 @@ impl Default for ProtocolHardeningLimits {
     }
 }
 
-pub(crate) fn is_supported_deduplication_capacity(capacity: usize) -> bool {
-    (MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity)
-}
-
 pub(crate) fn validate_deduplication_capacity(capacity: usize) -> Result<(), ProtocolStateError> {
-    if !is_supported_deduplication_capacity(capacity) {
+    if !(MIN_DEDUPLICATION_CAPACITY..=MAX_DEDUPLICATION_CAPACITY).contains(&capacity) {
         return Err(ProtocolStateError::InvalidDeduplicationCapacity {
             capacity,
             minimum: MIN_DEDUPLICATION_CAPACITY,

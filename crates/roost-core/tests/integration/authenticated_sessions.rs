@@ -13,7 +13,7 @@ fn accepted_message(outcome: InboundMessageOutcome) -> roost_core::InboundMessag
     let (InboundMessageOutcome::Accepted(result) | InboundMessageOutcome::ContactRequest(result)) =
         outcome
     else {
-        panic!("expected a delivered Message")
+        panic!("expected a delivered message")
     };
     *result
 }
@@ -47,7 +47,7 @@ fn establish(initiator: &mut Device, responder: &mut Device) -> SessionId {
     request.session_id
 }
 
-// Starts another session from `initiator` to an accepted `responder`, as a host that lost its
+// Starts another session from `initiator` to an accepted `responder`, as an app that lost its
 // session list does by requesting again, and has `responder` reply on it.
 fn reestablish(initiator: &mut Device, responder: &mut Device) -> SessionId {
     initiator.forget_sessions_with(responder);
@@ -126,9 +126,9 @@ fn a_message_naming_an_unknown_session_changes_nothing() {
         .acknowledgment
         .unwrap();
     for device in [&mut alice, &mut bob] {
-        device.host.forget_session();
+        device.database.forget_session();
     }
-    let before = bob.host.snapshot_bytes();
+    let before = bob.database.snapshot_bytes();
 
     assert!(matches!(
         bob.receive(&ordinary.message),
@@ -138,7 +138,7 @@ fn a_message_naming_an_unknown_session_changes_nothing() {
         bob.receive(&acknowledgment),
         InboundMessageOutcome::UnknownSession
     ));
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -153,13 +153,13 @@ fn a_first_message_delivered_twice_is_a_duplicate() {
         b"once",
     );
     bob.receive(&request.message);
-    let before = bob.host.snapshot_bytes();
+    let before = bob.database.snapshot_bytes();
 
     assert!(matches!(
         bob.receive(&request.message),
         InboundMessageOutcome::Duplicate
     ));
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -225,16 +225,16 @@ fn sessions_beyond_five_older_ones_are_deleted_and_stop_receiving() {
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
     establish(&mut alice, &mut bob);
-    let oldest = bob.host.only(ProtocolStateKind::RatchetSession);
+    let oldest = bob.database.only(ProtocolStateKind::RatchetSession);
     let late = alice.send(&bob, b"sent before eviction");
     for _ in 0..5 {
         reestablish(&mut alice, &mut bob);
     }
-    assert!(bob.host.blob_bytes(&oldest).is_some());
+    assert!(bob.database.blob_bytes(&oldest).is_some());
 
     reestablish(&mut alice, &mut bob);
 
-    assert!(bob.host.blob_bytes(&oldest).is_none());
+    assert!(bob.database.blob_bytes(&oldest).is_none());
     assert!(matches!(
         bob.receive(&late.message),
         InboundMessageOutcome::UnknownSession
@@ -246,7 +246,13 @@ fn waiting_on(device: &Device, session_id: SessionId) -> Vec<roost_protocol::Mes
     device
         .store
         .protocol_engine()
-        .pending_acknowledgments(&device.host.snapshot(), session_id)
+        .pending_acknowledgments(
+            session_id,
+            device
+                .database
+                .pending_acknowledgments_record(session_id)
+                .as_ref(),
+        )
         .unwrap()
         .into_iter()
         .map(|pending| pending.message_id)
@@ -259,7 +265,7 @@ fn a_session_the_peer_evicts_lists_its_unacknowledged_messages_as_undelivered() 
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
     let oldest = establish(&mut alice, &mut bob);
-    let oldest_record = bob.host.only(ProtocolStateKind::RatchetSession);
+    let oldest_record = bob.database.only(ProtocolStateKind::RatchetSession);
     let stranded = bob.send(&alice, b"never acknowledged");
     for _ in 0..5 {
         reestablish(&mut alice, &mut bob);
@@ -271,8 +277,8 @@ fn a_session_the_peer_evicts_lists_its_unacknowledged_messages_as_undelivered() 
 
     accepted_message(bob.receive(&request.message));
 
-    assert_eq!(bob.host.undelivered(), waiting);
-    assert!(bob.host.blob_bytes(&oldest_record).is_none());
+    assert_eq!(bob.database.undelivered(), waiting);
+    assert!(bob.database.blob_bytes(&oldest_record).is_none());
 }
 
 #[test]
@@ -281,7 +287,7 @@ fn a_session_a_send_evicts_lists_its_unacknowledged_messages_as_undelivered() {
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
     let oldest = establish(&mut alice, &mut bob);
-    let oldest_record = alice.host.only(ProtocolStateKind::RatchetSession);
+    let oldest_record = alice.database.only(ProtocolStateKind::RatchetSession);
     let stranded = alice.send(&bob, b"never acknowledged");
     // Each rotation makes Alice's next send start a session from Bob's newer bundle.
     for _ in 0..5 {
@@ -299,10 +305,10 @@ fn a_session_a_send_evicts_lists_its_unacknowledged_messages_as_undelivered() {
 
     assert_eq!(sealed.changes.undelivered(), [stranded.message_id]);
     alice
-        .host
+        .database
         .commit_sent(&sealed.result, sealed.changes)
         .unwrap();
-    assert!(alice.host.blob_bytes(&oldest_record).is_none());
+    assert!(alice.database.blob_bytes(&oldest_record).is_none());
 }
 
 #[test]
@@ -317,33 +323,36 @@ fn a_replayed_first_message_cannot_revive_a_deleted_session() {
         b"replay me",
     );
     bob.receive(&first.message);
-    let first_record = bob.host.only(ProtocolStateKind::RatchetSession);
+    let first_record = bob.database.only(ProtocolStateKind::RatchetSession);
     let acceptance = bob.accept_request(&alice, b"welcome");
     accepted_message(alice.receive(&acceptance.message));
     for _ in 0..6 {
         reestablish(&mut alice, &mut bob);
     }
-    assert!(bob.host.blob_bytes(&first_record).is_none());
+    assert!(bob.database.blob_bytes(&first_record).is_none());
+    // Bob still holds the signed prekey the deleted session used, so the next session keeps it
+    // remembered.
+    reestablish(&mut alice, &mut bob);
     bob.forget_received_digests();
     let current = bob.send(&alice, b"current").session_id;
-    let before = bob.host.snapshot_bytes();
+    let before = bob.database.snapshot_bytes();
 
     assert!(matches!(
         bob.receive(&first.message),
         InboundMessageOutcome::DeletedSession
     ));
 
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
     assert_eq!(bob.send(&alice, b"still current").session_id, current);
 }
 
 #[test]
-fn a_peer_can_start_a_new_session_after_the_host_wipes_the_current_one() {
+fn a_peer_can_start_a_new_session_after_the_app_wipes_the_current_one() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
     establish(&mut alice, &mut bob);
-    bob.host.forget_session();
+    bob.database.forget_session();
 
     alice.forget_sessions_with(&bob);
     let replacement = alice.request(&bob, b"after the wipe");
@@ -357,7 +366,7 @@ fn a_peer_can_start_a_new_session_after_the_host_wipes_the_current_one() {
 }
 
 #[test]
-fn a_handshake_cannot_bring_back_a_session_the_host_wiped() {
+fn a_handshake_cannot_bring_back_a_session_the_app_wiped() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
@@ -369,15 +378,15 @@ fn a_handshake_cannot_bring_back_a_session_the_host_wiped() {
     );
     let second = alice.send(&bob, b"second");
     bob.receive(&first.message);
-    bob.host.forget_session();
-    let before = bob.host.snapshot_bytes();
+    bob.database.forget_session();
+    let before = bob.database.snapshot_bytes();
 
     assert!(matches!(
         bob.receive(&second.message),
         InboundMessageOutcome::DeletedSession
     ));
 
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -408,8 +417,8 @@ fn a_tampered_or_misdelivered_first_message_changes_nothing() {
     let request = alice.request(&bob, b"for bob");
     let mut tampered = request.message.clone();
     *tampered.ciphertext.last_mut().unwrap() ^= 0x01;
-    let bob_before = bob.host.snapshot_bytes();
-    let carol_before = carol.host.snapshot_bytes();
+    let bob_before = bob.database.snapshot_bytes();
+    let carol_before = carol.database.snapshot_bytes();
 
     assert!(matches!(
         protocol_fault(bob.decrypt(&tampered)),
@@ -419,8 +428,8 @@ fn a_tampered_or_misdelivered_first_message_changes_nothing() {
         protocol_fault(carol.decrypt(&request.message)),
         ProtocolStateError::SealedFrame(SealedFrameError::RecipientMismatch)
     ));
-    assert_eq!(bob.host.snapshot_bytes(), bob_before);
-    assert_eq!(carol.host.snapshot_bytes(), carol_before);
+    assert_eq!(bob.database.snapshot_bytes(), bob_before);
+    assert_eq!(carol.database.snapshot_bytes(), carol_before);
 
     // Nothing was consumed, so the genuine message still starts the session.
     let received = accepted_message(bob.receive(&request.message));
@@ -436,7 +445,7 @@ fn a_request_refuses_a_discovery_key_that_does_not_vouch_for_the_identity() {
     let mut bundle = bob.bundle();
     // Mallory's discovery key signature, valid bytes over the wrong identity.
     bundle.discovery_to_identity = mallory.bundle().discovery_to_identity;
-    let before = alice.host.snapshot_bytes();
+    let before = alice.database.snapshot_bytes();
     let mut outgoing = alice.outgoing(&bob, b"hello bob");
     outgoing.prekey_bundle = Some(bundle);
 
@@ -450,7 +459,7 @@ fn a_request_refuses_a_discovery_key_that_does_not_vouch_for_the_identity() {
             ))
         ))
     ));
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -476,20 +485,20 @@ fn a_first_message_keeps_the_padding_and_size_limits() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
-    let mut too_large = alice.outgoing(&bob, &[0; 65_292]);
+    let mut too_large = alice.outgoing(&bob, &[0; 65_294]);
     too_large.prekey_bundle = Some(bob.bundle());
     assert!(matches!(
         alice.encrypt(too_large, Intent::Request),
         Err(DeviceError::Operation(
             MessageOperationError::ProtocolState(ProtocolStateError::ContentTooLong {
-                len: 65_292,
-                max: 65_291,
+                len: 65_294,
+                max: 65_293,
             })
         ))
     ));
 
     // The request's inbox grant shares the largest padding bucket with the longest content.
-    let largest = vec![0x2a; 65_291];
+    let largest = vec![0x2a; 65_293];
     let request = alice.request(&bob, &largest);
     assert!(request.message.to_bytes().unwrap().len() > 64 * 1024);
     let received = accepted_message(bob.receive(&request.message));

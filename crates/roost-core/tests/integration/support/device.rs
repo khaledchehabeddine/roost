@@ -1,12 +1,13 @@
-//! Devices that send and receive through KeyStore and commit through a host store.
+//! Devices that send and receive through KeyStore and commit through an app database.
 
-use super::host_identity::DeviceStorage;
-use super::{CREATED_AT_SECS, HostCommitError, HostStore, sender_certificate_bytes, validation};
+use super::app_identity::DeviceStorage;
+use super::{AppCommitError, AppDatabase, CREATED_AT_SECS, sender_certificate_bytes, validation};
 use rand::SeedableRng;
+use rand::rngs::OsRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    AdmissionRequest, ContactIdentityKey, ContactState, DeliveryCheckResult, DeliveryCheckStep,
-    DomainSigningKey, InboundMessageOutcome, IncomingMessage, KeyStore, KeyStoreError,
+    AdmissionRequest, ContactState, DeliveryCheckResult, DeliveryCheckStep, DomainSigningKey,
+    IdentityKey, InboundMessageOutcome, IncomingMessage, KeyStore, KeyStoreError,
     KeyStoreOperationError, MessageDecryptionStep, MessageDestination, MessageEncryption,
     MessageEncryptionStep, MessageOperationError, MessageRecoveryStep, MessageStartError,
     OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery,
@@ -99,7 +100,7 @@ pub(crate) struct Sealed {
 /// How an encryption ended.
 pub(crate) enum Encrypted {
     Ready(Box<Sealed>),
-    NeedsPreKeyBundle(ContactIdentityKey),
+    NeedsPreKeyBundle(IdentityKey),
     NothingToSend,
 }
 
@@ -107,7 +108,7 @@ impl Encrypted {
     pub(crate) fn ready(self) -> Sealed {
         match self {
             Self::Ready(sealed) => *sealed,
-            Self::NeedsPreKeyBundle(_) | Self::NothingToSend => panic!("expected a sealed Message"),
+            Self::NeedsPreKeyBundle(_) | Self::NothingToSend => panic!("expected a sealed message"),
         }
     }
 }
@@ -117,13 +118,13 @@ impl Encrypted {
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum Route {
     FirstMessage {
-        identity_key: ContactIdentityKey,
+        identity_key: IdentityKey,
         discovery_key: [u8; 32],
         signed_prekey_id: u64,
         one_time_prekey_id: Option<u64>,
     },
     Established {
-        identity_key: ContactIdentityKey,
+        identity_key: IdentityKey,
         discovery_key: [u8; 32],
         verifier: [u8; 32],
     },
@@ -164,10 +165,10 @@ pub(crate) struct Decrypted {
     pub(crate) acknowledgment_destination: Option<MessageDestination>,
 }
 
-/// One app install: its KeyStore, its host database, and the certificate its relay issued.
+/// One app install: its KeyStore, its database, and the certificate its relay issued.
 pub(crate) struct Device {
     pub(crate) store: KeyStore,
-    pub(crate) host: HostStore,
+    pub(crate) database: AppDatabase,
     storage: DeviceStorage,
     pub(crate) identity: PublicIdentityKey,
     credential: Credential,
@@ -187,7 +188,7 @@ const BACKUP_PASSPHRASE: &str = "correct horse battery staple";
 /// backup.
 pub(crate) struct Backup {
     identity: Vec<u8>,
-    host: HostStore,
+    database: AppDatabase,
     contents: BTreeMap<[u8; 16], Vec<u8>>,
     next_message: u16,
 }
@@ -200,14 +201,14 @@ impl Device {
     pub(crate) fn new(relay: &Relay, tag: u8) -> Self {
         let storage = DeviceStorage::default();
         let store = storage.open();
-        let created = store.prepare_identity_creation().unwrap();
+        let created = store.prepare_identity_creation(&mut OsRng).unwrap();
         finalize(&store, &created);
         let identity = created.output.public().unwrap();
-        let rotated = store.prepare_signed_prekey_rotation().unwrap();
+        let rotated = store.prepare_signed_prekey_rotation(&mut OsRng).unwrap();
         finalize(&store, &rotated);
         Self {
             store,
-            host: HostStore::default(),
+            database: AppDatabase::default(),
             storage,
             credential: relay.certify(&identity),
             identity,
@@ -219,7 +220,7 @@ impl Device {
         }
     }
 
-    pub(crate) fn identity_key(&self) -> ContactIdentityKey {
+    pub(crate) fn identity_key(&self) -> IdentityKey {
         identity_key(&self.identity)
     }
 
@@ -229,11 +230,11 @@ impl Device {
     }
 
     /// Returns this device as an app extension sees it: another KeyStore over the same
-    /// SecureStorage, reading a copy of the same host records.
+    /// SecureStorage, reading a copy of the same app records.
     pub(crate) fn second_instance_device(&self) -> Device {
         Device {
             store: self.storage.open(),
-            host: self.host.clone(),
+            database: self.database.clone(),
             storage: self.storage.clone(),
             identity: self.identity.clone(),
             credential: self.credential.clone(),
@@ -255,9 +256,9 @@ impl Device {
         Backup {
             identity: self
                 .store
-                .export_encrypted_backup(BACKUP_PASSPHRASE)
+                .export_encrypted_backup(&mut OsRng, BACKUP_PASSPHRASE)
                 .unwrap(),
-            host: self.host.clone(),
+            database: self.database.clone(),
             contents: self.contents.clone(),
             next_message: self.next_message,
         }
@@ -273,38 +274,38 @@ impl Device {
         self.store = self.storage.open();
         let import = self
             .store
-            .prepare_backup_import(&backup.identity, BACKUP_PASSPHRASE)
+            .prepare_backup_import(&mut OsRng, &backup.identity, BACKUP_PASSPHRASE)
             .unwrap();
         self.store.reserve_operation(import.id).unwrap();
-        self.host = backup.host.restored();
+        self.database = backup.database.restored();
         self.store.finalize_operation(import.id).unwrap();
         self.contents = backup.contents.clone();
         self.next_message = backup.next_message;
         self.rotate_inbox()
     }
 
-    /// Forgets the sessions kept with `peer`, as a host that lost that record does, so the next
+    /// Forgets the sessions kept with `peer`, as an app that lost that record does, so the next
     /// request starts a new session.
     pub(crate) fn forget_sessions_with(&mut self, peer: &Device) {
         let address = self.sessions_address(peer.identity_key());
-        self.host.remove(&address);
+        self.database.remove(&address);
     }
 
     /// Returns the address of this device's contact record for `peer`, as Roost names it.
-    pub(crate) fn contact_address(&self, peer: ContactIdentityKey) -> ProtocolStateAddress {
+    pub(crate) fn contact_address(&self, peer: IdentityKey) -> ProtocolStateAddress {
         self.contact_record_address(peer, ProtocolStateKind::ContactState)
     }
 
     /// Returns the address of this device's record of the sessions kept with `peer`, as Roost
     /// names it.
-    pub(crate) fn sessions_address(&self, peer: ContactIdentityKey) -> ProtocolStateAddress {
+    pub(crate) fn sessions_address(&self, peer: IdentityKey) -> ProtocolStateAddress {
         self.contact_record_address(peer, ProtocolStateKind::PeerSessions)
     }
 
     // Returns the address of `peer`'s record of `kind`, which a delivery check asks for first.
     fn contact_record_address(
         &self,
-        peer: ContactIdentityKey,
+        peer: IdentityKey,
         kind: ProtocolStateKind,
     ) -> ProtocolStateAddress {
         let now = std::time::UNIX_EPOCH + Duration::from_secs(CREATED_AT_SECS);
@@ -322,9 +323,9 @@ impl Device {
             .expect("a delivery check reads each of the contact's records")
     }
 
-    /// Returns the record this device's host holds for `peer`, if any.
-    pub(crate) fn contact_record(&self, peer: ContactIdentityKey) -> Option<ProtocolStateBlob> {
-        self.host
+    /// Returns the record this device's database holds for `peer`, if any.
+    pub(crate) fn contact_record(&self, peer: IdentityKey) -> Option<ProtocolStateBlob> {
+        self.database
             .blob_bytes(&self.contact_address(peer))
             .map(ProtocolStateBlob::from_bytes)
     }
@@ -343,10 +344,10 @@ impl Device {
         self.store.current_publication().unwrap()
     }
 
-    /// Returns the contact this device's host holds for `peer`, decoded after commit.
+    /// Returns the contact this device's database holds for `peer`, decoded after commit.
     pub(crate) fn contact(&self, peer: &Device) -> Option<ContactState> {
         let address = self.contact_address(peer.identity_key());
-        self.host.blob_bytes(&address).map(|bytes| {
+        self.database.blob_bytes(&address).map(|bytes| {
             self.store
                 .protocol_engine()
                 .decode_contact(&address, &ProtocolStateBlob::from_bytes(bytes))
@@ -356,7 +357,7 @@ impl Device {
 
     /// Publishes a bundle with a fresh one-time prekey, as the relay would serve it.
     pub(crate) fn bundle(&self) -> PeerPreKeyBundle {
-        let one_time_prekeys = self.store.prepare_one_time_prekeys(1).unwrap();
+        let one_time_prekeys = self.store.prepare_one_time_prekeys(&mut OsRng, 1).unwrap();
         finalize(&self.store, &one_time_prekeys);
         self.published(Some(one_time_prekeys.output[0].clone()))
     }
@@ -471,7 +472,7 @@ impl Device {
             changes,
             destination,
         } = sealed;
-        self.host.commit_sent(&result, changes).unwrap();
+        self.database.commit_sent(&result, changes).unwrap();
         SentMessage {
             session_id: result.session_id,
             message_id: result.message_id,
@@ -502,7 +503,7 @@ impl Device {
         }?;
         Ok(run_encryption(
             encryption,
-            &self.host,
+            &self.database,
             &mut ChaCha20Rng::from_seed([seed; 32]),
             &binding(),
         )?)
@@ -524,7 +525,7 @@ impl Device {
         loop {
             match check.step().unwrap() {
                 DeliveryCheckStep::NeedsState(addresses) => {
-                    check.supply_state(self.host.read(&addresses)).unwrap();
+                    check.supply_state(self.database.read(&addresses)).unwrap();
                 }
                 DeliveryCheckStep::Ready { result, changes } => {
                     self.commit_changes(changes).unwrap();
@@ -566,7 +567,7 @@ impl Device {
         loop {
             match recovery.step(&mut rng)? {
                 MessageRecoveryStep::NeedsState(addresses) => {
-                    recovery.supply_state(self.host.read(&addresses))?;
+                    recovery.supply_state(self.database.read(&addresses))?;
                 }
                 MessageRecoveryStep::NeedsContent(message_id) => {
                     let content = self.contents[message_id.as_bytes()].clone();
@@ -584,7 +585,7 @@ impl Device {
                 }
                 MessageRecoveryStep::Finished => return Ok(Recovered::Finished),
                 MessageRecoveryStep::Ready { result, changes } => {
-                    let destination = destination.expect("a resent Message names its destination");
+                    let destination = destination.expect("a resent message names its destination");
                     return Ok(Recovered::Resent(Box::new(Sealed {
                         result: *result,
                         changes,
@@ -634,7 +635,7 @@ impl Device {
         loop {
             match decryption.step(&mut rng)? {
                 MessageDecryptionStep::NeedsState(addresses) => {
-                    decryption.supply_state(self.host.read(&addresses))?;
+                    decryption.supply_state(self.database.read(&addresses))?;
                 }
                 MessageDecryptionStep::NeedsAdmission(request) => {
                     admission = Some(request);
@@ -659,14 +660,14 @@ impl Device {
         }
     }
 
-    /// Commits `changes`, reserving and finalizing the operation they carry around the host
+    /// Commits `changes`, reserving and finalizing the operation they carry around the app's
     /// transaction, and aborting it when a condition fails. Returns the updates it wrote.
     pub(crate) fn commit_changes(
         &mut self,
         changes: StateChanges,
-    ) -> Result<Vec<ProtocolStateUpdate>, HostCommitError> {
+    ) -> Result<Vec<ProtocolStateUpdate>, AppCommitError> {
         let Some(operation) = changes.operation() else {
-            return self.host.commit(changes);
+            return self.database.commit(changes);
         };
         // SecureStorage changed since preparation, so the result is stale like a failed condition.
         if let Err(KeyStoreError::Operation(KeyStoreOperationError::PreconditionChanged {
@@ -674,9 +675,9 @@ impl Device {
         })) = self.store.reserve_operation(operation)
         {
             self.store.abort_operation(operation).unwrap();
-            return Err(HostCommitError::StaleCondition);
+            return Err(AppCommitError::StaleCondition);
         }
-        match self.host.commit(changes) {
+        match self.database.commit(changes) {
             Ok(updates) => {
                 self.store.finalize_operation(operation).unwrap();
                 Ok(updates)
@@ -689,18 +690,18 @@ impl Device {
     }
 
     /// Blocks `peer`, given whatever record this device holds for them, and commits the block.
-    pub(crate) fn block(&mut self, peer: ContactIdentityKey) -> Option<PublicationBundle> {
+    pub(crate) fn block(&mut self, peer: IdentityKey) -> Option<PublicationBundle> {
         let record = self.contact_record(peer);
         let block = self
             .store
-            .prepare_block_contact(peer, record.as_ref())
+            .prepare_block_contact(&mut OsRng, peer, record.as_ref())
             .unwrap();
         self.commit_changes(block.changes).unwrap();
         block.publication
     }
 
     /// Unblocks `peer`, given whatever record this device holds for them, and commits it.
-    pub(crate) fn unblock(&mut self, peer: ContactIdentityKey) {
+    pub(crate) fn unblock(&mut self, peer: IdentityKey) {
         let record = self.contact_record(peer);
         let changes = self
             .store
@@ -712,13 +713,13 @@ impl Device {
 
     /// Deletes the deduplication set, as if every recorded digest had aged out.
     pub(crate) fn forget_received_digests(&mut self) {
-        let address = self.host.only(ProtocolStateKind::DeduplicationSet);
-        self.host.remove(&address);
+        let address = self.database.only(ProtocolStateKind::DeduplicationSet);
+        self.database.remove(&address);
     }
 
     /// Rotates the inbox outside any block, and returns the new publication.
     pub(crate) fn rotate_inbox(&self) -> PublicationBundle {
-        let rotation = self.store.prepare_inbox_rotation().unwrap();
+        let rotation = self.store.prepare_inbox_rotation(&mut OsRng).unwrap();
         finalize(&self.store, &rotation);
         rotation.output
     }
@@ -731,11 +732,11 @@ impl Device {
     }
 }
 
-/// Runs `encryption` over `host`'s records, supplying `binding` when it asks for a transport, and
-/// returns the destination it named.
+/// Runs `encryption` over `database`'s records, supplying `binding` when it asks for a transport,
+/// and returns the destination it named.
 pub(crate) fn run_encryption(
     mut encryption: MessageEncryption,
-    host: &HostStore,
+    database: &AppDatabase,
     rng: &mut ChaCha20Rng,
     binding: &TransportBinding,
 ) -> Result<Encrypted, MessageOperationError> {
@@ -743,7 +744,7 @@ pub(crate) fn run_encryption(
     loop {
         match encryption.step(rng)? {
             MessageEncryptionStep::NeedsState(addresses) => {
-                encryption.supply_state(host.read(&addresses))?;
+                encryption.supply_state(database.read(&addresses))?;
             }
             MessageEncryptionStep::NeedsTransport(asked) => {
                 destination = Some(asked);
@@ -754,7 +755,7 @@ pub(crate) fn run_encryption(
             }
             MessageEncryptionStep::NothingToSend => return Ok(Encrypted::NothingToSend),
             MessageEncryptionStep::Ready { result, changes } => {
-                let destination = destination.expect("a sealed Message names its destination");
+                let destination = destination.expect("a sealed message names its destination");
                 return Ok(Encrypted::Ready(Box::new(Sealed {
                     result: *result,
                     changes,
@@ -787,7 +788,7 @@ impl Recovered {
     }
 }
 
-/// A message the host committed and queued for sending.
+/// A message the app committed and queued for sending.
 pub(crate) struct SentMessage {
     pub(crate) session_id: SessionId,
     pub(crate) message_id: MessageId,
@@ -850,7 +851,7 @@ pub(crate) fn established_verifier(
             delivery_capability,
             ..
         } => delivery_capability.verifier(),
-        MessageDestination::FirstMessage { .. } => panic!("expected an established Message"),
+        MessageDestination::FirstMessage { .. } => panic!("expected an established message"),
     }
 }
 
@@ -869,8 +870,8 @@ pub(crate) fn redraft(draft: &OutgoingMessage) -> OutgoingMessage {
     }
 }
 
-fn identity_key(identity: &PublicIdentityKey) -> ContactIdentityKey {
-    ContactIdentityKey {
+fn identity_key(identity: &PublicIdentityKey) -> IdentityKey {
+    IdentityKey {
         x25519_public_key: *identity.public_key.as_bytes(),
         ed25519_verifying_key: identity.verifying_key.to_bytes(),
     }

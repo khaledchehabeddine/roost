@@ -1,12 +1,12 @@
 use super::{
     DIGEST_LEN, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError, ProtocolStateKey,
-    ProtocolStateKind, ProtocolStateSnapshot, ReceiveSettings, blob_body, digest_of, encode_blob,
-    encode_zeroizing, keep_newest, push_bounded,
+    ProtocolStateKind, ProtocolStateSnapshot, ReceiveSettings, decode_blob, deserialize_bounded,
+    digest_of, encode_blob, encode_zeroizing, keep_newest, push_bounded,
 };
-use crate::hardening::{ProtocolHardeningLimits, is_supported_deduplication_capacity};
+use crate::hardening::{MAX_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 const DEDUPLICATION_DIGEST_LABEL: &[u8] = b"RoostDeduplicationDigest-v1:";
 const DEDUPLICATION_KEY_LEN: usize = 32;
@@ -20,8 +20,9 @@ pub(super) fn deduplication_address() -> ProtocolStateAddress {
     )
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
+#[derive(ZeroizeOnDrop)]
 pub(super) struct LoadedDeduplicationSet {
+    // The size the app passed with this receive.
     capacity: usize,
     digest_key: Zeroizing<[u8; DEDUPLICATION_KEY_LEN]>,
     digests: Vec<[u8; DIGEST_LEN]>,
@@ -49,15 +50,15 @@ impl LoadedDeduplicationSet {
 
 #[derive(Serialize)]
 struct DeduplicationSetWire<'a> {
-    capacity: u16,
     digest_key: &'a [u8; DEDUPLICATION_KEY_LEN],
     digests: &'a [[u8; DIGEST_LEN]],
 }
 
-#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 struct DecodedDeduplicationSetWire {
-    capacity: u16,
     digest_key: [u8; DEDUPLICATION_KEY_LEN],
+    #[zeroize(skip)]
+    #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_DEDUPLICATION_CAPACITY>")]
     digests: Vec<[u8; DIGEST_LEN]>,
 }
 
@@ -66,22 +67,14 @@ pub(super) fn encode_deduplication_set(
     state: &LoadedDeduplicationSet,
     limits: ProtocolHardeningLimits,
 ) -> Result<ProtocolStateBlob, ProtocolStateError> {
-    let encode_error = |reason: String| ProtocolStateError::BlobEncode {
-        address: address.clone(),
-        reason,
-    };
-    let capacity = u16::try_from(state.capacity).map_err(|_| {
-        encode_error(format!(
-            "deduplication-set capacity {} doesn't fit its encoding",
-            state.capacity
-        ))
-    })?;
     let body = encode_zeroizing(&DeduplicationSetWire {
-        capacity,
         digest_key: &state.digest_key,
         digests: &state.digests,
     })
-    .map_err(|_| encode_error("deduplication set failed to encode".into()))?;
+    .map_err(|_| ProtocolStateError::BlobEncode {
+        address: address.clone(),
+        reason: "deduplication set failed to encode".into(),
+    })?;
     encode_blob(address, &body, limits.max_protocol_state_blob_len)
 }
 
@@ -94,51 +87,32 @@ pub(super) fn receiving_deduplication_set<R: RngCore + CryptoRng>(
     limits: ProtocolHardeningLimits,
 ) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
     let address = deduplication_address();
+    let capacity = settings.deduplication_capacity;
     let mut set = match snapshot.get(&address) {
-        Some(blob) => decode_deduplication_set(&address, blob, limits)?,
+        Some(blob) => decode_deduplication_set(&address, blob, capacity, limits)?,
         None => {
             let mut digest_key = Zeroizing::new([0u8; DEDUPLICATION_KEY_LEN]);
             rng.try_fill_bytes(&mut digest_key[..])
                 .map_err(ProtocolStateError::Randomness)?;
             LoadedDeduplicationSet {
-                capacity: settings.deduplication_capacity,
+                capacity,
                 digest_key,
                 digests: Vec::new(),
             }
         }
     };
-    set.capacity = settings.deduplication_capacity;
-    keep_newest(&mut set.digests, set.capacity);
+    keep_newest(&mut set.digests, capacity);
     Ok(set)
 }
 
 fn decode_deduplication_set(
     address: &ProtocolStateAddress,
     blob: &ProtocolStateBlob,
+    capacity: usize,
     limits: ProtocolHardeningLimits,
 ) -> Result<LoadedDeduplicationSet, ProtocolStateError> {
-    let decode_error = |reason: String| ProtocolStateError::BlobDecode {
-        address: address.clone(),
-        reason,
-    };
-    let body = blob_body(address, blob, limits.max_protocol_state_blob_len)?;
-    let (mut wire, trailing): (DecodedDeduplicationSetWire, &[u8]) =
-        postcard::take_from_bytes(body).map_err(|e| decode_error(e.to_string()))?;
-    if !trailing.is_empty() {
-        return Err(decode_error("deduplication set has trailing bytes".into()));
-    }
-    let capacity = usize::from(wire.capacity);
-    if !is_supported_deduplication_capacity(capacity) {
-        return Err(decode_error(format!(
-            "deduplication-set capacity is outside supported range: {capacity}"
-        )));
-    }
-    if wire.digests.len() > capacity {
-        return Err(decode_error(format!(
-            "deduplication-set digest count exceeds capacity: {}",
-            wire.digests.len()
-        )));
-    }
+    let mut wire: DecodedDeduplicationSetWire =
+        decode_blob(address, blob, limits.max_protocol_state_blob_len)?;
     Ok(LoadedDeduplicationSet {
         capacity,
         digest_key: Zeroizing::new(wire.digest_key),
@@ -190,7 +164,6 @@ mod tests {
     #[test]
     fn the_deduplication_set_has_one_fixed_address() {
         let address = deduplication_address();
-
         assert_eq!(address.kind(), ProtocolStateKind::DeduplicationSet);
         assert_eq!(address.key().as_bytes(), [0]);
     }
@@ -211,7 +184,12 @@ mod tests {
         bytes[0] += 1;
 
         assert!(matches!(
-            decode_deduplication_set(&address, &ProtocolStateBlob::from_bytes(bytes), limits),
+            decode_deduplication_set(
+                &address,
+                &ProtocolStateBlob::from_bytes(bytes),
+                MIN_DEDUPLICATION_CAPACITY,
+                limits
+            ),
             Err(ProtocolStateError::UnsupportedBlobVersion { address: actual, version })
                 if actual == address && version == super::super::PROTOCOL_STATE_BLOB_VERSION + 1
         ));

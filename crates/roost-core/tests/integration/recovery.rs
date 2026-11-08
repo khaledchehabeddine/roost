@@ -1,14 +1,15 @@
 //! The sender finds messages its contact hasn't acknowledged and recovers them on a newer session,
 //! and the contact shows each one once.
 
-use crate::support::HostCommitError;
+use crate::support::AppCommitError;
 use crate::support::device::{
     Device, DeviceError, Intent, Recovered, Relay, Route, SentMessage, befriended,
-    established_verifier,
+    established_verifier, requested,
 };
 use crate::support::{CREATED_AT_SECS, accepted};
 use roost_core::{
-    InboundMessageOutcome, MessageOperationError, ProtocolStateError, ProtocolStateKind,
+    ContactTrustState, InboundMessageOutcome, MessageOperationError, ProtocolStateError,
+    ProtocolStateKind,
 };
 use roost_protocol::PayloadKind;
 
@@ -25,11 +26,9 @@ fn a_message_unacknowledged_for_less_than_a_day_signals_nothing() {
     let relay = Relay::new();
     let (mut alice, bob) = befriended(&relay);
     alice.send(&bob, b"are you there?");
-
     let checked = alice.check_deliveries(&bob, sent_at_millis() + DAY_MILLIS - HOUR_MILLIS);
-
     assert!(!checked.starts_recovery);
-    assert!(alice.host.undelivered().is_empty());
+    assert!(alice.database.undelivered().is_empty());
 }
 
 #[test]
@@ -55,9 +54,7 @@ fn an_acknowledged_message_signals_nothing() {
     let sent = alice.send(&bob, b"are you there?");
     let acknowledgment = accepted(bob.receive(&sent.message)).acknowledgment.unwrap();
     alice.receive(&acknowledgment);
-
     let checked = alice.check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS);
-
     assert!(!checked.starts_recovery);
 }
 
@@ -92,7 +89,7 @@ fn messages_unacknowledged_for_thirty_days_show_as_not_delivered_once() {
 
     // The second check marks nothing again.
     assert_eq!(
-        alice.host.undelivered(),
+        alice.database.undelivered(),
         [first.message_id, second.message_id]
     );
     assert!(!checked.starts_recovery);
@@ -100,7 +97,13 @@ fn messages_unacknowledged_for_thirty_days_show_as_not_delivered_once() {
         alice
             .store
             .protocol_engine()
-            .pending_acknowledgments(&alice.host.snapshot(), first.session_id)
+            .pending_acknowledgments(
+                first.session_id,
+                alice
+                    .database
+                    .pending_acknowledgments_record(first.session_id)
+                    .as_ref()
+            )
             .unwrap()
             .is_empty()
     );
@@ -163,7 +166,13 @@ fn waiting_on(
     device
         .store
         .protocol_engine()
-        .pending_acknowledgments(&device.host.snapshot(), session_id)
+        .pending_acknowledgments(
+            session_id,
+            device
+                .database
+                .pending_acknowledgments_record(session_id)
+                .as_ref(),
+        )
         .map(|pending| pending.into_iter().map(|entry| entry.message_id).collect())
         .unwrap_or_default()
 }
@@ -172,10 +181,18 @@ fn waiting_on(
 fn a_contact_that_starts_a_new_session_gets_each_unacknowledged_message_again_on_it() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
+    // Bob acknowledges a message carrying Alice's grant, so her next messages leave it off.
+    let ready = alice.send(&bob, b"ready");
+    alice.receive(
+        &accepted(bob.receive(&ready.message))
+            .acknowledgment
+            .unwrap(),
+    );
     let first = alice.send(&bob, b"first");
     let second = alice.send(&bob, b"second");
+    assert_eq!(first.payload_kind, PayloadKind::Content);
     // Bob loses his session with Alice before either arrives, and writes on a new one.
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
@@ -224,7 +241,7 @@ fn a_silent_contact_gets_one_probe_on_a_new_session_and_the_rest_once_it_acknowl
     let first = alice.send(&bob, b"first");
     let second = alice.send(&bob, b"second");
     // Bob loses the session but keeps Alice as a contact, so he can't tell she wrote.
-    bob.host.forget_session();
+    bob.database.forget_session();
     assert!(
         alice
             .check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS)
@@ -359,7 +376,7 @@ fn a_probe_that_evicts_its_own_session_isnt_listed_as_undelivered() {
     let relay = Relay::new();
     let (mut alice, bob) = befriended(&relay);
     let sent = alice.send(&bob, b"are you there?");
-    let sent_record = alice.host.only(ProtocolStateKind::RatchetSession);
+    let sent_record = alice.database.only(ProtocolStateKind::RatchetSession);
     // Each rotation makes Alice's next send start a session, until hers with the message is the
     // oldest one kept.
     for _ in 0..5 {
@@ -381,10 +398,10 @@ fn a_probe_that_evicts_its_own_session_isnt_listed_as_undelivered() {
     assert_eq!(probe.result.message_id, sent.message_id);
     assert!(probe.changes.undelivered().is_empty());
     alice
-        .host
+        .database
         .commit_sent(&probe.result, probe.changes)
         .unwrap();
-    assert!(alice.host.blob_bytes(&sent_record).is_none());
+    assert!(alice.database.blob_bytes(&sent_record).is_none());
     assert_eq!(
         waiting_on(&alice, probe.result.session_id),
         [sent.message_id]
@@ -416,7 +433,7 @@ fn messages_held_behind_a_probe_whose_session_evicts_theirs_go_out_once_it_is_ac
     assert_eq!(probe.result.message_id, first.message_id);
     assert!(probe.changes.undelivered().is_empty());
     alice
-        .host
+        .database
         .commit_sent(&probe.result, probe.changes)
         .unwrap();
     let received = accepted(bob.receive(&probe.result.message));
@@ -450,7 +467,7 @@ fn a_newer_session_from_the_contact_during_the_fetch_wins_over_the_bundle() {
     ));
     let bundle = bob.bundle();
     // While Alice fetches, Bob, who lost the session, writes on a new one.
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
@@ -478,15 +495,18 @@ fn of_two_processes_recovering_at_once_only_the_first_commits() {
         panic!("expected a resend");
     };
     alice
-        .host
+        .database
         .commit_sent(&first.result, first.changes)
         .unwrap();
 
     assert_eq!(
-        alice.host.commit_sent(&second.result, second.changes).err(),
-        Some(HostCommitError::StaleCondition)
+        alice
+            .database
+            .commit_sent(&second.result, second.changes)
+            .err(),
+        Some(AppCommitError::StaleCondition)
     );
-    extension.host = alice.host.clone();
+    extension.database = alice.database.clone();
     assert!(matches!(
         extension.recover(&bob, None),
         Recovered::AwaitingProbe(id) if id == sent.message_id
@@ -505,8 +525,11 @@ fn a_recovery_whose_message_is_acknowledged_meanwhile_fails_to_commit_and_finish
     alice.receive(&acknowledgment);
 
     assert_eq!(
-        alice.host.commit_sent(&stale.result, stale.changes).err(),
-        Some(HostCommitError::StaleCondition)
+        alice
+            .database
+            .commit_sent(&stale.result, stale.changes)
+            .err(),
+        Some(AppCommitError::StaleCondition)
     );
     assert!(matches!(
         alice.recover(&bob, Some(bob.bundle())),
@@ -557,7 +580,7 @@ fn an_acknowledgment_of_the_original_copy_ends_the_wait_after_a_lost_probe() {
     alice.check_deliveries(&bob, sent_at_millis() + 31 * DAY_MILLIS);
 
     assert!(!recheck.starts_recovery);
-    assert!(alice.host.undelivered().is_empty());
+    assert!(alice.database.undelivered().is_empty());
 }
 
 #[test]
@@ -565,13 +588,12 @@ fn a_recovery_nobody_signaled_resends_nothing() {
     let relay = Relay::new();
     let (mut alice, bob) = befriended(&relay);
     alice.send(&bob, b"are you there?");
-    let before = alice.host.snapshot_bytes();
-
+    let before = alice.database.snapshot_bytes();
     assert!(matches!(
         alice.recover(&bob, Some(bob.bundle())),
         Recovered::Finished
     ));
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -588,7 +610,7 @@ fn after_the_relay_refuses_the_fetch_only_the_contacts_new_session_signals_again
             .check_deliveries(&bob, sent_at_millis() + 4 * DAY_MILLIS)
             .starts_recovery
     );
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     bob.rotate_inbox();
     let restart = bob.send_fetching_a_bundle(&alice, b"new inbox, new chat", Intent::Message);
@@ -642,12 +664,10 @@ fn messages_to_a_blocked_contact_still_show_as_not_delivered_but_are_never_recov
     let (mut alice, bob) = befriended(&relay);
     let sent = alice.send(&bob, b"before the block");
     alice.block(bob.identity_key());
-
     let after_a_day = alice.check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS);
     alice.check_deliveries(&bob, sent_at_millis() + 31 * DAY_MILLIS);
-
     assert!(!after_a_day.starts_recovery);
-    assert_eq!(alice.host.undelivered(), [sent.message_id]);
+    assert_eq!(alice.database.undelivered(), [sent.message_id]);
 }
 
 #[test]
@@ -655,20 +675,20 @@ fn a_recovery_stays_on_the_current_session_when_its_pending_acknowledgments_are_
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
     let first = alice.send(&bob, b"first");
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     let before = alice
-        .host
+        .database
         .addresses(ProtocolStateKind::PendingAcknowledgments);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
     let lost = alice
-        .host
+        .database
         .addresses(ProtocolStateKind::PendingAcknowledgments)
         .into_iter()
         .find(|address| !before.contains(address))
         .unwrap();
-    alice.host.remove(&lost);
+    alice.database.remove(&lost);
     assert!(
         alice
             .check_deliveries(&bob, sent_at_millis() + HOUR_MILLIS)
@@ -687,7 +707,7 @@ fn a_recovery_stays_on_the_current_session_when_its_pending_acknowledgments_are_
 fn blocked_with_a_message_left_behind(relay: &Relay) -> (Device, Device, SentMessage, SentMessage) {
     let (mut alice, mut bob) = befriended(relay);
     let first = alice.send(&bob, b"first");
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
@@ -948,7 +968,7 @@ fn a_recovery_starts_a_new_session_when_its_bundle_names_a_newer_key_than_the_co
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
     let first = alice.send(&bob, b"first");
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
@@ -976,7 +996,7 @@ fn a_new_session_a_recovery_starts_after_an_unblock_sends_the_rest_after_the_pro
     let (mut alice, mut bob) = befriended(&relay);
     let first = alice.send(&bob, b"first");
     let second = alice.send(&bob, b"second");
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
     alice.receive(&restart.message);
@@ -1013,7 +1033,7 @@ fn a_message_resent_near_the_limit_shows_as_not_delivered_while_its_copy_can_sti
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
     let sent = alice.send(&bob, b"first");
-    bob.host.forget_session();
+    bob.database.forget_session();
     bob.forget_sessions_with(&alice);
     assert!(
         alice
@@ -1024,11 +1044,34 @@ fn a_message_resent_near_the_limit_shows_as_not_delivered_while_its_copy_can_sti
 
     alice.check_deliveries(&bob, sent_at_millis() + 30 * DAY_MILLIS + HOUR_MILLIS);
 
-    assert_eq!(alice.host.undelivered(), [sent.message_id]);
+    assert_eq!(alice.database.undelivered(), [sent.message_id]);
     let received = accepted(bob.receive(&resent.message));
     assert_eq!(received.plaintext.as_slice(), b"first");
     assert!(matches!(
         alice.receive(&received.acknowledgment.unwrap()),
         InboundMessageOutcome::AcknowledgmentUnmatched(_)
     ));
+}
+
+#[test]
+fn a_recovery_resends_a_missed_acceptance_on_the_requesters_new_session_as_an_acceptance() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    // Bob's acceptance never arrives, and Alice, who lost her session, asks again.
+    bob.accept_request(&alice, b"welcome");
+    alice.forget_sessions_with(&bob);
+    let again = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
+    accepted(bob.receive(&again.message));
+
+    let checked = bob.check_deliveries(&alice, sent_at_millis() + HOUR_MILLIS);
+    let resent = bob.recover(&alice, None).committed();
+
+    assert!(checked.starts_recovery);
+    assert_eq!(resent.session_id, again.session_id);
+    assert_eq!(resent.payload_kind, PayloadKind::ContactAcceptance);
+    accepted(alice.receive(&resent.message));
+    assert_eq!(
+        alice.contact(&bob).unwrap().trust_state,
+        ContactTrustState::Unverified
+    );
 }

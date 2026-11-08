@@ -1,12 +1,15 @@
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
+use crate::retention::{RELAY_HOLD_TIME, SECONDS_PER_DAY, is_expired};
 use crate::storage::{SecureStorage, StorageError};
 use crate::stored_data::{
     SignatureWire, StoredDataError, decode_versioned, deserialize_bounded, encode_versioned,
     signature_from_wire, signature_to_wire,
 };
 use rand::{CryptoRng, RngCore};
-use roost_crypto::{PublicSignedPreKey, SignedPreKey, generate_signed_prekey_for_discovery_key};
-use roost_protocol::{SignatureError, from_unix_secs, to_unix_secs};
+use roost_crypto::{
+    PublicKeyError, PublicSignedPreKey, SignedPreKey, generate_signed_prekey_for_discovery_key,
+};
+use roost_protocol::{SignatureError, to_unix_secs};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
@@ -14,13 +17,9 @@ use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const SIGNED_PREKEYS: &str = "prekey/signed";
-const SIGNED_PREKEYS_VERSION: u8 = 5;
+const SIGNED_PREKEYS_VERSION: u8 = 1;
 const MAX_RETAINED_SIGNED_PREKEYS: usize = 5;
-const SECONDS_PER_DAY: u64 = 86_400;
 const SIGNED_PREKEY_ROTATION_WINDOW: Duration = Duration::from_secs(7 * SECONDS_PER_DAY);
-const SIGNED_PREKEY_RETENTION_WINDOW: Duration = Duration::from_secs(30 * SECONDS_PER_DAY);
-// Treat far-future timestamps as expired so clock manipulation cannot freeze rotation forever.
-const FUTURE_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(30 * SECONDS_PER_DAY);
 
 /// Errors returned by signed prekey operations.
 #[derive(Debug, thiserror::Error)]
@@ -30,13 +29,10 @@ pub enum SignedPreKeyError {
     Clock,
     /// The stored signed prekey's signature does not verify against the current discovery key.
     #[error("stored signed prekey signature does not match the discovery key")]
-    Corrupt,
+    Corrupt(#[source] PublicKeyError),
     /// Loading the discovery key for signed prekey rotation returned a [`DiscoveryKeyError`].
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
-    /// The stored retained signed prekeys repeat an identifier.
-    #[error("duplicate retained signed prekey identifier {0}")]
-    DuplicateRetainedId(u64),
     /// Backup restoration requires an inbox rotation before prekeys may be used.
     #[error("inbox rotation required before using restored prekey state")]
     InboxRotationRequired,
@@ -46,16 +42,6 @@ pub enum SignedPreKeyError {
     /// The internal storage lock was poisoned by a panicked thread.
     #[error("internal lock poisoned")]
     LockPoisoned,
-    /// The stored next identifier doesn't follow the current signed prekey's identifier.
-    #[error(
-        "next signed prekey identifier {next_id} does not follow current identifier {current_id}"
-    )]
-    NextIdMismatch {
-        /// Stored next identifier.
-        next_id: u64,
-        /// Current signed prekey's identifier.
-        current_id: u64,
-    },
     /// No signed prekey is stored.
     #[error("no signed prekey stored")]
     NotFound,
@@ -64,27 +50,6 @@ pub enum SignedPreKeyError {
     RetainedCapacityReached {
         /// Largest number of retained signed prekeys.
         max: usize,
-    },
-    /// A stored retained signed prekey belongs to a different epoch than the current one.
-    #[error(
-        "retained signed prekey epoch {retained_epoch} differs from current epoch {current_epoch}"
-    )]
-    RetainedEpochMismatch {
-        /// Retained signed prekey's epoch.
-        retained_epoch: u32,
-        /// Current signed prekey's epoch.
-        current_epoch: u32,
-    },
-    /// A stored retained signed prekey isn't older than the current one.
-    #[error(
-        "retained signed prekey identifier {retained_id} is not older than current identifier \
-         {current_id}"
-    )]
-    RetainedIdNotOlder {
-        /// Retained signed prekey's identifier.
-        retained_id: u64,
-        /// Current signed prekey's identifier.
-        current_id: u64,
     },
     /// Signing a new signed prekey with the discovery key failed.
     #[error("signing the signed prekey failed")]
@@ -203,12 +168,16 @@ impl SignedPreKeyManager {
         let previous = self
             .load_store_optional(now)?
             .filter(|store| store.current.epoch == discovery_key.epoch());
-        let next_id = previous.as_ref().map_or(0, |store| store.next_id);
-        let following_id = next_id
-            .checked_add(1)
-            .ok_or(SignedPreKeyError::IdentifiersExhausted)?;
+        let id = match &previous {
+            Some(store) => store
+                .current
+                .id
+                .checked_add(1)
+                .ok_or(SignedPreKeyError::IdentifiersExhausted)?,
+            None => 0,
+        };
         let signed_prekey =
-            generate_signed_prekey_for_discovery_key(rng, &discovery_key, next_id, now_secs)
+            generate_signed_prekey_for_discovery_key(rng, &discovery_key, id, now_secs)
                 .map_err(SignedPreKeyError::SignedPreKeySignature)?;
         // Room for every retained key, so the list of secrets never reallocates.
         let mut retained = Vec::with_capacity(MAX_RETAINED_SIGNED_PREKEYS);
@@ -227,7 +196,6 @@ impl SignedPreKeyManager {
         let entry = encode_versioned(
             SIGNED_PREKEYS_VERSION,
             &SignedPreKeysWire::Stored(StoredSignedPreKeysWire {
-                next_id: following_id,
                 current: SignedPreKeyWire::from_prekey(&signed_prekey),
                 retained,
             }),
@@ -256,14 +224,9 @@ impl SignedPreKeyManager {
             }
             SignedPreKeysWire::Stored(store) => store,
         };
-        store.validate()?;
-        store.retained.retain(|retained| {
-            !is_expired(
-                retained.superseded_at_secs,
-                now,
-                SIGNED_PREKEY_RETENTION_WINDOW,
-            )
-        });
+        store
+            .retained
+            .retain(|retained| !is_expired(retained.superseded_at_secs, now, RELAY_HOLD_TIME));
         Ok(Some(store))
     }
 
@@ -274,18 +237,6 @@ impl SignedPreKeyManager {
     }
 }
 
-// Returns whether a stored Unix-seconds timestamp is at least `window` old at `now`. Timestamps
-// more than `FUTURE_TIMESTAMP_TOLERANCE` ahead also count as expired.
-fn is_expired(timestamp_secs: u64, now: SystemTime, window: Duration) -> bool {
-    let Some(timestamp) = from_unix_secs(timestamp_secs) else {
-        return true;
-    };
-    match now.duration_since(timestamp) {
-        Ok(age) => age >= window,
-        Err(ahead) => ahead.duration() > FUTURE_TIMESTAMP_TOLERANCE,
-    }
-}
-
 #[derive(Deserialize, Serialize)]
 enum SignedPreKeysWire {
     // A restored backup left these prekeys unusable until an inbox rotation replaces them.
@@ -293,46 +244,11 @@ enum SignedPreKeysWire {
     Stored(StoredSignedPreKeysWire),
 }
 
-#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, Serialize, ZeroizeOnDrop)]
 struct StoredSignedPreKeysWire {
-    #[zeroize(skip)]
-    next_id: u64,
     current: SignedPreKeyWire,
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_RETAINED_SIGNED_PREKEYS>")]
     retained: Vec<RetainedSignedPreKeyWire>,
-}
-
-impl StoredSignedPreKeysWire {
-    fn validate(&self) -> Result<(), SignedPreKeyError> {
-        let current = &self.current;
-        if current.id.checked_add(1) != Some(self.next_id) {
-            return Err(SignedPreKeyError::NextIdMismatch {
-                next_id: self.next_id,
-                current_id: current.id,
-            });
-        }
-        for (index, entry) in self.retained.iter().enumerate() {
-            if entry.prekey.epoch != current.epoch {
-                return Err(SignedPreKeyError::RetainedEpochMismatch {
-                    retained_epoch: entry.prekey.epoch,
-                    current_epoch: current.epoch,
-                });
-            }
-            if entry.prekey.id >= current.id {
-                return Err(SignedPreKeyError::RetainedIdNotOlder {
-                    retained_id: entry.prekey.id,
-                    current_id: current.id,
-                });
-            }
-            if self.retained[..index]
-                .iter()
-                .any(|other| other.prekey.id == entry.prekey.id)
-            {
-                return Err(SignedPreKeyError::DuplicateRetainedId(entry.prekey.id));
-            }
-        }
-        Ok(())
-    }
 }
 
 #[derive(Default, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
@@ -401,8 +317,7 @@ mod tests {
     const FIXED_NOW: u64 = 1_700_000_000;
     const FIXED_EPOCH: u32 = 3;
     const SIGNED_PREKEY_ROTATION_WINDOW_SECS: u64 = SIGNED_PREKEY_ROTATION_WINDOW.as_secs();
-    const SIGNED_PREKEY_RETENTION_WINDOW_SECS: u64 = SIGNED_PREKEY_RETENTION_WINDOW.as_secs();
-    const FUTURE_TIMESTAMP_TOLERANCE_SECS: u64 = FUTURE_TIMESTAMP_TOLERANCE.as_secs();
+    const SIGNED_PREKEY_RETENTION_WINDOW_SECS: u64 = RELAY_HOLD_TIME.as_secs();
 
     fn at(secs: u64) -> SystemTime {
         from_unix_secs(secs).unwrap()
@@ -438,19 +353,12 @@ mod tests {
         SignedPreKeyManager::new(storage, discovery)
     }
 
-    // Stores `current` as the only signed prekey, with the next identifier after it.
+    // Stores `current` as the only signed prekey.
     fn store_only(manager: &SignedPreKeyManager, current: &SignedPreKey) {
-        store_entry(
-            manager,
-            StoredSignedPreKeysWire {
-                next_id: current.id() + 1,
-                current: SignedPreKeyWire::from_prekey(current),
-                retained: Vec::new(),
-            },
-        );
-    }
-
-    fn store_entry(manager: &SignedPreKeyManager, store: StoredSignedPreKeysWire) {
+        let store = StoredSignedPreKeysWire {
+            current: SignedPreKeyWire::from_prekey(current),
+            retained: Vec::new(),
+        };
         let entry =
             encode_versioned(SIGNED_PREKEYS_VERSION, &SignedPreKeysWire::Stored(store)).unwrap();
         manager
@@ -651,10 +559,8 @@ mod tests {
     fn rotate_if_stale_replaces_far_future_signed_prekey() {
         let mut rng = ChaCha20Rng::from_seed([0x99; 32]);
         let manager = setup_with_discovery_key().manager;
-        let signed_prekey = store_signed_prekey_with_created_at(
-            &manager,
-            FIXED_NOW + FUTURE_TIMESTAMP_TOLERANCE_SECS * 10,
-        );
+        let signed_prekey =
+            store_signed_prekey_with_created_at(&manager, FIXED_NOW + 300 * SECONDS_PER_DAY);
         let rotated = manager
             .rotate_if_stale(&mut rng, at(FIXED_NOW))
             .unwrap()
@@ -797,23 +703,16 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([0xa3; 32]);
         let setup = setup_with_discovery_key();
         let discovery_key = setup.discovery.current().unwrap();
-        let current = generate_signed_prekey_for_discovery_key(
-            &mut rng,
-            &discovery_key,
-            u64::MAX - 1,
-            FIXED_NOW,
-        )
-        .unwrap();
+        let current =
+            generate_signed_prekey_for_discovery_key(&mut rng, &discovery_key, u64::MAX, FIXED_NOW)
+                .unwrap();
         store_only(&setup.manager, &current);
 
         assert!(matches!(
             setup.manager.rotate_now(&mut rng, at(FIXED_NOW)),
             Err(SignedPreKeyError::IdentifiersExhausted)
         ));
-        assert_eq!(
-            setup.manager.current(at(FIXED_NOW)).unwrap().id(),
-            u64::MAX - 1
-        );
+        assert_eq!(setup.manager.current(at(FIXED_NOW)).unwrap().id(), u64::MAX);
     }
 
     #[test]
@@ -835,34 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn stored_signed_prekeys_with_a_retained_key_from_another_epoch_are_refused() {
-        let mut rng = ChaCha20Rng::from_seed([0xa5; 32]);
-        let setup = setup_with_discovery_key();
-        let first = setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap();
-        let mut retained = SignedPreKeyWire::from_prekey(&first);
-        retained.epoch += 1;
-        let current = SignedPreKeyWire::from_prekey(
-            &setup.manager.rotate_now(&mut rng, at(FIXED_NOW)).unwrap(),
-        );
-        store_entry(
-            &setup.manager,
-            StoredSignedPreKeysWire {
-                next_id: current.id + 1,
-                current,
-                retained: vec![RetainedSignedPreKeyWire {
-                    prekey: retained,
-                    superseded_at_secs: FIXED_NOW,
-                }],
-            },
-        );
-
-        assert!(matches!(
-            setup.manager.current(at(FIXED_NOW)),
-            Err(SignedPreKeyError::RetainedEpochMismatch { .. })
-        ));
-    }
-
-    #[test]
     fn stored_signed_prekeys_with_an_unknown_version_are_refused() {
         let manager = setup_with_discovery_key().manager;
         manager
@@ -873,7 +744,7 @@ mod tests {
 
         assert!(matches!(
             manager.current(at(FIXED_NOW)),
-            Err(SignedPreKeyError::StoredData(StoredDataError::UnsupportedVersion(version)))
+            Err(SignedPreKeyError::StoredData(StoredDataError::UnsupportedVersion { version }))
                 if version == SIGNED_PREKEYS_VERSION + 1
         ));
     }

@@ -1,6 +1,7 @@
 //! Two identities that have never met request, accept, and message each other through message
-//! operations, committing every result through the host.
+//! operations, committing every result through the app.
 
+use rand::rngs::OsRng;
 use std::time::Duration;
 
 use crate::support::accepted;
@@ -20,7 +21,7 @@ fn first_message_route(destination: &MessageDestination) -> (u64, Option<u64>) {
             one_time_prekey_id,
             ..
         } => (*signed_prekey_id, *one_time_prekey_id),
-        MessageDestination::Established { .. } => panic!("expected a first Message"),
+        MessageDestination::Established { .. } => panic!("expected a first message"),
     }
 }
 
@@ -29,7 +30,7 @@ fn a_request_without_a_bundle_asks_for_one_and_records_nothing() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let bob = Device::new(&relay, 0xb0);
-    let before = alice.host.snapshot_bytes();
+    let before = alice.database.snapshot_bytes();
 
     let outgoing = alice.outgoing(&bob, b"hi bob");
     let Encrypted::NeedsPreKeyBundle(identity_key) =
@@ -39,7 +40,7 @@ fn a_request_without_a_bundle_asks_for_one_and_records_nothing() {
     };
 
     assert_eq!(identity_key, bob.identity_key());
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -119,9 +120,7 @@ fn the_requester_keeps_sending_first_messages_until_acceptance() {
     let (mut alice, mut bob) = requested(&relay);
     let reply = bob.send(&alice, b"who is this?");
     alice.receive(&reply.message);
-
     let follow_up = alice.send(&bob, b"it's alice");
-
     first_message_route(&follow_up.destination);
     assert_eq!(follow_up.payload_kind, PayloadKind::ContentWithGrant);
 }
@@ -221,7 +220,7 @@ fn each_side_sends_at_most_three_distinct_messages_before_acceptance() {
         refused(alice.encrypt(fourth, Intent::Message)),
         roost_core::ProtocolStateError::PendingLimitReached { limit: 3 }
     ));
-    assert!(alice.encrypt(resent_third, Intent::Message).is_ok());
+    alice.encrypt(resent_third, Intent::Message).unwrap();
 }
 
 #[test]
@@ -230,17 +229,17 @@ fn the_receiver_withholds_plaintext_past_the_limit() {
     let (mut alice, mut bob) = requested(&relay);
     let second = alice.send(&bob, b"second");
     let contact_address = alice.contact_address(bob.identity_key());
-    let count_before_third = alice.host.blob_bytes(&contact_address).unwrap();
+    let count_before_third = alice.database.blob_bytes(&contact_address).unwrap();
     let third = alice.send(&bob, b"third");
-    // A sender that forgets its count, as a modified client would, sends a fourth distinct message.
-    alice.host.set_raw(contact_address, count_before_third);
+    // A sender that forgets its count, as a modified app would, sends a fourth distinct message.
+    alice.database.set_raw(contact_address, count_before_third);
     let fourth = alice.send(&bob, b"fourth");
     for message in [&second, &third] {
         accepted(bob.receive(&message.message));
     }
 
     let InboundMessageOutcome::Withheld(withheld) = bob.receive(&fourth.message) else {
-        panic!("expected the fourth Message withheld");
+        panic!("expected the fourth message withheld");
     };
 
     assert_eq!(withheld.message_id, fourth.message_id);
@@ -390,12 +389,12 @@ fn a_bundle_older_than_the_contacts_discovery_key_asks_again() {
     let relay = Relay::new();
     let (mut alice, mut bob) = requested(&relay);
     let stale = bob.bundle_without_one_time_prekey();
-    let rotation = bob.store.prepare_inbox_rotation().unwrap();
+    let rotation = bob.store.prepare_inbox_rotation(&mut OsRng).unwrap();
     bob.store.reserve_operation(rotation.id).unwrap();
     bob.store.finalize_operation(rotation.id).unwrap();
     let acceptance = bob.accept_request(&alice, b"welcome");
     alice.receive(&acceptance.message);
-    // Alice's host lost her sessions with Bob but kept his record, which the grant updated.
+    // Alice's app lost her sessions with Bob but kept his record, which the grant updated.
     alice.forget_sessions_with(&bob);
 
     let mut outgoing = alice.outgoing(&bob, b"hello again");
@@ -413,7 +412,10 @@ fn a_bundle_older_than_the_contacts_discovery_key_asks_again() {
 }
 
 fn rotate_signed_prekey(device: &Device) {
-    let rotation = device.store.prepare_signed_prekey_rotation().unwrap();
+    let rotation = device
+        .store
+        .prepare_signed_prekey_rotation(&mut OsRng)
+        .unwrap();
     device.store.reserve_operation(rotation.id).unwrap();
     device.store.finalize_operation(rotation.id).unwrap();
 }
@@ -424,7 +426,6 @@ fn a_first_message_on_the_current_signed_prekey_needs_no_admission() {
     let mut alice = Device::new(&relay, 0xa1);
     let bob = Device::new(&relay, 0xb0);
     let request = alice.request(&bob, b"hi bob");
-
     assert!(bob.observe(&request.message).unwrap().admission.is_none());
 }
 
@@ -439,7 +440,7 @@ fn a_first_message_on_a_kept_signed_prekey_needs_proven_admission() {
     let mut outgoing = alice.outgoing(&bob, b"hi bob");
     outgoing.prekey_bundle = Some(bundle);
     let request = alice.send_with(outgoing, Intent::Request);
-    let before = bob.host.snapshot_bytes();
+    let before = bob.database.snapshot_bytes();
 
     bob.admits = false;
     let Err(crate::support::device::DeviceError::NotAdmitted(admission)) =
@@ -448,7 +449,7 @@ fn a_first_message_on_a_kept_signed_prekey_needs_proven_admission() {
         panic!("expected Roost to ask for admission");
     };
     assert_eq!(admission.signed_prekey_id, kept_signed_prekey_id);
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 
     bob.admits = true;
     assert!(matches!(
@@ -512,7 +513,8 @@ fn a_replayed_first_message_is_a_duplicate_and_another_on_its_one_time_prekey_fa
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
     let bundle = bob.bundle();
-    let before_request = alice.host.clone();
+    let one_time_prekey_id = bundle.bundle.one_time_prekey.as_ref().unwrap().id;
+    let before_request = alice.database.clone();
     let mut first = alice.outgoing(&bob, b"hi bob");
     first.prekey_bundle = Some(clone_bundle(&bundle));
     let request = alice.send_with(first, Intent::Request);
@@ -522,8 +524,8 @@ fn a_replayed_first_message_is_a_duplicate_and_another_on_its_one_time_prekey_fa
         bob.observe(&request.message).unwrap().outcome,
         InboundMessageOutcome::Duplicate
     ));
-    // A host that lost Alice's commit starts another session on the same bundle.
-    alice.host = before_request;
+    // An app that lost Alice's commit starts another session on the same bundle.
+    alice.database = before_request;
     let mut second = alice.outgoing(&bob, b"hi again");
     second.prekey_bundle = Some(bundle);
     let second = alice.send_with(second, Intent::Request);
@@ -531,9 +533,9 @@ fn a_replayed_first_message_is_a_duplicate_and_another_on_its_one_time_prekey_fa
         bob.observe(&second.message),
         Err(crate::support::device::DeviceError::Operation(
             roost_core::MessageOperationError::KeyStore(roost_core::KeyStoreError::OneTimePreKey(
-                roost_core::OneTimePreKeyError::Used { .. }
+                roost_core::OneTimePreKeyError::Used { id }
             ))
-        ))
+        )) if id == one_time_prekey_id
     ));
 }
 
@@ -564,7 +566,7 @@ fn a_conflicting_commit_aborts_and_a_rerun_uses_the_one_time_prekey_once() {
 
     assert_eq!(
         bob.commit_changes(stale.changes).err(),
-        Some(crate::support::HostCommitError::StaleCondition)
+        Some(crate::support::AppCommitError::StaleCondition)
     );
     assert_eq!(
         bob.store.operation_status(stale_operation).unwrap(),
@@ -590,7 +592,7 @@ fn an_unknown_commit_outcome_is_reconciled_at_startup_without_losing_the_one_tim
     let operation = observed.changes.operation().unwrap();
     bob.store.reserve_operation(operation).unwrap();
     // The transaction commits, but a lost reply hides that it did, and the app restarts.
-    bob.host.commit(observed.changes).unwrap();
+    bob.database.commit(observed.changes).unwrap();
     bob.restart();
 
     let unfinished = bob.store.unfinished_operations().unwrap();
@@ -627,7 +629,7 @@ fn a_grant_rides_on_messages_until_the_contact_acknowledges_one() {
 fn after_an_inbox_rotation_contacts_get_the_new_grant() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
-    let rotation = bob.store.prepare_inbox_rotation().unwrap();
+    let rotation = bob.store.prepare_inbox_rotation(&mut OsRng).unwrap();
     bob.store.reserve_operation(rotation.id).unwrap();
     bob.store.finalize_operation(rotation.id).unwrap();
 
@@ -646,7 +648,7 @@ fn a_grant_for_an_older_discovery_key_changes_nothing() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);
     let delayed = bob.send(&alice, b"sent before the rotation");
-    let rotation = bob.store.prepare_inbox_rotation().unwrap();
+    let rotation = bob.store.prepare_inbox_rotation(&mut OsRng).unwrap();
     bob.store.reserve_operation(rotation.id).unwrap();
     bob.store.finalize_operation(rotation.id).unwrap();
     let current = bob.send(&alice, b"sent after the rotation");
@@ -689,7 +691,13 @@ fn messages_before_acceptance_leave_nothing_waiting_for_an_acknowledgment() {
     assert!(
         bob.store
             .protocol_engine()
-            .pending_acknowledgments(&alice.host.snapshot(), message.session_id)
+            .pending_acknowledgments(
+                message.session_id,
+                alice
+                    .database
+                    .pending_acknowledgments_record(message.session_id)
+                    .as_ref()
+            )
             .unwrap()
             .is_empty()
     );
@@ -713,7 +721,7 @@ fn blocking_a_stranger_rotates_the_inbox_and_hides_their_request() {
     assert!(contact.blocked);
     assert!(contact.discovery_key.is_none());
     // Bob's old bundle no longer reaches his inbox, and a fresh one reaches a blocked record.
-    let before_stale = alice.host.clone();
+    let before_stale = alice.database.clone();
     let mut stale = alice.outgoing(&bob, b"hi bob");
     stale.prekey_bundle = Some(bundle);
     let stale = alice.send_with(stale, Intent::Request);
@@ -727,7 +735,7 @@ fn blocking_a_stranger_rotates_the_inbox_and_hides_their_request() {
             )
         ))
     ));
-    alice.host = before_stale;
+    alice.database = before_stale;
     let request = alice.request(&bob, b"hi again");
     assert!(matches!(
         bob.receive(&request.message),
@@ -737,12 +745,12 @@ fn blocking_a_stranger_rotates_the_inbox_and_hides_their_request() {
 }
 
 #[test]
-fn a_blocked_stranger_learns_nothing_even_under_silent_receipt() {
+fn a_blocked_stranger_learns_nothing_even_under_the_acknowledge_policy() {
     let relay = Relay::new();
     let (mut alice, mut bob) = requested(&relay);
     bob.settings = ReceiveSettings::new(
         ProtocolHardeningLimits::default().default_deduplication_capacity,
-        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+        BlockedContactAcknowledgmentPolicy::Acknowledge,
         Duration::ZERO,
     )
     .unwrap();
@@ -752,7 +760,7 @@ fn a_blocked_stranger_learns_nothing_even_under_silent_receipt() {
     let request = alice.request(&bob, b"hello?");
 
     let InboundMessageOutcome::Blocked(blocked) = bob.receive(&request.message) else {
-        panic!("expected a blocked Message");
+        panic!("expected a blocked message");
     };
     assert!(blocked.acknowledgment.is_none());
 }
@@ -761,7 +769,7 @@ fn a_blocked_stranger_learns_nothing_even_under_silent_receipt() {
 fn a_blocked_contacts_new_session_is_authenticated_and_kept_with_its_plaintext_withheld() {
     for policy in [
         BlockedContactAcknowledgmentPolicy::Unreachable,
-        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+        BlockedContactAcknowledgmentPolicy::Acknowledge,
     ] {
         let relay = Relay::new();
         let (mut alice, mut bob) = befriended(&relay);
@@ -777,12 +785,12 @@ fn a_blocked_contacts_new_session_is_authenticated_and_kept_with_its_plaintext_w
         let request = alice.request(&bob, b"hidden");
 
         let InboundMessageOutcome::Blocked(hidden) = bob.receive(&request.message) else {
-            panic!("expected a blocked Message");
+            panic!("expected a blocked message");
         };
 
         assert_eq!(
             hidden.acknowledgment.is_some(),
-            policy == BlockedContactAcknowledgmentPolicy::SilentReceipt
+            policy == BlockedContactAcknowledgmentPolicy::Acknowledge
         );
         bob.unblock(alice.identity_key());
         let shown = accepted(bob.receive(&alice.send(&bob, b"shown").message));
@@ -791,11 +799,11 @@ fn a_blocked_contacts_new_session_is_authenticated_and_kept_with_its_plaintext_w
     }
 }
 
-// Alice's modified client stores `list` as her record of the sessions kept with `peer`. A list
+// Alice's modified app stores `list` as her record of the sessions kept with `peer`. A list
 // `peer` wrote for her says she started their session, so to Alice it says `peer` did.
 fn claim_the_peer_started_the_session(alice: &mut Device, peer: &Device, list: Vec<u8>) {
     let address = alice.sessions_address(peer.identity_key());
-    alice.host.set_raw(address, list);
+    alice.database.set_raw(address, list);
 }
 
 fn unsolicited(
@@ -816,7 +824,7 @@ fn an_acceptance_on_a_session_the_sender_started_is_refused() {
     let relay = Relay::new();
     let (mut alice, bob) = requested(&relay);
     let list = bob
-        .host
+        .database
         .blob_bytes(&bob.sessions_address(alice.identity_key()))
         .unwrap();
     claim_the_peer_started_the_session(&mut alice, &bob, list);
@@ -839,7 +847,7 @@ fn an_acceptance_that_starts_a_session_is_refused() {
     let request = alice.send_with(request, Intent::Request);
     // Bob never commits the request, so only a copy of his store holds the list it writes.
     let received = bob.observe(&request.message).unwrap();
-    let written = bob.host.clone().commit(received.changes).unwrap();
+    let written = bob.database.clone().commit(received.changes).unwrap();
     let list = written
         .iter()
         .find(|update| update.address().kind() == ProtocolStateKind::PeerSessions)
@@ -901,12 +909,12 @@ fn a_request_without_a_grant_from_an_identity_with_no_record_is_refused() {
         .acknowledgment
         .unwrap();
     alice.receive(&acknowledgment);
-    // Bob's host deletes everything about Alice, while Alice still counts Bob as accepted.
+    // Bob's app deletes everything about Alice, while Alice still counts Bob as accepted.
     for address in [
         bob.contact_address(alice.identity_key()),
         bob.sessions_address(alice.identity_key()),
     ] {
-        bob.host.remove(&address);
+        bob.database.remove(&address);
     }
     alice.forget_sessions_with(&bob);
     let ungranted = alice.request(&bob, b"no grant this time");
@@ -921,4 +929,16 @@ fn a_request_without_a_grant_from_an_identity_with_no_record_is_refused() {
         )) if reason == "contact request carries no inbox grant"
     ));
     assert!(bob.contact(&alice).is_none());
+}
+
+#[test]
+fn accepting_a_stranger_with_no_record_is_refused() {
+    let relay = Relay::new();
+    let mut alice = Device::new(&relay, 0xa1);
+    let bob = Device::new(&relay, 0xb0);
+    let outgoing = alice.outgoing(&bob, b"welcome");
+    assert!(matches!(
+        refused(alice.encrypt(outgoing, Intent::Acceptance)),
+        roost_core::ProtocolStateError::NoContactRequest
+    ));
 }

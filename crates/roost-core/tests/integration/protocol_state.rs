@@ -1,11 +1,12 @@
-//! Exercises the public protocol-state API over consumer-held opaque blobs.
+//! Exercises the public protocol-state API over opaque blobs the app holds.
 
 use crate::support::device::{Decrypted, Device, Relay, Sealed, run_encryption};
 use crate::support::{
-    CREATED_AT_SECS, HostStore, ProtocolFixture, TEST_RELAY_DOMAIN, accepted,
+    AppDatabase, CREATED_AT_SECS, ProtocolFixture, TEST_RELAY_DOMAIN, accepted,
     trusted_domain_signing_key, trusted_validation, validation,
 };
 use rand::SeedableRng;
+use rand::rngs::OsRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
     BlockedContactAcknowledgmentPolicy, ContactTrustState, InboundMessageOutcome,
@@ -27,7 +28,7 @@ fn rng(seed: u8) -> ChaCha20Rng {
 fn alice_sends(fixture: &ProtocolFixture, sequence: u16, plaintext: &[u8]) -> Sealed {
     fixture
         .encrypt(
-            &fixture.alice.host,
+            &fixture.alice.database,
             fixture.outgoing(sequence, plaintext),
             sequence as u8,
         )
@@ -44,14 +45,14 @@ fn alice_sends_certified(
     let mut outgoing = fixture.outgoing(sequence, plaintext);
     outgoing.sender_certificate = certificate;
     fixture
-        .encrypt(&fixture.alice.host, outgoing, sequence as u8)
+        .encrypt(&fixture.alice.database, outgoing, sequence as u8)
         .unwrap()
 }
 
 // Bob receives `message` over `store` with the given settings and certificate validation inputs.
 fn bob_receives(
     fixture: &ProtocolFixture,
-    store: &HostStore,
+    store: &AppDatabase,
     message: &SealedFrame,
     settings: ReceiveSettings,
     sender_certificate_validation: SenderCertificateValidation,
@@ -67,7 +68,7 @@ fn bob_receives(
 // Bob receives `message` with default settings, the trusted domain, and no revocations.
 fn bob_receives_validated(
     fixture: &ProtocolFixture,
-    store: &HostStore,
+    store: &AppDatabase,
     message: &SealedFrame,
     seed: u8,
 ) -> Result<Decrypted, MessageOperationError> {
@@ -108,20 +109,20 @@ fn block_alice(fixture: &mut ProtocolFixture) -> ProtocolStateAddress {
     let request = fixture.alice.request(&fixture.bob, b"after the block");
     let older = fixture
         .bob
-        .host
+        .database
         .addresses(ProtocolStateKind::RatchetSession);
     blocked(fixture.bob.receive(&request.message));
     fixture.session_id = request.session_id;
     fixture
         .bob
-        .host
+        .database
         .addresses(ProtocolStateKind::RatchetSession)
         .into_iter()
         .find(|address| !older.contains(address))
-        .expect("the request starts a Session")
+        .expect("the request starts a session")
 }
 
-fn blob(store: &HostStore, address: &ProtocolStateAddress) -> Vec<u8> {
+fn blob(store: &AppDatabase, address: &ProtocolStateAddress) -> Vec<u8> {
     store.blob_bytes(address).unwrap()
 }
 
@@ -156,7 +157,7 @@ fn sealed_sender_round_trip_hides_sender_identity_until_decrypt() {
     }
 
     let decrypted = accepted(
-        bob_receives_validated(&fixture, &fixture.bob.host, &encrypted.message, 12)
+        bob_receives_validated(&fixture, &fixture.bob.database, &encrypted.message, 12)
             .unwrap()
             .outcome,
     );
@@ -202,7 +203,7 @@ fn sealed_frame_hides_message_metadata_until_decrypt() {
     assert!(!encrypted.message.ciphertext.is_empty());
 
     let decrypted = accepted(
-        bob_receives_validated(&fixture, &fixture.bob.host, &encrypted.message, 0x42)
+        bob_receives_validated(&fixture, &fixture.bob.database, &encrypted.message, 0x42)
             .unwrap()
             .outcome,
     );
@@ -220,15 +221,22 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
     let encrypted = alice_sends(&fixture, 0x31, b"ack me");
     let message_id = encrypted.result.message_id;
     let message = encrypted.result.message;
-    fixture.alice.host.commit(encrypted.changes).unwrap();
+    fixture.alice.database.commit(encrypted.changes).unwrap();
     let pending = engine
-        .pending_acknowledgments(&fixture.alice.host.snapshot(), fixture.session_id)
+        .pending_acknowledgments(
+            fixture.session_id,
+            fixture
+                .alice
+                .database
+                .pending_acknowledgments_record(fixture.session_id)
+                .as_ref(),
+        )
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].message_id, message_id);
 
     let decrypted = accepted(
-        bob_receives_validated(&fixture, &fixture.bob.host, &message, 0x31)
+        bob_receives_validated(&fixture, &fixture.bob.database, &message, 0x31)
             .unwrap()
             .outcome,
     );
@@ -242,12 +250,12 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
             .any(|window| window == message_id.as_bytes())
     );
 
-    let process = |store: &HostStore, seed: u8| {
+    let process = |store: &AppDatabase, seed: u8| {
         fixture
             .alice_receives_over(store, &acknowledgment, seed)
             .unwrap()
     };
-    let processed = process(&fixture.alice.host, 0x41);
+    let processed = process(&fixture.alice.database, 0x41);
     let InboundMessageOutcome::AcknowledgmentMatched(cleared) = processed.outcome else {
         panic!("acknowledgment did not clear pending state");
     };
@@ -257,11 +265,16 @@ fn accepted_message_generates_encrypted_acknowledgment_that_clears_pending_state
         cleared.sender_identity.identity_key,
         *fixture.bob.identity.public_key.as_bytes()
     );
-    let mut alice_store = fixture.alice.host.clone();
+    let mut alice_store = fixture.alice.database.clone();
     alice_store.commit(processed.changes).unwrap();
     assert!(
         engine
-            .pending_acknowledgments(&alice_store.snapshot(), fixture.session_id)
+            .pending_acknowledgments(
+                fixture.session_id,
+                alice_store
+                    .pending_acknowledgments_record(fixture.session_id)
+                    .as_ref()
+            )
             .unwrap()
             .is_empty()
     );
@@ -278,9 +291,9 @@ fn pending_acknowledgment_state_faults_on_bad_blobs() {
     let fixture = ProtocolFixture::new();
     let address = fixture
         .alice
-        .host
+        .database
         .only(ProtocolStateKind::PendingAcknowledgments);
-    let mut corrupt = fixture.alice.host.clone();
+    let mut corrupt = fixture.alice.database.clone();
     corrupt.corrupt(&address);
 
     assert!(matches!(
@@ -328,34 +341,41 @@ fn oversized_sender_certificate_is_refused_before_sealing() {
     assert!(matches!(
         result,
         Err(MessageStartError::ProtocolState(
-            ProtocolStateError::InvalidMessage { .. }
-        ))
+            ProtocolStateError::InvalidMessage { reason }
+        )) if reason == format!(
+            "sender certificate length exceeds limit: {}",
+            limits.max_sender_certificate_len + 1
+        )
     ));
 }
 
 #[test]
 fn unique_received_message_is_accepted_recorded_and_emitted_once() {
     let mut fixture = ProtocolFixture::new();
-    let session_address = fixture.bob.host.only(ProtocolStateKind::RatchetSession);
-    let deduplication_address = fixture.bob.host.only(ProtocolStateKind::DeduplicationSet);
-    let prior_session = blob(&fixture.bob.host, &session_address);
-    let prior_deduplication = blob(&fixture.bob.host, &deduplication_address);
+    let session_address = fixture.bob.database.only(ProtocolStateKind::RatchetSession);
+    let deduplication_address = fixture
+        .bob
+        .database
+        .only(ProtocolStateKind::DeduplicationSet);
+    let prior_session = blob(&fixture.bob.database, &session_address);
+    let prior_deduplication = blob(&fixture.bob.database, &deduplication_address);
     let encrypted = alice_sends(&fixture, 10, b"accept once").result.message;
 
-    let received = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 19).unwrap();
+    let received = bob_receives_validated(&fixture, &fixture.bob.database, &encrypted, 19).unwrap();
 
     assert_eq!(
         accepted(received.outcome).plaintext.as_slice(),
         b"accept once"
     );
-    let updates = fixture.bob.host.commit(received.changes).unwrap();
+    let updates = fixture.bob.database.commit(received.changes).unwrap();
     assert_eq!(updates.len(), 2);
     assert_eq!(updates[0].address(), &session_address);
     assert_eq!(updates[1].address(), &deduplication_address);
     assert_ne!(updates[0].blob().unwrap().as_bytes(), prior_session);
     assert_ne!(updates[1].blob().unwrap().as_bytes(), prior_deduplication);
 
-    let duplicate = bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 20).unwrap();
+    let duplicate =
+        bob_receives_validated(&fixture, &fixture.bob.database, &encrypted, 20).unwrap();
     assert!(matches!(
         duplicate.outcome,
         InboundMessageOutcome::Duplicate
@@ -382,17 +402,17 @@ fn skipped_key_total_overflow_rejects_the_message_on_every_attempt() {
                 .into_iter()
                 .filter(|update| update.address().kind() == ProtocolStateKind::RatchetSession)
                 .collect();
-            fixture.alice.host.apply_all(&session_update);
+            fixture.alice.database.apply_all(&session_update);
         }
         let received =
-            bob_receives_validated(&fixture, &fixture.bob.host, &last.unwrap(), round).unwrap();
+            bob_receives_validated(&fixture, &fixture.bob.database, &last.unwrap(), round).unwrap();
         accepted(received.outcome);
-        fixture.bob.host.commit(received.changes).unwrap();
+        fixture.bob.database.commit(received.changes).unwrap();
         fixture.bob_replies(round);
     }
     sequence += 1;
     let undelivered = alice_sends(&fixture, sequence, b"undelivered");
-    fixture.alice.host.commit(undelivered.changes).unwrap();
+    fixture.alice.database.commit(undelivered.changes).unwrap();
     let terminal = alice_sends(&fixture, sequence + 1, b"overflow")
         .result
         .message;
@@ -401,11 +421,11 @@ fn skipped_key_total_overflow_rejects_the_message_on_every_attempt() {
         assert!(matches!(
             failure(bob_receives_validated(
                 &fixture,
-                &fixture.bob.host,
+                &fixture.bob.database,
                 &terminal,
                 seed
             )),
-            ProtocolStateError::Ratchet(RatchetError::MaxSkippedKeysExceeded { .. })
+            ProtocolStateError::Ratchet(RatchetError::MaxSkippedKeysExceeded { max: 500 })
         ));
     }
 }
@@ -422,14 +442,14 @@ fn a_tampered_message_fails_and_the_original_still_decrypts() {
     assert!(matches!(
         failure(bob_receives_validated(
             &fixture,
-            &fixture.bob.host,
+            &fixture.bob.database,
             &tampered,
             0x70
         )),
         ProtocolStateError::SealedFrame(SealedFrameError::Aead)
     ));
     let decrypted = accepted(
-        bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x71)
+        bob_receives_validated(&fixture, &fixture.bob.database, &encrypted, 0x71)
             .unwrap()
             .outcome,
     );
@@ -438,43 +458,53 @@ fn a_tampered_message_fails_and_the_original_still_decrypts() {
 }
 
 #[test]
-fn a_blocked_message_hides_its_plaintext_and_is_acknowledged_only_under_silent_receipt() {
+fn a_blocked_message_hides_its_plaintext_and_is_acknowledged_only_under_the_acknowledge_policy() {
     let mut fixture = ProtocolFixture::new();
     let session_address = block_alice(&mut fixture);
-    let deduplication_address = fixture.bob.host.only(ProtocolStateKind::DeduplicationSet);
-    let prior_session = blob(&fixture.bob.host, &session_address);
-    let prior_deduplication = blob(&fixture.bob.host, &deduplication_address);
+    let deduplication_address = fixture
+        .bob
+        .database
+        .only(ProtocolStateKind::DeduplicationSet);
+    let prior_session = blob(&fixture.bob.database, &session_address);
+    let prior_deduplication = blob(&fixture.bob.database, &deduplication_address);
     let encrypted = alice_sends(&fixture, 0x55, b"blocked text").result.message;
     let receive = |policy| {
         let received = bob_receives(
             &fixture,
-            &fixture.bob.host,
+            &fixture.bob.database,
             &encrypted,
             settings_with_policy(policy),
             trusted_validation(),
             0x55,
         )
         .unwrap();
-        let updates = fixture.bob.host.clone().commit(received.changes).unwrap();
+        let updates = fixture
+            .bob
+            .database
+            .clone()
+            .commit(received.changes)
+            .unwrap();
         (blocked(received.outcome).acknowledgment, updates)
     };
 
     let (suppressed, suppressed_updates) = receive(BlockedContactAcknowledgmentPolicy::Unreachable);
-    let (receipted, receipted_updates) = receive(BlockedContactAcknowledgmentPolicy::SilentReceipt);
+    let (acknowledged, acknowledged_updates) =
+        receive(BlockedContactAcknowledgmentPolicy::Acknowledge);
 
     assert!(suppressed.is_none());
-    assert!(receipted.unwrap().prekey_reference.is_none());
-    for updates in [&suppressed_updates, &receipted_updates] {
+    assert!(acknowledged.unwrap().prekey_reference.is_none());
+    for updates in [&suppressed_updates, &acknowledged_updates] {
         assert_eq!(updates.len(), 2);
         assert_eq!(updates[0].address(), &session_address);
         assert_eq!(updates[1].address(), &deduplication_address);
         assert_ne!(updates[0].blob().unwrap().as_bytes(), prior_session);
         assert_ne!(updates[1].blob().unwrap().as_bytes(), prior_deduplication);
     }
-    // The acknowledgment advances the sending chain, so only silent-receipt mutates it further.
+    // The acknowledgment advances the sending chain, so only the acknowledge policy changes it
+    // further.
     assert_ne!(
         suppressed_updates[0].blob().unwrap().as_bytes(),
-        receipted_updates[0].blob().unwrap().as_bytes(),
+        acknowledged_updates[0].blob().unwrap().as_bytes(),
     );
 }
 
@@ -482,19 +512,23 @@ fn a_blocked_message_hides_its_plaintext_and_is_acknowledged_only_under_silent_r
 fn discovery_key_rotation_does_not_bypass_blocked_inbound_message() {
     let mut fixture = ProtocolFixture::new();
     block_alice(&mut fixture);
-    let rotation = fixture.alice.store.prepare_inbox_rotation().unwrap();
+    let rotation = fixture
+        .alice
+        .store
+        .prepare_inbox_rotation(&mut OsRng)
+        .unwrap();
     fixture.alice.store.reserve_operation(rotation.id).unwrap();
     fixture.alice.store.finalize_operation(rotation.id).unwrap();
     let encrypted = alice_sends(&fixture, 0x54, b"rotated blocked").result;
     assert_eq!(encrypted.payload_kind, PayloadKind::ContentWithGrant);
 
     let received =
-        bob_receives_validated(&fixture, &fixture.bob.host, &encrypted.message, 0x54).unwrap();
+        bob_receives_validated(&fixture, &fixture.bob.database, &encrypted.message, 0x54).unwrap();
 
     let InboundMessageOutcome::Blocked(_) = received.outcome else {
-        panic!("expected the rotated contact's Message to stay blocked");
+        panic!("expected the rotated contact's message to stay blocked");
     };
-    fixture.bob.host.commit(received.changes).unwrap();
+    fixture.bob.database.commit(received.changes).unwrap();
     let contact = fixture.bob.contact(&fixture.alice).unwrap();
     assert!(contact.blocked);
     assert_eq!(
@@ -514,7 +548,7 @@ fn revoked_certificate_rejects_before_local_block_handling() {
 
     let result = bob_receives(
         &fixture,
-        &fixture.bob.host,
+        &fixture.bob.database,
         &encrypted,
         ReceiveSettings::default(),
         validation(vec![trusted_domain_signing_key()], revoked),
@@ -564,7 +598,7 @@ fn a_certificate_that_fails_validation_rejects_before_plaintext_is_surfaced() {
 
         let result = bob_receives(
             &fixture,
-            &fixture.bob.host,
+            &fixture.bob.database,
             &encrypted,
             ReceiveSettings::default(),
             validation,
@@ -598,7 +632,7 @@ fn message_at_the_passed_grace_boundary_is_accepted() {
     let accepted = accepted(
         bob_receives(
             &fixture,
-            &fixture.bob.host,
+            &fixture.bob.database,
             &encrypted,
             settings,
             trusted_validation(),
@@ -615,7 +649,7 @@ fn message_at_the_passed_grace_boundary_is_accepted() {
     assert!(matches!(
         failure(bob_receives_validated(
             &fixture,
-            &fixture.bob.host,
+            &fixture.bob.database,
             &encrypted,
             0x5f
         )),
@@ -639,7 +673,7 @@ fn certificate_identity_key_must_match_sealed_sender() {
     .message;
 
     assert!(matches!(
-        failure(bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 0x58)),
+        failure(bob_receives_validated(&fixture, &fixture.bob.database, &encrypted, 0x58)),
         ProtocolStateError::InvalidMessage { reason }
             if reason == "sender certificate identity key does not match sealed sender"
     ));
@@ -654,7 +688,7 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
     outgoing.sender_certificate = carol.certificate();
     let encrypted = run_encryption(
         carol.store.start_encryption(outgoing).unwrap(),
-        &fixture.alice.host,
+        &fixture.alice.database,
         &mut rng(9),
         &fixture.binding,
     )
@@ -664,7 +698,7 @@ fn decrypt_rejects_sender_identity_that_is_not_bound_to_session() {
     .message;
 
     assert!(matches!(
-        failure(bob_receives_validated(&fixture, &fixture.bob.host, &encrypted, 15)),
+        failure(bob_receives_validated(&fixture, &fixture.bob.database, &encrypted, 15)),
         ProtocolStateError::InvalidMessage { reason }
             if reason == "sealed sender identity key does not match session"
     ));
@@ -696,7 +730,7 @@ fn in_band_messages_and_acknowledgments_do_not_verify_contact() {
         ),
         "acknowledgment did not clear pending state"
     );
-    fixture.alice.host.commit(processed.changes).unwrap();
+    fixture.alice.database.commit(processed.changes).unwrap();
 
     assert_eq!(
         trust(&fixture.alice, &fixture.bob),
@@ -720,7 +754,7 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
         let encrypted = fixture.encrypt_from_alice(index as u16 + 1, b"fills window");
         let received = bob_receives(
             &fixture,
-            &fixture.bob.host,
+            &fixture.bob.database,
             &encrypted.message,
             smallest,
             trusted_validation(),
@@ -728,20 +762,23 @@ fn deduplication_capacity_evicts_oldest_digest_first() {
         )
         .unwrap();
         accepted(received.outcome);
-        fixture.bob.host.commit(received.changes).unwrap();
+        fixture.bob.database.commit(received.changes).unwrap();
         first_message.get_or_insert(encrypted.message);
     }
 
     let result = bob_receives(
         &fixture,
-        &fixture.bob.host,
+        &fixture.bob.database,
         &first_message.unwrap(),
         smallest,
         trusted_validation(),
         27,
     );
 
-    assert!(matches!(failure(result), ProtocolStateError::Ratchet(_)));
+    assert!(matches!(
+        failure(result),
+        ProtocolStateError::Ratchet(RatchetError::Aead)
+    ));
 }
 
 #[test]
@@ -760,7 +797,7 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
         *KeyPair::from_secret_bytes(&[0x55; 32]).public.as_bytes();
 
     for message in [wrong_recipient, wrong_ephemeral] {
-        let result = bob_receives_validated(&fixture, &fixture.bob.host, &message, 16);
+        let result = bob_receives_validated(&fixture, &fixture.bob.database, &message, 16);
         assert!(matches!(
             failure(result),
             ProtocolStateError::SealedFrame(_)
@@ -771,10 +808,10 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
 #[test]
 fn oversized_outbound_message_does_not_return_advanced_state() {
     let fixture = ProtocolFixture::new();
-    let before = fixture.alice.host.snapshot_bytes();
+    let before = fixture.alice.database.snapshot_bytes();
 
     let result = fixture.encrypt(
-        &fixture.alice.host,
+        &fixture.alice.database,
         fixture.outgoing(1, &[0u8; 64 * 1024]),
         1,
     );
@@ -783,18 +820,21 @@ fn oversized_outbound_message_does_not_return_advanced_state() {
         failure(result),
         ProtocolStateError::ContentTooLong { len, max } if len > max
     ));
-    assert_eq!(fixture.alice.host.snapshot_bytes(), before);
+    assert_eq!(fixture.alice.database.snapshot_bytes(), before);
 }
 
 #[test]
 fn oversized_or_corrupt_session_blob_is_a_decode_fault_without_reinitialization() {
     let fixture = ProtocolFixture::new();
-    let address = fixture.alice.host.only(ProtocolStateKind::RatchetSession);
-    let mut torn = blob(&fixture.alice.host, &address);
+    let address = fixture
+        .alice
+        .database
+        .only(ProtocolStateKind::RatchetSession);
+    let mut torn = blob(&fixture.alice.database, &address);
     torn.pop();
     let oversized = vec![1; ProtocolHardeningLimits::default().max_protocol_state_blob_len + 1];
     for stored in [oversized, torn] {
-        let mut alice_store = fixture.alice.host.clone();
+        let mut alice_store = fixture.alice.database.clone();
         alice_store.set_raw(address.clone(), stored.clone());
 
         let result = fixture.encrypt(&alice_store, fixture.outgoing(1, b"lost"), 1);
@@ -810,10 +850,9 @@ fn oversized_or_corrupt_session_blob_is_a_decode_fault_without_reinitialization(
 #[test]
 fn missing_required_state_is_an_explicit_failure() {
     let fixture = ProtocolFixture::new();
-    let address = fixture.alice.host.only(ProtocolStateKind::ContactState);
-    let mut alice_store = fixture.alice.host.clone();
+    let address = fixture.alice.database.only(ProtocolStateKind::ContactState);
+    let mut alice_store = fixture.alice.database.clone();
     alice_store.remove(&address);
-
     assert!(matches!(
         failure(fixture.encrypt(&alice_store, fixture.outgoing(1, b"lost"), 1)),
         ProtocolStateError::MissingRequiredState { address: actual } if actual == address

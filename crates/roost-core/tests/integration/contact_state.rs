@@ -1,9 +1,10 @@
 //! Contact calls that take a contact's one record, and the decoders apps read contacts through.
 
-use crate::support::HostCommitError;
+use crate::support::AppCommitError;
 use crate::support::device::{Device, Relay};
+use rand::rngs::OsRng;
 use roost_core::{
-    ContactIdentityKey, ContactSafetyNumberConfirmation, ContactTrustState, InboundMessageOutcome,
+    ContactSafetyNumberConfirmation, ContactTrustState, IdentityKey, InboundMessageOutcome,
     ProtocolStateBlob, ProtocolStateError, ProtocolStateKind, derive_safety_number,
 };
 
@@ -43,7 +44,7 @@ fn decoders_read_every_contact_record_and_refuse_other_kinds() {
     let (alice, bob) = befriended(&relay);
     let engine = *alice.store.protocol_engine();
     let contacts: Vec<_> = alice
-        .host
+        .database
         .snapshot_bytes()
         .into_iter()
         .filter(|(address, _)| address.kind() == ProtocolStateKind::ContactState)
@@ -61,9 +62,10 @@ fn decoders_read_every_contact_record_and_refuse_other_kinds() {
     assert!(matches!(
         engine.decode_contact(
             &sessions,
-            &ProtocolStateBlob::from_bytes(alice.host.blob_bytes(&sessions).unwrap())
+            &ProtocolStateBlob::from_bytes(alice.database.blob_bytes(&sessions).unwrap())
         ),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
+        Err(ProtocolStateError::InvalidStateBinding { address, reason })
+            if address == sessions && reason == "record is not a contact"
     ));
 }
 
@@ -73,23 +75,26 @@ fn a_contact_record_under_another_identitys_address_is_a_fault() {
     let (alice, bob) = befriended(&relay);
     let stranger = Device::new(&relay, 0xc0);
     let address = alice.contact_address(bob.identity_key());
-    let blob = alice.host.blob_bytes(&address).unwrap();
+    let stranger_address = alice.contact_address(stranger.identity_key());
+    let blob = alice.database.blob_bytes(&address).unwrap();
     let mut torn = blob.clone();
     torn.pop();
 
     assert!(matches!(
-        alice.store.protocol_engine().decode_contact(
-            &alice.contact_address(stranger.identity_key()),
-            &ProtocolStateBlob::from_bytes(blob)
-        ),
-        Err(ProtocolStateError::BlobDecode { .. })
+        alice
+            .store
+            .protocol_engine()
+            .decode_contact(&stranger_address, &ProtocolStateBlob::from_bytes(blob)),
+        Err(ProtocolStateError::BlobDecode { address: actual, reason })
+            if actual == stranger_address && reason == "contact identity key does not match address"
     ));
     assert!(matches!(
         alice
             .store
             .protocol_engine()
             .decode_contact(&address, &ProtocolStateBlob::from_bytes(torn)),
-        Err(ProtocolStateError::BlobDecode { .. })
+        Err(ProtocolStateError::BlobDecode { address: actual, reason })
+            if actual == address && reason == "contact state failed to decode"
     ));
 }
 
@@ -108,7 +113,9 @@ fn a_pending_contact_cannot_be_verified() {
             alice.contact_record(bob.identity_key()).as_ref(),
             &safety_number.grouped_decimal,
         ),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
+        Err(ProtocolStateError::InvalidStateBinding { address, reason })
+            if address == alice.contact_address(bob.identity_key())
+                && reason == "pending contact cannot be verified"
     ));
 }
 
@@ -155,7 +162,8 @@ fn confirming_without_a_record_is_a_fault() {
             None,
             &safety_number.grouped_decimal,
         ),
-        Err(ProtocolStateError::MissingRequiredState { .. })
+        Err(ProtocolStateError::MissingRequiredState { address })
+            if address == alice.contact_address(bob.identity_key())
     ));
 }
 
@@ -181,7 +189,7 @@ fn a_confirmation_cannot_commit_after_the_record_changed() {
 
     assert_eq!(
         alice.commit_changes(stale).err(),
-        Some(HostCommitError::StaleCondition)
+        Some(AppCommitError::StaleCondition)
     );
     let contact = alice.contact(&bob).unwrap();
     assert!(contact.blocked);
@@ -246,7 +254,7 @@ fn a_new_discovery_key_keeps_trust_blocking_and_the_safety_number() {
     let (mut alice, mut bob) = befriended(&relay);
     verify(&mut alice, &bob);
     let safety_number = derive_safety_number(alice.identity_key(), bob.identity_key()).unwrap();
-    let rotation = bob.store.prepare_inbox_rotation().unwrap();
+    let rotation = bob.store.prepare_inbox_rotation(&mut OsRng).unwrap();
     bob.store.reserve_operation(rotation.id).unwrap();
     bob.store.finalize_operation(rotation.id).unwrap();
     let message = bob.send(&alice, b"new inbox");
@@ -277,13 +285,15 @@ fn a_new_discovery_key_keeps_trust_blocking_and_the_safety_number() {
 fn contact_calls_refuse_a_non_canonical_identity_key() {
     let relay = Relay::new();
     let alice = Device::new(&relay, 0xa1);
-    let invalid = ContactIdentityKey {
+    let invalid = IdentityKey {
         x25519_public_key: [0; 32],
         ed25519_verifying_key: alice.identity_key().ed25519_verifying_key,
     };
 
     assert!(matches!(
         alice.store.protocol_engine().unblock_contact(invalid, None),
-        Err(ProtocolStateError::InvalidStateBinding { .. })
+        Err(ProtocolStateError::InvalidStateBinding { address, reason })
+            if address.kind() == ProtocolStateKind::ContactState
+                && reason == "contact identity key is invalid"
     ));
 }

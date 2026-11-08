@@ -12,9 +12,9 @@ use super::deduplication::{
 };
 use super::envelope::{
     LocalSender, OpenedMessage, OutboundContent, SignedRecipient, authenticate_first_message,
-    authenticate_session_message, certified_sender_identity_key, decode_acknowledgment_plaintext,
-    encode_acknowledgment_plaintext, open_message, seal_proved, seal_signed,
-    validate_sender_identity, verify_recipient_keys,
+    authenticate_message_on_session, certified_sender_identity_key, check_certificate_len,
+    decode_acknowledgment_plaintext, encode_acknowledgment_plaintext, open_message, seal_proved,
+    seal_signed, verify_recipient_keys,
 };
 use super::grant::{
     DiscoveryKeyStamp, InboxGrant, LocalGrant, MAX_ENCODED_GRANT_LEN, encode_granted_payload,
@@ -39,7 +39,7 @@ use super::{
     WithheldInboundMessageResult, match_state_entries, validate_contact_identity_key,
 };
 use crate::TransportBinding;
-use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
+use crate::contact::ContactDiscoveryKey;
 use crate::key_store::{KeyStore, KeyStoreError};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
@@ -49,8 +49,8 @@ use roost_crypto::{
     sign_identity_key_binding, verify_discovery_to_identity_binding,
 };
 use roost_protocol::{
-    MAX_SEALED_PLAINTEXT_LEN, MessageId, PUBLIC_KEY_LEN, PayloadKind, SenderCertificateValidation,
-    SessionId,
+    IdentityKey, MAX_SEALED_PLAINTEXT_LEN, MessageId, PUBLIC_KEY_LEN, PayloadKind,
+    SenderCertificateValidation, SessionId,
 };
 use std::collections::BTreeMap;
 use std::time::SystemTime;
@@ -107,14 +107,14 @@ pub struct PeerPreKeyBundle {
 /// What the app sends: a recipient, a stable draft message ID, and the plaintext.
 pub struct OutgoingMessage {
     /// The contact's identity key, which selects the session and the destination.
-    pub recipient: ContactIdentityKey,
+    pub recipient: IdentityKey,
     /// The message ID the app allocated for this draft, kept across retries.
     pub message_id: MessageId,
     /// Sender-observed Unix timestamp in milliseconds.
     pub sent_at_millis: u64,
     /// The local identity's certificate sealed into the message.
     pub sender_certificate: SignedSenderCertificate,
-    /// Plaintext bytes to encrypt, at most 65,291.
+    /// Plaintext bytes to encrypt, at most 65,293.
     pub plaintext: Zeroizing<Vec<u8>>,
     /// The bundle the app fetched after [`MessageEncryptionStep::NeedsPreKeyBundle`], kept with
     /// the draft until a send uses it.
@@ -124,7 +124,7 @@ pub struct OutgoingMessage {
 /// What the app sends to give a contact the current inbox grant: a recipient and a message ID.
 pub struct OutgoingGrantUpdate {
     /// The contact's identity key, which selects the session and the destination.
-    pub recipient: ContactIdentityKey,
+    pub recipient: IdentityKey,
     /// The message ID the app allocated for this grant update, kept across retries.
     pub message_id: MessageId,
     /// Sender-observed Unix timestamp in milliseconds.
@@ -174,7 +174,7 @@ pub enum MessageDestination {
     /// A first message, which the relay admits against the recipient's current prekeys.
     FirstMessage {
         /// The recipient's identity key.
-        identity_key: ContactIdentityKey,
+        identity_key: IdentityKey,
         /// The recipient discovery key's X25519 public key the message is sealed to.
         discovery_key: [u8; PUBLIC_KEY_LEN],
         /// The recipient signed prekey the handshake used.
@@ -185,7 +185,7 @@ pub enum MessageDestination {
     /// An established message, which the relay admits with the recipient's delivery capability.
     Established {
         /// The recipient's identity key.
-        identity_key: ContactIdentityKey,
+        identity_key: IdentityKey,
         /// The recipient discovery key's X25519 public key the message is sealed to.
         discovery_key: [u8; PUBLIC_KEY_LEN],
         /// The recipient's delivery capability, a secret the app passes only to the relay.
@@ -213,8 +213,9 @@ pub enum MessageEncryptionStep {
     /// A new session, or the first send after an unblock, needs this contact's prekey bundle, and
     /// the given one is missing or older than the contact's discovery key. A send to an accepted
     /// contact, or an acceptance of a request, whose session records are missing starts a new
-    /// session too. The operation has ended: fetch the bundle and start again with the same draft.
-    NeedsPreKeyBundle(ContactIdentityKey),
+    /// session too. The operation has ended, so fetch the bundle and start again with the same
+    /// draft.
+    NeedsPreKeyBundle(IdentityKey),
     /// The contact already acknowledged a message carrying the current inbox grant, so a grant
     /// update has nothing to carry. The operation has ended and nothing changed.
     NothingToSend,
@@ -290,7 +291,7 @@ struct Encrypting {
     engine: ProtocolStateEngine,
     sender: LocalSenderKeys,
     intent: SendIntent,
-    recipient: ContactIdentityKey,
+    recipient: IdentityKey,
     message_id: MessageId,
     sent_at_millis: u64,
     plaintext: Zeroizing<Vec<u8>>,
@@ -389,7 +390,7 @@ impl Route {
         }
     }
 
-    fn destination(&self, identity_key: ContactIdentityKey) -> MessageDestination {
+    fn destination(&self, identity_key: IdentityKey) -> MessageDestination {
         match self {
             Self::FirstMessage {
                 discovery_key,
@@ -451,8 +452,8 @@ impl ProtocolStateEngine {
                 max: MAX_CONTENT_LEN,
             });
         }
+        check_certificate_len(&message.sender_certificate.certificate, self.limits)?;
         let sender = LocalSenderKeys::new(keys, message.sender_certificate)?;
-        validate_sender_identity(&sender.identity, self.limits)?;
         Ok(Encrypting {
             engine: *self,
             sender,
@@ -478,8 +479,11 @@ impl ProtocolStateEngine {
         message: IncomingMessage,
     ) -> Result<MessageDecryption, ProtocolStateError> {
         let encoded = message.message.to_bytes()?;
+        check_certificate_len(
+            &message.acknowledgment_sender_certificate.certificate,
+            self.limits,
+        )?;
         let local = LocalSenderKeys::new(keys, message.acknowledgment_sender_certificate)?;
-        validate_sender_identity(&local.identity, self.limits)?;
         Ok(MessageDecryption(Some(Box::new(Decrypting {
             engine: *self,
             store,
@@ -664,7 +668,7 @@ impl Encrypting {
             (contact @ None, _) if self.intent == SendIntent::Request => {
                 return self.start_session(rng, contact);
             }
-            // An accepted contact has a session unless the host lost its records.
+            // An accepted contact has a session unless the app lost its records.
             (Some(contact), None) if contact.is_accepted() => {
                 return self.start_session(rng, Some(contact));
             }
@@ -781,7 +785,7 @@ impl Encrypting {
         &self,
         bundle: &PeerPreKeyBundle,
     ) -> Result<ContactDiscoveryKey, ProtocolStateError> {
-        let bundle_identity_key = ContactIdentityKey {
+        let bundle_identity_key = IdentityKey {
             x25519_public_key: *bundle.identity_key.public_key.as_bytes(),
             ed25519_verifying_key: bundle.identity_key.verifying_key.to_bytes(),
         };
@@ -1029,7 +1033,6 @@ impl Encrypting {
                 &pending_handshake.handshake,
                 &sender,
                 transport_binding,
-                limits,
             )?,
             None => seal_signed(
                 rng,
@@ -1041,7 +1044,6 @@ impl Encrypting {
                 },
                 &sender,
                 transport_binding,
-                limits,
             )?,
         };
         let pending_address = pending_acknowledgment_address(session_id);
@@ -1204,7 +1206,7 @@ struct Opened {
 struct KnownSession {
     opened: Opened,
     session_id: SessionId,
-    peer_identity_key: ContactIdentityKey,
+    peer_identity_key: IdentityKey,
     state: Box<RatchetState>,
     pending_handshake: Option<PendingHandshake>,
 }
@@ -1231,7 +1233,7 @@ struct AcceptedFirstMessage {
     digest: [u8; DIGEST_LEN],
     session_id: SessionId,
     state: Box<RatchetState>,
-    sender_identity_key: ContactIdentityKey,
+    sender_identity_key: IdentityKey,
     sender_discovery_key: ContactDiscoveryKey,
     grant: Option<InboxGrant>,
     message_id: MessageId,
@@ -1262,7 +1264,7 @@ enum Delivered {
 // An authenticated message and the state changes it makes, before any acknowledgment.
 struct Delivery {
     session_id: SessionId,
-    peer_identity_key: ContactIdentityKey,
+    peer_identity_key: IdentityKey,
     state: Box<RatchetState>,
     pending_handshake: Option<PendingHandshake>,
     message_id: MessageId,
@@ -1387,9 +1389,11 @@ impl Decrypting {
                     Ok(MessageDecryptionStep::NeedsAdmission(admission))
                 }
             }
-            DecryptionPhase::FirstMessagePeerRequested(first) => self.read_current_session(*first),
+            DecryptionPhase::FirstMessagePeerRequested(first) => {
+                self.read_current_session(rng, *first)
+            }
             DecryptionPhase::FirstMessageCurrentRequested(first, sessions) => {
-                self.record_first_message(*first, Some(sessions))
+                self.record_first_message(rng, *first, Some(sessions))
             }
             DecryptionPhase::AcknowledgmentTransportRequested(mut acknowledging) => {
                 match acknowledging.transport_binding.take() {
@@ -1540,7 +1544,6 @@ impl Decrypting {
         opened: Opened,
         reference: SealedFramePreKeyReference,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
-        let limits = self.engine.limits;
         let Opened {
             deduplication,
             digest,
@@ -1580,7 +1583,7 @@ impl Decrypting {
             }
             .into());
         }
-        let decoded = message.decrypt(rng, &mut state, limits)?;
+        let decoded = message.decrypt(rng, &mut state)?;
         let (sender, sender_discovery_key) =
             authenticate_first_message(&decoded, &handshake, &prekeys.signed_prekey)?;
         let sender_identity_key = certified_sender_identity_key(
@@ -1629,8 +1632,9 @@ impl Decrypting {
     // Asks for the records the new session's start touches: the session this side sends on when
     // this side started it, since the new one replaces it only once it no longer awaits a reply,
     // and the records of the sessions it evicts.
-    fn read_current_session(
+    fn read_current_session<R: RngCore + CryptoRng>(
         &mut self,
+        rng: &mut R,
         first: AcceptedFirstMessage,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
         let sessions = load_peer_sessions(
@@ -1645,7 +1649,7 @@ impl Decrypting {
             {
                 sessions
             }
-            sessions => return self.record_first_message(first, sessions),
+            sessions => return self.record_first_message(rng, first, sessions),
         };
         let mut addresses: Vec<ProtocolStateAddress> = sessions
             .evicted_by_next_start()
@@ -1656,7 +1660,7 @@ impl Decrypting {
             addresses.push(session_address(sessions.current()));
         }
         if addresses.is_empty() {
-            return self.record_first_message(first, Some(sessions));
+            return self.record_first_message(rng, first, Some(sessions));
         }
         self.phase = DecryptionPhase::FirstMessageCurrentRequested(Box::new(first), sessions);
         Ok(MessageDecryptionStep::NeedsState(
@@ -1665,8 +1669,9 @@ impl Decrypting {
     }
 
     // Records the new session and what the first message means for the sender's contact record.
-    fn record_first_message(
+    fn record_first_message<R: RngCore + CryptoRng>(
         &mut self,
+        rng: &mut R,
         first: AcceptedFirstMessage,
         sessions: Option<PeerSessions>,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
@@ -1694,8 +1699,7 @@ impl Decrypting {
             .as_ref()
             .is_some_and(|sessions| sessions.current_starter() == Starter::Local);
         let (peer_sessions, evicted) = match sessions {
-            // The session's blob is gone by now, so one the list still names was wiped by the
-            // host.
+            // The session's blob is gone by now, so one the list still names was wiped by the app.
             Some(sessions) if sessions.was_deleted(session_id) || sessions.contains(session_id) => {
                 return Ok(unchanged(InboundMessageOutcome::DeletedSession));
             }
@@ -1810,6 +1814,7 @@ impl Decrypting {
                 )?,
             );
             return self.withhold(
+                rng,
                 session_id,
                 message_id,
                 updates,
@@ -1821,6 +1826,7 @@ impl Decrypting {
             .then(|| Route::established(&contact))
             .transpose()?;
         self.deliver(
+            rng,
             Delivery {
                 session_id,
                 peer_identity_key: sender_identity_key,
@@ -1863,7 +1869,7 @@ impl Decrypting {
             pending_handshake,
         } = known;
         let payload_kind = message.metadata.payload_kind;
-        // A session the peer's list doesn't keep, such as after the host lost the list, is as
+        // A session the peer's list doesn't keep, such as after the app lost the list, is as
         // unknown as one whose record is gone.
         let Some((sessions, starter)) = load_peer_sessions(
             self.reads.snapshot(),
@@ -1876,8 +1882,8 @@ impl Decrypting {
         }) else {
             return Ok(unchanged(InboundMessageOutcome::UnknownSession));
         };
-        let decoded = message.decrypt(rng, &mut state, limits)?;
-        authenticate_session_message(
+        let decoded = message.decrypt(rng, &mut state)?;
+        authenticate_message_on_session(
             &decoded,
             &message,
             peer_identity_key,
@@ -2013,7 +2019,14 @@ impl Decrypting {
                     limits,
                 )?,
             );
-            return self.withhold(session_id, message.metadata.id, updates, Vec::new(), None);
+            return self.withhold(
+                rng,
+                session_id,
+                message.metadata.id,
+                updates,
+                Vec::new(),
+                None,
+            );
         }
         let delivered = if contact.blocked {
             Delivered::Blocked
@@ -2025,6 +2038,7 @@ impl Decrypting {
             .then(|| Route::established(&contact))
             .transpose()?;
         self.deliver(
+            rng,
             Delivery {
                 session_id,
                 peer_identity_key,
@@ -2086,18 +2100,19 @@ impl Decrypting {
     }
 
     // Returns whether a message from `contact` on a session `starter` started gets an
-    // acknowledgment. A blocked contact gets one only under the silent-receipt choice, and even
+    // acknowledgment. A blocked contact gets one only under the acknowledge policy, and even
     // then a stranger whose request is open doesn't learn it arrived.
     fn should_acknowledge(&self, contact: &ContactRecord, starter: Starter) -> bool {
         contact.should_acknowledge(starter)
             && (!contact.blocked
                 || self.settings.blocked_contact_acknowledgment_policy
-                    == BlockedContactAcknowledgmentPolicy::SilentReceipt)
+                    == BlockedContactAcknowledgmentPolicy::Acknowledge)
     }
 
     // Returns a message past the limit before acceptance without its plaintext.
-    fn withhold(
+    fn withhold<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         session_id: SessionId,
         message_id: MessageId,
         updates: Vec<ProtocolStateUpdate>,
@@ -2105,6 +2120,7 @@ impl Decrypting {
         one_time_prekey: Option<OneTimePreKeyUse>,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
         let changes = self.with_one_time_prekey(
+            rng,
             changes(&self.reads, updates).with_undelivered(undelivered),
             one_time_prekey,
         )?;
@@ -2118,8 +2134,9 @@ impl Decrypting {
     }
 
     // Returns the delivered message, or first asks where its acknowledgment goes.
-    fn deliver(
+    fn deliver<R: RngCore + CryptoRng>(
         &mut self,
+        rng: &mut R,
         delivery: Delivery,
         acknowledgment_route: Option<Route>,
     ) -> Result<MessageDecryptionStep, MessageOperationError> {
@@ -2132,7 +2149,7 @@ impl Decrypting {
                 delivery.pending_handshake.as_ref(),
                 self.engine.limits,
             )?;
-            return self.outcome(delivery, session, None);
+            return self.outcome(rng, delivery, session, None);
         };
         let destination = route.destination(delivery.peer_identity_key);
         self.phase = DecryptionPhase::AcknowledgmentTransportRequested(Box::new(Acknowledging {
@@ -2186,7 +2203,6 @@ impl Decrypting {
             },
             &self.local.local_sender(),
             transport_binding,
-            limits,
         )?;
         let session = session_update(
             self.reads.snapshot(),
@@ -2196,11 +2212,12 @@ impl Decrypting {
             delivery.pending_handshake.as_ref(),
             limits,
         )?;
-        self.outcome(delivery, session, Some(acknowledgment))
+        self.outcome(rng, delivery, session, Some(acknowledgment))
     }
 
-    fn outcome(
+    fn outcome<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         delivery: Delivery,
         session: ProtocolStateUpdate,
         acknowledgment: Option<SealedFrame>,
@@ -2220,6 +2237,7 @@ impl Decrypting {
         } = delivery;
         updates.insert(0, session);
         let changes = self.with_one_time_prekey(
+            rng,
             changes(&self.reads, updates).with_undelivered(undelivered),
             one_time_prekey,
         )?;
@@ -2257,14 +2275,15 @@ impl Decrypting {
     }
 
     // Stages the use of the one-time prekey a new session consumed, so it commits with `changes`.
-    fn with_one_time_prekey(
+    fn with_one_time_prekey<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         changes: StateChanges,
         one_time_prekey: Option<OneTimePreKeyUse>,
     ) -> Result<StateChanges, MessageOperationError> {
         Ok(match one_time_prekey {
             Some(OneTimePreKeyUse { epoch, id }) => {
-                changes.with_operation(self.store.prepare_one_time_prekey_use(epoch, id)?)
+                changes.with_operation(self.store.prepare_one_time_prekey_use(rng, epoch, id)?)
             }
             None => changes,
         })
@@ -2301,7 +2320,7 @@ fn open_payload(
 fn session_update(
     snapshot: &ProtocolStateSnapshot,
     session_id: SessionId,
-    peer_identity_key: ContactIdentityKey,
+    peer_identity_key: IdentityKey,
     state: &RatchetState,
     pending_handshake: Option<&PendingHandshake>,
     limits: ProtocolHardeningLimits,
@@ -2390,7 +2409,7 @@ impl LocalSenderKeys {
             identity: SenderIdentityMaterial {
                 identity_key: *identity_key.public_key.as_bytes(),
                 identity_verifying_key,
-                identity_binding_signature: identity_key.binding_signature.to_bytes().to_vec(),
+                identity_binding_signature: identity_key.binding_signature.to_bytes(),
                 certificate: certificate.certificate,
                 signature: certificate.signature,
             },
@@ -2454,7 +2473,7 @@ impl StateReads {
         self.pending.as_deref()
     }
 
-    // Records the host's entries for the pending read, which must match it exactly.
+    // Records the app's entries for the pending read, which must match it exactly.
     fn supply(
         &mut self,
         entries: Vec<(ProtocolStateAddress, Option<ProtocolStateBlob>)>,
@@ -2464,7 +2483,7 @@ impl StateReads {
         match_state_entries(&expected, &entries)?;
         for (address, blob) in entries {
             match blob {
-                Some(blob) => self.present.set(address, blob)?,
+                Some(blob) => self.present.insert(address, blob),
                 None => self.absent.push(address),
             }
         }
@@ -2496,6 +2515,7 @@ mod tests {
     use super::*;
     use crate::storage::InMemorySecureStorage;
     use rand::SeedableRng;
+    use rand::rngs::OsRng;
     use rand_chacha::ChaCha20Rng;
     use roost_crypto::generate_discovery_key;
 
@@ -2531,16 +2551,16 @@ mod tests {
     // Returns a KeyStore holding an identity and a signed prekey, as an app sets one up.
     fn key_store() -> (KeyStore, PublicIdentityKey) {
         let store = KeyStore::new(Box::new(InMemorySecureStorage::new()));
-        let created = store.prepare_identity_creation().unwrap();
+        let created = store.prepare_identity_creation(&mut OsRng).unwrap();
         store.reserve_operation(created.id).unwrap();
         store.finalize_operation(created.id).unwrap();
-        let rotated = store.prepare_signed_prekey_rotation().unwrap();
+        let rotated = store.prepare_signed_prekey_rotation(&mut OsRng).unwrap();
         store.reserve_operation(rotated.id).unwrap();
         store.finalize_operation(rotated.id).unwrap();
         (store, created.output.public().unwrap())
     }
 
-    // Runs `store`'s decryption of `message` over a host that holds no records.
+    // Runs `store`'s decryption of `message` over an app that holds no records.
     fn decrypt_over_no_records(
         store: &KeyStore,
         message: SealedFrame,
@@ -2611,7 +2631,7 @@ mod tests {
         let identity = SenderIdentityMaterial {
             identity_key: *identity_key.public_key.as_bytes(),
             identity_verifying_key: identity_key.verifying_key.to_bytes(),
-            identity_binding_signature: identity_key.binding_signature.to_bytes().to_vec(),
+            identity_binding_signature: identity_key.binding_signature.to_bytes(),
             certificate: Vec::new(),
             signature: [0; 64],
         };
@@ -2638,7 +2658,6 @@ mod tests {
                 &handshake,
                 &sender,
                 &TransportBinding::new(b"route".to_vec()).unwrap(),
-                ProtocolHardeningLimits::default(),
             )
             .unwrap()
         };

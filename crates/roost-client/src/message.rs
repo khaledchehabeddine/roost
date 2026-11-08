@@ -113,9 +113,9 @@ impl SenderIdentityMaterial {
                     agreement_key: value.identity_key.to_vec(),
                     signing_key: value.identity_verifying_key.to_vec(),
                 },
-                binding_signature: value.identity_binding_signature.clone(),
+                binding_signature: value.identity_binding_signature.to_vec(),
             },
-            certificate: value.certificate.clone(),
+            certificate: value.certificate,
             signature: value.signature.to_vec(),
         }
     }

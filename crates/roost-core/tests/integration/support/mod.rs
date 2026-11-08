@@ -1,14 +1,14 @@
+pub(crate) mod app_identity;
 pub(crate) mod device;
-pub(crate) mod host_identity;
 
 use device::{Decrypted, Device, Relay, Sealed, binding, run_encryption};
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use roost_core::{
-    ContactIdentityKey, DomainSigningKey, InboundMessageOutcome, IncomingMessage,
-    MessageDecryptionStep, MessageOperationError, MessageStartError, OutboundMessageResult,
-    OutgoingMessage, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKind,
-    ProtocolStateSnapshot, ProtocolStateUpdate, ReceiveSettings, RevocationState, SealedFrame,
+    DomainSigningKey, IdentityKey, InboundMessageOutcome, IncomingMessage, MessageDecryptionStep,
+    MessageOperationError, MessageStartError, OutboundMessageResult, OutgoingMessage,
+    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateKey, ProtocolStateKind,
+    ProtocolStateUpdate, ReceiveSettings, RevocationState, SealedFrame,
     SenderCertificateValidation, SessionId, SignedSenderCertificate, StateChanges,
     TransportBinding, commit_conditions_match,
 };
@@ -36,24 +36,25 @@ pub(crate) struct ProtocolFixture {
 /// The app's database: the records Roost asked it to keep, the messages it queued, and the sent
 /// messages it shows as not delivered.
 #[derive(Clone, Default)]
-pub(crate) struct HostStore {
+pub(crate) struct AppDatabase {
     blobs: BTreeMap<ProtocolStateAddress, Zeroizing<Vec<u8>>>,
     outbox: Vec<SealedFrame>,
     undelivered: Vec<MessageId>,
 }
 
-impl HostStore {
-    pub(crate) fn snapshot(&self) -> ProtocolStateSnapshot {
-        let mut snapshot = ProtocolStateSnapshot::new();
-        for (address, blob) in &self.blobs {
-            snapshot
-                .set(
-                    address.clone(),
-                    ProtocolStateBlob::from_bytes(blob.to_vec()),
-                )
-                .unwrap();
-        }
-        snapshot
+impl AppDatabase {
+    /// Returns the pending acknowledgment record of `session_id`, if the store holds one.
+    pub(crate) fn pending_acknowledgments_record(
+        &self,
+        session_id: SessionId,
+    ) -> Option<ProtocolStateBlob> {
+        let address = ProtocolStateAddress::new(
+            ProtocolStateKind::PendingAcknowledgments,
+            ProtocolStateKey::from_bytes(session_id.as_bytes().to_vec()).unwrap(),
+        );
+        self.blobs
+            .get(&address)
+            .map(|blob| ProtocolStateBlob::from_bytes(blob.to_vec()))
     }
 
     /// Commits `changes` in one transaction when every commit condition still holds, and returns
@@ -61,7 +62,7 @@ impl HostStore {
     pub(crate) fn commit(
         &mut self,
         changes: StateChanges,
-    ) -> Result<Vec<ProtocolStateUpdate>, HostCommitError> {
+    ) -> Result<Vec<ProtocolStateUpdate>, AppCommitError> {
         self.commit_with(changes, None)
     }
 
@@ -70,11 +71,11 @@ impl HostStore {
         &mut self,
         sent: &OutboundMessageResult,
         changes: StateChanges,
-    ) -> Result<Vec<ProtocolStateUpdate>, HostCommitError> {
+    ) -> Result<Vec<ProtocolStateUpdate>, AppCommitError> {
         self.commit_with(changes, Some(sent.message.clone()))
     }
 
-    /// Returns the host's entry for each requested record, with `None` where it holds none.
+    /// Returns the app's entry for each requested record, with `None` where it holds none.
     pub(crate) fn read(
         &self,
         addresses: &[ProtocolStateAddress],
@@ -98,14 +99,14 @@ impl HostStore {
         &mut self,
         changes: StateChanges,
         outbox: Option<SealedFrame>,
-    ) -> Result<Vec<ProtocolStateUpdate>, HostCommitError> {
+    ) -> Result<Vec<ProtocolStateUpdate>, AppCommitError> {
         let addresses: Vec<_> = changes
             .conditions()
             .iter()
             .map(|(address, _)| address.clone())
             .collect();
         if !commit_conditions_match(changes.conditions(), &self.read(&addresses)).unwrap() {
-            return Err(HostCommitError::StaleCondition);
+            return Err(AppCommitError::StaleCondition);
         }
         self.undelivered.extend_from_slice(changes.undelivered());
         let updates = changes.into_updates();
@@ -118,7 +119,7 @@ impl HostStore {
         &self.outbox
     }
 
-    /// Returns every sent message the host shows as not delivered, in the order commits marked
+    /// Returns every sent message the app shows as not delivered, in the order commits marked
     /// them.
     pub(crate) fn undelivered(&self) -> &[MessageId] {
         &self.undelivered
@@ -143,7 +144,7 @@ impl HostStore {
         }
     }
 
-    /// Returns the address of every record of `kind` the host holds.
+    /// Returns the address of every record of `kind` the database holds.
     pub(crate) fn addresses(&self, kind: ProtocolStateKind) -> Vec<ProtocolStateAddress> {
         self.blobs
             .keys()
@@ -152,7 +153,7 @@ impl HostStore {
             .collect()
     }
 
-    /// Returns the address of the one record of `kind` the host holds.
+    /// Returns the address of the one record of `kind` the database holds.
     pub(crate) fn only(&self, kind: ProtocolStateKind) -> ProtocolStateAddress {
         let [address] = &self.addresses(kind)[..] else {
             panic!("expected one {kind} record");
@@ -160,7 +161,7 @@ impl HostStore {
         address.clone()
     }
 
-    /// Deletes the records of the one session the host holds, as a host that lost them does.
+    /// Deletes the records of the one session the database holds, as an app that lost them does.
     pub(crate) fn forget_session(&mut self) {
         for kind in [
             ProtocolStateKind::RatchetSession,
@@ -196,7 +197,7 @@ impl HostStore {
         self.blobs.get(address).map(|blob| blob.to_vec())
     }
 
-    /// Writes `updates` without checking any condition, as a host that commits only part of a
+    /// Writes `updates` without checking any condition, as an app that commits only part of a
     /// result does.
     pub(crate) fn apply_all(&mut self, updates: &[ProtocolStateUpdate]) {
         for update in updates {
@@ -213,7 +214,7 @@ impl HostStore {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum HostCommitError {
+pub(crate) enum AppCommitError {
     StaleCondition,
 }
 
@@ -234,7 +235,7 @@ pub(crate) fn trusted_domain_signing_key() -> DomainSigningKey {
 /// Every identity's certificate validation inputs at the fixed test time.
 pub(crate) fn validation(
     domain_signing_keys: Vec<DomainSigningKey>,
-    revoked_identity_keys: Vec<ContactIdentityKey>,
+    revoked_identity_keys: Vec<IdentityKey>,
 ) -> SenderCertificateValidation {
     SenderCertificateValidation::new(
         domain_signing_keys,
@@ -252,7 +253,7 @@ pub(crate) fn trusted_validation() -> SenderCertificateValidation {
 
 /// Returns `identity_key`'s certificate from the test domain, expiring at `expires_at_secs`.
 pub(crate) fn certificate_until(
-    identity_key: ContactIdentityKey,
+    identity_key: IdentityKey,
     expires_at_secs: u64,
 ) -> SignedSenderCertificate {
     let certificate = sender_certificate_bytes(TEST_DOMAIN_ID, identity_key, expires_at_secs);
@@ -266,11 +267,11 @@ fn test_domain_key() -> SigningKeyPair {
     generate_signing_key_pair(&mut ChaCha20Rng::from_seed([0x90; 32]))
 }
 
-/// Runs `decryption` over `host`'s records, confirming admission and supplying `binding` when its
-/// acknowledgment asks for a transport.
+/// Runs `decryption` over `database`'s records, confirming admission and supplying `binding` when
+/// its acknowledgment asks for a transport.
 pub(crate) fn run_decryption(
     mut decryption: roost_core::MessageDecryption,
-    host: &HostStore,
+    database: &AppDatabase,
     rng: &mut ChaCha20Rng,
     binding: &TransportBinding,
 ) -> Result<Decrypted, MessageOperationError> {
@@ -279,7 +280,7 @@ pub(crate) fn run_decryption(
     loop {
         match decryption.step(rng)? {
             MessageDecryptionStep::NeedsState(addresses) => {
-                decryption.supply_state(host.read(&addresses))?;
+                decryption.supply_state(database.read(&addresses))?;
             }
             MessageDecryptionStep::NeedsAdmission(request) => {
                 admission = Some(request);
@@ -382,7 +383,7 @@ impl ProtocolFixture {
     /// Has Alice encrypt `outgoing` over `store` without committing.
     pub(crate) fn encrypt(
         &self,
-        store: &HostStore,
+        store: &AppDatabase,
         outgoing: OutgoingMessage,
         rng_seed: u8,
     ) -> Result<Sealed, MessageOperationError> {
@@ -398,7 +399,7 @@ impl ProtocolFixture {
     /// Has Bob decrypt `incoming` over `store` without committing.
     pub(crate) fn decrypt(
         &self,
-        store: &HostStore,
+        store: &AppDatabase,
         incoming: IncomingMessage,
         rng_seed: u8,
     ) -> Result<Decrypted, MessageOperationError> {
@@ -413,7 +414,7 @@ impl ProtocolFixture {
     /// Has Bob receive `message` over `store` with default settings and the trusted domain.
     pub(crate) fn receive(
         &self,
-        store: &HostStore,
+        store: &AppDatabase,
         message: &SealedFrame,
         rng_seed: u8,
     ) -> Result<Decrypted, MessageOperationError> {
@@ -430,13 +431,13 @@ impl ProtocolFixture {
         message: &SealedFrame,
         rng_seed: u8,
     ) -> Result<Decrypted, MessageOperationError> {
-        self.alice_receives_over(&self.alice.host, message, rng_seed)
+        self.alice_receives_over(&self.alice.database, message, rng_seed)
     }
 
     /// Has Alice receive `message` over `store` without committing.
     pub(crate) fn alice_receives_over(
         &self,
-        store: &HostStore,
+        store: &AppDatabase,
         message: &SealedFrame,
         rng_seed: u8,
     ) -> Result<Decrypted, MessageOperationError> {
@@ -461,12 +462,12 @@ impl ProtocolFixture {
             result, changes, ..
         } = self
             .encrypt(
-                &self.alice.host,
+                &self.alice.database,
                 self.outgoing(sequence, plaintext),
                 sequence as u8,
             )
             .unwrap();
-        self.alice.host.commit_sent(&result, changes).unwrap();
+        self.alice.database.commit_sent(&result, changes).unwrap();
         StoredMessage {
             message_id: result.message_id,
             plaintext: plaintext.to_vec(),
@@ -481,9 +482,9 @@ impl ProtocolFixture {
         rng_seed: u8,
     ) -> ReceivedMessage {
         let decrypted = self
-            .receive(&self.bob.host, &message.message, rng_seed)
+            .receive(&self.bob.database, &message.message, rng_seed)
             .unwrap();
-        self.bob.host.commit(decrypted.changes).unwrap();
+        self.bob.database.commit(decrypted.changes).unwrap();
         let received = accepted(decrypted.outcome);
         ReceivedMessage {
             message_id: received.message_id,
@@ -495,7 +496,7 @@ impl ProtocolFixture {
     }
 }
 
-/// A received message after the host committed it.
+/// A received message after the app committed it.
 pub(crate) struct ReceivedMessage {
     pub(crate) message_id: MessageId,
     pub(crate) plaintext: Zeroizing<Vec<u8>>,
@@ -513,7 +514,7 @@ pub(crate) fn accepted(outcome: InboundMessageOutcome) -> roost_core::InboundMes
 /// certificate.
 pub(crate) fn sender_certificate_bytes(
     signing_key_id: &[u8],
-    identity_key: ContactIdentityKey,
+    identity_key: IdentityKey,
     expires_at_secs: u64,
 ) -> Vec<u8> {
     let mut bytes = CERTIFICATE_LABEL.to_vec();

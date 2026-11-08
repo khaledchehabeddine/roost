@@ -4,6 +4,7 @@
 //! while the inbox lives in secure storage, and blocking must move both.
 
 use crate::support::device::{Relay, requested};
+use rand::rngs::OsRng;
 
 #[test]
 fn blocking_a_contact_rotates_the_inbox() {
@@ -43,7 +44,7 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
 
     let second = bob
         .store
-        .prepare_block_contact(alice.identity_key(), record.as_ref())
+        .prepare_block_contact(&mut OsRng, alice.identity_key(), record.as_ref())
         .unwrap();
 
     assert!(second.publication.is_none());

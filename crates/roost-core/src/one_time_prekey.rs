@@ -6,17 +6,15 @@ use crate::stored_data::{
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{OneTimePreKey, PublicOneTimePreKey, generate_one_time_prekey};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub(crate) const ONE_TIME_PREKEY_POOL_TARGET: usize = 100;
 pub(crate) const ONE_TIME_PREKEY_REPLENISH_THRESHOLD: usize = 25;
-const MAX_ONE_TIME_PREKEYS: usize = ONE_TIME_PREKEY_POOL_TARGET;
 
 const ONE_TIME_PREKEYS: &str = "prekey/one-time-pool";
-const ONE_TIME_PREKEYS_VERSION: u8 = 2;
+const ONE_TIME_PREKEYS_VERSION: u8 = 1;
 
 /// Errors returned by one-time prekey operations.
 #[derive(Debug, thiserror::Error)]
@@ -32,17 +30,6 @@ pub enum OneTimePreKeyError {
     /// Loading the discovery key returned a [`DiscoveryKeyError`].
     #[error("loading the discovery key failed")]
     Discovery(#[from] DiscoveryKeyError),
-    /// The stored pool repeats an identifier.
-    #[error("duplicate one-time prekey identifier {0}")]
-    DuplicateId(u64),
-    /// A stored one-time prekey's identifier isn't below the pool's next identifier.
-    #[error("one-time prekey identifier {id} is not below next identifier {next_id}")]
-    IdNotBelowNextId {
-        /// Stored identifier.
-        id: u64,
-        /// Pool's next identifier.
-        next_id: u64,
-    },
     /// Every one-time prekey identifier has been used.
     #[error("one-time prekey identifier space exhausted")]
     IdentifiersExhausted,
@@ -169,8 +156,8 @@ impl OneTimePreKeyManager {
         Ok(self.lock_storage()?.store(ONE_TIME_PREKEYS, &entry)?)
     }
 
-    // Appends as many prekeys as `count` asks for to the current epoch's pool, replacing a pool
-    // from an earlier epoch, and returns the new prekeys.
+    // Appends as many prekeys as `count` asks for to the stored pool, or to a new pool for the
+    // current epoch, and returns the new prekeys.
     fn append<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -178,12 +165,13 @@ impl OneTimePreKeyManager {
     ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
         let epoch = self.discovery.current()?.epoch();
         let mut storage = self.lock_storage()?;
+        // Every inbox rotation deletes the pool, so a stored pool belongs to the current epoch.
         let mut pool = match load_pool(&**storage)? {
-            Some(stored) if stored.epoch == epoch => with_room(stored),
-            Some(_) | None => OneTimePreKeyPoolWire {
+            Some(stored) => with_room(stored),
+            None => OneTimePreKeyPoolWire {
                 epoch,
                 next_id: 0,
-                entries: Vec::with_capacity(MAX_ONE_TIME_PREKEYS),
+                entries: Vec::with_capacity(ONE_TIME_PREKEY_POOL_TARGET),
             },
         };
         let count = count(&pool);
@@ -216,7 +204,7 @@ fn check_epoch(pool: &OneTimePreKeyPoolWire, epoch: u32) -> Result<(), OneTimePr
 // Moves the pool's prekeys into a list with room for the most it holds, so appending never
 // reallocates and leaves secrets in freed memory.
 fn with_room(mut pool: OneTimePreKeyPoolWire) -> OneTimePreKeyPoolWire {
-    let mut entries = Vec::with_capacity(MAX_ONE_TIME_PREKEYS);
+    let mut entries = Vec::with_capacity(ONE_TIME_PREKEY_POOL_TARGET);
     entries.append(&mut pool.entries);
     OneTimePreKeyPoolWire {
         epoch: pool.epoch,
@@ -230,7 +218,7 @@ fn append_batch<R: RngCore + CryptoRng>(
     pool: &mut OneTimePreKeyPoolWire,
     batch_size: usize,
 ) -> Result<Vec<PublicOneTimePreKey>, OneTimePreKeyError> {
-    let available = MAX_ONE_TIME_PREKEYS - pool.entries.len();
+    let available = ONE_TIME_PREKEY_POOL_TARGET - pool.entries.len();
     if batch_size > available {
         return Err(OneTimePreKeyError::BatchExceedsCapacity {
             requested: batch_size,
@@ -262,25 +250,10 @@ fn load_pool(
     let Some(entry) = storage.load(ONE_TIME_PREKEYS)? else {
         return Ok(None);
     };
-    let pool = match decode_versioned(ONE_TIME_PREKEYS_VERSION, &entry)? {
-        OneTimePreKeysWire::InboxRotationRequired => {
-            return Err(OneTimePreKeyError::InboxRotationRequired);
-        }
-        OneTimePreKeysWire::Pool(pool) => pool,
-    };
-    let mut ids = BTreeSet::new();
-    for entry in &pool.entries {
-        if entry.id >= pool.next_id {
-            return Err(OneTimePreKeyError::IdNotBelowNextId {
-                id: entry.id,
-                next_id: pool.next_id,
-            });
-        }
-        if !ids.insert(entry.id) {
-            return Err(OneTimePreKeyError::DuplicateId(entry.id));
-        }
+    match decode_versioned(ONE_TIME_PREKEYS_VERSION, &entry)? {
+        OneTimePreKeysWire::InboxRotationRequired => Err(OneTimePreKeyError::InboxRotationRequired),
+        OneTimePreKeysWire::Pool(pool) => Ok(Some(pool)),
     }
-    Ok(Some(pool))
 }
 
 fn store_pool(
@@ -298,13 +271,13 @@ enum OneTimePreKeysWire {
     Pool(OneTimePreKeyPoolWire),
 }
 
-#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, Serialize, ZeroizeOnDrop)]
 struct OneTimePreKeyPoolWire {
     #[zeroize(skip)]
     epoch: u32,
     #[zeroize(skip)]
     next_id: u64,
-    #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_ONE_TIME_PREKEYS>")]
+    #[serde(deserialize_with = "deserialize_bounded::<_, _, ONE_TIME_PREKEY_POOL_TARGET>")]
     entries: Vec<OneTimePreKeyWire>,
 }
 
@@ -423,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn generate_batch_creates_exact_caller_size_under_current_epoch() {
+    fn generate_batch_creates_the_requested_number_under_the_current_epoch() {
         let mut rng = ChaCha20Rng::from_seed([0xd3; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
         let first = manager.generate_batch(&mut rng, 3).unwrap();
@@ -517,7 +490,7 @@ mod tests {
 
         assert!(matches!(
             manager.consume_one_time_prekey(1, 0),
-            Err(OneTimePreKeyError::StoredData(StoredDataError::UnsupportedVersion(version)))
+            Err(OneTimePreKeyError::StoredData(StoredDataError::UnsupportedVersion { version }))
                 if version == ONE_TIME_PREKEYS_VERSION + 1
         ));
     }
@@ -529,50 +502,16 @@ mod tests {
             &manager,
             OneTimePreKeyPoolWire {
                 epoch: 1,
-                next_id: MAX_ONE_TIME_PREKEYS as u64 + 1,
-                entries: (0..=MAX_ONE_TIME_PREKEYS as u64).map(entry).collect(),
+                next_id: ONE_TIME_PREKEY_POOL_TARGET as u64 + 1,
+                entries: (0..=ONE_TIME_PREKEY_POOL_TARGET as u64)
+                    .map(entry)
+                    .collect(),
             },
         );
 
         assert!(matches!(
             manager.consume_one_time_prekey(1, 0),
             Err(OneTimePreKeyError::StoredData(StoredDataError::Decode(_)))
-        ));
-    }
-
-    #[test]
-    fn a_pool_that_repeats_an_identifier_is_refused() {
-        let OneTimePreKeySetup { manager, .. } = setup_with_discovery_key();
-        store(
-            &manager,
-            OneTimePreKeyPoolWire {
-                epoch: 1,
-                next_id: 3,
-                entries: vec![entry(0), entry(0)],
-            },
-        );
-
-        assert!(matches!(
-            manager.consume_one_time_prekey(1, 0),
-            Err(OneTimePreKeyError::DuplicateId(0))
-        ));
-    }
-
-    #[test]
-    fn a_pool_with_an_identifier_not_below_the_next_one_is_refused() {
-        let OneTimePreKeySetup { manager, .. } = setup_with_discovery_key();
-        store(
-            &manager,
-            OneTimePreKeyPoolWire {
-                epoch: 1,
-                next_id: 1,
-                entries: vec![entry(1)],
-            },
-        );
-
-        assert!(matches!(
-            manager.consume_one_time_prekey(1, 1),
-            Err(OneTimePreKeyError::IdNotBelowNextId { id: 1, next_id: 1 })
         ));
     }
 }

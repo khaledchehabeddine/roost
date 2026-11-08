@@ -25,7 +25,7 @@ fn the_first_send_after_an_unblock_asks_for_the_contacts_bundle() {
     let relay = Relay::new();
     let (mut alice, bob) = blocked_then_unblocked(&relay);
     let outgoing = alice.outgoing(&bob, b"hello again");
-    let before = alice.host.snapshot_bytes();
+    let before = alice.database.snapshot_bytes();
 
     let Encrypted::NeedsPreKeyBundle(identity_key) =
         alice.encrypt(outgoing, Intent::Message).unwrap()
@@ -34,7 +34,7 @@ fn the_first_send_after_an_unblock_asks_for_the_contacts_bundle() {
     };
 
     assert_eq!(identity_key, bob.identity_key());
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
 }
 
 #[test]

@@ -2,8 +2,9 @@ use super::grant::DiscoveryKeyStamp;
 use super::session::{pending_acknowledgment_address, session_record_addresses};
 use super::{
     DIGEST_LEN, PROTOCOL_STATE_BLOB_HEADER_LEN, ProtocolStateAddress, ProtocolStateBlob,
-    ProtocolStateEngine, ProtocolStateError, ProtocolStateSnapshot, ProtocolStateUpdate, blob_body,
-    contains_digest, deserialize_bounded, digest_of, encode_blob, push_bounded,
+    ProtocolStateEngine, ProtocolStateError, ProtocolStateSnapshot, ProtocolStateUpdate,
+    contains_digest, decode_blob, decode_error, deserialize_bounded, digest_of, encode_blob,
+    push_bounded,
 };
 use crate::hardening::{
     MAX_ACKNOWLEDGMENT_DIGESTS, MAX_PENDING_ACKNOWLEDGMENTS, ProtocolHardeningLimits,
@@ -11,7 +12,6 @@ use crate::hardening::{
 use roost_protocol::{MessageId, PayloadKind, SessionId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use zeroize::Zeroizing;
 
 const ACKNOWLEDGMENT_DIGEST_LABEL: &[u8] = b"RoostAcknowledgmentDigest-v1:";
 const PENDING_ACKNOWLEDGMENT_ENTRY_CAP: usize = 64;
@@ -28,14 +28,18 @@ pub struct PendingAcknowledgment {
 }
 
 impl ProtocolStateEngine {
-    /// Returns all pending acknowledgments stored for a session.
+    /// Returns the messages waiting for an acknowledgment on `session_id`, given its pending
+    /// acknowledgment record or the record's absence.
     pub fn pending_acknowledgments(
         &self,
-        snapshot: &ProtocolStateSnapshot,
         session_id: SessionId,
+        record: Option<&ProtocolStateBlob>,
     ) -> Result<Vec<PendingAcknowledgment>, ProtocolStateError> {
+        let Some(blob) = record else {
+            return Ok(Vec::new());
+        };
         let address = pending_acknowledgment_address(session_id);
-        let pending = load_pending_acknowledgments(snapshot, &address, self.limits)?;
+        let pending = decode_pending_acknowledgments(&address, blob, self.limits)?;
         Ok(pending
             .pending
             .iter()
@@ -103,8 +107,14 @@ pub(super) struct LoadedPendingAcknowledgment {
     pub(super) held: bool,
 }
 
-#[derive(Deserialize, Serialize)]
-struct PendingAcknowledgmentsWire {
+#[derive(Serialize)]
+struct PendingAcknowledgmentsWire<'a> {
+    pending: Vec<PendingAcknowledgmentWire>,
+    acknowledgment_digests: &'a [[u8; DIGEST_LEN]],
+}
+
+#[derive(Deserialize)]
+struct DecodedPendingAcknowledgmentsWire {
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_PENDING_ACKNOWLEDGMENTS>")]
     pending: Vec<PendingAcknowledgmentWire>,
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_ACKNOWLEDGMENT_DIGESTS>")]
@@ -138,16 +148,14 @@ pub(super) fn encode_pending_acknowledgments(
             held: entry.held,
         })
         .collect();
-    let body = Zeroizing::new(
-        postcard::to_stdvec(&PendingAcknowledgmentsWire {
-            pending,
-            acknowledgment_digests: state.acknowledgment_digests.clone(),
-        })
-        .map_err(|_| ProtocolStateError::BlobEncode {
-            address: address.clone(),
-            reason: "pending acknowledgments failed to encode".into(),
-        })?,
-    );
+    let body = postcard::to_stdvec(&PendingAcknowledgmentsWire {
+        pending,
+        acknowledgment_digests: &state.acknowledgment_digests,
+    })
+    .map_err(|_| ProtocolStateError::BlobEncode {
+        address: address.clone(),
+        reason: "pending acknowledgments failed to encode".into(),
+    })?;
     encode_blob(address, &body, max_pending_acknowledgments_blob_len(limits))
 }
 
@@ -187,7 +195,7 @@ pub(super) fn decode_pending_acknowledgments(
     let mut pending = BTreeMap::new();
     for entry in wire.pending {
         let payload_kind = PayloadKind::from_tag(entry.payload_kind)
-            .ok_or_else(|| decode_error(address, "pending payload kind is invalid".into()))?;
+            .ok_or_else(|| decode_error(address, "pending payload kind is invalid"))?;
         let replaced = pending.insert(
             entry.message_id,
             LoadedPendingAcknowledgment {
@@ -201,7 +209,7 @@ pub(super) fn decode_pending_acknowledgments(
         if replaced.is_some() {
             return Err(decode_error(
                 address,
-                "pending acknowledgment message ID is duplicated".into(),
+                "pending acknowledgment message ID is duplicated",
             ));
         }
     }
@@ -215,24 +223,8 @@ fn decode_wire(
     address: &ProtocolStateAddress,
     blob: &ProtocolStateBlob,
     limits: ProtocolHardeningLimits,
-) -> Result<PendingAcknowledgmentsWire, ProtocolStateError> {
-    let body = blob_body(address, blob, max_pending_acknowledgments_blob_len(limits))?;
-    let (wire, trailing): (PendingAcknowledgmentsWire, &[u8]) =
-        postcard::take_from_bytes(body).map_err(|e| decode_error(address, e.to_string()))?;
-    if !trailing.is_empty() {
-        return Err(decode_error(
-            address,
-            "pending acknowledgments have trailing bytes".into(),
-        ));
-    }
-    Ok(wire)
-}
-
-fn decode_error(address: &ProtocolStateAddress, reason: String) -> ProtocolStateError {
-    ProtocolStateError::BlobDecode {
-        address: address.clone(),
-        reason,
-    }
+) -> Result<DecodedPendingAcknowledgmentsWire, ProtocolStateError> {
+    decode_blob(address, blob, max_pending_acknowledgments_blob_len(limits))
 }
 
 fn max_pending_acknowledgments_blob_len(limits: ProtocolHardeningLimits) -> usize {
@@ -303,7 +295,6 @@ mod tests {
     #[test]
     fn acknowledgment_digest_changes_with_each_input() {
         let expected = acknowledgment_digest(b"transport-binding", b"encoded message");
-
         assert_ne!(
             acknowledgment_digest(b"other-binding", b"encoded message"),
             expected
@@ -389,6 +380,7 @@ mod tests {
         .unwrap()
         .as_bytes()
         .to_vec();
+        let left_over = 81_985 - bytes.len();
         bytes.resize(81_985, 0);
         let at_limit = ProtocolStateBlob::from_bytes(bytes.clone());
         bytes.push(0);
@@ -397,7 +389,8 @@ mod tests {
         assert!(matches!(
             decode_pending_acknowledgments(&address, &at_limit, limits),
             Err(ProtocolStateError::BlobDecode { address: actual, reason })
-                if actual == address && reason == "pending acknowledgments have trailing bytes"
+                if actual == address
+                    && reason == format!("pending-acknowledgment state has {left_over} bytes left over")
         ));
         assert!(matches!(
             decode_pending_acknowledgments(&address, &past_limit, limits),
@@ -405,5 +398,32 @@ mod tests {
                 if actual == address
                     && reason == "pending-acknowledgment state blob length 81986 exceeds limit 81985"
         ));
+    }
+
+    #[test]
+    fn a_full_session_refuses_a_new_message_and_keeps_a_resend() {
+        let entry = || LoadedPendingAcknowledgment {
+            first_sent_at_millis: 1,
+            payload_kind: PayloadKind::Content,
+            grant: None,
+            sent_to: None,
+            held: false,
+        };
+        let mut state = LoadedPendingAcknowledgments::empty();
+        for index in (0u128..).take(MAX_PENDING_ACKNOWLEDGMENTS) {
+            state
+                .record(MessageId::from_bytes(index.to_be_bytes()), entry())
+                .unwrap();
+        }
+
+        assert!(matches!(
+            state.record(MessageId::from_bytes(u128::MAX.to_be_bytes()), entry()),
+            Err(ProtocolStateError::PendingAcknowledgmentLimitReached {
+                limit: MAX_PENDING_ACKNOWLEDGMENTS
+            })
+        ));
+        state
+            .record(MessageId::from_bytes(0u128.to_be_bytes()), entry())
+            .unwrap();
     }
 }

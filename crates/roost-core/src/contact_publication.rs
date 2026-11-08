@@ -39,8 +39,11 @@ pub enum ContactPublicationError {
     #[error("contact publication isn't in its one encoding")]
     NotCanonical,
     /// The bytes start with a version older than the first one, so no Roost wrote them.
-    #[error("contact publication version {0} predates the first version")]
-    VersionBeforeFirst(u8),
+    #[error("contact publication version {version} predates the first version")]
+    VersionBeforeFirst {
+        /// The version the bytes start with.
+        version: u8,
+    },
 }
 
 impl ContactPublication {
@@ -73,7 +76,7 @@ impl ContactPublication {
         if let Some(&version) = bytes.first()
             && version < CONTACT_PUBLICATION_VERSION
         {
-            return Err(ContactPublicationError::VersionBeforeFirst(version));
+            return Err(ContactPublicationError::VersionBeforeFirst { version });
         }
         let wire: ContactPublicationWire = decode_versioned(CONTACT_PUBLICATION_VERSION, bytes)?;
         if *encode_versioned(CONTACT_PUBLICATION_VERSION, &wire)? != bytes {

@@ -5,20 +5,22 @@ use super::grant::{
 };
 use super::session::Starter;
 use super::{
-    ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError, ProtocolStateKind,
-    ProtocolStateSnapshot, blob_body, deserialize_bounded, encode_blob, encode_zeroizing,
+    DiscoveryKeyWire, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError,
+    ProtocolStateKind, ProtocolStateSnapshot, decode_blob, decode_error, deserialize_bounded,
+    encode_blob, encode_zeroizing,
 };
-use crate::contact::{ContactDiscoveryKey, ContactIdentityKey, ContactState, ContactTrustState};
+use crate::contact::{ContactDiscoveryKey, ContactState, ContactTrustState};
 use crate::hardening::{MAX_MESSAGES_BEFORE_ACCEPTANCE, ProtocolHardeningLimits};
+use crate::stored_data::{signature_from_wire, signature_to_wire};
 use roost_crypto::RecipientDeliveryCapability;
-use roost_protocol::{MessageId, PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
+use roost_protocol::{IdentityKey, MessageId, PUBLIC_KEY_LEN, parse_ed25519_verifying_key_bytes};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 const MESSAGE_ID_LEN: usize = 16;
 
-pub(super) fn contact_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
+pub(super) fn contact_address(identity_key: IdentityKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::ContactState, identity_key.into())
 }
 
@@ -57,7 +59,7 @@ pub(super) enum RecoveryProgress {
 
 /// A contact as Roost stores it, including the peer's delivery capability.
 pub(super) struct ContactRecord {
-    pub(super) identity_key: ContactIdentityKey,
+    pub(super) identity_key: IdentityKey,
     pub(super) discovery_key: Option<ContactDiscoveryKey>,
     /// The peer's capability for `discovery_key`, once a grant for it arrived.
     delivery_capability: Option<Zeroizing<[u8; CAPABILITY_LEN]>>,
@@ -81,7 +83,7 @@ pub(super) struct ContactRecord {
 impl ContactRecord {
     /// Starts a pending record for a contact whose discovery key Roost has verified.
     pub(super) fn pending(
-        identity_key: ContactIdentityKey,
+        identity_key: IdentityKey,
         discovery_key: Option<ContactDiscoveryKey>,
     ) -> Self {
         Self {
@@ -401,7 +403,7 @@ impl ContactRecord {
                     ed25519_verifying_key: discovery_key.ed25519_verifying_key,
                     epoch: discovery_key.epoch,
                     created_at_secs: discovery_key.created_at_secs,
-                    identity_signature: &discovery_key.identity_signature,
+                    identity_signature: signature_to_wire(&discovery_key.identity_signature),
                 }),
             delivery_capability: self.delivery_capability.as_deref(),
             acknowledged_grant: self.acknowledged_grant.map(DiscoveryKeyStamp::to_wire),
@@ -436,14 +438,9 @@ impl ContactRecord {
         blob: &ProtocolStateBlob,
         limits: ProtocolHardeningLimits,
     ) -> Result<Self, ProtocolStateError> {
-        let body = blob_body(address, blob, limits.max_protocol_state_blob_len)?;
-        let (wire, trailing): (DecodedContactRecordWire, &[u8]) =
-            postcard::take_from_bytes(body)
-                .map_err(|_| decode_error(address, "contact-state payload failed to decode"))?;
-        if !trailing.is_empty() {
-            return Err(decode_error(address, "contact state has trailing bytes"));
-        }
-        let identity_key = ContactIdentityKey {
+        let wire: DecodedContactRecordWire =
+            decode_blob(address, blob, limits.max_protocol_state_blob_len)?;
+        let identity_key = IdentityKey {
             x25519_public_key: wire.identity_x25519_public_key,
             ed25519_verifying_key: wire.identity_ed25519_verifying_key,
         };
@@ -531,8 +528,8 @@ pub(super) fn load_contact(
 
 fn decoded_discovery_key(
     address: &ProtocolStateAddress,
-    identity_key: &ContactIdentityKey,
-    wire: &DecodedDiscoveryKeyWire,
+    identity_key: &IdentityKey,
+    wire: &DiscoveryKeyWire,
 ) -> Result<ContactDiscoveryKey, ProtocolStateError> {
     let (Some(public), Some(identity_verifying_key)) = (
         parse_discovery_key(
@@ -540,7 +537,7 @@ fn decoded_discovery_key(
             &wire.ed25519_verifying_key,
             wire.epoch,
             wire.created_at_secs,
-            &wire.identity_signature,
+            &signature_from_wire(&wire.identity_signature),
         ),
         parse_ed25519_verifying_key_bytes(&identity_key.ed25519_verifying_key),
     ) else {
@@ -549,13 +546,6 @@ fn decoded_discovery_key(
     roost_crypto::verify_public_discovery_key(&public, &identity_verifying_key)
         .map_err(|_| decode_error(address, "contact discovery key signature failed"))?;
     Ok(ContactDiscoveryKey::from(&public))
-}
-
-fn decode_error(address: &ProtocolStateAddress, reason: &str) -> ProtocolStateError {
-    ProtocolStateError::BlobDecode {
-        address: address.clone(),
-        reason: reason.into(),
-    }
 }
 
 // A message ID sent before acceptance and the stamp of the grant it carried.
@@ -575,7 +565,7 @@ enum RecoveryProgressWire {
 struct ContactRecordWire<'a> {
     identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    discovery_key: Option<DiscoveryKeyWire<'a>>,
+    discovery_key: Option<DiscoveryKeyWire>,
     delivery_capability: Option<&'a [u8; CAPABILITY_LEN]>,
     acknowledged_grant: Option<(u64, u32)>,
     trust_state: ContactTrustState,
@@ -587,23 +577,14 @@ struct ContactRecordWire<'a> {
     recovery: Option<RecoverySignalWire>,
 }
 
-#[derive(Serialize)]
-struct DiscoveryKeyWire<'a> {
-    x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    epoch: u32,
-    created_at_secs: u64,
-    identity_signature: &'a [u8],
-}
-
-#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 struct DecodedContactRecordWire {
     #[zeroize(skip)]
     identity_x25519_public_key: [u8; PUBLIC_KEY_LEN],
     #[zeroize(skip)]
     identity_ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
     #[zeroize(skip)]
-    discovery_key: Option<DecodedDiscoveryKeyWire>,
+    discovery_key: Option<DiscoveryKeyWire>,
     delivery_capability: Option<[u8; CAPABILITY_LEN]>,
     #[zeroize(skip)]
     acknowledged_grant: Option<(u64, u32)>,
@@ -625,19 +606,10 @@ struct DecodedContactRecordWire {
     recovery: Option<RecoverySignalWire>,
 }
 
-#[derive(Deserialize)]
-struct DecodedDiscoveryKeyWire {
-    x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    epoch: u32,
-    created_at_secs: u64,
-    identity_signature: Vec<u8>,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::grant::SIGNATURE_LEN;
     use super::*;
+    use roost_crypto::Signature;
 
     fn discovery_key(seed: u8, created_at_secs: u64, epoch: u32) -> ContactDiscoveryKey {
         ContactDiscoveryKey {
@@ -645,7 +617,7 @@ mod tests {
             ed25519_verifying_key: [seed; PUBLIC_KEY_LEN],
             epoch,
             created_at_secs,
-            identity_signature: [seed; SIGNATURE_LEN],
+            identity_signature: [seed; Signature::BYTE_SIZE],
         }
     }
 
@@ -657,7 +629,7 @@ mod tests {
     }
 
     fn contact(discovery_key: ContactDiscoveryKey) -> ContactRecord {
-        let identity_key = ContactIdentityKey {
+        let identity_key = IdentityKey {
             x25519_public_key: [7; PUBLIC_KEY_LEN],
             ed25519_verifying_key: [7; PUBLIC_KEY_LEN],
         };
@@ -674,9 +646,7 @@ mod tests {
     #[test]
     fn a_grant_with_a_later_creation_time_replaces_one_with_a_higher_epoch() {
         let mut contact = contact(discovery_key(1, 100, 5));
-
         contact.record_grant(grant(discovery_key(2, 200, 1), 2));
-
         assert_eq!(contact.discovery_key, Some(discovery_key(2, 200, 1)));
         assert_eq!(capability(&contact), Some([2; CAPABILITY_LEN]));
     }
@@ -685,9 +655,7 @@ mod tests {
     fn a_grant_for_an_older_discovery_key_changes_nothing() {
         let mut contact = contact(discovery_key(2, 200, 1));
         contact.record_grant(grant(discovery_key(2, 200, 1), 2));
-
         contact.record_grant(grant(discovery_key(1, 100, 9), 1));
-
         assert_eq!(contact.discovery_key, Some(discovery_key(2, 200, 1)));
         assert_eq!(capability(&contact), Some([2; CAPABILITY_LEN]));
     }
@@ -696,9 +664,7 @@ mod tests {
     fn a_newer_discovery_key_without_a_grant_drops_the_old_capability() {
         let mut contact = contact(discovery_key(1, 100, 1));
         contact.record_grant(grant(discovery_key(1, 100, 1), 1));
-
         contact.record_discovery_key(discovery_key(2, 200, 2));
-
         assert!(matches!(
             contact.established_route(),
             Err(ProtocolStateError::NoDeliveryCapability)
@@ -720,7 +686,9 @@ mod tests {
         assert_eq!(contact.count_received(ids[0]), ReceivedCount::WithinLimit);
         assert!(matches!(
             contact.count_sent(ids[MAX_MESSAGES_BEFORE_ACCEPTANCE], None),
-            Err(ProtocolStateError::PendingLimitReached { .. })
+            Err(ProtocolStateError::PendingLimitReached {
+                limit: MAX_MESSAGES_BEFORE_ACCEPTANCE
+            })
         ));
         assert_eq!(
             contact.count_received(ids[MAX_MESSAGES_BEFORE_ACCEPTANCE]),
@@ -747,13 +715,11 @@ mod tests {
 
     #[test]
     fn a_contact_record_is_stored_under_the_contacts_identity_key() {
-        let identity_key = ContactIdentityKey {
+        let identity_key = IdentityKey {
             x25519_public_key: [7; PUBLIC_KEY_LEN],
             ed25519_verifying_key: [8; PUBLIC_KEY_LEN],
         };
-
         let address = contact_address(identity_key);
-
         assert_eq!(address.kind(), ProtocolStateKind::ContactState);
         assert_eq!(address.key().as_bytes(), identity_key.canonical_encoding());
     }

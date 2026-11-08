@@ -1,4 +1,5 @@
 use crate::identity::{IdentityError, IdentityManager};
+use crate::retention::{RELAY_HOLD_TIME, is_expired};
 use crate::storage::{SecureStorage, StorageError};
 use crate::stored_data::{
     SignatureWire, StoredDataError, decode_versioned, deserialize_bounded, encode_versioned,
@@ -6,25 +7,23 @@ use crate::stored_data::{
 };
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
-    DiscoveryKey, RecipientDeliveryCapability, Signature, VerifyingKey, generate_discovery_key,
-    generate_recipient_delivery_capability, verify_public_discovery_key,
+    DiscoveryKey, PublicKeyError, RecipientDeliveryCapability, Signature, VerifyingKey,
+    generate_discovery_key, generate_recipient_delivery_capability, verify_public_discovery_key,
 };
 use roost_protocol::{SignatureError, to_unix_secs};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const DISCOVERY_KEY: &str = "discovery/current";
 const PREVIOUS_DISCOVERY_KEYS: &str = "discovery/previous";
-const DISCOVERY_KEY_VERSION: u8 = 3;
-const PREVIOUS_DISCOVERY_KEYS_VERSION: u8 = 2;
+const DISCOVERY_KEY_VERSION: u8 = 1;
+const PREVIOUS_DISCOVERY_KEYS_VERSION: u8 = 1;
 // Identity creation starts at epoch 1.
 const FIRST_EPOCH: u32 = 1;
 // Enough for several blocks close together to keep each other's queued messages readable.
 const MAX_PREVIOUS_DISCOVERY_KEYS: usize = 5;
-// How long the relay may hold a queued message.
-const PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW: Duration = Duration::from_secs(30 * 86_400);
 
 /// Errors returned by discovery key operations.
 #[derive(Debug, thiserror::Error)]
@@ -34,7 +33,7 @@ pub enum DiscoveryKeyError {
     Clock,
     /// The stored discovery key's signature does not verify against the identity key.
     #[error("stored discovery key signature does not match the identity key")]
-    Corrupt,
+    Corrupt(#[source] PublicKeyError),
     /// Signing a new discovery key with the identity key failed.
     #[error("signing the discovery key failed")]
     DiscoveryKeySignature(#[source] SignatureError),
@@ -79,7 +78,7 @@ impl DiscoveryKeyManager {
         let discovery_key = self.load_current()?.discovery_key.to_key();
         let identity = self.identity.load_identity()?;
         verify_public_discovery_key(&discovery_key.public(), identity.verifying_key())
-            .map_err(|_| DiscoveryKeyError::Corrupt)?;
+            .map_err(DiscoveryKeyError::Corrupt)?;
         Ok(discovery_key)
     }
 
@@ -108,14 +107,6 @@ impl DiscoveryKeyManager {
         discovery_key
             .sign_identity_binding(&identity.public()?)
             .map_err(DiscoveryKeyError::IdentityBindingSignature)
-    }
-
-    // Returns the epoch of the stored discovery key, without verifying its signature, or `None`
-    // when none is stored.
-    pub(crate) fn stored_epoch(&self) -> Result<Option<u32>, DiscoveryKeyError> {
-        Ok(self
-            .load_current_optional()?
-            .map(|current| current.discovery_key.epoch))
     }
 
     // Replaces the discovery key and delivery capability with new ones at the next epoch.
@@ -149,7 +140,7 @@ impl DiscoveryKeyManager {
         )?;
         if let Some(mut replaced) = replaced {
             let mut previous = self.load_previous()?;
-            previous.retain(|previous| is_retained(previous.retired_at_secs, now_secs));
+            previous.retain(|previous| !is_expired(previous.retired_at_secs, now, RELAY_HOLD_TIME));
             previous.push(PreviousDiscoveryKeyWire {
                 discovery_key: std::mem::take(&mut replaced.discovery_key),
                 retired_at_secs: now_secs,
@@ -171,21 +162,19 @@ impl DiscoveryKeyManager {
         public_key: &[u8; 32],
         now: SystemTime,
     ) -> Result<Option<DiscoveryKey>, DiscoveryKeyError> {
-        let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
         Ok(self
             .load_previous()?
             .iter()
-            .filter(|previous| is_retained(previous.retired_at_secs, now_secs))
+            .filter(|previous| !is_expired(previous.retired_at_secs, now, RELAY_HOLD_TIME))
             .map(|previous| previous.discovery_key.to_key())
             .find(|discovery_key| discovery_key.public_key().as_bytes() == public_key))
     }
 
     // Deletes the previous discovery keys the relay can no longer hold messages for at `now`.
     pub(crate) fn delete_expired_previous(&self, now: SystemTime) -> Result<(), DiscoveryKeyError> {
-        let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
         let mut previous = self.load_previous()?;
         let count = previous.len();
-        previous.retain(|previous| is_retained(previous.retired_at_secs, now_secs));
+        previous.retain(|previous| !is_expired(previous.retired_at_secs, now, RELAY_HOLD_TIME));
         if previous.len() == count {
             return Ok(());
         }
@@ -210,8 +199,6 @@ impl DiscoveryKeyManager {
         Ok(entry)
     }
 
-    // Checks that a discovery key entry from a backup decodes and is signed by the restored
-    // identity key, before an import changes storage.
     pub(crate) fn validate_entry_for_identity(
         entry: &[u8],
         identity_verifying_key: &VerifyingKey,
@@ -221,13 +208,12 @@ impl DiscoveryKeyManager {
             &current.discovery_key.to_key().public(),
             identity_verifying_key,
         )
-        .map_err(|_| DiscoveryKeyError::Corrupt)
+        .map_err(DiscoveryKeyError::Corrupt)
     }
 
     // Restores a discovery key entry from a backup verbatim with a single store, keeping its epoch
-    // lineage and identity signature. The next read verifies the signature again.
+    // lineage and identity signature. The caller validates it first.
     pub(crate) fn restore_entry(&self, entry: &[u8]) -> Result<(), DiscoveryKeyError> {
-        decode_current(entry)?;
         Ok(self.lock_storage()?.store(DISCOVERY_KEY, entry)?)
     }
 
@@ -283,11 +269,6 @@ fn decode_current(entry: &[u8]) -> Result<CurrentDiscoveryKeyWire, DiscoveryKeyE
     Ok(decode_versioned(DISCOVERY_KEY_VERSION, entry)?)
 }
 
-// Returns whether a key retired at `retired_at_secs` may still open queued messages at `now_secs`.
-fn is_retained(retired_at_secs: u64, now_secs: u64) -> bool {
-    now_secs.saturating_sub(retired_at_secs) < PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW.as_secs()
-}
-
 // A discovery key's secrets and signed fields, as the current entry and each previous one hold
 // them.
 #[derive(Default, Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
@@ -325,7 +306,7 @@ impl DiscoveryKeyWire {
 }
 
 // The current discovery key with its inbox's delivery capability.
-#[derive(Deserialize, Serialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, Serialize, ZeroizeOnDrop)]
 struct CurrentDiscoveryKeyWire {
     discovery_key: DiscoveryKeyWire,
     delivery_capability: [u8; 32],
@@ -345,7 +326,7 @@ struct PreviousDiscoveryKeysWire<'a> {
     keys: &'a [PreviousDiscoveryKeyWire],
 }
 
-#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 struct DecodedPreviousDiscoveryKeysWire {
     #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_PREVIOUS_DISCOVERY_KEYS>")]
     keys: Vec<PreviousDiscoveryKeyWire>,
@@ -357,7 +338,8 @@ mod tests {
     use crate::storage::InMemorySecureStorage;
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
-    use roost_protocol::from_unix_secs;
+    use roost_protocol::{SignatureError, from_unix_secs};
+    use std::time::Duration;
 
     const FIXED_NOW: u64 = 1_700_000_000;
 
@@ -411,11 +393,13 @@ mod tests {
                 Err(DiscoveryKeyError::StoredData(StoredDataError::Decode(_)))
             )
         };
-        assert!(is_malformed(discovery.restore_entry(&malformed)));
+        let identity = discovery.identity.load_identity().unwrap();
+        assert!(is_malformed(
+            DiscoveryKeyManager::validate_entry_for_identity(&malformed, identity.verifying_key())
+        ));
         store(&discovery, DISCOVERY_KEY, &malformed);
 
         assert!(is_malformed(discovery.current().map(|_| ())));
-        assert!(is_malformed(discovery.stored_epoch().map(|_| ())));
         assert!(is_malformed(
             discovery.rotate_now(&mut rng, fixed_now()).map(|_| ())
         ));
@@ -436,18 +420,9 @@ mod tests {
 
         assert!(matches!(
             discovery.current(),
-            Err(DiscoveryKeyError::StoredData(StoredDataError::UnsupportedVersion(version)))
+            Err(DiscoveryKeyError::StoredData(StoredDataError::UnsupportedVersion { version }))
                 if version == DISCOVERY_KEY_VERSION + 1
         ));
-    }
-
-    #[test]
-    fn stored_epoch_reports_absent_and_present() {
-        let mut rng = ChaCha20Rng::from_seed([0xb2; 32]);
-        let discovery = manager_with_identity();
-        assert_eq!(discovery.stored_epoch().unwrap(), None);
-        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        assert_eq!(discovery.stored_epoch().unwrap(), Some(FIRST_EPOCH));
     }
 
     #[test]
@@ -505,8 +480,7 @@ mod tests {
         let discovery = manager_with_identity();
         let first = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         let current = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        let window = PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW;
-
+        let window = RELAY_HOLD_TIME;
         let last_moment = fixed_now() + window - Duration::from_secs(1);
         assert!(is_kept(&discovery, &first, last_moment));
         assert!(!is_kept(&discovery, &first, fixed_now() + window));
@@ -518,7 +492,7 @@ mod tests {
         let mut rng = ChaCha20Rng::from_seed([0xbc; 32]);
         let discovery = manager_with_identity();
         let expired = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-        let later = fixed_now() + PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW;
+        let later = fixed_now() + RELAY_HOLD_TIME;
         let mut retired = Vec::new();
         retired.push(discovery.rotate_now(&mut rng, fixed_now()).unwrap());
         for _ in 0..=MAX_PREVIOUS_DISCOVERY_KEYS {
@@ -538,7 +512,7 @@ mod tests {
     fn delete_expired_previous_keeps_only_unexpired_keys() {
         let mut rng = ChaCha20Rng::from_seed([0xbf; 32]);
         let discovery = manager_with_identity();
-        let window = PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW;
+        let window = RELAY_HOLD_TIME;
         let expired = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         let unexpired = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         discovery
@@ -565,7 +539,7 @@ mod tests {
         discovery.delete_expired_previous(fixed_now()).unwrap();
         assert_eq!(stored(&discovery, PREVIOUS_DISCOVERY_KEYS).unwrap(), before);
         discovery
-            .delete_expired_previous(fixed_now() + PREVIOUS_DISCOVERY_KEY_RETENTION_WINDOW)
+            .delete_expired_previous(fixed_now() + RELAY_HOLD_TIME)
             .unwrap();
         assert!(stored(&discovery, PREVIOUS_DISCOVERY_KEYS).is_none());
     }
@@ -576,9 +550,7 @@ mod tests {
         let discovery = manager_with_identity();
         let first = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
         discovery.rotate_now(&mut rng, fixed_now()).unwrap();
-
         discovery.reset().unwrap();
-
         assert!(!is_kept(&discovery, &first, fixed_now()));
     }
 
@@ -593,7 +565,7 @@ mod tests {
 
         assert!(matches!(
             discovery.previous_key(&[9; 32], fixed_now()),
-            Err(DiscoveryKeyError::StoredData(StoredDataError::UnsupportedVersion(version)))
+            Err(DiscoveryKeyError::StoredData(StoredDataError::UnsupportedVersion { version }))
                 if version == PREVIOUS_DISCOVERY_KEYS_VERSION + 1
         ));
     }
@@ -616,7 +588,9 @@ mod tests {
         );
         assert!(matches!(
             discovery.current(),
-            Err(DiscoveryKeyError::Corrupt)
+            Err(DiscoveryKeyError::Corrupt(PublicKeyError::Signature(
+                SignatureError::SignatureInvalid
+            )))
         ));
 
         let recovered = discovery.rotate_now(&mut rng, fixed_now()).unwrap();

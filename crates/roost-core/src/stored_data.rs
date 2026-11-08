@@ -25,8 +25,11 @@ pub enum StoredDataError {
         len: usize,
     },
     /// The stored bytes use a format version this build doesn't read.
-    #[error("unsupported stored data version {0}")]
-    UnsupportedVersion(u8),
+    #[error("unsupported stored data version {version}")]
+    UnsupportedVersion {
+        /// The version the bytes start with.
+        version: u8,
+    },
 }
 
 // A signature as two halves, since serde encodes arrays of at most 32 elements.
@@ -86,7 +89,9 @@ pub(crate) fn decode_versioned_prefix<'a, T: Deserialize<'a>>(
         postcard::Error::DeserializeUnexpectedEnd,
     ))?;
     if stored_version != version {
-        return Err(StoredDataError::UnsupportedVersion(stored_version));
+        return Err(StoredDataError::UnsupportedVersion {
+            version: stored_version,
+        });
     }
     postcard::take_from_bytes(body).map_err(StoredDataError::Decode)
 }
@@ -158,7 +163,7 @@ mod tests {
     fn decode_versioned_rejects_another_version_before_decoding() {
         assert!(matches!(
             decode_versioned::<u8>(2, &[3]),
-            Err(StoredDataError::UnsupportedVersion(3))
+            Err(StoredDataError::UnsupportedVersion { version: 3 })
         ));
     }
 
@@ -167,7 +172,6 @@ mod tests {
         let bytes = encode_versioned(2, &7u8).unwrap();
         let mut longer = bytes.to_vec();
         longer.push(0);
-
         assert_eq!(decode_versioned::<u8>(2, &bytes).unwrap(), 7);
         assert!(matches!(
             decode_versioned::<u8>(2, &longer),
@@ -178,7 +182,6 @@ mod tests {
     #[test]
     fn signature_wire_keeps_every_byte() {
         let signature: [u8; SIGNATURE_LEN] = std::array::from_fn(|index| index as u8);
-
         assert_eq!(
             signature_from_wire(&signature_to_wire(&signature)),
             signature

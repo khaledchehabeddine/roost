@@ -4,8 +4,8 @@ use zeroize::Zeroizing;
 
 /// A key-value storage abstraction for sensitive byte payloads.
 ///
-/// Implementations usually wrap platform secure storage. The UniFFI crate exposes a
-/// foreign-implementable adapter for clients. Each operation must be durable when it returns
+/// Implementations usually wrap platform secure storage, and roost-client exports a version the
+/// app implements in Swift or Kotlin. Each operation must be durable when it returns
 /// success. An interrupted `store` must leave either the complete previous value or the complete
 /// new value, never a torn value. `store` and `delete` may be retried after an ambiguous failure,
 /// so repeating either operation must be safe.

@@ -261,7 +261,7 @@ mod tests {
 
         assert!(matches!(
             manager.load_identity(),
-            Err(IdentityError::SecretBlob(StoredDataError::UnsupportedVersion(version)))
+            Err(IdentityError::SecretBlob(StoredDataError::UnsupportedVersion { version }))
                 if version == IDENTITY_SECRET_BLOB_VERSION + 1
         ));
     }
@@ -269,7 +269,6 @@ mod tests {
     #[test]
     fn identity_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-
         assert_zeroizes_on_drop::<Identity>();
     }
 

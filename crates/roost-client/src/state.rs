@@ -205,11 +205,14 @@ pub(crate) fn state_keys(addresses: &[CoreProtocolStateAddress]) -> Vec<StateKey
     addresses.iter().map(StateKey::from_core).collect()
 }
 
+// Most entries the app may pass for one read.
+const MAX_STATE_ENTRIES: usize = 4096;
+
 // Wraps every entry's bytes before checking any key, so a malformed entry leaves no copy behind.
 pub(crate) fn entries_to_core(
     mut entries: Vec<StateEntry>,
 ) -> Result<Vec<(CoreProtocolStateAddress, Option<CoreProtocolStateBlob>)>, RoostError> {
-    if entries.len() > roost_core::MAX_PROTOCOL_STATE_ENTRIES {
+    if entries.len() > MAX_STATE_ENTRIES {
         for entry in &mut entries {
             if let Some(blob) = &mut entry.blob {
                 blob.zeroize();
@@ -219,7 +222,7 @@ pub(crate) fn entries_to_core(
             reason: format!(
                 "{} protocol-state entries exceed the limit of {}",
                 entries.len(),
-                roost_core::MAX_PROTOCOL_STATE_ENTRIES
+                MAX_STATE_ENTRIES
             ),
         });
     }

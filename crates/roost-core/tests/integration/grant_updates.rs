@@ -24,7 +24,7 @@ fn refused(result: Result<Encrypted, DeviceError>) -> ProtocolStateError {
 
 fn grant_update(outcome: InboundMessageOutcome) -> GrantUpdateResult {
     let InboundMessageOutcome::GrantUpdate(result) = outcome else {
-        panic!("expected a Grant Update");
+        panic!("expected a grant update");
     };
     *result
 }
@@ -59,12 +59,12 @@ fn a_grant_update_to_a_contact_that_acknowledged_the_current_grant_has_nothing_t
         .acknowledgment
         .unwrap();
     bob.receive(&acknowledgment);
-    let before = bob.host.snapshot_bytes();
+    let before = bob.database.snapshot_bytes();
 
     let again = encrypt_grant_update(&mut bob, &alice).unwrap();
 
     assert!(matches!(again, Encrypted::NothingToSend));
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -72,13 +72,12 @@ fn a_grant_update_to_a_blocked_contact_is_refused() {
     let relay = Relay::new();
     let (alice, mut bob) = befriended(&relay);
     bob.block(alice.identity_key());
-    let before = bob.host.snapshot_bytes();
-
+    let before = bob.database.snapshot_bytes();
     assert!(matches!(
         refused(encrypt_grant_update(&mut bob, &alice)),
         ProtocolStateError::BlockedContact
     ));
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -86,13 +85,12 @@ fn a_grant_update_to_a_requester_this_side_has_not_accepted_is_refused() {
     let relay = Relay::new();
     let (alice, mut bob) = requested(&relay);
     bob.rotate_inbox();
-    let before = bob.host.snapshot_bytes();
-
+    let before = bob.database.snapshot_bytes();
     assert!(matches!(
         refused(encrypt_grant_update(&mut bob, &alice)),
         ProtocolStateError::ContactNotAccepted
     ));
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -135,12 +133,12 @@ fn a_requesters_grant_update_the_asked_side_acknowledged_stops_the_grant() {
         .acknowledgment
         .unwrap();
     alice.receive(&acknowledgment);
-    let before = alice.host.snapshot_bytes();
+    let before = alice.database.snapshot_bytes();
 
     let again = encrypt_grant_update(&mut alice, &bob).unwrap();
 
     assert!(matches!(again, Encrypted::NothingToSend));
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
     assert_eq!(
         alice.send(&bob, b"after the update").payload_kind,
         PayloadKind::Content
