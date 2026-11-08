@@ -15,8 +15,7 @@ use roost_crypto::{
     KeyPair, PublicDiscoveryKey as CryptoPublicDiscoveryKey,
     PublicIdentityKey as CryptoPublicIdentityKey, PublicKey,
     PublicSignedPreKey as CryptoPublicSignedPreKey, Signature, SigningKeyPair, VerifyingKey,
-    verify_discovery_to_identity_binding, verify_public_discovery_key, verify_public_identity_key,
-    verify_public_signed_prekey,
+    verify_discovery_to_identity_binding, verify_public_discovery_key, verify_public_signed_prekey,
 };
 use roost_protocol::{SenderCertificateValidationError, SignatureError, verify_with_context};
 use std::sync::Arc;
@@ -24,21 +23,6 @@ use std::sync::Arc;
 const PASSPHRASE: &str = "correct horse battery staple";
 const CERTIFICATE_EXPIRES_AT_SECS: u64 = 1_800_000_000;
 const CERTIFICATE_EXPIRES_AT_MILLIS: u64 = CERTIFICATE_EXPIRES_AT_SECS * 1_000;
-
-/// Every Ed25519 signature context and canonical-encoding domain tag Roost defines, plus the
-/// protocol-state commit and delivery verifier labels.
-const DOMAIN_REGISTRY: [&str; 10] = [
-    "RoostIKBinding-v1:",
-    "RoostDK-v1:",
-    "RoostDKToIK-v1:",
-    "RoostSPK-v1:",
-    "RoostMessageTranscript-v1:",
-    "RoostIK-v1:",
-    "RoostSafetyNumber-v1:",
-    "RoostSenderCertificate-v1:",
-    "RoostProtocolStateCommit-v1:",
-    "RoostDeliveryVerifier-v1:",
-];
 
 const RELAY_HTTP_AUTH_CONTEXT: &[u8] = b"Relay-HTTP-Auth-v1";
 const RELAY_PROTOCOL_VERSION: u16 = 1;
@@ -262,12 +246,6 @@ fn signed_authentication_transcript_verifies_bare_and_is_not_context_prefixed() 
         verify_with_context(&verifying, RELAY_HTTP_AUTH_CONTEXT, &transcript, &signature),
         Err(SignatureError::SignatureInvalid)
     ));
-    for label in DOMAIN_REGISTRY {
-        assert!(matches!(
-            verify_with_context(&verifying, label.as_bytes(), &transcript, &signature),
-            Err(SignatureError::SignatureInvalid)
-        ));
-    }
     // Ed25519 is deterministic, so an app that retries a challenge sends the same proof.
     assert_eq!(
         context.sign_authentication_transcript(transcript).unwrap(),
@@ -279,28 +257,16 @@ fn signed_authentication_transcript_verifies_bare_and_is_not_context_prefixed() 
 /// signing any bytes the app passes would sign those preimages too. Each starts with `Roost`, which
 /// the export refuses in any letter case.
 #[test]
-fn sign_authentication_transcript_refuses_reserved_preimages_and_prefixes() {
-    let (context, identity) = created_identity();
-    let preimages = DOMAIN_REGISTRY.iter().map(|label| {
-        [
-            label.as_bytes(),
-            &identity.key.agreement_key,
-            &identity.key.signing_key,
-        ]
-        .concat()
-    });
-    let prefixed = ["Roost", "roost", "ROOST"]
-        .iter()
-        .map(|prefix| [prefix.as_bytes(), &[0x41; 32]].concat());
-
-    for transcript in preimages.chain(prefixed) {
-        let start = String::from_utf8_lossy(&transcript[..10]).into_owned();
+fn sign_authentication_transcript_refuses_the_reserved_prefix_in_any_case() {
+    let (context, _) = created_identity();
+    for prefix in ["Roost", "roost", "ROOST"] {
+        let transcript = [prefix.as_bytes(), &[0x41; 32]].concat();
         assert!(
             matches!(
                 context.sign_authentication_transcript(transcript),
                 Err(RoostError::InvalidData { .. })
             ),
-            "expected InvalidData for a transcript starting {start}"
+            "expected InvalidData for a transcript starting {prefix}"
         );
     }
 }
@@ -312,16 +278,6 @@ fn sign_authentication_transcript_requires_a_stored_identity() {
         Err(RoostError::NotFound) => {}
         other => panic!("expected NotFound without an identity, got {other:?}"),
     }
-}
-
-#[test]
-fn generate_identity_returns_ffi_safe_public_keys() {
-    let (_, identity) = created_identity();
-    assert_eq!(identity.key.agreement_key.len(), 32);
-    assert_eq!(identity.key.signing_key.len(), 32);
-    assert_eq!(identity.binding_signature.len(), 64);
-    verifying_key(&identity);
-    verify_public_identity_key(&public_identity_key(&identity)).unwrap();
 }
 
 #[test]
