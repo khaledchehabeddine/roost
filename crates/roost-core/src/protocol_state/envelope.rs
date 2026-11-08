@@ -2,10 +2,12 @@
 //! ratchet ciphertext, and the sealed sender envelope inside it, and the checks that authenticate a
 //! message's sender.
 
-use super::{ProtocolStateError, encode_zeroizing};
+use super::grant::parse_discovery_key;
+use super::{DiscoveryKeyWire, ProtocolStateError, decode_failure, encode_zeroizing};
 use crate::TransportBinding;
-use crate::contact::{ContactDiscoveryKey, ContactIdentityKey};
+use crate::contact::ContactDiscoveryKey;
 use crate::hardening::ProtocolHardeningLimits;
+use crate::stored_data::{SignatureWire, decode_exact, signature_from_wire, signature_to_wire};
 use rand::{CryptoRng, RngCore};
 use roost_crypto::{
     DiscoveryKey, Handshake, Header, KeyPair, PublicDiscoveryKey, PublicIdentityKey, PublicKey,
@@ -15,42 +17,35 @@ use roost_crypto::{
     verify_public_discovery_key, verify_public_identity_key, verify_sender_proof,
 };
 use roost_protocol::{
-    MESSAGE_TRANSCRIPT_CONTEXT, MessageId, MessageTranscriptInput, PUBLIC_KEY_LEN, PayloadKind,
-    SenderCertificateValidation, SessionId, is_valid_x25519_public_key, message_transcript,
-    pad_sealed_payload, parse_ed25519_verifying_key_bytes, unpad_sealed_payload,
-    verify_with_context,
+    IdentityKey, MESSAGE_TRANSCRIPT_CONTEXT, MessageId, MessageTranscriptInput, PUBLIC_KEY_LEN,
+    PayloadKind, SenderCertificateValidation, SessionId, is_valid_x25519_public_key,
+    message_transcript, pad_sealed_payload, parse_ed25519_verifying_key_bytes,
+    unpad_sealed_payload, verify_with_context,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 const RATCHETED_PAYLOAD_CONTEXT: &[u8] = b"RoostRatchetedPayload-v1:";
-const SIGNATURE_LEN: usize = 64;
 
 /// Sender identity material decoded only after a message's ciphertext authenticates.
-///
-/// `Clone` is intentional for post-decryption metadata handoff; owned opaque bytes zeroize on drop.
-#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct SenderIdentityMaterial {
-    /// Sender identity key X25519 public bytes. Always 32 bytes.
-    #[zeroize(skip)]
-    pub identity_key: [u8; 32],
-    /// Sender identity key Ed25519 verifying-key bytes. Always 32 bytes.
-    #[zeroize(skip)]
-    pub identity_verifying_key: [u8; 32],
+    /// Sender identity key X25519 public bytes.
+    pub identity_key: [u8; PUBLIC_KEY_LEN],
+    /// Sender identity key Ed25519 verifying-key bytes.
+    pub identity_verifying_key: [u8; PUBLIC_KEY_LEN],
     /// Ed25519 signature binding `identity_key` to `identity_verifying_key`.
-    pub identity_binding_signature: Vec<u8>,
+    pub identity_binding_signature: [u8; Signature::BYTE_SIZE],
     /// Domain-signed sender certificate bytes.
     pub certificate: Vec<u8>,
     /// Domain signature over the sender certificate.
-    pub signature: [u8; SIGNATURE_LEN],
+    pub signature: [u8; Signature::BYTE_SIZE],
 }
 
 impl SenderIdentityMaterial {
-    /// Returns the sender's identity key as contact state records it.
-    pub(super) fn contact_identity_key(&self) -> ContactIdentityKey {
-        ContactIdentityKey {
+    pub(super) fn contact_identity_key(&self) -> IdentityKey {
+        IdentityKey {
             x25519_public_key: self.identity_key,
             ed25519_verifying_key: self.identity_verifying_key,
         }
@@ -70,7 +65,7 @@ impl SenderIdentityMaterial {
 #[derive(Clone, Copy)]
 pub(super) struct MessageMetadata {
     pub(super) session_id: SessionId,
-    /// The X3DH base key, carried until the initiator's first reply.
+    /// The X3DH base key, carried until the peer replies or, for a contact request, accepts.
     pub(super) base_key: Option<[u8; PUBLIC_KEY_LEN]>,
     pub(super) id: MessageId,
     pub(super) sent_at_millis: u64,
@@ -117,12 +112,11 @@ impl OpenedMessage {
         &self,
         rng: &mut R,
         state: &mut RatchetState,
-        limits: ProtocolHardeningLimits,
     ) -> Result<DecodedSealedSenderEnvelope, ProtocolStateError> {
         let associated_data = self.metadata.associated_data(&self.recipient_public_key);
         let sealed =
             state.ratchet_decrypt(rng, &self.ciphertext, &self.header, &associated_data)?;
-        let decoded = decode_sealed_sender_envelope(&sealed, limits)?;
+        let decoded = decode_sealed_sender_envelope(&sealed)?;
         match (self.metadata.base_key, &decoded.authentication) {
             (Some(_), SenderAuthentication::Proof { .. })
             | (None, SenderAuthentication::Signature(_)) => Ok(decoded),
@@ -181,12 +175,7 @@ pub(super) fn open_message(
         message,
         transport_binding,
     )?;
-    let (wire, trailing): (DecodedFramePlaintextWire, &[u8]) =
-        postcard::take_from_bytes(&frame_plaintext)
-            .map_err(|_| invalid("message frame plaintext failed to decode"))?;
-    if !trailing.is_empty() {
-        return Err(invalid("message frame plaintext has trailing bytes"));
-    }
+    let wire: DecodedFramePlaintextWire = decode_part(&frame_plaintext, "message frame plaintext")?;
     if wire.base_key.is_some() != message.prekey_reference.is_some() {
         return Err(invalid(
             "message handshake does not match its prekey reference",
@@ -225,21 +214,8 @@ pub(super) fn open_message(
     })
 }
 
-/// How the sender of a message proves who they are.
-enum OutboundAuthentication<'a> {
-    /// A signature over the message transcript, for messages after the handshake.
-    Signature(&'a Signature),
-    /// A first-message proof, with the discovery key the recipient replies to.
-    Proof {
-        discovery_key: &'a PublicDiscoveryKey,
-        discovery_to_identity: &'a Signature,
-        proof: &'a [u8; SENDER_PROOF_LEN],
-    },
-}
-
-/// How a received message's sender proved who they are.
 pub(super) enum SenderAuthentication {
-    Signature([u8; SIGNATURE_LEN]),
+    Signature([u8; Signature::BYTE_SIZE]),
     Proof {
         discovery_key: Box<PublicDiscoveryKey>,
         discovery_to_identity: Signature,
@@ -256,78 +232,40 @@ pub(super) struct DecodedSealedSenderEnvelope {
 
 fn encode_sealed_sender_envelope(
     sender_identity: &SenderIdentityMaterial,
-    authentication: OutboundAuthentication<'_>,
+    authentication: AuthenticationWire,
     padded_plaintext: &[u8],
-    limits: ProtocolHardeningLimits,
 ) -> Result<Zeroizing<Vec<u8>>, ProtocolStateError> {
-    validate_sender_identity(sender_identity, limits)?;
-    let signature_bytes;
-    let identity_signature_bytes;
-    let discovery_to_identity_bytes;
-    let authentication = match authentication {
-        OutboundAuthentication::Signature(signature) => {
-            signature_bytes = signature.to_bytes();
-            AuthenticationWire::Signature(&signature_bytes)
-        }
-        OutboundAuthentication::Proof {
-            discovery_key,
-            discovery_to_identity,
-            proof,
-        } => {
-            identity_signature_bytes = discovery_key.identity_signature.to_bytes();
-            discovery_to_identity_bytes = discovery_to_identity.to_bytes();
-            AuthenticationWire::Proof {
-                discovery_key: DiscoveryKeyWire {
-                    x25519_public_key: *discovery_key.public_key.as_bytes(),
-                    ed25519_verifying_key: discovery_key.verifying_key.to_bytes(),
-                    epoch: discovery_key.epoch,
-                    created_at_secs: discovery_key.created_at_secs,
-                    identity_signature: &identity_signature_bytes,
-                },
-                discovery_to_identity: &discovery_to_identity_bytes,
-                proof: *proof,
-            }
-        }
-    };
     // The sealed message's encoded size is checked against Roost's limits once it exists.
     encode_zeroizing(&SealedSenderEnvelopeWire {
         sender_identity_key: sender_identity.identity_key,
         sender_identity_verifying_key: sender_identity.identity_verifying_key,
-        sender_identity_binding_signature: &sender_identity.identity_binding_signature,
+        sender_identity_binding_signature: signature_to_wire(
+            &sender_identity.identity_binding_signature,
+        ),
         sender_certificate: &sender_identity.certificate,
-        sender_signature: &sender_identity.signature,
+        sender_signature: signature_to_wire(&sender_identity.signature),
         authentication,
         padded_plaintext,
     })
-    .map_err(|_| invalid("sealed-sender envelope failed to encode"))
+    .map_err(|_| invalid("sealed sender envelope failed to encode"))
 }
 
+// Decodes the envelope, and checks that its identity key's halves belong together.
 fn decode_sealed_sender_envelope(
     bytes: &[u8],
-    limits: ProtocolHardeningLimits,
 ) -> Result<DecodedSealedSenderEnvelope, ProtocolStateError> {
-    let (wire, trailing): (DecodedSealedSenderEnvelopeWire, &[u8]) =
-        postcard::take_from_bytes(bytes)
-            .map_err(|_| invalid("sealed-sender envelope failed to decode"))?;
-    let padded_plaintext = Zeroizing::new(wire.padded_plaintext);
+    let mut wire: DecodedSealedSenderEnvelopeWire = decode_part(bytes, "sealed sender envelope")?;
+    let padded_plaintext = Zeroizing::new(std::mem::take(&mut wire.padded_plaintext));
     let sender_identity = SenderIdentityMaterial {
         identity_key: wire.sender_identity_key,
         identity_verifying_key: wire.sender_identity_verifying_key,
-        identity_binding_signature: wire.sender_identity_binding_signature,
-        certificate: wire.sender_certificate,
-        signature: wire
-            .sender_signature
-            .as_slice()
-            .try_into()
-            .map_err(|_| invalid("sender signature length is invalid"))?,
+        identity_binding_signature: signature_from_wire(&wire.sender_identity_binding_signature),
+        certificate: std::mem::take(&mut wire.sender_certificate),
+        signature: signature_from_wire(&wire.sender_signature),
     };
-    if !trailing.is_empty() {
-        return Err(invalid("sealed-sender envelope has trailing bytes"));
-    }
-    // The frame's payload limit already bounds the envelope, so only the fields with limits of
-    // their own are checked here.
-    validate_sender_identity(&sender_identity, limits)?;
-    let authentication = decoded_authentication(wire.authentication)?;
+    verify_public_identity_key(&sender_identity.public_identity_key()?)
+        .map_err(|_| invalid("sender identity key binding signature failed"))?;
+    let authentication = decoded_authentication(&wire.authentication)?;
     let plaintext = unpad_sealed_payload(&padded_plaintext)?;
     Ok(DecodedSealedSenderEnvelope {
         sender_identity,
@@ -338,41 +276,31 @@ fn decode_sealed_sender_envelope(
 }
 
 fn decoded_authentication(
-    wire: DecodedAuthenticationWire,
+    wire: &AuthenticationWire,
 ) -> Result<SenderAuthentication, ProtocolStateError> {
     match wire {
-        DecodedAuthenticationWire::Signature(signature) => signature
-            .try_into()
-            .map(SenderAuthentication::Signature)
-            .map_err(|_| invalid("message transcript signature length is invalid")),
-        DecodedAuthenticationWire::Proof {
+        AuthenticationWire::Signature(signature) => Ok(SenderAuthentication::Signature(
+            signature_from_wire(signature),
+        )),
+        AuthenticationWire::Proof {
             discovery_key,
             discovery_to_identity,
             proof,
         } => {
-            if !is_valid_x25519_public_key(&discovery_key.x25519_public_key) {
-                return Err(invalid("sender discovery key is invalid"));
-            }
-            let verifying_key =
-                parse_ed25519_verifying_key_bytes(&discovery_key.ed25519_verifying_key)
-                    .ok_or_else(|| invalid("sender discovery key is invalid"))?;
-            let identity_signature: [u8; SIGNATURE_LEN] = discovery_key
-                .identity_signature
-                .try_into()
-                .map_err(|_| invalid("sender discovery key signature length is invalid"))?;
-            let discovery_to_identity: [u8; SIGNATURE_LEN] = discovery_to_identity
-                .try_into()
-                .map_err(|_| invalid("sender discovery binding signature length is invalid"))?;
+            let discovery_key = parse_discovery_key(
+                discovery_key.x25519_public_key,
+                &discovery_key.ed25519_verifying_key,
+                discovery_key.epoch,
+                discovery_key.created_at_secs,
+                &signature_from_wire(&discovery_key.identity_signature),
+            )
+            .ok_or_else(|| invalid("sender discovery key is invalid"))?;
             Ok(SenderAuthentication::Proof {
-                discovery_key: Box::new(PublicDiscoveryKey {
-                    public_key: PublicKey::from(discovery_key.x25519_public_key),
-                    verifying_key,
-                    epoch: discovery_key.epoch,
-                    created_at_secs: discovery_key.created_at_secs,
-                    identity_signature: Signature::from_bytes(&identity_signature),
-                }),
-                discovery_to_identity: Signature::from_bytes(&discovery_to_identity),
-                proof,
+                discovery_key: Box::new(discovery_key),
+                discovery_to_identity: Signature::from_bytes(&signature_from_wire(
+                    discovery_to_identity,
+                )),
+                proof: *proof,
             })
         }
     }
@@ -389,7 +317,7 @@ fn sign_message_transcript(
 fn verify_message_transcript(
     sender_identity: &SenderIdentityMaterial,
     input: MessageTranscriptInput<'_>,
-    signature: &[u8; SIGNATURE_LEN],
+    signature: &[u8; Signature::BYTE_SIZE],
 ) -> Result<(), ProtocolStateError> {
     let signature = Signature::from_bytes(signature);
     let verifying_key = parse_ed25519_verifying_key_bytes(&sender_identity.identity_verifying_key)
@@ -416,26 +344,19 @@ pub(super) fn encode_acknowledgment_plaintext(
 pub(super) fn decode_acknowledgment_plaintext(
     bytes: &[u8],
 ) -> Result<MessageId, ProtocolStateError> {
-    let (wire, trailing): (AcknowledgmentPlaintextWire, &[u8]) =
-        postcard::take_from_bytes(bytes)
-            .map_err(|_| invalid("acknowledgment plaintext failed to decode"))?;
-    if !trailing.is_empty() {
-        return Err(invalid("acknowledgment plaintext has trailing bytes"));
-    }
+    let wire: AcknowledgmentPlaintextWire = decode_part(bytes, "acknowledgment plaintext")?;
     Ok(MessageId::from_bytes(wire.acknowledged_message_id))
 }
 
-pub(super) fn validate_sender_identity(
-    sender_identity: &SenderIdentityMaterial,
+// Refuses a local sender certificate longer than Roost accepts, before an operation seals it.
+pub(super) fn check_certificate_len(
+    certificate: &[u8],
     limits: ProtocolHardeningLimits,
 ) -> Result<(), ProtocolStateError> {
-    let bundle = sender_identity.public_identity_key()?;
-    verify_public_identity_key(&bundle)
-        .map_err(|_| invalid("sender identity key binding signature failed"))?;
-    if sender_identity.certificate.len() > limits.max_sender_certificate_len {
+    if certificate.len() > limits.max_sender_certificate_len {
         return Err(invalid(&format!(
             "sender certificate length exceeds limit: {}",
-            sender_identity.certificate.len()
+            certificate.len()
         )));
     }
     Ok(())
@@ -461,7 +382,7 @@ pub(super) fn certified_sender_identity_key(
     validation: &SenderCertificateValidation,
     certificate_grace: Duration,
     sender_identity: &SenderIdentityMaterial,
-) -> Result<ContactIdentityKey, ProtocolStateError> {
+) -> Result<IdentityKey, ProtocolStateError> {
     let validated = validation
         .validate(
             &sender_identity.certificate,
@@ -478,7 +399,6 @@ pub(super) fn certified_sender_identity_key(
     Ok(identity_key)
 }
 
-// What one outbound message says, before Roost seals it.
 pub(super) struct OutboundContent<'a> {
     pub(super) session_id: SessionId,
     pub(super) id: MessageId,
@@ -502,7 +422,6 @@ pub(super) fn seal_signed<R: RngCore + CryptoRng>(
     recipient: SignedRecipient<'_>,
     sender: &LocalSender<'_>,
     transport_binding: &TransportBinding,
-    limits: ProtocolHardeningLimits,
 ) -> Result<SealedFrame, ProtocolStateError> {
     let sender_identity = sender.identity;
     let payload_kind = content.payload_kind;
@@ -521,9 +440,8 @@ pub(super) fn seal_signed<R: RngCore + CryptoRng>(
     )?;
     let envelope = encode_sealed_sender_envelope(
         sender_identity,
-        OutboundAuthentication::Signature(&signature),
+        AuthenticationWire::Signature(signature_to_wire(&signature.to_bytes())),
         &padded_plaintext,
-        limits,
     )?;
     seal_message(
         rng,
@@ -550,7 +468,6 @@ pub(super) fn seal_proved<R: RngCore + CryptoRng>(
     handshake: &Handshake,
     sender: &LocalSender<'_>,
     transport_binding: &TransportBinding,
-    limits: ProtocolHardeningLimits,
 ) -> Result<SealedFrame, ProtocolStateError> {
     let padded_plaintext = pad_sealed_payload(content.payload)?;
     let proof = prove_sender(
@@ -563,15 +480,21 @@ pub(super) fn seal_proved<R: RngCore + CryptoRng>(
             sender_certificate_signature: &sender.identity.signature,
         },
     )?;
+    let discovery_key = sender.discovery_key;
     let envelope = encode_sealed_sender_envelope(
         sender.identity,
-        OutboundAuthentication::Proof {
-            discovery_key: sender.discovery_key,
-            discovery_to_identity: sender.discovery_to_identity,
-            proof: &proof,
+        AuthenticationWire::Proof {
+            discovery_key: DiscoveryKeyWire {
+                x25519_public_key: *discovery_key.public_key.as_bytes(),
+                ed25519_verifying_key: discovery_key.verifying_key.to_bytes(),
+                epoch: discovery_key.epoch,
+                created_at_secs: discovery_key.created_at_secs,
+                identity_signature: signature_to_wire(&discovery_key.identity_signature.to_bytes()),
+            },
+            discovery_to_identity: signature_to_wire(&sender.discovery_to_identity.to_bytes()),
+            proof: *proof,
         },
         &padded_plaintext,
-        limits,
     )?;
     seal_message(
         rng,
@@ -590,8 +513,7 @@ pub(super) fn seal_proved<R: RngCore + CryptoRng>(
     )
 }
 
-// Checks a first message's proof and the discovery key it seals, and returns the sender's
-// identity key and that discovery key.
+// Checks a first message's proof and the discovery key it seals.
 pub(super) fn authenticate_first_message(
     decoded: &DecodedSealedSenderEnvelope,
     handshake: &Handshake,
@@ -634,12 +556,12 @@ pub(super) fn authenticate_first_message(
 // Checks that a message on a known session comes from the session's peer and, after the handshake,
 // that the peer signed it.
 //
-// A message that still carries the handshake needs no further check: only the peer holds the
+// A message that still carries the handshake needs no further check, since only the peer holds the
 // session's keys, and the handshake was proved when the session was created.
-pub(super) fn authenticate_session_message(
+pub(super) fn authenticate_message_on_session(
     decoded: &DecodedSealedSenderEnvelope,
     opened: &OpenedMessage,
-    peer_identity_key: ContactIdentityKey,
+    peer_identity_key: IdentityKey,
     recipient_identity_verifying_key: &[u8; PUBLIC_KEY_LEN],
 ) -> Result<(), ProtocolStateError> {
     if !bool::from(
@@ -689,6 +611,14 @@ fn invalid(reason: &str) -> ProtocolStateError {
     }
 }
 
+// Decodes `bytes` as one `T`, refusing bytes left over, and names `part` in the error.
+fn decode_part<'a, T: Deserialize<'a>>(
+    bytes: &'a [u8],
+    part: &str,
+) -> Result<T, ProtocolStateError> {
+    decode_exact(bytes).map_err(|error| invalid(&decode_failure(part, &error)))
+}
+
 #[derive(Serialize)]
 struct FramePlaintextWire<'a> {
     session_id: [u8; 16],
@@ -719,60 +649,40 @@ struct DecodedFramePlaintextWire {
 struct SealedSenderEnvelopeWire<'a> {
     sender_identity_key: [u8; PUBLIC_KEY_LEN],
     sender_identity_verifying_key: [u8; PUBLIC_KEY_LEN],
-    sender_identity_binding_signature: &'a [u8],
+    sender_identity_binding_signature: SignatureWire,
     sender_certificate: &'a [u8],
-    sender_signature: &'a [u8],
-    authentication: AuthenticationWire<'a>,
+    sender_signature: SignatureWire,
+    authentication: AuthenticationWire,
     padded_plaintext: &'a [u8],
 }
 
-#[derive(Serialize)]
-enum AuthenticationWire<'a> {
-    Signature(&'a [u8]),
+#[derive(Deserialize, Serialize)]
+enum AuthenticationWire {
+    // A signature over the message transcript, for messages after the handshake.
+    Signature(SignatureWire),
+    // A first message's proof, with the discovery key the recipient replies to.
     Proof {
-        discovery_key: DiscoveryKeyWire<'a>,
-        discovery_to_identity: &'a [u8],
+        discovery_key: DiscoveryKeyWire,
+        discovery_to_identity: SignatureWire,
         proof: [u8; SENDER_PROOF_LEN],
     },
 }
 
-#[derive(Serialize)]
-struct DiscoveryKeyWire<'a> {
-    x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    epoch: u32,
-    created_at_secs: u64,
-    identity_signature: &'a [u8],
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 struct DecodedSealedSenderEnvelopeWire {
+    #[zeroize(skip)]
     sender_identity_key: [u8; PUBLIC_KEY_LEN],
+    #[zeroize(skip)]
     sender_identity_verifying_key: [u8; PUBLIC_KEY_LEN],
-    sender_identity_binding_signature: Vec<u8>,
+    #[zeroize(skip)]
+    sender_identity_binding_signature: SignatureWire,
+    #[zeroize(skip)]
     sender_certificate: Vec<u8>,
-    sender_signature: Vec<u8>,
-    authentication: DecodedAuthenticationWire,
+    #[zeroize(skip)]
+    sender_signature: SignatureWire,
+    #[zeroize(skip)]
+    authentication: AuthenticationWire,
     padded_plaintext: Vec<u8>,
-}
-
-#[derive(Deserialize)]
-enum DecodedAuthenticationWire {
-    Signature(Vec<u8>),
-    Proof {
-        discovery_key: DecodedDiscoveryKeyWire,
-        discovery_to_identity: Vec<u8>,
-        proof: [u8; SENDER_PROOF_LEN],
-    },
-}
-
-#[derive(Deserialize)]
-struct DecodedDiscoveryKeyWire {
-    x25519_public_key: [u8; PUBLIC_KEY_LEN],
-    ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
-    epoch: u32,
-    created_at_secs: u64,
-    identity_signature: Vec<u8>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -847,7 +757,7 @@ mod tests {
         let sender_identity = SenderIdentityMaterial {
             identity_key: *identity_key.public.as_bytes(),
             identity_verifying_key: signing_key.verifying.to_bytes(),
-            identity_binding_signature: binding_signature.to_bytes().to_vec(),
+            identity_binding_signature: binding_signature.to_bytes(),
             certificate: b"sender certificate".to_vec(),
             signature: [0; 64],
         };
@@ -943,7 +853,7 @@ mod tests {
             material: SenderIdentityMaterial {
                 identity_key: *identity.public_key.as_bytes(),
                 identity_verifying_key: identity.verifying_key.to_bytes(),
-                identity_binding_signature: identity.binding_signature.to_bytes().to_vec(),
+                identity_binding_signature: identity.binding_signature.to_bytes(),
                 certificate: Vec::new(),
                 signature: [0; 64],
             },
@@ -979,7 +889,13 @@ mod tests {
         )
         .unwrap();
         let decoded = DecodedSealedSenderEnvelope {
-            sender_identity: claimed.material.clone(),
+            sender_identity: SenderIdentityMaterial {
+                identity_key: claimed.material.identity_key,
+                identity_verifying_key: claimed.material.identity_verifying_key,
+                identity_binding_signature: claimed.material.identity_binding_signature,
+                certificate: claimed.material.certificate.clone(),
+                signature: claimed.material.signature,
+            },
             authentication: SenderAuthentication::Proof {
                 discovery_key: Box::new(sealed.public()),
                 discovery_to_identity: sealed.sign_identity_binding(bound).unwrap(),
@@ -1005,7 +921,6 @@ mod tests {
         let alice = sender(0x10);
         let mallory = sender(0x20);
         let mallorys_discovery_key = discovery_key(&mallory, 0x21);
-
         assert!(matches!(
             authenticate(&alice, &mallorys_discovery_key, &alice.identity),
             Err(ProtocolStateError::InvalidMessage { reason })
@@ -1018,7 +933,6 @@ mod tests {
         let alice = sender(0x10);
         let mallory = sender(0x20);
         let alices_discovery_key = discovery_key(&alice, 0x11);
-
         assert!(matches!(
             authenticate(&alice, &alices_discovery_key, &mallory.identity),
             Err(ProtocolStateError::InvalidMessage { reason })
@@ -1051,7 +965,6 @@ mod tests {
         let (mut receiving, _) =
             accept_handshake(&handshake, &bob_discovery_key, &signed_prekey, None).unwrap();
         let binding = TransportBinding::new(b"route".to_vec()).unwrap();
-        let limits = ProtocolHardeningLimits::default();
         let agreement_key = KeyPair::from_secret_bytes(&[0x11; 32]);
         let alice_public_discovery_key = alice_discovery_key.public();
         let discovery_to_identity = alice_discovery_key
@@ -1079,7 +992,6 @@ mod tests {
                 discovery_to_identity: &discovery_to_identity,
             },
             &binding,
-            limits,
         )
         .unwrap();
         // Whoever holds Bob's discovery key seals the same ratchet ciphertext under another
@@ -1118,17 +1030,13 @@ mod tests {
             SessionId::from_bytes([0x75; 16])
         );
         assert!(matches!(
-            swapped.decrypt(&mut rng, &mut receiving, limits),
+            swapped.decrypt(&mut rng, &mut receiving),
             Err(ProtocolStateError::Ratchet(RatchetError::Aead))
         ));
         // The stored state still opens the genuine message.
         let original = open_message(&message, &bob_discovery_key, &binding).unwrap();
         let decoded = original
-            .decrypt(
-                &mut rng,
-                &mut RatchetState::from_bytes(&stored).unwrap(),
-                limits,
-            )
+            .decrypt(&mut rng, &mut RatchetState::from_bytes(&stored).unwrap())
             .unwrap();
         assert_eq!(&*decoded.plaintext, b"hello bob");
     }

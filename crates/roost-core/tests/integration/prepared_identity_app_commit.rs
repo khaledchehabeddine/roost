@@ -1,28 +1,23 @@
-//! Identity creation and recovery across the prepared-operation lifecycle and a host commit.
-//!
-//! Each scenario reserves a prepared identity, commits it in a host transaction with a chosen
-//! outcome, then recovers the way a host does at startup. An unknown outcome covers both a lost
-//! reply and a cancellation that hides whether the transaction committed.
-
-use crate::support::host_identity::{
-    CommitResult, DeviceStorage, HostCommit, IdentityDatabase, recover,
+use crate::support::app_identity::{
+    AppCommit, CommitResult, DeviceStorage, IdentityDatabase, resolve_unfinished,
 };
+use rand::rngs::OsRng;
 
 #[test]
 fn unknown_outcome_that_committed_finalizes_after_restart() {
     let storage = DeviceStorage::default();
     let database = IdentityDatabase::default();
     let store = storage.open();
-    let prepared = store.prepare_identity_creation().unwrap();
+    let prepared = store.prepare_identity_creation(&mut OsRng).unwrap();
     store.reserve_operation(prepared.id).unwrap();
     assert_eq!(
-        database.commit_identity(prepared.id, HostCommit::AppliesWithUnknownOutcome),
+        database.commit_identity(prepared.id, AppCommit::AppliesWithUnknownOutcome),
         CommitResult::Unknown
     );
     drop(store);
 
     let restarted = storage.open();
-    recover(&restarted, &database).unwrap();
+    resolve_unfinished(&restarted, &database).unwrap();
 
     let identity = restarted.identity().unwrap().unwrap();
     assert_eq!(identity.public_key(), prepared.output.public_key());
@@ -35,22 +30,22 @@ fn unknown_outcome_that_did_not_commit_aborts_after_restart() {
     let storage = DeviceStorage::default();
     let database = IdentityDatabase::default();
     let store = storage.open();
-    let lost = store.prepare_identity_creation().unwrap();
+    let lost = store.prepare_identity_creation(&mut OsRng).unwrap();
     store.reserve_operation(lost.id).unwrap();
     assert_eq!(
-        database.commit_identity(lost.id, HostCommit::FailsWithUnknownOutcome),
+        database.commit_identity(lost.id, AppCommit::FailsWithUnknownOutcome),
         CommitResult::Unknown
     );
     drop(store);
 
     let restarted = storage.open();
-    recover(&restarted, &database).unwrap();
+    resolve_unfinished(&restarted, &database).unwrap();
     assert!(restarted.identity().unwrap().is_none());
     assert!(restarted.unfinished_operations().unwrap().is_empty());
 
-    let created = restarted.prepare_identity_creation().unwrap();
+    let created = restarted.prepare_identity_creation(&mut OsRng).unwrap();
     restarted.reserve_operation(created.id).unwrap();
-    database.commit_identity(created.id, HostCommit::Applies);
+    database.commit_identity(created.id, AppCommit::Applies);
     restarted.finalize_operation(created.id).unwrap();
     assert_eq!(
         restarted.identity().unwrap().unwrap().public_key(),
@@ -59,19 +54,19 @@ fn unknown_outcome_that_did_not_commit_aborts_after_restart() {
 }
 
 #[test]
-fn finalization_the_host_never_recorded_is_reconciled_after_restart() {
+fn finalization_the_app_never_recorded_is_reconciled_after_restart() {
     let storage = DeviceStorage::default();
     let database = IdentityDatabase::default();
     let store = storage.open();
-    let prepared = store.prepare_identity_creation().unwrap();
+    let prepared = store.prepare_identity_creation(&mut OsRng).unwrap();
     store.reserve_operation(prepared.id).unwrap();
-    database.commit_identity(prepared.id, HostCommit::Applies);
+    database.commit_identity(prepared.id, AppCommit::Applies);
     store.finalize_operation(prepared.id).unwrap();
     drop(store);
     assert_eq!(database.pending_finalizations(), [prepared.id]);
 
     let restarted = storage.open();
-    recover(&restarted, &database).unwrap();
+    resolve_unfinished(&restarted, &database).unwrap();
     assert!(database.pending_finalizations().is_empty());
     assert_eq!(
         restarted.identity().unwrap().unwrap().public_key(),

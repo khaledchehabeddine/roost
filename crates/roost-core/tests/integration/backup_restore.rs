@@ -1,7 +1,7 @@
 //! Restoring a backup brings back every contact, and each contact can send and receive again right
-//! away on new sessions. The exception is an asked side that hasn't accepted yet. This side drops
-//! its acceptance on the old session and can only send it a new contact request. Both sides end up
-//! accepted whether the asked side accepts before or after that request.
+//! away on new sessions. The exception is a contact the restored side asked that hasn't accepted.
+//! The restored side loses any acceptance sent on the old session and can only send that contact a
+//! new contact request. Both sides end up accepted whether the contact accepts before or after it.
 
 use crate::support::device::{
     DeviceError, Intent, Recovered, Relay, Route, befriended, redraft, requested,
@@ -81,7 +81,7 @@ fn a_restored_side_talks_both_ways_with_a_contact_that_rotated_after_the_backup(
     alice.rotate_inbox();
     let update = alice.send_grant_update(&bob);
     let InboundMessageOutcome::GrantUpdate(received) = bob.receive(&update.message) else {
-        panic!("expected a Grant Update");
+        panic!("expected a grant update");
     };
     // Bob's old phone acknowledges Alice's new grant before it breaks.
     alice.receive(&received.acknowledgment.unwrap());
@@ -90,7 +90,7 @@ fn a_restored_side_talks_both_ways_with_a_contact_that_rotated_after_the_backup(
 
     let reconnect = bob.send_fetching_a_bundle(&alice, b"", Intent::GrantUpdate);
     let InboundMessageOutcome::GrantUpdate(received) = alice.receive(&reconnect.message) else {
-        panic!("expected a Grant Update");
+        panic!("expected a grant update");
     };
     bob.receive(&received.acknowledgment.unwrap());
 
@@ -155,7 +155,7 @@ fn a_restored_requester_cant_accept_a_contact_that_never_wrote() {
     alice.restore(&backup);
     let mut outgoing = alice.outgoing(&bob, b"accepting my own request");
     outgoing.prekey_bundle = Some(bob.bundle());
-    let before = alice.host.snapshot_bytes();
+    let before = alice.database.snapshot_bytes();
 
     assert!(matches!(
         alice.encrypt(redraft(&outgoing), Intent::Acceptance),
@@ -169,7 +169,7 @@ fn a_restored_requester_cant_accept_a_contact_that_never_wrote() {
             MessageOperationError::ProtocolState(ProtocolStateError::NoContactRequest)
         ))
     ));
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn a_restored_requester_cant_send_a_grant_update_or_message_before_acceptance() 
     let backup = alice.back_up();
     alice.restore(&backup);
     let outgoing = alice.outgoing(&bob, b"still there?");
-    let before = alice.host.snapshot_bytes();
+    let before = alice.database.snapshot_bytes();
 
     for intent in [Intent::GrantUpdate, Intent::Message] {
         let mut fetched = redraft(&outgoing);
@@ -193,7 +193,7 @@ fn a_restored_requester_cant_send_a_grant_update_or_message_before_acceptance() 
             ));
         }
     }
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn asking_again_accepts_a_restored_requester_whose_acceptance_was_lost() {
         bob.receive(&acknowledgment),
         InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
-    // The backup is from before the acceptance, so Bob has nothing left to resend.
+    // Alice acknowledged the acceptance, so Bob has nothing to resend, but her backup predates it.
     alice.restore(&backup);
 
     let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
@@ -339,4 +339,26 @@ fn a_restored_requester_that_used_up_the_limit_asks_again_within_the_asked_sides
             ContactTrustState::Unverified
         );
     }
+}
+
+#[test]
+fn a_restored_requester_asking_a_contact_that_rotated_since_the_backup_counts_from_zero() {
+    let relay = Relay::new();
+    let (mut alice, mut bob) = requested(&relay);
+    for follow_up in [b"hello?".as_slice(), b"still there?"] {
+        let sent = alice.send(&bob, follow_up);
+        accepted(bob.receive(&sent.message));
+    }
+    // The backup counts all the messages Alice may send before acceptance.
+    let backup = alice.back_up();
+    alice.restore(&backup);
+    let rotation = bob.rotate_inbox();
+
+    let request = alice.send_fetching_a_bundle(&bob, b"asking again", Intent::Request);
+
+    assert!(matches!(
+        Route::of(&request.destination),
+        Route::FirstMessage { discovery_key, .. }
+            if discovery_key == *rotation.discovery_key.public_key.as_bytes()
+    ));
 }

@@ -8,6 +8,7 @@ UniFFI copies exported items' comments into the Swift and Kotlin bindings, so ap
 - Start each documentation comment with a one-sentence summary in its own paragraph, opening with a third-person verb for a function, such as "Returns", or a noun phrase for a type.
 - After the summary, add only what the signature can't show, such as a required order, changes that remain after a failure, or the reason for a surprising choice.
 - Refer to other items with rustdoc links, such as ``[`ExampleError::NotFound`]``.
+- Name another workspace crate only in a rustdoc link.
 - Add an example only for a flow of several calls, and put it on their type, not on each method.
 
 ### ❌ Bad

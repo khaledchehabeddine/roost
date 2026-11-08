@@ -226,7 +226,7 @@ impl Messaging {
     /// - [`RoostError::InvalidData`] if a key, certificate, or bundle is malformed.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_recovery(
         &self,

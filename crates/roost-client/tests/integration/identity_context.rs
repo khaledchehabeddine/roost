@@ -28,7 +28,7 @@ fn identity_is_absent_until_its_creation_finalizes() {
         .unwrap();
     assert!(matches!(
         context.identity(),
-        Err(RoostError::OperationRecoveryRequired { operation_id, .. })
+        Err(RoostError::UnfinishedReservation { operation_id, .. })
             if operation_id == prepared.operation_id
     ));
 

@@ -1,18 +1,15 @@
-//! Identity lifecycle, messaging and transitions over host-owned protocol state.
+//! Identity lifecycle, messaging, and state changes over protocol state the app holds.
 //!
-//! This implementation crate coordinates [`roost_crypto`] operations with caller-owned storage.
-//! Mobile consumers use `roost-client`. Platform adapters provide [`SecureStorage`] for keys and
-//! the host owns durable protocol state blob transactions.
+//! This crate coordinates [`roost_crypto`] operations with storage the app owns. The app provides
+//! [`SecureStorage`] for keys and owns the transactions that store protocol state blobs.
 //!
-//! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys and the
+//! [`KeyStore`] coordinates identity setup, encrypted backups, publication keys, and the
 //! [`ProtocolStateEngine`], and starts each [`MessageEncryption`] and [`MessageDecryption`]. A
-//! message operation asks the host for exact records and returns [`StateChanges`] the host commits
-//! only while every commit condition holds. The host holds one identity lock across every instance
-//! and process sharing an identity, from an operation's first call until its commit is resolved,
-//! and during prepared-operation recovery. See [`KeyStore`] and [`StateChanges`] for the storage
+//! message operation asks the app for exact records and returns [`StateChanges`] the app commits
+//! only while every commit condition holds. See [`KeyStore`] and [`StateChanges`] for the storage
 //! and commit contracts.
 //!
-//! # Secret handling
+//! # Secret Handling
 //!
 //! Identity does not implement `Debug`.
 //!
@@ -34,7 +31,7 @@
 //! assert_debug::<ProtocolStateBlob>();
 //! ```
 //!
-//! Secret-owning public result types do not implement caller-visible `Clone`.
+//! Public result types that hold secrets don't implement `Clone`.
 //!
 //! ```compile_fail
 //! use roost_core::InboundMessageResult;
@@ -52,14 +49,14 @@ mod identity;
 mod key_store;
 mod one_time_prekey;
 mod protocol_state;
+mod retention;
 mod safety_number;
 mod signed_prekey;
 mod storage;
 mod stored_data;
 
 pub use contact::{
-    ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
-    ContactTrustState,
+    ContactDiscoveryKey, ContactSafetyNumberConfirmation, ContactState, ContactTrustState,
 };
 pub use contact_publication::{ContactPublication, ContactPublicationError};
 pub use discovery_key::DiscoveryKeyError;
@@ -75,14 +72,14 @@ pub use protocol_state::{
     AcknowledgmentResult, AdmissionRequest, BlockedContactAcknowledgmentPolicy,
     BlockedInboundMessageResult, DeliveryCheck, DeliveryCheckResult, DeliveryCheckStep,
     GrantUpdateResult, InboundMessageOutcome, InboundMessageResult, IncomingMessage,
-    MAX_PROTOCOL_STATE_ENTRIES, MessageDecryption, MessageDecryptionStep, MessageDestination,
-    MessageEncryption, MessageEncryptionStep, MessageOperationError, MessageRecovery,
-    MessageRecoveryStep, OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage,
-    OutgoingRecovery, PeerPreKeyBundle, PendingAcknowledgment, ProtocolStateAddress,
-    ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, ProtocolStateUpdate,
-    ReceiveSettings, SenderIdentityMaterial, SignedSenderCertificate, StateChanges,
-    StateEntryError, WithheldInboundMessageResult, commit_conditions_match, is_newer_discovery_key,
+    MessageDecryption, MessageDecryptionStep, MessageDestination, MessageEncryption,
+    MessageEncryptionStep, MessageOperationError, MessageRecovery, MessageRecoveryStep,
+    OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery,
+    PeerPreKeyBundle, PendingAcknowledgment, ProtocolStateAddress, ProtocolStateBlob,
+    ProtocolStateCommitCondition, ProtocolStateEngine, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateUpdate, ReceiveSettings, SenderIdentityMaterial,
+    SignedSenderCertificate, StateChanges, StateEntryError, WithheldInboundMessageResult,
+    commit_conditions_match, is_newer_discovery_key,
 };
 pub use roost_crypto::{
     HandshakeError, OneTimePreKeyReference, PreKeyBundle, PublicDiscoveryKey, PublicIdentityKey,

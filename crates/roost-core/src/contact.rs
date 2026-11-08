@@ -1,11 +1,7 @@
 use crate::protocol_state::StateChanges;
 use roost_crypto::{PublicDiscoveryKey, Signature};
-use roost_protocol::IdentityKey;
-use roost_protocol::PUBLIC_KEY_LEN;
+use roost_protocol::{IdentityKey, PUBLIC_KEY_LEN};
 use serde::{Deserialize, Serialize};
-
-/// A peer identity key that owns contact, trust, and blocking state.
-pub type ContactIdentityKey = IdentityKey;
 
 /// Current discovery key material for a contact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,12 +43,12 @@ pub enum ContactTrustState {
 
 /// A contact as the app shows it, decoded from its record after the app commits.
 ///
-/// The peer's delivery capability is not part of it: that leaves Roost only in the destination of
-/// an established message.
+/// The peer's delivery capability is not part of it, since it leaves Roost only in the destination
+/// of an established message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContactState {
     /// Permanent identity key that owns trust and blocking decisions.
-    pub identity_key: ContactIdentityKey,
+    pub identity_key: IdentityKey,
     /// Current discovery key, absent for a stranger blocked before they sent anything.
     pub discovery_key: Option<ContactDiscoveryKey>,
     /// Identity-key-bound trust state.

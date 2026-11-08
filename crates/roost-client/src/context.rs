@@ -9,6 +9,7 @@ use crate::operation::{
 };
 use crate::publication::{PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle};
 use crate::storage::SecureStorageAdapter;
+use rand::rngs::OsRng;
 use roost_core::{
     KeyStore as CoreKeyStore, PreparedKeyStoreOperation as CorePreparedKeyStoreOperation,
 };
@@ -38,16 +39,16 @@ const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 /// each receive.
 ///
 /// Roost owns the identity's keys, backups, prekeys, inbox rotations, and the inbox grants that
-/// share its inbox with contacts, the contents of protocol state blobs, and the journal that makes
-/// key changes recoverable. It reads no clock
-/// for certificate checks, does no networking, and keeps no copy of protocol state between calls.
+/// share its inbox with contacts, the contents of protocol state blobs, and the journal that lets
+/// an interrupted key change finish. It reads no clock for certificate checks, does no networking,
+/// and keeps no copy of protocol state between calls.
 ///
 /// The host owns the [`SecureStorage`] adapter, the database that stores protocol state blobs and
 /// operation IDs, and its transactions. It stores the blobs without decoding them or keeping a
 /// copy of its own, and calls Roost outside its database transactions, off the main thread. It
 /// holds the identity lock, one lock that covers every process sharing the identity, from the
 /// first call of any operation, such as a send or a key change, until its commit is resolved, and
-/// while it recovers unfinished operations.
+/// while it resolves unfinished operations.
 ///
 /// The host protects stored blobs like identity keys, and keeps blobs, keys, passphrases, and
 /// plaintext out of logs. Roost's tests don't cover the host's adapter or transactions, so the
@@ -63,8 +64,8 @@ const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 /// 3. Calls [`Self::finalize_operation`], then publishes the output.
 ///
 /// When the commit definitely failed, call [`Self::abort_operation`] instead. When the outcome is
-/// unknown, such as after a lost reply or a cancellation, neither finalize nor abort: recover
-/// first. Releasing a context never aborts its operations.
+/// unknown, such as after a lost reply or a cancellation, neither finalize nor abort until you
+/// resolve it as at startup. Releasing a context never aborts its operations.
 ///
 /// At startup, and after any unknown outcome, resolve each of [`Self::unfinished_operations`]
 /// against the host's records: finalize a reserved or finalizing operation whose ID the host
@@ -92,7 +93,7 @@ const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 ///     switch try database.saveIdentity(prepared.identity, operationId: prepared.operationId) {
 ///     case .committed: try context.finalizeOperation(id: prepared.operationId)
 ///     case .conflict: try context.abortOperation(id: prepared.operationId)
-///     case .unknown: throw StartupError.recoveryRequired
+///     case .unknown: throw StartupError.outcomeUnknown
 ///     }
 /// }
 /// ```
@@ -117,7 +118,7 @@ const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 ///     when (database.saveIdentity(prepared.identity, prepared.operationId)) {
 ///         CommitResult.COMMITTED -> context.finalizeOperation(prepared.operationId)
 ///         CommitResult.CONFLICT -> context.abortOperation(prepared.operationId)
-///         CommitResult.UNKNOWN -> throw RecoveryRequired()
+///         CommitResult.UNKNOWN -> throw OutcomeUnknown()
 ///     }
 /// }
 /// ```
@@ -195,7 +196,7 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::InvalidData`] if the stored identity is malformed.
     /// - [`RoostError::UnsupportedVersion`] if the stored identity uses an unknown format version.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn identity(&self) -> Result<Option<Identity>, RoostError> {
         self.inner
@@ -211,13 +212,13 @@ impl IdentityContext {
     ///
     /// # Errors
     /// - [`RoostError::AlreadyExists`] if an identity is already stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_identity_creation(&self) -> Result<PreparedIdentity, RoostError> {
         let (operation_id, identity) = convert_prepared(
             &self.inner,
-            self.inner.prepare_identity_creation()?,
+            self.inner.prepare_identity_creation(&mut OsRng)?,
             |identity| Ok(Identity::from_core(identity)?),
         )?;
         Ok(PreparedIdentity {
@@ -232,12 +233,12 @@ impl IdentityContext {
     /// operation ID. Preparing deletion with no identity stored still returns an operation.
     ///
     /// # Errors
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_identity_deletion(&self) -> Result<OperationId, RoostError> {
         Ok(OperationId::from_core(
-            self.inner.prepare_identity_deletion()?.id,
+            self.inner.prepare_identity_deletion(&mut OsRng)?.id,
         ))
     }
 
@@ -255,7 +256,7 @@ impl IdentityContext {
     /// - [`RoostError::InvalidData`] if the transcript is empty, longer than 4096 bytes, or starts
     ///   with a reserved prefix.
     /// - [`RoostError::NotFound`] if no identity is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn sign_authentication_transcript(
         &self,
@@ -279,11 +280,13 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::BackupFailed`] if key derivation or encryption fails.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn export_encrypted_backup(&self, passphrase: String) -> Result<Vec<u8>, RoostError> {
         let passphrase = Zeroizing::new(passphrase);
-        Ok(self.inner.export_encrypted_backup(&passphrase)?)
+        Ok(self
+            .inner
+            .export_encrypted_backup(&mut OsRng, &passphrase)?)
     }
 
     /// Prepares replacing this context's identity with the one in `backup`.
@@ -310,7 +313,7 @@ impl IdentityContext {
     /// - [`RoostError::DecryptionFailed`] if the passphrase is wrong or the backup was altered.
     /// - [`RoostError::InvalidData`] or [`RoostError::UnsupportedVersion`] if the backup is
     ///   malformed.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_backup_import(
@@ -322,7 +325,7 @@ impl IdentityContext {
         let passphrase = Zeroizing::new(passphrase);
         Ok(OperationId::from_core(
             self.inner
-                .prepare_backup_import(backup.as_slice(), passphrase.as_str())?
+                .prepare_backup_import(&mut OsRng, backup.as_slice(), passphrase.as_str())?
                 .id,
         ))
     }
@@ -336,7 +339,7 @@ impl IdentityContext {
     /// - [`RoostError::Corrupt`] if the stored keys don't verify as a chain.
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::NotFound`] if no identity, discovery key, or signed prekey is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn current_publication(&self) -> Result<PublicationBundle, RoostError> {
         PublicationBundle::from_core(self.inner.current_publication()?)
@@ -354,7 +357,7 @@ impl IdentityContext {
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::InvalidData`] if the stored identity is malformed.
     /// - [`RoostError::NotFound`] if no identity, discovery key, or signed prekey is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     /// - [`RoostError::UnsupportedVersion`] if the stored identity uses an unknown format version.
     pub fn encode_contact_publication(&self) -> Result<Vec<u8>, RoostError> {
@@ -378,13 +381,13 @@ impl IdentityContext {
     ///
     /// # Errors
     /// - [`RoostError::NotFound`] if no identity is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_inbox_rotation(&self) -> Result<PreparedInboxRotation, RoostError> {
         let (operation_id, publication) = convert_prepared(
             &self.inner,
-            self.inner.prepare_inbox_rotation()?,
+            self.inner.prepare_inbox_rotation(&mut OsRng)?,
             PublicationBundle::from_core,
         )?;
         Ok(PreparedInboxRotation {
@@ -401,7 +404,7 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_signed_prekey_rotation_and_discovery_key_cleanup(
@@ -410,30 +413,8 @@ impl IdentityContext {
         let (operation_id, signed_prekey) = convert_prepared(
             &self.inner,
             self.inner
-                .prepare_signed_prekey_rotation_and_discovery_key_cleanup()?,
+                .prepare_signed_prekey_rotation_and_discovery_key_cleanup(&mut OsRng)?,
             |signed_prekey| signed_prekey.map(PublicSignedPreKey::from_core).transpose(),
-        )?;
-        Ok(PreparedSignedPreKeyRotation {
-            operation_id,
-            signed_prekey,
-        })
-    }
-
-    /// Prepares a new signed prekey even if the current one is fresh.
-    ///
-    /// # Errors
-    /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
-    /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
-    /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
-    /// - [`RoostError::Storage`] if SecureStorage fails.
-    pub fn prepare_signed_prekey_rotation(
-        &self,
-    ) -> Result<PreparedSignedPreKeyRotation, RoostError> {
-        let (operation_id, signed_prekey) = convert_prepared(
-            &self.inner,
-            self.inner.prepare_signed_prekey_rotation()?,
-            |signed_prekey| PublicSignedPreKey::from_core(signed_prekey).map(Some),
         )?;
         Ok(PreparedSignedPreKeyRotation {
             operation_id,
@@ -447,7 +428,7 @@ impl IdentityContext {
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::InvalidData`] if the pool can't hold `count` more prekeys.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_one_time_prekeys(
@@ -459,7 +440,7 @@ impl IdentityContext {
         })?;
         let (operation_id, one_time_prekeys) = convert_prepared(
             &self.inner,
-            self.inner.prepare_one_time_prekeys(count)?,
+            self.inner.prepare_one_time_prekeys(&mut OsRng, count)?,
             public_one_time_prekeys_from_core,
         )?;
         Ok(PreparedOneTimePreKeys {
@@ -476,7 +457,7 @@ impl IdentityContext {
     /// # Errors
     /// - [`RoostError::InboxRotationRequired`] after a backup restore, until an inbox rotation.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::TooManyUnfinishedOperations`] if too many operations are unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn prepare_one_time_prekey_replenishment(
@@ -484,7 +465,8 @@ impl IdentityContext {
     ) -> Result<PreparedOneTimePreKeys, RoostError> {
         let (operation_id, one_time_prekeys) = convert_prepared(
             &self.inner,
-            self.inner.prepare_one_time_prekey_replenishment()?,
+            self.inner
+                .prepare_one_time_prekey_replenishment(&mut OsRng)?,
             public_one_time_prekeys_from_core,
         )?;
         Ok(PreparedOneTimePreKeys {
@@ -497,13 +479,13 @@ impl IdentityContext {
     /// the host's commit.
     ///
     /// Reserving again is harmless. Until the reserved operation is finalized or aborted, other
-    /// calls return [`RoostError::OperationRecoveryRequired`].
+    /// calls return [`RoostError::UnfinishedReservation`].
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `id` isn't a valid operation ID.
     /// - [`RoostError::NotFound`] if no recent operation has this ID.
     /// - [`RoostError::OperationConflict`] if the operation was aborted.
-    /// - [`RoostError::OperationRecoveryRequired`] if another reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if another reserved operation is unfinished.
     /// - [`RoostError::SecureStoragePreconditionChanged`] if another operation changed the keys
     ///   this one read. Abort it and prepare again.
     /// - [`RoostError::Storage`] if SecureStorage fails.
@@ -594,7 +576,7 @@ pub(crate) fn abort_unconverted(
     };
     match store.abort_operation(id) {
         Ok(_) => error,
-        Err(abort_error) => RoostError::OperationRecoveryRequired {
+        Err(abort_error) => RoostError::UnfinishedReservation {
             operation_id: OperationId::from_core(id),
             reason: format!(
                 "prepared output conversion failed and cleanup also failed: {}",
@@ -663,10 +645,11 @@ impl IdentityContext {
         self.complete_prepared(prepared.operation_id, prepared.one_time_prekeys)
     }
 
-    pub(crate) fn rotate_signed_prekey_now(&self) -> Result<PublicSignedPreKey, RoostError> {
-        let prepared = self.prepare_signed_prekey_rotation()?;
+    // Creates the first signed prekey of a new identity.
+    pub(crate) fn create_signed_prekey(&self) -> Result<PublicSignedPreKey, RoostError> {
+        let prepared = self.prepare_signed_prekey_rotation_and_discovery_key_cleanup()?;
         let signed_prekey = prepared.signed_prekey.ok_or(RoostError::InternalError {
-            reason: "forced signed-prekey rotation returned no bundle".into(),
+            reason: "a new identity's signed prekey rotation returned no bundle".into(),
         })?;
         self.complete_prepared(prepared.operation_id, signed_prekey)
     }
@@ -950,7 +933,7 @@ mod tests {
     fn current_publication_bundle_returns_verifiable_records() {
         let store = key_store();
         let identity = store.generate_identity().unwrap();
-        store.rotate_signed_prekey_now().unwrap();
+        store.create_signed_prekey().unwrap();
         let publication = store.current_publication().unwrap();
         assert_publication_verifies(&identity, &publication);
     }
@@ -959,7 +942,7 @@ mod tests {
     fn replenish_one_time_prekeys_returns_public_records() {
         let store = key_store();
         store.generate_identity().unwrap();
-        store.rotate_signed_prekey_now().unwrap();
+        store.create_signed_prekey().unwrap();
         let epoch = store.current_publication().unwrap().discovery_key.epoch;
         let bundles = store.replenish_one_time_prekeys().unwrap();
 

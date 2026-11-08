@@ -99,7 +99,7 @@ impl Identity {
         })
     }
 
-    /// Signs `message` with the Ed25519 signing key and returns the [`Signature`].
+    /// Signs `message` with the Ed25519 signing key.
     pub fn sign(&self, message: &[u8]) -> Signature {
         self.signing_key_pair.sign(message)
     }
@@ -261,7 +261,7 @@ mod tests {
 
         assert!(matches!(
             manager.load_identity(),
-            Err(IdentityError::SecretBlob(StoredDataError::UnsupportedVersion(version)))
+            Err(IdentityError::SecretBlob(StoredDataError::UnsupportedVersion { version }))
                 if version == IDENTITY_SECRET_BLOB_VERSION + 1
         ));
     }
@@ -269,7 +269,6 @@ mod tests {
     #[test]
     fn identity_zeroizes_on_drop() {
         fn assert_zeroizes_on_drop<T: zeroize::ZeroizeOnDrop>() {}
-
         assert_zeroizes_on_drop::<Identity>();
     }
 

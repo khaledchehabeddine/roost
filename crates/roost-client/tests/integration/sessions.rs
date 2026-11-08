@@ -75,7 +75,9 @@ impl Host {
         let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
         let identity = context.prepare_identity_creation().unwrap();
         complete(&context, identity.operation_id);
-        let signed_prekey = context.prepare_signed_prekey_rotation().unwrap();
+        let signed_prekey = context
+            .prepare_signed_prekey_rotation_and_discovery_key_cleanup()
+            .unwrap();
         complete(&context, signed_prekey.operation_id);
         let (certificate, certificate_signature) =
             issue_certificate(&identity.identity.key, NOW_MILLIS / 1_000 + 3_600);

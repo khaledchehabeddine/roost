@@ -1,21 +1,17 @@
-//! Session state, and the sessions Roost keeps with each peer and which one it sends on.
-
 use super::{
-    ContactIdentityKeyWire, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError,
-    ProtocolStateKey, ProtocolStateKind, ProtocolStateSnapshot, blob_body, encode_blob,
-    encode_zeroizing,
+    IdentityKeyWire, ProtocolStateAddress, ProtocolStateBlob, ProtocolStateError, ProtocolStateKey,
+    ProtocolStateKind, ProtocolStateSnapshot, decode_blob, decode_error, deserialize_bounded,
+    encode_blob, encode_zeroizing,
 };
-use crate::contact::ContactIdentityKey;
 use crate::hardening::ProtocolHardeningLimits;
 use roost_crypto::{
     Handshake, OneTimePreKeyReference, PublicKey, RatchetState, SealedFramePreKeyReference,
 };
-use roost_protocol::{PUBLIC_KEY_LEN, SessionId, is_valid_x25519_public_key};
+use roost_protocol::{IdentityKey, PUBLIC_KEY_LEN, SessionId, is_valid_x25519_public_key};
 use serde::{Deserialize, Serialize};
 
 /// Most sessions kept per peer besides the one Roost sends on.
 const MAX_OLDER_SESSIONS: usize = 5;
-/// Most deleted session IDs remembered per peer.
 const MAX_DELETED_SESSIONS: usize = 5;
 
 pub(super) fn session_address(session_id: SessionId) -> ProtocolStateAddress {
@@ -26,7 +22,6 @@ pub(super) fn pending_acknowledgment_address(session_id: SessionId) -> ProtocolS
     ProtocolStateAddress::new(ProtocolStateKind::PendingAcknowledgments, session_id.into())
 }
 
-/// Returns the addresses of the records a session keeps.
 pub(super) fn session_record_addresses(session_id: SessionId) -> [ProtocolStateAddress; 2] {
     [
         session_address(session_id),
@@ -34,7 +29,7 @@ pub(super) fn session_record_addresses(session_id: SessionId) -> [ProtocolStateA
     ]
 }
 
-pub(super) fn peer_sessions_address(identity_key: ContactIdentityKey) -> ProtocolStateAddress {
+pub(super) fn peer_sessions_address(identity_key: IdentityKey) -> ProtocolStateAddress {
     ProtocolStateAddress::new(ProtocolStateKind::PeerSessions, identity_key.into())
 }
 
@@ -44,10 +39,9 @@ impl From<SessionId> for ProtocolStateKey {
     }
 }
 
-/// A decoded session blob.
 pub(super) struct LoadedSession {
     /// The peer the handshake authenticated, fixed for the session's life.
-    pub(super) peer_identity_key: ContactIdentityKey,
+    pub(super) peer_identity_key: IdentityKey,
     pub(super) state: Box<RatchetState>,
     /// The handshake this side started, which its messages carry until the peer replies, or for a
     /// contact request until the peer accepts.
@@ -61,7 +55,6 @@ pub(super) struct PendingHandshake {
     pub(super) signed_prekey_id: u64,
 }
 
-/// Returns the session at `address`, or `None` when the snapshot has none.
 pub(super) fn load_session(
     snapshot: &ProtocolStateSnapshot,
     address: &ProtocolStateAddress,
@@ -87,7 +80,7 @@ pub(super) fn load_required_session(
 
 pub(super) fn encode_session(
     address: &ProtocolStateAddress,
-    peer_identity_key: ContactIdentityKey,
+    peer_identity_key: IdentityKey,
     state: &RatchetState,
     pending_handshake: Option<&PendingHandshake>,
     limits: ProtocolHardeningLimits,
@@ -110,17 +103,9 @@ fn decode_session(
     blob: &ProtocolStateBlob,
     limits: ProtocolHardeningLimits,
 ) -> Result<LoadedSession, ProtocolStateError> {
-    let body = blob_body(address, blob, limits.max_protocol_state_blob_len)?;
     // Borrow ratchet bytes so a failed decode or key validation leaves no unsanitized heap copy.
-    let (wire, trailing): (SessionWire<'_>, &[u8]) = postcard::take_from_bytes(body)
-        .map_err(|_| decode_error(address, "ratchet/session state failed to decode"))?;
-    if !trailing.is_empty() {
-        return Err(decode_error(
-            address,
-            "ratchet/session state has trailing bytes",
-        ));
-    }
-    let peer_identity_key = ContactIdentityKey::from(wire.peer_identity_key);
+    let wire: SessionWire<'_> = decode_blob(address, blob, limits.max_protocol_state_blob_len)?;
+    let peer_identity_key = IdentityKey::from(wire.peer_identity_key);
     if !peer_identity_key.is_valid() {
         return Err(decode_error(
             address,
@@ -191,7 +176,6 @@ pub(super) struct PeerSessions {
 }
 
 impl PeerSessions {
-    /// Starts the list with its first session.
     pub(super) fn new(session_id: SessionId, accepted_with: Option<SignedPreKeyUse>) -> Self {
         Self {
             current: SessionEntry {
@@ -209,13 +193,10 @@ impl PeerSessions {
         self.current.session_id
     }
 
-    /// Returns which side started the session Roost sends on.
     pub(super) fn current_starter(&self) -> Starter {
         self.current.starter()
     }
 
-    /// Returns which side started `session_id`, or `None` when it isn't one of this peer's
-    /// sessions.
     pub(super) fn starter(&self, session_id: SessionId) -> Option<Starter> {
         self.entry(session_id).map(SessionEntry::starter)
     }
@@ -225,8 +206,8 @@ impl PeerSessions {
         self.entries().map(|entry| entry.session_id)
     }
 
-    /// Returns whether this side started or accepted `session_id` before `later`, both of them
-    /// kept with this peer.
+    /// Returns whether this side started or accepted `session_id` before `later`, or `false` when
+    /// either isn't kept with this peer.
     pub(super) fn started_before(&self, session_id: SessionId, later: SessionId) -> bool {
         let position = |session_id| self.entry(session_id).map(|entry| entry.position);
         position(session_id)
@@ -234,7 +215,6 @@ impl PeerSessions {
             .is_some_and(|(earlier, later)| earlier < later)
     }
 
-    /// Returns whether `session_id` is one of this peer's sessions.
     pub(super) fn contains(&self, session_id: SessionId) -> bool {
         self.current.session_id == session_id
             || self
@@ -278,7 +258,7 @@ impl PeerSessions {
     /// Adds a session the peer started while this side's own start still awaits a reply, and
     /// returns the sessions this evicts.
     ///
-    /// Both peers keep the lower session ID, so they converge when they start at once.
+    /// Both peers send on the lower session ID, so they converge when they start at once.
     pub(super) fn start_alongside(
         &mut self,
         session_id: SessionId,
@@ -311,12 +291,10 @@ impl PeerSessions {
         }
     }
 
-    // Returns every session kept with this peer, the one Roost sends on first.
     fn entries(&self) -> impl Iterator<Item = &SessionEntry> {
         std::iter::once(&self.current).chain(&self.older)
     }
 
-    // Returns the kept session `session_id`, if any.
     fn entry(&self, session_id: SessionId) -> Option<&SessionEntry> {
         self.entries().find(|entry| entry.session_id == session_id)
     }
@@ -371,15 +349,7 @@ pub(super) fn load_peer_sessions(
     let Some(blob) = snapshot.get(address) else {
         return Ok(None);
     };
-    let body = blob_body(address, blob, limits.max_protocol_state_blob_len)?;
-    let (wire, trailing): (PeerSessionsWire, &[u8]) = postcard::take_from_bytes(body)
-        .map_err(|_| decode_error(address, "peer sessions failed to decode"))?;
-    if !trailing.is_empty() {
-        return Err(decode_error(address, "peer sessions have trailing bytes"));
-    }
-    if wire.older.len() > MAX_OLDER_SESSIONS || wire.deleted.len() > MAX_DELETED_SESSIONS {
-        return Err(decode_error(address, "peer sessions exceed their limit"));
-    }
+    let wire: PeerSessionsWire = decode_blob(address, blob, limits.max_protocol_state_blob_len)?;
     let sessions = PeerSessions {
         current: wire.current.into(),
         older: wire.older.into_iter().map(Into::into).collect(),
@@ -414,16 +384,9 @@ pub(super) fn encode_peer_sessions(
     encode_blob(address, &body, limits.max_protocol_state_blob_len)
 }
 
-fn decode_error(address: &ProtocolStateAddress, reason: &str) -> ProtocolStateError {
-    ProtocolStateError::BlobDecode {
-        address: address.clone(),
-        reason: reason.into(),
-    }
-}
-
 #[derive(Deserialize, Serialize)]
 struct SessionWire<'a> {
-    peer_identity_key: ContactIdentityKeyWire,
+    peer_identity_key: IdentityKeyWire,
     #[serde(borrow)]
     ratchet_state: &'a [u8],
     pending_handshake: Option<HandshakeWire>,
@@ -491,7 +454,9 @@ impl HandshakeWire {
 #[derive(Deserialize, Serialize)]
 struct PeerSessionsWire {
     current: SessionEntryWire,
+    #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_OLDER_SESSIONS>")]
     older: Vec<SessionEntryWire>,
+    #[serde(deserialize_with = "deserialize_bounded::<_, _, MAX_DELETED_SESSIONS>")]
     deleted: Vec<DeletedSessionWire>,
 }
 
@@ -588,7 +553,7 @@ mod tests {
     #[test]
     fn nested_ratchet_decode_failure_does_not_echo_state_bytes() {
         let address = session_address(id(9));
-        let peer_identity_key = ContactIdentityKey {
+        let peer_identity_key = IdentityKey {
             x25519_public_key: [9; 32],
             ed25519_verifying_key: [9; 32],
         };
@@ -637,7 +602,6 @@ mod tests {
         for byte in 2..=12 {
             sessions.start(id(byte), accepted(byte));
         }
-
         assert!(!sessions.was_deleted(id(1)));
         for byte in 2..=6 {
             assert!(sessions.was_deleted(id(byte)));
@@ -661,7 +625,7 @@ mod tests {
 
     #[test]
     fn delivery_on_an_older_session_makes_it_current() {
-        let address = peer_sessions_address(ContactIdentityKey {
+        let address = peer_sessions_address(IdentityKey {
             x25519_public_key: [9; 32],
             ed25519_verifying_key: [9; 32],
         });
@@ -673,14 +637,14 @@ mod tests {
         assert_eq!(sessions.current(), id(1));
         assert!(matches!(
             sessions.record_delivery(&address, id(3)),
-            Err(ProtocolStateError::InvalidStateBinding { .. })
+            Err(ProtocolStateError::InvalidStateBinding { address: actual, reason })
+                if actual == address && reason == "session is not kept for its peer"
         ));
     }
 
     #[test]
     fn a_sessions_records_are_stored_under_its_session_id() {
         let [session, pending] = session_record_addresses(id(9));
-
         assert_eq!(session.kind(), ProtocolStateKind::RatchetSession);
         assert_eq!(pending.kind(), ProtocolStateKind::PendingAcknowledgments);
         for address in [session, pending] {
@@ -690,13 +654,11 @@ mod tests {
 
     #[test]
     fn a_peers_session_list_is_stored_under_the_peers_identity_key() {
-        let identity_key = ContactIdentityKey {
+        let identity_key = IdentityKey {
             x25519_public_key: [7; PUBLIC_KEY_LEN],
             ed25519_verifying_key: [8; PUBLIC_KEY_LEN],
         };
-
         let address = peer_sessions_address(identity_key);
-
         assert_eq!(address.kind(), ProtocolStateKind::PeerSessions);
         assert_eq!(address.key().as_bytes(), identity_key.canonical_encoding());
     }

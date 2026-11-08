@@ -3,27 +3,24 @@ use crate::storage::{SecureStorage, StorageError};
 use crate::stored_data::{
     StoredDataError, decode_versioned, deserialize_bounded, encode_versioned,
 };
-use rand::RngCore;
-use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 const OPERATION_JOURNAL_KEY: &str = "operation/journal";
-const OPERATION_JOURNAL_VERSION: u8 = 2;
+const OPERATION_JOURNAL_VERSION: u8 = 1;
 const OPERATION_ID_LEN: usize = 16;
 const PRECONDITION_DIGEST_LEN: usize = 32;
 const MAX_OPERATION_RECORDS: usize = 32;
 const MAX_UNFINISHED_OPERATIONS: usize = 16;
 const MAX_OPERATION_PRECONDITIONS: usize = 32;
 const MAX_OPERATION_MUTATIONS: usize = 16;
-const MAX_STORAGE_KEY_LEN: usize = 128;
-const MAX_STAGED_VALUE_LEN: usize = 128 * 1024;
 const MAX_OPERATION_JOURNAL_LEN: usize = 2 * 1024 * 1024;
 const ID_GENERATION_ATTEMPTS: usize = 8;
-const SECURE_STORAGE_PRECONDITION_CONTEXT: &str = "RoostSecureStoragePrecondition-v1";
+const SECURE_STORAGE_PRECONDITION_CONTEXT: &str = "RoostSecureStoragePrecondition-v1:";
 
 /// Stable identifier for one prepared KeyStore operation.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -46,9 +43,9 @@ impl KeyStoreOperationId {
 /// Every returned operation must be finalized or aborted, even when its output reports that
 /// nothing needed to change.
 pub struct PreparedKeyStoreOperation<T> {
-    /// Stable identifier the host persists with its atomic transaction.
+    /// Stable identifier the app persists with its atomic transaction.
     pub id: KeyStoreOperationId,
-    /// Caller-visible result computed from the staged state.
+    /// The result the app sees, computed from the staged state.
     pub output: T,
 }
 
@@ -57,9 +54,10 @@ pub struct PreparedKeyStoreOperation<T> {
 pub enum KeyStoreOperationStatus {
     /// Secret mutations are staged and may be reserved or aborted.
     Prepared,
-    /// Preconditions matched and the host may commit its durable transaction.
+    /// Preconditions matched and the app may commit its durable transaction.
     Reserved,
-    /// Secure mutations are being made authoritative and recovery must resume finalization.
+    /// Secure mutations are being made authoritative, and finalizing again resumes where it
+    /// stopped.
     Finalizing,
     /// Every secure mutation is authoritative.
     Finalized,
@@ -67,12 +65,12 @@ pub enum KeyStoreOperationStatus {
     Aborted,
 }
 
-/// An unfinished operation discovered during recovery.
+/// A prepared operation that hasn't finished.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnfinishedKeyStoreOperation {
-    /// Stable identifier the host persisted with its transaction.
+    /// Stable identifier the app persisted with its transaction.
     pub id: KeyStoreOperationId,
-    /// Durable phase that determines whether the host aborts or finalizes recovery.
+    /// Durable phase that decides whether the app aborts or finalizes it.
     pub status: KeyStoreOperationStatus,
 }
 
@@ -105,41 +103,26 @@ pub enum KeyStoreOperationError {
         /// Stable SecureStorage entry name.
         key: String,
     },
-    /// The OS CSPRNG could not produce an operation identifier.
+    /// The random number generator could not produce an operation identifier.
     #[error("operation identifier generation failed")]
     Randomness(#[source] rand::Error),
     /// A previously reserved operation must be finalized or aborted before more work proceeds.
     #[error("an unfinished prepared operation must be finalized or aborted first")]
-    RecoveryRequired {
+    UnfinishedReservation {
         /// Identifier of the unfinished operation.
         id: KeyStoreOperationId,
     },
     /// SecureStorage returned a platform failure.
     #[error("prepared-operation storage failed")]
     Storage(#[from] StorageError),
-    /// The bounded unfinished-operation journal is full.
+    /// The journal already holds as many unfinished operations as it allows.
     #[error("too many unfinished prepared operations")]
     TooManyUnfinishedOperations,
 }
 
-/// A reason the prepared-operation journal can't be read, written, or hold a new operation.
+/// A reason the prepared-operation journal can't be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum JournalCorruption {
-    /// An operation stages the same SecureStorage entry twice.
-    #[error("operation stages secure-storage entry {key} twice")]
-    DuplicateMutation {
-        /// Stable SecureStorage entry name.
-        key: String,
-    },
-    /// Two operations share an identifier.
-    #[error("operation journal contains duplicate identifiers")]
-    DuplicateOperationIds,
-    /// An operation checks the same SecureStorage entry twice.
-    #[error("operation checks secure-storage entry {key} twice")]
-    DuplicatePrecondition {
-        /// Stable SecureStorage entry name.
-        key: String,
-    },
     /// Finalization progress can't advance past the largest one-byte value.
     #[error("finalization progress exceeds limit")]
     FinalizationProgressOverflow,
@@ -151,17 +134,6 @@ pub enum JournalCorruption {
         /// Number of staged mutations.
         mutations: usize,
     },
-    /// A finalizing operation's record has a status other than finalizing.
-    #[error("finalization progress has an invalid status")]
-    InvalidFinalizationStatus,
-    /// A SecureStorage entry name is empty or too long.
-    #[error("secure-storage key length {len} is outside 1..={max}")]
-    InvalidStorageKeyLength {
-        /// Entry name length in bytes.
-        len: usize,
-        /// Longest accepted length in bytes.
-        max: usize,
-    },
     /// The journal is longer than its limit.
     #[error("operation journal is {len} bytes, longer than {max}")]
     JournalTooLong {
@@ -170,53 +142,9 @@ pub enum JournalCorruption {
         /// Longest accepted length in bytes.
         max: usize,
     },
-    /// An operation stages a SecureStorage entry it doesn't check first.
-    #[error("operation stages secure-storage entry {key} without a precondition")]
-    MutationWithoutPrecondition {
-        /// Stable SecureStorage entry name.
-        key: String,
-    },
-    /// An operation reads or stages the journal's own SecureStorage entry.
-    #[error("operation touches the prepared-operation journal entry")]
-    ReservedStorageKey,
-    /// A staged SecureStorage value is longer than its limit.
-    #[error("staged secure value is {len} bytes, longer than {max}")]
-    StagedValueTooLong {
-        /// Value length in bytes.
-        len: usize,
-        /// Longest accepted length in bytes.
-        max: usize,
-    },
     /// The journal failed to encode, or the stored one is malformed or uses an unknown version.
     #[error("operation journal failed to encode or decode")]
     StoredData(#[from] StoredDataError),
-    /// A finalized or aborted operation still holds staged material.
-    #[error("a finished operation still holds staged material")]
-    TerminalRecordNotScrubbed,
-    /// An operation stages more SecureStorage entries than the limit allows.
-    #[error("operation has {count} secure-storage mutations, more than {max}")]
-    TooManyMutations {
-        /// Mutation count.
-        count: usize,
-        /// Largest accepted count.
-        max: usize,
-    },
-    /// An operation checks more SecureStorage entries than the limit allows.
-    #[error("operation has {count} secure-storage preconditions, more than {max}")]
-    TooManyPreconditions {
-        /// Precondition count.
-        count: usize,
-        /// Largest accepted count.
-        max: usize,
-    },
-    /// The journal holds more operations than the limit allows.
-    #[error("operation journal has {count} records, more than {max}")]
-    TooManyRecords {
-        /// Record count.
-        count: usize,
-        /// Largest accepted count.
-        max: usize,
-    },
 }
 
 #[derive(Clone, Copy)]
@@ -246,7 +174,7 @@ impl JournalStatus {
         )
     }
 
-    fn requires_recovery(self) -> bool {
+    fn is_unfinished_reservation(self) -> bool {
         matches!(self, Self::Reserved | Self::Finalizing { .. })
     }
 
@@ -271,20 +199,12 @@ impl JournalStatus {
     }
 }
 
-// The value one SecureStorage entry must still hold when an operation is reserved.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum SecureStorageExpectedValue {
-    // The entry must not exist.
-    Absent,
-    // The entry's value must match this domain-separated digest.
-    Digest([u8; PRECONDITION_DIGEST_LEN]),
-}
-
 // A SecureStorage entry an operation read, which must be unchanged when it is reserved.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 struct SecureStoragePrecondition {
     key: String,
-    expected_value: SecureStorageExpectedValue,
+    // The digest the entry's value must match, or `None` when the entry must be absent.
+    digest: Option<[u8; PRECONDITION_DIGEST_LEN]>,
 }
 
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -318,67 +238,16 @@ impl JournalRecord {
         self.preconditions.clear();
     }
 
-    // Checks every limit and invariant of one record, both before it's written and after it's
-    // read back.
-    fn validate(&self) -> Result<(), JournalCorruption> {
-        let preconditions = self.preconditions.len();
-        if preconditions > MAX_OPERATION_PRECONDITIONS {
-            return Err(JournalCorruption::TooManyPreconditions {
-                count: preconditions,
-                max: MAX_OPERATION_PRECONDITIONS,
-            });
-        }
-        let mutations = self.mutations.len();
-        if mutations > MAX_OPERATION_MUTATIONS {
-            return Err(JournalCorruption::TooManyMutations {
-                count: mutations,
-                max: MAX_OPERATION_MUTATIONS,
-            });
-        }
-        let mut checked = BTreeSet::new();
-        for precondition in &self.preconditions {
-            check_storage_key(&precondition.key)?;
-            if !checked.insert(precondition.key.as_str()) {
-                return Err(JournalCorruption::DuplicatePrecondition {
-                    key: precondition.key.clone(),
-                });
-            }
-        }
-        let mut staged = BTreeSet::new();
-        for mutation in &self.mutations {
-            check_storage_key(&mutation.key)?;
-            if !staged.insert(mutation.key.as_str()) {
-                return Err(JournalCorruption::DuplicateMutation {
-                    key: mutation.key.clone(),
-                });
-            }
-            if !checked.contains(mutation.key.as_str()) {
-                return Err(JournalCorruption::MutationWithoutPrecondition {
-                    key: mutation.key.clone(),
-                });
-            }
-            if let Some(value) = &mutation.value
-                && value.len() > MAX_STAGED_VALUE_LEN
-            {
-                return Err(JournalCorruption::StagedValueTooLong {
-                    len: value.len(),
-                    max: MAX_STAGED_VALUE_LEN,
-                });
-            }
-        }
+    // Checks that a finalizing record's progress names one of its mutations or the end.
+    fn check_progress(&self) -> Result<(), JournalCorruption> {
         match self.status {
             JournalStatus::Finalizing { next_mutation }
-                if usize::from(next_mutation) > mutations =>
+                if usize::from(next_mutation) > self.mutations.len() =>
             {
                 Err(JournalCorruption::FinalizationProgressOutOfRange {
                     next_mutation,
-                    mutations,
+                    mutations: self.mutations.len(),
                 })
-            }
-            JournalStatus::Finalized | JournalStatus::Aborted
-                if preconditions != 0 || mutations != 0 =>
-            {
-                Err(JournalCorruption::TerminalRecordNotScrubbed)
             }
             JournalStatus::Prepared
             | JournalStatus::Reserved
@@ -397,10 +266,7 @@ impl JournalRecord {
                 .iter()
                 .map(|precondition| PreconditionWire {
                     key: &precondition.key,
-                    digest: match precondition.expected_value {
-                        SecureStorageExpectedValue::Absent => None,
-                        SecureStorageExpectedValue::Digest(digest) => Some(digest),
-                    },
+                    digest: precondition.digest,
                 })
                 .collect(),
             mutations: self
@@ -423,11 +289,7 @@ impl JournalRecord {
                 .iter()
                 .map(|precondition| SecureStoragePrecondition {
                     key: precondition.key.to_owned(),
-                    expected_value: precondition
-                        .digest
-                        .map_or(SecureStorageExpectedValue::Absent, |digest| {
-                            SecureStorageExpectedValue::Digest(digest)
-                        }),
+                    digest: precondition.digest,
                 })
                 .collect(),
             mutations: wire
@@ -439,12 +301,12 @@ impl JournalRecord {
                 })
                 .collect(),
         };
-        record.validate()?;
+        record.check_progress()?;
         Ok(record)
     }
 }
 
-#[derive(Default, Zeroize, ZeroizeOnDrop)]
+#[derive(Default, ZeroizeOnDrop)]
 struct OperationJournal {
     records: Vec<JournalRecord>,
 }
@@ -487,7 +349,6 @@ enum JournalStatusWire {
 #[derive(Deserialize, Serialize)]
 struct PreconditionWire<'a> {
     key: &'a str,
-    // The digest the entry's value must match, or `None` when the entry must be absent.
     digest: Option<[u8; PRECONDITION_DIGEST_LEN]>,
 }
 
@@ -499,37 +360,27 @@ struct MutationWire<'a> {
     value: Option<&'a [u8]>,
 }
 
-#[derive(Default, Zeroize, ZeroizeOnDrop)]
+// What an operation read and staged. Each secret value zeroizes itself on drop.
+#[derive(Default)]
 struct StagingState {
-    #[zeroize(skip)]
-    preconditions: BTreeMap<String, SecureStorageExpectedValue>,
-    // BTreeMap does not implement Zeroize; every secret value is independently Zeroizing.
-    #[zeroize(skip)]
+    preconditions: BTreeMap<String, Option<[u8; PRECONDITION_DIGEST_LEN]>>,
     observed: BTreeMap<String, Option<Zeroizing<Vec<u8>>>>,
-    // BTreeMap does not implement Zeroize; every secret value is independently Zeroizing.
-    #[zeroize(skip)]
     mutations: BTreeMap<String, Option<Zeroizing<Vec<u8>>>>,
 }
 
 impl StagingState {
-    fn preconditions(&self) -> Vec<SecureStoragePrecondition> {
-        self.preconditions
-            .iter()
-            .map(|(key, expected_value)| SecureStoragePrecondition {
-                key: key.clone(),
-                expected_value: expected_value.clone(),
-            })
-            .collect()
-    }
-
-    fn mutations(&self) -> Vec<StagedMutation> {
-        self.mutations
-            .iter()
-            .map(|(key, value)| StagedMutation {
-                key: key.clone(),
-                value: value.as_ref().map(|bytes| Zeroizing::new(bytes.to_vec())),
-            })
-            .collect()
+    fn into_record_parts(self) -> (Vec<SecureStoragePrecondition>, Vec<StagedMutation>) {
+        let preconditions = self
+            .preconditions
+            .into_iter()
+            .map(|(key, digest)| SecureStoragePrecondition { key, digest })
+            .collect();
+        let mutations = self
+            .mutations
+            .into_iter()
+            .map(|(key, value)| StagedMutation { key, value })
+            .collect();
+        (preconditions, mutations)
     }
 }
 
@@ -571,7 +422,7 @@ impl StagingSecureStorage {
         state
             .preconditions
             .entry(key.to_owned())
-            .or_insert(expected_value(loaded.as_deref().map(Vec::as_slice)));
+            .or_insert(precondition_digest(loaded.as_deref().map(Vec::as_slice)));
         state.observed.insert(
             key.to_owned(),
             loaded.as_ref().map(|bytes| Zeroizing::new(bytes.to_vec())),
@@ -609,24 +460,26 @@ fn lock_staging(state: &Mutex<StagingState>) -> MutexGuard<'_, StagingState> {
 }
 
 impl KeyStore {
-    pub(super) fn prepare_operation<T, E>(
+    pub(super) fn prepare_operation<T, E, R: RngCore + CryptoRng>(
         &self,
-        operation: impl FnOnce(&KeyStore) -> Result<T, E>,
+        rng: &mut R,
+        operation: impl FnOnce(&KeyStore, &mut R) -> Result<T, E>,
     ) -> Result<PreparedKeyStoreOperation<T>, E>
     where
         E: From<KeyStoreOperationError>,
     {
         let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required()?;
+        self.ensure_no_unfinished_reservation()?;
 
         let (staging_storage, state) = StagingSecureStorage::new(Arc::clone(&self.0.storage));
         let staged_store = KeyStore::from_shared_storage(
             Arc::new(Mutex::new(Box::new(staging_storage))),
             self.0.engine,
         );
-        let output = operation(&staged_store)?;
-        let state = lock_staging(&state);
-        let id = self.stage_operation(state.preconditions(), state.mutations())?;
+        let output = operation(&staged_store, rng)?;
+        let (preconditions, mutations) =
+            std::mem::take(&mut *lock_staging(&state)).into_record_parts();
+        let id = self.stage_operation(rng, preconditions, mutations)?;
         Ok(PreparedKeyStoreOperation { id, output })
     }
 
@@ -645,12 +498,12 @@ impl KeyStore {
         Ok(journal.records[record_index(&journal, id)?].status.public())
     }
 
-    /// Validates secure inputs and reserves an operation for the host transaction.
+    /// Validates secure inputs and reserves an operation for the app's transaction.
     ///
-    /// Calling this repeatedly after a successful reservation is idempotent. The caller must next
+    /// Calling this repeatedly after a successful reservation is idempotent. The app must next
     /// commit the returned protocol state updates and outputs atomically, then call
-    /// [`Self::finalize_operation`]. Abort only after proving the host transaction did not commit.
-    /// If the host result is ambiguous, reload its operation record and reconcile it through
+    /// [`Self::finalize_operation`]. Abort only after proving the app's transaction did not commit.
+    /// If its outcome is unknown, reload the operation record and reconcile it through
     /// [`Self::unfinished_operations`].
     pub fn reserve_operation(
         &self,
@@ -666,9 +519,11 @@ impl KeyStore {
                 if let Some(record) = journal
                     .records
                     .iter()
-                    .find(|record| record.id != id && record.status.requires_recovery())
+                    .find(|record| record.id != id && record.status.is_unfinished_reservation())
                 {
-                    return Err(KeyStoreOperationError::RecoveryRequired { id: record.id }.into());
+                    return Err(
+                        KeyStoreOperationError::UnfinishedReservation { id: record.id }.into(),
+                    );
                 }
                 validate_preconditions(&**storage, &journal.records[index].preconditions)?;
                 journal.records[index].status = JournalStatus::Reserved;
@@ -690,7 +545,8 @@ impl KeyStore {
     ///
     /// Finalization records progress after every SecureStorage mutation. Repeating the call resumes
     /// at the last durable step, and repeating it after completion is idempotent. Once finalization
-    /// starts, retry a failure with this method; the operation can no longer be aborted safely.
+    /// starts, retry a failure with this method, since the operation can no longer be aborted
+    /// safely.
     pub fn finalize_operation(
         &self,
         id: KeyStoreOperationId,
@@ -699,7 +555,7 @@ impl KeyStore {
         let mut storage = self.lock_operation_storage()?;
         let mut journal = load_journal(&**storage)?;
         let index = record_index(&journal, id)?;
-        match journal.records[index].status {
+        let mut next_mutation = match journal.records[index].status {
             JournalStatus::Prepared | JournalStatus::Aborted => {
                 return Err(KeyStoreOperationError::InvalidTransition {
                     status: journal.records[index].status.public(),
@@ -711,45 +567,35 @@ impl KeyStore {
             JournalStatus::Reserved => {
                 journal.records[index].status = JournalStatus::Finalizing { next_mutation: 0 };
                 store_journal(&mut **storage, &journal)?;
+                0
             }
-            JournalStatus::Finalizing { .. } => {}
-        }
+            JournalStatus::Finalizing { next_mutation } => next_mutation,
+        };
 
-        loop {
-            let next = match journal.records[index].status {
-                JournalStatus::Finalizing { next_mutation } => usize::from(next_mutation),
-                JournalStatus::Prepared
-                | JournalStatus::Reserved
-                | JournalStatus::Finalized
-                | JournalStatus::Aborted => {
-                    return Err(KeyStoreOperationError::Corrupt(
-                        JournalCorruption::InvalidFinalizationStatus,
-                    )
-                    .into());
-                }
-            };
-            if next == journal.records[index].mutations.len() {
-                journal.records[index].scrub_staged_material();
-                journal.records[index].status = JournalStatus::Finalized;
-                store_journal(&mut **storage, &journal)?;
-                return Ok(KeyStoreOperationStatus::Finalized);
-            }
-
-            apply_mutation(&mut **storage, &journal.records[index].mutations[next])?;
-            let next_mutation = u8::try_from(next + 1)
-                .map_err(|_| JournalCorruption::FinalizationProgressOverflow)
+        while let Some(mutation) = journal.records[index]
+            .mutations
+            .get(usize::from(next_mutation))
+        {
+            apply_mutation(&mut **storage, mutation)?;
+            next_mutation = next_mutation
+                .checked_add(1)
+                .ok_or(JournalCorruption::FinalizationProgressOverflow)
                 .map_err(KeyStoreOperationError::from)?;
             journal.records[index].status = JournalStatus::Finalizing { next_mutation };
             store_journal(&mut **storage, &journal)?;
         }
+        journal.records[index].scrub_staged_material();
+        journal.records[index].status = JournalStatus::Finalized;
+        store_journal(&mut **storage, &journal)?;
+        Ok(KeyStoreOperationStatus::Finalized)
     }
 
     /// Discards staged material before finalization starts.
     ///
-    /// Prepared operations may be aborted. A reserved operation may be aborted only after the
-    /// caller proves its host transaction did not commit; an ambiguous host result must be
-    /// reconciled by identifier first. Repeating an abort is idempotent, while an operation that
-    /// started finalizing cannot be rolled back safely.
+    /// Prepared operations may be aborted. A reserved operation may be aborted only after the app
+    /// proves its transaction did not commit, and an unknown outcome must be reconciled by
+    /// identifier first. Repeating an abort is idempotent, while an operation that started
+    /// finalizing cannot be rolled back safely.
     pub fn abort_operation(
         &self,
         id: KeyStoreOperationId,
@@ -776,11 +622,11 @@ impl KeyStore {
         }
     }
 
-    /// Returns every prepared operation that still needs host recovery.
+    /// Returns every prepared operation that hasn't finished.
     ///
-    /// The host matches each identifier against its durable transaction record. It aborts an
-    /// orphaned Prepared or Reserved stage whose host transaction did not commit, and finalizes a
-    /// Reserved or Finalizing operation whose host transaction did commit.
+    /// The app matches each identifier against its durable transaction record. It aborts an
+    /// orphaned Prepared or Reserved stage whose transaction did not commit, and finalizes a
+    /// Reserved or Finalizing operation whose transaction did commit.
     pub fn unfinished_operations(&self) -> Result<Vec<UnfinishedKeyStoreOperation>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
         let storage = self.lock_operation_storage()?;
@@ -793,21 +639,22 @@ impl KeyStore {
             .collect())
     }
 
-    pub(super) fn ensure_no_recovery_required(&self) -> Result<(), KeyStoreOperationError> {
+    pub(super) fn ensure_no_unfinished_reservation(&self) -> Result<(), KeyStoreOperationError> {
         let storage = self.lock_operation_storage()?;
         let journal = load_journal(&**storage)?;
         if let Some(record) = journal
             .records
             .iter()
-            .find(|record| record.status.requires_recovery())
+            .find(|record| record.status.is_unfinished_reservation())
         {
-            return Err(KeyStoreOperationError::RecoveryRequired { id: record.id });
+            return Err(KeyStoreOperationError::UnfinishedReservation { id: record.id });
         }
         Ok(())
     }
 
-    fn stage_operation(
+    fn stage_operation<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         preconditions: Vec<SecureStoragePrecondition>,
         mutations: Vec<StagedMutation>,
     ) -> Result<KeyStoreOperationId, KeyStoreOperationError> {
@@ -823,7 +670,7 @@ impl KeyStore {
         {
             return Err(KeyStoreOperationError::TooManyUnfinishedOperations);
         }
-        let id = generate_id(&journal)?;
+        let id = generate_id(rng, &journal)?;
         journal.records.push(JournalRecord {
             id,
             status: JournalStatus::Prepared,
@@ -844,14 +691,8 @@ impl KeyStore {
     }
 }
 
-fn expected_value(value: Option<&[u8]>) -> SecureStorageExpectedValue {
-    match value {
-        Some(value) => SecureStorageExpectedValue::Digest(blake3::derive_key(
-            SECURE_STORAGE_PRECONDITION_CONTEXT,
-            value,
-        )),
-        None => SecureStorageExpectedValue::Absent,
-    }
+fn precondition_digest(value: Option<&[u8]>) -> Option<[u8; PRECONDITION_DIGEST_LEN]> {
+    value.map(|value| blake3::derive_key(SECURE_STORAGE_PRECONDITION_CONTEXT, value))
 }
 
 fn validate_preconditions(
@@ -860,9 +701,9 @@ fn validate_preconditions(
 ) -> Result<(), KeyStoreOperationError> {
     for precondition in preconditions {
         let actual = storage.load(&precondition.key)?;
-        let matches = match (&precondition.expected_value, actual.as_deref()) {
-            (SecureStorageExpectedValue::Absent, None) => true,
-            (SecureStorageExpectedValue::Digest(expected), Some(value)) => {
+        let matches = match (&precondition.digest, actual.as_deref()) {
+            (None, None) => true,
+            (Some(expected), Some(value)) => {
                 let actual = blake3::derive_key(SECURE_STORAGE_PRECONDITION_CONTEXT, value);
                 bool::from(actual.ct_eq(expected))
             }
@@ -888,11 +729,15 @@ fn apply_mutation(
     Ok(())
 }
 
-fn generate_id(journal: &OperationJournal) -> Result<KeyStoreOperationId, KeyStoreOperationError> {
+// Draws an identifier no retained operation uses. A seeded generator that reruns an operation
+// repeats its first draw, so a collision draws again.
+fn generate_id<R: RngCore + CryptoRng>(
+    rng: &mut R,
+    journal: &OperationJournal,
+) -> Result<KeyStoreOperationId, KeyStoreOperationError> {
     for _ in 0..ID_GENERATION_ATTEMPTS {
         let mut bytes = [0u8; OPERATION_ID_LEN];
-        OsRng
-            .try_fill_bytes(&mut bytes)
+        rng.try_fill_bytes(&mut bytes)
             .map_err(KeyStoreOperationError::Randomness)?;
         let id = KeyStoreOperationId(bytes);
         if journal.records.iter().all(|record| record.id != id) {
@@ -945,10 +790,6 @@ fn store_journal(
 }
 
 fn encode_journal(journal: &OperationJournal) -> Result<Zeroizing<Vec<u8>>, JournalCorruption> {
-    check_record_count(journal.records.len())?;
-    for record in &journal.records {
-        record.validate()?;
-    }
     let bytes = encode_versioned(
         OPERATION_JOURNAL_VERSION,
         &OperationJournalWire {
@@ -962,38 +803,12 @@ fn encode_journal(journal: &OperationJournal) -> Result<Zeroizing<Vec<u8>>, Jour
 fn decode_journal(bytes: &[u8]) -> Result<OperationJournal, JournalCorruption> {
     check_journal_len(bytes.len())?;
     let wire: OperationJournalWire<'_> = decode_versioned(OPERATION_JOURNAL_VERSION, bytes)?;
-    let mut records: Vec<JournalRecord> = Vec::with_capacity(wire.records.len());
-    for record in &wire.records {
-        let record = JournalRecord::from_wire(record)?;
-        if records.iter().any(|other| other.id == record.id) {
-            return Err(JournalCorruption::DuplicateOperationIds);
-        }
-        records.push(record);
-    }
+    let records = wire
+        .records
+        .iter()
+        .map(JournalRecord::from_wire)
+        .collect::<Result<_, _>>()?;
     Ok(OperationJournal { records })
-}
-
-fn check_storage_key(key: &str) -> Result<(), JournalCorruption> {
-    if key == OPERATION_JOURNAL_KEY {
-        return Err(JournalCorruption::ReservedStorageKey);
-    }
-    if key.is_empty() || key.len() > MAX_STORAGE_KEY_LEN {
-        return Err(JournalCorruption::InvalidStorageKeyLength {
-            len: key.len(),
-            max: MAX_STORAGE_KEY_LEN,
-        });
-    }
-    Ok(())
-}
-
-fn check_record_count(count: usize) -> Result<(), JournalCorruption> {
-    if count > MAX_OPERATION_RECORDS {
-        return Err(JournalCorruption::TooManyRecords {
-            count,
-            max: MAX_OPERATION_RECORDS,
-        });
-    }
-    Ok(())
 }
 
 fn check_journal_len(len: usize) -> Result<(), JournalCorruption> {
@@ -1013,11 +828,7 @@ mod tests {
 
     #[test]
     fn precondition_digest_changes_with_the_value() {
-        let digest = |value: &[u8]| match expected_value(Some(value)) {
-            SecureStorageExpectedValue::Digest(digest) => digest,
-            SecureStorageExpectedValue::Absent => panic!("a present value must produce a digest"),
-        };
-
+        let digest = |value: &[u8]| precondition_digest(Some(value)).unwrap();
         assert_ne!(digest(b"first value"), digest(b"second value"));
     }
 
@@ -1072,7 +883,7 @@ mod tests {
         assert_eq!(state.preconditions.len(), 1);
         assert_eq!(
             state.preconditions["identity/current"],
-            expected_value(Some(b"first"))
+            precondition_digest(Some(b"first"))
         );
     }
 
@@ -1083,11 +894,11 @@ mod tests {
             preconditions: vec![
                 SecureStoragePrecondition {
                     key: "identity/current".into(),
-                    expected_value: SecureStorageExpectedValue::Absent,
+                    digest: None,
                 },
                 SecureStoragePrecondition {
                     key: "discovery/current".into(),
-                    expected_value: expected_value(Some(b"discovery")),
+                    digest: precondition_digest(Some(b"discovery")),
                 },
             ],
             mutations: vec![
@@ -1129,52 +940,31 @@ mod tests {
     fn a_journal_with_an_unknown_version_is_refused() {
         let mut bytes = encode_journal(&OperationJournal::default()).unwrap();
         bytes[0] = OPERATION_JOURNAL_VERSION + 1;
-
         assert!(matches!(
             decode_journal(&bytes),
-            Err(JournalCorruption::StoredData(StoredDataError::UnsupportedVersion(version)))
+            Err(JournalCorruption::StoredData(StoredDataError::UnsupportedVersion { version }))
                 if version == OPERATION_JOURNAL_VERSION + 1
-        ));
-    }
-
-    #[test]
-    fn a_record_that_stages_an_unchecked_entry_is_refused() {
-        let mut unchecked = record(JournalStatus::Prepared);
-        unchecked.preconditions.pop();
-
-        assert!(matches!(
-            unchecked.validate(),
-            Err(JournalCorruption::MutationWithoutPrecondition { key }) if key == "discovery/current"
-        ));
-    }
-
-    #[test]
-    fn a_record_that_touches_the_journal_entry_is_refused() {
-        let mut reserved = record(JournalStatus::Prepared);
-        reserved.preconditions[0].key = OPERATION_JOURNAL_KEY.into();
-
-        assert!(matches!(
-            reserved.validate(),
-            Err(JournalCorruption::ReservedStorageKey)
-        ));
-    }
-
-    #[test]
-    fn a_finished_record_that_holds_staged_material_is_refused() {
-        assert!(matches!(
-            record(JournalStatus::Finalized).validate(),
-            Err(JournalCorruption::TerminalRecordNotScrubbed)
         ));
     }
 
     #[test]
     fn finalization_progress_past_the_last_mutation_is_refused() {
         assert!(matches!(
-            record(JournalStatus::Finalizing { next_mutation: 3 }).validate(),
+            record(JournalStatus::Finalizing { next_mutation: 3 }).check_progress(),
             Err(JournalCorruption::FinalizationProgressOutOfRange {
                 next_mutation: 3,
                 mutations: 2
             })
+        ));
+    }
+
+    #[test]
+    fn a_journal_longer_than_its_limit_is_refused_before_decoding() {
+        let bytes = vec![OPERATION_JOURNAL_VERSION; MAX_OPERATION_JOURNAL_LEN + 1];
+        assert!(matches!(
+            decode_journal(&bytes),
+            Err(JournalCorruption::JournalTooLong { len, max })
+                if len == MAX_OPERATION_JOURNAL_LEN + 1 && max == MAX_OPERATION_JOURNAL_LEN
         ));
     }
 }

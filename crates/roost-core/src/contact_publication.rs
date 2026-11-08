@@ -15,7 +15,7 @@ const CONTACT_PUBLICATION_VERSION: u8 = 1;
 /// two, as a contact link carries them.
 #[derive(Clone, Debug)]
 pub struct ContactPublication {
-    /// The identity key, whose binding signature ties its agreement key to its signing key.
+    /// The identity key.
     pub identity: PublicIdentityKey,
     /// The current discovery key, whose signature is the identity key's half of the binding
     /// between the two keys.
@@ -39,8 +39,11 @@ pub enum ContactPublicationError {
     #[error("contact publication isn't in its one encoding")]
     NotCanonical,
     /// The bytes start with a version older than the first one, so no Roost wrote them.
-    #[error("contact publication version {0} predates the first version")]
-    VersionBeforeFirst(u8),
+    #[error("contact publication version {version} predates the first version")]
+    VersionBeforeFirst {
+        /// The version the bytes start with.
+        version: u8,
+    },
 }
 
 impl ContactPublication {
@@ -73,7 +76,7 @@ impl ContactPublication {
         if let Some(&version) = bytes.first()
             && version < CONTACT_PUBLICATION_VERSION
         {
-            return Err(ContactPublicationError::VersionBeforeFirst(version));
+            return Err(ContactPublicationError::VersionBeforeFirst { version });
         }
         let wire: ContactPublicationWire = decode_versioned(CONTACT_PUBLICATION_VERSION, bytes)?;
         if *encode_versioned(CONTACT_PUBLICATION_VERSION, &wire)? != bytes {

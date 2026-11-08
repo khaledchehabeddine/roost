@@ -7,7 +7,6 @@ pub use operation::{
     PreparedKeyStoreOperation, UnfinishedKeyStoreOperation,
 };
 
-use crate::contact::ContactIdentityKey;
 use crate::contact_publication::ContactPublication;
 use crate::discovery_key::{DiscoveryKeyError, DiscoveryKeyManager};
 use crate::identity::{Identity, IdentityError, IdentityManager, decrypt_backup};
@@ -15,11 +14,12 @@ use crate::one_time_prekey::{OneTimePreKeyError, OneTimePreKeyManager};
 use crate::protocol_state::{ProtocolStateBlob, ProtocolStateEngine, StateChanges};
 use crate::signed_prekey::{SignedPreKeyError, SignedPreKeyManager};
 use crate::storage::SecureStorage;
-use rand::rngs::OsRng;
+use rand::{CryptoRng, RngCore};
 use roost_crypto::{
     PREKEY_BUNDLE_VERSION, PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey,
     RecipientDeliveryVerifier, Signature, verify_public_signed_prekey,
 };
+use roost_protocol::IdentityKey;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
@@ -48,16 +48,12 @@ pub enum KeyStoreError {
 
 /// A key publication that verifies from the identity key to the discovery key to the signed
 /// prekey.
-///
-/// Peers verify [`Self::discovery_key`] with the identity verifying key, then verify
-/// [`Self::signed_prekey`] with the discovery key's verifying key.
 #[derive(Clone, Debug)]
 pub struct PublicationBundle {
     /// Version of the public prekey bundle format.
     pub version: u8,
-    /// The discovery key for this publication.
-    ///
-    /// Its `identity_signature` field is the identity key's half of the mutual binding.
+    /// The discovery key, whose `identity_signature` is the identity key's half of the mutual
+    /// binding.
     pub discovery_key: PublicDiscoveryKey,
     /// The discovery key's half of the mutual binding: [`Self::discovery_key`] signing the identity
     /// it belongs to.
@@ -81,9 +77,9 @@ pub struct ContactBlock {
     pub changes: StateChanges,
     /// The rotated inbox's publication, or `None` when the contact was already blocked.
     ///
-    /// Present means every remaining contact holds a stale delivery capability until a message,
+    /// When present, every remaining contact holds a stale delivery capability until a message,
     /// acknowledgment, or grant update carries them the new inbox grant. The blocked contact never
-    /// gets one, which is what makes the block bite at the relay rather than only locally.
+    /// gets one.
     pub publication: Option<PublicationBundle>,
 }
 
@@ -101,21 +97,22 @@ struct KeyStoreInner {
 /// Facade over identity, discovery key, and prekey managers sharing one [`SecureStorage`].
 ///
 /// Clones share the same underlying storage and synchronization. Separately constructed instances
-/// do not. A host that uses multiple instances or processes for one identity namespace must hold
+/// do not. An app that uses multiple instances or processes for one identity namespace must hold
 /// one identity lock across them, from the first call of any operation, including a message
-/// operation, until its commit is resolved, and while it recovers unfinished operations.
+/// operation, until its commit is resolved, and while it resolves unfinished operations.
 ///
 /// Methods named `prepare_*` stage a secure-storage change and return it with an operation ID.
-/// Reserve the operation, persist its output and ID in the host transaction, then finalize:
+/// Reserve the operation, persist its output and ID in the app's transaction, then finalize:
 ///
 /// ```
+/// use rand::rngs::OsRng;
 /// use roost_core::{KeyStore, KeyStoreError, SecureStorage};
 ///
 /// fn create_identity(storage: Box<dyn SecureStorage>) -> Result<(), KeyStoreError> {
 ///     let store = KeyStore::new(storage);
-///     let prepared = store.prepare_identity_creation()?;
+///     let prepared = store.prepare_identity_creation(&mut OsRng)?;
 ///     store.reserve_operation(prepared.id)?;
-///     // Persist or publish `prepared.output` with the host operation ID.
+///     // Persist or publish `prepared.output` with the operation ID.
 ///     store.finalize_operation(prepared.id)?;
 ///     Ok(())
 /// }
@@ -163,10 +160,11 @@ impl KeyStore {
     }
 
     /// Prepares fresh identity and discovery key material without changing authoritative storage.
-    pub fn prepare_identity_creation(
+    pub fn prepare_identity_creation<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
     ) -> Result<PreparedKeyStoreOperation<Identity>, KeyStoreError> {
-        self.prepare_operation(|staged| staged.create_identity())
+        self.prepare_operation(rng, |staged, rng| staged.create_identity(rng))
     }
 
     /// Returns the stored [`Identity`], or `None` when no identity is stored.
@@ -183,7 +181,7 @@ impl KeyStore {
     /// Loads the stored [`Identity`].
     pub fn load_identity(&self) -> Result<Identity, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required()?;
+        self.ensure_no_unfinished_reservation()?;
         Ok(self.0.identity.load_identity()?)
     }
 
@@ -193,7 +191,7 @@ impl KeyStore {
     /// [`Self::prepare_one_time_prekey_replenishment`].
     pub fn current_publication(&self) -> Result<PublicationBundle, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required()?;
+        self.ensure_no_unfinished_reservation()?;
         self.publication()
     }
 
@@ -203,7 +201,7 @@ impl KeyStore {
     /// inbox that has no publication.
     pub fn contact_publication(&self) -> Result<ContactPublication, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required()?;
+        self.ensure_no_unfinished_reservation()?;
         let identity = self.0.identity.load_identity()?.public()?;
         let publication = self.publication()?;
         Ok(ContactPublication {
@@ -219,9 +217,9 @@ impl KeyStore {
         let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
         let discovery_key = discovery_key.public();
         let signed_prekey = self.0.signed_prekey.current_public(SystemTime::now())?;
-        // Reject storage rollback/desync before publishing a mismatched pair.
+        // A rolled-back or mismatched entry fails here, before Roost publishes the pair.
         verify_public_signed_prekey(&signed_prekey, &discovery_key.verifying_key)
-            .map_err(|_| SignedPreKeyError::Corrupt)?;
+            .map_err(SignedPreKeyError::Corrupt)?;
         Ok(PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
             discovery_key,
@@ -234,7 +232,7 @@ impl KeyStore {
     /// Blocks a contact, given its record or the record's absence, and rotates the inbox so the
     /// block takes effect at the relay.
     ///
-    /// Blocking alone only stops messages being surfaced locally; the relay would still accept and
+    /// Blocking alone only stops messages being surfaced locally. The relay would still accept and
     /// queue them, because the blocked contact still holds a working delivery capability or knows
     /// the inbox's prekeys. Rotating the inbox replaces both, even for a stranger who never got a
     /// grant, so a blocked person can't come back with a new identity at the same address. A
@@ -244,11 +242,12 @@ impl KeyStore {
     /// does not churn every contact's capability.
     ///
     /// Neither change is authoritative when this returns. Reserve the operation in
-    /// [`ContactBlock::changes`], commit the changes with its ID, then finalize it. Abort only after
-    /// proving the host transaction did not commit.
-    pub fn prepare_block_contact(
+    /// [`ContactBlock::changes`], commit the changes with its ID, then finalize it. Abort only
+    /// after proving the app's transaction did not commit.
+    pub fn prepare_block_contact<R: RngCore + CryptoRng>(
         &self,
-        identity_key: ContactIdentityKey,
+        rng: &mut R,
+        identity_key: IdentityKey,
         record: Option<&ProtocolStateBlob>,
     ) -> Result<ContactBlock, KeyStoreError> {
         let (changes, blocks) = self.0.engine.block_contact(identity_key, record)?;
@@ -258,7 +257,7 @@ impl KeyStore {
                 publication: None,
             });
         }
-        let prepared = self.prepare_operation(|staged| staged.rotate_inbox())?;
+        let prepared = self.prepare_operation(rng, |staged, rng| staged.rotate_inbox(rng))?;
         Ok(ContactBlock {
             changes: changes.with_operation(prepared.id),
             publication: Some(prepared.output),
@@ -267,114 +266,129 @@ impl KeyStore {
 
     /// Prepares exactly `batch_size` one-time prekeys for the current discovery key's epoch.
     ///
-    /// The new secrets remain staged until finalization. No discovery key rotation is required.
     /// The call fails if the requested batch would exceed the pool cap.
-    pub fn prepare_one_time_prekeys(
+    pub fn prepare_one_time_prekeys<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         batch_size: usize,
     ) -> Result<PreparedKeyStoreOperation<Vec<PublicOneTimePreKey>>, KeyStoreError> {
-        self.prepare_operation(move |staged| staged.generate_one_time_prekeys(batch_size))
+        self.prepare_operation(rng, |staged, rng| {
+            Ok(staged.0.one_time_prekey.generate_batch(rng, batch_size)?)
+        })
     }
 
     /// Prepares replenishment of the stored one-time prekey pool.
     ///
-    /// Returns the public one-time prekeys created by this call. A missing or stale pool is
-    /// rebuilt for the current discovery key's epoch; a current pool above the replenish threshold
-    /// is left unchanged and returns an empty list. The returned no-op operation must still be
-    /// finalized or aborted.
-    pub fn prepare_one_time_prekey_replenishment(
+    /// Returns the public one-time prekeys created by this call. A missing pool is created for the
+    /// current discovery key's epoch, and a pool above the replenish threshold is left unchanged
+    /// and returns an empty list. The returned no-op operation must still be finalized or aborted.
+    pub fn prepare_one_time_prekey_replenishment<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
     ) -> Result<PreparedKeyStoreOperation<Vec<PublicOneTimePreKey>>, KeyStoreError> {
-        self.prepare_operation(|staged| staged.replenish_one_time_prekeys())
+        self.prepare_operation(rng, |staged, rng| {
+            Ok(staged.0.one_time_prekey.replenish(rng)?)
+        })
     }
 
     /// Prepares rotation of the whole inbox.
     ///
-    /// Advances the epoch, replaces the discovery key and the delivery capability together, clears
-    /// epoch-bound one-time prekeys, and returns the publishable material. A preparation failure
-    /// discards the staged changes, leaving the previous authoritative inbox intact.
+    /// Advances the epoch, replaces the discovery key, delivery capability, and signed prekey
+    /// together, clears epoch-bound one-time prekeys, and returns the publishable material. A
+    /// preparation failure discards the staged changes, leaving the previous authoritative inbox
+    /// intact.
     ///
     /// This invalidates every contact's delivery capability until a message, acknowledgment, or
-    /// grant update carries them the new inbox grant — that is what makes it the mechanism behind
-    /// blocking, and why it is not merely a discovery key rotation. The replaced discovery key
-    /// still opens messages the relay queued for it, for as long as the relay may hold them.
-    pub fn prepare_inbox_rotation(
+    /// grant update carries them the new inbox grant. The replaced discovery key still opens
+    /// messages the relay queued for it, for as long as the relay may hold them.
+    pub fn prepare_inbox_rotation<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
     ) -> Result<PreparedKeyStoreOperation<PublicationBundle>, KeyStoreError> {
-        self.prepare_operation(|staged| staged.rotate_inbox())
+        self.prepare_operation(rng, |staged, rng| staged.rotate_inbox(rng))
     }
 
     /// Prepares a signed prekey rotation when the stored one is stale or missing, and deletes the
     /// previous discovery keys the relay can no longer hold messages for.
     ///
-    /// Returns the new public signed prekey when callers need to upload it, or `None` when no
+    /// Returns the new public signed prekey when the app needs to upload it, or `None` when no
     /// rotation was needed. The returned operation must be finalized or aborted either way.
-    pub fn prepare_signed_prekey_rotation_and_discovery_key_cleanup(
+    pub fn prepare_signed_prekey_rotation_and_discovery_key_cleanup<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
     ) -> Result<PreparedKeyStoreOperation<Option<PublicSignedPreKey>>, KeyStoreError> {
-        self.prepare_operation(|staged| staged.rotate_signed_prekey_and_clean_up_discovery_keys())
+        self.prepare_operation(rng, |staged, rng| {
+            staged.rotate_signed_prekey_and_clean_up_discovery_keys(rng)
+        })
     }
 
-    /// Prepares an immediate signed prekey rotation and returns the provisional public key.
-    ///
-    /// Use this for explicit key-reset operations that must publish a fresh signed prekey even
-    /// when the stored one is still fresh.
-    pub fn prepare_signed_prekey_rotation(
+    /// Prepares a signed prekey rotation even when the current one is fresh, and returns the
+    /// provisional public key.
+    pub fn prepare_signed_prekey_rotation<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
     ) -> Result<PreparedKeyStoreOperation<PublicSignedPreKey>, KeyStoreError> {
-        self.prepare_operation(|staged| staged.rotate_signed_prekey())
+        self.prepare_operation(rng, |staged, rng| {
+            Ok(staged
+                .0
+                .signed_prekey
+                .rotate_now(rng, SystemTime::now())?
+                .public())
+        })
     }
 
     /// Exports the stored identity and current discovery key as a passphrase-encrypted backup.
-    ///
-    /// Requires a stored discovery key; a partially generated identity must be completed with
-    /// [`Self::prepare_identity_creation`] (which repairs a missing discovery key) before
-    /// exporting.
-    pub fn export_encrypted_backup(&self, passphrase: &str) -> Result<Vec<u8>, KeyStoreError> {
+    pub fn export_encrypted_backup<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+        passphrase: &str,
+    ) -> Result<Vec<u8>, KeyStoreError> {
         let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required()?;
+        self.ensure_no_unfinished_reservation()?;
         self.0.discovery.current()?;
         let discovery_key_entry = self.0.discovery.export_entry()?;
         Ok(self
             .0
             .identity
-            .export_encrypted_backup(&mut OsRng, passphrase, &discovery_key_entry)?)
+            .export_encrypted_backup(rng, passphrase, &discovery_key_entry)?)
     }
 
     /// Prepares restoration of an identity and discovery key from an encrypted backup.
     ///
-    /// Authenticates the backup and validates the restored discovery key against the restored
-    /// identity before staging changes, so a wrong passphrase or malformed backup leaves existing
-    /// material untouched. Reserve this operation, then in the transaction that commits its ID,
-    /// keep the [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState)
-    /// records restored with the host's database and delete every other protocol-state record, then
-    /// finalize. A restored session would reuse message keys its copy already used, so each
-    /// contact's next message starts a new session instead. Roost stops tracking a message once its
-    /// session is deleted, so in the same transaction, also mark each sent message that has no
-    /// acknowledgment yet not delivered. The restored identity keeps the discovery key's epoch
-    /// lineage from the backup, but prekey generation and publication stay blocked until
+    /// A wrong passphrase, or a backup whose discovery key the restored identity didn't sign, fails
+    /// the preparation and leaves existing material untouched. Reserve this operation, then in the
+    /// transaction that commits its ID, keep the
+    /// [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState) records restored
+    /// with the app's database and delete every other protocol-state record, then finalize. A
+    /// restored session would reuse message keys its copy already used, so each contact's next
+    /// message starts a new session instead. Roost stops tracking a message once its session is
+    /// deleted, so in the same transaction, also mark each sent message that has no acknowledgment
+    /// yet not delivered. The restored identity keeps the discovery key's epoch lineage from the
+    /// backup, but prekey generation and publication stay blocked until
     /// [`Self::prepare_inbox_rotation`] advances to the next epoch. This avoids reusing prekey
     /// identifiers already published under the backed-up epoch.
-    pub fn prepare_backup_import(
+    pub fn prepare_backup_import<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         data: &[u8],
         passphrase: &str,
     ) -> Result<PreparedKeyStoreOperation<()>, KeyStoreError> {
-        self.prepare_operation(move |staged| staged.import_backup(data, passphrase))
+        self.prepare_operation(rng, |staged, _| staged.import_backup(data, passphrase))
     }
 
     /// Prepares deletion of the stored prekeys, discovery key, and identity.
     ///
-    /// Reserve this operation, atomically wipe host-owned protocol state, then finalize.
+    /// Reserve this operation, atomically wipe the protocol state the app holds, then finalize.
     /// Interrupted finalization resumes from durable progress.
-    pub fn prepare_identity_deletion(
+    pub fn prepare_identity_deletion<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
     ) -> Result<PreparedKeyStoreOperation<()>, KeyStoreError> {
-        self.prepare_operation(|staged| staged.delete_keys())
+        self.prepare_operation(rng, |staged, _| staged.delete_keys())
     }
 
-    // Keeps multikey updates from interleaving across cloned keystores. The per-storage mutex only
-    // protects individual storage calls. This guard protects the keychain invariant.
+    // Keeps updates of several keys from interleaving across cloned keystores, since the storage
+    // mutex only protects single storage calls.
     fn lifecycle_guard(&self) -> MutexGuard<'_, ()> {
         self.0
             .lifecycle
@@ -384,47 +398,30 @@ impl KeyStore {
 }
 
 // The changes each prepared operation stages. They run on the staging KeyStore that
-// `prepare_operation` builds while it holds the lifecycle guard, and each reads the clock once.
+// `prepare_operation` builds while it holds the lifecycle guard, and each reads the clock at most
+// once.
 impl KeyStore {
-    // Creates the identity and its first discovery key, or completes a creation that stored the
-    // identity but not the discovery key.
-    fn create_identity(&self) -> Result<Identity, KeyStoreError> {
-        let identity = match self.0.identity.generate_identity(&mut OsRng) {
-            Ok(identity) => identity,
-            Err(IdentityError::AlreadyExists) => {
-                if self.0.discovery.stored_epoch()?.is_some() {
-                    return Err(IdentityError::AlreadyExists.into());
-                }
-                self.0.identity.load_identity()?
-            }
-            Err(error) => return Err(error.into()),
-        };
-        self.0.discovery.rotate_now(&mut OsRng, SystemTime::now())?;
+    // Creates the identity and its first discovery key.
+    fn create_identity<R: RngCore + CryptoRng>(
+        &self,
+        rng: &mut R,
+    ) -> Result<Identity, KeyStoreError> {
+        let identity = self.0.identity.generate_identity(rng)?;
+        self.0.discovery.rotate_now(rng, SystemTime::now())?;
         Ok(identity)
     }
 
-    fn generate_one_time_prekeys(
+    fn rotate_inbox<R: RngCore + CryptoRng>(
         &self,
-        batch_size: usize,
-    ) -> Result<Vec<PublicOneTimePreKey>, KeyStoreError> {
-        Ok(self
-            .0
-            .one_time_prekey
-            .generate_batch(&mut OsRng, batch_size)?)
-    }
-
-    fn replenish_one_time_prekeys(&self) -> Result<Vec<PublicOneTimePreKey>, KeyStoreError> {
-        Ok(self.0.one_time_prekey.replenish(&mut OsRng)?)
-    }
-
-    fn rotate_inbox(&self) -> Result<PublicationBundle, KeyStoreError> {
+        rng: &mut R,
+    ) -> Result<PublicationBundle, KeyStoreError> {
         let now = SystemTime::now();
         self.0.one_time_prekey.reset()?;
         self.0.signed_prekey.reset()?;
-        let discovery_key = self.0.discovery.rotate_now(&mut OsRng, now)?;
+        let discovery_key = self.0.discovery.rotate_now(rng, now)?;
         let discovery_to_identity = self.0.discovery.identity_binding(&discovery_key)?;
         let recipient_delivery_verifier = self.0.discovery.current_capability()?.verifier();
-        let signed_prekey = self.0.signed_prekey.rotate_now(&mut OsRng, now)?;
+        let signed_prekey = self.0.signed_prekey.rotate_now(rng, now)?;
         Ok(PublicationBundle {
             version: PREKEY_BUNDLE_VERSION,
             discovery_key: discovery_key.public(),
@@ -434,25 +431,18 @@ impl KeyStore {
         })
     }
 
-    fn rotate_signed_prekey_and_clean_up_discovery_keys(
+    fn rotate_signed_prekey_and_clean_up_discovery_keys<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
     ) -> Result<Option<PublicSignedPreKey>, KeyStoreError> {
         let now = SystemTime::now();
         let signed_prekey = self
             .0
             .signed_prekey
-            .rotate_if_stale(&mut OsRng, now)?
+            .rotate_if_stale(rng, now)?
             .map(|signed_prekey| signed_prekey.public());
         self.0.discovery.delete_expired_previous(now)?;
         Ok(signed_prekey)
-    }
-
-    fn rotate_signed_prekey(&self) -> Result<PublicSignedPreKey, KeyStoreError> {
-        Ok(self
-            .0
-            .signed_prekey
-            .rotate_now(&mut OsRng, SystemTime::now())?
-            .public())
     }
 
     fn import_backup(&self, data: &[u8], passphrase: &str) -> Result<(), KeyStoreError> {
@@ -488,9 +478,12 @@ mod tests {
     use crate::storage::{InMemorySecureStorage, StorageError};
     use crate::stored_data::StoredDataError;
     use rand::SeedableRng;
+    use rand::rngs::OsRng;
     use rand_chacha::ChaCha20Rng;
-    use roost_crypto::{verify_discovery_to_identity_binding, verify_public_discovery_key};
-    use roost_protocol::from_unix_secs;
+    use roost_crypto::{
+        PublicKeyError, verify_discovery_to_identity_binding, verify_public_discovery_key,
+    };
+    use roost_protocol::{SignatureError, from_unix_secs};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use zeroize::Zeroizing;
 
@@ -499,6 +492,7 @@ mod tests {
     const PREVIOUS_DISCOVERY_KEYS: &str = "discovery/previous";
     const IDENTITY_CURRENT_KEY: &str = "identity/current";
     const SIGNED_PREKEYS: &str = "prekey/signed";
+    const ONE_TIME_PREKEYS: &str = "prekey/one-time-pool";
 
     type SharedStorage = Arc<Mutex<Box<dyn SecureStorage>>>;
 
@@ -517,7 +511,7 @@ mod tests {
         storage.lock().unwrap().load(key).unwrap()
     }
 
-    // Reserves and finalizes `prepared`, as a host does around its commit, and returns its output.
+    // Reserves and finalizes `prepared`, as an app does around its commit, and returns its output.
     fn commit<T>(store: &KeyStore, prepared: PreparedKeyStoreOperation<T>) -> T {
         store.reserve_operation(prepared.id).unwrap();
         store.finalize_operation(prepared.id).unwrap();
@@ -525,28 +519,35 @@ mod tests {
     }
 
     fn commit_identity_creation(store: &KeyStore) -> Identity {
-        commit(store, store.prepare_identity_creation().unwrap())
+        commit(store, store.prepare_identity_creation(&mut OsRng).unwrap())
     }
 
     fn commit_inbox_rotation(store: &KeyStore) -> PublicationBundle {
-        commit(store, store.prepare_inbox_rotation().unwrap())
+        commit(store, store.prepare_inbox_rotation(&mut OsRng).unwrap())
     }
 
     fn commit_signed_prekey_rotation(store: &KeyStore) -> PublicSignedPreKey {
-        commit(store, store.prepare_signed_prekey_rotation().unwrap())
+        commit(
+            store,
+            store.prepare_signed_prekey_rotation(&mut OsRng).unwrap(),
+        )
     }
 
     fn commit_replenishment(store: &KeyStore) -> Vec<PublicOneTimePreKey> {
         commit(
             store,
-            store.prepare_one_time_prekey_replenishment().unwrap(),
+            store
+                .prepare_one_time_prekey_replenishment(&mut OsRng)
+                .unwrap(),
         )
     }
 
     fn commit_import(store: &KeyStore, backup: &[u8], passphrase: &str) {
         commit(
             store,
-            store.prepare_backup_import(backup, passphrase).unwrap(),
+            store
+                .prepare_backup_import(&mut OsRng, backup, passphrase)
+                .unwrap(),
         );
     }
 
@@ -556,32 +557,6 @@ mod tests {
 
     fn signed_prekey(store: &KeyStore) -> Result<PublicSignedPreKey, SignedPreKeyError> {
         store.0.signed_prekey.current_public(SystemTime::now())
-    }
-
-    #[test]
-    fn identity_creation_completes_a_partial_discovery_key() {
-        let (key_store, storage) = store_with_storage();
-        commit_identity_creation(&key_store);
-        storage.lock().unwrap().delete(DISCOVERY_KEY).unwrap();
-        commit_identity_creation(&key_store);
-        discovery_key(&key_store).unwrap();
-    }
-
-    #[test]
-    fn identity_creation_rejects_a_malformed_discovery_key() {
-        let (key_store, storage) = store_with_storage();
-        commit_identity_creation(&key_store);
-        storage
-            .lock()
-            .unwrap()
-            .store(DISCOVERY_KEY, &[0xAAu8; 50])
-            .unwrap();
-        assert!(matches!(
-            key_store.prepare_identity_creation(),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::StoredData(
-                StoredDataError::UnsupportedVersion(0xAA)
-            )))
-        ));
     }
 
     #[test]
@@ -608,9 +583,6 @@ mod tests {
         .unwrap();
     }
 
-    /// The binding is recomputed per read rather than persisted, so it must be byte-stable.
-    /// Ed25519 is deterministic and the payload carries no timestamp, so two reads of an
-    /// unchanged discovery key must produce identical bytes.
     #[test]
     fn discovery_to_identity_binding_is_stable_across_reads() {
         let key_store = store();
@@ -643,7 +615,7 @@ mod tests {
         let keys_to_use = ONE_TIME_PREKEY_POOL_TARGET - ONE_TIME_PREKEY_REPLENISH_THRESHOLD;
         for prekey in prekeys.iter().take(keys_to_use) {
             let id = key_store
-                .prepare_one_time_prekey_use(epoch, prekey.id)
+                .prepare_one_time_prekey_use(&mut OsRng, epoch, prekey.id)
                 .unwrap();
             key_store.reserve_operation(id).unwrap();
             key_store.finalize_operation(id).unwrap();
@@ -663,10 +635,10 @@ mod tests {
         let epoch = discovery_key(&key_store).unwrap().epoch;
         let prekey = commit_replenishment(&key_store).remove(0);
         let first = key_store
-            .prepare_one_time_prekey_use(epoch, prekey.id)
+            .prepare_one_time_prekey_use(&mut OsRng, epoch, prekey.id)
             .unwrap();
         let second = key_store
-            .prepare_one_time_prekey_use(epoch, prekey.id)
+            .prepare_one_time_prekey_use(&mut OsRng, epoch, prekey.id)
             .unwrap();
 
         key_store.reserve_operation(first).unwrap();
@@ -675,8 +647,8 @@ mod tests {
         assert!(matches!(
             key_store.reserve_operation(second),
             Err(KeyStoreError::Operation(
-                KeyStoreOperationError::PreconditionChanged { .. }
-            ))
+                KeyStoreOperationError::PreconditionChanged { key }
+            )) if key == ONE_TIME_PREKEYS
         ));
         assert_eq!(
             key_store.operation_status(second).unwrap(),
@@ -691,16 +663,18 @@ mod tests {
         commit_replenishment(&destination_store);
         let source_store = store();
         commit_identity_creation(&source_store);
-        let backup = source_store.export_encrypted_backup("pass").unwrap();
+        let backup = source_store
+            .export_encrypted_backup(&mut OsRng, "pass")
+            .unwrap();
         commit_import(&destination_store, &backup, "pass");
         assert!(matches!(
-            destination_store.prepare_one_time_prekey_use(1, 0),
+            destination_store.prepare_one_time_prekey_use(&mut OsRng, 1, 0),
             Err(KeyStoreError::OneTimePreKey(
                 OneTimePreKeyError::InboxRotationRequired
             ))
         ));
         assert!(matches!(
-            destination_store.prepare_one_time_prekey_replenishment(),
+            destination_store.prepare_one_time_prekey_replenishment(&mut OsRng),
             Err(KeyStoreError::OneTimePreKey(
                 OneTimePreKeyError::InboxRotationRequired
             ))
@@ -727,7 +701,9 @@ mod tests {
             .unwrap();
         assert!(matches!(
             key_store.current_publication(),
-            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::Corrupt))
+            Err(KeyStoreError::SignedPreKey(SignedPreKeyError::Corrupt(
+                PublicKeyError::Signature(SignatureError::SignatureInvalid)
+            )))
         ));
     }
 
@@ -794,7 +770,7 @@ mod tests {
         let rotated = commit(
             &key_store,
             key_store
-                .prepare_signed_prekey_rotation_and_discovery_key_cleanup()
+                .prepare_signed_prekey_rotation_and_discovery_key_cleanup(&mut OsRng)
                 .unwrap(),
         );
 
@@ -822,7 +798,7 @@ mod tests {
                 )
                 .unwrap(),
                 // A reserved rotation blocks reads until it is finalized.
-                Err(KeyStoreError::Operation(KeyStoreOperationError::RecoveryRequired {
+                Err(KeyStoreError::Operation(KeyStoreOperationError::UnfinishedReservation {
                     ..
                 })) => {}
                 Err(error) => panic!("unexpected publication failure: {error}"),
@@ -848,7 +824,9 @@ mod tests {
         };
         let cases: [(Vec<u8>, &str, Matcher); 3] = [
             (
-                source_store.export_encrypted_backup("pass").unwrap(),
+                source_store
+                    .export_encrypted_backup(&mut OsRng, "pass")
+                    .unwrap(),
                 "wrong",
                 |error| {
                     matches!(
@@ -860,14 +838,21 @@ mod tests {
             (
                 backup(&other_store.0.discovery.export_entry().unwrap()),
                 "pass",
-                |error| matches!(error, KeyStoreError::Discovery(DiscoveryKeyError::Corrupt)),
+                |error| {
+                    matches!(
+                        error,
+                        KeyStoreError::Discovery(DiscoveryKeyError::Corrupt(
+                            PublicKeyError::Signature(SignatureError::SignatureInvalid)
+                        ))
+                    )
+                },
             ),
             // An authentic backup whose discovery key entry is malformed.
             (backup(&[0xAAu8; 50]), "pass", |error| {
                 matches!(
                     error,
                     KeyStoreError::Discovery(DiscoveryKeyError::StoredData(
-                        StoredDataError::UnsupportedVersion(0xAA)
+                        StoredDataError::UnsupportedVersion { version: 0xAA }
                     ))
                 )
             }),
@@ -880,7 +865,7 @@ mod tests {
                 commit_signed_prekey_rotation(&destination_store).public_key;
 
             let error = destination_store
-                .prepare_backup_import(&backup, passphrase)
+                .prepare_backup_import(&mut OsRng, &backup, passphrase)
                 .err()
                 .unwrap();
 
@@ -914,16 +899,18 @@ mod tests {
     fn backup_import_rejects_an_unknown_backup_version() {
         let source_store = store();
         commit_identity_creation(&source_store);
-        let mut backup = source_store.export_encrypted_backup("passphrase").unwrap();
+        let mut backup = source_store
+            .export_encrypted_backup(&mut OsRng, "passphrase")
+            .unwrap();
         backup[0] = 0xFF;
         let destination_store = store();
 
-        let result = destination_store.prepare_backup_import(&backup, "passphrase");
+        let result = destination_store.prepare_backup_import(&mut OsRng, &backup, "passphrase");
 
         assert!(matches!(
             result,
             Err(KeyStoreError::Identity(IdentityError::BackupFormat(
-                StoredDataError::UnsupportedVersion(0xFF)
+                StoredDataError::UnsupportedVersion { version: 0xFF }
             )))
         ));
         assert!(matches!(
@@ -968,7 +955,9 @@ mod tests {
 
         let source_store = store();
         let source_identity = commit_identity_creation(&source_store);
-        let backup = source_store.export_encrypted_backup("pass").unwrap();
+        let backup = source_store
+            .export_encrypted_backup(&mut OsRng, "pass")
+            .unwrap();
 
         counting.store(true, Ordering::SeqCst);
         commit_import(&destination_store, &backup, "pass");
@@ -990,7 +979,9 @@ mod tests {
 
         let source_store = store();
         commit_identity_creation(&source_store);
-        let backup = source_store.export_encrypted_backup("pass").unwrap();
+        let backup = source_store
+            .export_encrypted_backup(&mut OsRng, "pass")
+            .unwrap();
 
         commit_import(&destination_store, &backup, "pass");
         assert!(matches!(
@@ -998,7 +989,7 @@ mod tests {
             Err(SignedPreKeyError::InboxRotationRequired)
         ));
         assert!(matches!(
-            destination_store.prepare_signed_prekey_rotation_and_discovery_key_cleanup(),
+            destination_store.prepare_signed_prekey_rotation_and_discovery_key_cleanup(&mut OsRng),
             Err(KeyStoreError::SignedPreKey(
                 SignedPreKeyError::InboxRotationRequired
             ))
@@ -1013,7 +1004,9 @@ mod tests {
 
         let source_store = store();
         commit_identity_creation(&source_store);
-        let backup = source_store.export_encrypted_backup("pass").unwrap();
+        let backup = source_store
+            .export_encrypted_backup(&mut OsRng, "pass")
+            .unwrap();
         let backed_up_epoch = discovery_key(&source_store).unwrap().epoch;
         commit_import(&destination_store, &backup, "pass");
         let rotation = commit_inbox_rotation(&destination_store);
@@ -1036,14 +1029,15 @@ mod tests {
         commit_inbox_rotation(&source_store);
         commit_inbox_rotation(&source_store);
         assert_eq!(discovery_key(&source_store).unwrap().epoch, 3);
-        let backup = source_store.export_encrypted_backup("pass").unwrap();
+        let backup = source_store
+            .export_encrypted_backup(&mut OsRng, "pass")
+            .unwrap();
 
         let destination_store = store();
         commit_identity_creation(&destination_store);
         commit_import(&destination_store, &backup, "pass");
 
-        // The restored discovery key keeps the source epoch lineage instead of resetting to
-        // the first epoch, and verifies against the restored identity.
+        // `discovery_key` also verifies the restored key against the restored identity.
         assert_eq!(discovery_key(&destination_store).unwrap().epoch, 3);
     }
 
@@ -1061,8 +1055,10 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            key_store.export_encrypted_backup("pass"),
-            Err(KeyStoreError::Discovery(DiscoveryKeyError::Corrupt))
+            key_store.export_encrypted_backup(&mut OsRng, "pass"),
+            Err(KeyStoreError::Discovery(DiscoveryKeyError::Corrupt(
+                PublicKeyError::Signature(SignatureError::SignatureInvalid)
+            )))
         ));
     }
 
@@ -1071,7 +1067,9 @@ mod tests {
         let source_store = store();
         let source_identity = commit_identity_creation(&source_store);
         let source_discovery = discovery_key(&source_store).unwrap();
-        let backup = source_store.export_encrypted_backup("caf\u{00e9}").unwrap();
+        let backup = source_store
+            .export_encrypted_backup(&mut OsRng, "caf\u{00e9}")
+            .unwrap();
 
         let destination_store = store();
         commit_import(&destination_store, &backup, "cafe\u{0301}");
@@ -1102,7 +1100,7 @@ mod tests {
         commit_identity_creation(&key_store);
         storage.lock().unwrap().delete(DISCOVERY_KEY).unwrap();
         assert!(matches!(
-            key_store.export_encrypted_backup("pass"),
+            key_store.export_encrypted_backup(&mut OsRng, "pass"),
             Err(KeyStoreError::Discovery(DiscoveryKeyError::NotFound))
         ));
     }
@@ -1113,7 +1111,10 @@ mod tests {
         commit_identity_creation(&key_store);
         commit_replenishment(&key_store);
         commit_signed_prekey_rotation(&key_store);
-        commit(&key_store, key_store.prepare_identity_deletion().unwrap());
+        commit(
+            &key_store,
+            key_store.prepare_identity_deletion(&mut OsRng).unwrap(),
+        );
         assert!(matches!(
             key_store.load_identity(),
             Err(KeyStoreError::Identity(IdentityError::NotFound))
@@ -1135,7 +1136,45 @@ mod tests {
     #[test]
     fn identity_deletion_on_an_empty_store_succeeds() {
         let key_store = store();
-        commit(&key_store, key_store.prepare_identity_deletion().unwrap());
-        commit(&key_store, key_store.prepare_identity_deletion().unwrap());
+        commit(
+            &key_store,
+            key_store.prepare_identity_deletion(&mut OsRng).unwrap(),
+        );
+        commit(
+            &key_store,
+            key_store.prepare_identity_deletion(&mut OsRng).unwrap(),
+        );
+    }
+
+    #[test]
+    fn reserving_an_operation_while_another_is_reserved_names_the_other() {
+        let key_store = store();
+        commit_identity_creation(&key_store);
+        let first = key_store.prepare_one_time_prekeys(&mut OsRng, 1).unwrap();
+        let second = key_store.prepare_one_time_prekeys(&mut OsRng, 1).unwrap();
+        key_store.reserve_operation(first.id).unwrap();
+
+        assert!(matches!(
+            key_store.reserve_operation(second.id),
+            Err(KeyStoreError::Operation(KeyStoreOperationError::UnfinishedReservation { id }))
+                if id == first.id
+        ));
+        assert_eq!(
+            key_store.operation_status(second.id).unwrap(),
+            KeyStoreOperationStatus::Prepared
+        );
+    }
+
+    #[test]
+    fn a_finalized_operations_status_survives_the_next_preparation() {
+        let key_store = store();
+        let created = key_store.prepare_identity_creation(&mut OsRng).unwrap();
+        key_store.reserve_operation(created.id).unwrap();
+        key_store.finalize_operation(created.id).unwrap();
+        key_store.prepare_one_time_prekeys(&mut OsRng, 1).unwrap();
+        assert_eq!(
+            key_store.operation_status(created.id).unwrap(),
+            KeyStoreOperationStatus::Finalized
+        );
     }
 }

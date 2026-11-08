@@ -34,7 +34,7 @@ pub struct OutgoingMessage {
     pub sent_at_millis: u64,
     /// The local identity's certificate, sealed into the message.
     pub sender_certificate: SignedSenderCertificate,
-    /// The plaintext to encrypt, at most 65,291 bytes.
+    /// The plaintext to encrypt, at most 65,293 bytes.
     pub plaintext: Vec<u8>,
     /// The contact's bundle, fetched after a [`MessageEncryptionStep::NeedsPreKeyBundle`] step or
     /// for the discovery key in a fresh contact link, and saved with the draft until a session uses
@@ -102,7 +102,7 @@ pub enum BlockedContactAcknowledgmentPolicy {
     /// Suppress acknowledgments so blocks look like unreachable recipients.
     Unreachable,
     /// Return the acknowledgments an unblocked sender would get, while hiding plaintext.
-    SilentReceipt,
+    Acknowledge,
 }
 
 /// Where Roost sends a message, and how the relay admits it, so the app can supply a transport
@@ -347,8 +347,9 @@ pub struct GrantUpdateResult {
 
 /// A blocked receive with no plaintext available to the caller.
 ///
-/// The acknowledgment is present only under the silent-receipt policy. Commit it with the changes
-/// before sending; under the default policy the host persists only the processed state.
+/// The acknowledgment is present only under [`BlockedContactAcknowledgmentPolicy::Acknowledge`].
+/// Commit it with the changes before sending; under the default policy the host persists only the
+/// processed state.
 #[derive(uniffi::Record)]
 pub struct BlockedInboundMessageResult {
     /// Acknowledgment when the receive's policy permits one.
@@ -511,7 +512,7 @@ impl Messaging {
     ///   malformed or too long.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_encryption(
         &self,
@@ -532,7 +533,7 @@ impl Messaging {
     ///   or acknowledgment certificate are malformed or outside Roost's limits.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_decryption(
         &self,
@@ -568,7 +569,7 @@ impl Contacts {
     ///   the plaintext is too long.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn request_contact(
         &self,
@@ -593,7 +594,7 @@ impl Contacts {
     /// - [`RoostError::InvalidData`] if a key, message ID, certificate, or bundle is malformed.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn start_grant_update(
         &self,
@@ -617,7 +618,7 @@ impl Contacts {
     ///   plaintext is too long, or when stepping, if no contact request from the contact is open.
     /// - [`RoostError::NotFound`] if no identity or discovery key is stored.
     /// - [`RoostError::Corrupt`] if the stored discovery key fails its binding checks.
-    /// - [`RoostError::OperationRecoveryRequired`] if a reserved operation needs recovery.
+    /// - [`RoostError::UnfinishedReservation`] if a reserved operation is unfinished.
     /// - [`RoostError::Storage`] if SecureStorage fails.
     pub fn accept_contact(
         &self,
@@ -908,7 +909,7 @@ impl BlockedContactAcknowledgmentPolicy {
     fn to_core(self) -> roost_core::BlockedContactAcknowledgmentPolicy {
         match self {
             Self::Unreachable => roost_core::BlockedContactAcknowledgmentPolicy::Unreachable,
-            Self::SilentReceipt => roost_core::BlockedContactAcknowledgmentPolicy::SilentReceipt,
+            Self::Acknowledge => roost_core::BlockedContactAcknowledgmentPolicy::Acknowledge,
         }
     }
 }

@@ -1,5 +1,3 @@
-//! Corrupt host blobs fault at the Core receive boundary without replacing committed state.
-
 use crate::support::ProtocolFixture;
 use roost_core::{MessageOperationError, ProtocolStateError, ProtocolStateKind};
 
@@ -11,7 +9,7 @@ fn corrupt_committed_blobs_surface_faults_without_reinitialization() {
         ProtocolStateKind::RatchetSession,
         ProtocolStateKind::DeduplicationSet,
     ] {
-        let mut store = fixture.bob.host.clone();
+        let mut store = fixture.bob.database.clone();
         let address = store.only(kind);
         let corrupt = store.corrupt(&address);
         let result = fixture.receive(&store, &message.message, 0x57);

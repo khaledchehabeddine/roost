@@ -1,9 +1,5 @@
-//! Blocking a contact rotates the local inbox.
-//!
-//! Crosses the keystore boundary into protocol state: the contact flag lives in protocol state
-//! while the inbox lives in secure storage, and blocking must move both.
-
 use crate::support::device::{Relay, requested};
+use rand::rngs::OsRng;
 
 #[test]
 fn blocking_a_contact_rotates_the_inbox() {
@@ -31,8 +27,7 @@ fn blocking_a_contact_rotates_the_inbox() {
     );
 }
 
-/// Blocking someone already blocked must not churn every other contact's delivery capability for
-/// no reason, since each rotation sends every remaining contact a new inbox grant.
+/// Another rotation would make every other contact need a new inbox grant.
 #[test]
 fn blocking_an_already_blocked_contact_does_not_rotate_again() {
     let relay = Relay::new();
@@ -43,7 +38,7 @@ fn blocking_an_already_blocked_contact_does_not_rotate_again() {
 
     let second = bob
         .store
-        .prepare_block_contact(alice.identity_key(), record.as_ref())
+        .prepare_block_contact(&mut OsRng, alice.identity_key(), record.as_ref())
         .unwrap();
 
     assert!(second.publication.is_none());

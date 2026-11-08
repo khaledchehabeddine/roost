@@ -7,15 +7,16 @@ mod pending_acknowledgment;
 mod session;
 
 use crate::contact::{
-    ContactDiscoveryKey, ContactIdentityKey, ContactSafetyNumberConfirmation, ContactState,
-    ContactTrustState,
+    ContactDiscoveryKey, ContactSafetyNumberConfirmation, ContactState, ContactTrustState,
 };
 use crate::hardening::{
     DEFAULT_DEDUPLICATION_CAPACITY, ProtocolHardeningLimits, validate_deduplication_capacity,
 };
 use crate::key_store::KeyStoreOperationId;
-use crate::safety_number::derive_safety_number;
-use crate::stored_data::{deserialize_bounded, encode_zeroizing};
+use crate::safety_number::{SafetyNumberError, derive_safety_number};
+use crate::stored_data::{
+    SignatureWire, StoredDataError, decode_exact, deserialize_bounded, encode_zeroizing,
+};
 use contact_record::{ContactRecord, contact_address};
 pub use envelope::SenderIdentityMaterial;
 pub use grant::is_newer_discovery_key;
@@ -41,15 +42,15 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 use subtle::{Choice, ConstantTimeEq};
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::Zeroizing;
 
-const PROTOCOL_STATE_BLOB_VERSION: u8 = 5;
+const PROTOCOL_STATE_BLOB_VERSION: u8 = 1;
 const PROTOCOL_STATE_BLOB_HEADER_LEN: usize = 1;
 const MAX_PROTOCOL_STATE_KEY_LEN: usize = 96;
 // Deduplication and acknowledgment digests keep this many bytes of their hash.
 const DIGEST_LEN: usize = 16;
 
-/// The key part of a protocol-state address: a session ID, an identity key, or a host-chosen key.
+/// The key part of a protocol-state address, such as a session ID or an identity key.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ProtocolStateKey(Vec<u8>);
 
@@ -75,8 +76,8 @@ impl ProtocolStateKey {
     }
 }
 
-impl From<ContactIdentityKey> for ProtocolStateKey {
-    fn from(value: ContactIdentityKey) -> Self {
+impl From<IdentityKey> for ProtocolStateKey {
+    fn from(value: IdentityKey) -> Self {
         Self(value.canonical_encoding().to_vec())
     }
 }
@@ -145,7 +146,6 @@ impl fmt::Display for ProtocolStateAddress {
 /// An opaque protocol-state byte value.
 ///
 /// The bytes may contain ratchet or other protocol secrets and are zeroized on drop.
-#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct ProtocolStateBlob {
     bytes: Zeroizing<Vec<u8>>,
 }
@@ -170,10 +170,9 @@ impl ProtocolStateBlob {
     }
 }
 
-/// A Core-computed condition the host must enforce inside its state transaction.
+/// A condition Roost computes, which the app checks inside its state transaction.
 ///
-/// All updates and associated effects must commit atomically under the host's identity lock. A
-/// failed condition requires reloading state and processing the operation again.
+/// A failed condition requires reloading state and processing the operation again.
 #[derive(Clone, Copy, Debug)]
 pub enum ProtocolStateCommitCondition {
     /// No blob may exist at this address.
@@ -183,7 +182,6 @@ pub enum ProtocolStateCommitCondition {
 }
 
 impl ProtocolStateCommitCondition {
-    // Checks the condition against the blob read inside the host transaction.
     fn is_satisfied_by(&self, blob: Option<&ProtocolStateBlob>) -> bool {
         match (self, blob) {
             (Self::Absent, None) => true,
@@ -202,7 +200,7 @@ impl ProtocolStateCommitCondition {
     }
 }
 
-/// A state update the consumer must commit durably.
+/// A state update the app must commit durably.
 pub struct ProtocolStateUpdate {
     address: ProtocolStateAddress,
     blob: Option<ProtocolStateBlob>,
@@ -210,7 +208,6 @@ pub struct ProtocolStateUpdate {
 }
 
 impl ProtocolStateUpdate {
-    /// Creates an update that stores `blob` at `address`.
     #[must_use]
     fn set(address: ProtocolStateAddress, blob: ProtocolStateBlob) -> Self {
         Self {
@@ -220,7 +217,6 @@ impl ProtocolStateUpdate {
         }
     }
 
-    /// Creates an update that removes `address`.
     #[must_use]
     fn delete(address: ProtocolStateAddress) -> Self {
         Self {
@@ -230,7 +226,7 @@ impl ProtocolStateUpdate {
         }
     }
 
-    // Creates an update that replaces `current`, the record the caller passed for `address`.
+    // Creates an update that replaces `current`, the record the app passed for `address`.
     fn replacing(
         address: ProtocolStateAddress,
         blob: Option<ProtocolStateBlob>,
@@ -264,15 +260,14 @@ impl ProtocolStateUpdate {
 /// The records an operation's result relies on, the records it writes, the prepared KeyStore
 /// operation that commits with them, if any, and the sent messages Roost stops waiting for.
 ///
-/// Message operations and delivery checks return these beside their result, so the host commits
-/// them through [`Self::conditions`] and [`Self::into_updates`] and keeps the rest of the result.
-/// They're empty when the result changes nothing, such as a duplicate.
+/// Message operations, delivery checks, and contact changes return these beside their result.
+/// They're empty for a duplicate.
 ///
-/// The host reads the record at each commit condition's address inside its transaction, and
-/// commits the updates with the result's effects only when [`commit_conditions_match`] holds for
-/// them. The host marks each of [`Self::undelivered`] not delivered in the same transaction. When
-/// [`Self::operation`] is present, the host reserves it before the transaction, commits its ID
-/// with the updates, and finalizes it before using the result.
+/// The app reads the record at each commit condition's address inside its transaction, and commits
+/// the updates with the result's effects only when [`commit_conditions_match`] holds for them. The
+/// app marks each of [`Self::undelivered`] not delivered in the same transaction. When
+/// [`Self::operation`] is present, the app reserves it before the transaction, commits its ID with
+/// the updates, and finalizes it before using the result.
 pub struct StateChanges {
     conditions: Vec<(ProtocolStateAddress, ProtocolStateCommitCondition)>,
     updates: Vec<ProtocolStateUpdate>,
@@ -281,7 +276,6 @@ pub struct StateChanges {
 }
 
 impl StateChanges {
-    // Returns changes for a result that relies on no record and writes none.
     fn empty() -> Self {
         Self {
             conditions: Vec::new(),
@@ -334,7 +328,7 @@ impl StateChanges {
         &self.undelivered
     }
 
-    /// Returns the updates to commit, consuming the changes.
+    /// Returns the updates to commit.
     #[must_use]
     pub fn into_updates(self) -> Vec<ProtocolStateUpdate> {
         self.updates
@@ -387,7 +381,7 @@ fn match_state_entries<'a>(
     Ok(found)
 }
 
-/// Why the records a host returned don't line up with the ones Roost asked for.
+/// Why the records the app returned don't line up with the ones Roost asked for.
 #[derive(Debug, thiserror::Error)]
 pub enum StateEntryError {
     /// No entry was returned for a requested record.
@@ -410,41 +404,19 @@ pub enum StateEntryError {
     },
 }
 
-/// Maximum number of opaque entries accepted in one operation snapshot.
-pub const MAX_PROTOCOL_STATE_ENTRIES: usize = 4096;
-
-/// A consumer-held snapshot of protocol-state blobs.
+// The records an operation read, by address.
 #[derive(Default)]
-pub struct ProtocolStateSnapshot {
+pub(crate) struct ProtocolStateSnapshot {
     blobs: BTreeMap<ProtocolStateAddress, ProtocolStateBlob>,
 }
 
 impl ProtocolStateSnapshot {
-    /// Creates an empty protocol-state snapshot.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Returns the blob stored at `address`, if present.
-    #[must_use]
-    pub fn get(&self, address: &ProtocolStateAddress) -> Option<&ProtocolStateBlob> {
+    pub(crate) fn get(&self, address: &ProtocolStateAddress) -> Option<&ProtocolStateBlob> {
         self.blobs.get(address)
     }
 
-    /// Stores `blob` at `address` in the caller-supplied operation snapshot.
-    pub fn set(
-        &mut self,
-        address: ProtocolStateAddress,
-        blob: ProtocolStateBlob,
-    ) -> Result<(), ProtocolStateError> {
-        if self.blobs.len() >= MAX_PROTOCOL_STATE_ENTRIES && !self.blobs.contains_key(&address) {
-            return Err(ProtocolStateError::SnapshotCapacityExceeded {
-                max: MAX_PROTOCOL_STATE_ENTRIES,
-            });
-        }
+    fn insert(&mut self, address: ProtocolStateAddress, blob: ProtocolStateBlob) {
         self.blobs.insert(address, blob);
-        Ok(())
     }
 }
 
@@ -458,7 +430,7 @@ pub struct OutboundMessageResult {
     pub sent_at_millis: u64,
     /// Payload kind sealed inside the produced message.
     pub payload_kind: PayloadKind,
-    /// Message to hand to the consumer transport after state commit.
+    /// Message for the app to send once it commits the state changes.
     pub message: SealedFrame,
 }
 
@@ -469,15 +441,15 @@ pub struct OutboundMessageResult {
 pub struct InboundMessageResult {
     /// The session the message arrived on.
     pub session_id: SessionId,
-    /// Message ID recovered after decrypt.
+    /// The sender's message ID.
     pub message_id: MessageId,
-    /// Sender-observed Unix timestamp recovered after decrypt.
+    /// The sender's Unix timestamp, in milliseconds.
     pub sent_at_millis: u64,
-    /// Payload kind recovered after decrypt.
+    /// The payload kind.
     pub payload_kind: PayloadKind,
     /// Decrypted plaintext bytes.
     pub plaintext: Zeroizing<Vec<u8>>,
-    /// Sender identity material decoded from the sealed-sender envelope.
+    /// Sender identity material decoded from the sealed sender envelope.
     pub sender_identity: SenderIdentityMaterial,
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
     /// the contact isn't accepted and this side doesn't acknowledge yet, or while no inbox grant
@@ -491,22 +463,22 @@ pub struct InboundMessageResult {
 pub struct WithheldInboundMessageResult {
     /// The session the message arrived on.
     pub session_id: SessionId,
-    /// Message ID recovered after decrypt.
+    /// The sender's message ID.
     pub message_id: MessageId,
 }
 
-/// A grant update whose inbox grant Roost kept, which has nothing to show.
+/// A grant update, which has nothing to show.
 pub struct GrantUpdateResult {
     /// The session the grant update arrived on.
     pub session_id: SessionId,
-    /// Message ID recovered after decrypt.
+    /// The sender's message ID.
     pub message_id: MessageId,
     /// Encrypted acknowledgment artifact to durably queue with the state changes, absent while
     /// this side doesn't acknowledge the contact yet.
     pub acknowledgment: Option<SealedFrame>,
 }
 
-/// Accepted blocked inbound message result without consumer-visible plaintext.
+/// A blocked contact's message, which Roost accepted and whose plaintext it withholds.
 pub struct BlockedInboundMessageResult {
     /// Encrypted acknowledgment artifact to durably queue with the state changes, or `None` when
     /// the blocked-contact acknowledgment policy suppresses it or no inbox grant has supplied the
@@ -521,9 +493,9 @@ pub struct BlockedInboundMessageResult {
 pub struct AcknowledgmentResult {
     /// The session the acknowledgment arrived on.
     pub session_id: SessionId,
-    /// Acknowledgment message ID recovered after decrypt.
+    /// The acknowledgment's own message ID.
     pub message_id: MessageId,
-    /// Acknowledgment timestamp recovered after decrypt.
+    /// The sender's Unix timestamp for the acknowledgment.
     pub sent_at_millis: u64,
     /// The outbound message ID the acknowledgment names.
     pub acknowledged_message_id: MessageId,
@@ -541,9 +513,9 @@ pub enum InboundMessageOutcome {
     Blocked(Box<BlockedInboundMessageResult>),
     /// A message past the limit before acceptance decrypted, and its plaintext is withheld.
     Withheld(Box<WithheldInboundMessageResult>),
-    /// A grant update from a contact who isn't blocked, whose inbox grant Roost kept.
+    /// A grant update from a contact who isn't blocked.
     GrantUpdate(Box<GrantUpdateResult>),
-    /// The message matched an already-accepted encrypted byte sequence.
+    /// The message's bytes and transport binding match one already received.
     Duplicate,
     /// The message names a session this identity doesn't keep and carries no handshake, such as
     /// one whose records it lost, and nothing changed.
@@ -559,17 +531,16 @@ pub enum InboundMessageOutcome {
 
 /// Whether a blocked sender receives an acknowledgment for an accepted-but-hidden message.
 ///
-/// The default preserves privacy: a blocked sender cannot distinguish a block from an unreachable
-/// recipient. Opting in to [`Self::SilentReceipt`] trades that away for delivery confirmation.
+/// The default is [`Self::Unreachable`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BlockedContactAcknowledgmentPolicy {
     /// Return no acknowledgment and do not advance the sending chain, so a blocked sender can't
     /// tell the block from a recipient who is offline.
     #[default]
     Unreachable,
-    /// Return the acknowledgment an unblocked sender would get, revealing delivery; local plaintext
-    /// is still hidden.
-    SilentReceipt,
+    /// Return the acknowledgment an unblocked sender would get, which reveals delivery. The
+    /// plaintext stays hidden.
+    Acknowledge,
 }
 
 /// The settings an app passes with each receive, checked against Roost's limits.
@@ -608,7 +579,8 @@ impl ReceiveSettings {
 }
 
 impl Default for ReceiveSettings {
-    /// Returns the default deduplication set size, no receipts to blocked senders, and no grace.
+    /// Returns the default deduplication set size, no acknowledgments to blocked senders, and no
+    /// grace.
     fn default() -> Self {
         Self {
             deduplication_capacity: DEFAULT_DEDUPLICATION_CAPACITY,
@@ -618,18 +590,15 @@ impl Default for ReceiveSettings {
     }
 }
 
-/// Stateless protocol-state operations over consumer-held blobs.
+/// Stateless protocol-state operations over blobs the app holds.
 ///
-/// Consumers must read required blobs from an atomic, durable, crash-consistent, and
+/// The app must read required blobs from an atomic, durable, crash-consistent, and
 /// integrity-preserving store before each operation, then commit returned updates atomically with
-/// any produced message. Library instances for one identity take turns under the host's
-/// identity lock, from an operation's first call until its commit is resolved. Consumers still
-/// commit a result only while every commit condition in its [`StateChanges`] holds.
+/// any produced message.
 ///
 /// Received-message deduplication is scoped to one local identity through the
 /// [`ProtocolStateKind::DeduplicationSet`] blob. It drops byte-identical encrypted message retries
-/// before decryption; Double Ratchet replay rejection still handles cryptographic replays after
-/// decryption starts.
+/// before decryption, and the Double Ratchet's replay check rejects the replays it misses.
 #[derive(Clone, Copy)]
 pub struct ProtocolStateEngine {
     limits: ProtocolHardeningLimits,
@@ -666,7 +635,7 @@ impl ProtocolStateEngine {
     /// since nobody asked.
     pub fn unblock_contact(
         &self,
-        identity_key: ContactIdentityKey,
+        identity_key: IdentityKey,
         record: Option<&ProtocolStateBlob>,
     ) -> Result<StateChanges, ProtocolStateError> {
         let address = contact_address(identity_key);
@@ -691,21 +660,17 @@ impl ProtocolStateEngine {
     /// Records out-of-band safety number confirmation for an accepted contact, given its record.
     ///
     /// The presented value must match the safety number derived from `local_identity_key` and
-    /// `contact_identity_key`. In-band messages and acknowledgments never call this transition.
+    /// `contact_identity_key`.
     pub fn confirm_contact_safety_number(
         &self,
         local_identity_key: IdentityKey,
-        contact_identity_key: ContactIdentityKey,
+        contact_identity_key: IdentityKey,
         record: Option<&ProtocolStateBlob>,
         presented_grouped_decimal: &str,
     ) -> Result<ContactSafetyNumberConfirmation, ProtocolStateError> {
         let address = contact_address(contact_identity_key);
         validate_contact_identity_key(&address, &contact_identity_key)?;
-        let safety_number = derive_safety_number(local_identity_key, contact_identity_key)
-            .map_err(|_| ProtocolStateError::InvalidStateBinding {
-                address: address.clone(),
-                reason: "identity key is invalid".into(),
-            })?;
+        let safety_number = derive_safety_number(local_identity_key, contact_identity_key)?;
         let blob = record.ok_or_else(|| ProtocolStateError::MissingRequiredState {
             address: address.clone(),
         })?;
@@ -739,14 +704,14 @@ impl ProtocolStateEngine {
     // block anyone new. A stranger with no record gets one that holds only the block.
     pub(crate) fn block_contact(
         &self,
-        identity_key: ContactIdentityKey,
+        identity_key: IdentityKey,
         record: Option<&ProtocolStateBlob>,
     ) -> Result<(StateChanges, bool), ProtocolStateError> {
         let address = contact_address(identity_key);
         validate_contact_identity_key(&address, &identity_key)?;
         let mut contact = match record {
             Some(blob) => ContactRecord::decode(&address, blob, self.limits)?,
-            None => ContactRecord::pending(identity_key, None),
+            None => ContactRecord::pending(identity_key),
         };
         if contact.blocked {
             return Ok((StateChanges::for_record(address, record, None), false));
@@ -768,7 +733,7 @@ impl ProtocolStateEngine {
         &self,
         snapshot: &ProtocolStateSnapshot,
         session_id: SessionId,
-        peer_identity_key: ContactIdentityKey,
+        peer_identity_key: IdentityKey,
     ) -> Result<Option<ProtocolStateUpdate>, ProtocolStateError> {
         let peer_address = peer_sessions_address(peer_identity_key);
         let mut peer_sessions = load_peer_sessions(snapshot, &peer_address, self.limits)?
@@ -788,7 +753,7 @@ impl ProtocolStateEngine {
     }
 
     // Returns whether this side started `session_id` and hasn't heard back on it yet, from a peer
-    // whose current discovery key is `peer_discovery_key`. A session the host wiped, or one started
+    // whose current discovery key is `peer_discovery_key`. A session the app wiped, or one started
     // on prekeys the peer's rotation since deleted, awaits nothing, so the peer's new handshake
     // can replace it.
     fn awaits_reply(
@@ -814,7 +779,7 @@ pub enum ProtocolStateError {
     /// The contact is locally blocked.
     #[error("contact is blocked")]
     BlockedContact,
-    /// The contact isn't accepted, so Roost refuses the send: a grant update would give a
+    /// The contact isn't accepted, so Roost refuses the send, since a grant update would give a
     /// requester the inbox grant, or no session exists to send on.
     #[error("contact is not accepted")]
     ContactNotAccepted,
@@ -841,19 +806,13 @@ pub enum ProtocolStateError {
     /// A contact acceptance arrived on a session this side didn't start with a contact request.
     #[error("contact acceptance answers no request")]
     UnsolicitedAcceptance,
-    /// The operation snapshot would hold more entries than its cap.
-    #[error("protocol-state snapshot holds more than {max} entries")]
-    SnapshotCapacityExceeded {
-        /// Most entries one snapshot holds.
-        max: usize,
-    },
     /// The most messages allowed already wait for the contact's acknowledgment on the session.
     #[error("{limit} messages already wait for an acknowledgment on this session")]
     PendingAcknowledgmentLimitReached {
         /// Most messages that wait for an acknowledgment on one session.
         limit: usize,
     },
-    /// A persisted blob failed structural decoding.
+    /// A stored blob failed to decode or holds an invalid record.
     #[error("protocol-state blob failed to decode at {address}: {reason}")]
     BlobDecode {
         /// Address whose blob failed to decode.
@@ -878,9 +837,12 @@ pub enum ProtocolStateError {
     /// A ratchet state failed to encode or decode.
     #[error("protocol-state ratchet state failed")]
     RatchetState(#[from] roost_crypto::RatchetStateError),
-    /// Sealing or opening a sealed-sender frame failed.
+    /// Sealing or opening a sealed sender frame failed.
     #[error("protocol-state sealed frame failed")]
     SealedFrame(#[from] roost_crypto::SealedFrameError),
+    /// Deriving the safety number failed, because the local identity key is invalid.
+    #[error("safety number derivation failed")]
+    SafetyNumber(#[from] SafetyNumberError),
     /// A message transcript signature failed context framing or verification.
     #[error("protocol-state signature failed")]
     Signature(#[from] SignatureError),
@@ -898,10 +860,11 @@ pub enum ProtocolStateError {
         /// Longest content Roost accepts.
         max: usize,
     },
-    /// Sender-certificate validation failed during receive.
+    /// A sender certificate failed validation, or the certificate grace is too long.
     #[error("sender certificate validation failed")]
     SenderCertificateValidation(#[source] SenderCertificateValidationError),
-    /// A message did not carry the expected ratcheted payload.
+    /// A message is malformed or doesn't authenticate, or a prekey bundle or sender certificate it
+    /// uses is invalid.
     #[error("invalid message: {reason}")]
     InvalidMessage {
         /// Diagnostic failure context for logs only.
@@ -917,7 +880,7 @@ pub enum ProtocolStateError {
         /// Maximum supported capacity.
         maximum: usize,
     },
-    /// The records a host supplied don't line up with the ones Roost asked for.
+    /// The records the app supplied don't line up with the ones Roost asked for.
     #[error("protocol-state entries don't match the request")]
     StateEntry(#[from] StateEntryError),
     /// The random number generator failed.
@@ -942,7 +905,7 @@ pub enum ProtocolStateError {
         /// Longest key Roost accepts.
         max: usize,
     },
-    /// A required protocol-state blob was absent from the consumer snapshot.
+    /// A required protocol-state blob was absent from the records the app supplied.
     #[error("missing required protocol-state blob at {address}")]
     MissingRequiredState {
         /// Address that must be present before the operation.
@@ -990,6 +953,36 @@ fn encode_blob(
     Ok(ProtocolStateBlob::from_zeroizing(bytes))
 }
 
+// Checks a blob's length and version, then decodes its body as one `T`.
+fn decode_blob<'a, T: Deserialize<'a>>(
+    address: &ProtocolStateAddress,
+    blob: &'a ProtocolStateBlob,
+    max_len: usize,
+) -> Result<T, ProtocolStateError> {
+    let body = blob_body(address, blob, max_len)?;
+    decode_exact(body).map_err(|error| ProtocolStateError::BlobDecode {
+        address: address.clone(),
+        reason: decode_failure(address.kind(), &error),
+    })
+}
+
+// Says why `part` didn't decode as one value.
+fn decode_failure(part: impl fmt::Display, error: &StoredDataError) -> String {
+    match error {
+        StoredDataError::TrailingBytes { len } => format!("{part} has {len} bytes left over"),
+        StoredDataError::Decode(_)
+        | StoredDataError::Encode(_)
+        | StoredDataError::UnsupportedVersion { .. } => format!("{part} failed to decode"),
+    }
+}
+
+fn decode_error(address: &ProtocolStateAddress, reason: &str) -> ProtocolStateError {
+    ProtocolStateError::BlobDecode {
+        address: address.clone(),
+        reason: reason.into(),
+    }
+}
+
 // Checks a blob's length and version before anything decodes its body.
 fn blob_body<'a>(
     address: &ProtocolStateAddress,
@@ -1022,14 +1015,23 @@ fn blob_body<'a>(
     Ok(body)
 }
 
+#[derive(Deserialize, Serialize)]
+struct DiscoveryKeyWire {
+    x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
+    epoch: u32,
+    created_at_secs: u64,
+    identity_signature: SignatureWire,
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize)]
-struct ContactIdentityKeyWire {
+struct IdentityKeyWire {
     x25519_public_key: [u8; PUBLIC_KEY_LEN],
     ed25519_verifying_key: [u8; PUBLIC_KEY_LEN],
 }
 
-impl From<ContactIdentityKey> for ContactIdentityKeyWire {
-    fn from(value: ContactIdentityKey) -> Self {
+impl From<IdentityKey> for IdentityKeyWire {
+    fn from(value: IdentityKey) -> Self {
         Self {
             x25519_public_key: value.x25519_public_key,
             ed25519_verifying_key: value.ed25519_verifying_key,
@@ -1037,8 +1039,8 @@ impl From<ContactIdentityKey> for ContactIdentityKeyWire {
     }
 }
 
-impl From<ContactIdentityKeyWire> for ContactIdentityKey {
-    fn from(value: ContactIdentityKeyWire) -> Self {
+impl From<IdentityKeyWire> for IdentityKey {
+    fn from(value: IdentityKeyWire) -> Self {
         Self {
             x25519_public_key: value.x25519_public_key,
             ed25519_verifying_key: value.ed25519_verifying_key,
@@ -1048,7 +1050,7 @@ impl From<ContactIdentityKeyWire> for ContactIdentityKey {
 
 fn validate_contact_identity_key(
     address: &ProtocolStateAddress,
-    identity_key: &ContactIdentityKey,
+    identity_key: &IdentityKey,
 ) -> Result<(), ProtocolStateError> {
     if !identity_key.is_valid() {
         return Err(ProtocolStateError::InvalidStateBinding {
@@ -1086,13 +1088,11 @@ fn contains_digest(digests: &[[u8; DIGEST_LEN]], digest: &[u8; DIGEST_LEN]) -> b
     bool::from(found)
 }
 
-// Appends `digest`, dropping the oldest digests beyond `capacity`.
 fn push_bounded(digests: &mut Vec<[u8; DIGEST_LEN]>, digest: [u8; DIGEST_LEN], capacity: usize) {
     digests.push(digest);
     keep_newest(digests, capacity);
 }
 
-// Drops the oldest digests beyond `capacity`.
 fn keep_newest(digests: &mut Vec<[u8; DIGEST_LEN]>, capacity: usize) {
     let excess = digests.len().saturating_sub(capacity);
     digests.drain(..excess);
@@ -1123,5 +1123,14 @@ mod tests {
                     if actual == address && actual_version == version
             ));
         }
+    }
+
+    #[test]
+    fn a_protocol_state_key_holds_at_most_96_bytes() {
+        ProtocolStateKey::from_bytes(vec![1; 96]).unwrap();
+        assert!(matches!(
+            ProtocolStateKey::from_bytes(vec![1; 97]),
+            Err(ProtocolStateError::StateKeyTooLong { len: 97, max: 96 })
+        ));
     }
 }

@@ -1,11 +1,3 @@
-//! Passphrase-encrypted identity backup using Argon2id and XChaCha20-Poly1305.
-//!
-//! A backup starts with its version and a cleartext header that carries the Argon2id parameters,
-//! salt and nonce, and the cipher authenticates both as associated data. An unknown version is
-//! rejected before key derivation, and a work-factor parameter can't be altered without failing
-//! decryption. The ciphertext holds the identity key's secret halves and the verbatim discovery
-//! key entry, which this module treats as opaque so its version stays owned by `discovery_key.rs`.
-
 use super::{Identity, IdentityError, IdentityManager, IdentitySecretsWire};
 use crate::stored_data::{
     decode_exact, decode_versioned_prefix, encode_versioned, encode_zeroizing,
@@ -18,34 +10,33 @@ use chacha20poly1305::{
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
-use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
-const BACKUP_FORMAT_VERSION: u8 = 3;
+const BACKUP_FORMAT_VERSION: u8 = 1;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 24;
 
-// Argon2id memory cost is in KiB. Memory is the primary brute-force defense; time adds CPU work
-// without raising memory use. Parameters travel in the header so future backups can raise the work
-// factor, while the floors below refuse any read weaker than today's defaults.
-const ARGON2_M_COST: u32 = 65536;
-const ARGON2_T_COST: u32 = 3;
-const ARGON2_P_COST: u32 = 1;
+// Argon2id's memory, in KiB, is the main defense against guessing, and iterations add work without
+// raising memory use. The header carries the costs, so a later build can raise them.
+const DEFAULT_MEMORY_KIB: u32 = 65536;
+const DEFAULT_ITERATIONS: u32 = 3;
+const PARALLELISM: u32 = 1;
 const ARGON2_OUTPUT_LEN: usize = 32;
-// Normative read bounds. The floors are pinned to the OWASP Argon2id baseline (today's export
-// defaults) and stay independent of ARGON2_M_COST/ARGON2_T_COST, so raising an export default never
-// strands backups written by older builds. The ceilings bound a hostile or corrupt header: the
-// header parametrizes the KDF and must be acted on before the AEAD tag can authenticate it, so an
-// explicit range check is the only thing stopping an unbounded allocation on import.
-const MIN_M_COST: u32 = 65536;
-const MIN_T_COST: u32 = 3;
-const MAX_M_COST: u32 = 1 << 20; // 1 GiB; generous headroom above the default for future increases.
-const MAX_T_COST: u32 = 16;
-// Export writes the defaults, so a default outside the import range would produce unreadable backups.
+// The lowest costs a backup may name, fixed apart from the defaults, so raising a default never
+// strands an older backup.
+const MIN_MEMORY_KIB: u32 = 65536;
+const MIN_ITERATIONS: u32 = 3;
+// The highest costs a backup may name. Roost acts on the header before the cipher authenticates
+// it, so these bound the memory a forged header can make it allocate.
+const MAX_MEMORY_KIB: u32 = 1 << 20;
+const MAX_ITERATIONS: u32 = 16;
+// Export writes the defaults, so a default outside the import range would produce unreadable
+// backups.
 const _: () = assert!(
-    ARGON2_M_COST >= MIN_M_COST
-        && ARGON2_M_COST <= MAX_M_COST
-        && ARGON2_T_COST >= MIN_T_COST
-        && ARGON2_T_COST <= MAX_T_COST
+    DEFAULT_MEMORY_KIB >= MIN_MEMORY_KIB
+        && DEFAULT_MEMORY_KIB <= MAX_MEMORY_KIB
+        && DEFAULT_ITERATIONS >= MIN_ITERATIONS
+        && DEFAULT_ITERATIONS <= MAX_ITERATIONS
 );
 
 #[derive(Deserialize, Serialize)]
@@ -63,14 +54,13 @@ struct BackupContentsWire<'a> {
     discovery_key: &'a [u8],
 }
 
-#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Deserialize, ZeroizeOnDrop)]
 struct DecodedBackupContentsWire {
     identity: IdentitySecretsWire,
     discovery_key: Vec<u8>,
 }
 
 impl IdentityManager {
-    // Exports the current identity and the given discovery key entry as an encrypted backup.
     pub(crate) fn export_encrypted_backup<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -83,9 +73,9 @@ impl IdentityManager {
         })
         .map_err(IdentityError::BackupFormat)?;
         let header = BackupHeaderWire {
-            memory_kib: ARGON2_M_COST,
-            iterations: ARGON2_T_COST,
-            parallelism: ARGON2_P_COST,
+            memory_kib: DEFAULT_MEMORY_KIB,
+            iterations: DEFAULT_ITERATIONS,
+            parallelism: PARALLELISM,
             salt: random_bytes(rng)?,
             nonce: random_bytes(rng)?,
         };
@@ -117,7 +107,7 @@ impl IdentityManager {
     }
 }
 
-// Decrypts a backup into its identity and the opaque discovery key entry.
+// Returns the discovery key entry undecoded, so `discovery_key.rs` keeps owning its version.
 pub(crate) fn decrypt_backup(
     data: &[u8],
     passphrase: &str,
@@ -125,8 +115,7 @@ pub(crate) fn decrypt_backup(
     let (header, ciphertext): (BackupHeaderWire, &[u8]) =
         decode_versioned_prefix(BACKUP_FORMAT_VERSION, data)
             .map_err(IdentityError::BackupFormat)?;
-    // Bound the work factor before spending Argon2id memory: the floor blocks downgrade, the
-    // ceiling blocks an unauthenticated memory-exhaustion DoS from a hostile header.
+    // Check the costs before Argon2id spends memory on them. The floor blocks a downgrade.
     validate_import_argon2_params(header.memory_kib, header.iterations, header.parallelism)?;
     let associated_data = &data[..data.len() - ciphertext.len()];
 
@@ -158,25 +147,25 @@ pub(crate) fn decrypt_backup(
 }
 
 fn validate_import_argon2_params(
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
 ) -> Result<(), IdentityError> {
-    if !(MIN_M_COST..=MAX_M_COST).contains(&m_cost)
-        || !(MIN_T_COST..=MAX_T_COST).contains(&t_cost)
-        || p_cost != ARGON2_P_COST
+    if !(MIN_MEMORY_KIB..=MAX_MEMORY_KIB).contains(&memory_kib)
+        || !(MIN_ITERATIONS..=MAX_ITERATIONS).contains(&iterations)
+        || parallelism != PARALLELISM
     {
         return Err(IdentityError::BackupParametersOutOfRange {
-            memory_kib: m_cost,
-            iterations: t_cost,
-            parallelism: p_cost,
+            memory_kib,
+            iterations,
+            parallelism,
         });
     }
     Ok(())
 }
 
-// Salt and nonce come from the injected CSPRNG via the fallible `try_fill_bytes`, so an entropy
-// failure surfaces as `BackupRandomness` rather than a panic.
+// Draws with the fallible `try_fill_bytes`, so a failing generator returns `BackupRandomness`
+// instead of panicking.
 fn random_bytes<const N: usize, R: RngCore + CryptoRng>(
     rng: &mut R,
 ) -> Result<[u8; N], IdentityError> {
@@ -189,14 +178,14 @@ fn random_bytes<const N: usize, R: RngCore + CryptoRng>(
 fn derive_key(
     passphrase: &str,
     salt: &[u8],
-    m_cost: u32,
-    t_cost: u32,
-    p_cost: u32,
+    memory_kib: u32,
+    iterations: u32,
+    parallelism: u32,
 ) -> Result<Zeroizing<[u8; ARGON2_OUTPUT_LEN]>, IdentityError> {
     // Normalize to canonical Unicode (NFC) so the same characters typed on any platform derive the
     // same key. The normalized copy is a heap secret, so wipe it on drop.
     let normalized: Zeroizing<String> = Zeroizing::new(passphrase.nfc().collect());
-    let params = Params::new(m_cost, t_cost, p_cost, Some(ARGON2_OUTPUT_LEN))
+    let params = Params::new(memory_kib, iterations, parallelism, Some(ARGON2_OUTPUT_LEN))
         .map_err(IdentityError::BackupKeyDerivation)?;
     let argon2 = Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0u8; ARGON2_OUTPUT_LEN]);
@@ -280,7 +269,6 @@ mod tests {
         let manager = manager_with_identity();
         let expected = manager.load_identity().unwrap();
         let backup = export(&manager, 0x73, "passphrase");
-
         let (identity, discovery_key_entry) = decrypt_backup(&backup, "passphrase").unwrap();
         assert_eq!(identity.public_key(), expected.public_key());
         assert_eq!(identity.verifying_key(), expected.verifying_key());
@@ -291,7 +279,7 @@ mod tests {
     fn decrypt_backup_rejects_an_unknown_version_before_its_header() {
         assert!(matches!(
             decrypt_backup(&[BACKUP_FORMAT_VERSION + 1], "passphrase"),
-            Err(IdentityError::BackupFormat(StoredDataError::UnsupportedVersion(version)))
+            Err(IdentityError::BackupFormat(StoredDataError::UnsupportedVersion { version }))
                 if version == BACKUP_FORMAT_VERSION + 1
         ));
     }
@@ -308,19 +296,24 @@ mod tests {
     #[test]
     fn decrypt_backup_rejects_parameters_outside_their_bounds() {
         let backup = export(&manager_with_identity(), 0x74, "passphrase");
-        // m_cost and t_cost fail below their floor, and p_cost must equal 1. An oversized m_cost or
-        // t_cost must fail before Argon2id allocates, so a hostile header can't exhaust memory.
+        // Oversized memory or iterations must fail before Argon2id allocates, so a forged header
+        // can't exhaust memory.
         let changes: [fn(&mut BackupHeaderWire); 5] = [
             |header| header.memory_kib = 1,
             |header| header.iterations = 1,
             |header| header.parallelism = 2,
             |header| header.memory_kib = u32::MAX,
-            |header| header.iterations = MAX_T_COST + 1,
+            |header| header.iterations = MAX_ITERATIONS + 1,
         ];
         for change in changes {
+            let (mut header, _): (BackupHeaderWire, &[u8]) =
+                decode_versioned_prefix(BACKUP_FORMAT_VERSION, &backup).unwrap();
+            change(&mut header);
             assert!(matches!(
                 decrypt_backup(&with_header(&backup, change), "passphrase"),
-                Err(IdentityError::BackupParametersOutOfRange { .. })
+                Err(IdentityError::BackupParametersOutOfRange { memory_kib, iterations, parallelism })
+                    if (memory_kib, iterations, parallelism)
+                        == (header.memory_kib, header.iterations, header.parallelism)
             ));
         }
     }
@@ -328,7 +321,7 @@ mod tests {
     #[test]
     fn decrypt_backup_rejects_tampered_in_range_kdf_metadata() {
         let backup = export(&manager_with_identity(), 0x76, "passphrase");
-        let tampered = with_header(&backup, |header| header.iterations = ARGON2_T_COST + 1);
+        let tampered = with_header(&backup, |header| header.iterations = DEFAULT_ITERATIONS + 1);
         assert!(matches!(
             decrypt_backup(&tampered, "passphrase"),
             Err(IdentityError::DecryptionFailed)
@@ -389,16 +382,16 @@ mod tests {
         let first = derive_key(
             "passphrase-one",
             &salt,
-            ARGON2_M_COST,
-            ARGON2_T_COST,
-            ARGON2_P_COST,
+            DEFAULT_MEMORY_KIB,
+            DEFAULT_ITERATIONS,
+            PARALLELISM,
         );
         let second = derive_key(
             "passphrase-two",
             &salt,
-            ARGON2_M_COST,
-            ARGON2_T_COST,
-            ARGON2_P_COST,
+            DEFAULT_MEMORY_KIB,
+            DEFAULT_ITERATIONS,
+            PARALLELISM,
         );
         assert_ne!(*first.unwrap(), *second.unwrap());
     }
@@ -406,20 +399,19 @@ mod tests {
     // Uses costs far below the import floor, which only the import path enforces, to stay fast.
     #[test]
     fn argon2id_key_changes_with_the_salt_and_each_cost() {
-        const M_COST: u32 = 64;
-        const T_COST: u32 = 1;
-        const P_COST: u32 = 1;
+        const MEMORY_KIB: u32 = 64;
+        const ITERATIONS: u32 = 1;
         let salt = [0x01u8; SALT_LEN];
-        let key = |salt: &[u8], m_cost, t_cost, p_cost| {
-            *derive_key("passphrase", salt, m_cost, t_cost, p_cost).unwrap()
+        let key = |salt: &[u8], memory_kib, iterations, parallelism| {
+            *derive_key("passphrase", salt, memory_kib, iterations, parallelism).unwrap()
         };
-        let expected = key(&salt, M_COST, T_COST, P_COST);
+        let expected = key(&salt, MEMORY_KIB, ITERATIONS, PARALLELISM);
 
         for changed in [
-            key(&[0x02; SALT_LEN], M_COST, T_COST, P_COST),
-            key(&salt, M_COST + 1, T_COST, P_COST),
-            key(&salt, M_COST, T_COST + 1, P_COST),
-            key(&salt, M_COST, T_COST, P_COST + 1),
+            key(&[0x02; SALT_LEN], MEMORY_KIB, ITERATIONS, PARALLELISM),
+            key(&salt, MEMORY_KIB + 1, ITERATIONS, PARALLELISM),
+            key(&salt, MEMORY_KIB, ITERATIONS + 1, PARALLELISM),
+            key(&salt, MEMORY_KIB, ITERATIONS, PARALLELISM + 1),
         ] {
             assert_ne!(changed, expected);
         }

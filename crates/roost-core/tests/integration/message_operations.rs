@@ -1,5 +1,3 @@
-//! Message operations that ask a host for exact records and return results it commits atomically.
-
 use crate::support::device::{Device, Intent, Relay, Route, Sealed, binding, redraft};
 use crate::support::{CREATED_AT_SECS, TEST_RELAY_DOMAIN, trusted_domain_signing_key};
 use rand::SeedableRng;
@@ -8,15 +6,14 @@ use roost_core::{
     BlockedContactAcknowledgmentPolicy, InboundMessageOutcome, MessageDecryption,
     MessageDecryptionStep, MessageEncryption, MessageEncryptionStep, MessageOperationError,
     ProtocolHardeningLimits, ProtocolStateBlob, ProtocolStateCommitCondition, ProtocolStateError,
-    ProtocolStateKind, ReceiveSettings, RevocationState, SenderCertificateValidation, StateChanges,
-    StateEntryError, commit_conditions_match,
+    ProtocolStateKind, RatchetError, ReceiveSettings, RevocationState, SenderCertificateValidation,
+    StateChanges, StateEntryError, commit_conditions_match,
 };
 use roost_protocol::{
     MAX_CERTIFICATE_GRACE_WINDOW, SenderCertificateValidationError, from_unix_secs,
 };
 use std::time::Duration;
 
-// Has `initiator` ask `responder`, `responder` accept, and `initiator` receive the acceptance.
 fn establish(initiator: &mut Device, responder: &mut Device) -> roost_core::SessionId {
     let request = initiator.request(responder, b"hello");
     responder.receive(&request.message);
@@ -50,21 +47,23 @@ fn encryption_reads_the_contact_then_its_session_then_asks_for_a_transport() {
         ]
     );
     encryption
-        .supply_state(alice.host.read(&contact_reads))
+        .supply_state(alice.database.read(&contact_reads))
         .unwrap();
     let MessageEncryptionStep::NeedsState(session_reads) = encryption.step(&mut rng()).unwrap()
     else {
-        panic!("expected a read of the Session's records")
+        panic!("expected a read of the session's records")
     };
     assert_eq!(
         session_reads,
         [
-            alice.host.only(ProtocolStateKind::RatchetSession),
-            alice.host.only(ProtocolStateKind::PendingAcknowledgments),
+            alice.database.only(ProtocolStateKind::RatchetSession),
+            alice
+                .database
+                .only(ProtocolStateKind::PendingAcknowledgments),
         ]
     );
     encryption
-        .supply_state(alice.host.read(&session_reads))
+        .supply_state(alice.database.read(&session_reads))
         .unwrap();
     let MessageEncryptionStep::NeedsTransport(destination) = encryption.step(&mut rng()).unwrap()
     else {
@@ -74,14 +73,14 @@ fn encryption_reads_the_contact_then_its_session_then_asks_for_a_transport() {
     encryption.supply_transport_binding(binding()).unwrap();
     let MessageEncryptionStep::Ready { result, changes } = encryption.step(&mut rng()).unwrap()
     else {
-        panic!("expected the sealed Message")
+        panic!("expected the sealed message")
     };
     assert_eq!(result.session_id, session_id);
     let message = result.message.clone();
-    alice.host.commit(changes).unwrap();
+    alice.database.commit(changes).unwrap();
 
     let InboundMessageOutcome::Accepted(received) = bob.receive(&message) else {
-        panic!("expected Bob to accept the Message")
+        panic!("expected Bob to accept the message")
     };
     assert_eq!(&*received.plaintext, b"hello again");
 }
@@ -101,25 +100,25 @@ fn decryption_checks_duplicates_first_and_asks_where_to_acknowledge_only_after_a
     let MessageDecryptionStep::NeedsState(deduplication_read) =
         decryption.step(&mut rng()).unwrap()
     else {
-        panic!("expected a read of the Deduplication Set")
+        panic!("expected a read of the deduplication set")
     };
     assert_eq!(
         deduplication_read,
-        [bob.host.only(ProtocolStateKind::DeduplicationSet)]
+        [bob.database.only(ProtocolStateKind::DeduplicationSet)]
     );
     decryption
-        .supply_state(bob.host.read(&deduplication_read))
+        .supply_state(bob.database.read(&deduplication_read))
         .unwrap();
     let MessageDecryptionStep::NeedsState(session_read) = decryption.step(&mut rng()).unwrap()
     else {
-        panic!("expected a read of the named Session")
+        panic!("expected a read of the named session")
     };
     assert_eq!(
         session_read,
-        [bob.host.only(ProtocolStateKind::RatchetSession)]
+        [bob.database.only(ProtocolStateKind::RatchetSession)]
     );
     decryption
-        .supply_state(bob.host.read(&session_read))
+        .supply_state(bob.database.read(&session_read))
         .unwrap();
     let MessageDecryptionStep::NeedsState(peer_reads) = decryption.step(&mut rng()).unwrap() else {
         panic!("expected a read of the peer's records")
@@ -131,7 +130,9 @@ fn decryption_checks_duplicates_first_and_asks_where_to_acknowledge_only_after_a
             bob.sessions_address(alice.identity_key()),
         ]
     );
-    decryption.supply_state(bob.host.read(&peer_reads)).unwrap();
+    decryption
+        .supply_state(bob.database.read(&peer_reads))
+        .unwrap();
     let MessageDecryptionStep::NeedsAcknowledgmentTransport(destination) =
         decryption.step(&mut rng()).unwrap()
     else {
@@ -142,10 +143,10 @@ fn decryption_checks_duplicates_first_and_asks_where_to_acknowledge_only_after_a
         .supply_acknowledgment_transport_binding(binding())
         .unwrap();
     let MessageDecryptionStep::Ready { outcome, .. } = decryption.step(&mut rng()).unwrap() else {
-        panic!("expected the received Message")
+        panic!("expected the received message")
     };
     let InboundMessageOutcome::Accepted(received) = outcome else {
-        panic!("expected an accepted Message")
+        panic!("expected an accepted message")
     };
     assert_eq!(&*received.plaintext, b"ping");
 }
@@ -164,14 +165,16 @@ fn a_tampered_message_fails_before_roost_asks_where_to_acknowledge() {
     let failure = loop {
         match decryption.step(&mut rng()) {
             Ok(MessageDecryptionStep::NeedsState(addresses)) => {
-                decryption.supply_state(bob.host.read(&addresses)).unwrap();
+                decryption
+                    .supply_state(bob.database.read(&addresses))
+                    .unwrap();
             }
             Ok(
                 MessageDecryptionStep::NeedsAcknowledgmentTransport(_)
                 | MessageDecryptionStep::NeedsAdmission(_),
-            ) => panic!("a tampered Message must not reach the acknowledgment"),
+            ) => panic!("a tampered message must not reach the acknowledgment"),
             Ok(MessageDecryptionStep::Ready { .. }) => {
-                panic!("a tampered Message must not decrypt")
+                panic!("a tampered message must not decrypt")
             }
             Err(error) => break error,
         }
@@ -190,7 +193,7 @@ fn a_tampered_message_fails_before_roost_asks_where_to_acknowledge() {
 // Runs `encryption` to its result, asking each step twice when `ask_twice` is set.
 fn seal(
     mut encryption: MessageEncryption,
-    host: &crate::support::HostStore,
+    database: &crate::support::AppDatabase,
     ask_twice: bool,
 ) -> Sealed {
     let mut rng = rng();
@@ -215,14 +218,14 @@ fn seal(
         }
         match step {
             MessageEncryptionStep::NeedsState(addresses) => {
-                encryption.supply_state(host.read(&addresses)).unwrap();
+                encryption.supply_state(database.read(&addresses)).unwrap();
             }
             MessageEncryptionStep::NeedsTransport(asked) => {
                 destination = Some(asked);
                 encryption.supply_transport_binding(binding()).unwrap();
             }
             MessageEncryptionStep::NeedsPreKeyBundle(_) | MessageEncryptionStep::NothingToSend => {
-                panic!("expected an existing Session")
+                panic!("expected an existing session")
             }
             MessageEncryptionStep::Ready { result, changes } => {
                 return Sealed {
@@ -246,12 +249,12 @@ fn asking_a_waiting_operation_again_returns_the_same_request_without_repeating_w
 
     let asked_once = seal(
         alice.store.start_encryption(outgoing).unwrap(),
-        &alice.host,
+        &alice.database,
         false,
     );
     let asked_twice = seal(
         alice.store.start_encryption(replay).unwrap(),
-        &alice.host,
+        &alice.database,
         true,
     );
 
@@ -262,7 +265,7 @@ fn asking_a_waiting_operation_again_returns_the_same_request_without_repeating_w
     );
 }
 
-// What a host might hand back wrongly for a pending read.
+// What an app might hand back wrongly for a pending read.
 #[derive(Clone, Copy, Debug)]
 enum BadEntries {
     MissingOne,
@@ -288,20 +291,21 @@ fn entries_that_do_not_match_the_pending_read_end_the_operation() {
         else {
             panic!("expected a read")
         };
-        let mut entries = alice.host.read(&addresses);
+        let mut entries = alice.database.read(&addresses);
         entries.reverse();
-        match bad {
-            BadEntries::MissingOne => {
-                entries.pop();
-            }
+        let named = match bad {
+            BadEntries::MissingOne => entries.pop().unwrap().0,
             BadEntries::RepeatedOne => {
                 let repeated = entries[0].0.clone();
-                entries.push((repeated, None));
+                entries.push((repeated.clone(), None));
+                repeated
             }
             BadEntries::Unrequested => {
-                entries[0].0 = alice.host.only(ProtocolStateKind::DeduplicationSet);
+                let unrequested = alice.database.only(ProtocolStateKind::DeduplicationSet);
+                entries[0].0 = unrequested.clone();
+                unrequested
             }
-        }
+        };
 
         let supplied = encryption.supply_state(entries);
 
@@ -313,9 +317,10 @@ fn entries_that_do_not_match_the_pending_read_end_the_operation() {
         assert!(
             matches!(
                 (bad, error),
-                (BadEntries::MissingOne, StateEntryError::Missing { .. })
-                    | (BadEntries::RepeatedOne, StateEntryError::Repeated { .. })
-                    | (BadEntries::Unrequested, StateEntryError::Unexpected { .. })
+                (BadEntries::MissingOne, StateEntryError::Missing { address })
+                    | (BadEntries::RepeatedOne, StateEntryError::Repeated { address })
+                    | (BadEntries::Unrequested, StateEntryError::Unexpected { address })
+                    if address == named
             ),
             "wrong mismatch for {bad:?}"
         );
@@ -337,7 +342,7 @@ fn entries_in_any_order_satisfy_the_pending_read() {
     let MessageEncryptionStep::NeedsState(addresses) = encryption.step(&mut rng()).unwrap() else {
         panic!("expected a read")
     };
-    let mut entries = alice.host.read(&addresses);
+    let mut entries = alice.database.read(&addresses);
     entries.reverse();
 
     encryption.supply_state(entries).unwrap();
@@ -390,14 +395,14 @@ fn an_operation_refuses_every_call_after_returning_its_result() {
         match encryption.step(&mut rng()).unwrap() {
             MessageEncryptionStep::NeedsState(addresses) => {
                 encryption
-                    .supply_state(alice.host.read(&addresses))
+                    .supply_state(alice.database.read(&addresses))
                     .unwrap();
             }
             MessageEncryptionStep::NeedsTransport(_) => {
                 encryption.supply_transport_binding(binding()).unwrap();
             }
             MessageEncryptionStep::NeedsPreKeyBundle(_) | MessageEncryptionStep::NothingToSend => {
-                panic!("expected an existing Session")
+                panic!("expected an existing session")
             }
             MessageEncryptionStep::Ready { .. } => break,
         }
@@ -431,19 +436,19 @@ fn a_send_cannot_commit_after_another_operation_blocks_its_contact() {
     let contact = alice.contact_address(bob.identity_key());
     // The send reads the contact but never writes it, as a commit of the same draft shows.
     let same = alice.encrypt(draft, Intent::Message).unwrap().ready();
-    let written = alice.host.clone().commit(same.changes).unwrap();
+    let written = alice.database.clone().commit(same.changes).unwrap();
     assert!(written.iter().all(|update| update.address() != &contact));
 
     alice.block(bob.identity_key());
-    let before = alice.host.snapshot_bytes();
-    let queued = alice.host.outbox().len();
+    let before = alice.database.snapshot_bytes();
+    let queued = alice.database.outbox().len();
 
     assert_eq!(
-        alice.host.commit_sent(&sent.result, sent.changes).err(),
-        Some(crate::support::HostCommitError::StaleCondition)
+        alice.database.commit_sent(&sent.result, sent.changes).err(),
+        Some(crate::support::AppCommitError::StaleCondition)
     );
-    assert_eq!(alice.host.snapshot_bytes(), before);
-    assert_eq!(alice.host.outbox().len(), queued);
+    assert_eq!(alice.database.snapshot_bytes(), before);
+    assert_eq!(alice.database.outbox().len(), queued);
 }
 
 #[test]
@@ -459,33 +464,34 @@ fn matching_checks_each_condition_and_rejects_malformed_records() {
         .iter()
         .map(|(address, _)| address.clone())
         .collect();
-    let current = alice.host.read(&addresses);
+    let current = alice.database.read(&addresses);
     assert!(commit_conditions_match(sent.changes.conditions(), &current).unwrap());
 
-    let mut changed = alice.host.read(&addresses);
+    let mut changed = alice.database.read(&addresses);
     changed[0].1 = Some(ProtocolStateBlob::from_bytes(vec![1, 2, 3]));
     assert!(!commit_conditions_match(sent.changes.conditions(), &changed).unwrap());
-    let mut removed = alice.host.read(&addresses);
+    let mut removed = alice.database.read(&addresses);
     removed[0].1 = None;
     assert!(!commit_conditions_match(sent.changes.conditions(), &removed).unwrap());
 
-    let mut missing = alice.host.read(&addresses);
-    missing.pop();
+    let mut missing = alice.database.read(&addresses);
+    let absent = missing.pop().unwrap().0;
     assert!(matches!(
         commit_conditions_match(sent.changes.conditions(), &missing),
-        Err(StateEntryError::Missing { .. })
+        Err(StateEntryError::Missing { address }) if address == absent
     ));
-    let mut repeated = alice.host.read(&addresses);
-    repeated.push(alice.host.read(&addresses[..1]).remove(0));
+    let mut repeated = alice.database.read(&addresses);
+    repeated.push(alice.database.read(&addresses[..1]).remove(0));
     assert!(matches!(
         commit_conditions_match(sent.changes.conditions(), &repeated),
-        Err(StateEntryError::Repeated { .. })
+        Err(StateEntryError::Repeated { address }) if address == addresses[0]
     ));
-    let mut extra = alice.host.read(&addresses);
-    extra.push((alice.host.only(ProtocolStateKind::DeduplicationSet), None));
+    let mut extra = alice.database.read(&addresses);
+    let unrequested = alice.database.only(ProtocolStateKind::DeduplicationSet);
+    extra.push((unrequested.clone(), None));
     assert!(matches!(
         commit_conditions_match(sent.changes.conditions(), &extra),
-        Err(StateEntryError::Unexpected { .. })
+        Err(StateEntryError::Unexpected { address }) if address == unrequested
     ));
 }
 
@@ -502,17 +508,17 @@ fn the_first_receive_creates_the_deduplication_set_and_a_redelivery_stops_before
         bob.receive(&sent.message),
         InboundMessageOutcome::Accepted(_)
     ));
-    let deduplication_set = bob.host.only(ProtocolStateKind::DeduplicationSet);
+    let deduplication_set = bob.database.only(ProtocolStateKind::DeduplicationSet);
 
     let mut redelivery = bob
         .store
         .start_decryption(bob.incoming(&sent.message))
         .unwrap();
     let MessageDecryptionStep::NeedsState(reads) = redelivery.step(&mut rng()).unwrap() else {
-        panic!("expected a read of the Deduplication Set")
+        panic!("expected a read of the deduplication set")
     };
     assert_eq!(reads, [deduplication_set]);
-    redelivery.supply_state(bob.host.read(&reads)).unwrap();
+    redelivery.supply_state(bob.database.read(&reads)).unwrap();
     assert!(matches!(
         redelivery.step(&mut rng()),
         Ok(MessageDecryptionStep::Ready {
@@ -559,7 +565,7 @@ fn shrinking_the_deduplication_set_evicts_its_oldest_digests() {
     assert!(matches!(
         bob.decrypt(&oldest.message),
         Err(crate::support::device::DeviceError::Operation(
-            MessageOperationError::ProtocolState(ProtocolStateError::Ratchet(_))
+            MessageOperationError::ProtocolState(ProtocolStateError::Ratchet(RatchetError::Aead))
         ))
     ));
 }
@@ -584,30 +590,29 @@ fn receive_settings_refuse_values_outside_roosts_limits() {
             MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_millis(1)
         ),
         Err(ProtocolStateError::SenderCertificateValidation(
-            SenderCertificateValidationError::GraceWindowTooLarge { .. }
-        ))
+            SenderCertificateValidationError::GraceWindowTooLarge { grace_window, max }
+        )) if grace_window == MAX_CERTIFICATE_GRACE_WINDOW + Duration::from_millis(1)
+            && max == MAX_CERTIFICATE_GRACE_WINDOW
     ));
-    assert!(
-        ReceiveSettings::new(
-            ProtocolHardeningLimits::default().max_deduplication_capacity,
-            policy,
-            MAX_CERTIFICATE_GRACE_WINDOW
-        )
-        .is_ok()
-    );
+    ReceiveSettings::new(
+        ProtocolHardeningLimits::default().max_deduplication_capacity,
+        policy,
+        MAX_CERTIFICATE_GRACE_WINDOW,
+    )
+    .unwrap();
 }
 
 // Runs `decryption` to its result and returns it with every request it made.
 fn decrypt_recording(
     mut decryption: MessageDecryption,
-    host: &crate::support::HostStore,
+    database: &crate::support::AppDatabase,
 ) -> (Vec<String>, InboundMessageOutcome, StateChanges) {
     let mut requests = Vec::new();
     loop {
         match decryption.step(&mut rng()).unwrap() {
             MessageDecryptionStep::NeedsState(addresses) => {
                 requests.push(format!("{} records", addresses.len()));
-                decryption.supply_state(host.read(&addresses)).unwrap();
+                decryption.supply_state(database.read(&addresses)).unwrap();
             }
             MessageDecryptionStep::NeedsAdmission(_) => {
                 requests.push("admission".into());
@@ -634,11 +639,17 @@ fn an_acknowledgment_decrypts_like_any_message_and_never_asks_for_a_reply_transp
     let session_id = establish(&mut alice, &mut bob);
     let sent = alice.send(&bob, b"please acknowledge");
     let InboundMessageOutcome::Accepted(received) = bob.receive(&sent.message) else {
-        panic!("expected Bob to accept the Message")
+        panic!("expected Bob to accept the message")
     };
     let engine = *alice.store.protocol_engine();
     let pending = engine
-        .pending_acknowledgments(&alice.host.snapshot(), session_id)
+        .pending_acknowledgments(
+            session_id,
+            alice
+                .database
+                .pending_acknowledgments_record(session_id)
+                .as_ref(),
+        )
         .unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].message_id, sent.message_id);
@@ -647,17 +658,23 @@ fn an_acknowledgment_decrypts_like_any_message_and_never_asks_for_a_reply_transp
         .store
         .start_decryption(alice.incoming(received.acknowledgment.as_ref().unwrap()))
         .unwrap();
-    let (requests, outcome, changes) = decrypt_recording(decryption, &alice.host);
+    let (requests, outcome, changes) = decrypt_recording(decryption, &alice.database);
 
     assert_eq!(requests, ["1 records", "2 records", "2 records"]);
     let InboundMessageOutcome::AcknowledgmentMatched(matched) = outcome else {
         panic!("expected a matched acknowledgment")
     };
     assert_eq!(matched.acknowledged_message_id, sent.message_id);
-    alice.host.commit(changes).unwrap();
+    alice.database.commit(changes).unwrap();
     assert!(
         engine
-            .pending_acknowledgments(&alice.host.snapshot(), session_id)
+            .pending_acknowledgments(
+                session_id,
+                alice
+                    .database
+                    .pending_acknowledgments_record(session_id)
+                    .as_ref()
+            )
             .unwrap()
             .is_empty()
     );
@@ -677,16 +694,16 @@ fn an_unmatched_acknowledgment_still_commits_its_advanced_state() {
     establish(&mut alice, &mut bob);
     let sent = alice.encrypt_to(&bob, b"forgotten").unwrap();
     let message = sent.result.message.clone();
-    // The host keeps the ratchet's advance but loses the pending acknowledgment.
+    // The app keeps the ratchet's advance but loses the pending acknowledgment.
     let session_only: Vec<_> = sent
         .changes
         .into_updates()
         .into_iter()
         .filter(|update| update.address().kind() == ProtocolStateKind::RatchetSession)
         .collect();
-    alice.host.apply_all(&session_only);
+    alice.database.apply_all(&session_only);
     let InboundMessageOutcome::Accepted(received) = bob.receive(&message) else {
-        panic!("expected Bob to accept the Message")
+        panic!("expected Bob to accept the message")
     };
 
     let InboundMessageOutcome::AcknowledgmentUnmatched(unmatched) =
@@ -712,7 +729,7 @@ fn an_acknowledgment_needs_a_valid_sender_certificate() {
     establish(&mut alice, &mut bob);
     let sent = alice.send(&bob, b"acknowledge me");
     let InboundMessageOutcome::Accepted(received) = bob.receive(&sent.message) else {
-        panic!("expected Bob to accept the Message")
+        panic!("expected Bob to accept the message")
     };
     let mut incoming = alice.incoming(received.acknowledgment.as_ref().unwrap());
     // Bob's certificate expired long before this reference time.
@@ -723,11 +740,11 @@ fn an_acknowledgment_needs_a_valid_sender_certificate() {
         from_unix_secs(CREATED_AT_SECS + 1_000_000).unwrap(),
     )
     .unwrap();
-    let before = alice.host.snapshot_bytes();
+    let before = alice.database.snapshot_bytes();
 
     let failure = crate::support::run_decryption(
         alice.store.start_decryption(incoming).unwrap(),
-        &alice.host,
+        &alice.database,
         &mut rng(),
         &binding(),
     );
@@ -740,11 +757,11 @@ fn an_acknowledgment_needs_a_valid_sender_certificate() {
             )
         ))
     ));
-    assert_eq!(alice.host.snapshot_bytes(), before);
+    assert_eq!(alice.database.snapshot_bytes(), before);
 }
 
 #[test]
-fn a_blocked_sender_gets_an_acknowledgment_only_under_the_silent_receipt_choice() {
+fn a_blocked_sender_gets_an_acknowledgment_only_under_the_acknowledge_policy() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
     let mut bob = Device::new(&relay, 0xb0);
@@ -758,24 +775,24 @@ fn a_blocked_sender_gets_an_acknowledgment_only_under_the_silent_receipt_choice(
         .store
         .start_decryption(bob.incoming(&sent.message))
         .unwrap();
-    let (requests, outcome, _) = decrypt_recording(unreachable, &bob.host);
+    let (requests, outcome, _) = decrypt_recording(unreachable, &bob.database);
     assert_eq!(requests, ["1 records", "1 records", "2 records"]);
     let InboundMessageOutcome::Blocked(hidden) = outcome else {
-        panic!("expected a blocked Message")
+        panic!("expected a blocked message")
     };
     assert!(hidden.acknowledgment.is_none());
 
     bob.settings = ReceiveSettings::new(
         ProtocolHardeningLimits::default().default_deduplication_capacity,
-        BlockedContactAcknowledgmentPolicy::SilentReceipt,
+        BlockedContactAcknowledgmentPolicy::Acknowledge,
         Duration::ZERO,
     )
     .unwrap();
-    let silent_receipt = bob
+    let acknowledging = bob
         .store
         .start_decryption(bob.incoming(&sent.message))
         .unwrap();
-    let (requests, outcome, _) = decrypt_recording(silent_receipt, &bob.host);
+    let (requests, outcome, _) = decrypt_recording(acknowledging, &bob.database);
     assert_eq!(
         requests,
         [
@@ -785,10 +802,10 @@ fn a_blocked_sender_gets_an_acknowledgment_only_under_the_silent_receipt_choice(
             "acknowledgment transport"
         ]
     );
-    let InboundMessageOutcome::Blocked(receipted) = outcome else {
-        panic!("expected a blocked Message")
+    let InboundMessageOutcome::Blocked(acknowledged) = outcome else {
+        panic!("expected a blocked message")
     };
-    let acknowledgment = receipted.acknowledgment.unwrap();
+    let acknowledgment = acknowledged.acknowledgment.unwrap();
     assert!(matches!(
         alice.receive(&acknowledgment),
         InboundMessageOutcome::AcknowledgmentMatched(_)
@@ -807,33 +824,36 @@ fn a_second_instance_that_loses_the_commit_retries_from_fresh_reads() {
 
     let from_app = seal(
         alice.store.start_encryption(app_draft).unwrap(),
-        &alice.host,
+        &alice.database,
         false,
     );
     let stale = seal(
         extension
             .start_encryption(redraft(&extension_draft))
             .unwrap(),
-        &alice.host,
+        &alice.database,
         false,
     );
     let app_message = from_app.result.message.clone();
     alice
-        .host
+        .database
         .commit_sent(&from_app.result, from_app.changes)
         .unwrap();
     assert_eq!(
-        alice.host.commit_sent(&stale.result, stale.changes).err(),
-        Some(crate::support::HostCommitError::StaleCondition)
+        alice
+            .database
+            .commit_sent(&stale.result, stale.changes)
+            .err(),
+        Some(crate::support::AppCommitError::StaleCondition)
     );
     let retried = seal(
         extension.start_encryption(extension_draft).unwrap(),
-        &alice.host,
+        &alice.database,
         false,
     );
     let extension_message = retried.result.message.clone();
     alice
-        .host
+        .database
         .commit_sent(&retried.result, retried.changes)
         .unwrap();
 
@@ -842,7 +862,7 @@ fn a_second_instance_that_loses_the_commit_retries_from_fresh_reads() {
         (extension_message, &b"from the extension"[..]),
     ] {
         let InboundMessageOutcome::Accepted(received) = bob.receive(&message) else {
-            panic!("expected Bob to accept the Message")
+            panic!("expected Bob to accept the message")
         };
         assert_eq!(&*received.plaintext, plaintext);
     }
@@ -876,20 +896,20 @@ fn a_receive_that_found_no_deduplication_set_cannot_commit_after_another_creates
             })
     );
 
-    bob.host.commit(first.changes).unwrap();
-    let before = bob.host.snapshot_bytes();
+    bob.database.commit(first.changes).unwrap();
+    let before = bob.database.snapshot_bytes();
 
     assert_eq!(
-        bob.host.commit(second.changes).err(),
-        Some(crate::support::HostCommitError::StaleCondition)
+        bob.database.commit(second.changes).err(),
+        Some(crate::support::AppCommitError::StaleCondition)
     );
-    assert_eq!(bob.host.snapshot_bytes(), before);
+    assert_eq!(bob.database.snapshot_bytes(), before);
 }
 
 // Runs `decryption` to its result, asking each step twice when `ask_twice` is set.
 fn open_and_acknowledge(
     mut decryption: MessageDecryption,
-    host: &crate::support::HostStore,
+    database: &crate::support::AppDatabase,
     ask_twice: bool,
 ) -> InboundMessageOutcome {
     let mut rng = rng();
@@ -913,7 +933,7 @@ fn open_and_acknowledge(
         }
         match step {
             MessageDecryptionStep::NeedsState(addresses) => {
-                decryption.supply_state(host.read(&addresses)).unwrap();
+                decryption.supply_state(database.read(&addresses)).unwrap();
             }
             MessageDecryptionStep::NeedsAdmission(_) => decryption.confirm_admission().unwrap(),
             MessageDecryptionStep::NeedsAcknowledgmentTransport(_) => {
@@ -940,9 +960,9 @@ fn asking_a_waiting_decryption_again_repeats_no_work() {
             .start_decryption(bob.incoming(&sent.message))
             .unwrap();
         let InboundMessageOutcome::Accepted(received) =
-            open_and_acknowledge(decryption, &bob.host, ask_twice)
+            open_and_acknowledge(decryption, &bob.database, ask_twice)
         else {
-            panic!("expected Bob to accept the Message")
+            panic!("expected Bob to accept the message")
         };
         received.acknowledgment.unwrap().to_bytes().unwrap()
     });

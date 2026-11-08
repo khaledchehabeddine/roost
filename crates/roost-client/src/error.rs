@@ -94,9 +94,9 @@ pub enum RoostError {
         reason: String,
     },
     /// A reserved or finalizing operation must be finalized or aborted before other work.
-    #[error("prepared-operation recovery required: {reason}")]
-    OperationRecoveryRequired {
-        /// The operation to recover.
+    #[error("unfinished prepared operation: {reason}")]
+    UnfinishedReservation {
+        /// The unfinished operation.
         operation_id: crate::OperationId,
         /// Diagnostic context for logging only.
         reason: String,
@@ -153,7 +153,7 @@ impl RoostError {
             | RoostError::InvalidData { reason }
             | RoostError::OneTimePreKeyUsed { reason }
             | RoostError::OperationConflict { reason }
-            | RoostError::OperationRecoveryRequired { reason, .. }
+            | RoostError::UnfinishedReservation { reason, .. }
             | RoostError::ProtocolStateFault { reason }
             | RoostError::Storage { reason }
             | RoostError::UnsupportedVersion { reason } => *reason = new_reason,
@@ -175,7 +175,7 @@ impl RoostError {
     // decode is invalid, and a value that fails to encode is a bug.
     fn from_stored_data(error: &StoredDataError, reason: String) -> Self {
         match error {
-            StoredDataError::UnsupportedVersion(_) => RoostError::UnsupportedVersion { reason },
+            StoredDataError::UnsupportedVersion { .. } => RoostError::UnsupportedVersion { reason },
             StoredDataError::Decode(_) | StoredDataError::TrailingBytes { .. } => {
                 RoostError::InvalidData { reason }
             }
@@ -234,16 +234,14 @@ impl From<SignedPreKeyError> for RoostError {
             SignedPreKeyError::Clock
             | SignedPreKeyError::LockPoisoned
             | SignedPreKeyError::SignedPreKeySignature(_) => RoostError::InternalError { reason },
-            SignedPreKeyError::Corrupt => RoostError::Corrupt,
+            SignedPreKeyError::Corrupt(_) => RoostError::Corrupt,
             SignedPreKeyError::Discovery(e) => RoostError::from(e).with_reason(reason),
             SignedPreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
             SignedPreKeyError::StoredData(error) => RoostError::from_stored_data(&error, reason),
-            SignedPreKeyError::DuplicateRetainedId(_)
-            | SignedPreKeyError::IdentifiersExhausted
-            | SignedPreKeyError::NextIdMismatch { .. }
-            | SignedPreKeyError::RetainedCapacityReached { .. }
-            | SignedPreKeyError::RetainedEpochMismatch { .. }
-            | SignedPreKeyError::RetainedIdNotOlder { .. } => RoostError::InvalidData { reason },
+            SignedPreKeyError::IdentifiersExhausted
+            | SignedPreKeyError::RetainedCapacityReached { .. } => {
+                RoostError::InvalidData { reason }
+            }
             SignedPreKeyError::NotFound => RoostError::NotFound,
             SignedPreKeyError::Storage(_) => RoostError::Storage { reason },
         }
@@ -259,9 +257,7 @@ impl From<OneTimePreKeyError> for RoostError {
             OneTimePreKeyError::InboxRotationRequired => RoostError::InboxRotationRequired,
             OneTimePreKeyError::StoredData(error) => RoostError::from_stored_data(&error, reason),
             OneTimePreKeyError::BatchExceedsCapacity { .. }
-            | OneTimePreKeyError::DuplicateId(_)
             | OneTimePreKeyError::IdentifiersExhausted
-            | OneTimePreKeyError::IdNotBelowNextId { .. }
             | OneTimePreKeyError::StaleEpoch { .. } => RoostError::InvalidData { reason },
             OneTimePreKeyError::NotFound => RoostError::NotFound,
             OneTimePreKeyError::Used { .. } => RoostError::OneTimePreKeyUsed { reason },
@@ -277,7 +273,7 @@ impl From<DiscoveryKeyError> for RoostError {
             DiscoveryKeyError::Clock
             | DiscoveryKeyError::LockPoisoned
             | DiscoveryKeyError::DiscoveryKeySignature(_) => RoostError::InternalError { reason },
-            DiscoveryKeyError::Corrupt => RoostError::Corrupt,
+            DiscoveryKeyError::Corrupt(_) => RoostError::Corrupt,
             DiscoveryKeyError::Identity(e) => RoostError::from(e).with_reason(reason),
             DiscoveryKeyError::StoredData(error) => RoostError::from_stored_data(&error, reason),
             DiscoveryKeyError::IdentityBindingSignature(_) => RoostError::InvalidData { reason },
@@ -294,7 +290,9 @@ impl From<ContactPublicationError> for RoostError {
             ContactPublicationError::Format(error) => RoostError::from_stored_data(&error, reason),
             ContactPublicationError::Key(e) => RoostError::from(e).with_reason(reason),
             ContactPublicationError::NotCanonical
-            | ContactPublicationError::VersionBeforeFirst(_) => RoostError::InvalidData { reason },
+            | ContactPublicationError::VersionBeforeFirst { .. } => {
+                RoostError::InvalidData { reason }
+            }
         }
     }
 }
@@ -322,8 +320,8 @@ impl From<KeyStoreOperationError> for RoostError {
             KeyStoreOperationError::PreconditionChanged { key } => {
                 RoostError::SecureStoragePreconditionChanged { key }
             }
-            KeyStoreOperationError::RecoveryRequired { id } => {
-                RoostError::OperationRecoveryRequired {
+            KeyStoreOperationError::UnfinishedReservation { id } => {
+                RoostError::UnfinishedReservation {
                     operation_id: crate::OperationId::from_core(id),
                     reason,
                 }
@@ -464,7 +462,6 @@ impl From<ProtocolStateError> for RoostError {
             | ProtocolStateError::MessageTranscript(_)
             | ProtocolStateError::NoContactRequest
             | ProtocolStateError::SealedPayload(_)
-            | ProtocolStateError::SnapshotCapacityExceeded { .. }
             | ProtocolStateError::StateKeyTooLong { .. }
             | ProtocolStateError::StateEntry(_)
             | ProtocolStateError::TimeOutOfRange
@@ -490,6 +487,7 @@ impl From<ProtocolStateError> for RoostError {
             ProtocolStateError::RatchetState(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::SealedFrame(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::Signature(e) => RoostError::from(e).with_reason(reason),
+            ProtocolStateError::SafetyNumber(e) => RoostError::from(e).with_reason(reason),
             ProtocolStateError::BlobDecode { .. }
             | ProtocolStateError::InvalidStateBinding { .. }
             | ProtocolStateError::MissingRequiredState { .. } => {
@@ -620,7 +618,7 @@ mod tests {
     fn an_unknown_backup_version_is_an_unsupported_version() {
         assert!(matches!(
             RoostError::from(KeyStoreError::Identity(IdentityError::BackupFormat(
-                StoredDataError::UnsupportedVersion(0xff)
+                StoredDataError::UnsupportedVersion { version: 0xff }
             ))),
             RoostError::UnsupportedVersion { .. }
         ));

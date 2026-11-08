@@ -5,6 +5,7 @@ use crate::{
     MessageEncryption, MessageRecovery, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery,
     ProtocolStateError,
 };
+use rand::{CryptoRng, RngCore};
 use roost_crypto::{
     DiscoveryKey, OneTimePreKey, PublicSignedPreKey, SealedFramePreKeyReference, SignedPreKey,
 };
@@ -19,7 +20,8 @@ pub enum MessageStartError {
     /// Loading local identity state failed.
     #[error(transparent)]
     Identity(#[from] IdentityError),
-    /// A committed KeyStore operation must be recovered before local keys can be used.
+    /// A reserved KeyStore operation must be finalized or aborted first, or the operation journal
+    /// can't be read.
     #[error(transparent)]
     Operation(#[from] KeyStoreOperationError),
     /// The message's inputs failed their checks.
@@ -110,7 +112,7 @@ impl KeyStore {
 
     fn message_keys(&self) -> Result<LocalIdentityKeys, MessageStartError> {
         let _lifecycle = self.lifecycle_guard();
-        self.ensure_no_recovery_required()?;
+        self.ensure_no_unfinished_reservation()?;
         self.load_local_identity_keys()
     }
 
@@ -188,12 +190,13 @@ impl KeyStore {
     }
 
     // Stages consuming the one-time prekey a new session used, and returns the operation's ID.
-    pub(crate) fn prepare_one_time_prekey_use(
+    pub(crate) fn prepare_one_time_prekey_use<R: RngCore + CryptoRng>(
         &self,
+        rng: &mut R,
         epoch: u32,
         id: u64,
     ) -> Result<KeyStoreOperationId, KeyStoreError> {
-        let prepared = self.prepare_operation(|staged| {
+        let prepared = self.prepare_operation(rng, |staged, _| {
             staged
                 .0
                 .one_time_prekey

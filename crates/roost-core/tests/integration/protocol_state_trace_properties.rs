@@ -1,5 +1,3 @@
-//! Generated protocol-state traces across Core's public message and protocol state blob boundary.
-
 use crate::support::{ProtocolFixture, StoredMessage, validation};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
@@ -62,7 +60,7 @@ fn generated_receive_traces_accept_once_and_deduplicate_before_ratchet_property(
                     prop_assert_eq!(decrypted.message_id, message.message_id);
                     prop_assert_eq!(decrypted.plaintext.as_slice(), message.plaintext.as_slice());
 
-                    let mut corrupt_store = fixture.bob.host.clone();
+                    let mut corrupt_store = fixture.bob.database.clone();
                     let session = corrupt_store.only(ProtocolStateKind::RatchetSession);
                     corrupt_store.corrupt(&session);
                     let duplicate = fixture
