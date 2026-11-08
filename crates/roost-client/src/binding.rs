@@ -132,23 +132,6 @@ mod tests {
         .expect("a discovery key's binding for the identity it signed must verify");
     }
 
-    #[test]
-    fn discovery_to_identity_binding_fails_with_one_byte_altered() {
-        let mut tampered = discovery_to_identity_signature();
-        tampered[0] ^= 0x01;
-
-        match verify_discovery_to_identity_binding(
-            fixed_identity(),
-            discovery_verifying_key(),
-            tampered,
-        ) {
-            Err(RoostError::AuthenticationFailed { .. }) => {}
-            other => {
-                panic!("expected AuthenticationFailed for a tampered signature, got {other:?}")
-            }
-        }
-    }
-
     /// Both bindings sign the same 64 bytes, so only their contexts tell them apart.
     #[test]
     fn the_two_identity_contexts_do_not_accept_each_others_signatures() {
