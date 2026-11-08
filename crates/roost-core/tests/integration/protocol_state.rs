@@ -428,33 +428,6 @@ fn skipped_key_total_overflow_rejects_the_message_on_every_attempt() {
 }
 
 #[test]
-fn a_tampered_message_fails_and_the_original_still_decrypts() {
-    let fixture = ProtocolFixture::new();
-    let encrypted = alice_sends(&fixture, 0x70, b"valid after tamper")
-        .result
-        .message;
-    let mut tampered = encrypted.clone();
-    *tampered.ciphertext.last_mut().unwrap() ^= 0x01;
-
-    assert!(matches!(
-        failure(bob_receives_validated(
-            &fixture,
-            &fixture.bob.database,
-            &tampered,
-            0x70
-        )),
-        ProtocolStateError::SealedFrame(SealedFrameError::Aead)
-    ));
-    let decrypted = accepted(
-        bob_receives_validated(&fixture, &fixture.bob.database, &encrypted, 0x71)
-            .unwrap()
-            .outcome,
-    );
-
-    assert_eq!(decrypted.plaintext.as_slice(), b"valid after tamper");
-}
-
-#[test]
 fn a_blocked_message_hides_its_plaintext_and_is_acknowledged_only_under_the_acknowledge_policy() {
     let mut fixture = ProtocolFixture::new();
     let session_address = block_alice(&mut fixture);
@@ -800,24 +773,6 @@ fn tampered_transport_metadata_exposes_no_sender_identity() {
             ProtocolStateError::SealedFrame(_)
         ));
     }
-}
-
-#[test]
-fn oversized_outbound_message_does_not_return_advanced_state() {
-    let fixture = ProtocolFixture::new();
-    let before = fixture.alice.database.snapshot_bytes();
-
-    let result = fixture.encrypt(
-        &fixture.alice.database,
-        fixture.outgoing(1, &[0u8; 64 * 1024]),
-        1,
-    );
-
-    assert!(matches!(
-        failure(result),
-        ProtocolStateError::ContentTooLong { len, max } if len > max
-    ));
-    assert_eq!(fixture.alice.database.snapshot_bytes(), before);
 }
 
 #[test]

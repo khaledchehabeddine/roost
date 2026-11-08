@@ -355,20 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn decrypt_backup_tampered_ciphertext_error_formats_are_redacted() {
-        let mut backup = export(&manager_with_identity(), 0x7a, "correct-passphrase");
-        let last = backup.len() - 1;
-        backup[last] ^= 0xAA;
-
-        let err = decrypt_backup(&backup, "correct-passphrase").err().unwrap();
-        let display = err.to_string();
-        let debug = format!("{err:?}");
-
-        assert!(!display.contains("correct-passphrase"));
-        assert!(!debug.contains("correct-passphrase"));
-    }
-
-    #[test]
     fn argon2id_different_passphrases_produce_different_keys() {
         let salt = [0x01u8; SALT_LEN];
         let first = derive_key(

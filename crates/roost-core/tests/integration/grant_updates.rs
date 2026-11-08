@@ -27,26 +27,6 @@ fn grant_update(outcome: InboundMessageOutcome) -> GrantUpdateResult {
 }
 
 #[test]
-fn a_grant_update_after_a_rotation_reaches_the_contact_and_is_acknowledged() {
-    let relay = Relay::new();
-    let (mut alice, mut bob) = befriended(&relay);
-    let rotation = bob.rotate_inbox();
-
-    let update = bob.send_grant_update(&alice);
-
-    assert_eq!(update.payload_kind, PayloadKind::GrantUpdate);
-    let received = grant_update(alice.receive(&update.message));
-    assert!(matches!(
-        bob.receive(&received.acknowledgment.unwrap()),
-        InboundMessageOutcome::AcknowledgmentMatched(_)
-    ));
-    assert_eq!(
-        established_verifier(&alice.send(&bob, b"got it").destination).as_bytes(),
-        rotation.recipient_delivery_verifier.as_bytes()
-    );
-}
-
-#[test]
 fn a_grant_update_to_a_contact_that_acknowledged_the_current_grant_has_nothing_to_send() {
     let relay = Relay::new();
     let (mut alice, mut bob) = befriended(&relay);

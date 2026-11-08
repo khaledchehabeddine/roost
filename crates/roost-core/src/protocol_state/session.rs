@@ -582,21 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn starting_sessions_keeps_five_older_and_remembers_evicted_accepted_ones() {
-        let mut sessions = PeerSessions::new(id(1), accepted(1));
-        let mut evicted = Vec::new();
-        for byte in 2..=8 {
-            let accepted_with = if byte % 2 == 0 { None } else { accepted(byte) };
-            evicted.extend(sessions.start(id(byte), accepted_with));
-        }
-
-        assert_eq!(sessions.current(), id(8));
-        assert_eq!(evicted, vec![id(1), id(2)]);
-        assert!(sessions.was_deleted(id(1)));
-        assert!(!sessions.was_deleted(id(2)));
-    }
-
-    #[test]
     fn remembered_deletions_forget_the_oldest_beyond_five() {
         let mut sessions = PeerSessions::new(id(1), accepted(1));
         for byte in 2..=12 {

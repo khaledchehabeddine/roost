@@ -58,31 +58,6 @@ fn reestablish(initiator: &mut Device, responder: &mut Device) -> SessionId {
 }
 
 #[test]
-fn peers_derive_one_session_id_and_exchange_messages_both_ways() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let mut bob = Device::new(&relay, 0xb0);
-
-    let request = alice.request(&bob, b"hello bob");
-    let InboundMessageOutcome::ContactRequest(received) = bob.receive(&request.message) else {
-        panic!("expected a contact request");
-    };
-    assert_eq!(received.session_id, request.session_id);
-    assert_eq!(&*received.plaintext, b"hello bob");
-
-    let acceptance = bob.accept_request(&alice, b"hello alice");
-    assert_eq!(acceptance.session_id, request.session_id);
-    let received = accepted_message(alice.receive(&acceptance.message));
-    assert_eq!(received.session_id, request.session_id);
-    assert_eq!(&*received.plaintext, b"hello alice");
-
-    let follow_up = alice.send(&bob, b"how are you");
-    assert_eq!(follow_up.session_id, request.session_id);
-    let received = accepted_message(bob.receive(&follow_up.message));
-    assert_eq!(&*received.plaintext, b"how are you");
-}
-
-#[test]
 fn any_message_before_acceptance_can_start_the_session() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);

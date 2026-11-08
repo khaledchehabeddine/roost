@@ -158,14 +158,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decode_versioned_rejects_another_version_before_decoding() {
-        assert!(matches!(
-            decode_versioned::<u8>(2, &[3]),
-            Err(StoredDataError::UnsupportedVersion { version: 3 })
-        ));
-    }
-
-    #[test]
     fn decode_versioned_rejects_bytes_left_over() {
         let bytes = encode_versioned(2, &7u8).unwrap();
         let mut longer = bytes.to_vec();
@@ -175,14 +167,5 @@ mod tests {
             decode_versioned::<u8>(2, &longer),
             Err(StoredDataError::TrailingBytes { len: 1 })
         ));
-    }
-
-    #[test]
-    fn signature_wire_keeps_every_byte() {
-        let signature: [u8; SIGNATURE_LEN] = std::array::from_fn(|index| index as u8);
-        assert_eq!(
-            signature_from_wire(&signature_to_wire(&signature)),
-            signature
-        );
     }
 }

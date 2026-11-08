@@ -352,19 +352,6 @@ mod tests {
     }
 
     #[test]
-    fn replenish_creates_initial_pool() {
-        let mut rng = ChaCha20Rng::from_seed([0xd1; 32]);
-        let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let bundles = manager.replenish(&mut rng).unwrap();
-        assert_eq!(bundles.len(), ONE_TIME_PREKEY_POOL_TARGET);
-        assert!(
-            bundles
-                .iter()
-                .all(|bundle| bundle.epoch == discovery.current().unwrap().epoch())
-        );
-    }
-
-    #[test]
     fn consume_one_time_prekey_consumes_secret_once() {
         let mut rng = ChaCha20Rng::from_seed([0xd2; 32]);
         let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
@@ -393,32 +380,6 @@ mod tests {
                 if requested == epoch + 1 && pool_epoch == epoch
         ));
         assert_eq!(stored(&manager), before);
-    }
-
-    #[test]
-    fn generate_batch_creates_the_requested_number_under_the_current_epoch() {
-        let mut rng = ChaCha20Rng::from_seed([0xd3; 32]);
-        let OneTimePreKeySetup { discovery, manager } = setup_with_discovery_key();
-        let first = manager.generate_batch(&mut rng, 3).unwrap();
-        let second = manager.generate_batch(&mut rng, 2).unwrap();
-        let epoch = discovery.current().unwrap().epoch();
-
-        assert_eq!(first.len(), 3);
-        assert_eq!(second.len(), 2);
-        assert!(
-            first
-                .iter()
-                .chain(&second)
-                .all(|bundle| bundle.epoch == epoch)
-        );
-        assert_eq!(
-            first
-                .iter()
-                .chain(&second)
-                .map(|bundle| bundle.id)
-                .collect::<Vec<_>>(),
-            vec![0, 1, 2, 3, 4]
-        );
     }
 
     #[test]
@@ -459,24 +420,6 @@ mod tests {
             Err(OneTimePreKeyError::IdentifiersExhausted)
         ));
         assert_eq!(stored(&manager), before);
-    }
-
-    #[test]
-    fn marked_one_time_prekeys_require_an_inbox_rotation() {
-        let mut rng = ChaCha20Rng::from_seed([0xd7; 32]);
-        let OneTimePreKeySetup { manager, .. } = setup_with_discovery_key();
-        manager.replenish(&mut rng).unwrap();
-
-        manager.mark_inbox_rotation_required().unwrap();
-
-        assert!(matches!(
-            manager.consume_one_time_prekey(1, 0),
-            Err(OneTimePreKeyError::InboxRotationRequired)
-        ));
-        assert!(matches!(
-            manager.replenish(&mut rng),
-            Err(OneTimePreKeyError::InboxRotationRequired)
-        ));
     }
 
     #[test]

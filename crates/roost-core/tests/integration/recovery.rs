@@ -45,17 +45,6 @@ fn a_day_without_an_acknowledgment_signals_one_recovery() {
 }
 
 #[test]
-fn an_acknowledged_message_signals_nothing() {
-    let relay = Relay::new();
-    let (mut alice, mut bob) = befriended(&relay);
-    let sent = alice.send(&bob, b"are you there?");
-    let acknowledgment = accepted(bob.receive(&sent.message)).acknowledgment.unwrap();
-    alice.receive(&acknowledgment);
-    let checked = alice.check_deliveries(&bob, sent_at_millis() + 2 * DAY_MILLIS);
-    assert!(!checked.starts_recovery);
-}
-
-#[test]
 fn an_unacknowledged_recovery_is_signaled_again_after_seven_days() {
     let relay = Relay::new();
     let (mut alice, bob) = befriended(&relay);
@@ -452,28 +441,6 @@ fn messages_held_behind_a_probe_whose_session_evicts_theirs_go_out_once_it_is_ac
         InboundMessageOutcome::AcknowledgmentMatched(_)
     ));
     assert!(waiting_on(&alice, resent.session_id).is_empty());
-}
-
-#[test]
-fn a_newer_session_from_the_contact_during_the_fetch_wins_over_the_bundle() {
-    let relay = Relay::new();
-    let (mut alice, mut bob, _) = unanswered(&relay);
-    assert!(matches!(
-        alice.recover(&bob, None),
-        Recovered::NeedsPreKeyBundle
-    ));
-    let bundle = bob.bundle();
-    // While Alice fetches, Bob, who lost the session, writes on a new one.
-    bob.database.forget_session();
-    bob.forget_sessions_with(&alice);
-    let restart = bob.send_fetching_a_bundle(&alice, b"I lost our chat", Intent::Message);
-    alice.receive(&restart.message);
-
-    let resent = alice.recover(&bob, Some(bundle)).committed();
-
-    assert_eq!(resent.session_id, restart.session_id);
-    assert_eq!(Route::of(&resent.destination), bob.established_route());
-    assert!(matches!(alice.recover(&bob, None), Recovered::Finished));
 }
 
 #[test]

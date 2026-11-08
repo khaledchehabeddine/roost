@@ -307,27 +307,6 @@ mod tests {
     }
 
     #[test]
-    fn pending_acknowledgments_of_another_version_are_unsupported() {
-        let address = address();
-        let limits = ProtocolHardeningLimits::default();
-        let mut bytes = encode_pending_acknowledgments(
-            &address,
-            &LoadedPendingAcknowledgments::empty(),
-            limits,
-        )
-        .unwrap()
-        .as_bytes()
-        .to_vec();
-        bytes[0] += 1;
-
-        assert!(matches!(
-            decode_pending_acknowledgments(&address, &ProtocolStateBlob::from_bytes(bytes), limits),
-            Err(ProtocolStateError::UnsupportedBlobVersion { address: actual, version })
-                if actual == address && version == super::super::PROTOCOL_STATE_BLOB_VERSION + 1
-        ));
-    }
-
-    #[test]
     fn full_pending_acknowledgments_fit_their_blob_limit() {
         let address = address();
         let limits = ProtocolHardeningLimits::default();

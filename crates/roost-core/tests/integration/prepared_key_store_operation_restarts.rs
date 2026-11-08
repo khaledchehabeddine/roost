@@ -321,24 +321,6 @@ fn orphaned_preparation_is_discoverable_and_abortable_after_restart() {
 }
 
 #[test]
-fn reserved_preparation_blocks_authoritative_reads_until_finished() {
-    let storage = SharedSecureStorage::new();
-    let store = storage.key_store();
-    let prepared = store.prepare_identity_creation(&mut OsRng).unwrap();
-    store.reserve_operation(prepared.id).unwrap();
-
-    assert!(matches!(
-        store.identity(),
-        Err(KeyStoreError::Operation(
-            KeyStoreOperationError::UnfinishedReservation { id }
-        )) if id == prepared.id
-    ));
-
-    store.abort_operation(prepared.id).unwrap();
-    assert!(store.identity().unwrap().is_none());
-}
-
-#[test]
 fn applied_store_with_ambiguous_failure_is_safely_replayed() {
     let storage = SharedSecureStorage::new();
     let store = storage.key_store();

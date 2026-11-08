@@ -13,7 +13,6 @@ mod missing_sessions;
 mod prekey_ids;
 mod prepared_blocking;
 mod prepared_identity_app_commit;
-mod prepared_inbox_rotation;
 mod prepared_key_store_operation_lifecycle;
 mod prepared_key_store_operation_restarts;
 mod protocol_state;

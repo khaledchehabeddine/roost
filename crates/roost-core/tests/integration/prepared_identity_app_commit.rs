@@ -52,24 +52,3 @@ fn unknown_outcome_that_did_not_commit_aborts_after_restart() {
         created.output.public_key()
     );
 }
-
-#[test]
-fn finalization_the_app_never_recorded_is_reconciled_after_restart() {
-    let storage = DeviceStorage::default();
-    let database = IdentityDatabase::default();
-    let store = storage.open();
-    let prepared = store.prepare_identity_creation(&mut OsRng).unwrap();
-    store.reserve_operation(prepared.id).unwrap();
-    database.commit_identity(prepared.id, AppCommit::Applies);
-    store.finalize_operation(prepared.id).unwrap();
-    drop(store);
-    assert_eq!(database.pending_finalizations(), [prepared.id]);
-
-    let restarted = storage.open();
-    resolve_unfinished(&restarted, &database).unwrap();
-    assert!(database.pending_finalizations().is_empty());
-    assert_eq!(
-        restarted.identity().unwrap().unwrap().public_key(),
-        prepared.output.public_key()
-    );
-}

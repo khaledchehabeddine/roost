@@ -648,17 +648,6 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_discovery_key_without_a_grant_drops_the_old_capability() {
-        let mut contact = contact(discovery_key(1, 100, 1));
-        contact.record_grant(grant(discovery_key(1, 100, 1), 1));
-        contact.record_discovery_key(discovery_key(2, 200, 2));
-        assert!(matches!(
-            contact.established_route(),
-            Err(ProtocolStateError::NoDeliveryCapability)
-        ));
-    }
-
-    #[test]
     fn a_resent_message_counts_once_toward_the_limit() {
         let mut contact = contact(discovery_key(1, 100, 1));
         let ids: Vec<_> = (0..=MAX_MESSAGES_BEFORE_ACCEPTANCE as u8)

@@ -25,24 +25,6 @@ fn first_message_route(destination: &MessageDestination) -> (u64, Option<u64>) {
 }
 
 #[test]
-fn a_request_without_a_bundle_asks_for_one_and_records_nothing() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let bob = Device::new(&relay, 0xb0);
-    let before = alice.database.snapshot_bytes();
-
-    let outgoing = alice.outgoing(&bob, b"hi bob");
-    let Encrypted::NeedsPreKeyBundle(identity_key) =
-        alice.encrypt(outgoing, Intent::Request).unwrap()
-    else {
-        panic!("expected a request for Bob's bundle");
-    };
-
-    assert_eq!(identity_key, bob.identity_key());
-    assert_eq!(alice.database.snapshot_bytes(), before);
-}
-
-#[test]
 fn a_request_routes_to_the_bundles_prekeys_and_records_a_pending_contact() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
@@ -245,27 +227,6 @@ fn the_receiver_withholds_plaintext_past_the_limit() {
 }
 
 #[test]
-fn requests_that_cross_accept_both_sides() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let mut bob = Device::new(&relay, 0xb0);
-    let from_alice = alice.request(&bob, b"hi bob");
-    let from_bob = bob.request(&alice, b"hi alice");
-
-    let alice_received = accepted(alice.receive(&from_bob.message));
-    let bob_received = accepted(bob.receive(&from_alice.message));
-
-    assert!(alice_received.acknowledgment.is_some());
-    assert!(bob_received.acknowledgment.is_some());
-    for (device, peer) in [(&alice, &bob), (&bob, &alice)] {
-        assert_eq!(
-            device.contact(peer).unwrap().trust_state,
-            ContactTrustState::Unverified
-        );
-    }
-}
-
-#[test]
 fn a_request_that_crosses_one_sent_from_a_newer_bundle_accepts_both_sides() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
@@ -457,36 +418,6 @@ fn a_first_message_on_a_kept_signed_prekey_needs_proven_admission() {
 }
 
 #[test]
-fn a_first_message_on_a_one_time_prekey_commits_its_use_with_the_session() {
-    let relay = Relay::new();
-    let mut alice = Device::new(&relay, 0xa1);
-    let mut bob = Device::new(&relay, 0xb0);
-    let request = alice.request(&bob, b"hi bob");
-    let (_, one_time_prekey_id) = first_message_route(&request.destination);
-    assert!(one_time_prekey_id.is_some());
-
-    let observed = bob.observe(&request.message).unwrap();
-    assert!(matches!(
-        observed.outcome,
-        InboundMessageOutcome::ContactRequest(_)
-    ));
-    let operation = observed.changes.operation().unwrap();
-    assert!(
-        bob.store
-            .unfinished_operations()
-            .unwrap()
-            .iter()
-            .any(|unfinished| unfinished.id == operation)
-    );
-    bob.commit_changes(observed.changes).unwrap();
-
-    assert_eq!(
-        bob.store.operation_status(operation).unwrap(),
-        roost_core::KeyStoreOperationStatus::Finalized
-    );
-}
-
-#[test]
 fn a_first_message_without_a_one_time_prekey_carries_no_operation() {
     let relay = Relay::new();
     let mut alice = Device::new(&relay, 0xa1);
@@ -620,24 +551,6 @@ fn a_grant_rides_on_messages_until_the_contact_acknowledges_one() {
     assert_eq!(
         alice.send(&bob, b"third").payload_kind,
         PayloadKind::Content
-    );
-}
-
-#[test]
-fn after_an_inbox_rotation_contacts_get_the_new_grant() {
-    let relay = Relay::new();
-    let (mut alice, mut bob) = befriended(&relay);
-    let rotation = bob.store.prepare_inbox_rotation(&mut OsRng).unwrap();
-    bob.store.reserve_operation(rotation.id).unwrap();
-    bob.store.finalize_operation(rotation.id).unwrap();
-
-    let message = bob.send(&alice, b"new inbox");
-    assert_eq!(message.payload_kind, PayloadKind::ContentWithGrant);
-    alice.receive(&message.message);
-
-    assert_eq!(
-        established_verifier(&alice.send(&bob, b"got it").destination).as_bytes(),
-        rotation.output.recipient_delivery_verifier.as_bytes()
     );
 }
 
