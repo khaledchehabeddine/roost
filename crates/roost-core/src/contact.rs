@@ -30,8 +30,7 @@ impl From<&PublicDiscoveryKey> for ContactDiscoveryKey {
     }
 }
 
-/// The trust level Roost records for one contact identity key, which an acceptance and a safety
-/// number confirmation raise.
+/// The trust level Roost records for one contact identity key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ContactTrustState {
     /// A contact request is open in either direction.

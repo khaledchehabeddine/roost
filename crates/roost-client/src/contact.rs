@@ -24,8 +24,7 @@ pub struct ContactBlock {
     pub publication: Option<PublicationBundle>,
 }
 
-/// The trust level Roost records for a contact, which an acceptance and a safety number
-/// confirmation raise.
+/// The trust level Roost records for a contact.
 #[derive(Clone, Copy, uniffi::Enum)]
 pub enum ContactTrustState {
     /// A contact request is open in either direction.
