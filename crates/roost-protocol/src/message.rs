@@ -132,7 +132,7 @@ impl PayloadKind {
 pub struct MessageTranscriptInput<'a> {
     /// Session the message belongs to.
     pub session_id: SessionId,
-    /// Canonical recipient Ed25519 Identity Key.
+    /// The Ed25519 half of the recipient's identity key.
     pub recipient_identity_verifying_key: &'a [u8; PUBLIC_KEY_LEN],
     /// Sender-selected message ID.
     pub id: MessageId,

@@ -1,5 +1,3 @@
-//! Property tests for handshake and Double Ratchet protocol invariants.
-
 use crate::support::{ASSOCIATED_DATA, bootstrap, setup};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestRng, TestRunner};

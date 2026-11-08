@@ -1,4 +1,4 @@
-//! Handshakes and ratchets through roost-crypto's public API.
+//! Handshakes and ratchets through the public API.
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 mod peer_session;

@@ -6,10 +6,10 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An X25519 key pair for Diffie-Hellman key exchange.
 ///
-/// The secret key stays private. Use [`Self::to_secret_bytes`] only when storing the key pair.
+/// Use [`Self::to_secret_bytes`] only when storing the key pair.
 #[derive(ZeroizeOnDrop)]
 pub struct KeyPair {
-    /// Public key shared with peers for X25519 Diffie-Hellman.
+    /// The public key.
     #[zeroize(skip)]
     pub public: PublicKey,
     secret: StaticSecret,

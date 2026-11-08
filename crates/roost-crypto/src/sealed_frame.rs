@@ -44,7 +44,7 @@ pub struct OneTimePreKeyReference {
 pub struct SealedFrame {
     /// Recipient discovery key X25519 public key.
     pub recipient_public_key: [u8; 32],
-    /// Optional X3DH prekey reference.
+    /// The prekeys a first message names, or `None` on an established message.
     pub prekey_reference: Option<SealedFramePreKeyReference>,
     /// Per-frame ephemeral X25519 public key.
     pub ephemeral_public_key: [u8; 32],

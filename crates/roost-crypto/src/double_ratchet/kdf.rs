@@ -10,7 +10,6 @@ const ROOT_KEY_INFO: &[u8] = b"RoostRatchetRootKey-v1:";
 const MESSAGE_KEY_INPUT: &[u8] = &[0x01];
 const NEXT_CHAIN_KEY_INPUT: &[u8] = &[0x02];
 
-// Root key for the Double Ratchet root chain.
 // `RatchetState::snapshot` clones it to decrypt on a copy of the state.
 #[derive(Clone, ZeroizeOnDrop)]
 pub(crate) struct RootKey([u8; 32]);
@@ -25,7 +24,6 @@ impl RootKey {
     }
 }
 
-// Chain key for the Double Ratchet sending or receiving chain.
 // `RatchetState` clones it to decrypt on a copy of the state and to derive skipped keys.
 #[derive(Clone, ZeroizeOnDrop)]
 pub(super) struct ChainKey([u8; 32]);
@@ -56,8 +54,7 @@ impl MessageKey {
 }
 
 // Implements `KDF_RK` from the Double Ratchet specification
-// (https://signal.org/docs/specifications/doubleratchet/): derives the next root key and a chain
-// key from a root key and DH output.
+// (https://signal.org/docs/specifications/doubleratchet/).
 pub(super) fn derive_root_and_chain_keys(
     root_key: &RootKey,
     dh_output: &SharedSecret,
@@ -75,10 +72,7 @@ pub(super) fn derive_root_and_chain_keys(
     Ok((RootKey(*next_root_key), ChainKey(*chain_key)))
 }
 
-// Implements `KDF_CK` from the Double Ratchet specification: derives the next chain key and a
-// message key from a chain key.
-//
-// Uses HMAC-SHA256 with the chain key as the HMAC key.
+// Implements `KDF_CK` from the Double Ratchet specification.
 pub(super) fn derive_chain_and_message_keys(
     chain_key: &ChainKey,
 ) -> Result<(ChainKey, MessageKey), RatchetError> {

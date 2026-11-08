@@ -1,4 +1,4 @@
-//! Wire formats, signature framing, and sender certificate validation shared by the Roost crates.
+//! Wire formats, signature framing, and sender certificate validation.
 //!
 //! Handles session and message identifiers, payload kinds, the message transcript, sealed payload
 //! padding, public key validation and the identity key encoding, context-framed Ed25519

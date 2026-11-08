@@ -5,13 +5,13 @@
 //! and sealed sender frames. Higher layers handle persistence, replay tracking, and transport.
 //!
 //! The identity key signs the public discovery key. The discovery key signs the public signed
-//! prekey. Initiators run [`initiate_handshake`], which verifies both responder signatures and
-//! creates the first [`RatchetState`] and the [`SessionId`](roost_protocol::SessionId) both peers
-//! derive, then use the ratchet to encrypt messages. Responders run [`accept_handshake`] and
-//! check the initiator's [`prove_sender`] proof with [`verify_sender_proof`]. X3DH includes a
-//! one-time prekey when one is available.
+//! prekey. Initiators run [`initiate_handshake`], which verifies the responder's identity key,
+//! discovery key, and signed prekey and creates the first [`RatchetState`] and the
+//! [`SessionId`](roost_protocol::SessionId) both peers derive, then use the ratchet to encrypt
+//! messages. Responders run [`accept_handshake`] and check the initiator's [`prove_sender`] proof
+//! with [`verify_sender_proof`]. X3DH includes a one-time prekey when one is available.
 //!
-//! # Secret handling
+//! # Secret Handling
 //!
 //! Secret-owning public types do not implement `Debug`.
 //!
@@ -23,7 +23,7 @@
 //! assert_debug::<KeyPair>();
 //! ```
 //!
-//! Secret-owning public key types do not implement caller-visible `Clone`.
+//! Secret-owning public key types do not implement `Clone`.
 //!
 //! ```compile_fail
 //! use roost_crypto::SigningKeyPair;
@@ -33,7 +33,7 @@
 //! assert_clone::<SigningKeyPair>();
 //! ```
 //!
-//! Ratchet state does not implement caller-visible `Clone`.
+//! Ratchet state does not implement `Clone`.
 //!
 //! ```compile_fail
 //! use roost_crypto::RatchetState;
