@@ -1,8 +1,3 @@
-//! Session-level integration tests for peers bootstrapped through the X3DH handshake.
-//!
-//! These scenarios cross the handshake, signed prekey, and Double Ratchet modules through the
-//! public API the way a downstream crate would.
-
 use crate::support::{ASSOCIATED_DATA, bootstrap, setup};
 use roost_crypto::{
     HandshakeError, Header, OneTimePreKey, PreKeyBundle, PublicKeyError, RatchetError, Signature,

@@ -9,8 +9,7 @@ const VERIFIER_LEN: usize = 32;
 
 /// A recipient-wide bearer secret authorizing delivery to one inbox until it rotates.
 ///
-/// Hold it only as long as needed, and persist it through platform secure storage. It isn't
-/// `Clone`, `Debug`, or `Serialize`, because a copy that reaches a log leaks delivery
+/// It isn't `Clone`, `Debug`, or `Serialize`, because a copy that reaches a log leaks delivery
 /// authorization.
 #[derive(ZeroizeOnDrop)]
 pub struct RecipientDeliveryCapability([u8; CAPABILITY_LEN]);
@@ -43,7 +42,7 @@ impl RecipientDeliveryCapability {
 
 /// The public SHA-256 commitment to a [`RecipientDeliveryCapability`].
 ///
-/// The relay stores it, so the capability itself never reaches the relay.
+/// The relay stores it in place of the capability.
 #[derive(Clone, Copy, Debug)]
 pub struct RecipientDeliveryVerifier([u8; VERIFIER_LEN]);
 
@@ -77,8 +76,6 @@ mod tests {
         ChaCha20Rng::from_seed([9u8; 32])
     }
 
-    /// The app persists the capability and restores it later, so the round trip must keep the
-    /// exact bytes and so the verifier the relay already holds.
     #[test]
     fn capability_round_trips_through_secret_bytes() {
         let mut rng = seeded_rng();

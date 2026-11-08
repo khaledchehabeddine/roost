@@ -7,21 +7,20 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 /// An Ed25519 key pair for signing.
 ///
-/// The signing key stays private and zeroed on drop. Use [`Self::to_signing_bytes`] only when
-/// storing the key pair.
+/// Use [`Self::to_signing_bytes`] only when storing the key pair.
 #[derive(ZeroizeOnDrop)]
 pub struct SigningKeyPair {
-    /// Public verifying key shared with peers.
+    /// The verifying key.
     #[zeroize(skip)]
     pub verifying: VerifyingKey,
     signing: SigningKey,
 }
 
 impl SigningKeyPair {
-    /// Signs `message` bytes as provided with this key pair.
+    /// Signs `message` without a domain context.
     ///
-    /// Ed25519 signing is deterministic, so identical inputs produce identical signatures. Callers
-    /// using raw signing own any domain separation.
+    /// Ed25519 signing is deterministic, so identical inputs produce identical signatures. The
+    /// caller owns any domain separation.
     pub fn sign(&self, message: &[u8]) -> Signature {
         use ed25519_dalek::Signer;
         self.signing.sign(message)

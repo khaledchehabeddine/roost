@@ -18,8 +18,7 @@ const DISCOVERY_KEY_PAYLOAD_LEN: usize = 2 * PUBLIC_KEY_LEN + 4 + 8;
 
 /// A rotatable discovery key signed by the identity key.
 ///
-/// Holds X25519 key-agreement material and an Ed25519 signing key. The two secret keys are zeroed
-/// on drop.
+/// Holds X25519 key-agreement material and an Ed25519 signing key.
 #[derive(ZeroizeOnDrop)]
 pub struct DiscoveryKey {
     key_agreement_secret: StaticSecret,
@@ -37,8 +36,7 @@ pub struct DiscoveryKey {
 impl DiscoveryKey {
     /// Restores a discovery key from secret bytes.
     ///
-    /// Public keys are derived from the secret bytes. The caller must verify the restored key
-    /// with [`verify_public_discovery_key`].
+    /// The caller must verify the restored key with [`verify_public_discovery_key`].
     pub fn from_secret_bytes(
         key_agreement_secret: &[u8; 32],
         signing_secret: &[u8; 32],
@@ -70,7 +68,7 @@ impl DiscoveryKey {
         self.epoch
     }
 
-    /// Returns the Unix timestamp (seconds) when this discovery key was generated.
+    /// Returns when this discovery key was generated, in Unix seconds.
     pub fn created_at_secs(&self) -> u64 {
         self.created_at_secs
     }
@@ -108,14 +106,12 @@ impl DiscoveryKey {
 
     /// Signs `identity`'s public halves with this discovery key's Ed25519 half.
     ///
-    /// This is the discovery key's half of the binding between the two keys. A peer that starts
-    /// from a discovery key checks it to learn that the discovery key approved the identity it was
-    /// given, without trusting whoever gave it.
+    /// A peer that starts from a discovery key checks this signature to learn that the discovery
+    /// key approved the identity it was given, without trusting whoever gave it.
     ///
-    /// The signature covers only the identity key's two public halves, with no epoch or creation
-    /// time. The identity key's signature over a discovery key needs both, because one identity
-    /// key signs many discovery keys. Each discovery key belongs to one epoch, so its own signature
-    /// doesn't.
+    /// The signature covers no epoch or creation time. The identity key's signature over a
+    /// discovery key needs both, because one identity key signs many discovery keys. Each discovery
+    /// key belongs to one epoch, so its own signature doesn't.
     pub fn sign_identity_binding(
         &self,
         identity: &PublicIdentityKey,
@@ -153,9 +149,10 @@ pub fn verify_discovery_to_identity_binding(
 pub struct PublicDiscoveryKey {
     /// X25519 key-agreement public key.
     pub public_key: PublicKey,
-    /// Ed25519 verifying key that validates this discovery key's signed prekeys.
+    /// Ed25519 verifying key for this discovery key's signed prekeys and identity binding.
     pub verifying_key: VerifyingKey,
-    /// Rotation epoch, monotonic within a storage lineage.
+    /// The rotation epoch, which goes up with each inbox rotation. A restored backup continues from
+    /// the backup's epoch, so two discovery keys can share one.
     pub epoch: u32,
     /// Unix timestamp in seconds when the discovery key was generated.
     pub created_at_secs: u64,
@@ -248,11 +245,9 @@ fn discovery_key_payload(
     payload
 }
 
-/// Generates a signed prekey signed by `discovery_key`.
+/// Generates a signed prekey signed by `discovery_key`, in its epoch.
 ///
-/// This keeps the discovery signing key private while producing a signed prekey that verifies
-/// with [`PublicDiscoveryKey::verifying_key`]. The caller allocates `id` uniquely within this
-/// discovery key's epoch.
+/// The caller allocates `id` uniquely within that epoch.
 pub fn generate_signed_prekey_for_discovery_key<R: RngCore + CryptoRng>(
     rng: &mut R,
     discovery_key: &DiscoveryKey,
@@ -454,7 +449,6 @@ mod tests {
         ));
     }
 
-    /// Builds a verifiable public identity key from fixed secret bytes.
     fn public_identity_key(signing_secret: [u8; 32], x25519_public: [u8; 32]) -> PublicIdentityKey {
         let signing = SigningKeyPair::from_signing_bytes(&signing_secret);
         let public_key = PublicKey::from(x25519_public);

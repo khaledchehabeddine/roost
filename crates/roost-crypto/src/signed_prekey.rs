@@ -9,9 +9,6 @@ const SIGNED_PREKEY_CONTEXT: &[u8] = b"RoostSPK-v1:";
 const SIGNED_PREKEY_PAYLOAD_LEN: usize = PUBLIC_KEY_LEN + 4 + 8;
 
 /// An X25519 prekey signed by an Ed25519 signing key.
-///
-/// The secret key is zeroed on drop. The public key, signature, epoch, and creation timestamp
-/// remain available through accessors and [`Self::public`].
 #[derive(ZeroizeOnDrop)]
 pub struct SignedPreKey {
     secret_key: StaticSecret,
@@ -38,9 +35,7 @@ impl SignedPreKey {
         &self.public_key
     }
 
-    /// Returns the Ed25519 signature over
-    /// `public_key[32] || epoch.to_be_bytes() || created_at_secs.to_be_bytes()` under the signed
-    /// prekey signature context.
+    /// Returns the signature over the public key, epoch, and creation time.
     pub fn signature(&self) -> &Signature {
         &self.signature
     }
@@ -50,7 +45,7 @@ impl SignedPreKey {
         self.epoch
     }
 
-    /// Returns the Unix timestamp (seconds) when this signed prekey was generated.
+    /// Returns when this signed prekey was generated, in Unix seconds.
     pub fn created_at_secs(&self) -> u64 {
         self.created_at_secs
     }
@@ -67,7 +62,7 @@ impl SignedPreKey {
 
     /// Restores a signed prekey from secret bytes and stored metadata.
     ///
-    /// The public key is derived from `secret`. The stored signature is not verified here.
+    /// It doesn't verify `signature`.
     pub fn from_secret_bytes(
         secret: &[u8; 32],
         signature: [u8; 64],
@@ -108,14 +103,11 @@ impl SignedPreKey {
 pub struct PublicSignedPreKey {
     /// X25519 public key used by the peer during handshake root-key derivation.
     pub public_key: PublicKey,
-    /// Ed25519 signature over
-    /// `public_key[32] || epoch.to_be_bytes() || created_at_secs.to_be_bytes()` under the signed
-    /// prekey signature context.
+    /// The signature over the public key, epoch, and creation time.
     pub signature: Signature,
-    /// Stable unsigned identifier allocated within [`Self::epoch`].
+    /// Identifier within [`Self::epoch`]. [`Self::signature`] doesn't cover it.
     ///
-    /// The identifier is lookup metadata and is not covered by [`Self::signature`]. An app that
-    /// needs it authenticated as transport metadata must include it in its transport binding.
+    /// An app that needs it authenticated must include it in its transport binding.
     pub id: u64,
     /// Discovery-key epoch this signed prekey was produced under.
     pub epoch: u32,
@@ -123,11 +115,9 @@ pub struct PublicSignedPreKey {
     pub created_at_secs: u64,
 }
 
-/// Generates a signed prekey with the supplied Ed25519 signing key and caller-allocated
-/// identifier.
+/// Generates a signed prekey signed by `signing_key`.
 ///
-/// `id` is stable lookup metadata within one discovery-key epoch. The signature doesn't cover it,
-/// and no frame carries it.
+/// The signature doesn't cover `id`, and no frame carries it.
 pub(crate) fn generate_signed_prekey<R: RngCore + CryptoRng>(
     rng: &mut R,
     signing_key: &SigningKeyPair,

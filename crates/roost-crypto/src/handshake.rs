@@ -32,15 +32,15 @@ pub const SENDER_PROOF_LEN: usize = 32;
 pub struct PreKeyBundle {
     /// Version of the public prekey bundle format.
     pub version: u8,
-    /// Responder discovery key verified by the responder's identity key.
+    /// Responder discovery key, signed by the responder's identity key.
     pub discovery_key: PublicDiscoveryKey,
-    /// Responder signed prekey verified by the discovery key.
+    /// Responder signed prekey, signed by the discovery key.
     pub signed_prekey: PublicSignedPreKey,
     /// Optional one-time prekey bound to the same discovery-key epoch.
     pub one_time_prekey: Option<PublicOneTimePreKey>,
 }
 
-/// The public half of a handshake, which the initiator sends until the responder replies.
+/// The public half of a handshake, which each first message carries.
 #[derive(Clone, Copy)]
 pub struct Handshake {
     /// The initiator's ephemeral X25519 public key.
@@ -51,7 +51,7 @@ pub struct Handshake {
     pub prekey_reference: SealedFramePreKeyReference,
 }
 
-/// What a first message's sender proof covers besides the handshake.
+/// What a first message's sender proof covers.
 pub struct SenderProofTranscript<'a> {
     /// The handshake the proof belongs to.
     pub handshake: &'a Handshake,
@@ -67,9 +67,8 @@ pub struct SenderProofTranscript<'a> {
 
 /// Starts a session with the responder whose bundle the initiator fetched.
 ///
-/// The initiator's base key and first ratchet key are drawn from `rng`. The bundle's discovery key
-/// must be signed by `responder_identity_key` and its signed prekey by that discovery key. Both
-/// peers derive the returned [`SessionId`], and nobody else can.
+/// The bundle's discovery key must be signed by `responder_identity_key` and its signed prekey by
+/// that discovery key. Both peers derive the returned [`SessionId`], and nobody else can.
 pub fn initiate_handshake<R: RngCore + CryptoRng>(
     rng: &mut R,
     responder_identity_key: &PublicIdentityKey,
@@ -317,8 +316,7 @@ fn validate_one_time_prekey(
     }
 }
 
-// No salt means RFC 5869's all-zero salt, which X3DH also uses. The extract step turns the DH
-// outputs into a pseudorandom key, and the info labels keep the root key and session ID apart.
+// No salt means RFC 5869's all-zero salt, which X3DH also uses.
 fn derive_root_key_and_session_id(
     discovery_key_shared_secret: &SharedSecret,
     signed_prekey_shared_secret: &SharedSecret,

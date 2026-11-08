@@ -42,7 +42,6 @@ pub(crate) fn parse_verifying_key(bytes: &[u8]) -> Result<VerifyingKey, PublicKe
     parse_ed25519_verifying_key_bytes(&bytes).ok_or(PublicKeyError::InvalidKeyEncoding)
 }
 
-/// Parses a 64-byte Ed25519 signature.
 pub(crate) fn parse_signature(bytes: &[u8]) -> Result<Signature, PublicKeyError> {
     let bytes: [u8; Signature::BYTE_SIZE] = bytes
         .try_into()

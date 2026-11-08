@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use zeroize::Zeroizing;
 
-// Limits how many message keys one header can force this session to derive.
+// Limits how many message keys one header can force this session to derive per chain.
 const MAX_SKIP: u32 = 100;
 // Caps all cached skipped-message keys, so repeated DH steps cannot exhaust memory.
 const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
@@ -17,15 +17,14 @@ const MAX_SKIPPED_KEYS_TOTAL: usize = 500;
 /// A Double Ratchet session state between two peers.
 ///
 /// Implements the state variables of the
-/// [Double Ratchet specification](https://signal.org/docs/specifications/doubleratchet/). Field
-/// comments name each variable as the specification writes it.
+/// [Double Ratchet specification](https://signal.org/docs/specifications/doubleratchet/).
 ///
 /// After each successful encrypt or decrypt, callers that persist session states must replace the
 /// old stored blob with a new one from [`Self::to_bytes`].
 pub struct RatchetState {
     // Sending ratchet key pair (`DHs`).
     sending_ratchet_key_pair: KeyPair,
-    // Receiving ratchet public key (`DHr`). `None` until the first message arrives.
+    // Receiving ratchet public key (`DHr`). `None` until the responder receives the first message.
     receiving_ratchet_public_key: Option<PublicKey>,
     // Root key (`RK`). Evolves with each DH ratchet step.
     root_key: RootKey,
@@ -152,17 +151,11 @@ impl RatchetState {
 
     /// Decrypts `ciphertext`, advances the receiving chain, and returns the plaintext.
     ///
-    /// `associated_data` must match the value provided at encryption time. If authentication
-    /// fails, the session state is restored to its previous value.
+    /// `associated_data` must match the value passed to [`Self::ratchet_encrypt`]. When `header`
+    /// names a ratchet public key other than the current one, the call draws a fresh key pair from
+    /// `rng`.
     ///
-    /// When `header` carries a new ratchet public key, a Diffie-Hellman ratchet step draws a fresh
-    /// key pair from `rng`. On authentication failure the session state rolls back, but `rng` has
-    /// already advanced.
-    ///
-    /// Decryption handles three cases in order:
-    /// 1. Out-of-order message: looks up a previously skipped key.
-    /// 2. New ratchet public key: advances the DH ratchet before decrypting.
-    /// 3. Normal in-order message: advances the receiving chain.
+    /// A failed call leaves the state unchanged, though `rng` may have advanced.
     pub fn ratchet_decrypt<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -369,7 +362,6 @@ impl RatchetState {
         Ok(())
     }
 
-    // Performs a DH ratchet step and derives new receiving and sending chains.
     fn dh_ratchet_step<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -423,7 +415,7 @@ pub enum RatchetError {
     MaxSkipExceeded {
         /// Messages the header skips.
         count: u32,
-        /// Most messages one header may skip.
+        /// Most messages one header may skip in one chain.
         max: u32,
     },
     /// The skipped message key cache is full.
@@ -468,8 +460,7 @@ mod tests {
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
 
-    // Returns a fresh initiator/responder pair, shared associated data, and the seeded RNG that
-    // produced their keys. Callers keep drawing ratchet keys from it during decrypt.
+    // Returns the seeded RNG too, so callers keep drawing ratchet keys from it during decrypt.
     fn setup_pair() -> (RatchetState, RatchetState, Vec<u8>, ChaCha20Rng) {
         let mut rng = ChaCha20Rng::from_seed([0x11u8; 32]);
         let shared_secret = [0x42u8; 32];
