@@ -1,23 +1,10 @@
-//! A host puts its contact publication in a contact link, and another host checks the link.
+//! An app puts its contact publication in a contact link, and another app checks the link.
 
-use crate::support::{MemoryStorage, complete};
+use crate::support::{complete, published_identity};
 use roost_client::{
     IdentityContext, PublicDiscoveryKey, RoostError, decode_contact_publication,
     is_newer_discovery_key,
 };
-use std::sync::Arc;
-
-// Returns a context whose identity has a publication, as a host has before it shares a link.
-fn published_identity() -> Arc<IdentityContext> {
-    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
-    let created = context.prepare_identity_creation().unwrap();
-    complete(&context, created.operation_id);
-    let signed_prekey = context
-        .prepare_signed_prekey_rotation_and_discovery_key_cleanup()
-        .unwrap();
-    complete(&context, signed_prekey.operation_id);
-    context
-}
 
 // Returns the discovery key in the context's current contact link.
 fn linked_discovery_key(context: &IdentityContext) -> PublicDiscoveryKey {
@@ -29,10 +16,8 @@ fn linked_discovery_key(context: &IdentityContext) -> PublicDiscoveryKey {
 #[test]
 fn a_contact_publication_decodes_to_its_identity_and_current_discovery_key() {
     let alice = published_identity();
-
     let publication =
         decode_contact_publication(alice.encode_contact_publication().unwrap()).unwrap();
-
     assert_eq!(Some(publication.identity), alice.identity().unwrap());
     assert_eq!(
         publication.discovery_key,
@@ -124,9 +109,7 @@ fn a_link_made_after_an_inbox_rotation_has_a_newer_discovery_key() {
     let older = linked_discovery_key(&alice);
     let rotation = alice.prepare_inbox_rotation().unwrap();
     complete(&alice, rotation.operation_id);
-
     let newer = linked_discovery_key(&alice);
-
     assert!(is_newer_discovery_key(newer.clone(), Some(older.clone())).unwrap());
     assert!(!is_newer_discovery_key(older.clone(), Some(newer)).unwrap());
     assert!(!is_newer_discovery_key(older.clone(), Some(older)).unwrap());
@@ -135,6 +118,5 @@ fn a_link_made_after_an_inbox_rotation_has_a_newer_discovery_key() {
 #[test]
 fn any_discovery_key_is_newer_than_none_stored() {
     let key = linked_discovery_key(&published_identity());
-
     assert!(is_newer_discovery_key(key, None).unwrap());
 }

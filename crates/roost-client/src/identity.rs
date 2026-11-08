@@ -5,7 +5,7 @@ use roost_core::{
 };
 
 /// An identity's public keys, safe to cache or send to peers.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct Identity {
     /// The identity key.
     pub key: IdentityKey,
@@ -15,7 +15,7 @@ pub struct Identity {
 }
 
 /// An identity's permanent public key, used for trust, certificates, and contacts.
-#[derive(Clone, Debug, Eq, PartialEq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, uniffi::Record)]
 pub struct IdentityKey {
     /// The X25519 key that peers agree on shared secrets with. Always 32 bytes.
     pub agreement_key: Vec<u8>,

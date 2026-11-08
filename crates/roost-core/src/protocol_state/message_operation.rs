@@ -789,7 +789,8 @@ impl Encrypting {
             });
         }
         verify_discovery_to_identity_binding(
-            &bundle.identity_key,
+            &bundle.identity_key.public_key,
+            &bundle.identity_key.verifying_key,
             &bundle.bundle.discovery_key.verifying_key,
             &bundle.discovery_to_identity,
         )
@@ -2594,7 +2595,6 @@ mod tests {
         let (bob, bob_identity) = key_store();
         let publication = bob.current_publication().unwrap();
         let bundle = PreKeyBundle {
-            version: publication.version,
             discovery_key: publication.discovery_key,
             signed_prekey: publication.signed_prekey,
             one_time_prekey: None,

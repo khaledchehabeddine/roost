@@ -1,4 +1,4 @@
-//! The records the host stores for Roost, and the changes it commits to them.
+//! The records the app stores for Roost, and the changes it commits to them.
 
 use crate::encoding::{fixed_32, hex_bytes, hex_text};
 use crate::error::RoostError;
@@ -21,17 +21,17 @@ pub enum ProtocolStateKind {
     /// A session's pending acknowledgments, stored under its session ID.
     PendingAcknowledgments,
     /// A contact's record, stored under its identity key, which holds the peer's delivery
-    /// capability. Read it through [`Contacts::contact_state`](crate::Contacts::contact_state).
+    /// capability. Read it through [`Contacts::contact_states`](crate::Contacts::contact_states).
     ContactState,
     /// Identity-key-addressed record of the sessions kept with one peer and the one Roost sends
     /// on.
     PeerSessions,
 }
 
-/// The name of one record the host stores: its kind and its ID.
+/// The name of one record the app stores: its kind and its ID.
 ///
 /// The ID is lowercase hexadecimal. For a contact's records it encodes the contact's identity
-/// key, so the host can find every record of one contact without decoding a blob.
+/// key, so the app can find every record of one contact without decoding a blob.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, uniffi::Record)]
 pub struct StateKey {
     /// The record's kind.
@@ -40,18 +40,18 @@ pub struct StateKey {
     pub id: String,
 }
 
-/// One record as the host holds it, or its absence.
+/// One record as the app holds it, or its absence.
 ///
 /// Roost wraps the bytes and erases its copy once it's done with them.
 #[derive(uniffi::Record)]
 pub struct StateEntry {
     /// The record's name.
     pub key: StateKey,
-    /// The record's bytes, absent when the host holds no record under this key.
+    /// The record's bytes, absent when the app holds no record under this key.
     pub blob: Option<Vec<u8>>,
 }
 
-/// One record to write when the host commits.
+/// One record to write when the app commits.
 #[derive(uniffi::Record)]
 pub struct StateUpdate {
     /// The record's name.
@@ -60,9 +60,9 @@ pub struct StateUpdate {
     pub blob: Option<Vec<u8>>,
 }
 
-/// What one record must still be when the host commits: unchanged since Roost read it, or still
+/// What one record must still be when the app commits: unchanged since Roost read it, or still
 /// absent.
-#[derive(Clone, uniffi::Record)]
+#[derive(uniffi::Record)]
 pub struct CommitCondition {
     /// The record's name.
     pub key: StateKey,
@@ -80,7 +80,7 @@ pub struct CommitCondition {
 /// Inside one transaction, read the record under each condition's key, call [`Self::matches`],
 /// and only when it returns `true` write every update together with the result's effects, such as
 /// a message to send, and show each of [`Self::undelivered`] that has content as not delivered.
-/// When it returns `false`, another operation changed a record first: roll back, then start the
+/// When it returns `false`, another operation changed a record first, so roll back and start the
 /// operation again from fresh reads.
 ///
 /// When [`Self::operation_id`] is present, the changes also change SecureStorage, such as using a
@@ -93,7 +93,8 @@ pub struct CommitCondition {
 /// 3. Call [`IdentityContext::finalize_operation`](crate::IdentityContext::finalize_operation),
 ///    and only then show plaintext or send anything the result holds.
 ///
-/// When the commit's outcome is unknown, neither finalize nor abort: resolve it at startup.
+/// When the commit's outcome is unknown, neither finalize nor abort, and resolve it at startup
+/// instead.
 #[derive(uniffi::Record)]
 pub struct StateChanges {
     /// Every record the result relies on, including ones it read but doesn't write.
@@ -109,7 +110,7 @@ pub struct StateChanges {
 
 #[uniffi::export]
 impl StateChanges {
-    /// Returns whether every condition still holds for `current`, the host's entry for each
+    /// Returns whether every condition still holds for `current`, the app's entry for each
     /// condition's key, read inside the commit's transaction.
     ///
     /// # Errors
@@ -254,5 +255,35 @@ impl ProtocolStateKind {
             Self::ContactState => roost_core::ProtocolStateKind::ContactState,
             Self::PeerSessions => roost_core::ProtocolStateKind::PeerSessions,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(count: usize) -> Vec<StateEntry> {
+        (0..count)
+            .map(|_| StateEntry {
+                key: StateKey {
+                    kind: ProtocolStateKind::DeduplicationSet,
+                    id: "00".into(),
+                },
+                blob: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn entries_to_core_refuses_more_entries_than_the_limit() {
+        assert_eq!(
+            entries_to_core(entries(MAX_STATE_ENTRIES)).unwrap().len(),
+            MAX_STATE_ENTRIES
+        );
+        assert!(matches!(
+            entries_to_core(entries(MAX_STATE_ENTRIES + 1)),
+            Err(RoostError::InvalidData { reason })
+                if reason == "4097 protocol-state entries exceed the limit of 4096"
+        ));
     }
 }

@@ -361,7 +361,6 @@ impl Device {
             identity_key: self.identity.clone(),
             discovery_to_identity: publication.discovery_to_identity,
             bundle: PreKeyBundle {
-                version: publication.version,
                 discovery_key: publication.discovery_key,
                 signed_prekey: publication.signed_prekey,
                 one_time_prekey,
@@ -530,7 +529,6 @@ impl Device {
             Recovered::Resent(sealed) => Recovered::Committed(Box::new(self.commit_sent(*sealed))),
             other @ (Recovered::Committed(_)
             | Recovered::NeedsPreKeyBundle
-            | Recovered::AwaitingProbe(_)
             | Recovered::Finished) => other,
         }
     }
@@ -563,9 +561,6 @@ impl Device {
                 }
                 MessageRecoveryStep::NeedsPreKeyBundle(_) => {
                     return Ok(Recovered::NeedsPreKeyBundle);
-                }
-                MessageRecoveryStep::AwaitingProbe(message_id) => {
-                    return Ok(Recovered::AwaitingProbe(message_id));
                 }
                 MessageRecoveryStep::Finished => return Ok(Recovered::Finished),
                 MessageRecoveryStep::Ready { result, changes } => {
@@ -757,7 +752,6 @@ pub(crate) enum Recovered {
     /// A message encrypted again, committed, and queued for sending.
     Committed(Box<SentMessage>),
     NeedsPreKeyBundle,
-    AwaitingProbe(MessageId),
     Finished,
 }
 
@@ -765,7 +759,7 @@ impl Recovered {
     pub(crate) fn committed(self) -> SentMessage {
         match self {
             Self::Committed(sent) => *sent,
-            Self::Resent(_) | Self::NeedsPreKeyBundle | Self::AwaitingProbe(_) | Self::Finished => {
+            Self::Resent(_) | Self::NeedsPreKeyBundle | Self::Finished => {
                 panic!("expected a committed resend")
             }
         }

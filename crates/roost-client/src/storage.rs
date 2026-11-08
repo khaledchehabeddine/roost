@@ -1,17 +1,13 @@
 use crate::RoostError;
 use roost_core::{SecureStorage as CoreSecureStorage, StorageError};
-#[cfg(test)]
-use std::collections::HashMap;
 use std::sync::Arc;
-#[cfg(test)]
-use std::sync::Mutex;
 use zeroize::Zeroizing;
 
 /// Platform secure storage, such as Keychain or Keystore, that an
 /// [`IdentityContext`](crate::IdentityContext) keeps keys in.
 ///
 /// Implementations must persist bytes in platform secure storage, not plain files or temporary
-/// process memory. The values Roost saves and loads are secret: clear any copy the
+/// process memory. The values Roost saves and loads are secret, so clear any copy the
 /// implementation makes as soon as it's done with it.
 ///
 /// # Implementation
@@ -42,39 +38,7 @@ pub trait SecureStorage: Send + Sync {
     fn remove(&self, key: String) -> Result<(), RoostError>;
 }
 
-/// Secure storage held in memory, for this crate's unit tests.
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct MemoryStorage {
-    entries: Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
-}
-
-#[cfg(test)]
-impl SecureStorage for MemoryStorage {
-    fn save(&self, key: String, value: Vec<u8>) -> Result<(), RoostError> {
-        self.entries
-            .lock()
-            .unwrap()
-            .insert(key, Zeroizing::new(value));
-        Ok(())
-    }
-
-    fn load(&self, key: String) -> Result<Option<Vec<u8>>, RoostError> {
-        Ok(self
-            .entries
-            .lock()
-            .unwrap()
-            .get(&key)
-            .map(|value| value.to_vec()))
-    }
-
-    fn remove(&self, key: String) -> Result<(), RoostError> {
-        self.entries.lock().unwrap().remove(&key);
-        Ok(())
-    }
-}
-
-// Bridges the host's SecureStorage into Core's storage trait.
+// Bridges the app's SecureStorage to the key store's storage trait.
 pub(crate) struct SecureStorageAdapter {
     storage: Arc<dyn SecureStorage>,
 }
@@ -89,25 +53,25 @@ impl CoreSecureStorage for SecureStorageAdapter {
     fn store(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
         self.storage
             .save(key.to_string(), value.to_vec())
-            .map_err(host_storage_error)
+            .map_err(app_storage_error)
     }
 
     fn load(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
         self.storage
             .load(key.to_string())
             .map(|value| value.map(Zeroizing::new))
-            .map_err(host_storage_error)
+            .map_err(app_storage_error)
     }
 
     fn delete(&mut self, key: &str) -> Result<(), StorageError> {
         self.storage
             .remove(key.to_string())
-            .map_err(host_storage_error)
+            .map_err(app_storage_error)
     }
 }
 
-// Keeps the host's own reason, so a storage failure that returns to the host isn't prefixed twice.
-fn host_storage_error(error: RoostError) -> StorageError {
+// Keeps the app's own reason, so a storage failure that returns to the app isn't prefixed twice.
+fn app_storage_error(error: RoostError) -> StorageError {
     if let RoostError::Storage { reason } = error {
         StorageError::IO(reason)
     } else {

@@ -1,8 +1,8 @@
 use roost_client::{IdentityContext, IdentityKey, OperationId, RoostError, SecureStorage};
 use roost_crypto::SigningKeyPair;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 const CERTIFICATE_LABEL: &[u8] = b"RoostSenderCertificate-v1:";
@@ -10,10 +10,22 @@ const CERTIFICATE_VERSION: u8 = 1;
 pub(crate) const DOMAIN_SIGNING_KEY_ID: &[u8] = b"relay-signing-key";
 pub(crate) const RELAY_DOMAIN: &[u8] = b"relay.example";
 
-/// Reserves and finalizes an operation, as a host does around its own commit.
+/// Reserves and finalizes an operation, as an app does around its own commit.
 pub(crate) fn complete(context: &IdentityContext, id: OperationId) {
     context.reserve_operation(id.clone()).unwrap();
     context.finalize_operation(id).unwrap();
+}
+
+/// Returns a context whose identity has a publication, as an app has before it shares a link.
+pub(crate) fn published_identity() -> Arc<IdentityContext> {
+    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let created = context.prepare_identity_creation().unwrap();
+    complete(&context, created.operation_id);
+    let signed_prekey = context
+        .prepare_signed_prekey_rotation_and_discovery_key_cleanup()
+        .unwrap();
+    complete(&context, signed_prekey.operation_id);
+    context
 }
 
 /// Returns the relay domain's signing key, which every test certificate names.

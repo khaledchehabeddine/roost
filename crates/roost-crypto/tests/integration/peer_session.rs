@@ -13,7 +13,6 @@ fn tampered_signed_prekey_signature_rejects_before_any_key_work() {
     signature_bytes[0] ^= 0x01;
     bundle.signature = Signature::from_bytes(&signature_bytes);
     let prekey_bundle = PreKeyBundle {
-        version: roost_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: setup.bob_discovery_key.public(),
         signed_prekey: bundle,
         one_time_prekey: setup

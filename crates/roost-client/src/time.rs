@@ -1,7 +1,8 @@
-//! Conversions between host millisecond timestamps and Core's time values.
+//! Conversions between the app's millisecond timestamps and Roost's time values.
 //!
-//! Hosts see every time value in milliseconds. Core keeps signed values in the unit their encoding
-//! fixes, so seconds fields convert here and reject millisecond inputs they cannot represent.
+//! The app sees every time value in milliseconds. Roost keeps signed values in the unit their
+//! encoding fixes, so seconds fields convert here and refuse millisecond inputs they can't
+//! represent.
 
 use crate::error::RoostError;
 use roost_protocol::from_unix_millis;
@@ -9,7 +10,7 @@ use std::time::SystemTime;
 
 const MILLIS_PER_SEC: u64 = 1_000;
 
-// Converts a Core Unix-seconds value to host milliseconds.
+// Converts a Unix-seconds value Roost stores to the app's milliseconds.
 pub(crate) fn millis_from_secs(secs: u64, label: &str) -> Result<u64, RoostError> {
     secs.checked_mul(MILLIS_PER_SEC)
         .ok_or_else(|| RoostError::InvalidData {
@@ -17,7 +18,7 @@ pub(crate) fn millis_from_secs(secs: u64, label: &str) -> Result<u64, RoostError
         })
 }
 
-// Converts host milliseconds to a value Core signs or authenticates in whole Unix seconds.
+// Converts the app's milliseconds to a value Roost signs or authenticates in whole Unix seconds.
 pub(crate) fn whole_secs_from_millis(millis: u64, label: &str) -> Result<u64, RoostError> {
     if !millis.is_multiple_of(MILLIS_PER_SEC) {
         return Err(RoostError::InvalidData {
@@ -27,7 +28,7 @@ pub(crate) fn whole_secs_from_millis(millis: u64, label: &str) -> Result<u64, Ro
     Ok(millis / MILLIS_PER_SEC)
 }
 
-// Converts host Unix milliseconds to a time Core uses for decisions.
+// Converts the app's Unix milliseconds to a time Roost decides with.
 pub(crate) fn time_from_millis(millis: u64, label: &str) -> Result<SystemTime, RoostError> {
     from_unix_millis(millis).ok_or_else(|| RoostError::InvalidData {
         reason: format!("{label} is out of range"),

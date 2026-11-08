@@ -44,7 +44,7 @@ impl SessionId {
     }
 }
 
-/// Transport-visible X3DH prekey reference in a sealed-sender frame.
+/// Transport-visible X3DH prekey reference in a sealed sender frame.
 #[derive(Clone, uniffi::Record)]
 pub struct FramePreKeyReference {
     /// Recipient discovery key epoch.
@@ -55,7 +55,7 @@ pub struct FramePreKeyReference {
     pub one_time_prekey: Option<FrameOneTimePreKeyReference>,
 }
 
-/// The one-time prekey a sealed-sender frame's handshake used.
+/// The one-time prekey a sealed sender frame's handshake used.
 #[derive(Clone, uniffi::Record)]
 pub struct FrameOneTimePreKeyReference {
     /// The prekey's identifier.
@@ -64,7 +64,7 @@ pub struct FrameOneTimePreKeyReference {
     pub public_key: Vec<u8>,
 }
 
-/// Transport-visible sealed-sender frame exchanged as a message.
+/// Transport-visible sealed sender frame exchanged as a message.
 #[derive(Clone, uniffi::Record)]
 pub struct Message {
     /// Recipient discovery key X25519 public key. Always 32 bytes.
@@ -88,7 +88,7 @@ pub struct SenderIdentityMaterial {
     pub signature: Vec<u8>,
 }
 
-/// Payload kind recovered after decrypt.
+/// The kind of payload a message carries.
 #[derive(uniffi::Enum)]
 pub enum PayloadKind {
     /// Content from the app.

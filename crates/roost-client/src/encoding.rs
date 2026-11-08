@@ -1,4 +1,4 @@
-//! Conversions between the host's strings and byte arrays and Roost's fixed-size values.
+//! Conversions between the app's strings and byte arrays and Roost's fixed-size values.
 
 use crate::error::RoostError;
 

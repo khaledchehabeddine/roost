@@ -99,7 +99,8 @@ impl ContactPublication {
         verify_public_identity_key(&identity)?;
         verify_public_discovery_key(&discovery_key, &identity.verifying_key)?;
         verify_discovery_to_identity_binding(
-            &identity,
+            &identity.public_key,
+            &identity.verifying_key,
             &discovery_key.verifying_key,
             &discovery_to_identity,
         )?;

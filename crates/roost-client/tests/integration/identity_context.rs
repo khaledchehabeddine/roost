@@ -1,20 +1,59 @@
-//! A host drives identity creation, backup, prekeys, and deletion through one IdentityContext.
+//! An app drives identity creation, backup, prekeys, signing, and deletion through one
+//! IdentityContext.
 
 use crate::support::{
     DOMAIN_SIGNING_KEY_ID, MemoryStorage, RELAY_DOMAIN, complete, domain_signing_key,
-    issue_certificate,
+    issue_certificate, published_identity,
 };
 use roost_client::{
-    DomainSigningKey, IdentityContext, IdentityKey, OperationId, OperationStatus, RevocationState,
-    RoostError, SenderCertificateValidation, SignedSenderCertificate, ValidatedSenderCertificate,
+    DomainSigningKey, Identity, IdentityContext, IdentityKey, OperationId, OperationStatus,
+    PublicDiscoveryKey, PublicOneTimePreKey, PublicSignedPreKey, PublicationBundle,
+    RevocationState, RoostError, SenderCertificateValidation, SignedSenderCertificate,
+    ValidatedSenderCertificate,
 };
-use roost_crypto::{KeyPair, SigningKeyPair};
-use roost_protocol::SenderCertificateValidationError;
+use roost_crypto::{
+    KeyPair, PublicDiscoveryKey as CryptoPublicDiscoveryKey,
+    PublicIdentityKey as CryptoPublicIdentityKey, PublicKey,
+    PublicSignedPreKey as CryptoPublicSignedPreKey, Signature, SigningKeyPair, VerifyingKey,
+    verify_discovery_to_identity_binding, verify_public_discovery_key, verify_public_identity_key,
+    verify_public_signed_prekey,
+};
+use roost_protocol::{SenderCertificateValidationError, SignatureError, verify_with_context};
 use std::sync::Arc;
 
 const PASSPHRASE: &str = "correct horse battery staple";
 const CERTIFICATE_EXPIRES_AT_SECS: u64 = 1_800_000_000;
 const CERTIFICATE_EXPIRES_AT_MILLIS: u64 = CERTIFICATE_EXPIRES_AT_SECS * 1_000;
+
+/// Every Ed25519 signature context and canonical-encoding domain tag Roost defines, plus the
+/// protocol-state commit and delivery verifier labels.
+const DOMAIN_REGISTRY: [&str; 10] = [
+    "RoostIKBinding-v1:",
+    "RoostDK-v1:",
+    "RoostDKToIK-v1:",
+    "RoostSPK-v1:",
+    "RoostMessageTranscript-v1:",
+    "RoostIK-v1:",
+    "RoostSafetyNumber-v1:",
+    "RoostSenderCertificate-v1:",
+    "RoostProtocolStateCommit-v1:",
+    "RoostDeliveryVerifier-v1:",
+];
+
+const RELAY_HTTP_AUTH_CONTEXT: &[u8] = b"Relay-HTTP-Auth-v1";
+const RELAY_PROTOCOL_VERSION: u16 = 1;
+const RELAY_CHALLENGE_NONCE: [u8; 32] = [0x22; 32];
+const RELAY_METHOD: &[u8] = b"POST";
+const RELAY_REQUEST_TARGET: &[u8] = b"/v1/prekeys?count=10";
+const RELAY_BODY_DIGEST: [u8; 32] = [0x33; 32];
+
+// Returns a context whose identity is created and finalized, and the identity.
+fn created_identity() -> (Arc<IdentityContext>, Identity) {
+    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    let created = context.prepare_identity_creation().unwrap();
+    complete(&context, created.operation_id);
+    (context, created.identity)
+}
 
 #[test]
 fn identity_is_absent_until_its_creation_finalizes() {
@@ -53,6 +92,51 @@ fn identity_reports_a_storage_failure_instead_of_absence() {
 }
 
 #[test]
+fn startup_resolves_unfinished_operations_and_an_unrecorded_finalization() {
+    let storage = Arc::new(MemoryStorage::default());
+    let context = IdentityContext::new(storage.clone());
+    // The app commits the identity and finalizes it, but crashes before recording the finalization.
+    let created = context.prepare_identity_creation().unwrap();
+    complete(&context, created.operation_id.clone());
+    // The app commits these prekeys, but crashes before finalizing them.
+    let committed = context.prepare_one_time_prekeys(1).unwrap();
+    // The app never commits this rotation.
+    let abandoned = context.prepare_inbox_rotation().unwrap();
+    context
+        .reserve_operation(committed.operation_id.clone())
+        .unwrap();
+    let app_committed = [created.operation_id, committed.operation_id];
+
+    let restarted = IdentityContext::new(storage);
+    let unfinished = restarted.unfinished_operations().unwrap();
+    assert_eq!(unfinished.len(), 2);
+    for operation in unfinished {
+        match (operation.status, app_committed.contains(&operation.id)) {
+            (OperationStatus::Reserved | OperationStatus::Finalizing, true) => {
+                restarted.finalize_operation(operation.id).unwrap();
+            }
+            (OperationStatus::Prepared | OperationStatus::Reserved, false) => {
+                restarted.abort_operation(operation.id).unwrap();
+            }
+            other => panic!("unexpected unfinished operation {other:?}"),
+        }
+    }
+
+    assert!(restarted.unfinished_operations().unwrap().is_empty());
+    for id in app_committed {
+        assert_eq!(
+            restarted.operation_status(id).unwrap(),
+            OperationStatus::Finalized
+        );
+    }
+    assert_eq!(
+        restarted.operation_status(abandoned.operation_id).unwrap(),
+        OperationStatus::Aborted
+    );
+    assert_eq!(restarted.identity().unwrap(), Some(created.identity));
+}
+
+#[test]
 fn restored_backup_publishes_only_after_inbox_rotation() {
     let source = IdentityContext::new(Arc::new(MemoryStorage::default()));
     let created = source.prepare_identity_creation().unwrap();
@@ -68,7 +152,7 @@ fn restored_backup_publishes_only_after_inbox_rotation() {
     let import = restored
         .prepare_backup_import(backup, PASSPHRASE.into())
         .unwrap();
-    // The host replaces its protocol state in the same commit that records the import.
+    // The app replaces its protocol state in the same commit that records the import.
     complete(&restored, import);
     assert_eq!(restored.identity().unwrap(), Some(created.identity));
     assert!(matches!(
@@ -96,10 +180,7 @@ fn restored_backup_publishes_only_after_inbox_rotation() {
 
 #[test]
 fn deletion_removes_the_identity() {
-    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
-    let created = context.prepare_identity_creation().unwrap();
-    complete(&context, created.operation_id);
-
+    let (context, _) = created_identity();
     let deletion = context.prepare_identity_deletion().unwrap();
     complete(&context, deletion);
     assert_eq!(context.identity().unwrap(), None);
@@ -137,7 +218,201 @@ fn operation_ids_must_be_canonical() {
     ));
 }
 
-/// A sender certificate signed by a relay's domain key, with the keys a host checks it against.
+fn push_length_prefixed(transcript: &mut Vec<u8>, field: &[u8]) {
+    transcript.extend_from_slice(&(field.len() as u16).to_be_bytes());
+    transcript.extend_from_slice(field);
+}
+
+// The relay's authentication transcript: its context, protocol version, challenge nonce, and
+// identity signing key, then the relay domain, method, and request target, each after a big-endian
+// `u16` length, then the request body's SHA-256 digest. Nothing separates the context from what
+// follows it.
+fn relay_http_transcript(identity_signing_key: &[u8], body_digest: &[u8; 32]) -> Vec<u8> {
+    let mut transcript = RELAY_HTTP_AUTH_CONTEXT.to_vec();
+    transcript.extend_from_slice(&RELAY_PROTOCOL_VERSION.to_be_bytes());
+    transcript.extend_from_slice(&RELAY_CHALLENGE_NONCE);
+    transcript.extend_from_slice(identity_signing_key);
+    push_length_prefixed(&mut transcript, RELAY_DOMAIN);
+    push_length_prefixed(&mut transcript, RELAY_METHOD);
+    push_length_prefixed(&mut transcript, RELAY_REQUEST_TARGET);
+    transcript.extend_from_slice(body_digest);
+    transcript
+}
+
+/// The signature must cover the transcript bytes and nothing else.
+///
+/// The relay rebuilds the transcript alone and calls bare Ed25519 verify, so a context added on
+/// this side, as `sign_with_context` would add it, makes a preimage the relay never rebuilds. That
+/// signature would verify nowhere, and nothing at the boundary would say why.
+#[test]
+fn signed_authentication_transcript_verifies_bare_and_is_not_context_prefixed() {
+    let (context, identity) = created_identity();
+    let transcript = relay_http_transcript(&identity.key.signing_key, &RELAY_BODY_DIGEST);
+
+    let signature_bytes = context
+        .sign_authentication_transcript(transcript.clone())
+        .unwrap();
+
+    assert_eq!(signature_bytes.len(), 64);
+    let signature = signature_from(&signature_bytes);
+    let verifying = verifying_key(&identity);
+    verifying.verify_strict(&transcript, &signature).unwrap();
+    // The transcript's own context added again is the shape a contextual signature would have.
+    assert!(matches!(
+        verify_with_context(&verifying, RELAY_HTTP_AUTH_CONTEXT, &transcript, &signature),
+        Err(SignatureError::SignatureInvalid)
+    ));
+    for label in DOMAIN_REGISTRY {
+        assert!(matches!(
+            verify_with_context(&verifying, label.as_bytes(), &transcript, &signature),
+            Err(SignatureError::SignatureInvalid)
+        ));
+    }
+    // Ed25519 is deterministic, so an app that retries a challenge sends the same proof.
+    assert_eq!(
+        context.sign_authentication_transcript(transcript).unwrap(),
+        signature_bytes
+    );
+}
+
+/// The identity key signs identity bindings, discovery key bindings, and message transcripts, so
+/// signing any bytes the app passes would sign those preimages too. Each starts with `Roost`, which
+/// the export refuses in any letter case.
+#[test]
+fn sign_authentication_transcript_refuses_reserved_preimages_and_prefixes() {
+    let (context, identity) = created_identity();
+    let preimages = DOMAIN_REGISTRY.iter().map(|label| {
+        [
+            label.as_bytes(),
+            &identity.key.agreement_key,
+            &identity.key.signing_key,
+        ]
+        .concat()
+    });
+    let prefixed = ["Roost", "roost", "ROOST"]
+        .iter()
+        .map(|prefix| [prefix.as_bytes(), &[0x41; 32]].concat());
+
+    for transcript in preimages.chain(prefixed) {
+        let start = String::from_utf8_lossy(&transcript[..10]).into_owned();
+        assert!(
+            matches!(
+                context.sign_authentication_transcript(transcript),
+                Err(RoostError::InvalidData { .. })
+            ),
+            "expected InvalidData for a transcript starting {start}"
+        );
+    }
+}
+
+#[test]
+fn sign_authentication_transcript_requires_a_stored_identity() {
+    let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
+    match context.sign_authentication_transcript(RELAY_HTTP_AUTH_CONTEXT.to_vec()) {
+        Err(RoostError::NotFound) => {}
+        other => panic!("expected NotFound without an identity, got {other:?}"),
+    }
+}
+
+#[test]
+fn generate_identity_returns_ffi_safe_public_keys() {
+    let (_, identity) = created_identity();
+    assert_eq!(identity.key.agreement_key.len(), 32);
+    assert_eq!(identity.key.signing_key.len(), 32);
+    assert_eq!(identity.binding_signature.len(), 64);
+    verifying_key(&identity);
+    verify_public_identity_key(&public_identity_key(&identity)).unwrap();
+}
+
+#[test]
+fn current_publication_bundle_returns_verifiable_records() {
+    let context = published_identity();
+    let identity = context.identity().unwrap().unwrap();
+    let publication = context.current_publication().unwrap();
+    assert_publication_verifies(&identity, &publication);
+}
+
+#[test]
+fn replenish_one_time_prekeys_returns_public_records() {
+    let context = published_identity();
+    let epoch = context.current_publication().unwrap().discovery_key.epoch;
+    let replenished = context.prepare_one_time_prekey_replenishment().unwrap();
+    complete(&context, replenished.operation_id);
+
+    assert_eq!(replenished.one_time_prekeys.len(), 100);
+    for one_time_prekey in &replenished.one_time_prekeys {
+        assert_one_time_prekey_record(one_time_prekey, epoch);
+    }
+    let again = context.prepare_one_time_prekey_replenishment().unwrap();
+    complete(&context, again.operation_id);
+    assert!(again.one_time_prekeys.is_empty());
+}
+
+fn signature_from(bytes: &[u8]) -> Signature {
+    Signature::from_bytes(&<[u8; 64]>::try_from(bytes).unwrap())
+}
+
+fn verifying_key(identity: &Identity) -> VerifyingKey {
+    VerifyingKey::from_bytes(&<[u8; 32]>::try_from(identity.key.signing_key.as_slice()).unwrap())
+        .unwrap()
+}
+
+fn public_identity_key(identity: &Identity) -> CryptoPublicIdentityKey {
+    CryptoPublicIdentityKey::from_bytes(
+        &identity.key.agreement_key,
+        &identity.key.signing_key,
+        &identity.binding_signature,
+    )
+    .unwrap()
+}
+
+fn public_discovery_key(discovery_key: &PublicDiscoveryKey) -> CryptoPublicDiscoveryKey {
+    CryptoPublicDiscoveryKey::from_bytes(
+        &discovery_key.public_key,
+        &discovery_key.verifying_key,
+        discovery_key.epoch,
+        discovery_key.created_at_millis / 1_000,
+        &discovery_key.signature,
+    )
+    .unwrap()
+}
+
+fn public_signed_prekey(signed_prekey: &PublicSignedPreKey) -> CryptoPublicSignedPreKey {
+    CryptoPublicSignedPreKey {
+        id: signed_prekey.id,
+        public_key: PublicKey::from(
+            <[u8; 32]>::try_from(signed_prekey.public_key.as_slice()).unwrap(),
+        ),
+        signature: signature_from(&signed_prekey.signature),
+        epoch: signed_prekey.epoch,
+        created_at_secs: signed_prekey.created_at_millis / 1_000,
+    }
+}
+
+fn assert_publication_verifies(identity: &Identity, publication: &PublicationBundle) {
+    let discovery_key = public_discovery_key(&publication.discovery_key);
+    verify_public_discovery_key(&discovery_key, &verifying_key(identity)).unwrap();
+    verify_public_signed_prekey(
+        &public_signed_prekey(&publication.signed_prekey),
+        &discovery_key.verifying_key,
+    )
+    .unwrap();
+    let identity_key = public_identity_key(identity);
+    verify_discovery_to_identity_binding(
+        &identity_key.public_key,
+        &identity_key.verifying_key,
+        &discovery_key.verifying_key,
+        &signature_from(&publication.discovery_to_identity),
+    )
+    .unwrap();
+}
+
+fn assert_one_time_prekey_record(one_time_prekey: &PublicOneTimePreKey, epoch: u32) {
+    assert_eq!(one_time_prekey.public_key.len(), 32);
+    assert_eq!(one_time_prekey.epoch, epoch);
+}
+
+/// A sender certificate signed by a relay's domain key, with the keys an app checks it against.
 struct IssuedCertificate {
     identity_key: IdentityKey,
     certificate: Vec<u8>,
@@ -252,7 +527,6 @@ fn expired_sender_certificate_validates_only_within_the_passed_grace() {
 fn certificate_grace_above_five_minutes_is_refused() {
     let signed = IssuedCertificate::new();
     let context = IdentityContext::new(Arc::new(MemoryStorage::default()));
-
     assert!(matches!(
         signed.validate_at(&context, CERTIFICATE_EXPIRES_AT_MILLIS, 300_001),
         Err(RoostError::InvalidData { .. })

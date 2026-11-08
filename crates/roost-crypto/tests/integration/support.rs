@@ -51,7 +51,6 @@ pub(crate) fn bootstrap(
     let one_time_prekey_bundle =
         include_one_time_prekey.then(|| setup.bob_one_time_prekey.as_ref().unwrap().public());
     let prekey_bundle = PreKeyBundle {
-        version: roost_crypto::PREKEY_BUNDLE_VERSION,
         discovery_key: setup.bob_discovery_key.public(),
         signed_prekey: setup.bob_signed_prekey.public(),
         one_time_prekey: one_time_prekey_bundle,

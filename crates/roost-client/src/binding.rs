@@ -1,25 +1,17 @@
-//! Standalone IK/DK binding verification exposed through UniFFI.
+//! Standalone checks of the signatures that bind an identity key and a discovery key.
 //!
-//! Roost checks both directions of the mutual binding on every path that starts a session or takes
-//! an inbox grant. Apart from decoding a contact publication, neither is reachable from a binding
-//! without this module. A request checks them only once the app holds a whole prekey bundle. A
-//! client that looks someone up from a typed discovery key must decide whether the identity a relay
-//! answered with is the one that discovery key vouches for *before* it asks them.
-//!
-//! The functions here take public material only and return nothing but a verdict, so they are not
-//! a signing oracle. They are not a general Ed25519 verification oracle either: each one fixes its
-//! own context and rebuilds the payload from the identity key it was handed, so a caller chooses
-//! neither the context nor the shape of the signed bytes.
+//! Each check fixes its own signature context and rebuilds the signed bytes from the keys it's
+//! given, so the app can't make one check accept another kind of signature.
 
 use crate::encoding::{fixed_32, fixed_64};
 use crate::error::RoostError;
 use crate::identity::{Identity, IdentityKey};
 use roost_core::{
-    PublicIdentityKey as CorePublicIdentityKey, Signature,
+    PublicKey, Signature,
     verify_discovery_to_identity_binding as crypto_verify_discovery_to_identity_binding,
     verify_public_identity_key,
 };
-use roost_protocol::parse_ed25519_verifying_key_bytes;
+use roost_protocol::{is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes};
 
 /// Verifies that an identity's binding signature ties its agreement key to its signing key.
 ///
@@ -41,59 +33,48 @@ pub fn verify_identity_key_binding(identity: Identity) -> Result<(), RoostError>
 
 /// Verifies that `discovery_verifying_key` signed `identity`'s two public keys.
 ///
-/// This check is the whole security of adding a contact by discovery key: the relay answers a
-/// lookup with an identity, and nothing else shows that the discovery key authorized it. Pass the
-/// discovery key the user typed, never one read from the response being checked. The signature
-/// doesn't cover the identity's own binding signature, so check that with
-/// [`verify_identity_key_binding`] too.
+/// Adding a contact by discovery key relies on this check alone. The relay answers a lookup with an
+/// identity, and nothing else shows that the discovery key authorized it. Pass the discovery key
+/// the user typed, never one read from the response being checked. The signature doesn't cover the
+/// identity's own binding signature, so check that with [`verify_identity_key_binding`] too.
 ///
 /// # Errors
 /// - [`RoostError::AuthenticationFailed`] if the signature doesn't verify, including a valid
 ///   signature made for the identity's own binding.
-/// - [`RoostError::InvalidData`] if a key isn't 32 bytes, the signature isn't 64, or either
-///   signing key isn't a canonically encoded, non-weak point.
+/// - [`RoostError::InvalidData`] if a key isn't 32 bytes, the signature isn't 64, the agreement
+///   key is low order or not canonically encoded, or either signing key isn't a canonically
+///   encoded, non-weak point.
 #[uniffi::export]
 pub fn verify_discovery_to_identity_binding(
     identity: IdentityKey,
     discovery_verifying_key: Vec<u8>,
     signature: Vec<u8>,
 ) -> Result<(), RoostError> {
-    let identity = binding_payload_identity_key(&identity)?;
+    let identity = identity.to_core()?;
+    if !is_valid_x25519_public_key(&identity.x25519_public_key) {
+        return Err(invalid_key("identity x25519 public key"));
+    }
+    let identity_verifying_key = parse_ed25519_verifying_key_bytes(&identity.ed25519_verifying_key)
+        .ok_or_else(|| invalid_key("identity ed25519 verifying key"))?;
     let discovery_verifying_key = parse_ed25519_verifying_key_bytes(&fixed_32(
         &discovery_verifying_key,
         "discovery ed25519 verifying key",
     )?)
-    .ok_or_else(|| RoostError::InvalidData {
-        reason: "discovery ed25519 verifying key is not a canonical, non-weak point".into(),
-    })?;
+    .ok_or_else(|| invalid_key("discovery ed25519 verifying key"))?;
     let signature =
         Signature::from_bytes(&fixed_64(&signature, "discovery to identity signature")?);
     Ok(crypto_verify_discovery_to_identity_binding(
-        &identity,
+        &PublicKey::from(identity.x25519_public_key),
+        &identity_verifying_key,
         &discovery_verifying_key,
         &signature,
     )?)
 }
 
-/// Builds the public identity key the discovery key's verifier takes from an identity key that
-/// carries no signature.
-///
-/// [`crypto_verify_discovery_to_identity_binding`] reads exactly two fields of the key, the
-/// X25519 and Ed25519 halves, because those two are the entire signed payload. The signature slot
-/// is filled with zeros and is never read — it belongs to the *other* direction, and a caller who
-/// wants that direction checked calls [`verify_identity_key_binding`], which reads a real one. The
-/// zeros are here so this function cannot be mistaken for having checked something it did not.
-fn binding_payload_identity_key(
-    identity: &IdentityKey,
-) -> Result<CorePublicIdentityKey, RoostError> {
-    const UNREAD_BINDING_SIGNATURE: [u8; 64] = [0u8; 64];
-
-    let key = identity.to_core()?;
-    Ok(CorePublicIdentityKey::from_bytes(
-        &key.x25519_public_key,
-        &key.ed25519_verifying_key,
-        &UNREAD_BINDING_SIGNATURE,
-    )?)
+fn invalid_key(label: &str) -> RoostError {
+    RoostError::InvalidData {
+        reason: format!("{label} is not a canonical, non-weak point"),
+    }
 }
 
 #[cfg(test)]
@@ -119,8 +100,8 @@ mod tests {
     }
 
     // Signs `fixed_identity()` with the discovery signing key, as a peer's discovery key does.
-    // The DK→IK signature covers only the identity's two public halves, so the discovery key's
-    // other fields and the identity's own binding signature take placeholder values.
+    // The signature covers only the identity's two public halves, so the discovery key's other
+    // fields and the identity's own binding signature take placeholder values.
     fn discovery_to_identity_signature() -> Vec<u8> {
         let identity = PublicIdentityKey {
             public_key: IDENTITY_X25519.into(),
@@ -168,10 +149,7 @@ mod tests {
         }
     }
 
-    /// `RoostIKBinding-v1:` and `RoostDKToIK-v1:` sign a byte-identical 64-byte payload, so only
-    /// the context separates them. Exporting the two directions as one function that took a
-    /// caller-chosen context would have handed that separation to the caller; exporting them as two
-    /// functions that each fix their own is what keeps it here.
+    /// Both bindings sign the same 64 bytes, so only their contexts tell them apart.
     #[test]
     fn the_two_identity_contexts_do_not_accept_each_others_signatures() {
         let identity_signing = SigningKeyPair::from_signing_bytes(&IDENTITY_SIGNING_SECRET);
@@ -190,8 +168,8 @@ mod tests {
             other => panic!("expected AuthenticationFailed across contexts, got {other:?}"),
         }
 
-        // And the DK→IK signature must not pass as a self-binding, checked under the discovery key
-        // that made it, so that only the context can be what rejects it.
+        // The discovery key's signature must not pass as the identity's own binding either, even
+        // under the discovery key that made it, so only the context rejects it.
         match verify_identity_key_binding(Identity {
             key: IdentityKey {
                 agreement_key: IDENTITY_X25519.to_vec(),
@@ -204,9 +182,8 @@ mod tests {
         }
     }
 
-    /// The substitution the DK→IK check exists to catch: a relay answers a discovery-key lookup
-    /// with an identity of its own, correctly self-bound, that the typed discovery key never
-    /// signed.
+    /// A relay answers a discovery key lookup with an identity of its own, correctly self-bound,
+    /// that the typed discovery key never signed.
     #[test]
     fn a_substituted_identity_fails_against_the_typed_discovery_key() {
         let impostor = SigningKeyPair::from_signing_bytes(&[0x44; 32]);
@@ -216,14 +193,14 @@ mod tests {
         };
         let self_binding = sign_identity_key_binding(&impostor, &IDENTITY_X25519.into()).unwrap();
 
-        // The impostor's own self-binding holds — substitution does not fail here.
+        // The impostor's own binding verifies.
         verify_identity_key_binding(Identity {
             key: impostor_identity.clone(),
             binding_signature: self_binding.to_bytes().to_vec(),
         })
         .expect("a self-consistent impostor identity self-binds");
 
-        // It fails here, which is the only place it can.
+        // Only the discovery key's signature catches it.
         match verify_discovery_to_identity_binding(
             impostor_identity,
             discovery_verifying_key(),
@@ -265,10 +242,7 @@ mod tests {
                     discovery_to_identity_signature(),
                 ),
             ),
-            // A small-order key is the one that is not merely malformed: signatures under it
-            // verify for keys nobody controls, so an export that accepted one would report a
-            // binding that binds nothing. Every other Roost entry point refuses it, and this one
-            // has to as well — it is the entry point that takes a key straight from a relay.
+            // A weak key verifies signatures nobody made, so a binding under one binds nothing.
             (
                 "weak discovery key",
                 verify_discovery_to_identity_binding(
