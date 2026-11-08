@@ -39,7 +39,8 @@ pub enum OneTimePreKeyError {
     /// The internal storage lock was poisoned by a panicked thread.
     #[error("internal lock poisoned")]
     LockPoisoned,
-    /// The requested one-time prekey was never created.
+    /// The pool holds no one-time prekey with the requested ID, or the one it holds has another
+    /// public key.
     #[error("one-time prekey not found")]
     NotFound,
     /// The requested one-time prekey belongs to another discovery key epoch than the pool.
