@@ -422,8 +422,7 @@ fn bullet(line: &str) -> Option<&str> {
     skip_space(after_star(line)?).strip_prefix("- ")
 }
 
-// UniFFI strips indentation, so a wrapped bullet continues on any following non-blank line that
-// doesn't start a new bullet, heading, or code fence.
+// UniFFI strips the indent from a wrapped bullet line.
 fn continuation(line: &str) -> Option<&str> {
     let after = after_star(line)?;
     let text = after.trim_start();
