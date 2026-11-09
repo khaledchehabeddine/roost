@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
 
 rm -rf target/android
 rustup target add aarch64-linux-android
