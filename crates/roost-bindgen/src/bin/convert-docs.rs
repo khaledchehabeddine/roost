@@ -6,7 +6,6 @@ use std::fs;
 use std::path::Path;
 use std::process::ExitCode;
 
-// The directory of the Rust sources whose doc comments UniFFI copies into the bindings.
 const SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../roost-client/src");
 
 #[derive(Clone, Copy, PartialEq)]
@@ -52,7 +51,6 @@ fn usage() -> ExitCode {
     ExitCode::FAILURE
 }
 
-// Returns the text of every Rust file in `dir` and its subdirectories.
 fn read_sources(dir: &Path) -> Result<String, String> {
     let read_error = |path: &Path, error| format!("{}: {error}", path.display());
     let mut sources = String::new();
@@ -79,7 +77,6 @@ fn convert(binding: &str, language: Language, sources: &str) -> Result<String, S
     Ok(converted)
 }
 
-// Returns the lines of each code block in the sources' `///` comments.
 fn doc_blocks(sources: &str) -> Vec<Vec<&str>> {
     let mut blocks = Vec::new();
     let mut block: Option<Vec<&str>> = None;
@@ -101,14 +98,12 @@ fn doc_blocks(sources: &str) -> Vec<Vec<&str>> {
     blocks
 }
 
-// Returns the converted lines, each with its line number in the binding.
 fn filter_examples_and_links(
     binding: &str,
     language: Language,
     examples: &[Vec<&str>],
 ) -> Result<Vec<(usize, String)>, String> {
     let mut kept = Vec::new();
-    // The open block's fence line number, and whether this language keeps the block.
     let mut open: Option<(usize, bool)> = None;
     let mut block: Vec<(usize, &str)> = Vec::new();
     for (index, line) in binding.lines().enumerate() {
@@ -148,7 +143,6 @@ fn filter_examples_and_links(
     Ok(kept)
 }
 
-// Returns an example's lines with the indentation of the source example that matches them.
 fn restore_indentation(
     block: &[(usize, &str)],
     examples: &[Vec<&str>],
@@ -173,7 +167,6 @@ fn restore_indentation(
     Some(restored.collect())
 }
 
-// Rewrites each code span of snake case names joined by dots to lower camel case.
 fn rewrite_code_spans(line: &str) -> String {
     let parts: Vec<&str> = line.split('`').collect();
     let spans = parts.iter().enumerate().map(|(index, part)| {
@@ -298,7 +291,6 @@ fn move_errors_to_throws(
     language: Language,
 ) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
-    // The heading's line number, its prefix, and its bullets.
     let mut pending = None;
     let mut i = 0;
     while i < lines.len() {
