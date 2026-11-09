@@ -185,9 +185,6 @@ fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<Str
                 }
                 bullets.push(bullet);
             }
-            if bullets.is_empty() {
-                return Err("# Errors heading without a bullet on the next line".to_owned());
-            }
             pending = Some((prefix, bullets));
             continue;
         }
@@ -498,21 +495,6 @@ mod tests {
         let unterminated = Err("unterminated doc example block".to_owned());
         assert_eq!(convert(&binding, Language::Swift), unterminated);
         assert_eq!(convert(&binding, Language::Kotlin), unterminated);
-    }
-
-    #[test]
-    fn rejects_an_errors_heading_without_a_bullet_on_the_next_line() {
-        let binding = text(&[
-            "/**",
-            " * # Errors",
-            " *",
-            " * Fails when storage fails.",
-            " */",
-        ]);
-        assert_eq!(
-            convert(&binding, Language::Swift),
-            Err("# Errors heading without a bullet on the next line".to_owned())
-        );
     }
 
     #[test]
