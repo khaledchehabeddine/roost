@@ -244,7 +244,6 @@ fn throws_lines(
     Ok(lines)
 }
 
-// Splits a Kotlin bullet such as `[A] or [B] if …` into its error names and its condition.
 fn error_names(text: &str) -> Option<(Vec<&str>, &str)> {
     let (first, mut rest) = leading_name(text)?;
     let mut names = vec![first];
@@ -278,7 +277,6 @@ fn drop_extra_blank_lines(lines: Vec<String>) -> Vec<String> {
     kept
 }
 
-// Returns the text after the `*` of a comment line such as `     * text`.
 fn after_star(line: &str) -> Option<&str> {
     line.trim_start().strip_prefix('*')
 }
@@ -299,14 +297,12 @@ fn is_comment_end(line: &str) -> bool {
     after_star(line).is_some_and(|text| text.starts_with('/'))
 }
 
-// Returns a code fence's language tag, which is empty for a closing fence.
 fn fence_tag(line: &str) -> Option<&str> {
     let fence = skip_space(after_star(line)?).strip_prefix("```")?;
     let end = fence.find(|c: char| !is_word(c)).unwrap_or(fence.len());
     fence[end..].trim().is_empty().then(|| &fence[..end])
 }
 
-// Returns the `     *` that starts an `# Errors` heading.
 fn errors_heading(line: &str) -> Option<&str> {
     let text = after_star(line)?;
     (skip_space(text).trim_end() == "# Errors").then(|| &line[..line.len() - text.len()])
@@ -316,9 +312,8 @@ fn bullet(line: &str) -> Option<&str> {
     skip_space(after_star(line)?).strip_prefix("- ")
 }
 
-// Returns the text of a line that continues the bullet above it. UniFFI strips indentation, so a
-// wrapped bullet continues on any following non-blank line that doesn't start a new bullet,
-// heading, or code fence.
+// UniFFI strips indentation, so a wrapped bullet continues on any following non-blank line that
+// doesn't start a new bullet, heading, or code fence.
 fn continuation(line: &str) -> Option<&str> {
     let after = after_star(line)?;
     let text = after.trim_start();
