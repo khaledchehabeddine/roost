@@ -25,12 +25,6 @@ jobs:
       - run: scripts/build-android.sh
       - run: scripts/build-ios.sh
 
-      - name: Publish to roost-kotlin
-        env:
-          ORG_GRADLE_PROJECT_GitHubPackagesUsername: ${{ github.actor }}
-          ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ secrets.KOTLIN_PUBLISH_TOKEN }}
-        run: gradle -p android publishReleasePublicationToGitHubPackagesRepository
-
       - uses: actions/checkout@v7
         with:
           repository: ${{ env.GH_REPO }}
@@ -55,7 +49,12 @@ jobs:
           git add Package.swift Sources/Roost/Roost.swift
           git commit -m "chore: release Roost $TAG"
           git push origin "HEAD:refs/tags/$TAG"
-      - name: Publish roost-swift
+      - name: Publish to roost-kotlin
+        env:
+          ORG_GRADLE_PROJECT_GitHubPackagesUsername: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ secrets.KOTLIN_PUBLISH_TOKEN }}
+        run: gradle -p android publishReleasePublicationToGitHubPackagesRepository
+      - name: Publish to roost-swift
         env:
           GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
         run: gh release edit "$TAG" --draft=false
