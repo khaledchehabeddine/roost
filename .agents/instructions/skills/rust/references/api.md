@@ -37,7 +37,7 @@ fn derive_example_key(secret: &[u8; 32]) -> ExampleKey {
 
 ## Errors
 
-- Give each module or operation an error enum that lists only the failures it can return.
+- In a library crate, give each module or operation an error enum that lists only the failures it can return.
 - Derive `Display`, `Error`, and `From` with `thiserror`.
 - Wrap a lower-level error with `#[from]` or `#[source]`, and keep its message out of the outer message.
 

@@ -2,11 +2,11 @@
 //!
 //! UniFFI copies Rust doc comments into Swift and Kotlin unchanged. For the given language this:
 //!
-//! - keeps only that language's `swift` or `kotlin` example blocks;
-//! - rewrites rustdoc links to the names the binding exposes: ``[`RoostError::InvalidData`]``
-//!   becomes `` `RoostError.InvalidData` `` in Swift and `[RoostException.InvalidData]` in Kotlin,
-//!   and ``[`Self::reserve_operation`]`` becomes `reserveOperation`;
-//! - turns a `# Errors` section into Swift's `- Throws:` field or Kotlin's `@throws` tags at the end
+//! - Keeps only that language's `swift` or `kotlin` example blocks.
+//! - Rewrites rustdoc links to the names the binding exposes. For example,
+//!   ``[`RoostError::InvalidData`]`` becomes `` `RoostError.InvalidData` `` in Swift and
+//!   `[RoostException.InvalidData]` in Kotlin.
+//! - Turns a `# Errors` section into Swift's `- Throws:` field or Kotlin's `@throws` tags at the end
 //!   of the comment.
 //!
 //! Usage: `convert-docs <swift|kotlin> <binding>` rewrites the binding in place.
@@ -59,7 +59,8 @@ fn usage() -> ExitCode {
 
 fn convert(binding: &str, language: Language) -> Result<String, String> {
     let lines = filter_examples_and_links(binding, language)?;
-    let mut converted = move_errors_to_throws(&lines, language)?.join("\n");
+    let lines = move_errors_to_throws(&lines, language)?;
+    let mut converted = drop_extra_blank_lines(lines).join("\n");
     if binding.ends_with('\n') {
         converted.push('\n');
     }
@@ -70,7 +71,6 @@ fn filter_examples_and_links(binding: &str, language: Language) -> Result<Vec<St
     let mut kept: Vec<String> = Vec::new();
     let mut skipping = false;
     let mut in_block = false;
-    let mut skipped_block = false;
     for line in binding.lines() {
         let fence = fence_tag(line);
         if skipping {
@@ -82,15 +82,8 @@ fn filter_examples_and_links(binding: &str, language: Language) -> Result<Vec<St
             .is_some_and(|tag| tag != language)
         {
             skipping = true;
-            skipped_block = true;
             continue;
         }
-        // Dropping a block between two blank lines would leave them adjacent, so skip the second.
-        if skipped_block && is_blank(line) && kept.last().is_some_and(|last| is_blank(last)) {
-            skipped_block = false;
-            continue;
-        }
-        skipped_block = false;
         if fence.is_some() {
             in_block = !in_block;
         } else if is_doc_text(line) && !in_block {
@@ -193,10 +186,6 @@ fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<Str
         let line = &lines[i];
         if let Some(prefix) = errors_heading(line) {
             i += 1;
-            // Rustdoc style often leaves a blank line after the heading.
-            while lines.get(i).is_some_and(|line| is_blank(line)) {
-                i += 1;
-            }
             let mut bullets = Vec::new();
             while let Some(first) = lines.get(i).and_then(|line| bullet(line)) {
                 let mut bullet = vec![first];
@@ -208,14 +197,7 @@ fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<Str
                 bullets.push(bullet);
             }
             if bullets.is_empty() {
-                return Err("# Errors section without bullets".to_owned());
-            }
-            // Moving the section out would leave a doubled blank line, or one before `*/`.
-            let section_ends = lines
-                .get(i)
-                .is_none_or(|next| is_blank(next) || is_comment_end(next));
-            if section_ends && out.last().is_some_and(|last| is_blank(last)) {
-                out.pop();
+                return Err("# Errors heading without a bullet on the next line".to_owned());
             }
             pending = Some((prefix, bullets));
             continue;
@@ -292,6 +274,21 @@ fn leading_name(text: &str) -> Option<(&str, &str)> {
     let (name, rest) = text.strip_prefix('[')?.split_once(']')?;
     let valid = !name.is_empty() && name.chars().all(|c| is_word(c) || c == '.');
     valid.then_some((name, rest))
+}
+
+/// Drops a blank doc line that follows another or comes before `*/`, which removing an example
+/// or an `# Errors` section can leave.
+fn drop_extra_blank_lines(lines: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for line in lines {
+        if (is_blank(&line) || is_comment_end(&line))
+            && kept.last().is_some_and(|last| is_blank(last))
+        {
+            kept.pop();
+        }
+        kept.push(line);
+    }
+    kept
 }
 
 // A comment line looks like `     * text`. These helpers read the text after its `*`.
@@ -382,7 +379,6 @@ mod tests {
             " * ```swift",
             " * let operations = try context.unfinishedOperations()",
             " * ```",
-            " *",
             " */",
         ]);
         let kotlin = text(&[
@@ -525,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_errors_section_without_bullets() {
+    fn rejects_an_errors_heading_without_a_bullet_on_the_next_line() {
         let binding = text(&[
             "/**",
             " * # Errors",
@@ -535,7 +531,7 @@ mod tests {
         ]);
         assert_eq!(
             convert(&binding, Language::Swift),
-            Err("# Errors section without bullets".to_owned())
+            Err("# Errors heading without a bullet on the next line".to_owned())
         );
     }
 
