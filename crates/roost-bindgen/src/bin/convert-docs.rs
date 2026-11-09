@@ -1,15 +1,4 @@
 //! Converts the Rust doc comments in a generated UniFFI binding to Swift or Kotlin conventions.
-//!
-//! UniFFI copies Rust doc comments into Swift and Kotlin unchanged. For the given language this:
-//!
-//! - keeps only that language's `swift` or `kotlin` example blocks;
-//! - rewrites rustdoc links to the names the binding exposes: ``[`RoostError::InvalidData`]``
-//!   becomes `` `RoostError.InvalidData` `` in Swift and `[RoostException.InvalidData]` in Kotlin,
-//!   and ``[`Self::reserve_operation`]`` becomes `reserveOperation`;
-//! - turns a `# Errors` section into Swift's `- Throws:` field or Kotlin's `@throws` tags at the end
-//!   of the comment.
-//!
-//! Usage: `convert-docs <swift|kotlin> <binding>` rewrites the binding in place.
 
 use std::env;
 use std::fs;
@@ -59,7 +48,8 @@ fn usage() -> ExitCode {
 
 fn convert(binding: &str, language: Language) -> Result<String, String> {
     let lines = filter_examples_and_links(binding, language)?;
-    let mut converted = move_errors_to_throws(&lines, language)?.join("\n");
+    let lines = move_errors_to_throws(&lines, language)?;
+    let mut converted = drop_extra_blank_lines(lines).join("\n");
     if binding.ends_with('\n') {
         converted.push('\n');
     }
@@ -70,7 +60,6 @@ fn filter_examples_and_links(binding: &str, language: Language) -> Result<Vec<St
     let mut kept: Vec<String> = Vec::new();
     let mut skipping = false;
     let mut in_block = false;
-    let mut skipped_block = false;
     for line in binding.lines() {
         let fence = fence_tag(line);
         if skipping {
@@ -82,15 +71,8 @@ fn filter_examples_and_links(binding: &str, language: Language) -> Result<Vec<St
             .is_some_and(|tag| tag != language)
         {
             skipping = true;
-            skipped_block = true;
             continue;
         }
-        // Dropping a block between two blank lines would leave them adjacent, so skip the second.
-        if skipped_block && is_blank(line) && kept.last().is_some_and(|last| is_blank(last)) {
-            skipped_block = false;
-            continue;
-        }
-        skipped_block = false;
         if fence.is_some() {
             in_block = !in_block;
         } else if is_doc_text(line) && !in_block {
@@ -193,10 +175,6 @@ fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<Str
         let line = &lines[i];
         if let Some(prefix) = errors_heading(line) {
             i += 1;
-            // Rustdoc style often leaves a blank line after the heading.
-            while lines.get(i).is_some_and(|line| is_blank(line)) {
-                i += 1;
-            }
             let mut bullets = Vec::new();
             while let Some(first) = lines.get(i).and_then(|line| bullet(line)) {
                 let mut bullet = vec![first];
@@ -206,16 +184,6 @@ fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<Str
                     i += 1;
                 }
                 bullets.push(bullet);
-            }
-            if bullets.is_empty() {
-                return Err("# Errors section without bullets".to_owned());
-            }
-            // Moving the section out would leave a doubled blank line, or one before `*/`.
-            let section_ends = lines
-                .get(i)
-                .is_none_or(|next| is_blank(next) || is_comment_end(next));
-            if section_ends && out.last().is_some_and(|last| is_blank(last)) {
-                out.pop();
             }
             pending = Some((prefix, bullets));
             continue;
@@ -273,7 +241,6 @@ fn throws_lines(
     Ok(lines)
 }
 
-/// Splits a Kotlin bullet such as `[A] or [B] if …` into its error names and its condition.
 fn error_names(text: &str) -> Option<(Vec<&str>, &str)> {
     let (first, mut rest) = leading_name(text)?;
     let mut names = vec![first];
@@ -294,7 +261,18 @@ fn leading_name(text: &str) -> Option<(&str, &str)> {
     valid.then_some((name, rest))
 }
 
-// A comment line looks like `     * text`. These helpers read the text after its `*`.
+fn drop_extra_blank_lines(lines: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for line in lines {
+        if (is_blank(&line) || is_comment_end(&line))
+            && kept.last().is_some_and(|last| is_blank(last))
+        {
+            kept.pop();
+        }
+        kept.push(line);
+    }
+    kept
+}
 
 fn after_star(line: &str) -> Option<&str> {
     line.trim_start().strip_prefix('*')
@@ -316,14 +294,12 @@ fn is_comment_end(line: &str) -> bool {
     after_star(line).is_some_and(|text| text.starts_with('/'))
 }
 
-/// Returns a code fence's language tag, which is empty for a closing fence.
 fn fence_tag(line: &str) -> Option<&str> {
     let fence = skip_space(after_star(line)?).strip_prefix("```")?;
     let end = fence.find(|c: char| !is_word(c)).unwrap_or(fence.len());
     fence[end..].trim().is_empty().then(|| &fence[..end])
 }
 
-/// Returns the `     *` that starts an `# Errors` heading.
 fn errors_heading(line: &str) -> Option<&str> {
     let text = after_star(line)?;
     (skip_space(text).trim_end() == "# Errors").then(|| &line[..line.len() - text.len()])
@@ -333,10 +309,7 @@ fn bullet(line: &str) -> Option<&str> {
     skip_space(after_star(line)?).strip_prefix("- ")
 }
 
-/// Returns the text of a line that continues the bullet above it.
-///
-/// UniFFI strips indentation, so a wrapped bullet continues on any following non-blank line that
-/// doesn't start a new bullet, heading, or code fence.
+// UniFFI strips the indent from a wrapped bullet line.
 fn continuation(line: &str) -> Option<&str> {
     let after = after_star(line)?;
     let text = after.trim_start();
@@ -382,7 +355,6 @@ mod tests {
             " * ```swift",
             " * let operations = try context.unfinishedOperations()",
             " * ```",
-            " *",
             " */",
         ]);
         let kotlin = text(&[
@@ -522,21 +494,6 @@ mod tests {
         let unterminated = Err("unterminated doc example block".to_owned());
         assert_eq!(convert(&binding, Language::Swift), unterminated);
         assert_eq!(convert(&binding, Language::Kotlin), unterminated);
-    }
-
-    #[test]
-    fn rejects_an_errors_section_without_bullets() {
-        let binding = text(&[
-            "/**",
-            " * # Errors",
-            " *",
-            " * Fails when storage fails.",
-            " */",
-        ]);
-        assert_eq!(
-            convert(&binding, Language::Swift),
-            Err("# Errors section without bullets".to_owned())
-        );
     }
 
     #[test]

@@ -64,4 +64,4 @@ This list describes what Roost does today. Each feature gets one to three senten
 ## Algorithms and Packages
 
 - **Use standard algorithms.** Roost uses standard algorithms from established libraries, such as X25519, Ed25519, XChaCha20-Poly1305, HKDF, BLAKE3, and Argon2id.
-- **Ship Swift and Kotlin packages.** Each release ships a Swift package and a Maven package for Android, both built for arm64 only. The Swift package pins its XCFramework by checksum.
+- **Ship Swift and Kotlin packages.** Each release ships a Swift package and a Maven package for Android, both built for arm64 only. The Swift package pins its XCFramework by checksum. The documentation in each package uses that language's names, examples, and format for thrown errors.
