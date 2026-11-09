@@ -25,17 +25,12 @@ jobs:
       - run: scripts/build-android.sh
       - run: scripts/build-ios.sh
 
-      - name: Publish to roost-kotlin
-        env:
-          ORG_GRADLE_PROJECT_GitHubPackagesUsername: ${{ github.actor }}
-          ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ secrets.KOTLIN_PUBLISH_TOKEN }}
-        run: gradle -p android publishReleasePublicationToGitHubPackagesRepository
-
       - uses: actions/checkout@v7
         with:
           repository: ${{ env.GH_REPO }}
           token: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
           path: roost-swift
+          persist-credentials: false
       - name: Tag roost-swift
         working-directory: roost-swift
         env:
@@ -54,7 +49,13 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Package.swift Sources/Roost/Roost.swift
           git commit -m "chore: release Roost $TAG"
-          git push origin "HEAD:refs/tags/$TAG"
+          git push "https://x-access-token:$GH_TOKEN@github.com/$GH_REPO.git" "HEAD:refs/tags/$TAG"
+      # GitHub Packages accepts each version once, so Kotlin publishes after the roost-swift draft and tag.
+      - name: Publish to roost-kotlin
+        env:
+          ORG_GRADLE_PROJECT_GitHubPackagesUsername: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ secrets.KOTLIN_PUBLISH_TOKEN }}
+        run: gradle -p android publishReleasePublicationToGitHubPackagesRepository
       - name: Publish roost-swift
         env:
           GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
