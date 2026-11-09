@@ -50,7 +50,6 @@ jobs:
           git add Package.swift Sources/Roost/Roost.swift
           git commit -m "chore: release Roost $TAG"
           git push "https://x-access-token:$GH_TOKEN@github.com/$GH_REPO.git" "HEAD:refs/tags/$TAG"
-      # GitHub Packages accepts each version once, so Kotlin publishes after the roost-swift draft and tag.
       - name: Publish to roost-kotlin
         env:
           ORG_GRADLE_PROJECT_GitHubPackagesUsername: ${{ github.actor }}
