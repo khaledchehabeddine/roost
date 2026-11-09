@@ -1,9 +1,4 @@
 //! Converts the Rust doc comments in a generated UniFFI binding to Swift or Kotlin conventions.
-//!
-//! Keeps only the given language's examples, rewrites rustdoc links to the names the binding
-//! exposes, and moves each `# Errors` section to the end of its comment as Swift's `- Throws:`
-//! field or Kotlin's `@throws` tags. `convert-docs <swift|kotlin> <binding>` rewrites the binding
-//! in place.
 
 use std::env;
 use std::fs;
