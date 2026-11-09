@@ -312,11 +312,6 @@ fn move_errors_to_throws(
                 }
                 bullets.push(bullet);
             }
-            if bullets.is_empty() {
-                return Err(format!(
-                    "line {number}: # Errors heading without a bullet on the next line"
-                ));
-            }
             pending = Some((*number, prefix, bullets));
             continue;
         }
@@ -766,21 +761,6 @@ mod tests {
         assert_eq!(
             convert(&binding, Language::Swift, ""),
             Err("line 2: code fence with more than a language tag: swift title".to_owned())
-        );
-    }
-
-    #[test]
-    fn rejects_an_errors_heading_without_a_bullet_on_the_next_line() {
-        let binding = text(&[
-            "/**",
-            " * # Errors",
-            " *",
-            " * Fails when storage fails.",
-            " */",
-        ]);
-        assert_eq!(
-            convert(&binding, Language::Swift, ""),
-            Err("line 2: # Errors heading without a bullet on the next line".to_owned())
         );
     }
 
