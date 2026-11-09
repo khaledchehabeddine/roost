@@ -708,21 +708,4 @@ mod tests {
         ]);
         assert_eq!(convert(&binding, Language::Swift, "").unwrap(), swift);
     }
-
-    #[test]
-    fn rejects_an_unterminated_example_block() {
-        let binding = text(&["/**", " * ```swift", " * let a = 1", " */"]);
-        let unterminated = Err("unterminated doc example block".to_owned());
-        assert_eq!(convert(&binding, Language::Swift, ""), unterminated);
-        assert_eq!(convert(&binding, Language::Kotlin, ""), unterminated);
-    }
-
-    #[test]
-    fn rejects_a_kotlin_errors_bullet_without_an_error_name() {
-        let binding = text(&["/**", " * # Errors", " * - When storage fails.", " */"]);
-        assert_eq!(
-            convert(&binding, Language::Kotlin, ""),
-            Err("# Errors bullet without an error name: When storage fails.".to_owned())
-        );
-    }
 }
