@@ -110,8 +110,13 @@ fn filter_examples_and_links(
         match (open, fence_tag(line)) {
             (Some(keep), Some(_)) => {
                 if keep {
-                    let restored = restore_indentation(&block, examples)
-                        .ok_or("doc example not found in the Rust sources")?;
+                    let restored = restore_indentation(&block, examples).ok_or_else(|| {
+                        let first = block.first().and_then(|line| after_star(line));
+                        format!(
+                            "doc example not found in the Rust sources: {}",
+                            first.unwrap_or_default().trim()
+                        )
+                    })?;
                     kept.extend(restored);
                     kept.push(line.to_owned());
                 }
