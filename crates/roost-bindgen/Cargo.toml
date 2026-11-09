@@ -5,6 +5,7 @@ publish.workspace = true
 version.workspace = true
 
 [dependencies]
+heck.workspace = true
 uniffi = { workspace = true, features = ["cli"] }
 
 [lints]

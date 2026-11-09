@@ -1,8 +1,12 @@
 //! Converts the Rust doc comments in a generated UniFFI binding to Swift or Kotlin conventions.
 
+use heck::{ToLowerCamelCase, ToShoutySnakeCase};
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process::ExitCode;
+
+const SOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../roost-client/src");
 
 #[derive(Clone, Copy, PartialEq)]
 enum Language {
@@ -28,10 +32,11 @@ fn main() -> ExitCode {
     let Some(language) = Language::from_tag(tag) else {
         return usage();
     };
-    let result = fs::read_to_string(path)
-        .map_err(|error| error.to_string())
-        .and_then(|binding| convert(&binding, language))
-        .and_then(|converted| fs::write(path, converted).map_err(|error| error.to_string()));
+    let result = read_sources(Path::new(SOURCES)).and_then(|sources| {
+        let binding = fs::read_to_string(path).map_err(|error| error.to_string())?;
+        let converted = convert(&binding, language, &sources)?;
+        fs::write(path, converted).map_err(|error| error.to_string())
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -46,8 +51,24 @@ fn usage() -> ExitCode {
     ExitCode::FAILURE
 }
 
-fn convert(binding: &str, language: Language) -> Result<String, String> {
-    let lines = filter_examples_and_links(binding, language)?;
+fn read_sources(dir: &Path) -> Result<String, String> {
+    let read_error = |path: &Path, error| format!("{}: {error}", path.display());
+    let mut sources = String::new();
+    for entry in fs::read_dir(dir).map_err(|error| read_error(dir, error))? {
+        let path = entry.map_err(|error| read_error(dir, error))?.path();
+        if path.is_dir() {
+            sources.push_str(&read_sources(&path)?);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            sources.push_str(&fs::read_to_string(&path).map_err(|error| read_error(&path, error))?);
+            sources.push('\n');
+        }
+    }
+    Ok(sources)
+}
+
+fn convert(binding: &str, language: Language, sources: &str) -> Result<String, String> {
+    let examples = doc_blocks(sources);
+    let lines = filter_examples_and_links(binding, language, &examples)?;
     let lines = move_errors_to_throws(&lines, language)?;
     let mut converted = drop_extra_blank_lines(lines).join("\n");
     if binding.ends_with('\n') {
@@ -56,35 +77,112 @@ fn convert(binding: &str, language: Language) -> Result<String, String> {
     Ok(converted)
 }
 
-fn filter_examples_and_links(binding: &str, language: Language) -> Result<Vec<String>, String> {
-    let mut kept: Vec<String> = Vec::new();
-    let mut skipping = false;
-    let mut in_block = false;
-    for line in binding.lines() {
-        let fence = fence_tag(line);
-        if skipping {
-            skipping = fence.is_none();
+fn doc_blocks(sources: &str) -> Vec<Vec<&str>> {
+    let mut blocks = Vec::new();
+    let mut block: Option<Vec<&str>> = None;
+    for line in sources.lines() {
+        let Some(text) = line.trim_start().strip_prefix("///") else {
             continue;
+        };
+        let text = skip_space(text);
+        match block.take() {
+            Some(lines) if text.starts_with("```") => blocks.push(lines),
+            Some(mut lines) => {
+                lines.push(text);
+                block = Some(lines);
+            }
+            None if text.starts_with("```") => block = Some(Vec::new()),
+            None => {}
         }
-        if fence
-            .and_then(Language::from_tag)
-            .is_some_and(|tag| tag != language)
-        {
-            skipping = true;
-            continue;
-        }
-        if fence.is_some() {
-            in_block = !in_block;
-        } else if is_doc_text(line) && !in_block {
-            kept.push(rewrite_links(line, language, binding)?);
-            continue;
-        }
-        kept.push(line.to_owned());
     }
-    if skipping || in_block {
+    blocks
+}
+
+fn filter_examples_and_links(
+    binding: &str,
+    language: Language,
+    examples: &[Vec<&str>],
+) -> Result<Vec<String>, String> {
+    let mut kept = Vec::new();
+    let mut open: Option<bool> = None;
+    let mut block: Vec<&str> = Vec::new();
+    for line in binding.lines() {
+        match (open, fence_tag(line)) {
+            (Some(keep), Some(_)) => {
+                if keep {
+                    kept.extend(restore_indentation(&block, examples)?);
+                    kept.push(line.to_owned());
+                }
+                open = None;
+            }
+            (Some(_), None) => block.push(line),
+            (None, Some(tag)) => {
+                let keep = Language::from_tag(tag).is_none_or(|tag| tag == language);
+                if keep {
+                    kept.push(line.to_owned());
+                }
+                open = Some(keep);
+                block.clear();
+            }
+            (None, None) if is_doc_text(line) => {
+                kept.push(rewrite_links(&rewrite_code_spans(line), language, binding)?);
+            }
+            (None, None) => kept.push(line.to_owned()),
+        }
+    }
+    if open.is_some() {
         return Err("unterminated doc example block".to_owned());
     }
     Ok(kept)
+}
+
+fn restore_indentation(block: &[&str], examples: &[Vec<&str>]) -> Result<Vec<String>, String> {
+    let matches = |example: &&Vec<&str>| {
+        example.len() == block.len()
+            && example.iter().zip(block).all(|(source, line)| {
+                after_star(line).is_some_and(|text| text.trim() == source.trim())
+            })
+    };
+    let Some(example) = examples.iter().find(matches) else {
+        let first = block.first().and_then(|line| after_star(line));
+        let first = first.unwrap_or_default().trim();
+        return Err(format!(
+            "doc example not found in the Rust sources: {first}"
+        ));
+    };
+    let restored = block.iter().zip(example).map(|(line, source)| {
+        let prefix = &line[..line.len() - after_star(line).unwrap_or_default().len()];
+        let source = source.trim_end();
+        if source.is_empty() {
+            prefix.to_owned()
+        } else {
+            format!("{prefix} {source}")
+        }
+    });
+    Ok(restored.collect())
+}
+
+fn rewrite_code_spans(line: &str) -> String {
+    let parts: Vec<&str> = line.split('`').collect();
+    let spans = parts.iter().enumerate().map(|(index, part)| {
+        let closed = index % 2 == 1 && index + 1 < parts.len();
+        if closed && part.split('.').all(is_snake_case) {
+            part.split('.')
+                .map(ToLowerCamelCase::to_lower_camel_case)
+                .collect::<Vec<_>>()
+                .join(".")
+        } else {
+            (*part).to_owned()
+        }
+    });
+    spans.collect::<Vec<_>>().join("`")
+}
+
+fn is_snake_case(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 fn rewrite_links(line: &str, language: Language, binding: &str) -> Result<String, String> {
@@ -101,15 +199,18 @@ fn rewrite_links(line: &str, language: Language, binding: &str) -> Result<String
             continue;
         };
         rewritten.push_str(&rest[..start]);
-        rewritten.push_str(&host_name(&link[..end], language, binding)?);
+        let mut path = &link[..end];
         rest = &link[end + 2..];
-        // Drop a link target, such as `(crate::IdentityContext)`.
+        // A Rust path target, such as `(crate::IdentityContext)`, replaces the link text.
         if let Some(target) = rest.strip_prefix('(')
-            && let Some(close) = target.find(|c: char| c == ')' || c.is_whitespace())
-            && target[close..].starts_with(')')
+            && let Some((item, after)) = target.split_once(')')
         {
-            rest = &target[close + 1..];
+            if item.chars().all(|c| is_word(c) || c == ':') {
+                path = item;
+            }
+            rest = after;
         }
+        rewritten.push_str(&host_name(path, language, binding)?);
     }
     rewritten.push_str(rest);
     Ok(rewritten)
@@ -123,35 +224,25 @@ fn host_name(path: &str, language: Language, binding: &str) -> Result<String, St
     let Some((last, parents)) = segments.split_last() else {
         return Err(format!("rustdoc link without an item: {path}"));
     };
-    let mut name = if last.starts_with(char::is_lowercase) {
-        lower_camel(last)
+    let parent = parents
+        .last()
+        .filter(|parent| parent.starts_with(char::is_uppercase));
+    let member = if last.starts_with(char::is_lowercase) {
+        last.to_lower_camel_case()
+    } else if let Some(parent) = parent {
+        host_variant(parent, last, language, binding)
     } else {
         host_type(last, language, binding)
     };
-    if let Some(parent) = parents
-        .last()
-        .filter(|parent| parent.starts_with(char::is_uppercase))
-    {
-        name = format!("{}.{name}", host_type(parent, language, binding));
-    }
+    let name = match parent {
+        Some(parent) => format!("{}.{member}", host_type(parent, language, binding)),
+        None => member,
+    };
     // KDoc resolves [Name] links. DocC needs full symbol signatures, so Swift gets code voice.
     Ok(match language {
         Language::Swift => format!("`{name}`"),
         Language::Kotlin => format!("[{name}]"),
     })
-}
-
-fn lower_camel(name: &str) -> String {
-    let mut words = name.split('_');
-    let mut camel = words.next().unwrap_or_default().to_owned();
-    for word in words {
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            camel.extend(first.to_uppercase());
-            camel.push_str(chars.as_str());
-        }
-    }
-    camel
 }
 
 fn host_type(name: &str, language: Language, binding: &str) -> String {
@@ -165,6 +256,24 @@ fn host_type(name: &str, language: Language, binding: &str) -> String {
         }
     }
     name.to_owned()
+}
+
+fn host_variant(parent: &str, variant: &str, language: Language, binding: &str) -> String {
+    match language {
+        // UniFFI keeps the Rust names of a Swift error's cases.
+        Language::Swift if binding.contains(&format!("enum {parent}: Swift.Error")) => {
+            variant.to_owned()
+        }
+        Language::Swift => variant.to_lower_camel_case(),
+        // UniFFI turns only an enum without fields into a Kotlin enum class.
+        Language::Kotlin
+            if binding.contains(&format!("enum class {parent} "))
+                || binding.contains(&format!("enum class {parent}(")) =>
+        {
+            variant.to_shouty_snake_case()
+        }
+        Language::Kotlin => host_type(variant, language, binding),
+    }
 }
 
 fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<String>, String> {
@@ -295,9 +404,7 @@ fn is_comment_end(line: &str) -> bool {
 }
 
 fn fence_tag(line: &str) -> Option<&str> {
-    let fence = skip_space(after_star(line)?).strip_prefix("```")?;
-    let end = fence.find(|c: char| !is_word(c)).unwrap_or(fence.len());
-    fence[end..].trim().is_empty().then(|| &fence[..end])
+    skip_space(after_star(line)?).strip_prefix("```")
 }
 
 fn errors_heading(line: &str) -> Option<&str> {
@@ -333,8 +440,20 @@ mod tests {
         lines.join("\n") + "\n"
     }
 
+    fn rust_docs(lines: &[&str]) -> String {
+        lines.iter().map(|line| format!("/// {line}\n")).collect()
+    }
+
     #[test]
     fn keeps_only_the_host_languages_examples() {
+        let sources = rust_docs(&[
+            "```swift",
+            "let operations = try context.unfinishedOperations()",
+            "```",
+            "```kotlin",
+            "val operations = context.unfinishedOperations()",
+            "```",
+        ]);
         let binding = text(&[
             "/**",
             " * Lists unfinished operations.",
@@ -366,8 +485,56 @@ mod tests {
             " * ```",
             " */",
         ]);
-        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
-        assert_eq!(convert(&binding, Language::Kotlin).unwrap(), kotlin);
+        assert_eq!(convert(&binding, Language::Swift, &sources).unwrap(), swift);
+        assert_eq!(
+            convert(&binding, Language::Kotlin, &sources).unwrap(),
+            kotlin
+        );
+    }
+
+    #[test]
+    fn restores_example_indentation_from_the_sources() {
+        let sources = text(&[
+            "    /// ```swift",
+            "    /// if done {",
+            "    ///     stop()",
+            "    ///",
+            "    ///     log()",
+            "    /// }",
+            "    /// ```",
+            "    /// Sends when ready.",
+            "    ///",
+            "    /// ```swift",
+            "    /// if ready {",
+            "    ///     send()",
+            "    ///",
+            "    ///     log()",
+            "    /// }",
+            "    /// ```",
+        ]);
+        let binding = text(&[
+            "/**",
+            " * ```swift",
+            " * if ready {",
+            " * send()",
+            " *",
+            " * log()",
+            " * }",
+            " * ```",
+            " */",
+        ]);
+        let swift = text(&[
+            "/**",
+            " * ```swift",
+            " * if ready {",
+            " *     send()",
+            " *",
+            " *     log()",
+            " * }",
+            " * ```",
+            " */",
+        ]);
+        assert_eq!(convert(&binding, Language::Swift, &sources).unwrap(), swift);
     }
 
     #[test]
@@ -375,41 +542,91 @@ mod tests {
         let binding = text(&[
             "    /**",
             "     * Fails with [`RoostError::InvalidData`] after [`Self::reserve_operation`] in an",
-            "     * [`IdentityContext`](crate::IdentityContext).",
+            "     * [`IdentityContext`](crate::IdentityContext) that returned",
+            "     * [`MessageEncryptionStep::NeedsState`] or",
+            "     * [`NeedsPreKeyBundle`](crate::MessageEncryptionStep::NeedsPreKeyBundle), as in",
+            "     * [`RFC 9180`](https://www.rfc-editor.org/rfc/rfc9180).",
             "     */",
+            "enum RoostError: Swift.Error {",
         ]);
         let swift = text(&[
             "    /**",
             "     * Fails with `RoostError.InvalidData` after `reserveOperation` in an",
-            "     * `IdentityContext`.",
+            "     * `IdentityContext` that returned",
+            "     * `MessageEncryptionStep.needsState` or",
+            "     * `MessageEncryptionStep.needsPreKeyBundle`, as in",
+            "     * `RFC 9180`.",
             "     */",
+            "enum RoostError: Swift.Error {",
         ]);
-        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
+        assert_eq!(convert(&binding, Language::Swift, "").unwrap(), swift);
     }
 
     #[test]
     fn rewrites_links_to_kotlin_names_outside_code() {
+        let sources = rust_docs(&["```kotlin", "// [`RoostError::InvalidData`]", "```"]);
         let binding = text(&[
             "/**",
             " * Fails with [`RoostError::InvalidData`] after [`Self::reserve_operation`].",
+            " * Returns [`ProtocolStateKind::ContactState`] or [`MessageEncryptionStep::NeedsState`].",
+            " * Reads [`PayloadKind::ContentWithGrant`].",
             " *",
             " * ```kotlin",
             " * // [`RoostError::InvalidData`]",
             " * ```",
             " */",
             "sealed class RoostException",
+            "enum class ProtocolStateKind {",
+            "enum class PayloadKind(val value: UByte) {",
         ]);
         let kotlin = text(&[
             "/**",
             " * Fails with [RoostException.InvalidData] after [reserveOperation].",
+            " * Returns [ProtocolStateKind.CONTACT_STATE] or [MessageEncryptionStep.NeedsState].",
+            " * Reads [PayloadKind.CONTENT_WITH_GRANT].",
             " *",
             " * ```kotlin",
             " * // [`RoostError::InvalidData`]",
             " * ```",
             " */",
             "sealed class RoostException",
+            "enum class ProtocolStateKind {",
+            "enum class PayloadKind(val value: UByte) {",
         ]);
-        assert_eq!(convert(&binding, Language::Kotlin).unwrap(), kotlin);
+        assert_eq!(
+            convert(&binding, Language::Kotlin, &sources).unwrap(),
+            kotlin
+        );
+    }
+
+    #[test]
+    fn rewrites_snake_case_code_spans_outside_examples() {
+        let sources = rust_docs(&["```swift", "// `identity_key`", "```"]);
+        let binding = text(&[
+            "/**",
+            " * Pass `identity_key` and `admission.signed_prekey_id`, not `Self`, `ID_KEY`, or `30_000`.",
+            " * A span that wraps, such as `stored_key",
+            " * name`, stays.",
+            " *",
+            " * ```swift",
+            " * // `identity_key`",
+            " * ```",
+            " */",
+            "// Passes the bytes to `ffi_bytebuffer_from_bytes`.",
+        ]);
+        let swift = text(&[
+            "/**",
+            " * Pass `identityKey` and `admission.signedPrekeyId`, not `Self`, `ID_KEY`, or `30_000`.",
+            " * A span that wraps, such as `stored_key",
+            " * name`, stays.",
+            " *",
+            " * ```swift",
+            " * // `identity_key`",
+            " * ```",
+            " */",
+            "// Passes the bytes to `ffi_bytebuffer_from_bytes`.",
+        ]);
+        assert_eq!(convert(&binding, Language::Swift, &sources).unwrap(), swift);
     }
 
     #[test]
@@ -423,6 +640,7 @@ mod tests {
             "     * signed for another relay domain.",
             "     * - [`RoostError::InvalidData`] if a key or the reference time is malformed.",
             "     */",
+            "enum RoostError: Swift.Error {",
         ]);
         let swift = text(&[
             "    /**",
@@ -433,8 +651,9 @@ mod tests {
             "     *     signed for another relay domain.",
             "     *   - `RoostError.InvalidData` if a key or the reference time is malformed.",
             "     */",
+            "enum RoostError: Swift.Error {",
         ]);
-        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
+        assert_eq!(convert(&binding, Language::Swift, "").unwrap(), swift);
     }
 
     #[test]
@@ -460,7 +679,7 @@ mod tests {
             "     */",
             "sealed class RoostException",
         ]);
-        assert_eq!(convert(&binding, Language::Kotlin).unwrap(), kotlin);
+        assert_eq!(convert(&binding, Language::Kotlin, "").unwrap(), kotlin);
     }
 
     #[test]
@@ -474,6 +693,7 @@ mod tests {
             " *",
             " * Call it once per contact.",
             " */",
+            "enum RoostError: Swift.Error {",
         ]);
         let swift = text(&[
             "/**",
@@ -484,23 +704,24 @@ mod tests {
             " * - Throws:",
             " *   - `RoostError.InvalidData` if the key is malformed.",
             " */",
+            "enum RoostError: Swift.Error {",
         ]);
-        assert_eq!(convert(&binding, Language::Swift).unwrap(), swift);
+        assert_eq!(convert(&binding, Language::Swift, "").unwrap(), swift);
     }
 
     #[test]
     fn rejects_an_unterminated_example_block() {
         let binding = text(&["/**", " * ```swift", " * let a = 1", " */"]);
         let unterminated = Err("unterminated doc example block".to_owned());
-        assert_eq!(convert(&binding, Language::Swift), unterminated);
-        assert_eq!(convert(&binding, Language::Kotlin), unterminated);
+        assert_eq!(convert(&binding, Language::Swift, ""), unterminated);
+        assert_eq!(convert(&binding, Language::Kotlin, ""), unterminated);
     }
 
     #[test]
     fn rejects_a_kotlin_errors_bullet_without_an_error_name() {
         let binding = text(&["/**", " * # Errors", " * - When storage fails.", " */"]);
         assert_eq!(
-            convert(&binding, Language::Kotlin),
+            convert(&binding, Language::Kotlin, ""),
             Err("# Errors bullet without an error name: When storage fails.".to_owned())
         );
     }

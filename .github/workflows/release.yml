@@ -22,7 +22,7 @@ jobs:
           gradle-version: '9.8.1'
           cache-disabled: true
       - run: cargo install cargo-ndk --version 4.1.2 --locked
-      - run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865" scripts/build-android.sh
+      - run: scripts/build-android.sh
       - run: scripts/build-ios.sh
 
       - name: Publish to roost-kotlin
