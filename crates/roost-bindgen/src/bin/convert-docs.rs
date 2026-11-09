@@ -110,14 +110,7 @@ fn filter_examples_and_links(
         match (open, fence_tag(line)) {
             (Some(keep), Some(_)) => {
                 if keep {
-                    let restored = restore_indentation(&block, examples).ok_or_else(|| {
-                        let first = block.first().and_then(|line| after_star(line));
-                        format!(
-                            "doc example not found in the Rust sources: {}",
-                            first.unwrap_or_default().trim()
-                        )
-                    })?;
-                    kept.extend(restored);
+                    kept.extend(restore_indentation(&block, examples)?);
                     kept.push(line.to_owned());
                 }
                 open = None;
@@ -143,14 +136,20 @@ fn filter_examples_and_links(
     Ok(kept)
 }
 
-fn restore_indentation(block: &[&str], examples: &[Vec<&str>]) -> Option<Vec<String>> {
+fn restore_indentation(block: &[&str], examples: &[Vec<&str>]) -> Result<Vec<String>, String> {
     let matches = |example: &&Vec<&str>| {
         example.len() == block.len()
             && example.iter().zip(block).all(|(source, line)| {
                 after_star(line).is_some_and(|text| text.trim() == source.trim())
             })
     };
-    let example = examples.iter().find(matches)?;
+    let Some(example) = examples.iter().find(matches) else {
+        let first = block.first().and_then(|line| after_star(line));
+        let first = first.unwrap_or_default().trim();
+        return Err(format!(
+            "doc example not found in the Rust sources: {first}"
+        ));
+    };
     let restored = block.iter().zip(example).map(|(line, source)| {
         let prefix = &line[..line.len() - after_star(line).unwrap_or_default().len()];
         let source = source.trim_end();
@@ -160,7 +159,7 @@ fn restore_indentation(block: &[&str], examples: &[Vec<&str>]) -> Option<Vec<Str
             format!("{prefix} {source}")
         }
     });
-    Some(restored.collect())
+    Ok(restored.collect())
 }
 
 fn rewrite_code_spans(line: &str) -> String {
@@ -202,17 +201,14 @@ fn rewrite_links(line: &str, language: Language, binding: &str) -> Result<String
         rewritten.push_str(&rest[..start]);
         let mut path = &link[..end];
         rest = &link[end + 2..];
-        // A Rust path target, such as `(crate::IdentityContext)`, names the item in place of the
-        // text. A URL or other target leaves the text as the name.
+        // A Rust path target, such as `(crate::IdentityContext)`, replaces the link text.
         if let Some(target) = rest.strip_prefix('(')
-            && let Some(close) = target.find(|c: char| c == ')' || c.is_whitespace())
-            && target[close..].starts_with(')')
+            && let Some((item, after)) = target.split_once(')')
         {
-            let item = &target[..close];
             if item.chars().all(|c| is_word(c) || c == ':') {
                 path = item;
             }
-            rest = &target[close + 1..];
+            rest = after;
         }
         rewritten.push_str(&host_name(path, language, binding)?);
     }
@@ -264,14 +260,12 @@ fn host_type(name: &str, language: Language, binding: &str) -> String {
 
 fn host_variant(parent: &str, variant: &str, language: Language, binding: &str) -> String {
     match language {
-        // UniFFI writes an error's Swift cases in upper camel case, as Rust names them, and every
-        // other enum's in lower camel case.
+        // UniFFI keeps the Rust names of a Swift error's cases.
         Language::Swift if binding.contains(&format!("enum {parent}: Swift.Error")) => {
             variant.to_owned()
         }
         Language::Swift => variant.to_lower_camel_case(),
-        // UniFFI writes an enum without fields as a Kotlin enum class with upper snake case
-        // entries.
+        // UniFFI turns only an enum without fields into a Kotlin enum class.
         Language::Kotlin
             if binding.contains(&format!("enum class {parent} "))
                 || binding.contains(&format!("enum class {parent}(")) =>
