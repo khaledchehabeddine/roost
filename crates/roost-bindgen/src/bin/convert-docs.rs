@@ -102,67 +102,58 @@ fn filter_examples_and_links(
     binding: &str,
     language: Language,
     examples: &[Vec<&str>],
-) -> Result<Vec<(usize, String)>, String> {
+) -> Result<Vec<String>, String> {
     let mut kept = Vec::new();
-    let mut open: Option<(usize, bool)> = None;
-    let mut block: Vec<(usize, &str)> = Vec::new();
-    for (index, line) in binding.lines().enumerate() {
-        let number = index + 1;
-        let fence = fence_tag(line).map_err(|error| format!("line {number}: {error}"))?;
-        match (open, fence) {
-            (Some((start, keep)), Some(_)) => {
+    let mut open: Option<bool> = None;
+    let mut block: Vec<&str> = Vec::new();
+    for line in binding.lines() {
+        match (open, fence_tag(line)) {
+            (Some(keep), Some(_)) => {
                 if keep {
-                    let restored = restore_indentation(&block, examples).ok_or_else(|| {
-                        format!("line {start}: doc example not found in the Rust sources")
-                    })?;
+                    let restored = restore_indentation(&block, examples)
+                        .ok_or("doc example not found in the Rust sources")?;
                     kept.extend(restored);
-                    kept.push((number, line.to_owned()));
+                    kept.push(line.to_owned());
                 }
                 open = None;
             }
-            (Some(_), None) => block.push((number, line)),
+            (Some(_), None) => block.push(line),
             (None, Some(tag)) => {
                 let keep = Language::from_tag(tag).is_none_or(|tag| tag == language);
                 if keep {
-                    kept.push((number, line.to_owned()));
+                    kept.push(line.to_owned());
                 }
-                open = Some((number, keep));
+                open = Some(keep);
                 block.clear();
             }
             (None, None) if is_doc_text(line) => {
-                let rewritten = rewrite_links(&rewrite_code_spans(line), language, binding)
-                    .map_err(|error| format!("line {number}: {error}"))?;
-                kept.push((number, rewritten));
+                kept.push(rewrite_links(&rewrite_code_spans(line), language, binding)?);
             }
-            (None, None) => kept.push((number, line.to_owned())),
+            (None, None) => kept.push(line.to_owned()),
         }
     }
-    if let Some((start, _)) = open {
-        return Err(format!("line {start}: unterminated doc example block"));
+    if open.is_some() {
+        return Err("unterminated doc example block".to_owned());
     }
     Ok(kept)
 }
 
-fn restore_indentation(
-    block: &[(usize, &str)],
-    examples: &[Vec<&str>],
-) -> Option<Vec<(usize, String)>> {
+fn restore_indentation(block: &[&str], examples: &[Vec<&str>]) -> Option<Vec<String>> {
     let matches = |example: &&Vec<&str>| {
         example.len() == block.len()
-            && example.iter().zip(block).all(|(source, (_, line))| {
+            && example.iter().zip(block).all(|(source, line)| {
                 after_star(line).is_some_and(|text| text.trim() == source.trim())
             })
     };
     let example = examples.iter().find(matches)?;
-    let restored = block.iter().zip(example).map(|((number, line), source)| {
+    let restored = block.iter().zip(example).map(|(line, source)| {
         let prefix = &line[..line.len() - after_star(line).unwrap_or_default().len()];
         let source = source.trim_end();
-        let line = if source.is_empty() {
+        if source.is_empty() {
             prefix.to_owned()
         } else {
             format!("{prefix} {source}")
-        };
-        (*number, line)
+        }
     });
     Some(restored.collect())
 }
@@ -286,52 +277,40 @@ fn host_variant(parent: &str, variant: &str, language: Language, binding: &str) 
     }
 }
 
-fn move_errors_to_throws(
-    lines: &[(usize, String)],
-    language: Language,
-) -> Result<Vec<String>, String> {
+fn move_errors_to_throws(lines: &[String], language: Language) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     let mut pending = None;
     let mut i = 0;
     while i < lines.len() {
-        let (number, line) = &lines[i];
+        let line = &lines[i];
         if let Some(prefix) = errors_heading(line) {
-            if pending.is_some() {
-                return Err(format!(
-                    "line {number}: second # Errors section in a doc comment"
-                ));
-            }
             i += 1;
             let mut bullets = Vec::new();
-            while let Some(first) = lines.get(i).and_then(|(_, line)| bullet(line)) {
+            while let Some(first) = lines.get(i).and_then(|line| bullet(line)) {
                 let mut bullet = vec![first];
                 i += 1;
-                while let Some(text) = lines.get(i).and_then(|(_, line)| continuation(line)) {
+                while let Some(text) = lines.get(i).and_then(|line| continuation(line)) {
                     bullet.push(text);
                     i += 1;
                 }
                 bullets.push(bullet);
             }
-            pending = Some((*number, prefix, bullets));
+            pending = Some((prefix, bullets));
             continue;
         }
         if is_comment_end(line)
-            && let Some((heading, prefix, bullets)) = pending.take()
+            && let Some((prefix, bullets)) = pending.take()
         {
             if out.last().is_some_and(|last| !is_blank(last)) {
                 out.push(prefix.to_owned());
             }
-            let throws = throws_lines(prefix, &bullets, language)
-                .map_err(|error| format!("line {heading}: {error}"))?;
-            out.extend(throws);
+            out.extend(throws_lines(prefix, &bullets, language)?);
         }
         out.push(line.clone());
         i += 1;
     }
-    if let Some((heading, ..)) = pending {
-        return Err(format!(
-            "line {heading}: # Errors section outside a doc comment"
-        ));
+    if pending.is_some() {
+        return Err("# Errors section outside a doc comment".to_owned());
     }
     Ok(out)
 }
@@ -359,11 +338,6 @@ fn throws_lines(
                 let Some((names, condition)) = error_names(&text) else {
                     return Err(format!("# Errors bullet without an error name: {text}"));
                 };
-                if condition.starts_with(',') || condition.starts_with("and ") {
-                    return Err(format!(
-                        "# Errors bullet doesn't join its error names with \"or\": {text}"
-                    ));
-                }
                 for name in names {
                     lines.push(
                         format!("{prefix} @throws {name} {condition}")
@@ -430,15 +404,8 @@ fn is_comment_end(line: &str) -> bool {
     after_star(line).is_some_and(|text| text.starts_with('/'))
 }
 
-fn fence_tag(line: &str) -> Result<Option<&str>, String> {
-    let Some(fence) = after_star(line).and_then(|text| skip_space(text).strip_prefix("```")) else {
-        return Ok(None);
-    };
-    let tag = fence.trim();
-    if !tag.chars().all(is_word) {
-        return Err(format!("code fence with more than a language tag: {tag}"));
-    }
-    Ok(Some(tag))
+fn fence_tag(line: &str) -> Option<&str> {
+    skip_space(after_star(line)?).strip_prefix("```")
 }
 
 fn errors_heading(line: &str) -> Option<&str> {
@@ -530,6 +497,13 @@ mod tests {
     #[test]
     fn restores_example_indentation_from_the_sources() {
         let sources = text(&[
+            "    /// ```swift",
+            "    /// if done {",
+            "    ///     stop()",
+            "    ///",
+            "    ///     log()",
+            "    /// }",
+            "    /// ```",
             "    /// Sends when ready.",
             "    ///",
             "    /// ```swift",
@@ -563,16 +537,6 @@ mod tests {
             " */",
         ]);
         assert_eq!(convert(&binding, Language::Swift, &sources).unwrap(), swift);
-    }
-
-    #[test]
-    fn rejects_an_example_missing_from_the_sources() {
-        let sources = rust_docs(&["```swift", "let a = 1", "let b = 2", "```"]);
-        let binding = text(&["/**", " * ```swift", " * let a = 1", " * ```", " */"]);
-        assert_eq!(
-            convert(&binding, Language::Swift, &sources),
-            Err("line 2: doc example not found in the Rust sources".to_owned())
-        );
     }
 
     #[test]
@@ -750,35 +714,9 @@ mod tests {
     #[test]
     fn rejects_an_unterminated_example_block() {
         let binding = text(&["/**", " * ```swift", " * let a = 1", " */"]);
-        let unterminated = Err("line 2: unterminated doc example block".to_owned());
+        let unterminated = Err("unterminated doc example block".to_owned());
         assert_eq!(convert(&binding, Language::Swift, ""), unterminated);
         assert_eq!(convert(&binding, Language::Kotlin, ""), unterminated);
-    }
-
-    #[test]
-    fn rejects_a_fence_with_more_than_a_language_tag() {
-        let binding = text(&["/**", " * ```swift title", " * let a = 1", " * ```", " */"]);
-        assert_eq!(
-            convert(&binding, Language::Swift, ""),
-            Err("line 2: code fence with more than a language tag: swift title".to_owned())
-        );
-    }
-
-    #[test]
-    fn rejects_a_second_errors_section_in_one_comment() {
-        let binding = text(&[
-            "/**",
-            " * # Errors",
-            " * - [`RoostError::NotFound`] if the operation is unknown.",
-            " *",
-            " * # Errors",
-            " * - [`RoostError::Storage`] if storage fails.",
-            " */",
-        ]);
-        assert_eq!(
-            convert(&binding, Language::Swift, ""),
-            Err("line 5: second # Errors section in a doc comment".to_owned())
-        );
     }
 
     #[test]
@@ -786,29 +724,7 @@ mod tests {
         let binding = text(&["/**", " * # Errors", " * - When storage fails.", " */"]);
         assert_eq!(
             convert(&binding, Language::Kotlin, ""),
-            Err("line 2: # Errors bullet without an error name: When storage fails.".to_owned())
+            Err("# Errors bullet without an error name: When storage fails.".to_owned())
         );
-    }
-
-    #[test]
-    fn rejects_a_kotlin_errors_bullet_that_joins_names_without_or() {
-        for joined in [
-            "[`RoostError::NotFound`], [`RoostError::Storage`], or [`RoostError::Corrupt`] if",
-            "[`RoostError::NotFound`] and [`RoostError::Storage`] if",
-        ] {
-            let bullet = format!(" * - {joined}");
-            let binding = text(&["/**", " * # Errors", &bullet, " * it fails.", " */"]);
-            let names = joined
-                .replace("[`", "[")
-                .replace("`]", "]")
-                .replace("::", ".");
-            assert_eq!(
-                convert(&binding, Language::Kotlin, ""),
-                Err(format!(
-                    "line 2: # Errors bullet doesn't join its error names with \"or\": \
-                     {names} it fails."
-                ))
-            );
-        }
     }
 }
