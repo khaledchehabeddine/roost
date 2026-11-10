@@ -42,11 +42,11 @@ jobs:
           checksum="$(swift package compute-checksum "$zip")"
           sed "s|{TAG}|$TAG|; s|{URL}|$url|; s|{CHECKSUM}|$checksum|" \
             ../ios/Package.swift > Package.swift
-          mkdir -p Sources/Roost
+          rm -rf Sources && mkdir -p Sources/Roost
           cp ../target/ios/Sources/Roost/Roost.swift Sources/Roost/
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Package.swift Sources/Roost/Roost.swift
+          git add Package.swift Sources
           git commit -m "chore: release Roost $TAG"
           git push origin "HEAD:refs/tags/$TAG"
       - name: Publish to roost-kotlin
@@ -55,6 +55,9 @@ jobs:
           ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ secrets.KOTLIN_PUBLISH_TOKEN }}
         run: gradle -p android publishReleasePublicationToGitHubPackagesRepository
       - name: Publish to roost-swift
+        working-directory: roost-swift
         env:
           GH_TOKEN: ${{ secrets.SWIFT_PUBLISH_TOKEN }}
-        run: gh release edit "$TAG" --draft=false
+        run: |
+          gh release edit "$TAG" --draft=false
+          git push origin HEAD:main
