@@ -72,11 +72,12 @@ impl DiscoveryKeyManager {
 
     // Loads the discovery key and verifies its signature against the identity key.
     pub(crate) fn current(&self) -> Result<DiscoveryKey, DiscoveryKeyError> {
-        let discovery_key = self.load_current()?.discovery_key.to_key();
+        let current = self.load_current()?;
         let identity = self.identity.load_identity()?;
-        verify_public_discovery_key(&discovery_key.public(), identity.verifying_key())
-            .map_err(DiscoveryKeyError::Corrupt)?;
-        Ok(discovery_key)
+        current
+            .discovery_key
+            .to_verified_key(identity.verifying_key())
+            .map_err(DiscoveryKeyError::Corrupt)
     }
 
     // Returns the delivery capability of the current epoch's inbox.
@@ -107,9 +108,11 @@ impl DiscoveryKeyManager {
 
     // Replaces the discovery key and delivery capability with new ones at the next epoch.
     //
-    // A key whose signature doesn't verify is still replaced, but a malformed entry must be reset
-    // first. The replaced key joins the previous keys, which drop any past the relay's queue time
-    // and then the oldest past the limit.
+    // The new key is dated at `now`, but at least one second after a replaced key the identity
+    // signed, because contacts keep the key with the later date. A key whose signature doesn't
+    // verify is still replaced, but a malformed entry must be reset first. The replaced key joins
+    // the previous keys, which drop any past the relay's queue time and then the oldest past the
+    // limit.
     pub(crate) fn rotate_now<R: RngCore + CryptoRng>(
         &self,
         rng: &mut R,
@@ -118,11 +121,26 @@ impl DiscoveryKeyManager {
         let identity = self.identity.load_identity()?;
         let now_secs = to_unix_secs(now).ok_or(DiscoveryKeyError::Clock)?;
         let replaced = self.load_current_optional()?;
-        let epoch = replaced.as_ref().map_or(FIRST_EPOCH, |current| {
-            current.discovery_key.epoch.saturating_add(1)
-        });
+        let (epoch, created_at_secs) = match &replaced {
+            None => (FIRST_EPOCH, now_secs),
+            Some(current) => {
+                // A date the identity didn't sign may be corrupt, so it can't hold back later keys.
+                let after_replaced_secs = match current
+                    .discovery_key
+                    .to_verified_key(identity.verifying_key())
+                {
+                    Ok(replaced_key) => replaced_key.created_at_secs().saturating_add(1),
+                    Err(PublicKeyError::Signature(_)) => now_secs,
+                    Err(error) => return Err(DiscoveryKeyError::Corrupt(error)),
+                };
+                (
+                    current.discovery_key.epoch.saturating_add(1),
+                    now_secs.max(after_replaced_secs),
+                )
+            }
+        };
         let discovery_key =
-            generate_discovery_key(rng, identity.signing_key_pair(), epoch, now_secs)
+            generate_discovery_key(rng, identity.signing_key_pair(), epoch, created_at_secs)
                 .map_err(DiscoveryKeyError::DiscoveryKeySignature)?;
         // The capability rotates with the discovery key because both belong to one epoch, and
         // they are written in one entry so they cannot diverge.
@@ -199,12 +217,11 @@ impl DiscoveryKeyManager {
         entry: &[u8],
         identity_verifying_key: &VerifyingKey,
     ) -> Result<(), DiscoveryKeyError> {
-        let current = decode_current(entry)?;
-        verify_public_discovery_key(
-            &current.discovery_key.to_key().public(),
-            identity_verifying_key,
-        )
-        .map_err(DiscoveryKeyError::Corrupt)
+        decode_current(entry)?
+            .discovery_key
+            .to_verified_key(identity_verifying_key)
+            .map_err(DiscoveryKeyError::Corrupt)?;
+        Ok(())
     }
 
     // Restores a discovery key entry from a backup verbatim with a single store, keeping its epoch
@@ -298,6 +315,15 @@ impl DiscoveryKeyWire {
             signature_from_wire(&self.identity_signature),
         )
     }
+
+    fn to_verified_key(
+        &self,
+        identity_verifying_key: &VerifyingKey,
+    ) -> Result<DiscoveryKey, PublicKeyError> {
+        let discovery_key = self.to_key();
+        verify_public_discovery_key(&discovery_key.public(), identity_verifying_key)?;
+        Ok(discovery_key)
+    }
 }
 
 #[derive(Deserialize, Serialize, ZeroizeOnDrop)]
@@ -329,7 +355,9 @@ struct DecodedPreviousDiscoveryKeysWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::retention::SECONDS_PER_DAY;
     use crate::storage::InMemorySecureStorage;
+    use crate::{ContactDiscoveryKey, is_newer_discovery_key};
     use rand::SeedableRng;
     use rand_chacha::ChaCha20Rng;
     use roost_protocol::{SignatureError, from_unix_secs};
@@ -438,6 +466,48 @@ mod tests {
             discovery.current_capability().unwrap().to_bytes(),
             capability.to_bytes()
         );
+    }
+
+    #[test]
+    fn rotate_now_dates_each_key_after_the_one_it_replaces_when_the_clock_moved_back() {
+        let mut rng = ChaCha20Rng::from_seed([0xc0; 32]);
+        let discovery = manager_with_identity();
+        let fast_clock_secs = FIXED_NOW + SECONDS_PER_DAY;
+        let fast = discovery
+            .rotate_now(&mut rng, from_unix_secs(fast_clock_secs).unwrap())
+            .unwrap();
+        assert_eq!(fast.created_at_secs(), fast_clock_secs);
+
+        let corrected = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        assert_eq!(corrected.created_at_secs(), fast_clock_secs + 1);
+        assert_eq!(corrected.epoch(), fast.epoch() + 1);
+        assert!(is_newer_discovery_key(
+            &ContactDiscoveryKey::from(&corrected.public()),
+            &ContactDiscoveryKey::from(&fast.public()),
+        ));
+        let caught_up_secs = fast_clock_secs + 60;
+        let caught_up = discovery
+            .rotate_now(&mut rng, from_unix_secs(caught_up_secs).unwrap())
+            .unwrap();
+        assert_eq!(caught_up.created_at_secs(), caught_up_secs);
+    }
+
+    #[test]
+    fn rotate_now_ignores_a_replaced_date_the_identity_didnt_sign() {
+        let mut rng = ChaCha20Rng::from_seed([0xc1; 32]);
+        let discovery = manager_with_identity();
+        discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        let mut current = discovery.load_current().unwrap();
+        current.discovery_key.created_at_secs = u64::MAX;
+        store(
+            &discovery,
+            DISCOVERY_KEY,
+            &encode_versioned(DISCOVERY_KEY_VERSION, &current).unwrap(),
+        );
+
+        let rotated = discovery.rotate_now(&mut rng, fixed_now()).unwrap();
+        assert_eq!(rotated.created_at_secs(), FIXED_NOW);
+        discovery.current().unwrap();
     }
 
     fn is_kept(discovery: &DiscoveryKeyManager, key: &DiscoveryKey, now: SystemTime) -> bool {

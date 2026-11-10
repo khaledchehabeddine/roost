@@ -68,7 +68,7 @@ impl DiscoveryKey {
         self.epoch
     }
 
-    /// Returns when this discovery key was generated, in Unix seconds.
+    /// Returns the creation time this discovery key was signed with, in Unix seconds.
     pub fn created_at_secs(&self) -> u64 {
         self.created_at_secs
     }
@@ -155,7 +155,7 @@ pub struct PublicDiscoveryKey {
     /// The rotation epoch, which goes up with each inbox rotation. A restored backup continues from
     /// the backup's epoch, so two discovery keys can share one.
     pub epoch: u32,
-    /// Unix timestamp in seconds when the discovery key was generated.
+    /// The creation time the discovery key was signed with, in Unix seconds.
     pub created_at_secs: u64,
     /// Identity-key signature over the domain-separated discovery-key payload.
     pub identity_signature: Signature,
