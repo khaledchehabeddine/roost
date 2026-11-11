@@ -1,6 +1,6 @@
 # Signing Established Messages
 
-The sender signs each established message with their identity key, over a transcript that names the recipient and the session ID. So nobody can pass off a session as belonging to an identity that didn't take part, and by design a sender can't deny writing a message after the handshake.
+The sender signs each established message with their identity key, over a transcript that names the recipient and the session ID. So nobody can pass off a session as belonging to an identity that didn't take part. By design, a sender also can't deny writing a message after the handshake.
 
 ## Alternatives
 

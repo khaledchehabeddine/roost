@@ -1,6 +1,6 @@
 # Restoring a Backup as a Snapshot
 
-An identity backup holds only the identity key and the current discovery key, and the app backs up contact records with its own database. A backup may be old or copied, so a restore drops every session, pending acknowledgment, and the deduplication set, and leaves prekeys unusable until the next inbox rotation.
+An identity backup holds only the identity key and the current discovery key. The app backs up contact records with its own database. A backup may be old or copied, so a restore drops every session, pending acknowledgment, and the deduplication set, and leaves prekeys unusable until the next inbox rotation.
 
 ## Alternatives
 

@@ -1,6 +1,6 @@
 # Sender-Proof Transcript
 
-A first message proves the sender holds their identity key with a Diffie-Hellman proof that only the recipient can check. The proof covers the handshake's public keys, prekey choice, and sender certificate, so fields copied from one handshake can't be reused in another. The cost is that whoever holds a recipient's signed prekey can forge first messages to that recipient until the prekey rotates.
+A first message proves the sender holds their identity key with a Diffie-Hellman proof that only the recipient can check. The proof covers the handshake's public keys, prekey choice, and sender certificate, so nobody can reuse fields from one handshake in another. The cost is that whoever holds a recipient's signed prekey can forge first messages to that recipient until the prekey rotates.
 
 ## Alternatives
 

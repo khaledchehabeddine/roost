@@ -4,5 +4,5 @@ Only the sender can notice a lost session, so Roost signals a recovery on the se
 
 ## Alternatives
 
-- Let the receiver ask the sender to resend, as Signal and WhatsApp do: the sender is sealed inside the ratchet ciphertext, so the receiver can't tell who sent a message it can't decrypt.
+- Let the receiver ask the sender to resend, as Signal and WhatsApp do: the ratchet ciphertext hides the sender, so the receiver can't tell who sent a message it can't decrypt.
 - Wait out the period after a newer inbox grant too: the relay answers messages sent with a dead delivery capability as if it admitted them, so they never arrive.

@@ -4,5 +4,5 @@ The asked side shares its inbox grant only when it accepts, so a requester it tu
 
 ## Alternatives
 
-- Share the grant with the first reply: a requester turned down later would keep delivering until the next inbox rotation.
+- Share the grant with the first reply: a requester the asked side later turns down would keep delivering until the next inbox rotation.
 - Leave a lost acceptance to recovery: recovery resends only unacknowledged messages, so an acceptance the requester acknowledged before restoring an older backup never comes back.

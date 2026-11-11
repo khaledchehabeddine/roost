@@ -1,6 +1,6 @@
 # Holding the Identity Lock Through Each Commit
 
-The app and its extensions share one identity lock. They hold it from each operation's first call until its commit resolves, and while finishing interrupted key changes, but never across a network call. Without it, an operation started during another process's reserved key change would fail, and finishing interrupted changes would abort that change.
+The app and its extensions share one identity lock, held from each operation's first call until its commit resolves and while finishing interrupted key changes, but never across a network call. Without it, an operation started during another process's reserved key change would fail. Finishing interrupted changes would also abort that change.
 
 ## Alternatives
 
