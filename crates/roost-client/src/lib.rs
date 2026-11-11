@@ -31,8 +31,8 @@ pub use certificate::{
     DomainSigningKey, RevocationState, SenderCertificateValidation, ValidatedSenderCertificate,
 };
 pub use contact::{
-    ContactBlock, ContactSafetyNumberConfirmation, ContactState, ContactTrustState, SafetyNumber,
-    derive_safety_number,
+    ContactBlock, ContactSafetyNumberConfirmation, ContactState, ContactStateFailure,
+    ContactStateFailureKind, ContactStates, ContactTrustState, SafetyNumber, derive_safety_number,
 };
 pub use context::{Contacts, IdentityContext, Messaging};
 pub use error::RoostError;

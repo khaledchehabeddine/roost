@@ -28,4 +28,6 @@ pub use sender_certificate::{
 };
 pub use signature::{SignatureError, contextual_message, verify_with_context};
 pub use transport_binding::{TransportBinding, TransportBindingError};
-pub use unix_time::{from_unix_millis, from_unix_secs, to_unix_millis, to_unix_secs};
+pub use unix_time::{
+    from_unix_millis, from_unix_secs, to_unix_millis, to_unix_secs, unix_secs_to_millis,
+};

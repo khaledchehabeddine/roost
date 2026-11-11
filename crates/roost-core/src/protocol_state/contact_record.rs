@@ -1,5 +1,6 @@
 use super::grant::{
-    CAPABILITY_LEN, DiscoveryKeyStamp, InboxGrant, is_newer_discovery_key, parse_discovery_key,
+    CAPABILITY_LEN, DiscoveryKeyStamp, InboxGrant, is_newer_discovery_key,
+    parse_stored_discovery_key,
 };
 use super::session::Starter;
 use super::{
@@ -517,7 +518,7 @@ fn decoded_discovery_key(
     wire: &DiscoveryKeyWire,
 ) -> Result<ContactDiscoveryKey, ProtocolStateError> {
     let (Some(public), Some(identity_verifying_key)) = (
-        parse_discovery_key(
+        parse_stored_discovery_key(
             wire.x25519_public_key,
             &wire.ed25519_verifying_key,
             wire.epoch,
@@ -594,7 +595,9 @@ struct DecodedContactRecordWire {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use roost_crypto::Signature;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
+    use roost_crypto::{KeyPair, Signature, SigningKeyPair, generate_discovery_key};
 
     fn discovery_key(seed: u8, created_at_secs: u64, epoch: u32) -> ContactDiscoveryKey {
         ContactDiscoveryKey {
@@ -628,6 +631,33 @@ mod tests {
             .established_route()
             .ok()
             .map(|(_, capability)| *capability.to_bytes())
+    }
+
+    #[test]
+    fn a_stored_contact_dated_past_the_millisecond_range_still_decodes() {
+        let signing_key = SigningKeyPair::from_signing_bytes(&[9; 32]);
+        let identity_key = IdentityKey {
+            x25519_public_key: *KeyPair::from_secret_bytes(&[10; 32]).public.as_bytes(),
+            ed25519_verifying_key: signing_key.verifying.to_bytes(),
+        };
+        let discovery_key = generate_discovery_key(
+            &mut ChaCha20Rng::from_seed([9; 32]),
+            &signing_key,
+            1,
+            u64::MAX,
+        )
+        .unwrap();
+        let mut record = ContactRecord::pending(identity_key);
+        record.discovery_key = Some(ContactDiscoveryKey::from(&discovery_key.public()));
+        let address = contact_address(identity_key);
+        let limits = ProtocolHardeningLimits::default();
+        let blob = record.encode(&address, limits).unwrap();
+
+        let decoded = ContactRecord::decode(&address, &blob, limits).unwrap();
+        assert_eq!(
+            decoded.discovery_key.map(|key| key.created_at_secs),
+            Some(u64::MAX)
+        );
     }
 
     #[test]

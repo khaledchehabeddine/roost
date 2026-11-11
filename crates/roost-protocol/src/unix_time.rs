@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const MILLIS_PER_SEC: u64 = 1_000;
+
 /// Returns whole seconds since the Unix epoch, or `None` before the epoch.
 #[must_use]
 pub fn to_unix_secs(time: SystemTime) -> Option<u64> {
@@ -13,6 +15,12 @@ pub fn to_unix_secs(time: SystemTime) -> Option<u64> {
 pub fn to_unix_millis(time: SystemTime) -> Option<u64> {
     let since_epoch = time.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(since_epoch.as_millis()).ok()
+}
+
+/// Returns `secs` Unix seconds as Unix milliseconds, or `None` beyond `u64`.
+#[must_use]
+pub fn unix_secs_to_millis(secs: u64) -> Option<u64> {
+    secs.checked_mul(MILLIS_PER_SEC)
 }
 
 /// Returns the time `secs` seconds after the Unix epoch, or `None` if the platform cannot

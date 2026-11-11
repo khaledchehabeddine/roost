@@ -2,11 +2,12 @@ use crate::context::Contacts;
 use crate::error::RoostError;
 use crate::identity::IdentityKey;
 use crate::publication::{PublicDiscoveryKey, PublicationBundle};
-use crate::state::{StateChanges, StateEntry, entries_to_core};
+use crate::state::{StateChanges, StateEntry, StateKey, entries_to_core};
 use rand::rngs::OsRng;
 use roost_core::{
     ContactSafetyNumberConfirmation as CoreSafetyNumberConfirmation,
-    ProtocolStateBlob as CoreProtocolStateBlob,
+    ProtocolStateAddress as CoreProtocolStateAddress, ProtocolStateBlob as CoreProtocolStateBlob,
+    ProtocolStateKind as CoreProtocolStateKind,
 };
 
 /// Result of blocking a contact.
@@ -50,6 +51,37 @@ pub struct ContactState {
     pub trust_state: ContactTrustState,
     /// Whether this device blocked the contact.
     pub blocked: bool,
+}
+
+/// The contacts [`Contacts::contact_states`] read, and the records it couldn't.
+#[derive(Default, uniffi::Record)]
+pub struct ContactStates {
+    /// The contact each readable record holds, in the order given.
+    pub contacts: Vec<ContactState>,
+    /// Each record Roost couldn't read, in the order given.
+    pub failures: Vec<ContactStateFailure>,
+}
+
+/// A contact state record Roost couldn't read.
+#[derive(uniffi::Record)]
+pub struct ContactStateFailure {
+    /// The record's name.
+    pub key: StateKey,
+    /// Why Roost couldn't read the record.
+    pub kind: ContactStateFailureKind,
+    /// Diagnostic context for logging only.
+    pub reason: String,
+}
+
+/// Why Roost couldn't read a contact state record.
+#[derive(Debug, PartialEq, uniffi::Enum)]
+pub enum ContactStateFailureKind {
+    /// The record is damaged or stored under another identity's key.
+    Damaged,
+    /// The record uses a format this version of Roost doesn't read, such as one from a newer app.
+    NewerFormat,
+    /// The entry has no record, or the record holds a value the app can't represent.
+    Invalid,
 }
 
 /// The result of confirming a contact's safety number.
@@ -134,35 +166,35 @@ impl Contacts {
         })
     }
 
-    /// Returns the contact each contact state record holds, in the order given.
+    /// Returns the contact each contact state record holds, and each record Roost couldn't read.
     ///
     /// Pass the app's committed records of kind
     /// [`ProtocolStateKind::ContactState`](crate::ProtocolStateKind::ContactState), so views can
-    /// refresh after each commit without Roost keeping subscriptions or cursors.
+    /// refresh after each commit without Roost keeping subscriptions or cursors. A record Roost
+    /// can't read doesn't stop the others from loading. Roost changes nothing for it, so the app
+    /// decides whether to keep it, hide it, or ask the user to update. A malformed key, or one
+    /// that names another kind of record, fails the whole call instead.
     ///
     /// # Errors
-    /// - [`RoostError::InvalidData`] if a key is malformed, an entry has no bytes, or there are
-    ///   more entries than Roost's limit.
-    /// - [`RoostError::ProtocolStateFault`] if an entry isn't a contact record, or a record is
-    ///   malformed or stored under another identity's key.
-    /// - [`RoostError::UnsupportedVersion`] if a record has an unsupported version.
-    pub fn contact_states(
-        &self,
-        records: Vec<StateEntry>,
-    ) -> Result<Vec<ContactState>, RoostError> {
-        entries_to_core(records)?
-            .into_iter()
-            .map(|(address, blob)| {
-                let blob = blob.ok_or_else(|| RoostError::InvalidData {
-                    reason: "contact entry has no record".into(),
-                })?;
-                ContactState::from_core(
-                    self.inner
-                        .protocol_engine()
-                        .decode_contact(&address, &blob)?,
-                )
-            })
-            .collect()
+    /// - [`RoostError::InvalidData`] if a key is malformed or names another kind of record, or
+    ///   there are more entries than Roost's limit.
+    pub fn contact_states(&self, records: Vec<StateEntry>) -> Result<ContactStates, RoostError> {
+        let mut states = ContactStates::default();
+        for (address, blob) in entries_to_core(records)? {
+            if address.kind() != CoreProtocolStateKind::ContactState {
+                return Err(RoostError::InvalidData {
+                    reason: format!("{} entry isn't a contact record", address.kind()),
+                });
+            }
+            match self.contact_state(&address, blob) {
+                Ok(contact) => states.contacts.push(contact),
+                Err(error) => states.failures.push(ContactStateFailure::from_error(
+                    StateKey::from_core(&address),
+                    error,
+                )?),
+            }
+        }
+        Ok(states)
     }
 
     /// Confirms a contact's safety number using this context's local identity, given the record
@@ -230,6 +262,58 @@ impl Contacts {
                 .protocol_engine()
                 .unblock_contact(identity_key.to_core()?, record.as_ref())?,
         ))
+    }
+}
+
+impl Contacts {
+    fn contact_state(
+        &self,
+        address: &CoreProtocolStateAddress,
+        blob: Option<CoreProtocolStateBlob>,
+    ) -> Result<ContactState, RoostError> {
+        let blob = blob.ok_or_else(|| RoostError::InvalidData {
+            reason: "contact entry has no record".into(),
+        })?;
+        ContactState::from_core(
+            self.inner
+                .protocol_engine()
+                .decode_contact(address, &blob)?,
+        )
+    }
+}
+
+impl ContactStateFailure {
+    // Returns the failure for a record that didn't decode, or `error` itself when it isn't about
+    // the record.
+    fn from_error(key: StateKey, error: RoostError) -> Result<Self, RoostError> {
+        let (kind, reason) = match error {
+            RoostError::ProtocolStateFault { reason } => (ContactStateFailureKind::Damaged, reason),
+            RoostError::UnsupportedVersion { reason } => {
+                (ContactStateFailureKind::NewerFormat, reason)
+            }
+            RoostError::InvalidData { reason } => (ContactStateFailureKind::Invalid, reason),
+            other @ (RoostError::AlreadyExists
+            | RoostError::AuthenticationFailed { .. }
+            | RoostError::BackupFailed { .. }
+            | RoostError::BlockedContact { .. }
+            | RoostError::CertificateRejected { .. }
+            | RoostError::ContactNotAccepted { .. }
+            | RoostError::Corrupt
+            | RoostError::DecryptionFailed
+            | RoostError::InternalError { .. }
+            | RoostError::InboxRotationRequired
+            | RoostError::NoDeliveryCapability
+            | RoostError::NotFound
+            | RoostError::OneTimePreKeyUsed { .. }
+            | RoostError::OperationFinished
+            | RoostError::OperationConflict { .. }
+            | RoostError::UnfinishedReservation { .. }
+            | RoostError::Storage { .. }
+            | RoostError::SecureStoragePreconditionChanged { .. }
+            | RoostError::TooManyUnfinishedOperations
+            | RoostError::TooManyPendingAcknowledgments { .. }) => return Err(other),
+        };
+        Ok(Self { key, kind, reason })
     }
 }
 

@@ -7,6 +7,7 @@ use roost_crypto::{
 };
 use roost_protocol::{
     PUBLIC_KEY_LEN, is_valid_x25519_public_key, parse_ed25519_verifying_key_bytes,
+    unix_secs_to_millis,
 };
 use serde::{Deserialize, Serialize};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
@@ -61,9 +62,31 @@ pub fn is_newer_discovery_key(
     DiscoveryKeyStamp::of(candidate) > DiscoveryKeyStamp::of(current)
 }
 
-/// Returns the public discovery key these fields describe, or `None` when a key is malformed. The
+/// Returns the public discovery key a message carries, or `None` when a key is malformed or its
+/// creation time has no Unix-millisecond value. The caller still verifies the signature.
+///
+/// The app reads every time in milliseconds, so a contact's key must convert to them. Stored
+/// records skip this check, so one saved before it still decodes.
+pub(super) fn parse_received_discovery_key(
+    x25519_public_key: [u8; PUBLIC_KEY_LEN],
+    ed25519_verifying_key: &[u8; PUBLIC_KEY_LEN],
+    epoch: u32,
+    created_at_secs: u64,
+    identity_signature: &[u8; Signature::BYTE_SIZE],
+) -> Option<PublicDiscoveryKey> {
+    unix_secs_to_millis(created_at_secs)?;
+    parse_stored_discovery_key(
+        x25519_public_key,
+        ed25519_verifying_key,
+        epoch,
+        created_at_secs,
+        identity_signature,
+    )
+}
+
+/// Returns the public discovery key a stored record holds, or `None` when a key is malformed. The
 /// caller still verifies the signature.
-pub(super) fn parse_discovery_key(
+pub(super) fn parse_stored_discovery_key(
     x25519_public_key: [u8; PUBLIC_KEY_LEN],
     ed25519_verifying_key: &[u8; PUBLIC_KEY_LEN],
     epoch: u32,
@@ -143,7 +166,7 @@ fn verify_grant(
     wire: &DecodedInboxGrantWire,
     sender: &PublicIdentityKey,
 ) -> Result<InboxGrant, ProtocolStateError> {
-    let discovery_key = parse_discovery_key(
+    let discovery_key = parse_received_discovery_key(
         wire.x25519_public_key,
         &wire.ed25519_verifying_key,
         wire.epoch,
@@ -217,6 +240,10 @@ mod tests {
     }
 
     fn owner(seed: u8) -> Owner {
+        owner_dated(seed, 1_700_000_000)
+    }
+
+    fn owner_dated(seed: u8, created_at_secs: u64) -> Owner {
         let signing_key = SigningKeyPair::from_signing_bytes(&[seed; 32]);
         let agreement_key = KeyPair::from_secret_bytes(&[seed.wrapping_add(1); 32]);
         let identity = PublicIdentityKey {
@@ -229,7 +256,7 @@ mod tests {
             &mut ChaCha20Rng::from_seed([seed; 32]),
             &signing_key,
             3,
-            1_700_000_000,
+            created_at_secs,
         )
         .unwrap();
         Owner {
@@ -274,6 +301,27 @@ mod tests {
         assert!(matches!(
             open_granted_payload(&payload(&owner, &wrong_binding), &owner.identity),
             Err(ProtocolStateError::InvalidInboxGrant)
+        ));
+    }
+
+    #[test]
+    fn a_grant_dated_past_the_millisecond_range_is_rejected() {
+        let last_millisecond_secs = u64::MAX / 1_000;
+        let latest = owner_dated(7, last_millisecond_secs);
+        open_granted_payload(
+            &payload(&latest, &latest.discovery_to_identity),
+            &latest.identity,
+        )
+        .unwrap();
+
+        let too_late = owner_dated(7, last_millisecond_secs + 1);
+        assert!(matches!(
+            open_granted_payload(
+                &payload(&too_late, &too_late.discovery_to_identity),
+                &too_late.identity,
+            ),
+            Err(ProtocolStateError::InvalidMessage { reason })
+                if reason == "inbox grant discovery key is invalid"
         ));
     }
 

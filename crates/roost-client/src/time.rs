@@ -5,17 +5,16 @@
 //! represent.
 
 use crate::error::RoostError;
-use roost_protocol::from_unix_millis;
+use roost_protocol::{from_unix_millis, unix_secs_to_millis};
 use std::time::SystemTime;
 
 const MILLIS_PER_SEC: u64 = 1_000;
 
 // Converts a Unix-seconds value Roost stores to the app's milliseconds.
 pub(crate) fn millis_from_secs(secs: u64, label: &str) -> Result<u64, RoostError> {
-    secs.checked_mul(MILLIS_PER_SEC)
-        .ok_or_else(|| RoostError::InvalidData {
-            reason: format!("{label} exceeds the millisecond range"),
-        })
+    unix_secs_to_millis(secs).ok_or_else(|| RoostError::InvalidData {
+        reason: format!("{label} exceeds the millisecond range"),
+    })
 }
 
 // Converts the app's milliseconds to a value Roost signs or authenticates in whole Unix seconds.

@@ -2,7 +2,7 @@
 //! ratchet ciphertext, and the sealed sender envelope inside it, and the checks that authenticate a
 //! message's sender.
 
-use super::grant::parse_discovery_key;
+use super::grant::parse_received_discovery_key;
 use super::{DiscoveryKeyWire, ProtocolStateError, decode_failure, encode_zeroizing};
 use crate::TransportBinding;
 use crate::contact::ContactDiscoveryKey;
@@ -287,7 +287,7 @@ fn decoded_authentication(
             discovery_to_identity,
             proof,
         } => {
-            let discovery_key = parse_discovery_key(
+            let discovery_key = parse_received_discovery_key(
                 discovery_key.x25519_public_key,
                 &discovery_key.ed25519_verifying_key,
                 discovery_key.epoch,
@@ -914,6 +914,29 @@ mod tests {
             },
         };
         authenticate_first_message(&decoded, &handshake, &signed_prekey).map(|_| ())
+    }
+
+    #[test]
+    fn a_first_message_sender_key_dated_past_the_millisecond_range_is_rejected() {
+        let key = discovery_key(&sender(0x10), 0x11).public();
+        let authentication = |created_at_secs| AuthenticationWire::Proof {
+            discovery_key: DiscoveryKeyWire {
+                x25519_public_key: *key.public_key.as_bytes(),
+                ed25519_verifying_key: key.verifying_key.to_bytes(),
+                epoch: key.epoch,
+                created_at_secs,
+                identity_signature: signature_to_wire(&key.identity_signature.to_bytes()),
+            },
+            discovery_to_identity: signature_to_wire(&[0; 64]),
+            proof: [0; SENDER_PROOF_LEN],
+        };
+        decoded_authentication(&authentication(u64::MAX / 1_000)).unwrap();
+
+        assert!(matches!(
+            decoded_authentication(&authentication(u64::MAX / 1_000 + 1)),
+            Err(ProtocolStateError::InvalidMessage { reason })
+                if reason == "sender discovery key is invalid"
+        ));
     }
 
     #[test]
