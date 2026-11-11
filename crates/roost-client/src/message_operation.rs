@@ -30,7 +30,8 @@ pub struct OutgoingMessage {
     /// The message ID from [`Messaging::create_message`], saved with the draft and kept across
     /// retries.
     pub message_id: MessageId,
-    /// When the app sent the message, in Unix milliseconds.
+    /// When the app sent the message, in Unix milliseconds, from the clock
+    /// [`IdentityContext`](crate::IdentityContext) describes.
     pub sent_at_millis: u64,
     /// The local identity's certificate, sealed into the message.
     pub sender_certificate: SignedSenderCertificate,
@@ -51,7 +52,8 @@ pub struct OutgoingGrantUpdate {
     pub recipient: IdentityKey,
     /// A message ID from [`Messaging::create_message`], kept across retries.
     pub message_id: MessageId,
-    /// When the app sent the grant update, in Unix milliseconds.
+    /// When the app sent the grant update, in Unix milliseconds, from the clock
+    /// [`IdentityContext`](crate::IdentityContext) describes.
     pub sent_at_millis: u64,
     /// The local identity's certificate, sealed into the message.
     pub sender_certificate: SignedSenderCertificate,
@@ -71,7 +73,8 @@ pub struct IncomingMessage {
     pub settings: ReceiveSettings,
     /// Trust, revocation, and time inputs for the sender's certificate.
     pub sender_certificate_validation: SenderCertificateValidation,
-    /// When the app sends the acknowledgment, in Unix milliseconds.
+    /// When the app sends the acknowledgment, in Unix milliseconds, from the clock
+    /// [`IdentityContext`](crate::IdentityContext) describes.
     pub acknowledgment_sent_at_millis: u64,
     /// The local identity's certificate, sealed into the acknowledgment.
     pub acknowledgment_sender_certificate: SignedSenderCertificate,

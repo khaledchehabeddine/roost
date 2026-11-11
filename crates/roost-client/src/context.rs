@@ -41,6 +41,13 @@ const RESERVED_DOMAIN_PREFIX: &str = "Roost";
 /// first call of any operation, such as a send or a key change, until its commit is resolved, and
 /// while it resolves unfinished operations.
 ///
+/// The app also owns the times it passes, such as send times and the current time for delivery
+/// checks and certificate checks. The app takes them all from one clock that every process shares,
+/// such as the device clock plus an offset measured from the relay's responses. Certificate checks
+/// compare that time with an expiry the relay set, so it must be right. Delivery checks compare it
+/// with the send times the app passed, so a clock that jumps starts recoveries early or late.
+/// Roost reads the device clock itself only to date and expire its own keys.
+///
 /// The app protects stored blobs like identity keys, and keeps blobs, keys, passphrases, and
 /// plaintext out of logs. Roost's tests don't cover the app's adapter or transactions, so the app
 /// tests them itself.
