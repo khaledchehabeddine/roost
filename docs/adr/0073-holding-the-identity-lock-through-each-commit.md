@@ -1,7 +1,0 @@
-# Holding the Identity Lock Through Each Commit
-
-The app and its extensions can each run Roost for one identity, and a key change stays staged in SecureStorage until the app's commit resolves. So they share one identity lock, held from each operation's first call until its commit resolves and while finishing interrupted key changes, but never across a network call. Any operation started during another process's reserved change would fail, and finishing interrupted changes then would abort it.
-
-## Alternatives
-
-- Lock only key changes and let other operations run at once: a receive learns partway through whether it uses up a one-time prekey, and other starts would fail during another process's commit.

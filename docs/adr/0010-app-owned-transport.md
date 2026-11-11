@@ -1,8 +1,0 @@
-# App-Owned Transport
-
-Each app has its own delivery, push, and retry policy, so Roost does no networking. Roost returns messages and acknowledgments for the app to send however it chooses, with its own authentication, retries, and rate limits.
-
-## Alternatives
-
-- A standard transport envelope: apps need different metadata and versions.
-- Treat transport authentication as proof of the sender: it proves only the app's channel, while X3DH, certificates, and signed transcripts prove the sender.
