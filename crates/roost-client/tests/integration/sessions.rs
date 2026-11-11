@@ -594,37 +594,32 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
 
 #[test]
 fn unreadable_contact_records_are_reported_beside_the_readable_ones() {
-    let mut bob = App::new();
     let mut alice = App::new();
-    let mut carol = App::new();
-    let mut dave = App::new();
+    let mut bob = App::new();
     establish(&mut alice, &mut bob);
-    establish(&mut carol, &mut bob);
-    establish(&mut dave, &mut bob);
-    let (alice_key, alice_record) = bob.contact_entry(&alice).unwrap();
-    let (carol_key, carol_record) = bob.contact_entry(&carol).unwrap();
-    let (dave_key, mut dave_record) = bob.contact_entry(&dave).unwrap();
+    let (key, record) = bob.contact_entry(&alice).unwrap();
+    let mut newer = record.clone();
     // The first byte is the record's version.
-    dave_record[0] += 1;
+    newer[0] += 1;
     let empty_key = StateKey {
         kind: ProtocolStateKind::ContactState,
         id: "ab".into(),
+    };
+    let session_key = StateKey {
+        kind: ProtocolStateKind::RatchetSession,
+        id: key.id.clone(),
     };
     let entry = |key: &StateKey, blob| StateEntry {
         key: key.clone(),
         blob,
     };
+    let contacts = bob.context.contacts();
 
-    let states = bob
-        .context
-        .contacts()
+    let states = contacts
         .contact_states(vec![
-            entry(
-                &carol_key,
-                Some(carol_record[..carol_record.len() - 1].to_vec()),
-            ),
-            entry(&alice_key, Some(alice_record)),
-            entry(&dave_key, Some(dave_record)),
+            entry(&key, Some(record[..record.len() - 1].to_vec())),
+            entry(&key, Some(record)),
+            entry(&key, Some(newer)),
             entry(&empty_key, None),
         ])
         .unwrap();
@@ -638,19 +633,13 @@ fn unreadable_contact_records_are_reported_beside_the_readable_ones() {
             .map(|failure| (&failure.key, &failure.kind))
             .collect::<Vec<_>>(),
         [
-            (&carol_key, &ContactStateFailureKind::Damaged),
-            (&dave_key, &ContactStateFailureKind::NewerFormat),
+            (&key, &ContactStateFailureKind::Damaged),
+            (&key, &ContactStateFailureKind::NewerFormat),
             (&empty_key, &ContactStateFailureKind::Invalid),
         ]
     );
     assert!(matches!(
-        bob.context.contacts().contact_states(vec![StateEntry {
-            key: StateKey {
-                kind: ProtocolStateKind::RatchetSession,
-                id: alice_key.id.clone(),
-            },
-            blob: Some(bob.contact_record(&alice).unwrap()),
-        }]),
+        contacts.contact_states(vec![entry(&session_key, None)]),
         Err(RoostError::InvalidData { reason }) if reason == "ratchet/session state entry isn't a contact record"
     ));
 }

@@ -54,7 +54,7 @@ pub struct ContactState {
 }
 
 /// The contacts [`Contacts::contact_states`] read, and the records it couldn't.
-#[derive(uniffi::Record)]
+#[derive(Default, uniffi::Record)]
 pub struct ContactStates {
     /// The contact each readable record holds, in the order given.
     pub contacts: Vec<ContactState>,
@@ -179,20 +179,13 @@ impl Contacts {
     /// - [`RoostError::InvalidData`] if a key is malformed or names another kind of record, or
     ///   there are more entries than Roost's limit.
     pub fn contact_states(&self, records: Vec<StateEntry>) -> Result<ContactStates, RoostError> {
-        let entries = entries_to_core(records)?;
-        if let Some((address, _)) = entries
-            .iter()
-            .find(|(address, _)| address.kind() != CoreProtocolStateKind::ContactState)
-        {
-            return Err(RoostError::InvalidData {
-                reason: format!("{} entry isn't a contact record", address.kind()),
-            });
-        }
-        let mut states = ContactStates {
-            contacts: Vec::new(),
-            failures: Vec::new(),
-        };
-        for (address, blob) in entries {
+        let mut states = ContactStates::default();
+        for (address, blob) in entries_to_core(records)? {
+            if address.kind() != CoreProtocolStateKind::ContactState {
+                return Err(RoostError::InvalidData {
+                    reason: format!("{} entry isn't a contact record", address.kind()),
+                });
+            }
             match self.contact_state(&address, blob) {
                 Ok(contact) => states.contacts.push(contact),
                 Err(error) => states.failures.push(ContactStateFailure::from_error(
