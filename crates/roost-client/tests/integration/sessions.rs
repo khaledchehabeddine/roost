@@ -5,10 +5,10 @@ use crate::support::{
     issue_certificate,
 };
 use roost_client::{
-    BlockedContactAcknowledgmentPolicy, ContactSafetyNumberConfirmation, ContactTrustState,
-    DeliveryCheckResult, DeliveryCheckStep, DomainSigningKey, IdentityContext, IdentityKey,
-    InboundMessageOutcome, IncomingMessage, Message, MessageDecryptionStep, MessageDestination,
-    MessageEncryption, MessageEncryptionStep, MessageId, MessageRecoveryStep,
+    BlockedContactAcknowledgmentPolicy, ContactSafetyNumberConfirmation, ContactStateFailureKind,
+    ContactTrustState, DeliveryCheckResult, DeliveryCheckStep, DomainSigningKey, IdentityContext,
+    IdentityKey, InboundMessageOutcome, IncomingMessage, Message, MessageDecryptionStep,
+    MessageDestination, MessageEncryption, MessageEncryptionStep, MessageId, MessageRecoveryStep,
     OutboundMessageResult, OutgoingGrantUpdate, OutgoingMessage, OutgoingRecovery, PayloadKind,
     PreKeyBundle, ProtocolStateKind, ReceiveSettings, RevocationState, RoostError,
     SenderCertificateValidation, SessionId, SignedSenderCertificate, StateChanges, StateEntry,
@@ -132,6 +132,11 @@ impl App {
 
     // Returns the record the app holds for `peer`'s contact, by decoding each contact record.
     fn contact_record(&self, peer: &App) -> Option<Vec<u8>> {
+        self.contact_entry(peer).map(|(_, record)| record)
+    }
+
+    // Returns the key and record the app holds for `peer`'s contact.
+    fn contact_entry(&self, peer: &App) -> Option<(StateKey, Vec<u8>)> {
         let contacts = self.context.contacts();
         self.records
             .iter()
@@ -141,9 +146,10 @@ impl App {
                     key: (*key).clone(),
                     blob: Some((*blob).clone()),
                 };
-                contacts.contact_states(vec![entry]).unwrap()[0].identity_key == peer.identity_key()
+                contacts.contact_states(vec![entry]).unwrap().contacts[0].identity_key
+                    == peer.identity_key()
             })
-            .map(|(_, blob)| blob.clone())
+            .map(|(key, blob)| (key.clone(), blob.clone()))
     }
 
     // Writes `changes` only when every condition holds, as one app transaction does, around the
@@ -448,6 +454,7 @@ fn a_request_routes_to_the_bundle_and_commits_its_one_time_prekey_with_the_conta
                 .collect(),
         )
         .unwrap()
+        .contacts
         .remove(0);
     assert_eq!(contact.identity_key, alice.identity_key());
     assert!(matches!(contact.trust_state, ContactTrustState::Pending));
@@ -580,8 +587,72 @@ fn safety_number_confirmation_uses_the_contexts_local_identity() {
             blob: record,
         }])
         .unwrap()
+        .contacts
         .remove(0);
     assert!(matches!(contact.trust_state, ContactTrustState::Verified));
+}
+
+#[test]
+fn unreadable_contact_records_are_reported_beside_the_readable_ones() {
+    let mut bob = App::new();
+    let mut alice = App::new();
+    let mut carol = App::new();
+    let mut dave = App::new();
+    establish(&mut alice, &mut bob);
+    establish(&mut carol, &mut bob);
+    establish(&mut dave, &mut bob);
+    let (alice_key, alice_record) = bob.contact_entry(&alice).unwrap();
+    let (carol_key, carol_record) = bob.contact_entry(&carol).unwrap();
+    let (dave_key, mut dave_record) = bob.contact_entry(&dave).unwrap();
+    // The first byte is the record's version.
+    dave_record[0] += 1;
+    let empty_key = StateKey {
+        kind: ProtocolStateKind::ContactState,
+        id: "ab".into(),
+    };
+    let entry = |key: &StateKey, blob| StateEntry {
+        key: key.clone(),
+        blob,
+    };
+
+    let states = bob
+        .context
+        .contacts()
+        .contact_states(vec![
+            entry(
+                &carol_key,
+                Some(carol_record[..carol_record.len() - 1].to_vec()),
+            ),
+            entry(&alice_key, Some(alice_record)),
+            entry(&dave_key, Some(dave_record)),
+            entry(&empty_key, None),
+        ])
+        .unwrap();
+
+    assert_eq!(states.contacts.len(), 1);
+    assert_eq!(states.contacts[0].identity_key, alice.identity_key());
+    assert_eq!(
+        states
+            .failures
+            .iter()
+            .map(|failure| (&failure.key, &failure.kind))
+            .collect::<Vec<_>>(),
+        [
+            (&carol_key, &ContactStateFailureKind::Damaged),
+            (&dave_key, &ContactStateFailureKind::NewerFormat),
+            (&empty_key, &ContactStateFailureKind::Invalid),
+        ]
+    );
+    assert!(matches!(
+        bob.context.contacts().contact_states(vec![StateEntry {
+            key: StateKey {
+                kind: ProtocolStateKind::RatchetSession,
+                id: alice_key.id.clone(),
+            },
+            blob: Some(bob.contact_record(&alice).unwrap()),
+        }]),
+        Err(RoostError::InvalidData { reason }) if reason == "ratchet/session state entry isn't a contact record"
+    ));
 }
 
 #[test]

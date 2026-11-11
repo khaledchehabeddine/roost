@@ -1006,6 +1006,16 @@ fn blob_body<'a>(
             address: address.clone(),
             reason: format!("{} blob is empty", address.kind()),
         })?;
+    // A version below the first was never written, so the blob is damaged, not newer.
+    if version < PROTOCOL_STATE_BLOB_VERSION {
+        return Err(ProtocolStateError::BlobDecode {
+            address: address.clone(),
+            reason: format!(
+                "{} blob version {version} is before the first",
+                address.kind()
+            ),
+        });
+    }
     if version != PROTOCOL_STATE_BLOB_VERSION {
         return Err(ProtocolStateError::UnsupportedBlobVersion {
             address: address.clone(),
@@ -1110,12 +1120,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn blob_versions_other_than_the_current_one_are_faults() {
+    fn blob_versions_before_the_first_are_damaged_and_later_ones_unsupported() {
         let address = ProtocolStateAddress::new(
             ProtocolStateKind::RatchetSession,
             ProtocolStateKey::from_bytes(vec![9; 16]).unwrap(),
         );
-        for version in [0, PROTOCOL_STATE_BLOB_VERSION + 1, u8::MAX] {
+        assert!(matches!(
+            blob_body(&address, &ProtocolStateBlob::from_bytes(vec![0, 0xaa]), 64),
+            Err(ProtocolStateError::BlobDecode { address: actual, .. }) if actual == address
+        ));
+        for version in [PROTOCOL_STATE_BLOB_VERSION + 1, u8::MAX] {
             let blob = ProtocolStateBlob::from_bytes(vec![version, 0xaa]);
             assert!(matches!(
                 blob_body(&address, &blob, 64),

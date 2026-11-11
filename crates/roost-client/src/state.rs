@@ -189,7 +189,7 @@ impl StateUpdate {
 }
 
 impl StateKey {
-    fn from_core(address: &CoreProtocolStateAddress) -> Self {
+    pub(crate) fn from_core(address: &CoreProtocolStateAddress) -> Self {
         Self {
             kind: ProtocolStateKind::from_core(address.kind()),
             id: hex_text(address.key().as_bytes()),
