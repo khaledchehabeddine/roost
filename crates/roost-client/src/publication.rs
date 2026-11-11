@@ -103,7 +103,7 @@ pub struct PublicDiscoveryKey {
     pub epoch: u32,
     /// Creation time in Unix milliseconds, always a whole number of seconds.
     ///
-    /// It orders this identity's discovery keys, so it can be later than the current time.
+    /// After the device clock moves back, this can be later than now.
     pub created_at_millis: u64,
 }
 
