@@ -198,8 +198,7 @@ impl Messaging {
     /// acknowledges a recovery's probe. Once started, it comes back only after a week, after an
     /// unblock, or once the contact sends a newer inbox grant or starts a new session.
     ///
-    /// Pass `now_millis` from the clock [`IdentityContext`](crate::IdentityContext) describes,
-    /// the one that sets each message's send time.
+    /// Pass `now_millis` from the same clock as the messages' send times.
     ///
     /// # Errors
     /// - [`RoostError::InvalidData`] if `contact` or `now_millis` is out of range.

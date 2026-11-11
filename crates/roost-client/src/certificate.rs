@@ -41,11 +41,10 @@ pub struct SenderCertificateValidation {
     pub expected_relay_domain: Vec<u8>,
     /// The app's list of revoked identity keys, if the list loaded.
     pub revocation_state: RevocationState,
-    /// The time to validate the certificate at, in Unix milliseconds, from the clock
-    /// [`IdentityContext`](crate::IdentityContext) describes.
+    /// The time to validate the certificate at, in Unix milliseconds.
     ///
-    /// With a clock that runs ahead, Roost refuses certificates that are still valid. With one
-    /// that runs behind, it accepts expired ones.
+    /// Correct the device clock against the relay's. Otherwise, Roost refuses valid certificates
+    /// when the clock runs ahead and accepts expired ones when it runs behind.
     pub reference_time_millis: u64,
 }
 
