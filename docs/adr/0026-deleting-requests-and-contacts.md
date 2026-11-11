@@ -1,6 +1,6 @@
 # Deleting Requests and Contacts
 
-Deleting a request or a contact only hides it in the app, and Roost keeps the record, with any block in place.
+Deleting a request or a contact only hides it in the app. Roost keeps the record and any block.
 
 ## Alternatives
 

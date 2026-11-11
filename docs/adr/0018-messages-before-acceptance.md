@@ -1,9 +1,9 @@
 # Messages Before Acceptance
 
-Before a contact is accepted, each side may send a few messages so people can check who they're talking to, and Roost sets how many. Each side counts the distinct message IDs it sent to or received from that contact, refuses to send past the limit, and withholds the plaintext of messages it receives past it. Sealed sender hides the sender from the relay, so only the recipient can enforce the limit.
+Before acceptance, each side may send a few messages, so people can check who they're talking to. Each side counts the distinct message IDs it sends and receives, refuses to send past Roost's limit, and withholds the plaintext of messages that arrive past it. Sealed sender hides the sender from the relay, so only the recipient can enforce the limit.
 
 ## Alternatives
 
-- One message per request: someone who wants a little context first would have to accept a stranger to get it.
-- Count both sides' messages together: a lost or late message would make the two sides disagree on when the limit applies.
-- Let the app pass the limit with each call: two apps could disagree on it.
+- One message per request: people would have to accept a stranger to get any context.
+- Count both directions together: a lost or late message would make the sides disagree on when the limit applies.
+- Let the app set the limit: two apps could disagree on it.
