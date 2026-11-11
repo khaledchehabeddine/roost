@@ -43,8 +43,8 @@ pub struct SenderCertificateValidation {
     pub revocation_state: RevocationState,
     /// The time to validate the certificate at, in Unix milliseconds.
     ///
-    /// Correct the device clock against the relay's. Otherwise, Roost refuses valid certificates
-    /// when the clock runs ahead and accepts expired ones when it runs behind.
+    /// Correct the device clock against the relay's. A wrong clock makes Roost refuse valid
+    /// certificates or accept expired ones.
     pub reference_time_millis: u64,
 }
 
