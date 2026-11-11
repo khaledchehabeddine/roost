@@ -102,6 +102,8 @@ pub struct PublicDiscoveryKey {
     /// Rotation epoch, monotonic within one storage lineage.
     pub epoch: u32,
     /// Creation time in Unix milliseconds, always a whole number of seconds.
+    ///
+    /// After the device clock moves back, this can be later than now.
     pub created_at_millis: u64,
 }
 
