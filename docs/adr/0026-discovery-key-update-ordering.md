@@ -4,5 +4,4 @@ Restoring an older backup continues from that backup's epoch, so two different d
 
 ## Alternatives
 
-- Let the relay say which key is current: Roost doesn't trust the relay to choose where contacts send.
 - Refuse a key dated after the contact's own clock: a contact whose clock is slow would ignore every new key.
