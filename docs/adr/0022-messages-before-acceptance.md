@@ -4,6 +4,5 @@ Before acceptance, each side may send a few messages, so people can check who th
 
 ## Alternatives
 
-- One message per request: people would have to accept a stranger to get any context.
 - Count both directions together: a lost or late message would make the sides disagree on when the limit applies.
 - Let the app set the limit: two apps could disagree on it.
