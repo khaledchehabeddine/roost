@@ -104,9 +104,12 @@ impl App {
     fn bundle(&self) -> PreKeyBundle {
         let one_time_prekeys = self.context.prepare_one_time_prekeys(1).unwrap();
         complete(&self.context, one_time_prekeys.operation_id);
+        let publication = self.context.current_publication().unwrap();
         PreKeyBundle {
             identity: self.context.identity().unwrap().unwrap(),
-            publication: self.context.current_publication().unwrap(),
+            discovery_key: publication.discovery_key,
+            discovery_to_identity: publication.discovery_to_identity,
+            signed_prekey: publication.signed_prekey,
             one_time_prekey: Some(one_time_prekeys.one_time_prekeys[0].clone()),
         }
     }
