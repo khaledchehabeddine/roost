@@ -255,13 +255,11 @@ pub fn is_newer_discovery_key(
 pub struct PreKeyBundle {
     /// The contact's identity.
     pub identity: Identity,
-    /// The contact's discovery key, whose signature is the identity key's half of the binding
-    /// between the two keys.
+    /// The contact's discovery key.
     pub discovery_key: PublicDiscoveryKey,
-    /// [`Self::discovery_key`]'s signature over the contact's identity, the other half of that
-    /// binding. Always 64 bytes.
+    /// [`Self::discovery_key`]'s signature over the contact's identity. Always 64 bytes.
     pub discovery_to_identity: Vec<u8>,
-    /// The contact's signed prekey, which verifies with [`Self::discovery_key`].
+    /// The contact's signed prekey.
     pub signed_prekey: PublicSignedPreKey,
     /// The one-time prekey the relay handed out, absent once the contact's pool ran out.
     pub one_time_prekey: Option<PublicOneTimePreKey>,
