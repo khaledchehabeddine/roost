@@ -255,26 +255,27 @@ pub fn is_newer_discovery_key(
 pub struct PreKeyBundle {
     /// The contact's identity.
     pub identity: Identity,
-    /// The contact's discovery key, both binding signatures, and signed prekey.
-    pub publication: PublicationBundle,
+    /// The contact's discovery key.
+    pub discovery_key: PublicDiscoveryKey,
+    /// [`Self::discovery_key`]'s signature over the contact's identity. Always 64 bytes.
+    pub discovery_to_identity: Vec<u8>,
+    /// The contact's signed prekey.
+    pub signed_prekey: PublicSignedPreKey,
     /// The one-time prekey the relay handed out, absent once the contact's pool ran out.
     pub one_time_prekey: Option<PublicOneTimePreKey>,
 }
 
 impl PreKeyBundle {
-    // The discovery key's signature over the identity travels beside the prekey bundle, which has
-    // no field for it, since it verifies against the identity the bundle doesn't carry.
     pub(crate) fn to_core(&self) -> Result<roost_core::PeerPreKeyBundle, RoostError> {
-        let publication = &self.publication;
         Ok(roost_core::PeerPreKeyBundle {
             identity_key: self.identity.to_core()?,
             discovery_to_identity: Signature::from_bytes(&fixed_64(
-                &publication.discovery_to_identity,
+                &self.discovery_to_identity,
                 "discovery_to_identity",
             )?),
             bundle: CorePreKeyBundle {
-                discovery_key: publication.discovery_key.to_core()?,
-                signed_prekey: publication.signed_prekey.to_core()?,
+                discovery_key: self.discovery_key.to_core()?,
+                signed_prekey: self.signed_prekey.to_core()?,
                 one_time_prekey: self
                     .one_time_prekey
                     .as_ref()
