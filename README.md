@@ -14,8 +14,8 @@ Roost is the cryptographic core for private, end-to-end encrypted messaging apps
 
 Add the package for your platform:
 
-- iOS: [Roost Swift](https://github.com/chirp-org/roost-swift)
-- Android: [Roost Kotlin](https://github.com/chirp-org/roost-kotlin)
+- iOS: [Roost Swift](https://github.com/khaledchehabeddine/roost-swift)
+- Android: [Roost Kotlin](https://github.com/khaledchehabeddine/roost-kotlin)
 
 ## Architecture
 

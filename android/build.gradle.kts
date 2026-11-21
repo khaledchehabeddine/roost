@@ -49,7 +49,7 @@ publishing {
 
         maven {
             name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/chirp-org/roost-kotlin")
+            url = uri("https://maven.pkg.github.com/khaledchehabeddine/roost-kotlin")
             credentials(PasswordCredentials::class)
         }
     }

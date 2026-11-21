@@ -12,7 +12,7 @@ jobs:
     runs-on: macos-26
     env:
       TAG: ${{ github.ref_name }}
-      GH_REPO: chirp-org/roost-swift
+      GH_REPO: khaledchehabeddine/roost-swift
     steps:
       - uses: actions/checkout@v7
         with:
