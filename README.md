@@ -2,9 +2,9 @@
 
 The cryptographic core for private, end-to-end encrypted messaging apps.
 
-Roost is a Rust library that ships as Swift and Kotlin packages. It manages identities, contacts, and messaging sessions for an app. It protects messages with X3DH, the Double Ratchet, and sealed sender. The app keeps the networking, the storage, and the clock.
+Roost is a Rust library that ships as Swift and Kotlin packages. It manages identities and contacts, and protects messages with X3DH, the Double Ratchet, and sealed sender. The app handles networking and storage.
 
-**Roost has had no independent security audit. Don't use it to protect real conversations.**
+**Roost is unaudited. Don't use it for real conversations.**
 
 ## Limits
 
@@ -15,8 +15,10 @@ Roost is a Rust library that ships as Swift and Kotlin packages. It manages iden
 
 ## Install
 
-- Swift: add the [Roost Swift](https://github.com/chirp-org/roost-swift) package.
-- Kotlin: add the [Roost Kotlin](https://github.com/chirp-org/roost-kotlin) package.
+Follow the README of the package for your platform:
+
+- iOS: [Roost Swift](https://github.com/chirp-org/roost-swift)
+- Android: [Roost Kotlin](https://github.com/chirp-org/roost-kotlin)
 
 ## Architecture
 
@@ -25,8 +27,6 @@ Roost is a Rust library that ships as Swift and Kotlin packages. It manages iden
 - `roost-core`: Manages identities, contacts, and messaging sessions.
 - `roost-crypto`: Implements key generation, signing, X3DH handshakes, and Double Ratchet encryption.
 - `roost-protocol`: Defines the wire formats, sender certificates, and message padding the other crates share.
-
-[docs/adr](docs/adr/) records each design decision.
 
 ## Development
 
@@ -50,5 +50,3 @@ cargo build
 ```bash
 scripts/release.sh X.Y.Z
 ```
-
-The script pushes a tag, which starts a workflow that builds and publishes the Roost Swift and Roost Kotlin packages.
