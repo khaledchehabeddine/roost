@@ -6,14 +6,14 @@ Roost is the cryptographic core for private, end-to-end encrypted messaging apps
 
 ## Limitations
 
-- Key agreement uses X25519 alone, so it has no post-quantum protection.
-- Each established message carries the sender's signature, so the recipient can prove who wrote it.
 - Roost has no group messaging.
 - An identity lives on one device.
+- Key agreement uses X25519 alone, so it has no post-quantum protection.
+- Each established message carries the sender's signature, so the recipient can prove who wrote it.
 
 ## Install
 
-Follow the README of the package for your platform:
+Add the package for your platform:
 
 - iOS: [Roost Swift](https://github.com/chirp-org/roost-swift)
 - Android: [Roost Kotlin](https://github.com/chirp-org/roost-kotlin)
