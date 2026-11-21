@@ -4,7 +4,7 @@ The cryptographic core for private, end-to-end encrypted messaging apps.
 
 Roost is a Rust library that ships as Swift and Kotlin packages. It manages identities, contacts, and messaging sessions for an app. The app keeps the networking, the storage, and the clock.
 
-**Roost has had no independent security audit. Don't use it to protect real conversations.** See [SECURITY.md](SECURITY.md).
+**Roost has had no independent security audit. Don't use it to protect real conversations.**
 
 ## Features
 
@@ -16,8 +16,6 @@ Roost is a Rust library that ships as Swift and Kotlin packages. It manages iden
 - **Delivery recovery.** Roost tracks each message to an accepted contact until the contact acknowledges it, and encrypts unacknowledged messages again on a newer session.
 - **Backup and restore.** A passphrase-encrypted backup moves an identity to a new device.
 - **Standard algorithms.** Roost takes X25519, Ed25519, XChaCha20-Poly1305, HKDF, BLAKE3, and Argon2id from established libraries.
-
-[FEATURES.md](FEATURES.md) describes each feature.
 
 ## Limits
 
@@ -49,7 +47,7 @@ cargo doc --no-deps -p roost-client --open
 - `roost-crypto`: Implements key generation, signing, X3DH handshakes, and Double Ratchet encryption.
 - `roost-protocol`: Defines the wire formats, sender certificates, and message padding the other crates share.
 
-[docs/adr](docs/adr/) records each design decision, and [GLOSSARY.md](GLOSSARY.md) defines each term.
+[docs/adr](docs/adr/) records each design decision.
 
 ## Development
 
@@ -69,16 +67,10 @@ cargo build
 cargo test
 ```
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers commits, branches, and pull requests.
-
 ## Releasing
 
 ```bash
 scripts/release.sh X.Y.Z
 ```
 
-The script sets the version, tags the commit, and pushes. The tag starts a workflow that builds the Android library and the iOS XCFramework, then publishes them as Roost Kotlin and Roost Swift. The Swift package pins its XCFramework by checksum, and an app installs either package by its version number.
-
-## License
-
-Roost is available under the [MIT License](LICENSE).
+The script pushes a tag, which starts a workflow that builds and publishes the Roost Swift and Roost Kotlin packages.
