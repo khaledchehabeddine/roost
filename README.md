@@ -2,6 +2,8 @@
 
 Roost is the cryptographic core for private, end-to-end encrypted messaging apps. It is a Rust library that ships as Swift and Kotlin packages. It manages identities and contacts, and protects messages with X3DH, Double Ratchet, and sealed sender. The app handles networking and storage.
 
+**Roost is unaudited and not maintained. Don't use it for real conversations.**
+
 ## Limitations
 
 - Roost has no group messaging.
